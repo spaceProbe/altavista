@@ -74,8 +74,32 @@ fn decode_signal(payload: &[u8]) -> f64 {
 #[test]
 fn the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client() {
     let repo_root = repo_root();
-    let python = repo_root.join(".venv").join("bin").join("python3");
-    assert!(python.is_file(), "expected a repo-local venv python at {}", python.display());
+    // The Python reference peer needs `protobuf` (it imports `altavista.pb`). Prefer the
+    // repo-local venv; otherwise a `python3` on PATH that can import protobuf; otherwise skip
+    // visibly (same idiom as the Docker-gated kernel tests) rather than panic on a fresh
+    // checkout that has not run the README's Python setup.
+    let python = {
+        let venv = repo_root.join(".venv").join("bin").join("python3");
+        if venv.is_file() {
+            venv
+        } else {
+            let path_python = PathBuf::from("python3");
+            let ok = Command::new(&path_python)
+                .args(["-c", "import google.protobuf"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                println!(
+                    "SKIPPED the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client: no .venv/bin/python3 and no python3 with protobuf on PATH (run the README's Python setup)."
+                );
+                return;
+            }
+            path_python
+        }
+    };
     let peer_script = repo_root.join("tests").join("lockstep_local_peer.py");
     assert!(peer_script.is_file(), "expected the reference peer fixture at {}", peer_script.display());
 
