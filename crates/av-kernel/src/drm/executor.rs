@@ -443,6 +443,9 @@ impl RunProducts {
             // `RunProducts` construction so every reader of this struct, not just `to_proto`,
             // sees the required order).
             measurements: self.measurements.clone(),
+            // Question 175: filled by M25.4 once the executor writes the PortTrafficLog
+            // sidecar; empty until then, never synthesized.
+            port_traffic_hash: String::new(),
         }
     }
 }

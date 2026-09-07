@@ -11,6 +11,7 @@ syntax = "proto3";
 package altavista.v1;
 
 import "altavista/v1/core.proto";
+import "altavista/v1/system.proto";
 import "altavista/v1/trajectory.proto";
 
 // One evaluated Objective or MeasureOfEffectiveness (ADR-005 §6).
@@ -44,4 +45,31 @@ message RunProducts {
   // PacketCodecs into CDM Measurements, sensor outputs), sorted (epoch_ns, measurement_id).
   // A measurement is its own CDM type; it is never smuggled into an Event's attributes.
   repeated Measurement measurements = 8;
+  // Question 175: SHA-256 of the run's PortTrafficLog sidecar (below), empty when the run
+  // recorded no port traffic. The sidecar's location is in provenance.attributes
+  // ["port_traffic_uri"]; the hash is what a replay verifies against.
+  string port_traffic_hash = 9;
+}
+
+// One frame as it crossed a port during a run (question 175): the raw bytes the router
+// carried, with the sender, the port, the direction relative to that instance, and the
+// emission epoch. Recorded by the executor for every FRAMED and BYTE_STREAM port, so a run
+// replays with any bound process replaced by a replay binding that plays these back.
+message PortTrafficRecord {
+  string instance = 1;
+  string port = 2;
+  PortDirection direction = 3;
+  int64 tai_ns = 4;
+  bytes payload = 5;
+  // Step sequence within the run at which the frame was carried.
+  uint64 sequence = 6;
+}
+
+// The run's port traffic, written as a sidecar beside the RunProducts rather than inside
+// them: framed traffic at step rate is orders of magnitude larger than the products. Sorted
+// (sequence, instance, port). Hashed as a whole; the hash lives in RunProducts.port_traffic_hash.
+message PortTrafficLog {
+  string run_id = 1;
+  repeated PortTrafficRecord records = 2;
+  Provenance provenance = 3;
 }

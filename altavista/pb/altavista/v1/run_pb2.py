@@ -23,10 +23,11 @@ _sym_db = _symbol_database.Default()
 
 
 from . import core_pb2 as altavista_dot_v1_dot_core__pb2
+from . import system_pb2 as altavista_dot_v1_dot_system__pb2
 from . import trajectory_pb2 as altavista_dot_v1_dot_trajectory__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x61ltavista/v1/run.proto\x12\x0c\x61ltavista.v1\x1a\x17\x61ltavista/v1/core.proto\x1a\x1d\x61ltavista/v1/trajectory.proto\"l\n\x0bScoreResult\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x01\x12 \n\x04unit\x18\x03 \x01(\x0e\x32\x12.altavista.v1.Unit\x12\x13\n\x06passed\x18\x04 \x01(\x08H\x00\x88\x01\x01\x42\t\n\x07_passed\"\x87\x04\n\x0bRunProducts\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x41\n\x0ctrajectories\x18\x02 \x03(\x0b\x32+.altavista.v1.RunProducts.TrajectoriesEntry\x12#\n\x06\x65vents\x18\x03 \x03(\x0b\x32\x13.altavista.v1.Event\x12\x35\n\x06scores\x18\x04 \x03(\x0b\x32%.altavista.v1.RunProducts.ScoresEntry\x12,\n\nprovenance\x18\x05 \x01(\x0b\x32\x18.altavista.v1.Provenance\x12\"\n\x1a\x64ropped_in_flight_messages\x18\x06 \x01(\x04\x12-\n\x06\x66rames\x18\x07 \x03(\x0b\x32\x1d.altavista.v1.FrameDefinition\x12/\n\x0cmeasurements\x18\x08 \x03(\x0b\x32\x19.altavista.v1.Measurement\x1aM\n\x11TrajectoriesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\'\n\x05value\x18\x02 \x01(\x0b\x32\x18.altavista.v1.Trajectory:\x02\x38\x01\x1aH\n\x0bScoresEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.altavista.v1.ScoreResult:\x02\x38\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16\x61ltavista/v1/run.proto\x12\x0c\x61ltavista.v1\x1a\x17\x61ltavista/v1/core.proto\x1a\x19\x61ltavista/v1/system.proto\x1a\x1d\x61ltavista/v1/trajectory.proto\"l\n\x0bScoreResult\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x01\x12 \n\x04unit\x18\x03 \x01(\x0e\x32\x12.altavista.v1.Unit\x12\x13\n\x06passed\x18\x04 \x01(\x08H\x00\x88\x01\x01\x42\t\n\x07_passed\"\xa2\x04\n\x0bRunProducts\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x41\n\x0ctrajectories\x18\x02 \x03(\x0b\x32+.altavista.v1.RunProducts.TrajectoriesEntry\x12#\n\x06\x65vents\x18\x03 \x03(\x0b\x32\x13.altavista.v1.Event\x12\x35\n\x06scores\x18\x04 \x03(\x0b\x32%.altavista.v1.RunProducts.ScoresEntry\x12,\n\nprovenance\x18\x05 \x01(\x0b\x32\x18.altavista.v1.Provenance\x12\"\n\x1a\x64ropped_in_flight_messages\x18\x06 \x01(\x04\x12-\n\x06\x66rames\x18\x07 \x03(\x0b\x32\x1d.altavista.v1.FrameDefinition\x12/\n\x0cmeasurements\x18\x08 \x03(\x0b\x32\x19.altavista.v1.Measurement\x12\x19\n\x11port_traffic_hash\x18\t \x01(\t\x1aM\n\x11TrajectoriesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\'\n\x05value\x18\x02 \x01(\x0b\x32\x18.altavista.v1.Trajectory:\x02\x38\x01\x1aH\n\x0bScoresEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.altavista.v1.ScoreResult:\x02\x38\x01\"\x96\x01\n\x11PortTrafficRecord\x12\x10\n\x08instance\x18\x01 \x01(\t\x12\x0c\n\x04port\x18\x02 \x01(\t\x12.\n\tdirection\x18\x03 \x01(\x0e\x32\x1b.altavista.v1.PortDirection\x12\x0e\n\x06tai_ns\x18\x04 \x01(\x03\x12\x0f\n\x07payload\x18\x05 \x01(\x0c\x12\x10\n\x08sequence\x18\x06 \x01(\x04\"\x80\x01\n\x0ePortTrafficLog\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x30\n\x07records\x18\x02 \x03(\x0b\x32\x1f.altavista.v1.PortTrafficRecord\x12,\n\nprovenance\x18\x03 \x01(\x0b\x32\x18.altavista.v1.Provenanceb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,12 +38,16 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_RUNPRODUCTS_TRAJECTORIESENTRY']._serialized_options = b'8\001'
   _globals['_RUNPRODUCTS_SCORESENTRY']._loaded_options = None
   _globals['_RUNPRODUCTS_SCORESENTRY']._serialized_options = b'8\001'
-  _globals['_SCORERESULT']._serialized_start=96
-  _globals['_SCORERESULT']._serialized_end=204
-  _globals['_RUNPRODUCTS']._serialized_start=207
-  _globals['_RUNPRODUCTS']._serialized_end=726
-  _globals['_RUNPRODUCTS_TRAJECTORIESENTRY']._serialized_start=575
-  _globals['_RUNPRODUCTS_TRAJECTORIESENTRY']._serialized_end=652
-  _globals['_RUNPRODUCTS_SCORESENTRY']._serialized_start=654
-  _globals['_RUNPRODUCTS_SCORESENTRY']._serialized_end=726
+  _globals['_SCORERESULT']._serialized_start=123
+  _globals['_SCORERESULT']._serialized_end=231
+  _globals['_RUNPRODUCTS']._serialized_start=234
+  _globals['_RUNPRODUCTS']._serialized_end=780
+  _globals['_RUNPRODUCTS_TRAJECTORIESENTRY']._serialized_start=629
+  _globals['_RUNPRODUCTS_TRAJECTORIESENTRY']._serialized_end=706
+  _globals['_RUNPRODUCTS_SCORESENTRY']._serialized_start=708
+  _globals['_RUNPRODUCTS_SCORESENTRY']._serialized_end=780
+  _globals['_PORTTRAFFICRECORD']._serialized_start=783
+  _globals['_PORTTRAFFICRECORD']._serialized_end=933
+  _globals['_PORTTRAFFICLOG']._serialized_start=936
+  _globals['_PORTTRAFFICLOG']._serialized_end=1064
 # @@protoc_insertion_point(module_scope)
