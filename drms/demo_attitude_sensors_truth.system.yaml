@@ -1,0 +1,101 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.2 (star tracker
+# and IMU sensor models feeding FRAMED CCSDS ports; docs/sil-plan.md's M22 milestone paragraph
+# and its Decisions (2026-09-05) decision A: "attitude control first"; docs/open-questions.md
+# questions 142/149/151/152).
+#
+# The truth source for drms/demo_attitude_sensors.sos.yaml's own two sensor instances: field-for-
+# field the same torque-free axisymmetric precession physics as
+# drms/demo_attitude_precession.system.yaml (Jt=Jz=100/100, Jz=50, q0=identity, omega0=[0.05,
+# 0.03, 0.2] rad/s), plus seven declared `PORT_KIND_SIGNAL` OUT ports -- `crate::drm::sensors::
+# TRUTH_PORT_NAMES`'s own fixed convention (`truth_qx/qy/qz/qw/wx/wy/wz`) -- carrying the
+# propagated quaternion and body rate to both sensor instances every step.
+#
+# M22.2b (`docs/open-questions.md` questions 142/149/151/152, decided by the lead):
+# `dynamics_model: attitude.sensors_demo` dispatches through the real `"attitude."` binding path
+# (`crate::registry::ModelKind::Attitude`, `crate::drm::attitude::AttitudeWheelsModel`), wrapped
+# unconditionally in `crate::drm::sensors::TruthBroadcastAttitude` at `AnyModel::Attitude`
+# construction (see that variant's own doc comment in `crate::drm::binding` for why the wrap is
+# unconditional and why that is a strict no-op for every attitude fixture that declares no
+# matching ports/connections) -- so, unlike through M22.2, the seven truth ports declared below
+# **do** carry real traffic when this SoS is run through `av_kernel::drm::execute` today, to the
+# two real sensor instances `drms/demo_attitude_sensors_startracker.system.yaml`/
+# `demo_attitude_sensors_imu.system.yaml` declare. `crates/av-kernel/tests/drm_attitude_sensors.rs`
+# is the `execute()`-driven proof of exactly this three-instance topology; the router-mediated
+# unit-level proof this header used to point to (`crate::drm::sensors::tests::
+# attitude_instance_is_measured_by_both_sensors_through_the_real_router`) still exists and still
+# passes -- it was never made stale by this wiring, only no longer the *only* proof.
+id: attitude_sensors_truth_sys
+version: "1"
+name: Torque-free precession truth source for the star tracker/IMU demo (M22.2)
+dynamics_model: attitude.sensors_demo
+state_space_id: attitude.sensors_demo.space
+state_space:
+  id: attitude.sensors_demo.space
+  components:
+    - label: q_x
+      unit: UNIT_DIMENSIONLESS
+    - label: q_y
+      unit: UNIT_DIMENSIONLESS
+    - label: q_z
+      unit: UNIT_DIMENSIONLESS
+    - label: q_w
+      unit: UNIT_DIMENSIONLESS
+    - label: body_rate_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_z
+      unit: UNIT_RADIAN_PER_SECOND
+ports:
+  - name: truth_qx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qw
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+parameters:
+  - name: attitude.inertia.jxx
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jyy
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jzz
+    value: 50.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.q0.x
+    value: 0.0
+  - name: attitude.q0.y
+    value: 0.0
+  - name: attitude.q0.z
+    value: 0.0
+  - name: attitude.q0.w
+    value: 1.0
+  - name: attitude.omega0.x
+    value: 0.05
+  - name: attitude.omega0.y
+    value: 0.03
+  - name: attitude.omega0.z
+    value: 0.2
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_sensors_truth.system.yaml
+hash: "d1fd4296094adfe31e9d154e5fcbab0179012700a7db46d19c05b21350407003"

@@ -1,0 +1,105 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.3 (question 173).
+# A byte-for-byte clone of drms/demo_attitude_sensors_startracker.system.yaml's own physics and
+# port shape, under a new `id` (out of scope to touch that file -- it is a committed, hash-pinned,
+# 14-test fixture shared by `demo_attitude_control`/`demo_attitude_wheel_fault`, and its own
+# packet_codecs deliberately declare no `PacketField.target`; see
+# drms/demo_measurements.drm.yaml's own header comment for why that matters).
+#
+# The one real difference: every `packet_codecs[0].fields[*].target` is populated, following
+# `packet.proto`'s own `PacketField.target` doc comment convention ("<measurement_id>/<label>",
+# e.g. "altavista.attitude_q4/qx") -- the exact string `crate::drm::sensors::
+# star_tracker_packet_codec` now builds by default (M25.3). This is what makes this instance's
+# own telemetry actually decode into a CDM `Measurement` (`crate::codec::
+# measurements_from_field_values`), unlike the M22.2 fixture it clones.
+id: measurements_demo_startracker_sys
+version: "1"
+name: Star tracker measuring the M25.3 measurements demo's truth attitude (M25.3)
+dynamics_model: startracker.measurements_demo
+state_space_id: startracker.measurements_demo.space
+state_space:
+  id: startracker.measurements_demo.space
+  components: []
+ports:
+  - name: truth_qx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qw
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: st_meas
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: st_meas_codec
+    apid: 100
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "star tracker attitude measurement (M25.3)"
+    fields:
+      - name: qx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+        target: altavista.attitude_q4/qx
+      - name: qy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+        target: altavista.attitude_q4/qy
+      - name: qz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+        target: altavista.attitude_q4/qz
+      - name: qw
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+        target: altavista.attitude_q4/qw
+parameters:
+  - name: startracker.update_rate_hz
+    value: 2.0
+    unit: UNIT_HERTZ
+  - name: startracker.seed
+    value: 1.0
+  - name: startracker.noise_sigma_rad
+    value: 0.00001
+    unit: UNIT_RADIAN
+  - name: output.seq
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_measurements_startracker.system.yaml
+hash: "1aa0734f5dd78e12be5607cc28f36e40b62eb18773723282d577d4222a690a40"

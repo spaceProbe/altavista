@@ -1,0 +1,22 @@
+[package]
+name = "gmat-sys"
+publish = false
+description = "FFI to GMAT's C++ core: drive ODEModel::GetDerivatives from Rust (ADR-002 depth 2, P0 spike)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+links = "gmatffi"
+build = "build.rs"
+
+[dependencies]
+av-dynamics = { path = "../av-dynamics" }
+av-cdm = { path = "../av-cdm" }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

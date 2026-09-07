@@ -1,0 +1,514 @@
+=== [1/8] cmake availability ===
+cmake not found in this image -- installing (question 154's one-time network exception)
+Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+Get:4 http://deb.debian.org/debian bookworm/main arm64 Packages [8689 kB]
+Get:5 http://deb.debian.org/debian bookworm-updates/main arm64 Packages [6936 B]
+Get:6 http://deb.debian.org/debian-security bookworm-security/main arm64 Packages [334 kB]
+Fetched 9272 kB in 1s (6327 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following additional packages will be installed:
+  cmake-data libarchive13 libjsoncpp25 libproc2-0 librhash0 libuv1 procps
+Suggested packages:
+  cmake-doc cmake-format elpa-cmake-mode lrzip
+Recommended packages:
+  psmisc
+The following NEW packages will be installed:
+  cmake cmake-data libarchive13 libjsoncpp25 libproc2-0 librhash0 libuv1
+  procps
+0 upgraded, 8 newly installed, 0 to remove and 1 not upgraded.
+Need to get 10.2 MB of archives.
+After this operation, 41.1 MB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian bookworm/main arm64 libproc2-0 arm64 2:4.0.2-3 [60.1 kB]
+Get:2 http://deb.debian.org/debian bookworm/main arm64 procps arm64 2:4.0.2-3 [698 kB]
+Get:3 http://deb.debian.org/debian-security bookworm-security/main arm64 libarchive13 arm64 3.6.2-1+deb12u5 [318 kB]
+Get:4 http://deb.debian.org/debian bookworm/main arm64 libjsoncpp25 arm64 1.9.5-4 [72.3 kB]
+Get:5 http://deb.debian.org/debian bookworm/main arm64 librhash0 arm64 1.4.3-3 [131 kB]
+Get:6 http://deb.debian.org/debian bookworm/main arm64 libuv1 arm64 1.44.2-1+deb12u1 [130 kB]
+Get:7 http://deb.debian.org/debian bookworm/main arm64 cmake-data all 3.25.1-1 [2026 kB]
+Get:8 http://deb.debian.org/debian bookworm/main arm64 cmake arm64 3.25.1-1 [6806 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Fetched 10.2 MB in 3s (3249 kB/s)
+Selecting previously unselected package libproc2-0:arm64.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 17628 files and directories currently installed.)
+Preparing to unpack .../0-libproc2-0_2%3a4.0.2-3_arm64.deb ...
+Unpacking libproc2-0:arm64 (2:4.0.2-3) ...
+Selecting previously unselected package procps.
+Preparing to unpack .../1-procps_2%3a4.0.2-3_arm64.deb ...
+Unpacking procps (2:4.0.2-3) ...
+Selecting previously unselected package libarchive13:arm64.
+Preparing to unpack .../2-libarchive13_3.6.2-1+deb12u5_arm64.deb ...
+Unpacking libarchive13:arm64 (3.6.2-1+deb12u5) ...
+Selecting previously unselected package libjsoncpp25:arm64.
+Preparing to unpack .../3-libjsoncpp25_1.9.5-4_arm64.deb ...
+Unpacking libjsoncpp25:arm64 (1.9.5-4) ...
+Selecting previously unselected package librhash0:arm64.
+Preparing to unpack .../4-librhash0_1.4.3-3_arm64.deb ...
+Unpacking librhash0:arm64 (1.4.3-3) ...
+Selecting previously unselected package libuv1:arm64.
+Preparing to unpack .../5-libuv1_1.44.2-1+deb12u1_arm64.deb ...
+Unpacking libuv1:arm64 (1.44.2-1+deb12u1) ...
+Selecting previously unselected package cmake-data.
+Preparing to unpack .../6-cmake-data_3.25.1-1_all.deb ...
+Unpacking cmake-data (3.25.1-1) ...
+Selecting previously unselected package cmake.
+Preparing to unpack .../7-cmake_3.25.1-1_arm64.deb ...
+Unpacking cmake (3.25.1-1) ...
+Setting up libarchive13:arm64 (3.6.2-1+deb12u5) ...
+Setting up libuv1:arm64 (1.44.2-1+deb12u1) ...
+Setting up libproc2-0:arm64 (2:4.0.2-3) ...
+Setting up libjsoncpp25:arm64 (1.9.5-4) ...
+Setting up librhash0:arm64 (1.4.3-3) ...
+Setting up procps (2:4.0.2-3) ...
+Setting up cmake-data (3.25.1-1) ...
+Setting up cmake (3.25.1-1) ...
+Processing triggers for libc-bin (2.36-9+deb12u14) ...
+cmake version 3.25.1
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+=== [2/8] fetch-cfs.sh (expected no-op: already fetched on host) ===
+already present and pinned: /workspace/third_party/cfs (088b2fa828db9ff7e00733f1908e0eeb59f66ce3)
+=== [3/8] copy lockstep apps + psp into the cFS tree (matches services/cfs/Dockerfile's own COPY steps) ===
+=== [4/8] write third_party/cfs/rtems_zynqmp_defs/ (a NEW mission-defs dir -- sample_defs/ for the posix build is untouched) ===
+=== [5/8] (re-)append the rtems_zynqmp CONFIG_NAMES entry to target-configs.mk ===
+appended (fresh)
+=== [6/8] make rtems_zynqmp.prep ===
+rm -f "build-rtems_zynqmp/stamp.prep"
+env  make --no-print-directory -f /workspace/third_party/cfs/target-rules.mk \
+	CFG=rtems_zynqmp GOAL=rtems_zynqmp.prep STAMPFILE=build-rtems_zynqmp/stamp.prep all
+mkdir -p "build-rtems_zynqmp"
+cmake -DSIMULATION=arm-rtems6-zynqmp_rpu_lock_step -DMISSIONCONFIG=rtems_zynqmp -DCFE_EDS_ENABLED=OFF -DCMAKE_BUILD_TYPE=debug -DOSAL_CONFIG_INCLUDE_NETWORK=FALSE -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE -DCMAKE_BUILD_TYPE=debug -S "/workspace/third_party/cfs/cfe" -DCMAKE_INSTALL_PREFIX=/exe -B "build-rtems_zynqmp" 
+-- Search path for modules: apps;libs;psp/fsw/modules;cfe/modules
+-- Module 'core_api' found at /workspace/third_party/cfs/cfe/modules/core_api
+-- Module 'core_private' found at /workspace/third_party/cfs/cfe/modules/core_private
+-- Module 'cfe_assert' found at /workspace/third_party/cfs/cfe/modules/cfe_assert
+-- Module 'cfe_testcase' found at /workspace/third_party/cfs/cfe/modules/cfe_testcase
+-- Module 'io_lockstep' found at /workspace/third_party/cfs/apps/io_lockstep
+-- Module 'sch_lockstep' found at /workspace/third_party/cfs/apps/sch_lockstep
+-- Module 'adcs' found at /workspace/third_party/cfs/apps/adcs
+-- Module 'config' found at /workspace/third_party/cfs/cfe/modules/config
+-- Module 'es' found at /workspace/third_party/cfs/cfe/modules/es
+-- Module 'evs' found at /workspace/third_party/cfs/cfe/modules/evs
+-- Module 'fs' found at /workspace/third_party/cfs/cfe/modules/fs
+-- Module 'sb' found at /workspace/third_party/cfs/cfe/modules/sb
+-- Module 'tbl' found at /workspace/third_party/cfs/cfe/modules/tbl
+-- Module 'time' found at /workspace/third_party/cfs/cfe/modules/time
+-- Module 'osal' found at /workspace/third_party/cfs/osal
+-- Module 'psp' found at /workspace/third_party/cfs/psp
+-- Module 'msg' found at /workspace/third_party/cfs/cfe/modules/msg
+-- Module 'sbr' found at /workspace/third_party/cfs/cfe/modules/sbr
+-- Module 'resourceid' found at /workspace/third_party/cfs/cfe/modules/resourceid
+-- OSAL_SYSTEM_BSPTYPE not defined, no OSAL implementation will be compiled
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_api/config/default_cfe_core_api_interface_cfg_values.h for cfe_core_api_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_api/config/default_cfe_core_api_msgid_mapping.h for cfe_core_api_msgid_mapping.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_api/config/default_cfe_mission_cfg.h for cfe_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/rtems_zynqmp_defs/cfe_perfids.h for cfe_perfids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msg.h for cfe_test_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgdefs.h for cfe_test_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgstruct.h for cfe_test_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgids.h for cfe_test_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgid_values.h for cfe_test_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_tbl.h for cfe_test_tbl.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_tblstruct.h for cfe_test_tblstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_topicid_values.h for cfe_test_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_mission_cfg.h for cfe_es_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_interface_cfg_values.h for cfe_es_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_memaddress.h for cfe_es_memaddress.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_extern_typedefs.h for cfe_es_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_fcncode_values.h for cfe_es_fcncode_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_msgdefs.h for cfe_es_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_msg.h for cfe_es_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_msgstruct.h for cfe_es_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_topicid_values.h for cfe_es_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_mission_cfg.h for cfe_evs_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_interface_cfg_values.h for cfe_evs_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_extern_typedefs.h for cfe_evs_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_fcncode_values.h for cfe_evs_fcncode_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_msgdefs.h for cfe_evs_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_msg.h for cfe_evs_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_msgstruct.h for cfe_evs_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_topicid_values.h for cfe_evs_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/fs/config/default_cfe_fs_mission_cfg.h for cfe_fs_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/fs/config/default_cfe_fs_interface_cfg_values.h for cfe_fs_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/fs/config/default_cfe_fs_filedef.h for cfe_fs_filedef.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/fs/config/default_cfe_fs_extern_typedefs.h for cfe_fs_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_mission_cfg.h for cfe_sb_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_interface_cfg_values.h for cfe_sb_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_extern_typedefs.h for cfe_sb_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_fcncode_values.h for cfe_sb_fcncode_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_msgdefs.h for cfe_sb_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_msg.h for cfe_sb_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_msgstruct.h for cfe_sb_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_topicid_values.h for cfe_sb_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_mission_cfg.h for cfe_tbl_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_interface_cfg_values.h for cfe_tbl_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_extern_typedefs.h for cfe_tbl_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_fcncode_values.h for cfe_tbl_fcncode_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_msgdefs.h for cfe_tbl_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_msg.h for cfe_tbl_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_msgstruct.h for cfe_tbl_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_topicid_values.h for cfe_tbl_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_mission_cfg.h for cfe_time_mission_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_interface_cfg_values.h for cfe_time_interface_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_extern_typedefs.h for cfe_time_extern_typedefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_fcncode_values.h for cfe_time_fcncode_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_msgdefs.h for cfe_time_msgdefs.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_msg.h for cfe_time_msg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_msgstruct.h for cfe_time_msgstruct.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_topicid_values.h for cfe_time_topicid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/msg/option_inc/default_cfe_msg_hdr_pri.h for cfe_msg_hdr.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/msg/option_inc/default_cfe_msg_sechdr.h for cfe_msg_sechdr.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/resourceid/option_inc/cfe_resourceid_simple.h for cfe_resourceid_typedef.h
+-- Configuring for system arch: arm-rtems6-zynqmp_rpu_lock_step/default_cpu1
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_api/config/default_cfe_core_api_base_msgid_values.h for cfe_core_api_base_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_api/config/default_cfe_msgids.h for cfe_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_private/config/default_cfe_platform_cfg.h for platform_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/core_private/config/default_cfe_core_private_internal_cfg.h for cfe_core_private_internal_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgids.h for cfe_test_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/config/default_cfe_test_msgid_values.h for cfe_test_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_internal_cfg_values.h for cfe_es_internal_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_msgid_values.h for cfe_es_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_msgids.h for cfe_es_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/es/config/default_cfe_es_platform_cfg.h for cfe_es_platform_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_internal_cfg_values.h for cfe_evs_internal_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_msgid_values.h for cfe_evs_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_msgids.h for cfe_evs_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/evs/config/default_cfe_evs_platform_cfg.h for cfe_evs_platform_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_internal_cfg_values.h for cfe_sb_internal_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_msgid_values.h for cfe_sb_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_msgids.h for cfe_sb_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/sb/config/default_cfe_sb_platform_cfg.h for cfe_sb_platform_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_internal_cfg_values.h for cfe_tbl_internal_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_msgid_values.h for cfe_tbl_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_msgids.h for cfe_tbl_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/tbl/config/default_cfe_tbl_platform_cfg.h for cfe_tbl_platform_cfg.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_internal_cfg_values.h for cfe_time_internal_cfg_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_msgid_values.h for cfe_time_msgid_values.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_msgids.h for cfe_time_msgids.h
+-- Using file: /workspace/third_party/cfs/cfe/modules/time/config/default_cfe_time_platform_cfg.h for cfe_time_platform_cfg.h
+CMake Warning at cmake/arch_build.cmake:763 (message):
+  Mismatched PSP/BSP: pc-rtems implies pc-rtems, but generic-rtems is
+  configured
+Call Stack (most recent call first):
+  CMakeLists.txt:143 (process_arch)
+
+
+-- BSP Selection: generic-rtems at /workspace/third_party/cfs/osal/src/bsp/generic-rtems
+-- Using file: /workspace/third_party/cfs/rtems_zynqmp_defs/bsp_rtems_cfg.h for bsp_rtems_cfg.h
+-- OSAL Selection: rtems at /workspace/third_party/cfs/osal/src/os/rtems
+-- OSAL Compile Definitions: _BSD_SOURCE;_RTEMS_OS_
+-- PSP Selection: pc-rtems
+-- Building Core Module: core_api
+-- Building Core Module: core_private
+-- Building Core Module: config
+-- Building Core Module: es
+-- Building Core Module: evs
+-- Building Core Module: fs
+-- Building Core Module: sb
+-- Building Core Module: tbl
+-- Building Core Module: time
+-- Building Core Module: psp
+-- Building Core Module: msg
+-- CCSDS primary header included in message header (not including CCSDS extended header)
+-- Message Id version 1 in use (MsgId V1)
+-- Building Core Module: sbr
+-- Using hashed map software bus routing implementation
+-- Building Core Module: resourceid
+-- Building Static App: io_lockstep targets=cpu1
+-- Building Static App: sch_lockstep targets=cpu1
+-- Building Static App: adcs targets=cpu1
+-- Building Dynamic App: cfe_assert targets=cpu1
+-- Building Dynamic App: cfe_testcase targets=cpu1
+NOTE: "cfeTestAppTable" passed to add_cfe_tables is not a previously-defined application target
+-- Using file: /workspace/third_party/cfs/cfe/modules/cfe_testcase/tables/cfe_test_tbl.c for cfe_test_tbl.c
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /workspace/third_party/cfs/build-rtems_zynqmp/arm-rtems6-zynqmp_rpu_lock_step/default_cpu1
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /workspace/third_party/cfs/build-rtems_zynqmp
+echo '-DSIMULATION=arm-rtems6-zynqmp_rpu_lock_step -DMISSIONCONFIG=rtems_zynqmp -DCFE_EDS_ENABLED=OFF -DCMAKE_BUILD_TYPE=debug -DOSAL_CONFIG_INCLUDE_NETWORK=FALSE -DCMAKE_EXPORT_COMPILE_COMMANDS=TRUE -DCMAKE_BUILD_TYPE=debug -S "/workspace/third_party/cfs/cfe" -DCMAKE_INSTALL_PREFIX=/exe' > "build-rtems_zynqmp/stamp.prep"
+rtems_zynqmp.prep successfully completed
+prep exit status: 0
+=== [7/8] make rtems_zynqmp.compile ===
+rm -f "build-rtems_zynqmp/stamp.compile"
+env  make --no-print-directory -f /workspace/third_party/cfs/target-rules.mk \
+	CFG=rtems_zynqmp GOAL=rtems_zynqmp.compile STAMPFILE=build-rtems_zynqmp/stamp.compile all
+make --no-print-directory -C "build-rtems_zynqmp" mission-all
+[ 22%] Built target elf2cfetbl
+[ 22%] Built target cfe-build-env
+[ 22%] Built target cfe-module-version
+[ 22%] Built target mission-version
+[ 33%] Built target cfeconfig_platformdata_arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[ 77%] Built target cfeconfig_platformdata_tool
+[100%] Built target cfgtool-execute-arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[100%] Built target mission-prebuild
+[100%] Built target tblobj_cpu1_cfeTestAppTable.tbl73923747936cc0a9f12840194ab37e957be2355c
+[100%] Generating /workspace/third_party/cfs/build-rtems_zynqmp/tables/cpu1_cfeTestAppTable.tbl73923747936cc0a9f12840194ab37e957be2355c.cfe_test_tbl.d
+[100%] Built target generate_table_cpu1_cfeTestAppTable_cfe_test_tbl
+[100%] Built target cfetables
+[100%] Built target arm_rtems6_zynqmp_rpu_lock_step_default_cpu1-cfetables
+[100%] Built target mission-cfetables
+mkdir: created directory 'elf'
+mkdir: created directory 'elf/cpu1/'
+mkdir: created directory 'staging/cpu1'
+mkdir: created directory 'staging/cpu1/eeprom/'
+Table build completed
+[100%] Built target tabletool-execute
+[  1%] Building C object osal/generic-rtems_impl/CMakeFiles/osal_generic-rtems_impl.dir/src/bsp_init.c.o
+[  1%] Built target osal_generic-rtems_impl
+[  1%] Linking C static library libosal_bsp.a
+[  3%] Built target osal_bsp
+[ 14%] Built target osal_rtems_impl
+[ 22%] Built target osal
+[ 24%] Built target ut_assert
+[ 40%] Built target ut_osapi_stubs
+[ 44%] Built target config
+[ 44%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_api.c.o
+[ 44%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_apps.c.o
+[ 45%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_backgroundtask.c.o
+[ 45%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_cds.c.o
+[ 45%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_cds_mempool.c.o
+[ 46%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_erlog.c.o
+[ 46%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_generic_pool.c.o
+[ 46%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_mempool.c.o
+[ 48%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_perf.c.o
+[ 48%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_resource.c.o
+[ 48%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_start.c.o
+[ 48%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_syslog.c.o
+[ 49%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_task.c.o
+[ 49%] Building C object es/CMakeFiles/es.dir/fsw/src/cfe_es_dispatch.c.o
+[ 49%] Linking C static library libes.a
+[ 49%] Built target es
+[ 50%] Building C object evs/CMakeFiles/evs.dir/fsw/src/cfe_evs.c.o
+[ 50%] Building C object evs/CMakeFiles/evs.dir/fsw/src/cfe_evs_log.c.o
+[ 50%] Building C object evs/CMakeFiles/evs.dir/fsw/src/cfe_evs_task.c.o
+[ 50%] Building C object evs/CMakeFiles/evs.dir/fsw/src/cfe_evs_utils.c.o
+[ 50%] Building C object evs/CMakeFiles/evs.dir/fsw/src/cfe_evs_dispatch.c.o
+[ 50%] Linking C static library libevs.a
+[ 51%] Built target evs
+[ 53%] Built target fs
+[ 53%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_api.c.o
+[ 53%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_buf.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_init.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_priv.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_task.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_util.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_dispatch.c.o
+[ 54%] Building C object sb/CMakeFiles/sb.dir/fsw/src/cfe_sb_msg_id_util.c.o
+[ 54%] Linking C static library libsb.a
+[ 55%] Built target sb
+[ 57%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_api.c.o
+[ 57%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_accdesc.c.o
+[ 57%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_load.c.o
+[ 57%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_loadbuff.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_registry.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_regrec.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_dump.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_dumpctl.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_valresult.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_internal.c.o
+[ 58%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_transaction.c.o
+[ 59%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_task.c.o
+[ 59%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_task_cmds.c.o
+[ 59%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_passthru_codec.c.o
+[ 61%] Building C object tbl/CMakeFiles/tbl.dir/fsw/src/cfe_tbl_dispatch.c.o
+[ 61%] Linking C static library libtbl.a
+[ 62%] Built target tbl
+[ 62%] Building C object time/CMakeFiles/time.dir/fsw/src/cfe_time_api.c.o
+[ 62%] Building C object time/CMakeFiles/time.dir/fsw/src/cfe_time_task.c.o
+[ 62%] Building C object time/CMakeFiles/time.dir/fsw/src/cfe_time_tone.c.o
+[ 63%] Building C object time/CMakeFiles/time.dir/fsw/src/cfe_time_utils.c.o
+[ 63%] Building C object time/CMakeFiles/time.dir/fsw/src/cfe_time_dispatch.c.o
+[ 63%] Linking C static library libtime.a
+[ 63%] Built target time
+[ 64%] Built target ram_notimpl
+[ 66%] Building C object psp/pc-rtems-impl/CMakeFiles/psp-pc-rtems-impl.dir/src/cfe_psp_start.c.o
+[ 66%] Built target psp-pc-rtems-impl
+[ 68%] Built target psp-pc-rtems-shared
+[ 68%] Built target soft_timebase
+[ 70%] Built target timebase_posix_clock
+[ 70%] Built target eeprom_notimpl
+[ 70%] Built target port_notimpl
+[ 71%] Built target iodriver
+[ 72%] Built target endian_api
+[ 74%] Built target rtems_sysmon
+[ 75%] Linking C static library libpsp-pc-rtems.a
+[ 75%] Built target psp-pc-rtems
+[ 77%] Built target msg
+[ 79%] Built target sbr
+[ 79%] Built target resourceid
+[ 79%] Building C object apps/io_lockstep/CMakeFiles/psp_lockstep.dir/workspace/third_party/cfs/psp-lockstep/src/psp_lockstep.c.o
+[ 79%] Linking C static library libpsp_lockstep.a
+[ 79%] Built target psp_lockstep
+[ 80%] Building C object apps/io_lockstep/CMakeFiles/ccsds_codec.dir/workspace/third_party/cfs/apps/shared/ccsds/src/ccsds_codec.c.o
+[ 80%] Linking C static library libccsds_codec.a
+[ 80%] Built target ccsds_codec
+[ 81%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/io_lockstep_app.c.o
+[ 81%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/lockstep_local_framing.c.o
+[ 81%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/lockstep_local_io.c.o
+[ 81%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/pbmini.c.o
+[ 83%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/lockstep_messages.c.o
+[ 83%] Building C object apps/io_lockstep/CMakeFiles/io_lockstep.dir/fsw/src/io_lockstep_port_table.c.o
+[ 83%] Linking C static library libio_lockstep.a
+[ 83%] Built target io_lockstep
+[ 84%] Building C object apps/sch_lockstep/CMakeFiles/sch_lockstep.dir/fsw/src/sch_lockstep_app.c.o
+[ 84%] Linking C static library libsch_lockstep.a
+[ 84%] Built target sch_lockstep
+[ 84%] Building C object apps/adcs/CMakeFiles/adcs.dir/fsw/src/adcs_app.c.o
+[ 84%] Building C object apps/adcs/CMakeFiles/adcs.dir/fsw/src/adcs_control.c.o
+[ 84%] Building C object apps/adcs/CMakeFiles/adcs.dir/fsw/src/adcs_packets.c.o
+[ 84%] Linking C static library libadcs.a
+[ 84%] Built target adcs
+[ 85%] Built target ut_assert_pic
+[ 87%] Built target cfe_assert
+[ 97%] Built target cfe_testcase
+[ 97%] Generating cfe_build_env_table.c
+[ 97%] Building C object cpu1/CMakeFiles/core-cpu1.dir/cfe_build_env_table.c.o
+[ 97%] Linking C executable core-cpu1.exe
+RTEMS Kernel Symbols 6.0
+kernel: core-cpu1.exe-prelink
+cache:load-sym: object files: 1
+cache:load-sym: symbols: 3807
+Filtered symbols: 2764
+symbol C file: /tmp/ccMsaaaa.c
+symbol O file: core-cpu1.exe-dl-sym.o
+[100%] Built target core-cpu1
+[100%] Built target arm_rtems6_zynqmp_rpu_lock_step_default_cpu1-all
+[  5%] Built target cfeconfig_platformdata_arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[ 27%] Built target cfeconfig_platformdata_tool
+[ 38%] Built target cfe_ts_crc
+[ 66%] Built target cmd_send
+[ 88%] Built target tlm_recv
+[100%] Built target elf2cfetbl
+Built target mission-all
+touch "build-rtems_zynqmp/stamp.compile"
+rtems_zynqmp.compile successfully completed
+compile exit status: 0
+=== [8/8] make rtems_zynqmp.install ===
+rm -f "build-rtems_zynqmp/stamp.install"
+env  make --no-print-directory -f /workspace/third_party/cfs/target-rules.mk \
+	CFG=rtems_zynqmp GOAL=rtems_zynqmp.install STAMPFILE=build-rtems_zynqmp/stamp.install all
+make --no-print-directory -C "build-rtems_zynqmp" DESTDIR="/workspace/third_party/cfs/build-rtems_zynqmp" mission-install
+[ 22%] Built target elf2cfetbl
+[ 22%] Built target cfe-build-env
+[ 22%] Built target cfe-module-version
+[ 22%] Built target mission-version
+[ 33%] Built target cfeconfig_platformdata_arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[ 77%] Built target cfeconfig_platformdata_tool
+[100%] Built target cfgtool-execute-arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[100%] Built target mission-prebuild
+[100%] Built target tblobj_cpu1_cfeTestAppTable.tbl73923747936cc0a9f12840194ab37e957be2355c
+[100%] Built target generate_table_cpu1_cfeTestAppTable_cfe_test_tbl
+[100%] Built target cfetables
+[100%] Built target arm_rtems6_zynqmp_rpu_lock_step_default_cpu1-cfetables
+[100%] Built target mission-cfetables
+Table build completed
+[100%] Built target tabletool-execute
+[  1%] Built target osal_generic-rtems_impl
+[  3%] Built target osal_bsp
+[ 14%] Built target osal_rtems_impl
+[ 22%] Built target osal
+[ 24%] Built target ut_assert
+[ 40%] Built target ut_osapi_stubs
+[ 44%] Built target config
+[ 49%] Built target es
+[ 51%] Built target evs
+[ 53%] Built target fs
+[ 55%] Built target sb
+[ 62%] Built target tbl
+[ 63%] Built target time
+[ 64%] Built target ram_notimpl
+[ 66%] Built target psp-pc-rtems-impl
+[ 68%] Built target psp-pc-rtems-shared
+[ 68%] Built target soft_timebase
+[ 70%] Built target timebase_posix_clock
+[ 70%] Built target eeprom_notimpl
+[ 70%] Built target port_notimpl
+[ 71%] Built target iodriver
+[ 72%] Built target endian_api
+[ 74%] Built target rtems_sysmon
+[ 75%] Built target psp-pc-rtems
+[ 77%] Built target msg
+[ 79%] Built target sbr
+[ 79%] Built target resourceid
+[ 79%] Built target psp_lockstep
+[ 80%] Built target ccsds_codec
+[ 83%] Built target io_lockstep
+[ 84%] Built target sch_lockstep
+[ 84%] Built target adcs
+[ 85%] Built target ut_assert_pic
+[ 87%] Built target cfe_assert
+[ 97%] Built target cfe_testcase
+[ 97%] Generating cfe_build_env_table.c
+[ 97%] Building C object cpu1/CMakeFiles/core-cpu1.dir/cfe_build_env_table.c.o
+[ 97%] Linking C executable core-cpu1.exe
+RTEMS Kernel Symbols 6.0
+kernel: core-cpu1.exe-prelink
+cache:load-sym: object files: 1
+cache:load-sym: symbols: 3807
+Filtered symbols: 2764
+symbol C file: /tmp/ccSzaaaa.c
+symbol O file: core-cpu1.exe-dl-sym.o
+[100%] Built target core-cpu1
+Install the project...
+-- Install configuration: "debug"
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_assert.obj
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_testcase.obj
+-- Installing: /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe
+[100%] Built target arm_rtems6_zynqmp_rpu_lock_step_default_cpu1-install
+[  5%] Built target cfeconfig_platformdata_arm_rtems6_zynqmp_rpu_lock_step_default_cpu1
+[ 27%] Built target cfeconfig_platformdata_tool
+[ 38%] Built target cfe_ts_crc
+[ 66%] Built target cmd_send
+[ 88%] Built target tlm_recv
+[100%] Built target elf2cfetbl
+Install the project...
+-- Install configuration: "debug"
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/host/cfe_ts_crc
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/host/cmd_send
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/host/tlm_recv
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/.
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/./cpu1
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/./cpu1/eeprom
+-- Installing: /workspace/third_party/cfs/build-rtems_zynqmp/exe/./cpu1/eeprom/cfe_test_tbl.tbl
+-- Up-to-date: /workspace/third_party/cfs/build-rtems_zynqmp/exe/host/elf2cfetbl
+Built target mission-install
+touch "build-rtems_zynqmp/stamp.install"
+rtems_zynqmp.install successfully completed
+install exit status: 0
+=== Artifact verification (by content, not exit code) ===
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_es_startup.scr
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_test_tbl.tbl
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_testcase.obj
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_assert.obj
+--- /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe ---
+/workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), statically linked, with debug_info, not stripped
+ELF Header:
+  Magic:   7f 45 4c 46 01 01 01 00 00 00 00 00 00 00 00 00 
+  Class:                             ELF32
+  Data:                              2's complement, little endian
+  Version:                           1 (current)
+  OS/ABI:                            UNIX - System V
+  ABI Version:                       0
+  Type:                              EXEC (Executable file)
+  Machine:                           ARM
+  Version:                           0x1
+  Entry point address:               0x40
+  Start of program headers:          52 (bytes into file)
+  Start of section headers:          7549120 (bytes into file)
+  Flags:                             0x5000400, Version5 EABI, hard-float ABI
+  Size of this header:               52 (bytes)
+  Size of program headers:           32 (bytes)
+  Number of program headers:         4
+  Size of section headers:           40 (bytes)
+  Number of section headers:         40
+  Section header string table index: 39
+07c65280c58154b44c34ba0c1f2a9d47ea86d32338eca0f4d2911a3b3715e96a  /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe
+-rwxr-xr-x 1 root root 7550720 Sep  6 20:20 /workspace/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe
+=== Done. Logs in /workspace/third_party/rtems-container/output/rtems-cross-build-logs ===

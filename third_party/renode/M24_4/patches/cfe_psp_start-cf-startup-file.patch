@@ -1,0 +1,59 @@
+--- a/psp/fsw/pc-rtems/src/cfe_psp_start.c
++++ b/psp/fsw/pc-rtems/src/cfe_psp_start.c
+@@ -173,6 +173,56 @@
+     }
+ 
+     /*
++    ** AltaVista M24.4 (docs/open-questions.md question 148; recorded here as this task's
++    ** first-ever patch to third_party/cfs/{cfe,osal,psp} -- every prior M24 task kept that
++    ** count at zero): a raw ELF `LoadELF` boot under Renode has no real disk/network backing
++    ** the "/cf" mapping just above, so CFE_ES_StartApplications's later open() of
++    ** CFE_PSP_NONVOL_STARTUP_FILE ("/cf/cfe_es_startup.scr") fails with EC=-1 and no app ever
++    ** starts, even though every app is already statically linked in (cpu1_STATIC_SYMLIST) --
++    ** confirmed live, third_party/renode/M24_4_REPORT.md item 3. The exact same three lines
++    ** services/cfs/build/generate_startup.cmake writes to disk for a real/posix build are
++    ** written here directly into the default in-memory root filesystem via plain OSAL POSIX
++    ** calls -- no new filesystem code, no tar/bin2c embedding needed: RTEMS's IMFS is already
++    ** this BSP's unconditional default root filesystem, "/cf" already resolves into it via the
++    ** OS_FileSysAddFixedMap call directly above, and OS_OpenCreate(..., OS_FILE_FLAG_CREATE) on
++    ** that path is ordinary in-memory file creation, not a mount operation. Content copied
++    ** byte-for-byte from a real cross-build's own generated file
++    ** (third_party/cfs/build-rtems_zynqmp/exe/cpu1/eeprom/cfe_es_startup.scr), not retyped from
++    ** memory. Guarded so a real disk-backed deployment (a future non-Renode target where "/cf"
++    ** is persistent EEPROM/flash and may already carry a real, possibly different, startup
++    ** file) is never overwritten: this only ever writes when the file cannot already be opened
++    ** for reading.
++    */
++    {
++        static const char av_m24_4_startup_script[] =
++            "CFE_APP, io_lockstep,  IO_LOCKSTEP_AppMain, IO_LOCKSTEP, 70,  131072, 0x0, 0;\n"
++            "CFE_APP, sch_lockstep, SCH_LS_AppMain,       SCH_LOCKSTEP, 70,  131072, 0x0, 0;\n"
++            "CFE_APP, adcs,         ADCS_AppMain,         ADCS,        71,  131072, 0x0, 0;\n";
++        osal_id_t check_fd;
++
++        if (OS_OpenCreate(&check_fd, "/cf/cfe_es_startup.scr", OS_FILE_FLAG_NONE, OS_READ_ONLY) == OS_SUCCESS)
++        {
++            OS_close(check_fd);
++        }
++        else
++        {
++            osal_id_t startup_fd;
++            int32     write_status = OS_OpenCreate(&startup_fd, "/cf/cfe_es_startup.scr", OS_FILE_FLAG_CREATE | OS_FILE_FLAG_TRUNCATE, OS_WRITE_ONLY);
++
++            if (write_status == OS_SUCCESS)
++            {
++                OS_write(startup_fd, av_m24_4_startup_script, sizeof(av_m24_4_startup_script) - 1);
++                OS_close(startup_fd);
++                OS_printf("CFE_PSP: AltaVista M24.4 wrote a default /cf/cfe_es_startup.scr into the in-memory root fs (Renode/no-disk boot)\n");
++            }
++            else
++            {
++                OS_printf("CFE_PSP: AltaVista M24.4 could not write /cf/cfe_es_startup.scr: %d\n", (int)write_status);
++            }
++        }
++    }
++
++    /*
+     ** Initialize the statically linked modules (if any)
+     */
+     CFE_PSP_ModuleInit();

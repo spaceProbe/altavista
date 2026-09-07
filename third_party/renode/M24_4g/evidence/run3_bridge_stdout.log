@@ -1,0 +1,11 @@
+bridge: Renode booted, include reply: include @/tmp/av-renode-m24c-56716/renode_bridge_generated.56933.resc
+Command setup_uart_tx_bridge failed, returning "0".
+(av-m24-4b-bridge-56933) 
+(av-m24-4b-bridge-56933)
+bridge: uart1 TX hook connected
+bridge: connecting to shim's Unix socket at /tmp/av-renode-m24c-56716/lockstep.sock
+bridge: connected to shim; entering relay loop
+bridge: relayed HELLO both ways
+bridge: relayed BIND (start_tai_ns=1767225637000000000)
+bridge: STEP idle-CPU trace (informational, not a stall -- guest_read_frame reads from the M24.4f CharReceived hook socket): distinct PC values: ['0x4004bb32']
+bridge: STEP idle-CPU trace (informational, not a stall -- guest_read_frame reads from the M24.4f CharReceived hook socket): distinct PC values: ['0x4004bb32']

@@ -1,0 +1,90 @@
+{
+  "ballistics": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0
+  },
+  "burn_epoch_a1mjd": 31041.542095305344,
+  "dv_ric_km_s": [
+    0.0,
+    0.02,
+    0.0
+  ],
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "final_state": [
+    -2677.2863721474337,
+    3414.1908277758225,
+    5405.939787321972,
+    -6.325787402354232,
+    -4.1137454141739545,
+    -0.5698611983130978
+  ],
+  "force_model": {
+    "central_body": "Earth",
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-06T13:19:06+00:00",
+  "gmat_version": "R2026a",
+  "initial_state": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "keplerian": {
+    "AOP": 0.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "TA": 0.0
+  },
+  "name": "leo_1day_maneuver_ric",
+  "note": "state_pre_burn/state_post_burn/final_state all come from altavista.scenario.Scenario.maneuver's own RIC path (altavista/scenario.py::Scenario._fire_impulsive_burn), which fires a real GMAT ImpulsiveBurn whose CoordinateSystem is an ObjectReferenced RIC system (XAxis=R, ZAxis=N, question 73) built through altavista.frames.FrameRegistry -- not a hand re-derivation of that rotation. crates/av-kernel/src/drm/maneuver.rs::dv_to_inertial's AxesKind::Ric branch is pinned against this same function field-for-field. See also goldens/leo_1day_maneuver_gmat_lvlh.json and altavista/FRAMES.md's 'GMAT ImpulsiveBurn LVLH vs AXES_KIND_VVLH' section: GMAT's own ImpulsiveBurn Axes=LVLH turns out to realize this exact same X=R,Z=N triad, so that golden's dv/state numbers reproduce these ones bit-for-bit even though it was fired through a completely different GMAT mechanism (Axes=LVLH, not this CoordinateSystem).",
+  "post_burn_duration_s": 3600.0,
+  "pre_burn_duration_s": 3600.0,
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "reason": "M26.1 (question 160): rename the old package/identifier prefix to altavista in golden metadata (note/reason text only); physics unchanged, regenerated to keep the file's self sha256 consistent",
+  "sha256": "22e457a93dc0c48b371922251cfccc4497f13c56ff054041d34e72b6bd69d6ac",
+  "state_post_burn": [
+    -2334.790785997252,
+    -5039.175416023983,
+    -4047.137364991917,
+    6.537183932767661,
+    0.14215125984238566,
+    -3.9431103912906473
+  ],
+  "state_pre_burn": [
+    -2334.790785997252,
+    -5039.175416023983,
+    -4047.137364991917,
+    6.520063843738155,
+    0.14178478576932116,
+    -3.9327775190677094
+  ],
+  "tolerance_m": 0.05,
+  "tolerance_mps": 5e-05,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}

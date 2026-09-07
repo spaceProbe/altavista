@@ -1,0 +1,481 @@
+=== t=0 (post-reset) ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000001   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000001\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x40\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 1: renode currentTime=1.0s, driver_wall=1.280s ---
+=== after step 1 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x01FC7946   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x01FC7946\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x0206CC80   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x0206CC80\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x00000000000112CA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 2: renode currentTime=2.0s, driver_wall=1.269s ---
+=== after step 2 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x03F90C96   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x03F90C96\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x03FE56C0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x03FE56C0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000001363D\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 3: renode currentTime=3.0s, driver_wall=0.678s ---
+=== after step 3 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x05F59FE6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x05F59FE6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x05F5E100   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x05F5E100\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x00000000000159B0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 4: renode currentTime=4.0s, driver_wall=1.053s ---
+=== after step 4 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x07F23336   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x07F23336\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x07FCAD80   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x07FCAD80\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000017E3A\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 5: renode currentTime=5.0s, driver_wall=1.054s ---
+=== after step 5 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x09EEC686   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x09EEC686\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x09F437C0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x09F437C0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000001A1AD\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 6: renode currentTime=6.0s, driver_wall=1.054s ---
+=== after step 6 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x0BEB59D6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x0BEB59D6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x0BEBC200   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x0BEBC200\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000001C520\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 7: renode currentTime=7.0s, driver_wall=1.057s ---
+=== after step 7 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x0DE7ED26   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x0DE7ED26\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x0DF28E80   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x0DF28E80\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000001E9AA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 8: renode currentTime=8.0s, driver_wall=1.053s ---
+=== after step 8 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x0FE48076   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x0FE48076\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x0FEA18C0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x0FEA18C0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000020D1D\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 9: renode currentTime=9.0s, driver_wall=1.054s ---
+=== after step 9 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x11E113C6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x11E113C6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x11E1A300   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x11E1A300\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000023090\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 10: renode currentTime=10.0s, driver_wall=1.054s ---
+=== after step 10 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x13DDA716   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x13DDA716\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x13E86F80   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x13E86F80\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000002551A\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 11: renode currentTime=11.0s, driver_wall=1.053s ---
+=== after step 11 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x15DA3A66   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x15DA3A66\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x15DFF9C0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x15DFF9C0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000002788D\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 12: renode currentTime=12.0s, driver_wall=1.055s ---
+=== after step 12 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x17D6CDB6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x17D6CDB6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x17D78400   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x17D78400\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000029C00\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 13: renode currentTime=13.0s, driver_wall=1.054s ---
+=== after step 13 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x19D36106   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x19D36106\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x19DE5080   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x19DE5080\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000002C08A\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 14: renode currentTime=14.0s, driver_wall=1.055s ---
+=== after step 14 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x1BCFF456   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x1BCFF456\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x1BD5DAC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x1BD5DAC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000002E3FD\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 15: renode currentTime=15.0s, driver_wall=1.056s ---
+=== after step 15 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x1DCC87A6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x1DCC87A6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x1DCD6500   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x1DCD6500\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000030770\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 16: renode currentTime=16.0s, driver_wall=1.054s ---
+=== after step 16 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x1FC91AF6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x1FC91AF6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x1FD43180   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x1FD43180\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000033F3B\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 17: renode currentTime=17.0s, driver_wall=1.060s ---
+=== after step 17 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x21C5AE46   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x21C5AE46\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x21CBBBC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x21CBBBC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x00000000000362AE\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 18: renode currentTime=18.0s, driver_wall=1.050s ---
+=== after step 18 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x23C24196   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x23C24196\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x23C34600   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x23C34600\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000038621\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 19: renode currentTime=19.0s, driver_wall=1.110s ---
+=== after step 19 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x25BED4E6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x25BED4E6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x25CA1280   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x25CA1280\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000003AAAB\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 20: renode currentTime=20.0s, driver_wall=0.997s ---
+=== after step 20 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x27BB6836   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x27BB6836\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x27C19CC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x27C19CC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000003CE1E\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 21: renode currentTime=21.0s, driver_wall=1.053s ---
+=== after step 21 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x29B7FB86   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x29B7FB86\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x29B92700   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x29B92700\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000003F191\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 22: renode currentTime=22.0s, driver_wall=1.052s ---
+=== after step 22 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x2BB48ED6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x2BB48ED6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x2BBFF380   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x2BBFF380\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004161B\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 23: renode currentTime=23.0s, driver_wall=1.056s ---
+=== after step 23 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x2DB12226   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x2DB12226\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x2DB77DC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x2DB77DC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004398E\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 24: renode currentTime=24.0s, driver_wall=1.054s ---
+=== after step 24 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x2FADB576   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x2FADB576\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x2FAF0800   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x2FAF0800\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x0000000000045D01\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 25: renode currentTime=25.0s, driver_wall=1.054s ---
+=== after step 25 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x31AA48C6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x31AA48C6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x31B5D480   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x31B5D480\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004818B\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 26: renode currentTime=26.0s, driver_wall=1.055s ---
+=== after step 26 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x33A6DC16   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x33A6DC16\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x33AD5EC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x33AD5EC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004A4FE\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 27: renode currentTime=27.0s, driver_wall=1.053s ---
+=== after step 27 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x35A36F66   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x35A36F66\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x35A4E900   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x35A4E900\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004C871\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 28: renode currentTime=28.0s, driver_wall=1.056s ---
+=== after step 28 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x37A002B6   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x37A002B6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x37ABB580   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x37ABB580\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000004ECFB\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 29: renode currentTime=29.0s, driver_wall=1.057s ---
+=== after step 29 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x399C9606   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x399C9606\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x39A33FC0   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x39A33FC0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x000000000005106E\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- step 30: renode currentTime=30.0s, driver_wall=1.051s ---
+=== after step 30 ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0x3B992956   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0x3B992956\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0x3B9ACA00   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0x3B9ACA00\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x00000000000533E1\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+--- final jump +60.0s: renode currentTime=90.0s, driver_wall=60.053s ---
+=== after final jump ===
+  TTC0.CLK_CNTRL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.CNT_CNTRL = 0x00000008   [raw: 'sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.COUNT_VALUE = 0xB2CBB016   [raw: 'sysbus ReadDoubleWord 0xff110018\n\r0xB2CBB016\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.INTERVAL_VAL = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.MATCH_0 = 0xB2D05E00   [raw: 'sysbus ReadDoubleWord 0xff110030\n\r0xB2D05E00\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.ISR = 0x00000000   [raw: 'sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  TTC0.IER = 0x00000002   [raw: 'sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)']
+  rpuGic.ISENABLER1 = 0xf9000104   [raw: "sysbus ReadDoubleWord 0xf9000104\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527044'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ISPENDR1 = 0xf9000204   [raw: "sysbus ReadDoubleWord 0xf9000204\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177527300'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpuGic.ICFGR2 = 0xf9000c08   [raw: "sysbus ReadDoubleWord 0xf9000c08\n\rThere was an error executing command 'sysbus ReadDoubleWord 4177529864'\r\nCan't verify current CPU in the given context.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)"]
+  rpu0 PC -> 'rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 IsHalted -> 'rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+  rpu0 ExecutedInstructions -> 'rpu0 ExecutedInstructions\n\r0x00000000000E1E05\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)'
+UART final (768B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:09   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:09   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:14   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:14   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:19   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:19   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:24   12/31/1988\r\n'
+renode final returncode: -9

@@ -1,0 +1,98 @@
+# Execution profile (docs/architecture.md section 5, "Configurability: four profiles", the
+# Execution column). See profiles/design.yaml's header comment for the shared rules
+# (profiles select components, never numerical behaviour -- ADR-000 rule 1) and
+# profiles/README.md for the schema and the "status: not_yet_built" convention.
+#
+# The Python gmat-service (services/gmat-service) MUST NOT appear anywhere in this file --
+# question 85 / docs/adr/003-substrate-and-deployment.md's 2026-09-02 amendment moved the
+# deployed DynamicsService path to Rust precisely so grpcio/BoringSSL never has to reach a
+# production profile, and Execution is the one profile that is actually deployed end to end.
+# tests/test_profiles.py checks this mechanically (structurally, against the actual files on
+# disk any component's `path` names -- not by pattern-matching this file's text) rather than
+# relying on a human noticing an addition here.
+id: execution
+name: Execution profile
+architecture_ref: 'docs/architecture.md section 5, "Configurability: four profiles", Execution column'
+rule: "Profiles select components; they never change numerical behaviour (ADR-000 rule 1)."
+
+# The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
+# question 11's rule: a profile selects *which* tile source the viewer points at, never
+# how the viewer behaves once it has one). See profiles/design.yaml's own imagery entry
+# for the full rationale; every profile defaults to the same offline fixture for now.
+imagery:
+  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
+  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
+  max_level: 2
+
+dynamics_backend:
+  - name: av-dynamics-service
+    kind: rust_service
+    path: crates/av-dynamics-service
+    role: >-
+      altavista.v1.DynamicsService, hosted in Rust (tonic over the OpenSSL-backed stack,
+      GMAT through gmat-sys) -- present in every profile (question 85 / ADR-003's amendment);
+      this is the profile the amendment was written for: Execution is deployed, and grpcio's
+      bundled BoringSSL must never reach it.
+
+planes:
+  ingestion:
+    per_architecture: "live edge plugins, HIL boards"
+    components: []
+    status: not_yet_built
+    note: >-
+      No edge-plugin or HIL-board ingestion component exists in this repository yet.
+      ADR-005 (the simulation-kernel ADR that would define this runtime) is Proposed, not
+      accepted -- this task's own instructions say not to implement its scheduler refactor,
+      so this gap is named, not filled.
+
+  hot_track:
+    per_architecture: "live engine, SIL/HIL kernel"
+    components:
+      - name: av-kernel
+        kind: rust_crate
+        path: crates/av-kernel
+        role: >-
+          The live lockstep engine for BINDING_KIND_MODEL instances (a real GmatModel or the
+          native ConstantAccelModel placeholder) -- crates/av-kernel/README.md's "Kernel<M>"
+          and "The multi-rate scheduler" sections. This is the "live engine" half of the
+          architecture.md cell.
+    status: partial
+    not_yet_built:
+      - "SIL/HIL bindings: BINDING_KIND_CONTAINER, BINDING_KIND_RENODE and BINDING_KIND_BOARD are all explicitly refused today (crates/av-kernel/src/drm/binding.rs::classify_binding -> DrmError::UnsupportedBinding) -- ADR-005's runtime for any of the three is Proposed, not accepted, and this task's own instructions say not to implement its scheduler refactor."
+
+  heavy_track:
+    per_architecture: "tiling, ML batch"
+    components: []
+    status: not_yet_built
+    note: "No tiling or ML-batch component exists in this repository yet."
+
+  viewer:
+    per_architecture: "live scene, command console"
+    components:
+      - name: web viewer
+        kind: web_app
+        path: web
+        role: >-
+          Live scene: the same frame graph + floating-origin viewer profiles/design.yaml
+          lists (web/VIEWER.md) is capable of rendering a live-updating scene; nothing here
+          claims a dedicated "live" mode beyond what that viewer already does.
+        status: partial
+    status: partial
+    not_yet_built:
+      - "A command console (the human-authorization UI for the Command plane's full path, below) does not exist in this repository yet."
+
+  ai:
+    per_architecture: "sidecars as tree nodes, proposals"
+    components: []
+    status: not_yet_built
+    note: "No AI-plane sidecar isolation or proposal component exists in this repository yet -- architecture.md section 8 places this at phase P4."
+
+  command:
+    per_architecture: "full path"
+    components: []
+    status: not_yet_built
+    note: >-
+      No command component exists in this repository yet: proto/altavista/v1/command.proto
+      declares the Command message schema, but there is no command state machine, no OPA
+      policy integration, and no dispatch path implemented anywhere in this repository.
+      architecture.md section 8 places the command path at phase P4.

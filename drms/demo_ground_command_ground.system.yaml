@@ -1,0 +1,41 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.2b.
+#
+# The demo's ground-segment dispatch instance -- field-for-field the same shape as
+# drms/demo_command_ground.system.yaml (M25.2), a non-physical `"native."`-dispatched
+# `crate::drm::binding::ConstantAccelModel` with an EMPTY declared state space
+# (`native.controller.empty`) that carries no live model logic of its own: `crate::drm::
+# executor::run_shared_group`'s own command-dispatch code (M25.2, generalized to a GMAT-bound
+# target by M25.2b -- one new match arm on `BindingPlan::Gmat`, no other change) hands the
+# encoded CCSDS telecommand straight to `crate::router::Router::deliver` *as if* it were this
+# instance's own `Outbox` emission on the declared `cmd_out` port, at the epoch
+# `drms/demo_ground_command.drm.yaml`'s own declared `command` Scenario.event names. No
+# `ack_in` port is declared here (unlike `demo_command_ground.system.yaml`): this fixture does
+# not exercise ack correlation, only the command-delivery-and-apply path and the resulting
+# propagated arc -- `demo_ground_command_flight.system.yaml`'s own declared `ack_framed` still
+# sends a real ack packet every time it applies (keeping `crate::drm::executor`'s "an applied
+# command's mere presence proves the ack was sent" assumption true, `crate::drm::gmat_command`'s
+# own module doc comment), it is simply never routed anywhere (`crate::router::Router`'s own
+# "no matching Connection, silently dropped" rule -- harmless, not an error).
+id: ground_command_demo_ground_sys
+version: "1"
+name: Ground-segment dispatch instance for the M25.2b GMAT-target ground-issued-telecommand demo
+dynamics_model: native.ground_command_demo_dispatch
+state_space_id: native.controller.empty
+ports:
+  - name: cmd_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+state_space:
+  id: native.controller.empty
+  components: []
+parameters:
+  - name: frame_id
+    string_value: ground_command_demo_frame
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_ground_command_ground.system.yaml
+hash: "b9740bbfe9acf6b212cba82d0596eb6a5104dd0bdd7c73b1c2b943a76f657517"

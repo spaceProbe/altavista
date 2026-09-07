@@ -1,0 +1,49 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M25.1
+# (docs/sil-plan.md's M25 milestone: "ground segment as a system").
+#
+# 900 s run at 1 Hz, no faults, no maneuvers, no covariance (a GroundStationModel/
+# ConstantAccelModel pair -- neither declares STM capability; see
+# drms/demo_ground_segment_ground.system.yaml's own header comment, "Fault / maneuver /
+# covariance"). `scenario.frames` declares the ground station's own topocentric ENU frame
+# (question 10's day-one mandatory frame, `AXES_KIND_ENU`) via `origin_geodetic` -- the CDM/
+# viewer's own frame graph entry for the identical site the `ground` instance's own
+# `station.*` parameters declare (see crate::drm::ground's own module doc comment for why the
+# same four numbers are declared in both places rather than the model reading the frame
+# registry live).
+#
+# Expected result (stated before running, per this task's own "state the exact expected count"
+# rule -- crates/av-kernel/tests/drm_ground_segment.rs checks it): one rise-and-set pass, AOS
+# near t=50s, LOS near t=795s (see drms/demo_ground_segment_flight.system.yaml's own header
+# comment for the x0/v0 derivation) -- exactly one EVENT_KIND_CONTACT_START and one
+# EVENT_KIND_CONTACT_END on the `ground` instance.
+id: ground_segment_demo_drm
+version: "1"
+name: "Ground segment demo (M25.1): one rise-and-set pass over a Cape-Canaveral-like site"
+sos_configuration_id: demo_ground_segment_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767226537000000000
+  frames:
+    - id: ground_station_enu
+      platform_id: ground
+      axes: AXES_KIND_ENU
+      origin_geodetic:
+        body: Earth
+        latitude_rad: 0.49741883681838395
+        longitude_rad: -1.4067353771074296
+        height_m: 0.0
+      description: "Cape-Canaveral-like ground station site, topocentric ENU (question 10)"
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_ground_segment.drm.yaml
+hash: "7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0"

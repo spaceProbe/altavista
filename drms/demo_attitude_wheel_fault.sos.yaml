@@ -1,0 +1,22 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M22.1b. A single
+# BINDING_KIND_MODEL instance ("att_wheel") bound to demo_attitude_wheel_fault.system.yaml,
+# stepped at 10 Hz (0.1 s native steps, matching crate::drm::attitude::tests::a_wheel_driven_
+# past_its_limit_stops_accumulating_momentum_and_the_body_responds_accordingly's own dt).
+id: attitude_wheel_fault_sos
+version: "1"
+name: Single reaction wheel demo (wheel-limit DYNAMICS fault)
+instances:
+  - name: att_wheel
+    system_id: attitude_wheel_fault_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_wheel_fault_sys
+    step_rate_hz: 10.0
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_attitude_wheel_fault.sos.yaml
+hash: "aef3607716ff8a39e76b00f7d496f8022130de9b5c810e18ecdc2a19c0680d0a"

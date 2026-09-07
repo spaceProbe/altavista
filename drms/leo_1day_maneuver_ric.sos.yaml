@@ -1,0 +1,31 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M11.3
+# (docs/open-questions.md question 102: pin RIC and VVLH impulsive burns). One instance
+# ("leo_mvr_ric"), bound to the *golden's own* leo_sys SystemDefinition
+# (drms/leo_1day_golden.system.yaml -- same vehicle, same JGM2 8x8 + Sun/Moon force model,
+# unchanged) via BINDING_KIND_MODEL. step_rate_hz = 10 matches leo_1day_golden.sos.yaml's own
+# native integration rate (this golden pins the burn, not a differently-tuned integrator); this
+# DRM's own output sampling (DrmOptions.sample_interval_s, in the .drm.yaml) is coarser (60 s)
+# since goldens/leo_1day_maneuver_ric.json only records the pre-burn/post-burn/final epochs, not
+# a full 10 Hz trajectory -- see drms/README.md's "leo_1day_maneuver_ric / leo_1day_maneuver_vvlh"
+# section. Instance name "leo_mvr_ric" is distinct from "leo_mvr" (VNB), "leo_mvr_vvlh" (VVLH,
+# M12.4 rename of LVLH) and the retired "leo_mvr_lvlh" fixture (now a typed-load-error case only)
+# -- GMAT's configuration manager is process-global, so every DRM test in this crate needs its
+# own object names (crates/av-kernel/tests/drm_maneuver.rs's module doc comment).
+id: leo_sos_maneuver_ric
+version: "1"
+name: LEO maneuver golden (RIC burn), single instance
+instances:
+  - name: leo_mvr_ric
+    system_id: leo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_sys
+    step_rate_hz: 10.0
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M11.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/leo_1day_maneuver_ric.sos.yaml
+hash: "6fbc527e1cb25d32a80e395a96f0ef725a56b36bbe61c2984840c0c234dfef9a"

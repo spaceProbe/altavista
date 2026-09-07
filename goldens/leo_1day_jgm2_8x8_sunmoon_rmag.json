@@ -1,0 +1,28 @@
+{
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-03T21:03:40+00:00",
+  "gmat_version": "R2026a",
+  "name": "leo_1day_jgm2_8x8_sunmoon_rmag",
+  "note": "GMAT's own RMAG real parameter, read from a genuine GMAT ReportFile (script run, SolverIterations=Current -- never Execute() through the object API, per this repository's documented ReportFile quirk) for the identical arc leo_1day_jgm2_8x8_sunmoon.json pins. As of M11.1 (question 99), gmat_sys::model::GmatModel::step reads its own OUTPUT_RMAG through gmat_sys::DerivativeModel::real_parameter (gmatffi_get_real_parameter) -- GMAT's own GetRealParameter, not Rust arithmetic -- so this golden confirms that value against a second, genuinely different GMAT code path: the script engine's own Propagate statement and parameter evaluation (this file), versus gmat-sys's own GetDerivatives-driven integration with the propagated state written back into a different Spacecraft object and read via GetRealParameter directly, not a ReportFile (crates/gmat-sys/src/model.rs).",
+  "reason": "M11.1 (question 99): gmat_sys::model::GmatModel::step now reads RMAG through gmatffi_get_real_parameter instead of computing it in Rust; regenerating only to update this golden's own note/reason text to match -- the ReportFile mechanism, script, and golden arc are unchanged, so the numeric value is expected to reproduce exactly",
+  "report_last_row": {
+    "epoch_a1mjd": 31042.50042863867,
+    "rmag_km": 6870.294675573457,
+    "vx_kmps": -6.873114692272363,
+    "vy_kmps": -3.277540234874902,
+    "vz_kmps": -0.04502077105809715,
+    "x_km": -1869.022450937179,
+    "y_km": 3841.870677714497,
+    "z_km": 5380.309814761908
+  },
+  "rmag_km": 6870.294675573457,
+  "rmag_m": 6870294.675573457,
+  "rmag_self_check_km": 9.094947017729282e-13,
+  "rmag_self_check_note": "rmag_km - sqrt(x_km^2 + y_km^2 + z_km^2) from the same report row; should be floating-point noise, confirming RMAG is defined as the position-vector magnitude.",
+  "source_golden": "leo_1day_jgm2_8x8_sunmoon",
+  "units": {
+    "position": "km",
+    "rmag": "km",
+    "velocity": "km/s"
+  }
+}

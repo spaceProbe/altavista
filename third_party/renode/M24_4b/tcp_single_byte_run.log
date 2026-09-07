@@ -1,0 +1,10 @@
+include reply: include @/Users/probe/code/AltaVista/third_party/renode/M24_4b/uart1_register_probe_v3_no_uart0_backend.resc
+bridge client connected (before boot, like the real handshake test)
+RXEN observed at step 22, control=0x00000114
+pre-send channel_sts=0x0000000a REMPTY=True
+sent single byte 0x41 ('A') over the TCP bridge client socket
+post-send channel_sts=0x0000000a REMPTY=True
+{
+  "rxen_first_observed_at_step": 22,
+  "tcp_single_byte_worked": false
+}

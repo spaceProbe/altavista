@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 774, in <module>
+    main()
+    ~~~~^^
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 753, in main
+    bridge.run(shim_sock)
+    ~~~~~~~~~~^^^^^^^^^^^
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 681, in run
+    _ft, _pl, guest_raw = self.guest_read_frame(timeout=60.0)
+                          ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 560, in guest_read_frame
+    frame_type, payload, raw = read_frame(self.hook_conn, timeout=timeout)
+                               ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 109, in read_frame
+    length_field = read_exact(sock, 4, deadline)
+  File "/Users/probe/code/AltaVista/crates/av-kernel/../../third_party/renode/M24_4b/renode_bridge.py", line 99, in read_exact
+    chunk = sock.recv(n - len(buf))
+TimeoutError: timed out

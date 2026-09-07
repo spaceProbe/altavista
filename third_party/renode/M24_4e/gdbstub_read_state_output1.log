@@ -1,0 +1,304 @@
+=== connected, initial buffered bytes: b'$T0'
+
+--- uart0 (console) live context ---
+{'base': 1074456016, 'regs': 4278190080, 'tx_queued': 0, 'transmitting': False, 'irq': 53}
+
+--- uart1 (lockstep) live context ---
+{'base': 1074456060, 'regs': 4278255616, 'tx_queued': 0, 'transmitting': False, 'irq': 54}
+
+--- global tick counters (two samples, 1s apart, to see if anything is still advancing) ---
+_Watchdog_Ticks_since_boot: 23747 -> 23747 (delta 0)
+Clock_driver_ticks: 23747 -> 23747 (delta 0)
+
+--- RTEMS classic task table walk ---
+maximum_id=0xa010049 local_table@0x401d8184
+[0] tcb=0x401e0508 name='UI1 ' (0x55493120) current_state=0x8000 saved_sp=0x401f28d8 saved_lr=0x40049cc7
+[1] tcb=0x401e0720 name='SHLL' (0x53484c4c) current_state=0x2 saved_sp=0x401f6330 saved_lr=0x40049cc7
+[2] tcb=0x401e0938 name='....' (0x000c0001) current_state=0x2 saved_sp=0x401f79c8 saved_lr=0x40049cc7
+[3] tcb=0x401e0b50 name='....' (0x00080001) current_state=0x2 saved_sp=0x401f89d0 saved_lr=0x40049cc7
+[4] tcb=0x401e0d68 name='BSWP' (0x42535750) current_state=0x4 saved_sp=0x401f9ab0 saved_lr=0x40049cc7
+[5] tcb=0x401e0f80 name='....' (0x00010001) current_state=0x10 saved_sp=0x401fb9b0 saved_lr=0x40049cc7
+[6] tcb=0x401e1198 name='....' (0x00010002) current_state=0x2 saved_sp=0x401fcc48 saved_lr=0x40049cc7
+[7] tcb=0x401e13b0 name='....' (0x00010003) current_state=0x10 saved_sp=0x401febc0 saved_lr=0x40049cc7
+[8] tcb=0x401e15c8 name='....' (0x00010004) current_state=0x10 saved_sp=0x40200ed0 saved_lr=0x40049cc7
+[9] tcb=0x401e17e0 name='....' (0x00010005) current_state=0x10 saved_sp=0x402031e0 saved_lr=0x40049cc7
+[10] tcb=0x401e19f8 name='....' (0x00010006) current_state=0x10 saved_sp=0x40205360 saved_lr=0x40049cc7
+[11] tcb=0x401e1c10 name='....' (0x00010007) current_state=0x2 saved_sp=0x40206530 saved_lr=0x40049cc7
+[12] tcb=0x401e1e28 name='....' (0x00010008) current_state=0x2 saved_sp=0x402085b8 saved_lr=0x40049cc7
+[13] tcb=0x401e2040 name='....' (0x00010009) current_state=0x2 saved_sp=0x40227670 saved_lr=0x40049cc7
+[14] tcb=0x401e2258 name='....' (0x0001000a) current_state=0x100 saved_sp=0x402487c8 saved_lr=0x40049cc7
+[15] tcb=0x401e2470 name='....' (0x0001000b) current_state=0x10 saved_sp=0x402686f0 saved_lr=0x40049cc7
+[16] tcb=0x401e2688 name='....' (0x00080002) current_state=0x20 saved_sp=0x40269950 saved_lr=0x40049cc7
+
+--- stack-scan each task (return addresses on the stack, matched against known symbols) ---
+[0] tcb=0x401e0508 name_raw=0x55493120 sp=0x401f28d8
+      sp+0x08 = 0x400492ed  -> _Scheduler_priority_Block+0x1
+      sp+0x24 = 0x4004686d  -> rtems_task_suspend+0x31
+      sp+0x3c = 0x400210b7  -> OS_IdleLoop_Impl+0x1b
+      sp+0x44 = 0x4001cf7d  -> OS_IdleLoop+0xb
+      sp+0x4c = 0x40027ceb  -> OS_Application_Run+0x9
+      sp+0x54 = 0x40027ee5  -> OS_BSPMain+0x31
+      sp+0x5c = 0x40027ef9  -> Init+0xd
+      sp+0x6c = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x7c = 0x4004b339  -> _Thread_Continue+0x1
+      sp+0xac = 0x40072bf5  -> cleanup_stdio+0x1
+[1] tcb=0x401e0720 name_raw=0x53484c4c sp=0x401f6330
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004979b  -> _Semaphore_Wait_timed_ticks+0x4f
+      sp+0x30 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x38 = 0x4007f3d9  -> __swrite+0x1
+      sp+0x3c = 0x40033731  -> oproc+0x3d
+      sp+0x5c = 0x40033d9d  -> rtems_termios_read_tty+0x1a5
+      sp+0x9c = 0x40034019  -> rtems_termios_imfs_read+0x81
+      sp+0xd4 = 0x40031b43  -> read+0x4f
+      sp+0xe0 = 0x4007f3a9  -> __sread+0x1
+      sp+0xe4 = 0x4007f3b5  -> __sread+0xd
+      sp+0xec = 0x400740dd  -> __srefill_r+0x4d
+      sp+0xfc = 0x40077aaf  -> __srget_r+0x33
+      sp+0x10c = 0x4007891d  -> fgetc+0x45
+      sp+0x11c = 0x400671f1  -> rtems_shell_getchar+0x15
+      sp+0x12c = 0x40065a3f  -> shell_main_loop+0x217
+      sp+0x13c = 0x40030d7d  -> malloc+0xd
+      sp+0x144 = 0x40032af9  -> rtems_filesystem_location_transform_to_global+0xd
+      sp+0x1d4 = 0x4002fabd  -> chdir+0x25
+      sp+0x22c = 0x400659dd  -> shell_main_loop+0x1b5
+[2] tcb=0x401e0938 name_raw=0x000c0001 sp=0x401f79c8
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004620f  -> rtems_semaphore_obtain+0xff
+      sp+0x38 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x400227ff  -> OS_ConsoleOutput_Impl+0x89
+      sp+0x64 = 0x400211a1  -> OS_ConsoleTask_Entry+0x57
+      sp+0x8c = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x9c = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[3] tcb=0x401e0b50 name_raw=0x00080001 sp=0x401f89d0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004620f  -> rtems_semaphore_obtain+0xff
+      sp+0x38 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0x58 = 0x4001b001  -> CFE_TIME_Local1HzTimerCallback+0x1
+      sp+0x64 = 0x40022183  -> OS_TimeBase_WaitImpl+0x49
+      sp+0x94 = 0x400204fd  -> OS_TimeBase_CallbackThread+0x7f
+      sp+0xd8 = 0x4002213b  -> OS_TimeBase_WaitImpl+0x1
+      sp+0xf4 = 0x400222e7  -> OS_TimeBase_CallbackThreadEntry+0x17
+      sp+0x10c = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x11c = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[4] tcb=0x401e0d68 name_raw=0x42535750 sp=0x401f9ab0
+      sp+0x08 = 0x400492ed  -> _Scheduler_priority_Block+0x1
+      sp+0x24 = 0x40045803  -> _Event_Seize+0x97
+      sp+0x3c = 0x40045765  -> rtems_event_receive+0x4d
+      sp+0x6c = 0x4002cb3f  -> rtems_bdbuf_swapout_task+0x9f
+      sp+0xb4 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0xc4 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[5] tcb=0x401e0f80 name_raw=0x00010001 sp=0x401fb9b0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x40008a4d  -> CFE_ES_TaskMain+0x6f
+      sp+0x204 = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x20c = 0x400089df  -> CFE_ES_TaskMain+0x1
+      sp+0x214 = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x224 = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x22c = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x23c = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x24c = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[6] tcb=0x401e1198 name_raw=0x00010002 sp=0x401fcc48
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004620f  -> rtems_semaphore_obtain+0xff
+      sp+0x38 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x64 = 0x40020fb5  -> OS_BinSemTimedWait_Impl+0x57
+      sp+0x84 = 0x4001cbf1  -> OS_BinSemTimedWait+0x2d
+      sp+0xac = 0x40003aff  -> CFE_ES_BackgroundTask+0x111
+      sp+0xec = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0xf4 = 0x400039ef  -> CFE_ES_BackgroundTask+0x1
+      sp+0xfc = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x10c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x114 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x124 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x134 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[7] tcb=0x401e13b0 name_raw=0x00010003 sp=0x401febc0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x4000c0ef  -> CFE_EVS_TaskMain+0x71
+      sp+0x1fc = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x204 = 0x4000c07f  -> CFE_EVS_TaskMain+0x1
+      sp+0x20c = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x21c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x224 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x234 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x244 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[8] tcb=0x401e15c8 name_raw=0x00010004 sp=0x40200ed0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x40011f23  -> CFE_SB_TaskMain+0x71
+      sp+0x1fc = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x204 = 0x40011eb3  -> CFE_SB_TaskMain+0x1
+      sp+0x20c = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x21c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x224 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x234 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x244 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[9] tcb=0x401e17e0 name_raw=0x00010005 sp=0x402031e0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x4001789f  -> CFE_TBL_TaskMain+0x71
+      sp+0x1fc = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x204 = 0x4001782f  -> CFE_TBL_TaskMain+0x1
+      sp+0x20c = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x21c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x224 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x234 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x244 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[10] tcb=0x401e19f8 name_raw=0x00010006 sp=0x40205360
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x40019db7  -> CFE_TIME_TaskMain+0x71
+      sp+0x1fc = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x204 = 0x40019d47  -> CFE_TIME_TaskMain+0x1
+      sp+0x20c = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x21c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x224 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x234 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x244 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[11] tcb=0x401e1c10 name_raw=0x00010007 sp=0x40206530
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004620f  -> rtems_semaphore_obtain+0xff
+      sp+0x38 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x64 = 0x40020f41  -> OS_BinSemTake_Impl+0x2d
+      sp+0x7c = 0x4001cbb9  -> OS_BinSemTake+0x29
+      sp+0xa4 = 0x4001b1bd  -> CFE_TIME_Tone1HzTask+0x1d
+      sp+0xb4 = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0xbc = 0x4001b1a1  -> CFE_TIME_Tone1HzTask+0x1
+      sp+0xc4 = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0xd4 = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0xdc = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0xec = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0xfc = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[12] tcb=0x401e1e28 name_raw=0x00010008 sp=0x402085b8
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004620f  -> rtems_semaphore_obtain+0xff
+      sp+0x38 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x64 = 0x40020f41  -> OS_BinSemTake_Impl+0x2d
+      sp+0x7c = 0x4001cbb9  -> OS_BinSemTake+0x29
+      sp+0xa4 = 0x4001b3ad  -> CFE_TIME_Local1HzTask+0x1d
+      sp+0xb4 = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0xbc = 0x4001b391  -> CFE_TIME_Local1HzTask+0x1
+      sp+0xc4 = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0xd4 = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0xdc = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0xec = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0xfc = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[13] tcb=0x401e2040 name_raw=0x00010009 sp=0x40227670
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x4004979b  -> _Semaphore_Wait_timed_ticks+0x4f
+      sp+0x30 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x5c = 0x40033d9d  -> rtems_termios_read_tty+0x1a5
+      sp+0x9c = 0x40034019  -> rtems_termios_imfs_read+0x81
+      sp+0xa4 = 0x40021f89  -> OS_TaskGetId_Impl+0x2f
+      sp+0xb4 = 0x40021a1f  -> OS_MutSemGive_Impl+0x29
+      sp+0xd4 = 0x40031b43  -> read+0x4f
+      sp+0xe4 = 0x40025b3b  -> read_all+0x27
+      sp+0x104 = 0x40025c87  -> lockstep_read_frame+0x8b
+      sp+0x134 = 0x40024d57  -> IO_LOCKSTEP_AppMain+0x341
+[14] tcb=0x401e2258 name_raw=0x0001000a sp=0x402487c8
+      sp+0x08 = 0x400492ed  -> _Scheduler_priority_Block+0x1
+      sp+0x24 = 0x400468a7  -> rtems_task_wake_after+0x27
+      sp+0x3c = 0x40021eff  -> OS_TaskDelay_Impl+0x29
+      sp+0x54 = 0x4001ffeb  -> OS_TaskDelay+0xf
+      sp+0x64 = 0x40026b55  -> SCH_LS_AppMain+0x155
+      sp+0xac = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0xb4 = 0x40026a01  -> SCH_LS_AppMain+0x1
+      sp+0xbc = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0xcc = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0xd4 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0xe4 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0xf4 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[15] tcb=0x401e2470 name_raw=0x0001000b sp=0x402686f0
+      sp+0x00 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x24 = 0x400471c7  -> _CORE_message_queue_Seize+0xa3
+      sp+0x34 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x44 = 0x40045afb  -> rtems_message_queue_receive+0x53
+      sp+0x58 = 0x4004acd5  -> _Thread_queue_Add_timeout_ticks+0x1
+      sp+0x84 = 0x40021c15  -> OS_QueueGet_Impl+0x81
+      sp+0xa4 = 0x4001e9af  -> OS_ObjectIdGetById+0x47
+      sp+0xc4 = 0x4001fbb7  -> OS_QueueGet+0xf1
+      sp+0x104 = 0x40011bc3  -> CFE_SB_ReceiveTxn_PipeHandler+0x2f
+      sp+0x13c = 0x4001191d  -> CFE_SB_MessageTxn_ProcessPipes+0x35
+      sp+0x14c = 0x40011b95  -> CFE_SB_ReceiveTxn_PipeHandler+0x1
+      sp+0x164 = 0x40011c69  -> CFE_SB_ReceiveTxn_Execute+0x27
+      sp+0x184 = 0x4000fe1b  -> CFE_SB_ReceiveBuffer+0x57
+      sp+0x1ec = 0x4002715f  -> ADCS_AppMain+0x57
+      sp+0x20c = 0x4000272f  -> CFE_ES_TaskEntryPoint+0x3d
+      sp+0x214 = 0x40027109  -> ADCS_AppMain+0x1
+      sp+0x21c = 0x4001fd7d  -> OS_TaskEntryPoint+0x25
+      sp+0x22c = 0x400026f3  -> CFE_ES_TaskEntryPoint+0x1
+      sp+0x234 = 0x40021d59  -> OS_RtemsEntry+0x17
+      sp+0x244 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x254 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+[16] tcb=0x401e2688 name_raw=0x00080002 sp=0x40269950
+      sp+0x00 = 0x40044c15  -> _POSIX_Condition_variables_Enqueue_no_timeout+0x1
+      sp+0x24 = 0x40044ce3  -> _POSIX_Condition_variables_Wait_support+0x8f
+      sp+0x30 = 0x40044c15  -> _POSIX_Condition_variables_Enqueue_no_timeout+0x1
+      sp+0x4c = 0x4001ee5b  -> OS_ObjectIdToArrayIndex+0x51
+      sp+0x64 = 0x40028c19  -> psp_lockstep_external_sync+0x2d
+      sp+0x84 = 0x400220c9  -> OS_TimeBaseUnlock_Impl+0x29
+      sp+0x9c = 0x400204fd  -> OS_TimeBase_CallbackThread+0x7f
+      sp+0xe0 = 0x40028bed  -> psp_lockstep_external_sync+0x1
+      sp+0xfc = 0x400222e7  -> OS_TimeBase_CallbackThreadEntry+0x17
+      sp+0x114 = 0x40049ee1  -> _Thread_Handler+0x4d
+      sp+0x124 = 0x40049cc7  -> _Thread_Do_dispatch+0x63
+
+done

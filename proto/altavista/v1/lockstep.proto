@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+// The kernel's lockstep protocol for out-of-process bindings (ADR-005 §4).
+//
+//   Bind(run, instance, ports, clock)   -> capability + binding hash
+//   (messages are prefixed Lockstep* because dynamics_service.proto already owns
+//   StepRequest/StepResponse in this package)
+//   Step(until_tai_ns, inputs)          -> (reached_tai_ns, outputs)   blocking, one outstanding
+//   Reset(reason)                       -> ok                           power-cycle / reboot faults
+//   Shutdown()                          -> ok
+//
+// CONTAINER bindings speak it directly; RENODE bindings speak it through a bridge process
+// that owns the Renode instance and slaves Renode's virtual time to the kernel; BOARD
+// bindings do not use it (real-time pacing, signed I/O batches, ADR-004). The transport is
+// ADR-003's: mTLS over the system OpenSSL when it crosses a host, plaintext loopback only
+// inside one node under test.
+//
+// Determinism (ADR-004): a bound process must be a pure function of (Bind, the ordered
+// sequence of Step requests). Wall-clock reads, unseeded randomness and unordered I/O are
+// forbidden; a binding that cannot promise this declares lockstep_capable = false in its
+// BindResponse and is refused at load, never at step 10,000. Every request carries a
+// sequence number the kernel increments by one; a response whose sequence does not match
+// is a protocol error and the run stops.
+package altavista.v1;
+
+import "altavista/v1/system.proto";
+
+// One message on one port. `payload` is encoded per the port's declared `schema`:
+// a CDM message (PORT_KIND_CDM) is its protobuf wire form; FRAMED ports carry one frame
+// per message; BYTE_STREAM ports carry the bytes emitted in the step, in order; SIGNAL
+// ports carry a little-endian IEEE-754 double.
+message PortMessage {
+  string port = 1;
+  // Emission epoch, TAI ns. Inputs carry the sender's emission epoch; the router has
+  // already applied the link model, so this is the epoch at which the message is
+  // available to the receiver.
+  int64 tai_ns = 2;
+  bytes payload = 3;
+}
+
+message LockstepBindRequest {
+  string run_id = 1;
+  string instance = 2;
+  // The instance's ports as declared in its SystemDefinition; the bound process must
+  // accept exactly this set (names, kinds, directions) or refuse.
+  repeated Port ports = 3;
+  int64 start_tai_ns = 4;
+  // The kernel's base period (ADR-005 §2); every Step's until_tai_ns is start + k * base.
+  int64 base_period_ns = 5;
+  // This instance's own step period, a multiple of base_period_ns.
+  int64 step_period_ns = 6;
+  // Seed for any randomness the bound process needs (ADR-004: seeds are inputs).
+  uint64 seed = 7;
+  // Instance parameters (SystemInstance.overrides applied), name -> string form.
+  map<string, string> parameters = 8;
+}
+
+message LockstepBindResponse {
+  bool lockstep_capable = 1;
+  // SHA-256 over the bound process's own identity (image digest or binary hash plus its
+  // configuration); recorded in the run's provenance.
+  string binding_hash = 2;
+  // Free-form version string for the run log.
+  string version = 3;
+  // Set when lockstep_capable is false: why.
+  string refusal_reason = 4;
+}
+
+message LockstepStepRequest {
+  uint64 sequence = 1;
+  int64 until_tai_ns = 2;
+  // Inputs available to the receiver in this step, in the router's deterministic order.
+  repeated PortMessage inputs = 3;
+}
+
+message LockstepStepResponse {
+  uint64 sequence = 1;
+  // Must equal until_tai_ns; anything else is a protocol error.
+  int64 reached_tai_ns = 2;
+  repeated PortMessage outputs = 3;
+  // Named scalar outputs for `output.<instance>.<name>@time` expressions (ADR-005 §6).
+  map<string, double> named_outputs = 4;
+}
+
+message LockstepResetRequest {
+  uint64 sequence = 1;
+  int64 tai_ns = 2;
+  // "power_cycle", "watchdog", "fault:<fault id>".
+  string reason = 3;
+}
+
+message LockstepResetResponse {
+  uint64 sequence = 1;
+}
+
+message LockstepShutdownRequest {
+  string run_id = 1;
+}
+
+message LockstepShutdownResponse {}
+
+service LockstepService {
+  rpc Bind(LockstepBindRequest) returns (LockstepBindResponse);
+  rpc Step(LockstepStepRequest) returns (LockstepStepResponse);
+  rpc Reset(LockstepResetRequest) returns (LockstepResetResponse);
+  rpc Shutdown(LockstepShutdownRequest) returns (LockstepShutdownResponse);
+}

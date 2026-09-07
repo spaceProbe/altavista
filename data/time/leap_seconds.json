@@ -1,0 +1,179 @@
+{
+  "version": "1.0.0",
+  "source": {
+    "file": "SPICELeapSecondKernel.tls",
+    "sha256": "678e32bdb5a744117a467cd9601cd6b373f0e9bc9bbde1371d5eee39600a039b"
+  },
+  "generated_from": "DELTET/DELTA_AT block of the SPICE leap-second kernel, parsed by scripts/gen_leap_seconds.py",
+  "clamped_before_first_entry": "A UTC instant before the first entry's utc_effective uses that first entry's offset (SPICE deltet_ convention); the pre-1972 rubber-second UTC formula (DELTET/DELTA_T_A, K, EB, M) is not represented in this table.",
+  "entries": [
+    {
+      "tai_utc_offset_seconds": 10,
+      "utc_effective": "1972-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 63072000000000000,
+      "tai_effective_ns": 63072010000000000
+    },
+    {
+      "tai_utc_offset_seconds": 11,
+      "utc_effective": "1972-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 78796800000000000,
+      "tai_effective_ns": 78796811000000000
+    },
+    {
+      "tai_utc_offset_seconds": 12,
+      "utc_effective": "1973-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 94694400000000000,
+      "tai_effective_ns": 94694412000000000
+    },
+    {
+      "tai_utc_offset_seconds": 13,
+      "utc_effective": "1974-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 126230400000000000,
+      "tai_effective_ns": 126230413000000000
+    },
+    {
+      "tai_utc_offset_seconds": 14,
+      "utc_effective": "1975-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 157766400000000000,
+      "tai_effective_ns": 157766414000000000
+    },
+    {
+      "tai_utc_offset_seconds": 15,
+      "utc_effective": "1976-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 189302400000000000,
+      "tai_effective_ns": 189302415000000000
+    },
+    {
+      "tai_utc_offset_seconds": 16,
+      "utc_effective": "1977-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 220924800000000000,
+      "tai_effective_ns": 220924816000000000
+    },
+    {
+      "tai_utc_offset_seconds": 17,
+      "utc_effective": "1978-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 252460800000000000,
+      "tai_effective_ns": 252460817000000000
+    },
+    {
+      "tai_utc_offset_seconds": 18,
+      "utc_effective": "1979-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 283996800000000000,
+      "tai_effective_ns": 283996818000000000
+    },
+    {
+      "tai_utc_offset_seconds": 19,
+      "utc_effective": "1980-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 315532800000000000,
+      "tai_effective_ns": 315532819000000000
+    },
+    {
+      "tai_utc_offset_seconds": 20,
+      "utc_effective": "1981-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 362793600000000000,
+      "tai_effective_ns": 362793620000000000
+    },
+    {
+      "tai_utc_offset_seconds": 21,
+      "utc_effective": "1982-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 394329600000000000,
+      "tai_effective_ns": 394329621000000000
+    },
+    {
+      "tai_utc_offset_seconds": 22,
+      "utc_effective": "1983-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 425865600000000000,
+      "tai_effective_ns": 425865622000000000
+    },
+    {
+      "tai_utc_offset_seconds": 23,
+      "utc_effective": "1985-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 489024000000000000,
+      "tai_effective_ns": 489024023000000000
+    },
+    {
+      "tai_utc_offset_seconds": 24,
+      "utc_effective": "1988-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 567993600000000000,
+      "tai_effective_ns": 567993624000000000
+    },
+    {
+      "tai_utc_offset_seconds": 25,
+      "utc_effective": "1990-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 631152000000000000,
+      "tai_effective_ns": 631152025000000000
+    },
+    {
+      "tai_utc_offset_seconds": 26,
+      "utc_effective": "1991-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 662688000000000000,
+      "tai_effective_ns": 662688026000000000
+    },
+    {
+      "tai_utc_offset_seconds": 27,
+      "utc_effective": "1992-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 709948800000000000,
+      "tai_effective_ns": 709948827000000000
+    },
+    {
+      "tai_utc_offset_seconds": 28,
+      "utc_effective": "1993-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 741484800000000000,
+      "tai_effective_ns": 741484828000000000
+    },
+    {
+      "tai_utc_offset_seconds": 29,
+      "utc_effective": "1994-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 773020800000000000,
+      "tai_effective_ns": 773020829000000000
+    },
+    {
+      "tai_utc_offset_seconds": 30,
+      "utc_effective": "1996-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 820454400000000000,
+      "tai_effective_ns": 820454430000000000
+    },
+    {
+      "tai_utc_offset_seconds": 31,
+      "utc_effective": "1997-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 867715200000000000,
+      "tai_effective_ns": 867715231000000000
+    },
+    {
+      "tai_utc_offset_seconds": 32,
+      "utc_effective": "1999-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 915148800000000000,
+      "tai_effective_ns": 915148832000000000
+    },
+    {
+      "tai_utc_offset_seconds": 33,
+      "utc_effective": "2006-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 1136073600000000000,
+      "tai_effective_ns": 1136073633000000000
+    },
+    {
+      "tai_utc_offset_seconds": 34,
+      "utc_effective": "2009-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 1230768000000000000,
+      "tai_effective_ns": 1230768034000000000
+    },
+    {
+      "tai_utc_offset_seconds": 35,
+      "utc_effective": "2012-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 1341100800000000000,
+      "tai_effective_ns": 1341100835000000000
+    },
+    {
+      "tai_utc_offset_seconds": 36,
+      "utc_effective": "2015-07-01T00:00:00Z",
+      "utc_effective_unix_ns": 1435708800000000000,
+      "tai_effective_ns": 1435708836000000000
+    },
+    {
+      "tai_utc_offset_seconds": 37,
+      "utc_effective": "2017-01-01T00:00:00Z",
+      "utc_effective_unix_ns": 1483228800000000000,
+      "tai_effective_ns": 1483228837000000000
+    }
+  ]
+}

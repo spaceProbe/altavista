@@ -1,0 +1,40 @@
+# M24.2 -- run RTEMS's own `hello` sample (testsuites/samples/hello) on Renode's mainline
+# Zynq UltraScale+ Cortex-R5 platform (docs/open-questions.md question 144), on rpu0 only
+# (lock-step BSP; apu*/rpu1 left halted, same convention as the M24.1 spike's setup.resc and
+# this build's own bundled scripts/single-node/zynqmp_zephyr.resc, which runs a different RTOS
+# on the same rpu0/zynqmp.repl combination). UART0 output is captured to a file via
+# `CreateFileBackend` (headless-safe; `showAnalyzer` needs a GUI window and is not used here).
+#
+# `hello` explicitly disables the clock driver (see testsuites/samples/hello/init.c:
+# CONFIGURE_APPLICATION_DOES_NOT_NEED_CLOCK_DRIVER) and only prints three lines once, so a
+# short virtual run (2s) is ample -- expected output stated in REPORT.md before running:
+#   *** HELLO WORLD TEST ***
+#   Hello World
+#   *** END OF HELLO WORLD TEST ***
+
+:name: zynqmp-rpu-lockstep-hello
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "zynqmp-rpu-hello"
+
+machine LoadPlatformDescription @platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend @$ORIGIN/hello_uart.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF $ORIGIN/hello.exe cpu=rpu0
+"""
+
+runMacro $reset
+
+start
+emulation RunFor "2"
+quit

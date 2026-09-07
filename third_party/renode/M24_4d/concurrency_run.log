@@ -1,0 +1,32 @@
+[
+  {
+    "tag": "A",
+    "monitor_port": 57762,
+    "uart_port": 57764,
+    "pid": 26681,
+    "shared_resc_path": "/Users/probe/code/AltaVista/third_party/renode/M24_4d/concurrency_shared.resc",
+    "include_reply": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/concurrency_shared.resc",
+    "tcp_connect_succeeded_within_20s": true,
+    "lsof_first_listen_offset_s": 2.5791697079548612,
+    "post_include_prompt": "(av-m24-4d-conc-A) \n\r(av-m24-4d-conc-A) using sysbus\n\r(av-m24-4d-conc-A) \n\r(av-m24-4d-conc-A)",
+    "final_lsof_listen_lines": [
+      "renode  26681 probe  429u  IPv4 0xcecab721a5660056      0t0  TCP *:57762 (LISTEN)",
+      "renode  26681 probe  432u  IPv4 0xa6aa31f8f97eb819      0t0  TCP *:57764 (LISTEN)"
+    ]
+  },
+  {
+    "tag": "B",
+    "monitor_port": 57763,
+    "uart_port": 57765,
+    "pid": 26682,
+    "shared_resc_path": "/Users/probe/code/AltaVista/third_party/renode/M24_4d/concurrency_shared.resc",
+    "include_reply": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/concurrency_shared.resc",
+    "tcp_connect_succeeded_within_20s": true,
+    "lsof_first_listen_offset_s": 2.7514970829943195,
+    "post_include_prompt": "(av-m24-4d-conc-A) \n\r(av-m24-4d-conc-A) using sysbus\n\r(av-m24-4d-conc-A) \n\r(av-m24-4d-conc-A)",
+    "final_lsof_listen_lines": [
+      "renode  26682 probe  429u  IPv4  0xb5267e8bfcfb7ae      0t0  TCP *:57763 (LISTEN)",
+      "renode  26682 probe  432u  IPv4 0x12c7bc9a815c3180      0t0  TCP *:57765 (LISTEN)"
+    ]
+  }
+]

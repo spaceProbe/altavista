@@ -1,0 +1,5 @@
+baseline channel_sts=0x0000000a REMPTY=True
+WriteChar reply: 'sysbus.uart1 WriteChar 0x41\n\r(av-m24-4b-uart1-register-probe) \n\r(av-m24-4b-uart1-register-probe)'
+after WriteChar channel_sts=0x0000000a REMPTY=True
+WriteChar RX-injection works for uart1: False
+FAIL: WriteChar does not inject either

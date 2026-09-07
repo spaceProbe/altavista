@@ -1,0 +1,87 @@
+{
+  "baseline_uncommanded": {
+    "final_row": {
+      "cd": 2.2,
+      "epoch_a1mjd": 31041.583761972,
+      "rmag_km": 6620.405922631662,
+      "vx_kmps": -4.291693682943538,
+      "vy_kmps": -5.510499447919322,
+      "vz_kmps": -3.378066093103394,
+      "x_km": -4888.908450791294,
+      "y_km": 1162.156177126006,
+      "z_km": 4310.190455207951
+    }
+  },
+  "command_at_s": 3600.0,
+  "commanded": {
+    "final_row": {
+      "cd": 4.4,
+      "epoch_a1mjd": 31041.583761972,
+      "rmag_km": 6620.018296967984,
+      "vx_kmps": -4.291071799980434,
+      "vy_kmps": -5.510886136825724,
+      "vz_kmps": -3.378876162670171,
+      "x_km": -4889.067476940683,
+      "y_km": 1161.519859856607,
+      "z_km": 4309.58618352974
+    },
+    "pre_command_row": {
+      "cd": 2.2,
+      "epoch_a1mjd": 31041.54209530534,
+      "rmag_km": 6620.534792894706,
+      "vx_kmps": 7.067050337462669,
+      "vy_kmps": 1.426870197131377,
+      "vz_kmps": -2.864614273238344,
+      "x_km": -906.9290203434945,
+      "y_km": -4700.960687694977,
+      "z_km": -4572.737616432251
+    }
+  },
+  "duration_s": 7200.0,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "force_model": {
+    "central_body": "Earth",
+    "drag": "JacchiaRoberts",
+    "gravity_degree": 8,
+    "gravity_file": "JGM2.cof",
+    "gravity_order": 8,
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-05T02:26:09+00:00",
+  "gmat_version": "R2026a",
+  "measured_arc_difference_commanded_vs_baseline_m": 891.8145797268592,
+  "name": "gmat_port_cd_command",
+  "note": "GMAT script + ReportFile (SolverIterations=Current, never Execute() through the object API) reference for M18.3 (docs/open-questions.md question 126): a SIGNAL-commanded Cd change (2.2 -> 4.4) applied mid-run through a drag-inclusive force model (JGM2 8x8 + Sun/Moon + JacchiaRoberts drag), pinning crates/gmat-sys/tests/gmat_port_cd_command.rs's own gmat_sys::model::GmatModel::step_with_ports-driven arc. 'baseline' is a structurally identical two-stage run whose second-stage Cd is left at 2.2 (a no-op 'command') -- its difference from 'commanded' at duration_s is this fixture's own proof that Cd has a real, non-vacuous effect on this force model (unlike drms/demo_two_instance.system.yaml's own gravity+point-mass-only force model, deliberately).",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 300.0,
+    "min_step_s": 0.0
+  },
+  "reason": "M18.3 initial generation: SIGNAL-commanded Cd change reference for gmat_port_cd_command.rs",
+  "spacecraft": {
+    "AOP": 0.0,
+    "Cd_after": 4.4,
+    "Cd_before": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6628.0,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "tolerance_m": 1.0,
+  "units": {
+    "position": "km",
+    "rmag": "km",
+    "velocity": "km/s"
+  }
+}

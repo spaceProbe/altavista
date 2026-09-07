@@ -1,0 +1,36 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M11.3
+# (docs/open-questions.md question 102: pin RIC and LVLH impulsive burns).
+#
+# CURRENT ROLE (M12.4, question 106): kept, deliberately unchanged, purely as the SosConfiguration
+# half of the drms/leo_1day_maneuver_lvlh.drm.yaml fixture that now proves a DRM naming
+# AXES_KIND_LVLH is refused at load (`DrmError::InvalidEnumValue`) -- see that file's own header
+# for the full story. The mismatch measurement this bundle originally pinned now lives in
+# drms/leo_1day_maneuver_vvlh.{sos,drm}.yaml instead.
+#
+# One instance ("leo_mvr_lvlh"), bound to the *golden's own* leo_sys SystemDefinition
+# (drms/leo_1day_golden.system.yaml -- same vehicle, same JGM2 8x8 + Sun/Moon force model,
+# unchanged) via BINDING_KIND_MODEL. step_rate_hz = 10 matches leo_1day_golden.sos.yaml's own
+# native integration rate; this DRM's own output sampling (DrmOptions.sample_interval_s, in the
+# .drm.yaml) is coarser (60 s). Instance name "leo_mvr_lvlh" is distinct from "leo_mvr" (VNB)
+# and "leo_mvr_ric" (RIC) -- GMAT's configuration manager is process-global, so every DRM test
+# in this crate needs its own object names (crates/av-kernel/tests/drm_maneuver.rs's module doc
+# comment). (Moot for this particular fixture since M12.4: loading it now fails before any GMAT
+# object is ever constructed.)
+id: leo_sos_maneuver_lvlh
+version: "1"
+name: LEO maneuver golden (LVLH burn), single instance
+instances:
+  - name: leo_mvr_lvlh
+    system_id: leo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_sys
+    step_rate_hz: 10.0
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M11.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/leo_1day_maneuver_lvlh.sos.yaml
+hash: "36f74ef2504f99b6f12805efd56eafe52d6ef21bdab2c042656e0ead70cf2c84"

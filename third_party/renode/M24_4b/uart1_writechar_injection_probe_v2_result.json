@@ -1,0 +1,98 @@
+{
+  "rxen_first_observed_at_step": 22,
+  "writechar_worked": true,
+  "samples": [
+    {
+      "phase": "step0",
+      "control": 296
+    },
+    {
+      "phase": "step1",
+      "control": 296
+    },
+    {
+      "phase": "step2",
+      "control": 296
+    },
+    {
+      "phase": "step3",
+      "control": 296
+    },
+    {
+      "phase": "step4",
+      "control": 296
+    },
+    {
+      "phase": "step5",
+      "control": 296
+    },
+    {
+      "phase": "step6",
+      "control": 296
+    },
+    {
+      "phase": "step7",
+      "control": 296
+    },
+    {
+      "phase": "step8",
+      "control": 296
+    },
+    {
+      "phase": "step9",
+      "control": 296
+    },
+    {
+      "phase": "step10",
+      "control": 296
+    },
+    {
+      "phase": "step11",
+      "control": 296
+    },
+    {
+      "phase": "step12",
+      "control": 296
+    },
+    {
+      "phase": "step13",
+      "control": 296
+    },
+    {
+      "phase": "step14",
+      "control": 296
+    },
+    {
+      "phase": "step15",
+      "control": 296
+    },
+    {
+      "phase": "step16",
+      "control": 296
+    },
+    {
+      "phase": "step17",
+      "control": 296
+    },
+    {
+      "phase": "step18",
+      "control": 296
+    },
+    {
+      "phase": "step19",
+      "control": 296
+    },
+    {
+      "phase": "step20",
+      "control": 296
+    },
+    {
+      "phase": "step21",
+      "control": 296
+    },
+    {
+      "phase": "step22",
+      "control": 276
+    }
+  ]
+}

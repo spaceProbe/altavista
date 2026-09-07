@@ -1,0 +1,4 @@
+bridge client connected
+received on TCP client after direct register writes: b'AV_M24_4B_TX_DIRECTION_PROBE\n'
+TX direction works (bytes written to tx_rx_fifo reached the TCP client): True
+PASS: uart1 TX (peripheral->TCP) direction works

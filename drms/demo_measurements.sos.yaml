@@ -1,0 +1,95 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M25.3 (question 173).
+# Three BINDING_KIND_MODEL instances -- "attitude" reuses the existing, untouched
+# drms/demo_attitude_sensors_truth.system.yaml (`attitude_sensors_truth_sys`) verbatim (no fixture
+# this task is out of scope to touch is modified: this file only *references* it by
+# `system_id`), "startracker" and "imu" are this task's own new, target-populated codec fixtures
+# (drms/demo_measurements_{startracker,imu}.system.yaml). Same fourteen `Connection`s
+# drms/demo_attitude_sensors.sos.yaml already declares (each of the seven
+# `crate::drm::sensors::TRUTH_PORT_NAMES`, zero-latency, from "attitude" to both "startracker" and
+# "imu").
+id: measurements_demo_sos
+version: "1"
+name: Star tracker + IMU telemetry decoded into CDM Measurements (M25.3)
+instances:
+  - name: attitude
+    system_id: attitude_sensors_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_sensors_truth_sys
+  - name: startracker
+    system_id: measurements_demo_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: measurements_demo_startracker_sys
+  - name: imu
+    system_id: measurements_demo_imu_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: measurements_demo_imu_sys
+connections:
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: startracker
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: startracker
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: startracker
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: startracker
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: startracker
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: startracker
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: startracker
+    to_port: truth_wz
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: imu
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: imu
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: imu
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: imu
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: imu
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: imu
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: imu
+    to_port: truth_wz
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_measurements.sos.yaml
+hash: "aced1fdb70627adb28dc31bcc22a6a0e1cc6901623e0f7cb1caffef4757f22dc"

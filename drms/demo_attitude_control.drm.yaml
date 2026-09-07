@@ -1,0 +1,109 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M22.4
+# (docs/sil-plan.md's M22 milestone paragraph: "A native 'controller' instance closes the loop
+# first so the whole chain is proven before any external binary is involved"; its Decisions
+# (2026-09-05) decision A, "attitude control first": "star tracker and IMU in, reaction wheel
+# torques out"; docs/open-questions.md questions 142, 149, 151, 152).
+#
+# 300 s run at 10 Hz default kernel step (fine enough that the kernel's own zero-order-hold
+# discretization of the commanded torque -- a real effect at 1 Hz, measured during authoring to
+# shift the transient's late-time tail by an amount that grows with elapsed time as the
+# closed-form's own predicted value shrinks -- stays within a few percent through t=100s; see
+# crates/av-kernel/tests/drm_attitude_control.rs's own checkpoint tolerances), growing
+# drms/demo_attitude_sensors.*.yaml's own
+# three-instance topology (M22.2/M22.2b) into a closed loop: a fourth instance, the native
+# `crate::drm::controller::AttitudeControllerModel` ("controller"), consumes the star tracker's
+# and IMU's own CCSDS measurement packets (never the plant's truth state) and commands reaction
+# wheel torques back to the three-wheel plant ("attitude", drms/demo_attitude_control_truth.
+# system.yaml) over its own declared FRAMED port -- see drms/demo_attitude_control.sos.yaml's own
+# header comment for the exact port/connection topology this task's own brief requires ("the
+# demo DRM grows the pointing objective").
+#
+# ---------------------------------------------------------------------------------------------
+# Expected settling behaviour, stated BEFORE running (task brief's own explicit requirement) --
+# crates/av-kernel/tests/drm_attitude_control.rs measures against exactly these numbers.
+# ---------------------------------------------------------------------------------------------
+#
+# Initial pointing error: 0.2 rad (~11.46 deg) rotation about +z (attitude.q0 =
+# [0, 0, sin(0.1), cos(0.1)]), zero initial body rate, target attitude = identity
+# (controller.target_q = identity). Since J is diagonal, the wheels are body-axis-aligned, and
+# the plant starts exactly at rest with the error confined to a single axis, the motion stays
+# (to an excellent approximation -- the only nonlinearity is qv_z = sin(theta/2) instead of
+# theta/2, a <= 0.017% relative error at theta = 0.2 rad) a single-axis rotation about z for the
+# whole run: the x/y wheels are never excited.
+#
+# Control law (crate::drm::controller's own module doc comment has the full derivation):
+#   tau_z = kp*qv_z + kd*omega_z,   qv_z = sign(q_err.w) * q_err.z,   q_err = target_q^-1 (x) q
+# Linearizing (theta = 2*qv_z, omega_z = theta_dot, Euler's equation with the gyroscopic term
+# negligible near this small, at-rest initial condition):
+#   Jz*theta_ddot + kd*theta_dot + (kp/2)*theta = 0   =>   omega_n = sqrt(kp/(2*Jz)),
+#   zeta*omega_n = kd/(2*Jz)   =>   envelope time constant tau = 2*Jz/kd.
+#
+# This fixture's own declared gains (drms/demo_attitude_control_controller.system.yaml) are sized
+# for EXACT critical damping (zeta = 1) against Jz = 50 (drms/demo_attitude_control_truth.
+# system.yaml): kd = 5.0, kp = kd^2/(2*Jz) = 25/100 = 0.25 exactly. At zeta = 1:
+#   tau = 2*Jz/kd = 100/5 = 20 s,   theta(t)/theta(0) = (1 + t/tau) * exp(-t/tau)   (no overshoot
+#   -- a critically damped release from rest never crosses zero).
+# At t = 300 s = 15*tau: theta(300)/theta(0) = 16*exp(-15) = 4.88e-6, i.e. the *physical* residual
+# from the deterministic transient alone is ~0.2 rad * 4.88e-6 =~ 9.8e-7 rad -- far below the star
+# tracker's own declared per-axis noise floor (sigma = 1e-5 rad, drms/demo_attitude_control_
+# startracker.system.yaml), so by t = 300 s the measured `pointing_error_rad` (computed from the
+# noisy star tracker reading, never truth -- see `AttitudeControllerModel::step_with_ports`'s own
+# doc comment) is expected to be dominated by measurement noise, not the residual deterministic
+# transient: nonzero, never exactly zero (the "wired truth in by mistake" trap the task brief
+# warns against). **Measured** (crates/av-kernel/tests/drm_attitude_control.rs, seed as declared
+# below): 1.25788264624569269e-4 rad -- about 12.6x the star tracker's own single-sample 1e-5 rad
+# noise floor, not merely one noise sample's worth: the star tracker and IMU noise continuously
+# force this closed loop for the whole 300 s run (not a single measurement at the end), so the
+# loop settles to a *stochastic* steady state whose spread reflects the noise integrated through
+# the closed-loop's own bandwidth, not a single i.i.d. draw -- still four orders of magnitude
+# below the initial 0.2 rad error. No overshoot is expected anywhere in the run (critically
+# damped, zeta=1 exactly by construction).
+#
+# Wheel saturation: `attitude.wheel.3.momentum_limit = 20.0` kg*m^2/s (drms/
+# demo_attitude_control_truth.system.yaml); the order-of-magnitude peak commanded torque is
+# `kp*qv_z(0) =~ 0.25*sin(0.1) =~ 0.025 N*m`, and the total momentum the wheel accumulates over
+# the whole 20s-time-constant transient is bounded by a few kg*m^2/s -- nowhere near the declared
+# 20.0 limit (crates/av-kernel/tests/drm_attitude_control.rs asserts this explicitly, not merely
+# assumes it) -- the gains are sized to stay within the wheel's declared authority, not to probe
+# saturation (the task brief's alternative, disclosed but not the choice made here).
+id: attitude_control_drm
+version: "1"
+name: Closed-loop attitude control (M22.4)
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # target: the exact value crates/av-kernel/tests/drm_attitude_control.rs's own
+    # `two_runs_of_the_control_drm_with_the_same_seed_are_byte_identical_for_the_imu_bias_
+    # trajectory` test proves is bit-for-bit reproducible from this file's own declared seeds
+    # (a real measured value, never hand-picked -- this task's own report has the exact command).
+    # tolerance: 1e-5 rad, about 8% of the measured target -- sized to absorb legitimate
+    # cross-platform floating-point/libm differences (expected to be many orders of magnitude
+    # smaller than this, since the RNG draws themselves are exact integer arithmetic) while still
+    # catching a real regression: this residual is entirely noise-and-discretization-driven (see
+    # this file's own header comment), so any change to the control law's sign, gain, or wiring
+    # would move it by orders of magnitude, not by a few percent.
+    target: 0.00012578826462456927
+    tolerance: 0.00001
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control.drm.yaml
+hash: "f3e755a6077cdcafa386fd7539df9b15557e69ca5934a1472e3b2b0ad4cadb93"

@@ -1,0 +1,33 @@
+{
+ "meta": {
+  "source": "tests/fixtures/demo_two_instance.runproducts.bin (drms/demo_two_instance.*, a real av-run binary)",
+  "groundTruth": "altavista.frames.FrameRegistry.convert() (real GMAT CoordinateConverter, read-only)",
+  "quaternionSource": "RunProducts.frames[EarthICRF].fixed_rotation_q, as actually computed by av_kernel::drm::executor::fill_fixed_rotations",
+  "quaternionConvention": "wire order [w, x, y, z], parent (EarthMJ2000Eq) -> this (EarthICRF)",
+  "note": "posMJ2000EqM is demo_flt's own last trajectory sample position (EarthMJ2000Eq, metres); icrfGroundTruthM is that same physical point's position converted to EarthICRF directly through GMAT, at the sample's own real epoch"
+ },
+ "quaternion": [
+  0.9999999999999936,
+  1.6883303622918998e-08,
+  -1.1229944099017862e-07,
+  6.633029520278694e-10
+ ],
+ "epochA1mjd": 31041.58376197201,
+ "epochTaiNs": 1767232837000000000,
+ "posMJ2000EqM": [
+  -2876852.927716647,
+  3235530.3338271803,
+  5334704.420431515
+ ],
+ "icrfGroundTruthM": [
+  -2876854.130139181,
+  3235530.1491911584,
+  5334703.883982259
+ ],
+ "orbitRadiusM": 6870517.488675741,
+ "measuredDisplacementM": 1.3295443639824764,
+ "expectedDisplacementFromQuaternionM": 1.5593857262618653,
+ "rotationAngleRad": 2.2696772533249593e-07,
+ "angleToPositionVectorRad": 2.1216373790865948,
+ "preciseExpectedDisplacementM": 1.3287285835394664
+}

@@ -1,0 +1,198 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M23.4
+# (docs/sil-plan.md's M23 milestone: "the reference ADCS app ... loop closed and scored;
+# byte-identical at the port boundary"; docs/open-questions.md questions 143, 145, 146, 147, 153,
+# 154, 155).
+#
+# The cFS-bound attitude controller: `services/cfs/apps/adcs` (M23.3's reference ADCS app,
+# compiled for real as of M23.4 -- see that app's own `adcs_app.h` top comment) running inside
+# `altavista-cfs-lockstep` (`services/cfs/IMAGE_DIGEST.md`), fronted by `crates/av-lockstep-shim`
+# in the same container (`services/cfs/container-entrypoint.sh`). This is
+# `drms/demo_attitude_control_controller.system.yaml` (M22.4's native controller) REBOUND, not a
+# different model: identical `ports`/`packet_codecs` (copied verbatim -- apid 200/201 in,
+# apid 300 out, field-for-field identical to the startracker/imu/truth fixtures), so the same
+# physical signals and the same declared FRAMED-port shape close the loop through either
+# binding. Everything that differs is *how* the instance is bound and run, not what it is:
+#
+#   - `dynamics_model`/`state_space_id`/`state_space` -- left empty/unused. Unlike a
+#     `BINDING_KIND_MODEL` instance, `binding::classify_binding`'s `BindingKind::Container` arm
+#     (crates/av-kernel/src/drm/binding.rs) never reads `dynamics_model` or constructs a state
+#     space for a container-bound instance at all -- the actual control law now lives in
+#     `services/cfs/apps/adcs/fsw/src/adcs_control.c` (kp=0.25, kd=5.0, target=identity --
+#     `ADCS_CONTROLLER_KP_DEFAULT`/`KD_DEFAULT`/`ADCS_QuatIdentity()`, chosen to match this
+#     system's own M22.4 native counterpart exactly, so the two are a fair settling-behaviour
+#     comparison -- see crates/av-kernel/tests/drm_attitude_control_cfs.rs's own module doc
+#     comment for that comparison).
+#   - `parameters` -- `"container.*"` (the Docker image-lifecycle path), not `"controller.*"`
+#     (there is no Rust-side controller to configure): `container.seed_key` (question 107,
+#     unused by this app today but still a required declared parameter -- ADR-004 "seeds are
+#     logged inputs" applies uniformly to every container-bound instance) and
+#     `container.control_port` (50070, matching `services/cfs/container-entrypoint.sh`'s own
+#     fixed `--grpc-addr 0.0.0.0:50070`) plus the `container.sysctl.*` entries M23.4's own
+#     `av_lockstep::docker::ManagedContainer::pull_and_run` extension threads to `docker run
+#     --sysctl` (cFE's core `CFE_SB`/`CFE_EVS` POSIX message queues fail `OS_QueueCreate` on a
+#     Docker Desktop host's own default `fs.mqueue.msg_max` -- confirmed by actually running the
+#     image; `services/cfs/IMAGE_DIGEST.md`'s own runtime note recorded this before this task
+#     built the real binding, and `av_lockstep::docker::ManagedContainer::pull_and_run`'s own doc
+#     comment records the exact error).
+#   - No `"output.*"` declarations: `services/cfs/apps/io_lockstep` never populates
+#     `LockstepStepResponse.named_outputs` (`lockstep_messages.h`'s own doc comment says so
+#     plainly) -- there is no C-side "pointing_error_rad" scalar to name. The pointing-error
+#     comparison instead reads the *truth* plant's own quaternion state directly
+#     (`drms/demo_attitude_control_truth.system.yaml`'s declared `q_x`/`q_y`/`q_z`/`q_w`
+#     components, via `entity.attitude.<component>@<time>`) -- physically meaningful regardless
+#     of which binding closes the loop, and unaffected by rebinding this instance at all.
+id: attitude_control_controller_cfs_sys
+version: "1"
+name: cFS-bound attitude controller (M23.4) -- services/cfs/apps/adcs in altavista-cfs-lockstep
+dynamics_model: ""
+# `"container.none"` -- the zero-component declared state space every other
+# BINDING_KIND_CONTAINER fixture in this repository uses (e.g.
+# crates/av-kernel/tests/drm_container.rs's own `docker_container_system` helper): a container
+# instance's state is opaque to this kernel (M14.4's own "zero-order hold, no interpolation"
+# rule), so there is nothing to declare beyond "zero-dimensional."
+state_space_id: "container.none"
+state_space:
+  id: "container.none"
+  components: []
+ports:
+  - name: startracker_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: imu_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: wheel_torque_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: controller_star_in_codec
+    apid: 200
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "star tracker attitude measurement, decoded (M23.4, copied from M22.4)"
+    fields:
+      - name: qx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qw
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: controller_imu_in_codec
+    apid: 201
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement, decoded (M23.4, copied from M22.4)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+  - id: controller_wheel_torque_out_codec
+    apid: 300
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "reaction wheel torque command, wheel k aligned with body axis k (M23.4, copied from M22.4)"
+    fields:
+      - name: tau_1
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_2
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_3
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: container.seed_key
+    string_value: controller
+  - name: container.control_port
+    value: 50070
+  - name: container.sysctl.fs.mqueue.msg_max
+    string_value: "256"
+  - name: container.sysctl.fs.mqueue.msgsize_max
+    string_value: "65536"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M23.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_control_controller_cfs.system.yaml
+hash: "ea25e977a39354f215f52dc19938421338303e972bc266d1ece6dad0a3774d15"

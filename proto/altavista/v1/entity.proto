@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+// Entities and asset references (ADR-001).
+//
+// An Entity is the identity that survives from a design reference mission through
+// feasibility, software-in-the-loop and execution. The DRM's entity id is authoritative;
+// external identifiers are aliases; a track binds to an entity through association
+// evidence, never by assumption (question 13).
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/envelope.proto";
+
+enum EntityKind {
+  ENTITY_KIND_UNSPECIFIED = 0;
+  ENTITY_KIND_SPACECRAFT = 1;
+  ENTITY_KIND_LAUNCH_VEHICLE = 2;
+  ENTITY_KIND_AIRCRAFT = 3;
+  ENTITY_KIND_UAS = 4;
+  ENTITY_KIND_GROUND_VEHICLE = 5;
+  ENTITY_KIND_VESSEL = 6;
+  ENTITY_KIND_GROUND_STATION = 7;
+  ENTITY_KIND_SENSOR = 8;
+  ENTITY_KIND_PAYLOAD = 9;
+  ENTITY_KIND_DEBRIS = 10;
+  ENTITY_KIND_CELESTIAL_BODY = 11;
+  ENTITY_KIND_OTHER = 12;
+}
+
+// An external identifier for an entity, e.g. {scheme: "norad", value: "25544"},
+// {scheme: "icao24", value: "a0b1c2"}, {scheme: "mavlink.sysid", value: "1"},
+// {scheme: "ccsds.apid", value: "0x1a0"}, {scheme: "tail", value: "N12345"}.
+message Alias {
+  string scheme = 1;
+  string value = 2;
+}
+
+message Entity {
+  // Authoritative id, assigned in the DRM. Stable for the entity's whole lifecycle.
+  string id = 1;
+  EntityKind kind = 2;
+  string name = 3;
+  repeated Alias aliases = 4;
+  // The SystemDefinition this entity is an instance of, if any.
+  string system_id = 5;
+  Label label = 6;
+  Provenance provenance = 7;
+  map<string, string> attributes = 8;
+}
+
+// Axis-aligned extent in a declared frame, metres.
+message SpatialExtent {
+  string frame_id = 1;
+  repeated double min = 2 [packed = true];
+  repeated double max = 3 [packed = true];
+}
+
+message TemporalExtent {
+  int64 start_tai_ns = 1;
+  int64 end_tai_ns = 2;
+}
+
+// A reference to a heavy payload in the object store. Messages carry references, never
+// payloads (claim-check pattern). The hot path never dereferences one.
+message AssetRef {
+  // Object-store URI, e.g. "s3://altavista-heavy/imagery/2026/…/scene.tif".
+  string uri = 1;
+  // SHA-256 of the object, hex.
+  string sha256 = 2;
+  uint64 size_bytes = 3;
+  // IANA media type, or a platform type such as "application/vnd.altavista.tileset+json".
+  string media_type = 4;
+  Label label = 5;
+  SpatialExtent spatial_extent = 6;
+  TemporalExtent temporal_extent = 7;
+  Provenance provenance = 8;
+  map<string, string> attributes = 9;
+}

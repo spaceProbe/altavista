@@ -1,0 +1,136 @@
+# cargo-deny configuration (M6.2, question 86, ADR-003's 2026-09-02 amendment: "The
+# crypto rule is enforced mechanically from here: cargo-deny bans ring, md-5, sha1, blake2
+# and non-OpenSSL TLS crates in CI").
+#
+# Run with:
+#   cargo deny check                 # everything (advisories, bans, licenses, sources)
+#   cargo deny check bans            # just the crypto-crate ban list below
+#   cargo deny check licenses        # just the open-core license policy
+#
+# `cargo-deny` was installed for this task into the user's cargo home (`~/.cargo/bin`,
+# `cargo install cargo-deny --locked`, v0.20.2) -- see this task's report for the exact
+# command and whether it was available. If it cannot be installed in a given environment,
+# `scripts/cargo_deny_check.sh` records that gap explicitly rather than faking a pass.
+
+[graph]
+targets = []
+all-features = false
+no-default-features = false
+
+# ---------------------------------------------------------------------------------------
+# advisories: RustSec vulnerability/unmaintained-crate database. `unmaintained = "warn"`
+# (not "deny") because this workspace deliberately vendors `rskafka`-class thin-maintenance
+# crates by design (ADR-003) elsewhere in the platform; a vulnerability itself still fails
+# the build.
+# ---------------------------------------------------------------------------------------
+[advisories]
+version = 2
+ignore = [
+    # `paste` (via `nalgebra` -> `simba`, pulled in by `av-cdm`'s pre-existing `nalgebra`
+    # dependency for spoore-cdm interop -- unrelated to this task) is an *unmaintained*
+    # advisory, not a vulnerability: upstream archived the repo but nothing about `paste`'s
+    # actual behaviour is unsafe. Named explicitly (not a blanket `unmaintained = "none"`)
+    # so a real future vulnerability advisory on any crate still fails the build; only this
+    # one, specific, already-triaged advisory ID is excused.
+    "RUSTSEC-2024-0436",
+]
+
+# ---------------------------------------------------------------------------------------
+# licenses: the open-core policy -- ADR-003's "no copyleft/BSL deps in the open core" and
+# this task's binding rule. `allow` is an explicit allow-list (deny-by-default for anything
+# not named), the safer direction for a policy whose whole point is "nothing copyleft/BSL
+# sneaks in unnoticed". Populated from what this workspace's own dependency tree actually
+# uses (`cargo deny check licenses` run against it -- see the task report for the exact
+# command/output); a genuinely new license needs a deliberate addition here, not a silent
+# pass.
+# ---------------------------------------------------------------------------------------
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0", # the Boost Software License -- NOT the Business Source License (BSL) ADR-003
+               # means when it says "BSL"; unrelated, permissive, spelled out here so the
+               # abbreviation collision is never silently conflated with the license this
+               # policy actually exists to keep out (see the `deny` list below).
+]
+# `cargo-deny` 0.20's `[licenses]` policy is allow-list-only (an explicit `deny` list was
+# removed upstream -- https://github.com/EmbarkStudios/cargo-deny/pull/611): anything whose
+# license is not in `allow` above already fails the build, which is exactly the
+# "copyleft/BSL is refused outright" rule this task needs -- GPL/LGPL/AGPL and BUSL-1.1
+# (the SPDX id for the Business Source License 1.1, Redpanda's license --
+# docs/adr/003-substrate-and-deployment.md: "pending legal review... its BSL license is an
+# operational dependency outside the open core") are simply never added to `allow`, so a
+# crate declaring any of them is denied by default rather than needing its own deny entry.
+# Redpanda itself is not a Cargo dependency (a separately-run binary reached over the Kafka
+# wire protocol), so nothing in this workspace's tree is expected to trip this today; the
+# allow-list is what keeps it that way mechanically if that ever changes.
+
+# ---------------------------------------------------------------------------------------
+# bans: the mechanical form of ADR-004's crypto rule -- "the system FIPS OpenSSL only, no
+# bundled crypto... this excludes ring-based TLS" (ADR-003 amendment, question 86: "cargo-
+# deny bans ring, md-5, sha1, blake2 and non-OpenSSL TLS crates"). `deny` fails the build
+# outright the moment any of these crate names enters `Cargo.lock`, at any version, from
+# any dependency (direct or transitive) -- this is the check that would have caught tonic's
+# `tls`/`tls-native-roots`/`tls-webpki-roots` features (which pull `tokio-rustls` ->
+# `ring`) had `crates/av-grpc` or `crates/av-dynamics-service` enabled them by mistake.
+# ---------------------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# Every workspace crate depends on its siblings via a bare `path = "../x"` with no
+# `version =` (question 2's path-dependency convention), which cargo-deny counts as a
+# wildcard. Since the lead review of 2026-09-02 every workspace member is `publish = false`,
+# so `allow-wildcard-paths` exempts exactly those private path dependencies and the rule
+# can be "deny" for everything else (a `*` requirement on a registry crate still fails).
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    # ADR-004: "ring-based TLS" is explicitly excluded. `cargo tree --workspace | grep -ci
+    # ring` staying 0 is this same rule, checked by hand for the report; this makes it a
+    # build failure instead of a thing someone has to remember to grep for.
+    { name = "ring" },
+    # MD5 and SHA-1 are both cryptographically broken for collision resistance; nothing in
+    # this platform's evidence/signing/hashing paths should ever reach for either (SHA-256
+    # only -- via `sha2`, pure Rust, for non-security-critical fingerprints, or the
+    # `openssl` crate's OpenSSL-backed SHA-256 for the evidence log -- see
+    # crates/av-dynamics-service/src/evidence.rs).
+    { name = "md-5" },
+    { name = "md5" },
+    { name = "sha1" },
+    # BLAKE2 is not banned for being weak (it isn't) but for being *a second hash family*
+    # this platform has no reason to carry: ADR-004's rule is "SHA-256 only", and a second,
+    # unused-by-policy hash algorithm in the dependency tree is exactly the kind of drift
+    # this ban list exists to catch mechanically instead of by code review.
+    { name = "blake2" },
+    { name = "blake3" },
+    # rustls without an OpenSSL-backed crypto provider pulls `ring` by default (`tokio-
+    # rustls`'s own default feature is `ring`) -- see `crates/av-grpc/Cargo.toml`'s and
+    # `crates/av-dynamics-service/Cargo.toml`'s own comments on why `tonic`'s `tls*`
+    # features are never enabled. Denying `rustls`/`tokio-rustls` outright (rather than
+    # trying to allow only an OpenSSL-provider build of them) is the simpler, harder-to-
+    # accidentally-defeat rule: this workspace's TLS story is `openssl`/`hyper-openssl`
+    # end to end (`crates/av-grpc/src/tls.rs`), never rustls in any configuration.
+    { name = "rustls" },
+    { name = "tokio-rustls" },
+    { name = "rustls-webpki" },
+    { name = "webpki-roots" },
+]
+
+# ---------------------------------------------------------------------------------------
+# sources: only the registries/git hosts this workspace actually pulls from. `spoore-cdm`
+# is a local path dependency (question 12), not a registry/git source, so it needs no
+# entry here.
+# ---------------------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

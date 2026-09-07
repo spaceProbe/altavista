@@ -1,0 +1,27 @@
+# M24.1 virtual-time slaving spike -- Renode's mainline Zynq UltraScale+ Cortex-R5 platform
+# (docs/open-questions.md question 144), a trivial bare-loop firmware on rpu0 (the software
+# under test does not matter -- this spike measures Renode's own time base). Renode's :name:/
+# :description: script metadata fields must be single-line (confirmed against this build's
+# own scripts/single-node/zynqmp_remoteproc.resc) -- the original multi-line :description:
+# here failed to tokenize (recorded in REPORT.md), so the description moved to this comment.
+:name: zynqmp-rpu-lockstep-spike
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "zynqmp-rpu-spike"
+
+machine LoadPlatformDescription @platforms/cpus/zynqmp.repl
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadBinary $ORIGIN/loop.bin 0x0 cpu=rpu0
+    rpu0 PC 0x0
+"""
+
+runMacro $reset

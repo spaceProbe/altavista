@@ -1,0 +1,71 @@
+# Analysis profile (docs/architecture.md section 5, "Configurability: four profiles", the
+# Analysis column). See profiles/design.yaml's header comment for the shared rules
+# (profiles select components, never numerical behaviour -- ADR-000 rule 1) and
+# profiles/README.md for the schema and the "status: not_yet_built" convention.
+#
+# Stated plainly up front: as of M7.2, every plane-specific cell architecture.md's table
+# names for Analysis is unbuilt in this repository. The replay/analytics substrate
+# (architecture.md section 6: Redpanda, ClickHouse, MinIO) and the replay engine itself are
+# later P1/P2 scope, not built yet -- this file names the gaps rather than selecting
+# components that do not exist.
+id: analysis
+name: Analysis profile
+architecture_ref: 'docs/architecture.md section 5, "Configurability: four profiles", Analysis column'
+rule: "Profiles select components; they never change numerical behaviour (ADR-000 rule 1)."
+
+# The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
+# question 11's rule: a profile selects *which* tile source the viewer points at, never
+# how the viewer behaves once it has one). See profiles/design.yaml's own imagery entry
+# for the full rationale; every profile defaults to the same offline fixture for now.
+imagery:
+  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
+  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
+  max_level: 2
+
+dynamics_backend:
+  - name: av-dynamics-service
+    kind: rust_service
+    path: crates/av-dynamics-service
+    role: >-
+      altavista.v1.DynamicsService, hosted in Rust -- present in every profile (question 85 /
+      ADR-003's amendment); see profiles/design.yaml's own entry for the full rationale. The
+      one component this profile has, since a replayed/analyzed run's dynamics still need
+      re-deriving or re-checking through the same backend every other profile uses.
+
+planes:
+  ingestion:
+    per_architecture: "replay from logs or files"
+    components: []
+    status: not_yet_built
+    note: "No replay-from-log/file ingestion component exists in this repository yet."
+
+  hot_track:
+    per_architecture: "replay engine"
+    components: []
+    status: not_yet_built
+    note: "No replay engine exists in this repository yet -- av-kernel runs a DRM forward from a declared initial state; it does not replay a recorded run."
+
+  heavy_track:
+    per_architecture: "scorecards, tiling"
+    components: []
+    status: not_yet_built
+    note: "No scorecard or tiling component exists in this repository yet."
+
+  viewer:
+    per_architecture: "replay with truth overlays"
+    components: []
+    status: not_yet_built
+    note: >-
+      No replay-with-truth-overlay UI exists in web/ yet. The base scene+trajectory viewer
+      (profiles/design.yaml's own web viewer entry) is the substrate a replay view would be
+      built on, but "replay with truth overlays" specifically is not built.
+
+  ai:
+    per_architecture: "model evaluation"
+    components: []
+    status: not_yet_built
+    note: "No model-evaluation component exists in this repository yet."
+
+  command:
+    per_architecture: none
+    components: []

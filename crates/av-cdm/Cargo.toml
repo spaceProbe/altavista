@@ -1,0 +1,21 @@
+[package]
+name = "av-cdm"
+publish = false
+description = "AltaVista Common Data Model v1 (ADR-001): generated altavista.v1 types, TAI epochs, SI unit helpers, and the spoore.v0 adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+spoore-cdm.workspace = true
+nalgebra.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true

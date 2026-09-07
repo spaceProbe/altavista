@@ -1,0 +1,57 @@
+[package]
+name = "av-dynamics-service"
+description = "M6.2: a Rust-hosted tonic server for altavista.v1.DynamicsService over gmat-sys/av-dynamics (ADR-002 depth 2, 'gmat-ffi'; ADR-003's 2026-09-02 amendment: DynamicsService is hosted in Rust so grpcio leaves the deployed runtime -- services/gmat-service stays as a design-time tool). Plaintext on localhost only; mTLS across a host boundary is terminated by a service-owned nginx front, same as services/gmat-service/deploy/."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io -- an internal workspace member only. Also lets
+# cargo-deny's `allow-wildcard-paths` treat this crate's own bare `path = "../x"` deps as
+# intentional (see the root `deny.toml`'s `[bans]` comment for why the other four
+# workspace crates don't yet have this set, and why `wildcards` is "allow" repo-wide until
+# they do).
+publish = false
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+av-dynamics = { path = "../av-dynamics" }
+gmat-sys = { path = "../gmat-sys" }
+prost.workspace = true
+prost-types.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+# tonic, default-features off, "server" (not "channel"): this crate only ever HOSTS
+# altavista.v1.DynamicsService, it is never itself a gRPC client (crates/av-grpc already
+# owns that half). Critically, "server" does NOT pull tokio-rustls/`ring` -- only the
+# `tls`/`tls-native-roots`/`tls-webpki-roots` features do (see tonic 0.12.3's own
+# Cargo.toml: `tls = ["dep:tokio-rustls", ...]`, and `tokio-rustls`'s own `ring` feature
+# flag). This server binds plaintext on 127.0.0.1 only; mTLS across a host boundary is
+# terminated by a service-owned nginx front (services/gmat-service/deploy/nginx-gmat-grpc.conf.template),
+# exactly like services/gmat-service's own Python server -- see this crate's README.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+# "io-util" (AsyncReadExt/AsyncWriteExt/AsyncBufReadExt/BufReader) is for src/admin.rs's
+# hand-rolled `/admin/api/evidence` HTTP server (ADR-004 question 63) -- a plain
+# tokio::net::TcpListener with manual GET-only request parsing rather than depending on
+# axum/hyper directly, even though both are already present *transitively* via tonic's own
+# internals: pinning them here would mean tracking tonic's own version/feature choices for
+# no real benefit over what this small, fixed set of routes needs.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
+
+# SHA-256 for the evidence log, via the `openssl` crate (openssl-sys -> the system/Homebrew
+# libssl/libcrypto) -- deliberately NOT `sha2` (which av-dynamics already uses for the
+# non-security-critical settings_hash, per ADR-004's rule that a settings fingerprint may
+# use pure-Rust sha2 while the platform's evidence/signing path proves the OpenSSL-backed
+# hashing path -- crates/av-grpc's own TLS stack is the same rule applied to the transport
+# side). See src/evidence.rs's module doc for exactly what this does and does not claim.
+openssl = "0.10"
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[[bin]]
+name = "av-dynamics-service"
+path = "src/bin/server.rs"

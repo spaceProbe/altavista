@@ -1,0 +1,42 @@
+# M24.4 item 1 -- TTC-rate-vs-virtual-time gate. Must pass before anything else in M24.4 is
+# trusted (task brief: "Do item 1 first -- everything else depends on it").
+#
+# Loads RTEMS's own `ticker` sample (the same M24.2/M24.2d artifact,
+# third_party/rtems-container/run-renode/ticker.exe -- reused read-only, not rebuilt here)
+# on rpu0, but against AltaVista's OWN platform file
+# (third_party/renode/platforms/cpus/zynqmp.repl, this file's sibling) instead of Renode's
+# shipped one, so `ttc0`'s `frequency: 100000000` line is in effect. `ticker` is used (not
+# `hello`) because `hello` explicitly disables the RTEMS clock driver
+# (CONFIGURE_APPLICATION_DOES_NOT_NEED_CLOCK_DRIVER) and never programs TTC0's CNT_CNTRL, so
+# its COUNT_VALUE would never move -- there would be nothing to measure a rate against.
+#
+# Modeled on third_party/rtems-container/run-renode/ticker_noquit.resc (same reset macro,
+# same ELF, same "no RunFor/quit here -- the driving script owns stepping" convention) with
+# exactly one change: LoadPlatformDescription points at our own .repl by absolute path, not
+# the shipped `@platforms/cpus/zynqmp.repl` search-path form. An absolute path after `@` is
+# already a literal string needing no `$ORIGIN` substitution, so it does not hit the
+# `@$ORIGIN/...`-suppresses-substitution bug M24.2b found and recorded in hello.resc's own
+# comment.
+
+:name: av-m24-4-ttc-rate-test
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4-ttc-rate-test"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/ttc_rate_uart.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/ticker.exe cpu=rpu0
+"""
+
+runMacro $reset

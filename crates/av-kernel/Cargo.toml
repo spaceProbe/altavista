@@ -1,0 +1,50 @@
+[package]
+name = "av-kernel"
+publish = false
+description = "The deterministic kernel skeleton (ADR-002/ADR-005 lockstep, Planned): a TAI-nanosecond clock authority, a multi-rate scheduler over DynamicsModel systems with Hermite-with-velocity interpolated output, and CDM v1 Trajectory assembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+av-dynamics = { path = "../av-dynamics" }
+# M6.1: the `drm` module binds BINDING_KIND_MODEL space-system instances to a real
+# gmat_sys::model::GmatModel -- see src/drm/mod.rs's module doc comment for why this moved
+# out of [dev-dependencies] (previously only tests/golden_acceptance.rs used it). Every other
+# module (clock/interpolate/schedule/kernel/trajectory) still has no GMAT dependency.
+gmat-sys = { path = "../gmat-sys" }
+# M13.2 (question 107): the crate/drm/binding.rs's ContainerModel speaks
+# altavista.v1.LockstepService (BINDING_KIND_CONTAINER) through this crate's tonic client --
+# see crates/av-lockstep/src/lib.rs's own module doc comment for why it, not av-grpc
+# directly, and for the OpenSSL-backed-mTLS-vs-plaintext-loopback split.
+av-lockstep = { path = "../av-lockstep" }
+serde.workspace = true
+serde_json.workspace = true
+# DRM authoring format (question 87): YAML, field-for-field mirroring the proto messages --
+# see src/drm/schema.rs's module doc comment. Not already a workspace dependency, so pinned
+# here with an explicit version per this task's own dependency rule.
+serde_yaml = "0.9"
+# Already a workspace dependency (crates/av-dynamics/src/lib.rs::settings_hash) -- reused here
+# for the DRM/SosConfiguration/SystemDefinition canonical hash (src/drm/hash.rs) rather than
+# pulling in openssl for a second, unrelated hashing need. Pure Rust, no bundled C crypto
+# (ADR-004's crypto rule).
+sha2.workspace = true
+# Canonical protobuf encoding for hashing (src/drm/hash.rs): prost::Message::encode_to_vec.
+# Already a transitive dependency via av-cdm/av-dynamics; named directly here since drm/hash.rs
+# calls it explicitly.
+prost.workspace = true
+
+[dev-dependencies]
+# M24.4c: crates/av-kernel/tests/drm_attitude_control_renode.rs spawns the real
+# av-lockstep-shim binary as a plain child process (fronting the Renode bridge) exactly the way
+# services/cfs does in production. A path dev-dependency makes Cargo build it before this
+# crate's tests run (`CARGO_BIN_EXE_av-lockstep-shim` itself is NOT set this way -- Cargo only
+# sets that for a binary target of the SAME package as the integration test, confirmed by
+# actually trying it; that test locates the built binary next to its own test executable
+# instead -- see its own `shim_bin_path` doc comment). Not a [dependencies] entry: av-kernel's
+# own library code never links against the shim binary, only this one test spawns it
+# out-of-process.
+av-lockstep-shim = { path = "../av-lockstep-shim" }

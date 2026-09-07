@@ -1,0 +1,43 @@
+{
+  "samples": [
+    {
+      "step": 1,
+      "cumulative_virtual_s": 1.0,
+      "ttc0_count_value": 99980000,
+      "implied_ttc_seconds_at_100mhz": 0.9998,
+      "ratio": 0.9998
+    },
+    {
+      "step": 2,
+      "cumulative_virtual_s": 2.0,
+      "ttc0_count_value": 199980000,
+      "implied_ttc_seconds_at_100mhz": 1.9998,
+      "ratio": 0.9999
+    },
+    {
+      "step": 3,
+      "cumulative_virtual_s": 3.0,
+      "ttc0_count_value": 299980000,
+      "implied_ttc_seconds_at_100mhz": 2.9998,
+      "ratio": 0.9999333333333333
+    },
+    {
+      "step": 4,
+      "cumulative_virtual_s": 4.0,
+      "ttc0_count_value": 399980000,
+      "implied_ttc_seconds_at_100mhz": 3.9998,
+      "ratio": 0.99995
+    },
+    {
+      "step": 5,
+      "cumulative_virtual_s": 5.0,
+      "ttc0_count_value": 499980000,
+      "implied_ttc_seconds_at_100mhz": 4.9998,
+      "ratio": 0.99996
+    }
+  ],
+  "tolerance": 0.001,
+  "worst_deviation_from_1": 0.00019999999999997797,
+  "final_ratio": 0.99996,
+  "passed": true
+}

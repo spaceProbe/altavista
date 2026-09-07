@@ -1,0 +1,38 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- question 87's
+# required fixture: "a DRM executor in av-kernel ... express the golden as a DRM, run it
+# through the executor, and match goldens/leo_1day_jgm2_8x8_sunmoon.json". See
+# drms/README.md for how the numbers below were derived and crates/av-kernel/src/drm/
+# executor.rs's module doc comment for exactly how each `options` field drives the run.
+#
+# start_tai_ns / end_tai_ns: 2026-01-01T00:00:00Z (the golden's own epoch_utc,
+# "01 Jan 2026 00:00:00.000") in TAI nanoseconds -- computed once, offline, from this
+# repository's own leap-second table (data/time/leap_seconds.json's last entry: TAI-UTC =
+# 37 s, in force since 2017 and extrapolated forward, matching
+# crates/av-cdm/src/time.rs::Tai::from_utc_nanos's documented post-table extrapolation): unix
+# seconds for 2026-01-01T00:00:00Z is 1767225600, so start_tai_ns = (1767225600 + 37) * 1e9.
+# end_tai_ns = start_tai_ns + 86400 s (the golden's own duration_s). The DRM executor binds
+# the SystemDefinition's GMAT spacecraft to this same instant numerically (A1ModJulian, not a
+# calendar string -- see binding.rs) and cross-checks GMAT's own read-back epoch against this
+# declared value to within one microsecond.
+id: drm_leo_1day_golden
+version: "1"
+name: LEO one day, JGM2 8x8 + Sun/Moon (golden reproduction)
+sos_configuration_id: leo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767312037000000000
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 0.1
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M6.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). A tampered copy of this file (a
+# flipped character here) is refused by the executor, not silently accepted -- see
+# tests/drm_executor.rs::a_tampered_drm_hash_is_refused.
+hash: "4694f388692c23d86e7f54baf5b087b4821b1ff01c037a4e7f82403b7c45bc43"

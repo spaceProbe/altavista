@@ -1,0 +1,102 @@
+test drm::sensors::tests::imu_bias_single_step_variance_scales_linearly_with_dt_not_its_square_root_or_unscaled ... ok
+test drm::sensors::tests::imu_bias_variance_grows_linearly_with_elapsed_time ... ok
+test drm::sensors::tests::star_tracker_recovered_boresight_error_matches_its_declared_sigma_statistically ... ok
+test drm::executor::fixed_rotation_measurement_interval_tests::a_day_long_separation_would_have_failed_the_constancy_check_for_earthicrf ... ok
+test drm::executor::fixed_rotation_measurement_interval_tests::repeating_the_identical_epoch_gives_a_bit_identical_rotation_matrix ... ok
+
+test result: ok. 515 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.85s
+
+     Running tests/covariance_frame_conversion.rs (target/debug/deps/covariance_frame_conversion-01d79fa1bf76e1d8)
+
+running 1 test
+test drm_covariance_matches_r_p_rt_built_from_gmats_own_reported_rotation_in_earthbodyfixed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.25s
+
+     Running tests/demo_two_instance.rs (target/debug/deps/demo_two_instance-73dd84f32054a8e8)
+
+running 14 tests
+test demo_two_instance_bystander_invariance_against_real_single_instance_gmat_runs ... ok
+test demo_two_instance_produces_a_small_number_of_port_command_events_not_thousands ... ok
+test demo_two_instance_matches_the_golden_and_scores_its_objective ... ok
+test icrf_conversion_matches_the_genuine_gmat_reportfile ... ok
+test demo_two_instance_earthmj2000eq_fixed_rotation_q_stays_empty ... ok
+test demo_two_instance_run_products_frames_include_icrf_and_the_mandatory_central_body_frames ... ok
+test declared_scenario_frame_wins_over_the_registry_default_through_the_real_loader ... ok
+test covariance_is_declared_on_demo_mvr_only_and_the_asymmetry_is_load_bearing ... ok
+test demo_two_instance_earthbodyfixed_fixed_rotation_q_stays_empty ... ok
+test demo_two_instance_signal_port_delivers_a_drag_sail_command_that_measurably_changes_the_arc ... ok
+test demo_ctrl_declares_an_empty_state_space_and_emits_no_trajectory_but_keeps_its_events ... ok
+test demo_two_instance_earthicrf_fixed_rotation_q_is_filled_and_unit ... ok
+test icrf_round_trip_through_mj2000eq_is_the_identity_to_1e_minus_9_m ... ok
+test mandatory_frames_appear_even_when_the_instance_propagated_in_icrf_not_mj2000eq ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.50s
+
+     Running tests/drm_attitude.rs (target/debug/deps/drm_attitude-235864774be0f560)
+
+running 9 tests
+test an_unclassifiable_component_in_an_attitude_shaped_state_space_is_a_typed_refusal ... ok
+test attitude_state_space_classifies_quaternion_then_linear_scalar_body_rate ... ok
+test a_dynamics_fault_halving_a_wheel_limit_changes_the_arc_by_the_precomputed_magnitude ... ok
+test execute_refuses_a_wheel_momentum_component_declared_with_the_torque_unit ... ok
+test a_maneuver_event_targeting_an_attitude_only_instance_is_a_typed_load_error_through_execute ... ok
+test a_torque_free_precession_drm_runs_through_execute_and_matches_the_closed_form ... ok
+test run_products_from_a_real_attitude_run_slerp_the_quaternion_and_linearly_interpolate_the_rest ... ok
+test a_wheel_limit_fault_drm_runs_through_execute ... ok
+test covariance_requested_against_an_attitude_instance_is_a_typed_refusal_through_execute ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.18s
+
+     Running tests/drm_attitude_control.rs (target/debug/deps/drm_attitude_control-d59988ab4668e6e8)
+
+running 9 tests
+test sanity_the_fixtures_own_declared_gains_are_exactly_critically_damped ... ok
+test expected_theta_ratio_matches_hand_computed_values ... ok
+test a_different_star_tracker_seed_changes_the_propagated_pointing_error_curve ... ok
+test a_maneuver_targeting_the_controller_instance_is_a_typed_load_error_through_execute ... ok
+test the_final_pointing_error_is_meaningfully_smaller_than_the_initial_one_and_is_not_exactly_zero ... ok
+test two_runs_of_the_control_drm_with_the_same_seed_are_byte_identical_for_the_imu_bias_trajectory ... ok
+test the_measured_pointing_error_tracks_the_closed_form_decay_at_two_widely_separated_checkpoints ... ok
+test the_error_never_overshoots_past_the_closed_form_envelope ... ok
+test the_wheel_never_approaches_its_declared_saturation_limit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.43s
+
+     Running tests/drm_attitude_control_cfs.rs (target/debug/deps/drm_attitude_control_cfs-512bd40af288966c)
+
+running 3 tests
+test the_cfs_bound_loop_settles_and_tracks_the_native_run ... ok
+test a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues has been running for over 60 seconds
+test byte_identical_run_products_across_two_separately_spawned_cfs_containers has been running for over 60 seconds
+test a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues ... ok
+test byte_identical_run_products_across_two_separately_spawned_cfs_containers ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 150.28s
+
+     Running tests/drm_attitude_control_renode.rs (target/debug/deps/drm_attitude_control_renode-c7ba7dd1b4dde118)
+
+running 1 test
+test byte_identical_port_traffic_between_posix_container_and_renode has been running for over 60 seconds
+test byte_identical_port_traffic_between_posix_container_and_renode ... FAILED
+
+failures:
+
+---- byte_identical_port_traffic_between_posix_container_and_renode stdout ----
+posix-container run: 1s @ 10Hz in 16.28s wall time
+Renode scratch dir (socket, monitor/uart0 logs, shim+bridge stdout/stderr): /tmp/av-renode-m24c-32250
+Renode bridge ready (boot + HELLO/BIND handshake path primed) in 23.21s wall time
+
+thread 'byte_identical_port_traffic_between_posix_container_and_renode' (15841409) panicked at crates/av-kernel/tests/drm_attitude_control_renode.rs:515:128:
+the Renode-bound run must execute end to end through the real RTEMS/cFE/IO_LOCKSTEP guest: ContainerProtocol { instance: "controller", source: StepRpc { detail: "status: Aborted, message: \"the peer closed the connection cleanly between frames\", details: [], metadata: MetadataMap { headers: {\"content-type\": \"application/grpc\", \"date\": \"Mon, 07 Sep 2026 02:02:13 GMT\", \"content-length\": \"0\"} }" } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    byte_identical_port_traffic_between_posix_container_and_renode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 85.52s
+
+error: test failed, to rerun pass `-p av-kernel --test drm_attitude_control_renode`
+
+[exited with code 0]

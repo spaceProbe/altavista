@@ -1,0 +1,100 @@
+# Design profile (docs/architecture.md section 5, "Configurability: four profiles", the
+# Design column). Profiles are files first ("a console that edits the same files comes
+# later" -- architecture.md's own words); this is one of the first four such files, M7.2,
+# following on from question 87's DRM executor. A profile SELECTS components; it never
+# changes numerical behaviour (ADR-000 rule 1, restated in architecture.md section 5's own
+# second sentence) -- nothing in this file may set a rate, a tolerance, or a force-model
+# choice; those live in DRMs/SystemDefinitions (proto/altavista/v1/system.proto) and are
+# hashed there, never here. See profiles/README.md for the (informal, no-proto-yet) schema
+# every profile file in this directory follows, and for the "status: not_yet_built"
+# convention used below.
+id: design
+name: Design profile
+architecture_ref: 'docs/architecture.md section 5, "Configurability: four profiles", Design column'
+rule: "Profiles select components; they never change numerical behaviour (ADR-000 rule 1)."
+
+# The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
+# question 11's rule to the globe: a profile selects *which* tile source the viewer
+# points at, never how the viewer behaves once it has one). Every profile defaults to
+# the same offline fixture (web/fixtures/gen_globe_tiles.py, generated and checked in --
+# tests/test_profiles.py pins this url_template against web/js/globe.js's own
+# DEFAULT_IMAGERY_URL constant, so the two never drift apart silently); which public and
+# restricted basemaps to ship per profile is a later user decision (question 132's own
+# text), not decided here. `max_level` is the selected source's own declared pyramid
+# depth (a property of the component, like a component's `path`), not a viewer LOD
+# behaviour knob -- screen-space-error threshold, tile budget and resident-cache size
+# stay hardcoded in web/js/globe.js, never profile-configurable.
+imagery:
+  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
+  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
+  max_level: 2
+
+# The one component every profile lists (question 85 / ADR-003's 2026-09-02 amendment): the
+# deployed Rust DynamicsService. Not a plane-specific selection -- it is the dynamics compute
+# path every plane's numerical work can call, in every profile, Design included.
+dynamics_backend:
+  - name: av-dynamics-service
+    kind: rust_service
+    path: crates/av-dynamics-service
+    role: >-
+      altavista.v1.DynamicsService, hosted in Rust (tonic over the OpenSSL-backed stack,
+      GMAT through gmat-sys) -- the deployed path question 85 moved DynamicsService to,
+      superseding the Python gmat-service for anything that leaves design-time use.
+
+planes:
+  ingestion:
+    per_architecture: none
+    components: []
+
+  hot_track:
+    per_architecture: "off"
+    components: []
+
+  heavy_track:
+    per_architecture: "GMAT solves, batch DRM runs"
+    components:
+      - name: gmat-service
+        kind: python_service
+        path: services/gmat-service
+        role: >-
+          GMAT solves: the design-time GMAT Python API host (ADR-002 depth 1) for
+          interactive authoring, solvers and golden generation (goldens/gen_leo_1day.py and
+          friends). Design-time only (services/gmat-service/README.md's own top note,
+          question 85) -- this profile and feasibility.yaml are the only two that list it;
+          it never appears in analysis.yaml or execution.yaml (checked mechanically by
+          tests/test_profiles.py for the execution profile).
+      - name: av-kernel::drm
+        kind: rust_crate
+        path: crates/av-kernel/src/drm
+        role: >-
+          Batch DRM runs: DesignReferenceMission + SosConfiguration + SystemDefinitions ->
+          one CDM Trajectory per instance, with provenance carrying the declared hashes
+          (crates/av-kernel/README.md's "The DRM executor" section; drms/README.md for the
+          fixture format). drms/leo_1day_golden.*.yaml is the first real fixture.
+
+  viewer:
+    per_architecture: "design scene, trajectories, planning tools"
+    components:
+      - name: web viewer
+        kind: web_app
+        path: web
+        role: >-
+          Design scene + trajectories: frame graph (a scene node per declared frame,
+          camera parented to any frame), floating-origin precision, trajectory rendering
+          (web/VIEWER.md). Planning tools (maneuver/scenario-editing UI) are not yet built
+          in this repository.
+        status: partial
+
+  ai:
+    per_architecture: "optional planners"
+    components: []
+    status: not_yet_built
+    note: >-
+      No planner/AI-plane component exists in this repository yet. architecture.md section 8
+      places the AI plane's sidecar isolation and read-only gateway at phase P4; this profile
+      can select a planner once one exists, not before -- see the "What architecture.md calls
+      for but does not exist yet" summary in profiles/README.md.
+
+  command:
+    per_architecture: none
+    components: []

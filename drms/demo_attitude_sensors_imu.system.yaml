@@ -1,0 +1,146 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.2. The IMU
+# instance for drms/demo_attitude_sensors.sos.yaml: seven `PORT_KIND_SIGNAL` IN ports consuming
+# `attitude_sensors_truth_sys`'s own truth broadcast, and one `PORT_KIND_FRAMED` OUT port
+# (`schema: "ccsds.spp"`) carrying the noisy rate/specific-force measurement as one CCSDS space
+# packet per `crate::drm::sensors::imu_packet_codec`'s declared field layout (`wx,wy,wz,ax,ay,az`,
+# six big-endian IEEE-754 `binary64` fields, 48 user-data bytes).
+#
+# The declared state space (`bias_gyro_{x,y,z}`, `bias_accel_{x,y,z}`) matches
+# `crate::drm::sensors::ImuModel::state_dim() == 6` exactly -- the discrete-time bias random walk
+# (trap 2) is this model's only genuinely propagated physical state.
+#
+# `crate::drm::sensors::parse_imu_spec`/`ImuModel` are this system's own typed parser/model.
+#
+# M22.2b (`docs/open-questions.md` questions 142/149/151/152, decided by the lead):
+# `dynamics_model: imu.sensors_demo` now dispatches through `crate::registry::ModelKind::Imu`
+# (`crate::registry::kind_for`) -> `crate::drm::binding::BindingPlan::Imu` -> `AnyModel::Imu` --
+# a real, `execute()`-runnable instance whose propagated bias-random-walk state (declared above)
+# is what `crates/av-kernel/tests/drm_attitude_sensors.rs`'s own determinism proof compares
+# across runs (this instance, unlike the star tracker's `state_dim() == 0`, carries real
+# propagated state a run-to-run comparison can actually discriminate on). The declared
+# `output.seq` parameter below exposes this instance's own CCSDS sequence-count field as
+# `output.imu.seq@<time>`, the same declared-update-rate observability
+# `demo_attitude_sensors_startracker.system.yaml`'s own header comment describes.
+id: attitude_sensors_imu_sys
+version: "1"
+name: IMU measuring the M22.2 demo's truth attitude (M22.2)
+dynamics_model: imu.sensors_demo
+state_space_id: imu.sensors_demo.space
+state_space:
+  id: imu.sensors_demo.space
+  components:
+    - label: bias_gyro_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_gyro_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_gyro_z
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_accel_x
+      unit: UNIT_METER_PER_SECOND_SQUARED
+    - label: bias_accel_y
+      unit: UNIT_METER_PER_SECOND_SQUARED
+    - label: bias_accel_z
+      unit: UNIT_METER_PER_SECOND_SQUARED
+ports:
+  - name: truth_qx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qw
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: imu_meas
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: imu_meas_codec
+    apid: 101
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement (M22.2)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: imu.update_rate_hz
+    value: 2.0
+    unit: UNIT_HERTZ
+  - name: imu.seed
+    value: 2.0
+  - name: imu.gyro_noise_sigma
+    value: 0.0001
+    unit: UNIT_RADIAN_PER_SECOND
+  - name: imu.gyro_bias_rw_sigma
+    value: 0.000001
+    unit: UNIT_RADIAN_PER_SECOND
+  - name: imu.accel_noise_sigma
+    value: 0.001
+    unit: UNIT_METER_PER_SECOND_SQUARED
+  - name: imu.accel_bias_rw_sigma
+    value: 0.00001
+    unit: UNIT_METER_PER_SECOND_SQUARED
+  - name: output.seq
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_sensors_imu.system.yaml
+hash: "3f7fc84b614ef081dc863a5c6bde18c3294c305879f37d7c51353be69e7c4e12"

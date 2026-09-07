@@ -1,0 +1,62 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M11.3
+# (docs/open-questions.md question 102). ORIGINAL ROLE (M11.3): declared a burn "in LVLH", the
+# way any caller targeting this platform's then-named AXES_KIND_LVLH (question 73, Z=-R, Y=-N,
+# X=N x R) would write it, and pinned the M11.3 mismatch against goldens/
+# leo_1day_maneuver_gmat_lvlh.json (GMAT's own native ImpulsiveBurn Axes=LVLH).
+#
+# CURRENT ROLE (M12.4, question 106): question 106 renamed the platform's convention to
+# AXES_KIND_VVLH and made "AXES_KIND_LVLH" a `reserved` enum name in core.proto -- it can never
+# be reintroduced. This fixture is kept, DELIBERATELY UNCHANGED below (still literally
+# declaring `frame_id: AXES_KIND_VVLH` under its old name -- see the `attributes` block), as the
+# one place that name is still spelled out on disk: it now exists solely to prove that a DRM
+# naming AXES_KIND_LVLH is refused at load with the existing typed `DrmError::InvalidEnumValue`
+# (crates/av-kernel/tests/drm_maneuver.rs::a_drm_naming_axes_kind_lvlh_is_a_typed_load_error).
+# The mismatch measurement this fixture originally pinned now lives in
+# drms/leo_1day_maneuver_vvlh.{drm,sos}.yaml (identical numbers, AXES_KIND_VVLH declared
+# instead) -- see that file's own header and
+# crates/av-kernel/tests/drm_maneuver.rs::drm_maneuver_axes_kind_vvlh_does_not_reproduce_gmats_native_lvlh_burn.
+#
+# start_tai_ns/end_tai_ns/burn tai_ns: identical arithmetic to leo_1day_maneuver_ric.drm.yaml /
+# leo_1day_maneuver_vnb.drm.yaml (same "01 Jan 2026 00:00:00Z" epoch, same 3600 s pre/post-burn
+# windows).
+#
+# dv_x/dv_y/dv_z: 0.0, 20.0, 0.0 m/s -- the same three numbers as
+# goldens/leo_1day_maneuver_gmat_lvlh.json's dv_lvlh_km_s = [0.0, 0.02, 0.0] (and, not by
+# coincidence, leo_1day_maneuver_ric.drm.yaml's dv -- see the note above).
+#
+# NOTE: `id`/`name`/`sos_configuration_id`/`instance`/`hash` below still read "lvlh" -- left
+# untouched on purpose, since changing them would change this message's canonical protobuf
+# encoding and invalidate the recorded `hash` for no behavioural reason; only the frame_id
+# string this file exists to test needs to stay exactly "AXES_KIND_LVLH".
+id: drm_leo_1day_maneuver_lvlh
+version: "1"
+name: LEO maneuver golden (LVLH burn, AXES_KIND_LVLH declared)
+sos_configuration_id: leo_sos_maneuver_lvlh
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  events:
+    - id: burn1
+      tai_ns: 1767229237000000000
+      kind: maneuver
+      instance: leo_mvr_lvlh
+      values:
+        dv_x: 0.0
+        dv_y: 20.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_LVLH
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M11.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/leo_1day_maneuver_lvlh.drm.yaml
+hash: "c7247402aeb5c487acb43cfb3a1b7ecd3cce7c0933ebf5f1349c2cbee4b731d5"

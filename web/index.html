@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alta Vista</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Empty data-URI favicon (question 168): without an explicit <link rel="icon">, every
+     browser auto-requests /favicon.ico, which 404s (no icon file is shipped) and logs its
+     own "Failed to load resource: 404" console error -- a second, independent source of
+     console noise on page load, found while measuring the WebSocket startup race below.
+     An explicit icon link (even an empty one) heads that request off entirely. -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/addons/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="layout-toolbar" title="M26.2 windowing: binary split-tree tiling (docs/open-questions.md question 161)">
+    <div id="layout-error" hidden></div>
+    <button id="layout-export" title="Download the current pane layout as JSON">Export layout</button>
+    <button id="layout-import" title="Load a pane layout from a JSON file">Import layout</button>
+    <input type="file" id="layout-import-file" accept="application/json" hidden>
+    <button id="layout-reset" title="Discard the current layout and go back to this profile's default">Reset layout</button>
+  </div>
+  <div id="layout-root"></div>
+  <!-- Real, live elements -- moved into panes UNCHANGED by web/js/layout_bootstrap.js
+       (re-parented, never cloned). Every id below is exactly what web/js/app.js has
+       always looked up via document.getElementById(); re-parenting an element does
+       not change its id, children, or listeners, so app.js needed no changes. -->
+  <div id="pane-content-pool" hidden>
+  <aside id="sidebar">
+    <header>
+      <h1>Alta Vista</h1>
+      <span id="conn" class="badge off" title="viewer server connection">offline</span>
+    </header>
+
+    <section>
+      <label class="row">Scenario
+        <select id="scenario-select"></select>
+      </label>
+      <div id="scenario-info" class="muted small"></div>
+    </section>
+
+    <section>
+      <h2>Spacecraft</h2>
+      <ul id="sc-list" class="objlist"></ul>
+    </section>
+
+    <section>
+      <h2>Bodies</h2>
+      <ul id="body-list" class="objlist"></ul>
+    </section>
+
+    <section>
+      <h2>Events</h2>
+      <ul id="event-list" class="objlist"></ul>
+    </section>
+
+    <section>
+      <h2>Frames</h2>
+      <label class="row" title="Which frame the camera is parented in (M4.1). Switching frames is re-parenting, not re-loading (docs/architecture.md &sect;4) -- pick an entity-relative frame (e.g. a target's RIC frame) to view another entity close up at full precision.">
+        View frame
+        <select id="frame-select"></select>
+      </label>
+      <ul id="frame-origin-list" class="objlist"></ul>
+    </section>
+
+    <section>
+      <h2>View</h2>
+      <label class="row">Focus
+        <select id="focus-select"></select>
+      </label>
+      <label class="row">Trajectory
+        <select id="opt-trail">
+          <option value="full">full</option>
+          <option value="past">past only</option>
+          <option value="off">hidden</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="opt-labels" checked> Labels</label>
+      <label><input type="checkbox" id="opt-axes"> Frame axes</label>
+      <label><input type="checkbox" id="opt-grid"> XY plane grid</label>
+      <label><input type="checkbox" id="opt-stars" checked> Stars</label>
+      <label title="Rebase render-space coordinates to a nearby origin instead of storing absolute float32 positions (docs/open-questions.md Q46). Off reproduces the pre-M3.1 precision bug exactly, for comparison.">
+        <input type="checkbox" id="opt-origin" checked> Floating origin</label>
+      <label><input type="checkbox" id="opt-sync" checked> Sync clock with other browsers</label>
+      <button id="btn-reset">Reset view</button>
+    </section>
+
+    <section>
+      <h2>Globe (M15.4)</h2>
+      <label title="Quadtree WGS84 ellipsoid globe (web/js/globe.js): screen-space-error LOD, raster imagery from the active profile's imagery source (profiles/*.yaml, defaults to the offline fixture at web/fixtures/tiles/ -- question 132). Replaces Earth's plain sphere with tiles while enabled.">
+        <input type="checkbox" id="opt-globe"> Tiled globe (Earth)</label>
+      <button id="btn-load-3dtiles" title="Load web/fixtures/3dtiles/tileset.json through the vendored NASA AMMOS 3DTilesRendererJS (web/js/tiles_layer.js) -- an overlay layer, not the globe.">Load 3D Tiles fixture</button>
+      <div id="globe-info" class="muted small"></div>
+    </section>
+  </aside>
+
+  <main id="viewport">
+    <canvas id="canvas"></canvas>
+    <div id="labels"></div>
+    <div id="empty" class="overlay">
+      <div>
+        <strong>Waiting for a scenario</strong><br>
+        Publish one from Python: <code>Scenario(...).publish()</code><br>
+        or <code>python -m altavista run path/to/mission.script</code>
+      </div>
+    </div>
+    <div id="hud" class="mono small"></div>
+  </main>
+
+  <!-- M26.3: the three extra 3D-viewport panes for the RPO default layout (ICRF beside
+       RIC beside globe, web/js/layout/default_layouts.js's buildRpoTripleViewportLayout()
+       -- panel ids ICRF_PANEL_ID/RIC_PANEL_ID/GLOBE_PANEL_ID). Moved into panes unchanged
+       by web/js/layout_bootstrap.js, exactly like #sidebar/#viewport above; registered
+       against the shared Viewer as real Viewport instances (web/js/viewport.js) by
+       web/js/app.js once a scenario that declares a RIC frame loads. Each owns its own
+       canvas/labels/HUD -- "labels ... per viewport", this task's own brief. -->
+  <div class="av-viewport3d" id="viewport-icrf">
+    <canvas id="canvas-icrf"></canvas>
+    <div class="labels" id="labels-icrf"></div>
+    <div class="av-viewport3d-hud mono small" id="hud-icrf"></div>
+  </div>
+  <div class="av-viewport3d" id="viewport-ric">
+    <canvas id="canvas-ric"></canvas>
+    <div class="labels" id="labels-ric"></div>
+    <div class="av-viewport3d-hud mono small" id="hud-ric"></div>
+  </div>
+  <div class="av-viewport3d" id="viewport-globe">
+    <canvas id="canvas-globe"></canvas>
+    <div class="labels" id="labels-globe"></div>
+    <div class="av-viewport3d-hud mono small" id="hud-globe"></div>
+  </div>
+  <!-- M26.4: the three panels (run products & scores, 2D companion map, console/log --
+       docs/ui-rework-plan.md). Real, live elements populated by web/js/app.js through
+       web/js/panels/*.js, moved into panes unchanged by web/js/layout_bootstrap.js
+       exactly like every other panel above. -->
+  <div class="av-panel" id="panel-run-products"></div>
+  <div class="av-panel" id="panel-map"></div>
+  <div class="av-panel" id="panel-console"></div>
+  </div><!-- /#pane-content-pool -->
+
+  <footer id="timebar">
+    <button id="btn-play" title="play / pause (space)">&#9654;</button>
+    <button id="btn-start" title="jump to start">&#9198;</button>
+    <select id="speed" title="playback speed"></select>
+    <div id="slider-wrap">
+      <div id="event-ticks"></div>
+      <input type="range" id="slider" min="0" max="1" step="any" value="0">
+    </div>
+    <div id="epoch" class="mono">&mdash;</div>
+  </footer>
+</div>
+<script type="module" src="./js/layout_bootstrap.js"></script>
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,194 @@
+[
+  {
+    "idx": 0,
+    "monitor_port": 56429,
+    "uart_port": 56430,
+    "pid": 25098,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_0_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3030884590698406,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-0) \n\r(av-m24-4d-race-0)",
+    "extra_wait_elapsed_s": 3.4669766660081223,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.7704937920207158,
+    "lsof_first_listen_offset_from_poll_start_s": 2.55859283299651,
+    "lsof_sample_count": 52,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.061,
+        "hit": false
+      },
+      {
+        "t": 2.559,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25098 probe  429u  IPv4 0xb1108a95e8843b4a      0t0  TCP *:56429 (LISTEN)",
+      "renode  25098 probe  432u  IPv4 0xf001f410b9438f14      0t0  TCP *:56430 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25098 probe  429u  IPv4 0xb1108a95e8843b4a      0t0  TCP *:56429 (LISTEN)",
+      "renode  25098 probe  432u  IPv4 0xf001f410b9438f14      0t0  TCP *:56430 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 1,
+    "monitor_port": 56478,
+    "uart_port": 56479,
+    "pid": 25222,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_1_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.30391783302184194,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-1) \n\r(av-m24-4d-race-1)",
+    "extra_wait_elapsed_s": 3.4937031669542193,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.798153124982491,
+    "lsof_first_listen_offset_from_poll_start_s": 2.5507156669627875,
+    "lsof_sample_count": 52,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.063,
+        "hit": false
+      },
+      {
+        "t": 2.551,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25222 probe  429u  IPv4 0x69fcd813f7d18413      0t0  TCP *:56478 (LISTEN)",
+      "renode  25222 probe  432u  IPv4 0x27f5a10ddefbf08e      0t0  TCP *:56479 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25222 probe  429u  IPv4 0x69fcd813f7d18413      0t0  TCP *:56478 (LISTEN)",
+      "renode  25222 probe  432u  IPv4 0x27f5a10ddefbf08e      0t0  TCP *:56479 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 2,
+    "monitor_port": 56543,
+    "uart_port": 56544,
+    "pid": 25357,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_2_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3018535419832915,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-2) \n\r(av-m24-4d-race-2)",
+    "extra_wait_elapsed_s": 3.391937499982305,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.6941749580437317,
+    "lsof_first_listen_offset_from_poll_start_s": 2.3974077919265255,
+    "lsof_sample_count": 51,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.068,
+        "hit": false
+      },
+      {
+        "t": 2.397,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25357 probe  429u  IPv4 0xf001f410b9438f14      0t0  TCP *:56543 (LISTEN)",
+      "renode  25357 probe  432u  IPv4 0x66cd41d8ed04630f      0t0  TCP *:56544 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25357 probe  429u  IPv4 0xf001f410b9438f14      0t0  TCP *:56543 (LISTEN)",
+      "renode  25357 probe  432u  IPv4 0x66cd41d8ed04630f      0t0  TCP *:56544 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 3,
+    "monitor_port": 56598,
+    "uart_port": 56599,
+    "pid": 25479,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_3_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3027322500711307,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-3) \n\r(av-m24-4d-race-3)",
+    "extra_wait_elapsed_s": 3.373505415976979,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.676629540976137,
+    "lsof_first_listen_offset_from_poll_start_s": 2.4212339580990374,
+    "lsof_sample_count": 51,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.067,
+        "hit": false
+      },
+      {
+        "t": 2.421,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25479 probe  429u  IPv4 0x69fcd813f7d18413      0t0  TCP *:56598 (LISTEN)",
+      "renode  25479 probe  432u  IPv4 0xb735ce003725da7d      0t0  TCP *:56599 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25479 probe  429u  IPv4 0x69fcd813f7d18413      0t0  TCP *:56598 (LISTEN)",
+      "renode  25479 probe  432u  IPv4 0xb735ce003725da7d      0t0  TCP *:56599 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 4,
+    "monitor_port": 56643,
+    "uart_port": 56644,
+    "pid": 25612,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_4_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3046513330191374,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-4) \n\r(av-m24-4d-race-4)",
+    "extra_wait_elapsed_s": 3.3717300000134856,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.676839750027284,
+    "lsof_first_listen_offset_from_poll_start_s": 2.4181874999776483,
+    "lsof_sample_count": 51,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.077,
+        "hit": false
+      },
+      {
+        "t": 2.418,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25612 probe  429u  IPv4 0x2206145e4846496f      0t0  TCP *:56643 (LISTEN)",
+      "renode  25612 probe  432u  IPv4 0xba5cc6e9b40ed8dd      0t0  TCP *:56644 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25612 probe  429u  IPv4 0x2206145e4846496f      0t0  TCP *:56643 (LISTEN)",
+      "renode  25612 probe  432u  IPv4 0xba5cc6e9b40ed8dd      0t0  TCP *:56644 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 5,
+    "monitor_port": 56709,
+    "uart_port": 56710,
+    "pid": 25880,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_5_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3018183750100434,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-5) \n\r(av-m24-4d-race-5)",
+    "extra_wait_elapsed_s": 3.2477749169338495,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 3.549859583028592,
+    "lsof_first_listen_offset_from_poll_start_s": 2.387614915962331,
+    "lsof_sample_count": 51,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.061,
+        "hit": false
+      },
+      {
+        "t": 2.388,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  25880 probe  429u  IPv4 0xa48b65a33c2139d3      0t0  TCP *:56709 (LISTEN)",
+      "renode  25880 probe  432u  IPv4 0x27f5a10ddefbf08e      0t0  TCP *:56710 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  25880 probe  429u  IPv4 0xa48b65a33c2139d3      0t0  TCP *:56709 (LISTEN)",
+      "renode  25880 probe  432u  IPv4 0x27f5a10ddefbf08e      0t0  TCP *:56710 (LISTEN)"
+    ]
+  }
+]

@@ -1,0 +1,63 @@
+
+
+*** RTEMS Info ***
+Copyright (C) 1989, 2021 RTEMS Project and contributors
+rtems-6.0.0 (ARM/ARMv4/zynqmp_rpu_lock_step)
+
+ Stack size=9472
+ Workspace size=8398080
+RTEMS_NO_CMDLINE:TRUE, command line not implemented
+*** End RTEMS info ***
+
+RTEMS_NO_SHELL:FALSE, BatchMode:FALSE, shell implemented and initialized
+RTEMS Shell on /dev/console. Use 'help' to list commands.
+SHLL [/] # 
+
+CFE_PSP: initializing module 'soft_timebase' with ID 0110ff00
+CFE_PSP: Instantiated software timebase 'cFS-Master' running at 10000 usec
+CFE_PSP: initializing module 'timebase_posix_clock' with ID 0110ff01
+CFE_PSP: Using POSIX monotonic clock as CFE timebase
+CFE_PSP: initializing module 'eeprom_notimpl' with ID 0110ff02
+CFE_PSP: EEPROM access not implemented
+CFE_PSP: initializing module 'port_notimpl' with ID 0110ff03
+CFE_PSP: I/O Port access not implemented
+CFE_PSP: initializing module 'iodriver' with ID 0110ff04
+CFE_PSP: initializing module 'endian_api' with ID 0110ff05
+CFE_PSP: Host CPU Endian=LITTLE
+CFE_PSP: initializing module 'rtems_sysmon' with ID 0110ff06
+CFE_PSP: initializing module 'ram_notimpl' with ID 0110ff07
+CFE_PSP: Physical RAM access not implemented
+Size of BSP reserved memory = 3406336 bytes
+CFE_PSP: Allocated 3406336 bytes for PSP reserved memory at: 0x409F1398
+CFE_PSP: PSP reserved memory ends at: 0x40D30D98
+CFE_PSP: Clearing Processor Reserved Memory.
+1980-001-00:00:01.51469 CFE_ES_SetupResetVariables: POWER ON RESET due to Power Cycle (Power Cycle).
+1980-001-00:00:01.51479 CFE_ES_Main: CFE_ES_Main in EARLY_INIT state
+CFE_PSP: CFE_PSP_AttachExceptions called
+1980-001-00:00:01.51749 CFE_ES_Main: CFE_ES_Main entering CORE_STARTUP state
+1980-001-00:00:01.51759 CFE_ES_CreateObjects: Starting Object Creation calls.
+1980-001-00:00:01.51769 CFE_ES_CreateObjects: Calling EarlyInit for CFE_CONFIG
+1980-001-00:00:01.51819 CFE_ES_CreateObjects: Calling EarlyInit for CFE_ES
+1980-001-00:00:01.53089 CFE_ES_CreateObjects: Calling EarlyInit for CFE_EVS
+1980-001-00:00:01.53109 CFE_EVS_EarlyInit: Event Log cleared following power-on reset
+1980-001-00:00:01.53119 CFE_ES_CreateObjects: Calling EarlyInit for CFE_FS
+1980-001-00:00:01.53139 CFE_ES_CreateObjects: Calling EarlyInit for CFE_SB
+1980-001-00:00:01.53339 CFE_ES_CreateObjects: Calling EarlyInit for CFE_TBL
+1980-001-00:00:01.53829 CFE_ES_CreateObjects: Calling EarlyInit for CFE_TIME
+EVS Port1 1980-012-14:03:20.04209 65/1/CFE_ES 1: cFE ES Initialized: CFE_ES v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.04249 65/1/CFE_ES 2: cFS Versions: cfe v7.0.1+dev0, osal v7.0.1+dev0, psp v7.0.1+dev0. cFE chksm 0
+EVS Port1 1980-012-14:03:20.04299 65/1/CFE_ES 91: Version Info: Mission AltaVistaCfsLockstep, version (null)
+EVS Port1 1980-012-14:03:20.04348 65/1/CFE_ES 92: Build 202609061819 by root@c963e3efac1d, config rtems_zynqmp
+EVS Port1 1980-012-14:03:20.14199 65/1/CFE_EVS 1: cFE EVS Initialized: CFE_EVS v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+1980-012-14:03:20.24160 CFE_SB_AppInit: Registered 4 events for filtering
+EVS Port1 1980-012-14:03:20.24238 65/1/CFE_SB 1: cFE SB Initialized: CFE_SB v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.24279 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_SB
+EVS Port1 1980-012-14:03:20.34219 65/1/CFE_TBL 1: cFE TBL Initialized: CFE_TBL v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.34259 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_TBL
+EVS Port1 1980-012-14:03:20.44299 65/1/CFE_TIME 1: cFE TIME Initialized: CFE_TIME v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.44338 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_TIME
+1980-012-14:03:20.49150 CFE_ES_CreateObjects: Finished ES CreateObject table entries.
+1980-012-14:03:20.49160 CFE_ES_Main: CFE_ES_Main entering CORE_READY state
+1980-012-14:03:20.49179 CFE_ES_StartApplications: Error, Can't Open ES App Startup file: /cf/cfe_es_startup.scr, EC = -1
+1980-012-14:03:20.49200 CFE_ES_Main: CFE_ES_Main entering APPS_INIT state
+1980-012-14:03:20.49209 CFE_ES_Main: CFE_ES_Main entering OPERATIONAL state

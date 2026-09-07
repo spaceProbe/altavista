@@ -1,0 +1,51 @@
+[package]
+name = "av-lockstep-shim"
+publish = false
+description = "M23.1 (docs/open-questions.md question 153, docs/sil-plan.md M23): a Rust process that speaks altavista.v1.LockstepService (server side) to the kernel and 'lockstep-local v1' -- a length-prefixed frame protocol documented byte-exactly in services/cfs/README.md -- over a Unix socket to whatever flight software is bound (cFS today; the same shim fronts the Renode bridge in M24, so this protocol assumes nothing about cFS or a container)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Every altavista.v1 message type (LockstepBindRequest, LockstepStepRequest, PortMessage,
+# ...) is already generated once, in av-cdm (crates/av-cdm/build.rs compiles every .proto
+# under proto/altavista/v1/ with plain prost-build). This crate's own build.rs (below)
+# extern_paths the whole package onto av_cdm::pb, exactly the way
+# crates/av-dynamics-service/build.rs does for DynamicsService, so this build produces the
+# `lockstep_service_server` trait/plumbing only -- never a second, independently-generated
+# copy of the same wire types. The local-socket frame payloads below are literally these
+# same av_cdm::pb types, `prost::Message::encode_to_vec()`d -- see src/framing.rs.
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+prost-types.workspace = true
+thiserror.workspace = true
+
+# tonic, default-features off, "server" only (like av-dynamics-service, not "channel"):
+# this crate only ever HOSTS altavista.v1.LockstepService, it is never itself a gRPC
+# client. Critically this does NOT pull tokio-rustls/`ring` -- only tonic's own
+# `tls`/`tls-native-roots`/`tls-webpki-roots` features do (see av-grpc/Cargo.toml's
+# comment). The brief calls for an OpenSSL-backed TLS listener matching av-grpc's stack;
+# see this crate's README "Honesty" section for why that half is not implemented in this
+# batch (no server-side OpenSSL-over-tokio acceptor exists anywhere in this dependency
+# tree today, and adding one is out of scope for M23.1 -- every required test uses
+# plaintext loopback, which the task brief explicitly allows).
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+# Drives this crate's own gRPC server exactly the way `av-kernel`'s `ContainerModel` would
+# (M23.1's acceptance evidence: "against the existing kernel container path") -- the same
+# client crate, same Bind/Step/Reset/Shutdown plaintext-loopback contract, without touching
+# `crates/av-kernel` itself.
+av-lockstep = { path = "../av-lockstep" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "process"] }
+
+[[bin]]
+name = "av-lockstep-shim"
+path = "src/bin/av-lockstep-shim.rs"

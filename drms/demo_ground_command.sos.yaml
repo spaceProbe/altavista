@@ -1,0 +1,44 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M25.2b
+# (docs/sil-plan.md's M25 milestone: migrating the demo's drag-sail command to a ground-issued
+# telecommand).
+#
+# Two instances: `demo_flt` (drms/demo_ground_command_flight.system.yaml, a byte-for-byte
+# physics clone of drms/demo_two_instance.system.yaml's own `leo_demo_sys` + demo_flt's own drag
+# override, FRAMED-consume instead of SIGNAL-consume) and `demo_ground`
+# (drms/demo_ground_command_ground.system.yaml, a non-physical dispatch instance). One FRAMED
+# connection, `link_model: ""` (zero declared latency) -- deliberately matching
+# drms/demo_two_instance.sos.yaml's own `demo_ctrl -> demo_flt` SIGNAL connection's own
+# `link_model: ""` exactly, so the command's delivery timing (not merely its dispatch epoch)
+# matches the SIGNAL-commanded run: see drms/demo_ground_command.drm.yaml's own header comment
+# for the stated expectation and the measured result.
+id: ground_command_demo_sos
+version: "1"
+name: "Ground-issued telecommand demo (M25.2b): the drag-sail Cd command reaches a GMAT-bound instance through a real CCSDS telecommand"
+instances:
+  - name: demo_flt
+    system_id: leo_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_demo_ground_sys
+    step_rate_hz: 10.0
+  - name: demo_ground
+    system_id: ground_command_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_command_demo_ground_sys
+    step_rate_hz: 10.0
+connections:
+  - from_instance: demo_ground
+    from_port: cmd_out
+    to_instance: demo_flt
+    to_port: cd_cmd_in
+    link_model: ""
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_ground_command.sos.yaml
+hash: "1d53a28126a4f5742c6048d4bd17017e73a0f6d70a8cc5957400328c6fcc0f85"

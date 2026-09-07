@@ -1,0 +1,3 @@
+include @/Users/probe/code/AltaVista/third_party/renode/M24_4b/uart1_register_probe_v2.resc
+(av-m24-4b-uart1-register-probe) 
+(av-m24-4b-uart1-register-probe) 

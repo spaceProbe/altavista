@@ -1,0 +1,26 @@
+[package]
+name = "av-lockstep"
+publish = false
+description = "M13.2 (docs/open-questions.md question 107): a tonic client for altavista.v1.LockstepService -- the wire contract av-kernel's DRM executor speaks to an already-running BINDING_KIND_CONTAINER process's Bind/Step/Reset/Shutdown RPCs. Built on av-grpc's own pb module and OpenSSL-backed mTLS connector (never ring); a plaintext loopback connector is provided too, for local-subprocess tests only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Reuses av-grpc's already-compiled `pb` module (LockstepService's generated client + message
+# types) and its OpenSSL-backed `tls::connect` helper -- see this crate's lib.rs module doc
+# comment for why this crate does not run its own protoc/tonic-build pass at all.
+av-grpc = { path = "../av-grpc" }
+av-cdm = { path = "../av-cdm" }
+thiserror.workspace = true
+
+# Same restricted feature set as av-grpc's own tonic dependency (default-features off, no
+# `tls`/`tls-native-roots`/`tls-webpki-roots`) -- see av-grpc/Cargo.toml's comment on why: those
+# features pull `tokio-rustls`, which pulls `ring`, forbidden by ADR-004's crypto rule.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process", "io-util"] }

@@ -1,0 +1,6 @@
+all 5 iterations finished in 14.03s wall time
+{"idx": 100, "include_reply_first_pass_elapsed_s": 0.3063383330591023, "tcp_connect_succeeded_within_15s": true, "tcp_connect_elapsed_from_include_sent_s": 7.224211708060466, "lsof_first_listen_offset_from_poll_start_s": 5.469065916026011, "exception": null}
+{"idx": 101, "include_reply_first_pass_elapsed_s": 0.30168316699564457, "tcp_connect_succeeded_within_15s": true, "tcp_connect_elapsed_from_include_sent_s": 6.6716141670476645, "lsof_first_listen_offset_from_poll_start_s": 5.157659291988239, "exception": null}
+{"idx": 102, "include_reply_first_pass_elapsed_s": 0.30950025003403425, "tcp_connect_succeeded_within_15s": true, "tcp_connect_elapsed_from_include_sent_s": 7.059626832953654, "lsof_first_listen_offset_from_poll_start_s": 5.380910707986914, "exception": null}
+{"idx": 103, "include_reply_first_pass_elapsed_s": 0.3087096670642495, "tcp_connect_succeeded_within_15s": true, "tcp_connect_elapsed_from_include_sent_s": 7.267573042074218, "lsof_first_listen_offset_from_poll_start_s": 5.705521917087026, "exception": null}
+{"idx": 104, "include_reply_first_pass_elapsed_s": 0.30282145796809345, "tcp_connect_succeeded_within_15s": true, "tcp_connect_elapsed_from_include_sent_s": 6.418160041910596, "lsof_first_listen_offset_from_poll_start_s": 5.071664334041998, "exception": null}

@@ -1,0 +1,74 @@
+{
+  "duration_s": 7200.0,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "force_model": {
+    "central_body": "Earth",
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "frame": "EarthBodyFixed",
+  "generated": "2026-09-05T04:20:00+00:00",
+  "gmat_coordinate_system": "EarthFixed",
+  "gmat_version": "R2026a",
+  "keplerian": {
+    "AOP": 0.0,
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "name": "bodyfixed_leo_2h",
+  "note": "GMAT's own body-fixed-expressed state (Golden.EarthFixed.*, GMAT's built-in Earth body-fixed CoordinateSystem), read from a genuine GMAT ReportFile (script run, SolverIterations=Current -- never Execute() through the object API, per this repository's documented ReportFile quirk). Same vehicle/orbit/force-model/epoch/duration as icrf_leo_2h.json -- the deliberately time-varying counterpart to that golden's near-constant ICRF frame bias (question 128, M19.1). Also reports the identical instant's EarthMJ2000Eq state in the same row, for the same reason icrf_leo_2h.json does (crates/gmat-sys/tests/convert.rs isolates the conversion itself from Dopri5-vs-PrinceDormand78 integrator divergence by converting state_final_km_mj2000eq directly, rather than re-propagating). This golden holds icrf_leo_2h.json's strict tolerance class (1e-4 m / 7.837e-8 m/s) because the script sets Earth.NutationUpdateInterval = 0. Earth's own NutationUpdateInterval defaults to 60 s (Planet::nutationUpdateInterval, third_party/gmat-src/src/base/solarsys/Planet.cpp), so BodyFixedAxes caches its rotation (and rotation-rate) matrix and only recomputes when the requested epoch moves outside that window since the last computed one; with the default the ReportFile evaluates EarthFixed at whatever micro-epoch its last cached recompute landed on, not bit-identically the same instant gmat_sys::Gmat::convert computes fresh (cold, no prior calls) for the identical nominal epoch, which cost a measured ~9.9e-5 m / ~1.66e-7 m/s of sub-microsecond epoch staleness. Forcing recomputation every call removes it at the source rather than absorbing it into a looser tolerance (M19.1 manager review). For scale, the error this task's fix (question 128) closes is ~1.33 m -- four orders of magnitude larger. This task's own fix (question 128) closes, and both consistent with sub-microsecond epoch staleness (Earth's rotation rate times ~200 ns), not a conversion defect. The near-static EarthICRF frame bias has no such time-dependent caching, so icrf_leo_2h.json's own tolerance stays tight.",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "reason": "M19.1 review (manager): Earth.NutationUpdateInterval=0 removes the cached-nutation staleness at its source, so this golden holds icrf_leo_2h.json's strict tolerance class (1e-4 m / 7.837e-8 m/s) rather than the 5e-4 / 3e-7 the loosened version used",
+  "report_last_row": {
+    "epoch_a1mjd": 31041.58376197201,
+    "vx_kmps": 0.8127285658393285,
+    "vy_kmps": 7.213453405616004,
+    "vz_kmps": -0.7985536108916456,
+    "x_km": 4337.280379327408,
+    "y_km": 102.7206486762244,
+    "z_km": 5327.381222624352
+  },
+  "state_final_km": [
+    4337.280379327408,
+    102.7206486762244,
+    5327.381222624352,
+    0.8127285658393285,
+    7.213453405616004,
+    -0.7985536108916456
+  ],
+  "state_final_km_mj2000eq": [
+    -2876.356934332727,
+    3236.078558074417,
+    5334.595548307344,
+    -6.257318662900953,
+    -4.268083411331073,
+    -0.7825571617657777
+  ],
+  "tolerance_m": 0.0001,
+  "tolerance_mps": 7.837e-08,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}

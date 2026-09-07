@@ -1,0 +1,178 @@
+syntax = "proto3";
+
+// The dynamics contract as a gRPC service (ADR-002).
+//
+//   derivatives(state, t, controls)                    -> state_dot
+//   step(state, t, controls, dt)                       -> (state, t + dt, outputs)
+//   propagate(seed, control schedule, horizon, ...)    -> Trajectory
+//   solve(problem)                                     -> Solution   (declared capability)
+//   describe()                                         -> ModelInfo
+//
+// The same contract is exported as a C ABI and as an FMU; this file is the gRPC face.
+// spoore's ModelService (estimation: warm_start / predict / measurement_likelihood /
+// update / claim_testability) is a separate, unchanged service; a model-tree node may bind
+// either or both.
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/trajectory.proto";
+
+// A control input slot (thrust command, wheel torque, throttle...).
+message ControlComponent {
+  string label = 1;
+  Unit unit = 2;
+  double min = 3;
+  double max = 4;
+}
+
+enum ModelCapability {
+  MODEL_CAPABILITY_UNSPECIFIED = 0;
+  MODEL_CAPABILITY_DERIVATIVES = 1;
+  MODEL_CAPABILITY_STEP = 2;
+  MODEL_CAPABILITY_PROPAGATE = 3;
+  MODEL_CAPABILITY_SOLVE = 4;
+  // Provides the state transition matrix alongside the state (covariance propagation).
+  MODEL_CAPABILITY_STM = 5;
+  // Pure function of inputs and simulated time (lockstep-safe, replayable).
+  MODEL_CAPABILITY_DETERMINISTIC = 6;
+}
+
+message ModelInfo {
+  // Stable id, e.g. "gmat.earth.jgm2_8x8.sun_moon.srp", "native.orbital.two_body_j2",
+  // "native.relative.cw", "jsbsim.c172".
+  string id = 1;
+  string version = 2;
+  string state_space_id = 3;
+  // Frame the state is expressed in.
+  string frame_id = 4;
+  repeated ControlComponent controls = 5;
+  repeated ModelCapability capabilities = 6;
+  // ADR-002 depth: "gmat-api", "gmat-ffi", "native", or the external engine name.
+  string depth = 7;
+  // SHA-256 of the model's settings (force model, integrator, data files).
+  string settings_hash = 8;
+  // Names of the GMAT goldens this model is pinned against, if any.
+  repeated string goldens = 9;
+}
+
+message DescribeRequest {
+  string model_id = 1;
+}
+
+// A plain state vector at an epoch, in the model's state space and frame.
+message StateVector {
+  repeated double state = 1 [packed = true];
+  int64 tai_ns = 2;
+}
+
+message DerivativesRequest {
+  string model_id = 1;
+  StateVector state = 2;
+  repeated double controls = 3 [packed = true];
+}
+
+message DerivativesResponse {
+  repeated double state_dot = 1 [packed = true];
+  // Optional: the Jacobian d(state_dot)/d(state), row-major n x n, if the model provides it.
+  repeated double jacobian = 2 [packed = true];
+}
+
+message StepRequest {
+  string model_id = 1;
+  StateVector state = 2;
+  repeated double controls = 3 [packed = true];
+  double dt_s = 4;
+  // Optional covariance to propagate through the STM (requires MODEL_CAPABILITY_STM).
+  repeated double cov = 5 [packed = true];
+}
+
+message StepResponse {
+  StateVector state = 1;
+  // Propagated covariance, if requested.
+  repeated double cov = 2 [packed = true];
+  // Named outputs (sensor-model inputs, power draw, thrust achieved...), SI.
+  map<string, double> outputs = 3;
+}
+
+// A piecewise-constant control schedule.
+message ControlSegment {
+  int64 start_tai_ns = 1;
+  int64 end_tai_ns = 2;
+  repeated double controls = 3 [packed = true];
+}
+
+// An impulsive event applied at an epoch (delta-v in a declared frame), for design use.
+message Impulse {
+  int64 tai_ns = 1;
+  string frame_id = 2;
+  repeated double delta_v_mps = 3 [packed = true];
+  string name = 4;
+}
+
+message PropagateRequest {
+  string model_id = 1;
+  GaussianState seed = 2;
+  repeated ControlSegment controls = 3;
+  repeated Impulse impulses = 4;
+  int64 horizon_tai_ns = 5;
+  double sample_interval_s = 6;
+  bool covariance = 7;
+  // Frame to express the output trajectory in (converted by the frame service).
+  string output_frame_id = 8;
+  string entity_id = 9;
+}
+
+message PropagateResponse {
+  Trajectory trajectory = 1;
+  repeated Event events = 2;
+}
+
+// A targeting problem for the differential corrector (question 17). Optimizers (Yukon,
+// CSALT) are reached through GMAT scripts, not this message.
+message SolveVariable {
+  // e.g. "TOI.Element1"
+  string name = 1;
+  double initial = 2;
+  double lower = 3;
+  double upper = 4;
+  double max_step = 5;
+  double perturbation = 6;
+}
+
+message SolveGoal {
+  // e.g. "Sat.MoonMJ2000Eq.BdotT"
+  string name = 1;
+  double target = 2;
+  double tolerance = 3;
+}
+
+message SolveRequest {
+  string model_id = 1;
+  // "differential_corrector" (day one); others declared by capability.
+  string solver = 2;
+  GaussianState seed = 3;
+  repeated SolveVariable variables = 4;
+  repeated SolveGoal goals = 5;
+  // The mission sequence the solver iterates, in the model's native form (a GMAT script
+  // fragment for GMAT-backed models).
+  string sequence = 6;
+  uint32 max_iterations = 7;
+}
+
+message SolveResponse {
+  bool converged = 1;
+  uint32 iterations = 2;
+  map<string, double> variables = 3;
+  map<string, double> achieved = 4;
+  Trajectory trajectory = 5;
+  repeated Event events = 6;
+  string report = 7;
+}
+
+service DynamicsService {
+  rpc Describe(DescribeRequest) returns (ModelInfo);
+  rpc Derivatives(DerivativesRequest) returns (DerivativesResponse);
+  rpc Step(StepRequest) returns (StepResponse);
+  rpc Propagate(PropagateRequest) returns (PropagateResponse);
+  rpc Solve(SolveRequest) returns (SolveResponse);
+}

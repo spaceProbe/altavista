@@ -1,0 +1,72 @@
+
+
+*** RTEMS Info ***
+Copyright (C) 1989, 2021 RTEMS Project and contributors
+rtems-6.0.0 (ARM/ARMv4/zynqmp_rpu_lock_step)
+
+ Stack size=9472
+ Workspace size=8398080
+RTEMS_NO_CMDLINE:TRUE, command line not implemented
+*** End RTEMS info ***
+
+RTEMS_NO_SHELL:FALSE, BatchMode:FALSE, shell implemented and initialized
+RTEMS Shell on /dev/console. Use 'help' to list commands.
+SHLL [/] # 
+
+CFE_PSP: initializing module 'soft_timebase' with ID 0110ff00
+CFE_PSP: Instantiated software timebase 'cFS-Master' running at 10000 usec
+CFE_PSP: initializing module 'timebase_posix_clock' with ID 0110ff01
+CFE_PSP: Using POSIX monotonic clock as CFE timebase
+CFE_PSP: initializing module 'eeprom_notimpl' with ID 0110ff02
+CFE_PSP: EEPROM access not implemented
+CFE_PSP: initializing module 'port_notimpl' with ID 0110ff03
+CFE_PSP: I/O Port access not implemented
+CFE_PSP: initializing module 'iodriver' with ID 0110ff04
+CFE_PSP: initializing module 'endian_api' with ID 0110ff05
+CFE_PSP: Host CPU Endian=LITTLE
+CFE_PSP: initializing module 'rtems_sysmon' with ID 0110ff06
+CFE_PSP: initializing module 'ram_notimpl' with ID 0110ff07
+CFE_PSP: Physical RAM access not implemented
+Size of BSP reserved memory = 3406336 bytes
+CFE_PSP: Allocated 3406336 bytes for PSP reserved memory at: 0x409F15D8
+CFE_PSP: PSP reserved memory ends at: 0x40D30FD8
+CFE_PSP: AltaVista M24.4 wrote a default /cf/cfe_es_startup.scr into the in-memory root fs (Renode/no-disk boot)
+CFE_PSP: Clearing Processor Reserved Memory.
+1980-001-00:00:01.51489 CFE_ES_SetupResetVariables: POWER ON RESET due to Power Cycle (Power Cycle).
+1980-001-00:00:01.51509 CFE_ES_Main: CFE_ES_Main in EARLY_INIT state
+CFE_PSP: CFE_PSP_AttachExceptions called
+1980-001-00:00:01.51769 CFE_ES_Main: CFE_ES_Main entering CORE_STARTUP state
+1980-001-00:00:01.51779 CFE_ES_CreateObjects: Starting Object Creation calls.
+1980-001-00:00:01.51789 CFE_ES_CreateObjects: Calling EarlyInit for CFE_CONFIG
+1980-001-00:00:01.51849 CFE_ES_CreateObjects: Calling EarlyInit for CFE_ES
+1980-001-00:00:01.53119 CFE_ES_CreateObjects: Calling EarlyInit for CFE_EVS
+1980-001-00:00:01.53129 CFE_EVS_EarlyInit: Event Log cleared following power-on reset
+1980-001-00:00:01.53149 CFE_ES_CreateObjects: Calling EarlyInit for CFE_FS
+1980-001-00:00:01.53159 CFE_ES_CreateObjects: Calling EarlyInit for CFE_SB
+1980-001-00:00:01.53359 CFE_ES_CreateObjects: Calling EarlyInit for CFE_TBL
+1980-001-00:00:01.53859 CFE_ES_CreateObjects: Calling EarlyInit for CFE_TIME
+EVS Port1 1980-012-14:03:20.04188 65/1/CFE_ES 1: cFE ES Initialized: CFE_ES v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.04229 65/1/CFE_ES 2: cFS Versions: cfe v7.0.1+dev0, osal v7.0.1+dev0, psp v7.0.1+dev0. cFE chksm 0
+EVS Port1 1980-012-14:03:20.04278 65/1/CFE_ES 91: Version Info: Mission AltaVistaCfsLockstep, version (null)
+EVS Port1 1980-012-14:03:20.04328 65/1/CFE_ES 92: Build 202609062020 by root@7742f9a1e091, config rtems_zynqmp
+EVS Port1 1980-012-14:03:20.14179 65/1/CFE_EVS 1: cFE EVS Initialized: CFE_EVS v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+1980-012-14:03:20.24140 CFE_SB_AppInit: Registered 4 events for filtering
+EVS Port1 1980-012-14:03:20.24218 65/1/CFE_SB 1: cFE SB Initialized: CFE_SB v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.24259 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_SB
+EVS Port1 1980-012-14:03:20.34199 65/1/CFE_TBL 1: cFE TBL Initialized: CFE_TBL v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.34239 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_TBL
+EVS Port1 1980-012-14:03:20.44279 65/1/CFE_TIME 1: cFE TIME Initialized: CFE_TIME v7.0.1+dev0 (Draco) v7.0.1 Official Release, EDS disabled
+EVS Port1 1980-012-14:03:20.44319 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender CFE_TIME
+1980-012-14:03:20.49130 CFE_ES_CreateObjects: Finished ES CreateObject table entries.
+1980-012-14:03:20.49140 CFE_ES_Main: CFE_ES_Main entering CORE_READY state
+1980-012-14:03:20.49160 CFE_ES_StartApplications: Opened ES App Startup file: /cf/cfe_es_startup.scr
+1980-012-14:03:20.49320 CFE_ES_ParseFileEntry: Loading file: /cf/io_lockstep.obj, APP: IO_LOCKSTEP
+1980-012-14:03:20.53919 CFE_ES_ParseFileEntry: Loading file: /cf/sch_lockstep.obj, APP: SCH_LOCKSTEP
+1980-012-14:03:20.54099 CFE_ES_ParseFileEntry: Loading file: /cf/adcs.obj, APP: ADCS
+EVS Port1 1980-012-14:03:20.59188 65/1/IO_LOCKSTEP 4: IO_LOCKSTEP: lockstep-local handshake failed
+EVS Port1 1980-012-14:03:20.59228 65/1/CFE_SB 14: No subscribers for MsgId 0x808,sender IO_LOCKSTEP
+1980-012-14:03:20.59270 CFE_ES_ExitApp: Application IO_LOCKSTEP called CFE_ES_ExitApp
+EVS Port1 1980-012-14:03:20.59298 65/1/SCH_LOCKSTEP 4: SCH_LOCKSTEP: lockstep timebase armed
+EVS Port1 1980-012-14:03:20.59419 65/1/ADCS 0: ADCS: initialized, kp=0.250000 kd=5.000000
+1980-012-14:03:20.64130 CFE_ES_Main: CFE_ES_Main entering APPS_INIT state
+1980-012-14:03:20.64140 CFE_ES_Main: CFE_ES_Main entering OPERATIONAL state

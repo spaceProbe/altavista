@@ -1,0 +1,61 @@
+{
+  "name": "expr_straight_accel",
+  "generated": "1788454414.395774s",
+  "reason": "M9.3 (question 95): the DRM executor now emits real CDM Events (EVENT_KIND_LIFECYCLE run start/end, EVENT_KIND_FAULT for every applied DYNAMICS fault) instead of always returning RunProducts.events == []; expr_fault_split_accel's three event.*-referencing expressions move onto DesignReferenceMission.objectives/.measures now that they resolve against real events (renamed the fault id / event name from f1 to accel_change, and the maneuver_count measure to fault_count / count(event.fault), since a DYNAMICS parameter fault is EVENT_KIND_FAULT, not EVENT_KIND_MANEUVER); removes the synthetic caller-supplied Event this generator previously stood in with",
+  "drm_id": "straight_accel_drm",
+  "drm_hash": "b9e5784e37d1e905371ed7b80c0b96e361a3ea312e40ffb48b1e90e0b363a588",
+  "instance": "veh",
+  "objectives": [
+    {
+      "name": "final_x_near_50m",
+      "expression": "entity.veh.pos_x@end",
+      "target": 50.0,
+      "tolerance": 0.01,
+      "unit": "m",
+      "value": 49.99999999999995,
+      "computed_unit": "m",
+      "pass": true
+    },
+    {
+      "name": "final_vx_near_5",
+      "expression": "entity.veh.vel_x@end",
+      "target": 5.0,
+      "tolerance": 0.01,
+      "unit": "m/s",
+      "value": 9.99999999999998,
+      "computed_unit": "m/s",
+      "pass": false
+    }
+  ],
+  "measures": [
+    {
+      "name": "mean_x",
+      "expression": "mean(entity.veh.pos_x)",
+      "unit": "m",
+      "value": 16.749999999999996,
+      "computed_unit": "m"
+    },
+    {
+      "name": "integral_vx",
+      "expression": "integral(entity.veh.vel_x)",
+      "unit": "m",
+      "value": 49.99999999999995,
+      "computed_unit": "m"
+    },
+    {
+      "name": "max_vx",
+      "expression": "max(entity.veh.vel_x)",
+      "unit": "m/s",
+      "value": 9.99999999999998,
+      "computed_unit": "m/s"
+    },
+    {
+      "name": "final_x",
+      "expression": "final(entity.veh.pos_x)",
+      "unit": "m",
+      "value": 49.99999999999995,
+      "computed_unit": "m"
+    }
+  ],
+  "sha256": "7028489387460a8c015813bc27eaa7c1c9d77a8c1700d6ebe9c81a36913be9e3"
+}

@@ -1,0 +1,116 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.2
+# (docs/sil-plan.md's M25 milestone: "DRM command events become CDM Commands, framed as CCSDS
+# telecommands, delivered through the router with the link model").
+#
+# The demo's flight-side command consumer: `crate::drm::binding::ConstantAccelModel` (dynamics_
+# model `native.*` -> `crate::registry::ModelKind::Native`), with `port.consume_framed`/`.
+# consume_framed_field`/`.ack_framed` set (M25.2 additions -- see
+# `crate::drm::binding::ConstantAccelSpec::consume_framed_port`'s own doc comment, "Job 1: the
+# flight-side FRAMED consume"). Constant acceleration `accel.z = 1.0` m/s^2; a ground-issued
+# telecommand multiplies it by the commanded `accel_scale` (`CONSTANT_ACCEL_WRITABLE_PARAMETERS`'s
+# own one entry) the moment it is decoded, so the effect is real and measurable in the propagated
+# arc -- the native-model analogue of `drms/demo_two_instance_ctrl.system.yaml`'s own drag-sail
+# `Cd` command, moved from a native SIGNAL controller to a real ground-issued CCSDS telecommand
+# (see `drms/demo_command.drm.yaml`'s own header comment for the full pipeline).
+id: command_demo_flight_sys
+version: "1"
+name: Native flight command consumer for the ground-issued-telecommand demo (M25.2)
+dynamics_model: native.command_demo_flight
+state_space_id: native.command_demo_flight.space
+state_space:
+  id: native.command_demo_flight.space
+  components:
+    - label: pos_x
+      unit: UNIT_METER
+    - label: pos_y
+      unit: UNIT_METER
+    - label: pos_z
+      unit: UNIT_METER
+    - label: vel_x
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_y
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_z
+      unit: UNIT_METER_PER_SECOND
+ports:
+  - name: cmd_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+  - name: ack_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+packet_codecs:
+  - id: flight_cmd_in_codec
+    apid: 700
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 8
+    description: "ground-issued command telecommand: commanded accel_scale value (M25.2)"
+    fields:
+      - name: value
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: flight_ack_out_codec
+    apid: 701
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 2
+    description: "flight-software command ack: acknowledged packet's own CCSDS sequence_count (M25.2)"
+    fields:
+      - name: cmd_seq
+        bit_offset: 0
+        bit_width: 16
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: frame_id
+    string_value: command_demo_frame
+  - name: accel.x
+    value: 0.0
+  - name: accel.y
+    value: 0.0
+  - name: accel.z
+    value: 1.0
+  - name: state.px
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.py
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.pz
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.vx
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: state.vy
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: state.vz
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: port.consume_framed
+    string_value: cmd_in
+  - name: port.consume_framed_field
+    string_value: accel_scale
+  - name: port.ack_framed
+    string_value: ack_out
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_command_flight.system.yaml
+hash: "5a7f009689f9a5f168083507abdf3a1720f9bec43d0e17c9a3f78d5e8835df58"

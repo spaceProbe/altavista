@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "altavista",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "altavista", "serve", "--host", "127.0.0.1", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

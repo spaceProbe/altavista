@@ -1,0 +1,39 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding. One instance, bound
+# to leo_1day_golden.system.yaml via BINDING_KIND_MODEL (a real GmatModel -- see
+# crates/av-kernel/src/drm/binding.rs). step_rate_hz = 10 matches
+# tests/golden_acceptance.rs's own configuration (native step == output rate), the
+# already-measured configuration this DRM is meant to reproduce (see drms/README.md).
+#
+# initial_covariance (question 89, proto field 8): the golden's own declared P0
+# (goldens/leo_1day_jgm2_8x8_sunmoon.json's "stm".p0_si -- row-major 6x6, SI, diag(10000,
+# 10000, 10000, 0.01, 0.01, 0.01) m^2 / (m/s)^2, i.e. 100 m position / 0.1 m/s velocity
+# 1-sigma) -- the same P0 tests/golden_acceptance.rs's own
+# kernel_covariance_matches_the_golden_stm_and_propagated_cov feeds the kernel directly. Read
+# by crates/av-kernel/src/drm/executor.rs::load_initial_covariance and SPD-checked at load
+# (question 83); the former covariance.p0_row_major parameter-string convention is gone.
+id: leo_sos
+version: "1"
+name: LEO golden, single instance
+instances:
+  - name: leo
+    system_id: leo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_sys
+    step_rate_hz: 10.0
+    initial_covariance:
+      [10000.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 10000.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 10000.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.0, 0.01]
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M6.1/M7.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Recomputed for M7.2 after adding
+# initial_covariance -- `cargo run -p av-kernel --example drm_hash -- sos
+# drms/leo_1day_golden.sos.yaml`.
+hash: "ab9f12339adacda6ecfad20a2e6f32ec40ce6b50f0bbe01cff0da828cef261e3"

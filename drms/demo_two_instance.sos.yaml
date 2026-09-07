@@ -1,0 +1,145 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M17.3
+# (docs/open-questions.md question 123): "a two-instance DRM fixture with a real fault on one
+# instance and a maneuver on the other becomes a golden and is the demo bundle." Two of the three
+# instances below, both bound to drms/demo_two_instance.system.yaml's leo_demo_sys --
+# field-for-field the same vehicle and JGM2 8x8 + Sun/Moon force model as the golden's own leo_sys
+# (drms/leo_1day_golden.system.yaml), under a new id only because this task additionally
+# declares `output.rmag` (see that file's own header comment for why it is not added to
+# leo_1day_golden.system.yaml directly: that file is an existing golden this task must not
+# change) -- via BINDING_KIND_MODEL:
+#
+#   - demo_flt: carries a real FAULT_TARGET_KIND_DYNAMICS fault mid-run
+#     (demo_two_instance.drm.yaml's Scenario.faults -- force_model.gravity_order, 8 -> 0, a
+#     real change to the propagated force model, not the synthetic "accel.x" fixture every
+#     other fault test in this crate uses). No initial_covariance -- covariance and a DYNAMICS
+#     fault on the same instance are mutually exclusive (executor.rs's own
+#     DrmError::CovarianceWithFaultsNotSupported), so this instance never requests it. M19.4
+#     (question 131) additionally declares a drag-inclusive force model via
+#     `force_model.drag_*` overrides -- see that section below.
+#   - demo_mvr: carries a real VNB maneuver mid-run (demo_two_instance.drm.yaml's
+#     Scenario.events, the identical 20 m/s prograde burn leo_1day_maneuver_vnb.drm.yaml uses).
+#     Declares initial_covariance -- the golden's own P0 (question 89), identical to
+#     leo_1day_golden.sos.yaml's own "leo" instance -- the "covariance requested on one
+#     instance, absent on the other" half of M17.3's brief. Unused by
+#     demo_two_instance.drm.yaml itself (options.covariance: false, required for the fault +
+#     shared kernel run to execute at all -- run_covariance_instance refuses a
+#     DYNAMICS-faulted instance outright, and the covariance path is DRM-wide, not
+#     per-instance); see crates/av-kernel/tests/demo_two_instance.rs's own
+#     "covariance_is_declared_on_demo_mvr_only..." test for how this declaration is checked
+#     and exercised (attempting options.covariance: true against this same SosConfiguration is
+#     refused by name, DrmError::MissingInitialCovariance{instance: "demo_flt"} -- proof the
+#     asymmetry is load-bearing, not decorative).
+#
+# M18.3 (docs/open-questions.md question 126) opened the SIGNAL connection this file's own header
+# used to escalate ("crate::drm::binding::GmatModel has no port emit/consume path at all --
+# neither instance could be an honest sender or receiver"): `demo_mvr` emits its own live
+# `output.rmag`, and `demo_flt` consumed it directly into its own `Cd` every step. Question 131
+# (M18.3's own escalation, closed here by M19.4) named that wiring "physically meaningless: range
+# magnitude fed into Cd on an instance with no drag" -- `leo_demo_sys`'s own force model had no
+# drag, so the command changed nothing.
+#
+# **M19.4 (question 131) closes it: a third instance, a native range-condition controller,
+# sits between the two GMAT instances, and demo_flt's own force model now genuinely includes
+# drag.**
+#
+#   demo_mvr --(cd_cmd_out, rmag)--> demo_ctrl --(cd_sail_cmd_out, drag-sail Cd)--> demo_flt
+#
+# `demo_ctrl` (drms/demo_two_instance_ctrl.system.yaml, a native `ConstantAccelModel` -- see that
+# file's own header comment for exactly how the range condition and its threshold are declared
+# and chosen) consumes `demo_mvr`'s own live `rmag` and, the first native step it rises to or past
+# a declared threshold near `demo_mvr`'s own apoapsis, emits a single, latched drag-sail `Cd`
+# command (220.0 -- 100x `demo_flt`'s own baseline `spacecraft.Cd = 2.2`) that `demo_flt` consumes
+# into its own `Cd` exactly as before (`crate::drm::binding::GMAT_WRITABLE_PARAMETERS`). Because
+# the command is edge-triggered and latched (never re-sent once fired), and `demo_flt`'s own
+# `port.consume` path only ever reports an `EVENT_KIND_PORT_COMMAND` event when a message is
+# actually present that step (`crate::drm::binding::ConstantAccelModel`'s own doc comment; see
+# also `gmat_sys::model::GmatModel::step_with_ports`'s identical "applied, not merely arrived"
+# rule), this whole run produces a small, disclosed number of port-command events -- not the
+# ~72,000 the pre-M19.4 "consume every step, forever" wiring produced (that number itself was
+# measured, and is disclosed and fixed, not merely asserted about in the abstract; see
+# crates/av-kernel/tests/demo_two_instance.rs's own port-command-count test for the exact figure
+# this repository's own committed fixture produces).
+#
+# **`demo_flt` now genuinely carries atmospheric drag** (`force_model.drag_model =
+# "JacchiaRoberts"`, plus the packaged CSSI space-weather file this repository's own GMAT install
+# ships under `GMAT R2026a/data/atmosphere/earth/SpaceWeather-All-v1.2.txt` -- never downloaded;
+# see `crate::drm::binding::materialize_gmat`'s own doc comment for exactly how this is threaded
+# into a real `DragForce` + atmosphere-model object pair, the identical pattern
+# `crates/gmat-sys/tests/drag_srp_stm.rs::build_fm_drag_srp` already proves end to end), declared
+# only on `demo_flt`'s own `parameter_overrides` -- `demo_mvr` shares the same base
+# `leo_demo_sys` SystemDefinition but does NOT declare drag, so its own dynamics are unaffected
+# (never drifting apart from the base golden's own gravity + Sun/Moon force model). This is what
+# makes the drag-sail command "visibly change the arc" (question 131's own decision text) rather
+# than remaining physically inert the way the pre-M19.4 wiring was: see
+# `goldens/gen_demo_two_instance.py`'s own updated header comment for the expected-order-of-
+# magnitude reasoning (calibrated against M18.3's own `gmat_port_cd_command.json` measurement,
+# 891.8 m of divergence for a 2.2 -> 4.4 Cd change over 7200 s at SMA 6628 km -- a much lower,
+# denser-atmosphere orbit than this fixture's own SMA 6878 km) and the actually-measured result.
+id: demo_two_instance_sos
+version: "1"
+name: Two-instance demo (fault + maneuver on the golden LEO dynamics, M19.4 drag-sail coupling)
+instances:
+  - name: demo_flt
+    system_id: leo_demo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_demo_sys
+    step_rate_hz: 10.0
+    parameter_overrides:
+      - name: port.consume
+        string_value: cd_cmd_in
+      - name: port.consume_parameter
+        string_value: Cd
+      - name: force_model.drag_model
+        string_value: JacchiaRoberts
+      - name: force_model.drag_historic_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_predicted_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_cssi_space_weather_file
+        string_value: SpaceWeather-All-v1.2.txt
+  - name: demo_mvr
+    system_id: leo_demo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_demo_sys
+    step_rate_hz: 10.0
+    parameter_overrides:
+      - name: port.emit
+        string_value: cd_cmd_out
+      - name: port.emit_output
+        string_value: rmag
+    initial_covariance:
+      [10000.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 10000.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 10000.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.0, 0.01]
+  - name: demo_ctrl
+    system_id: demo_ctrl_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: demo_ctrl_sys
+    step_rate_hz: 10.0
+connections:
+  - from_instance: demo_mvr
+    from_port: cd_cmd_out
+    to_instance: demo_ctrl
+    to_port: range_in
+    link_model: ""
+  - from_instance: demo_ctrl
+    from_port: cd_sail_cmd_out
+    to_instance: demo_flt
+    to_port: cd_cmd_in
+    link_model: ""
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M17.3, M19.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_two_instance.sos.yaml
+hash: "e1028e4f6e67e62a2ccf7b3fb11e0499ccff42c0dad09ec60dc41c7f32b4f3a8"

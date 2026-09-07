@@ -1,0 +1,11 @@
+include reply: include @/Users/probe/code/AltaVista/third_party/renode/M24_4b/handshake_fix_test.resc
+bridge client connected (captures guest's own UART1 TX, proven-working direction)
+RXEN observed at step 22
+injecting shim HELLO via WriteChar, 11 bytes: 070000000141564c310100
+guest sent 11 bytes back: 070000000141564c310100
+guest HELLO reply matches shim's own HELLO bytes: True
+UART0 'handshake failed' present: False
+UART0 'BIND failed' present: False
+UART0 'bound, entering step loop' present: False
+UART0: 1980-012-14:03:20.49320 CFE_ES_ParseFileEntry: Loading file: /cf/io_lockstep.obj, APP: IO_LOCKSTEP
+HANDSHAKE FIX RESULT: PASS

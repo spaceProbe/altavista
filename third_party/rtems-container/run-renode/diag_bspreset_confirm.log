@@ -1,0 +1,41 @@
+>>> include done
+>>> AdvanceImmediately on
+[coarse 1/9] cumulative nominal 10s: wall 5.12s
+[coarse 2/9] cumulative nominal 20s: wall 4.37s
+[coarse 3/9] cumulative nominal 30s: wall 4.68s
+[coarse 4/9] cumulative nominal 40s: wall 5.05s
+[coarse 5/9] cumulative nominal 50s: wall 4.83s
+[coarse 6/9] cumulative nominal 60s: wall 4.84s
+[coarse 7/9] cumulative nominal 70s: wall 5.75s
+[coarse 8/9] cumulative nominal 80s: wall 4.52s
+[coarse 9/9] cumulative nominal 90s: wall 4.86s
+[fine 1/25] cumulative nominal 92s: wall 1.04s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000000E9ED3\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 2/25] cumulative nominal 94s: wall 1.10s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000000EE6D0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 3/25] cumulative nominal 96s: wall 1.10s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000000F2DB6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 4/25] cumulative nominal 98s: wall 1.02s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000000F75B3\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 5/25] cumulative nominal 100s: wall 1.08s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000000FBC9D\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 6/25] cumulative nominal 102s: wall 1.07s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x0000000000100496\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 7/25] cumulative nominal 104s: wall 1.12s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x0000000000104C93\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=924B, COMPLETE=False
+[fine 8/25] cumulative nominal 106s: wall 1.08s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x000000000010A6FA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 9/25] cumulative nominal 108s: wall 1.01s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x000000000010EEF3\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 10/25] cumulative nominal 110s: wall 1.12s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000001136F0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 11/25] cumulative nominal 112s: wall 1.21s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x0000000000117DDA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 12/25] cumulative nominal 114s: wall 1.04s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x000000000011C5D3\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 13/25] cumulative nominal 116s: wall 1.21s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x0000000000120DD0\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 14/25] cumulative nominal 118s: wall 0.92s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x00000000001254BA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 15/25] cumulative nominal 120s: wall 1.00s, PC=0x400045e6, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x0000000000129CB3\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=976B, COMPLETE=False
+[fine 16/25] cumulative nominal 122s: wall 329.15s, PC=0x4000706c, ExecutedInstructions_reply='rpu0 ExecutedInstructions\n\r0x000000000BEB9A03\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker)', UART=1200B, COMPLETE=True
+>>> COMPLETION DETECTED at cumulative nominal 122s (PC=0x4000706c) -- continuing a few more steps to observe post-completion PC/rate
+renode final returncode: 143
+Traceback (most recent call last):
+  File "/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/diag_bspreset_confirm.py", line 182, in <module>
+    d, wall, pc = step(2, f"fine {j}/25")
+                  ~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/diag_bspreset_confirm.py", line 151, in step
+    out = client.cmd(f'emulation RunFor "{nominal_s}"; currentTime', overall_timeout=1800.0)
+  File "/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/diag_bspreset_confirm.py", line 96, in cmd
+    return self.read_until_marker(marker, overall_timeout=overall_timeout)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/diag_bspreset_confirm.py", line 91, in read_until_marker
+    raise TimeoutError(f"marker {marker!r} not seen; buffer so far: {buf!r}")
+TimeoutError: marker b'zynqmp-rpu-ticker) ' not seen; buffer so far: b'emulation RunFor "2"; currentTime\n\rCurrent virtual time: 00:00:00.000000000\r\nCurrent real time: 00:00:00.000000000\r\n\r\x1b[31;1m(monitor) \x1b[0m\n\r\x1b[31;1m(monitor) \x1b[0m'

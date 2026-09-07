@@ -1,0 +1,39 @@
+# M24.4 item 3 prep -- first-ever attempt to boot the M24.3 cFS artifact
+# (third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe) under Renode. M24.3's own report
+# states explicitly: "The RTEMS binary has never been executed." This script is that first
+# attempt, against our own fixed platform file (item 1) -- BSP_RESET_BOARD_AT_EXIT is NOT yet
+# fixed in THIS specific binary (it was only rebuilt into the isolated
+# rtems-bsp-noreset/myout prefix for the ticker/hello samples, item 2's own "what is NOT yet
+# done" note) -- so a clean exit from this binary, if it ever reaches one, would still spin;
+# this smoke test is about whether cFE/OSAL/the lockstep apps boot at all, not about exit
+# behavior.
+#
+# UART0 is cFE's own debug console (question 148/M24.3: this BSP's two Zynq UARTs are
+# ttyS0=UART0 debug console, ttyS1=UART1 the lockstep transport). No backend is attached to
+# uart1 in this smoke test (no bridge yet) -- io_lockstep's open()/read()/write() on
+# /dev/ttyS1 should still succeed against the bare peripheral model even with nothing
+# listening on the other end; whether the app *blocks* waiting for a HELLO that never arrives
+# is exactly one of the things this smoke test is watching for.
+
+:name: av-m24-4-cfs-boot-smoke
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4-cfs-boot-smoke"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/cfs_boot_uart0.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe cpu=rpu0
+"""
+
+runMacro $reset

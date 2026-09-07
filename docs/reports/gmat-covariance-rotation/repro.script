@@ -1,0 +1,44 @@
+% Minimal reproduction of the OrbitErrorCovariance rotating-frame conversion issue.
+Create Spacecraft Sat;
+Sat.DateFormat = UTCGregorian;
+Sat.Epoch = '01 Jan 2026 00:00:00.000';
+Sat.CoordinateSystem = EarthMJ2000Eq;
+Sat.DisplayStateType = Cartesian;
+Sat.X = 6878.137;
+Sat.Y = 0;
+Sat.Z = 0;
+Sat.VX = 0;
+Sat.VY = 5.38;
+Sat.VZ = 5.38;
+
+Create ForceModel FM;
+FM.CentralBody = Earth;
+FM.PrimaryBodies = {Earth};
+FM.GravityField.Earth.Degree = 0;
+FM.GravityField.Earth.Order = 0;
+FM.Drag = None;
+FM.SRP = Off;
+Create Propagator Prop;
+Prop.FM = FM;
+Prop.Type = RungeKutta89;
+
+Create ReportFile StateReport;
+StateReport.Filename = '/Users/probe/code/AltaVista/docs/reports/gmat-covariance-rotation/repro_state.rpt';
+StateReport.Precision = 16;
+StateReport.WriteHeaders = false;
+StateReport.Delimiter = ',';
+StateReport.SolverIterations = Current;
+StateReport.Add = {Sat.EarthMJ2000Eq.X, Sat.EarthMJ2000Eq.Y, Sat.EarthMJ2000Eq.Z, Sat.EarthMJ2000Eq.VX, Sat.EarthMJ2000Eq.VY, Sat.EarthMJ2000Eq.VZ, Sat.EarthFixed.X, Sat.EarthFixed.Y, Sat.EarthFixed.Z, Sat.EarthFixed.VX, Sat.EarthFixed.VY, Sat.EarthFixed.VZ};
+
+Create ReportFile CovReport;
+CovReport.Filename = '/Users/probe/code/AltaVista/docs/reports/gmat-covariance-rotation/repro_cov.rpt';
+CovReport.Precision = 16;
+CovReport.WriteHeaders = false;
+CovReport.Delimiter = ',';
+CovReport.SolverIterations = Current;
+CovReport.Add = {Sat.EarthMJ2000Eq.OrbitErrorCovariance, Sat.EarthFixed.OrbitErrorCovariance};
+
+BeginMissionSequence;
+% Position uncertainty of 1 km (1 sigma) per axis, velocity uncertainty exactly zero.
+Sat.OrbitErrorCovariance = diag([1 1 1 0 0 0]);
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};

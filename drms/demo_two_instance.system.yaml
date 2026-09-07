@@ -1,0 +1,117 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M17.3
+# (docs/open-questions.md question 123).
+#
+# Field-for-field the *same* vehicle and force model as drms/leo_1day_golden.system.yaml's
+# leo_sys (JGM2 8x8 Earth gravity, Sun + Moon point masses, one-day-golden ballistic
+# properties) -- "on the golden LEO dynamics" per M17.3's own brief -- with one additive
+# difference: an `output.rmag` declaration (crates/av-kernel/tests/drm_executor.rs's own
+# `covariance_and_plain_paths_produce_the_same_named_output_set` establishes this exact
+# `output.<name>` vocabulary), which demo_two_instance.drm.yaml's Objective scores
+# (`output.demo_flt.rmag@end`).
+#
+# A separate file from leo_1day_golden.system.yaml, deliberately, rather than adding
+# `output.rmag` to that file directly: leo_1day_golden.system.yaml is an EXISTING golden this
+# task must not change (drms/leo_1day_golden.drm.yaml, both maneuver goldens, and the RIC/VVLH
+# goldens all reference it, and their own tests -- none of which this task may touch --
+# recompute and check its hash). Declaring the identical physics under a new id
+# (`leo_demo_sys`) keeps this task's own additive `output.*` declaration off that shared file
+# while still reproducing its exact dynamics -- the same "no separate SystemDefinition file"
+# intent leo_1day_maneuver_vnb.sos.yaml's own README section states (never drifting apart on
+# the vehicle), applied here as "never drifting apart on the vehicle's *physics*", since this
+# file's own `output.rmag` addition is metadata, not a physics parameter.
+#
+# M18.3 (docs/open-questions.md question 126) additive change: `output.cd` (GmatModel's own
+# second named output -- gmat_sys::model::OUTPUT_CD) and two SIGNAL ports, `cd_cmd_out` (OUT)
+# and `cd_cmd_in` (IN), closing the "demo's router exercise had to use a native instance
+# instead" gap. Through M18.3, neither instance's own force model gained a drag term from this
+# (leo_demo_sys stayed gravity + Sun/Moon only), so the SIGNAL-commanded Cd this connection
+# carried had no propagated physical effect -- question 131's own escalation.
+#
+# **M19.4 (question 131) closes that escalation, but the fix lives on `demo_flt`'s own
+# `SystemInstance.parameter_overrides` (drms/demo_two_instance.sos.yaml), not here.**
+# `leo_demo_sys` itself -- this file -- declares NO drag: it stays exactly the base "golden LEO
+# dynamics" (gravity + Sun/Moon only) both instances that bind to it share, so `demo_mvr` (which
+# declares no drag override) never drifts from the base golden's own physics. `demo_flt` adds
+# four `force_model.drag_*` overrides on top of this shared declaration -- see
+# `crate::drm::binding::materialize_gmat`'s own doc comment for exactly how those are threaded
+# into a real `DragForce`/atmosphere-model object pair, and `drms/demo_two_instance.sos.yaml`'s
+# own header comment for the full three-instance wiring (`demo_mvr` -> a new native
+# `demo_ctrl` range-condition controller -> `demo_flt`) that now makes the SIGNAL-commanded Cd
+# change genuinely alter `demo_flt`'s own propagated arc.
+id: leo_demo_sys
+version: "1"
+name: LEO JGM2 8x8 + Sun/Moon (golden-pinned physics, M17.3 two-instance demo declaration)
+dynamics_model: gmat.earth.jgm2_8x8.sun_moon
+state_space_id: gmat.orbital.cartesian6
+ports:
+  - name: cd_cmd_out
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: cd_cmd_in
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+state_space:
+  id: gmat.orbital.cartesian6
+  components:
+    - label: pos_x
+      unit: UNIT_METER
+    - label: pos_y
+      unit: UNIT_METER
+    - label: pos_z
+      unit: UNIT_METER
+    - label: vel_x
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_y
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_z
+      unit: UNIT_METER_PER_SECOND
+parameters:
+  - name: force_model.central_body
+    string_value: Earth
+  - name: force_model.gravity_file
+    string_value: JGM2.cof
+  - name: force_model.gravity_degree
+    value: 8
+  - name: force_model.gravity_order
+    value: 8
+  - name: force_model.point_masses
+    string_value: "Luna,Sun"
+  - name: force_model.golden_ref
+    string_value: leo_1day_jgm2_8x8_sunmoon
+  - name: spacecraft.CoordinateSystem
+    string_value: EarthMJ2000Eq
+  - name: spacecraft.DisplayStateType
+    string_value: Keplerian
+  - name: spacecraft.SMA
+    value: 6878.0
+  - name: spacecraft.ECC
+    value: 0.001
+  - name: spacecraft.INC
+    value: 51.6
+  - name: spacecraft.RAAN
+    value: 30.0
+  - name: spacecraft.AOP
+    value: 0.0
+  - name: spacecraft.TA
+    value: 0.0
+  - name: spacecraft.DryMass
+    value: 500.0
+  - name: spacecraft.Cd
+    value: 2.2
+  - name: spacecraft.Cr
+    value: 1.8
+  - name: spacecraft.DragArea
+    value: 5.0
+  - name: spacecraft.SRPArea
+    value: 5.0
+  - name: output.rmag
+    unit: UNIT_METER
+  - name: output.cd
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M17.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_two_instance.system.yaml
+hash: "20ed412883a8e16bbcc2a625da852ffbe0b7954ad0d7d91ded42fd72f4ea7886"

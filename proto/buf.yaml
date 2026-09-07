@@ -1,0 +1,14 @@
+version: v2
+modules:
+  - path: .
+    name: buf.build/altavista/cdm
+lint:
+  use:
+    - STANDARD
+  except:
+    # Field names like `r`, `z`, `nu`, `s` are the estimation literature's; kept from spoore.v0.
+    - FIELD_LOWER_SNAKE_CASE
+breaking:
+  use:
+    - FILE
+deps: []

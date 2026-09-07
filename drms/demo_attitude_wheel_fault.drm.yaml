@@ -1,0 +1,59 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M22.1b
+# (docs/open-questions.md question 152, decided by the lead): "a DYNAMICS fault on an attitude
+# instance changes inertia, wheel limits, or a wheel's availability, through declared
+# parameters". This DRM's own fault halves attitude.wheel.1.momentum_limit (1.0 -> 0.5) at
+# t = 0.5 s.
+#
+# Expected magnitude, derived from the physics and written down BEFORE running (see
+# crates/av-kernel/tests/drm_attitude.rs for the executed comparison against this):
+#
+# Isotropic J = 10 kg*m^2 on a single principal-axis wheel keeps omega collinear with that axis
+# for all time (crate::drm::attitude's own golden 5 closed form): h_w(t) = min(tau*t, limit),
+# omega_x(t) = -h_w(t)/J, with tau = 0.4 N*m (attitude.wheel.1.commanded_torque, this DRM's own
+# system.yaml).
+#
+# BASELINE (no fault): saturation at t* = limit/tau = 1.0/0.4 = 2.5 s, after this run's own
+# end_tai_ns (T = 2.0 s) -- never saturates. At T: h_w(T) = tau*T = 0.8, omega_x(T) = -0.8/10 =
+# -0.08 rad/s.
+#
+# FAULTED (this DRM): h_w grows identically (h_w(0.5s) = 0.4*0.5 = 0.2, below the still-1.0
+# limit, unaffected by a fault that has not fired yet) until t=0.5s, when the limit drops to
+# 0.5; growth continues at the same rate until the (now lower) limit is reached, at
+# t = 0.5 + (0.5 - 0.2)/0.4 = 1.25 s, then h_w plateaus at 0.5 for the remainder of the run. At
+# T = 2.0 s: h_w(T) = 0.5, omega_x(T) = -0.5/10 = -0.05 rad/s.
+#
+# EXPECTED DIFFERENCE (faulted minus baseline), stated before running: delta(h_w) = 0.5 - 0.8 =
+# -0.3 (N*m*s); delta(omega_x) = -0.05 - (-0.08) = +0.03 rad/s. Both are ~4-6 orders of magnitude
+# above this integrator's own numerical-integration precision (Dopri5 default rtol=atol=1e-12,
+# crate::drm::attitude's own goldens measure ~1e-10 residuals at this scale) -- a real,
+# measurable difference, not integration noise.
+id: attitude_wheel_fault_drm
+version: "1"
+name: Single reaction wheel demo, wheel-limit DYNAMICS fault
+sos_configuration_id: attitude_wheel_fault_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225639000000000
+  faults:
+    - id: wheel_limit_fault
+      tai_ns: 1767225637500000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: att_wheel
+      target: attitude.wheel.1.momentum_limit
+      kind: parameter
+      params:
+        value: 0.5
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 0.1
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_wheel_fault.drm.yaml
+hash: "0522110627288e9eb86647670f66a4b62386ae60704550bb88b076593f9670c1"

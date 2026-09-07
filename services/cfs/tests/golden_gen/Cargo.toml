@@ -1,0 +1,32 @@
+[workspace]
+# Deliberately its OWN workspace (empty [workspace] table), not a member of the root
+# Cargo.toml's `members` list. This is a test-support tool for M23.2
+# (docs/open-questions.md question 149; docs/sil-plan.md M23): it needs to call
+# `av_kernel::codec::encode_packet`/`decode_packet` -- the SAME implementation
+# `crates/av-kernel/src/codec.rs` uses, which `crates/av-kernel` is off limits for this task to
+# edit (see services/cfs/README.md's ownership note) -- to produce genuine "bytes the kernel's
+# own codec produces" for services/cfs's C-side CCSDS tests to check against (never against the
+# C side's own encoder alone). Being its own workspace means `cargo test --workspace` /
+# `cargo build --workspace` at the repository root never sees this crate: it has no effect on
+# build time, Cargo.lock, or dependency resolution for anything the rest of the platform runs.
+# Build/run it explicitly:
+#   cargo run --manifest-path services/cfs/tests/golden_gen/Cargo.toml -- <case>
+[package]
+name = "cfs-golden-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cfs-golden-gen"
+path = "src/main.rs"
+
+[dependencies]
+av-cdm = { path = "../../../../crates/av-cdm" }
+av-kernel = { path = "../../../../crates/av-kernel" }
+serde_json = "1"
+# Matches the root workspace's own pin (Cargo.toml's [workspace.dependencies]) -- named directly
+# here (rather than relying on it only transitively through av-cdm) since this binary calls
+# `prost::Message::encode_to_vec` itself to produce genuine wire bytes for the lockstep messages.
+prost = "0.13"
+

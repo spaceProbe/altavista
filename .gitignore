@@ -1,0 +1,44 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+target/
+third_party/gmat-src/
+third_party/cspice/
+third_party/cfs/
+.DS_Store
+# GMAT run products
+GMAT*/output/
+GMAT*/bin/api_startup_file.txt
+# node-only module-resolution shim for the headless viewer tests (web/VIEWER.md)
+web/node_modules/
+
+# --- added 2026-09-07 when the repository went under git ---
+# The GMAT R2026a install lives beside the code; it is a vendor install, never committed.
+GMAT R2026a/
+# Fetched or built third-party trees (recreated by third_party/*.sh and the container recipes);
+# our scripts, patches, platform files, reports and small logs beside them stay tracked.
+third_party/renode/renode-*-osx-arm64/
+third_party/renode/*.dmg
+third_party/renode/M24_4/rtems-bsp-noreset/
+third_party/rtems/toolchain-build/
+third_party/rtems/toolchain-build-log/
+third_party/rtems/rtems-src/
+third_party/rtems/rsb/
+third_party/rtems/*.log
+third_party/rtems-container/output/
+third_party/rtems-container/work/
+third_party/rtems-container/*.log
+third_party/rtems-container/run-renode/*.exe
+# Compiled binaries copied into Docker build contexts (rebuilt by the documented cross-build
+# command in services/cfs/Dockerfile), and the C test build cache (question 172).
+services/cfs/bin/av-lockstep-shim
+.cbuild-cache/
+# Scratch target dir of the cross-build (see .dockerignore).
+target-docker-linux/
+# Generated GMAT scripts and report files from the golden generators (never sources).
+goldens/_gen_*
+# Per-user Claude Code settings; launch.json stays tracked.
+.claude/settings.local.json

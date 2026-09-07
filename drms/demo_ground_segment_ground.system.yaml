@@ -1,0 +1,118 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.1
+# (docs/sil-plan.md's M25 milestone: "ground segment as a system"; docs/open-questions.md
+# questions 10, 108, 149, 156, 157, 164).
+#
+# The native ground station: `crate::drm::ground::GroundStationModel`, dispatched via `ground.`
+# (`crate::registry::ModelKind::Ground`). Site is Cape Canaveral-like (28.5 deg N, 80.6 deg W,
+# sea level) -- a recognizable, non-cherry-picked choice within the connected flight instance's
+# own short-arc ground track (drms/demo_ground_segment_flight.system.yaml), elevation mask 10
+# degrees (a common operational default, matching GMAT's own ContactLocator sample scripts'
+# typical range). Receives the flight instance's own Earth-fixed Cartesian position over the
+# declared FRAMED `tm_in` port (apid 500, matching the flight instance's own `tm_out` codec --
+# "the same apid on both ends" convention drms/demo_attitude_control_controller.system.yaml's own
+# header comment already established), computes topocentric elevation
+# (crate::drm::ground::elevation_of) and compares it against `station.elevation_mask_rad`; on a
+# rising edge, sends one AOS-acknowledgment CCSDS telecommand on the declared FRAMED `tc_out`
+# port (apid 501) and reports the transition as EVENT_KIND_CONTACT_START/_END
+# (crate::drm::events::contact_event). `tc_out` is declared but not connected to anything in
+# this demo (drms/demo_ground_segment.sos.yaml) -- the flight instance
+# (crate::drm::binding::ConstantAccelModel) has no FRAMED-consume capability today (only a
+# SIGNAL `port.consume`), so the telecommand path is exercised as far as encode-and-send, not
+# as far as a flight-side consumer; see this fixture's own report entry for the full account.
+#
+# `station.body/latitude_rad/longitude_rad/height_m` mirror `core.proto`'s `Geodetic` (the
+# declared origin for AXES_KIND_ENU/NED, question 10) field-for-field -- the identical four
+# numbers are declared again in drms/demo_ground_segment.drm.yaml's own `scenario.frames` entry
+# (a real `FrameDefinition`, `axes: AXES_KIND_ENU`) for the CDM/viewer's own frame graph; see
+# `crate::drm::ground`'s own module doc comment for why the model itself reads these as plain
+# instance parameters rather than a live frame-registry lookup.
+id: ground_station_demo_sys
+version: "1"
+name: Native ground station, Cape-Canaveral-like site (M25.1)
+dynamics_model: ground.station_demo
+state_space_id: ground.station_demo.space
+state_space:
+  id: ground.station_demo.space
+  components: []
+ports:
+  - name: tm_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 50000000
+  - name: tc_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 50000000
+packet_codecs:
+  - id: ground_tm_in_codec
+    apid: 500
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "target Earth-fixed Cartesian position telemetry, decoded (M25.1)"
+    fields:
+      - name: x
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: y
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: z
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+  - id: ground_tc_out_codec
+    apid: 501
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 4
+    description: "AOS acknowledgment telecommand, encoded (M25.1)"
+    fields:
+      - name: seq
+        bit_offset: 0
+        bit_width: 32
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: station.body
+    string_value: Earth
+  - name: station.latitude_rad
+    value: 0.49741883681838395
+    unit: UNIT_RADIAN
+  - name: station.longitude_rad
+    value: -1.4067353771074296
+    unit: UNIT_RADIAN
+  - name: station.height_m
+    value: 0.0
+    unit: UNIT_METER
+  - name: station.elevation_mask_rad
+    value: 0.17453292519943295
+    unit: UNIT_RADIAN
+  - name: output.elevation_rad
+    unit: UNIT_RADIAN
+  - name: output.in_contact
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_ground_segment_ground.system.yaml
+hash: "95464050c842706ab5efad828e650604d3149565b794e825b0282592e89a1c08"

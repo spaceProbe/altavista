@@ -1,0 +1,6 @@
+(lldb) command source -s 0 '/Users/probe/code/AltaVista/third_party/renode/M24_4e/lldb_live_inspect.lldb'
+Executing commands in '/Users/probe/code/AltaVista/third_party/renode/M24_4e/lldb_live_inspect.lldb'.
+(lldb) target create /Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe
+Current executable set to '/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe' (arm).
+(lldb) gdb-remote 127.0.0.1:15900
+error: failed to get reply to handshake packet within timeout of 0.0 seconds

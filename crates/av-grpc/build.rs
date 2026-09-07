@@ -1,0 +1,123 @@
+//! Compiles `proto/altavista/v1/*.proto` into Rust with `tonic-build` (which wraps
+//! `prost-build`), exposed by `src/lib.rs` as the `av_grpc::pb` module -- including the
+//! generated `DynamicsServiceClient` this crate's `describe_client` binary drives.
+//!
+//! `protoc`/well-known-types resolution mirrors `crates/av-cdm/build.rs` verbatim (same
+//! environment, same fallback order); kept as a separate copy rather than a shared helper
+//! crate since both build scripts are a few dozen lines and neither crate should gain a
+//! path dependency on the other just for this.
+//!
+//! Client-only: `build_server(false)` below, and this crate's `tonic` dependency has
+//! default features off with only `codegen`, `prost`, `channel` enabled (no `tls*`
+//! feature) -- see Cargo.toml's comment on why that matters (`ring`).
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The fixed `/opt/homebrew/bin/protoc` path named in this repo's environment notes.
+const HOMEBREW_PROTOC: &str = "/opt/homebrew/bin/protoc";
+
+fn resolve_protoc() -> PathBuf {
+    if let Ok(p) = env::var("PROTOC") {
+        return PathBuf::from(p);
+    }
+    if Path::new(HOMEBREW_PROTOC).is_file() {
+        return PathBuf::from(HOMEBREW_PROTOC);
+    }
+    PathBuf::from("protoc")
+}
+
+/// Directory holding `google/protobuf/any.proto` (needed transitively: `envelope.proto`,
+/// imported by `trajectory.proto` and `command.proto`, imports it) for the resolved
+/// `protoc`. Same search order as `crates/av-cdm/build.rs`.
+fn resolve_wkt_include_dir(protoc: &Path) -> PathBuf {
+    if let Ok(p) = env::var("PROTOC_INCLUDE") {
+        let p = PathBuf::from(p);
+        if p.join("google/protobuf/any.proto").is_file() {
+            return p;
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = vec![PathBuf::from("/opt/homebrew/opt/protobuf/include")];
+
+    if let Some(bin_dir) = protoc.parent() {
+        if let Some(prefix) = bin_dir.parent() {
+            candidates.push(prefix.join("include"));
+        }
+    }
+
+    candidates.push(PathBuf::from("/usr/local/include"));
+    candidates.push(PathBuf::from("/usr/include"));
+
+    for c in &candidates {
+        if c.join("google/protobuf/any.proto").is_file() {
+            return c.clone();
+        }
+    }
+
+    let version = Command::new(protoc)
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("<failed to run {}: {e}>", protoc.display()));
+
+    panic!(
+        "av-grpc build.rs: could not find google/protobuf/any.proto under any of \
+         {candidates:?}. Resolved protoc: {} ({version}). Set PROTOC_INCLUDE to the \
+         well-known-types include directory, or install the protobuf package that ships \
+         it (this repo documents /opt/homebrew/opt/protobuf/include).",
+        protoc.display(),
+    );
+}
+
+fn main() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("crate lives at <repo>/crates/av-grpc")
+        .to_path_buf();
+    let proto_dir = repo_root.join("proto");
+    let v1_dir = proto_dir.join("altavista").join("v1");
+
+    let mut protos: Vec<PathBuf> = std::fs::read_dir(&v1_dir)
+        .unwrap_or_else(|e| panic!("av-grpc build.rs: cannot read {}: {e}", v1_dir.display()))
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "proto"))
+        .collect();
+    protos.sort();
+    assert!(
+        !protos.is_empty(),
+        "av-grpc build.rs: no .proto files found under {}",
+        v1_dir.display()
+    );
+
+    for proto in &protos {
+        println!("cargo:rerun-if-changed={}", proto.display());
+    }
+    // A new .proto file must also trigger a rebuild: per-file rerun-if-changed lines only
+    // watch files that already existed at the last build (found 2026-09-04 when
+    // lockstep.proto was added and av_cdm::pb silently lacked its types).
+    println!("cargo:rerun-if-changed={}", v1_dir.display());
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    println!("cargo:rerun-if-env-changed=PROTOC_INCLUDE");
+
+    let protoc = resolve_protoc();
+    env::set_var("PROTOC", &protoc);
+    let wkt_include = resolve_wkt_include_dir(&protoc);
+
+    tonic_build::configure()
+        .build_client(true)
+        .build_server(false) // this crate is a client only (describe_client)
+        .btree_map(["."]) // ADR-004/ADR-001 determinism: no HashMap iteration on any output path.
+        .extern_path(".google.protobuf.Any", "::prost_types::Any")
+        // M13.2: reuse av_cdm::pb's own `Port`/`PortMessage` generated types (see Cargo.toml's
+        // dependency comment on `av-cdm`) rather than generating a second, independently
+        // compiled copy of the same wire message here -- lets `av-kernel`'s lockstep client
+        // pass `av_dynamics::Inbox`/`Outbox` messages straight into a `LockstepStepRequest`/
+        // read them straight out of a `LockstepStepResponse` with no field-by-field conversion.
+        .extern_path(".altavista.v1.Port", "::av_cdm::pb::Port")
+        .extern_path(".altavista.v1.PortMessage", "::av_cdm::pb::PortMessage")
+        .compile_protos(&protos, &[proto_dir, wkt_include])
+        .unwrap_or_else(|e| panic!("av-grpc build.rs: tonic-build failed: {e}"));
+}

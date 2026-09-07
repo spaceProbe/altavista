@@ -1,0 +1,31 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M22.2/M22.2b
+# (`docs/open-questions.md` questions 142/149/151/152). 6 s run at 1 Hz default step rate,
+# matching drms/demo_attitude_sensors_truth.system.yaml's own torque-free precession physics.
+# No faults, no maneuvers, no covariance. Runs end to end through `av_kernel::drm::execute` as
+# of M22.2b -- `crates/av-kernel/tests/drm_attitude_sensors.rs` is the proof: both sensor
+# instances' own declared 2 Hz update rate (0.5 s period) against this DRM's 6 s duration and
+# 1 Hz kernel step means exactly 12 scheduled measurement emissions each (6 s / 0.5 s), observed
+# through `output.startracker.seq@end`/`output.imu.seq@end` -- the identical count
+# `crate::drm::sensors::tests::attitude_instance_is_measured_by_both_sensors_through_the_real_
+# router` already established directly against the router.
+id: attitude_sensors_drm
+version: "1"
+name: Star tracker + IMU measuring a torque-free precession truth source (M22.2)
+sos_configuration_id: attitude_sensors_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225643000000000
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_sensors.drm.yaml
+hash: "610a993b7e7efe3c9ce16b5ee2cb2d4bf2dd0c6b3f64a87e408821c85d523532"

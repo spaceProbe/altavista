@@ -1,0 +1,277 @@
+{
+  "samples": [
+    {
+      "phase": "pre-boot",
+      "control": 296,
+      "channel_sts": 10
+    },
+    {
+      "phase": "step0",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step1",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step2",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step3",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step4",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step5",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step6",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step7",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step8",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step9",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step10",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step11",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step12",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step13",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step14",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step15",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step16",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step17",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step18",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step19",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step20",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step21",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step22",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step23",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step24",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step25",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step26",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step27",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step28",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step29",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step30",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step31",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step32",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step33",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step34",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step35",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step36",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step37",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step38",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step39",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step40",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step41",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step42",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    }
+  ],
+  "rxen_first_observed_at_step": 22,
+  "final": {
+    "control": 276,
+    "channel_sts": 10,
+    "irq_sts": 266
+  },
+  "popped_fifo_bytes": [],
+  "guest_bytes_len": 0,
+  "guest_bytes_hex": "",
+  "handshake_failed_in_log": null
+}

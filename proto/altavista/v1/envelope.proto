@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+// Envelopes, batches and signatures (ADR-001, ADR-004).
+//
+// Every message on the wire travels inside a Batch; every Batch carries a handling label,
+// its producer and a sequence number; the edge signs each Batch (ECDSA P-384 under its
+// seccert-issued key) and chains batch hashes per producer, so provenance survives the log,
+// replay and export and can be verified by an assessor later (question 36).
+package altavista.v1;
+
+import "google/protobuf/any.proto";
+
+// A handling marking. One level per deployment is enforced (question 32); the label is
+// still carried on every message so a future multi-level deployment changes enforcement,
+// not schema.
+message Label {
+  // The marking as the customer's scheme spells it, e.g. "CUI", "CUI//SP-EXPT", "UNCLASSIFIED".
+  string marking = 1;
+  // Caveats / dissemination controls, scheme-specific.
+  repeated string caveats = 2;
+}
+
+// Per-message envelope. Carried inside Batch.messages via `Any` wrapping of an Envelope +
+// payload pair (see BatchMessage), or attached by consumers that unpack batches.
+message Envelope {
+  // Unique message id; the tie-break in the (epoch, id) total order (spoore ADR-004).
+  string message_id = 1;
+  // Producer identity: plugin id, service id, or OIDC subject.
+  string producer_id = 2;
+  Label label = 3;
+  // Event time the payload refers to, nanoseconds on TAI.
+  int64 event_tai_ns = 4;
+  // Wall-clock production time at the producer, nanoseconds on TAI. Never used for ordering.
+  int64 produced_tai_ns = 5;
+  // Trace correlation id (W3C traceparent compatible).
+  string trace_id = 6;
+  // Fully-qualified payload type, e.g. "altavista.v1.Measurement".
+  string payload_type = 7;
+}
+
+message BatchMessage {
+  Envelope envelope = 1;
+  google.protobuf.Any payload = 2;
+}
+
+// A batch of messages from one producer under one label.
+message Batch {
+  string batch_id = 1;
+  string producer_id = 2;
+  Label label = 3;
+  // Monotonic per producer. Gaps are counted at ingest.
+  uint64 sequence = 4;
+  repeated BatchMessage messages = 5;
+  int64 first_event_tai_ns = 6;
+  int64 last_event_tai_ns = 7;
+}
+
+// A Batch with its signature and chain link. The log stores SignedBatch; consumers verify
+// before unpacking. Hash algorithm is SHA-256 only (ADR-004 crypto rule).
+message SignedBatch {
+  // Serialized Batch (deterministic protobuf encoding).
+  bytes batch = 1;
+  // ECDSA P-384 signature over `hash`, DER encoded.
+  bytes signature = 2;
+  // SHA-256 fingerprint of the signer's certificate (seccert-issued).
+  string signer_cert_sha256 = 3;
+  // SHA-256 of the previous SignedBatch.hash from the same producer, or the literal bytes
+  // of "GENESIS" for the first one (the suite's ledger convention).
+  bytes prev_hash = 4;
+  // SHA-256 over (prev_hash || batch).
+  bytes hash = 5;
+}
+
+// Result of walking a producer's chain, exposed by verify endpoints.
+message ChainVerification {
+  string producer_id = 1;
+  bool ok = 2;
+  uint64 checked = 3;
+  // Sequence number at which the chain broke, if !ok.
+  uint64 broken_at_sequence = 4;
+  string detail = 5;
+}

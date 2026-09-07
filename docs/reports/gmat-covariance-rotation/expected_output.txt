@@ -1,0 +1,10 @@
+GMAT R2026a, epoch 2026-01-01T00:00:01 UTC, spacecraft in LEO
+|v| inertial (EarthMJ2000Eq) = 7.608469 km/s
+|v| EarthFixed               = 7.262489 km/s  (differs by ~|omega x r| = 0.501562 km/s: the STATE conversion includes the rotation rate)
+Declared covariance (EarthMJ2000Eq), diagonal:  [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+GMAT-reported covariance in EarthFixed, diagonal: [0.9999999999999999, 0.9999999999999999, 1.0, 0.0, 0.0, 0.0]
+Reported EarthFixed velocity variances: [0.0, 0.0, 0.0]  (all exactly 0)
+Reported EarthFixed position-velocity cross terms, max |.|: 0.000e+00  (exactly 0)
+Physically required velocity 1-sigma from 1 km position uncertainty in a frame rotating at omega_E: ~7.292e-05 km/s = 0.0729 m/s per in-plane axis
+Expected EarthFixed velocity variance: ~5.317e-09 km^2/s^2 ; GMAT reports 0.0
+REPRODUCED: covariance conversion used [[R,0],[0,R]] (no Rdot term)

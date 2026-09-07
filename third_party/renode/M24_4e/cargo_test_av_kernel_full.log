@@ -1,0 +1,613 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/av_kernel-8ae6951f9d4779fa)
+
+running 515 tests
+test codec::tests::a_packet_shorter_than_the_primary_header_is_a_typed_error ... ok
+test clock::tests::tick_advances_by_exactly_one_period_and_is_exact_over_many_ticks ... ok
+test clock::tests::base_period_of_a_single_output_period_with_no_instances_is_the_output_period_itself ... ok
+test codec::tests::a_field_extent_past_user_data_bytes_is_a_typed_load_error ... ok
+test codec::tests::a_fixed_width_type_disagreeing_with_bit_width_is_a_typed_load_error ... ok
+test codec::tests::a_zero_bit_width_is_a_typed_load_error ... ok
+test codec::tests::an_unknown_apid_is_a_typed_error ... ok
+test codec::tests::field_byte_order_is_big_endian_against_a_hand_written_byte_string ... ok
+test clock::tests::check_integer_multiples_refuses_an_output_period_that_does_not_divide_the_base_period ... ok
+test codec::tests::a_packet_with_the_wrong_total_length_is_a_typed_error ... ok
+test codec::tests::a_packet_with_the_off_by_one_forgotten_is_a_typed_length_mismatch ... ok
+test codec::tests::hand_computed_decode_matches_ccsds_bit_layout_pinned_by_hand ... ok
+test clock::tests::base_period_refuses_a_non_positive_instance_period_naming_it ... ok
+test codec::tests::a_declared_scale_of_zero_defaults_to_one ... ok
+test codec::tests::packet_data_length_field_is_the_packet_data_field_minus_one_pinned_by_hand ... ok
+test codec::tests::hand_computed_encode_matches_ccsds_bit_layout_pinned_by_hand ... ok
+test codec::tests::is_command_selects_the_telecommand_type_bit ... ok
+test codec::tests::round_trips_a_scale_and_offset_conversion_exactly ... ok
+test codec::tests::duplicate_apids_across_codecs_are_a_typed_load_error ... ok
+test codec::tests::secondary_header_bytes_are_carried_verbatim_between_primary_header_and_user_data ... ok
+test codec::tests::packet_data_length_counts_the_secondary_header_pinned_by_hand ... ok
+test clock::tests::base_period_is_the_gcd_of_the_output_period_and_every_instance_period ... ok
+test clock::tests::a_base_period_computed_by_this_module_always_passes_its_own_integer_multiple_check ... ok
+test clock::tests::check_integer_multiples_refuses_an_instance_whose_period_does_not_divide_the_base_period_naming_it ... ok
+test codec::tests::round_trips_every_packet_field_type_with_default_scale_offset ... ok
+test drm::attitude::tests::new_refuses_a_wheel_momentum_component_labelled_with_the_torque_unit ... ok
+test codec::tests::distinct_apids_build_an_ordered_map ... ok
+test clock::tests::zero_period_panics - should panic ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_a_missing_required_inertia_component ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_a_non_unit_initial_quaternion ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_an_inertia_parameter_declared_with_the_wrong_unit ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_a_non_positive_definite_inertia_tensor ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_an_unrecognized_parameter_name ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_noncontiguous_wheel_indices ... ok
+test drm::attitude::tests::rotate_body_to_inertial_matches_the_textbook_rotation_about_z ... ok
+test drm::attitude::tests::parse_attitude_spec_accepts_inertia_parameters_with_the_correct_unit_or_no_declared_unit ... ok
+test drm::attitude::tests::new_accepts_a_wheel_momentum_component_correctly_labelled_newton_meter_second ... ok
+test drm::attitude::tests::new_refuses_a_state_space_whose_width_disagrees_with_the_parsed_wheel_count ... ok
+test drm::attitude::tests::parse_attitude_spec_refuses_a_non_unit_wheel_axis ... ok
+test drm::attitude::tests::an_unavailable_wheel_exerts_no_torque_even_with_a_nonzero_declared_commanded_torque ... ok
+test drm::binding::tests::a_native_instance_declaring_a_partial_subset_of_state_parameters_is_a_typed_missing_parameter_error ... ok
+test drm::attitude::tests::wheel_torque_exchange_matches_delta_j_omega_equals_minus_delta_h_w ... ok
+test drm::binding::tests::a_native_instance_declaring_six_components_but_configuring_no_physical_state_is_a_typed_load_error ... ok
+test drm::binding::tests::a_native_instance_declaring_exactly_six_scalar_components_classifies_normally ... ok
+test drm::attitude::tests::derivatives_falls_back_to_the_declared_commanded_torque_when_controls_is_empty ... ok
+test drm::binding::tests::a_native_instance_declaring_an_empty_state_space_but_configuring_six_state_parameters_is_a_typed_load_error ... ok
+test drm::binding::tests::a_native_instance_declaring_the_wrong_state_space_dimension_is_a_typed_load_error ... ok
+test drm::binding::tests::a_native_instance_with_an_empty_declared_state_space_materializes_at_zero_dim ... ok
+test drm::binding::tests::a_well_formed_consume_pair_naming_cd_classifies_and_is_carried_on_the_spec ... ok
+test drm::binding::tests::a_star_tracker_instance_declaring_no_packet_codec_is_a_typed_sensor_port_configuration_error ... ok
+test drm::binding::tests::a_controller_instance_declaring_the_wrong_number_of_packet_codecs_is_a_typed_error ... ok
+test drm::binding::tests::a_well_formed_drag_declaration_classifies_and_is_carried_on_the_spec ... ok
+test drm::binding::tests::a_well_formed_controller_instance_classifies_to_binding_plan_controller ... ok
+test drm::binding::tests::a_well_formed_emit_pair_classifies_and_is_carried_on_the_spec ... ok
+test drm::binding::tests::a_well_formed_attitude_instance_classifies_to_binding_plan_attitude ... ok
+test drm::binding::tests::a_well_formed_imu_instance_classifies_to_binding_plan_imu ... ok
+test drm::binding::tests::a_well_formed_range_condition_classifies_and_is_carried_on_the_spec ... ok
+test drm::binding::tests::an_attitude_instance_whose_declared_state_space_width_disagrees_with_the_wheel_count_is_refused ... ok
+test drm::binding::tests::a_well_formed_star_tracker_instance_classifies_to_binding_plan_star_tracker ... ok
+test drm::binding::tests::an_imu_instance_declaring_no_framed_out_port_is_a_typed_sensor_port_configuration_error ... ok
+test drm::binding::tests::an_unrecognized_attitude_parameter_is_a_typed_invalid_attitude_spec_error ... ok
+test drm::binding::tests::an_unrecognized_controller_parameter_is_a_typed_load_error ... ok
+test drm::binding::tests::an_unrecognized_imu_parameter_is_a_typed_invalid_imu_spec_error ... ok
+test drm::binding::tests::an_unrecognized_port_dot_field_name_is_a_typed_refusal ... ok
+test drm::binding::tests::an_unrecognized_star_tracker_parameter_is_a_typed_invalid_star_tracker_spec_error ... ok
+test drm::binding::tests::any_model_derivatives_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_derivatives_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_derivatives_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_derivatives_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_derivatives_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_describe_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_describe_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_describe_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_describe_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_describe_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_integrator_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_integrator_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_integrator_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_integrator_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_integrator_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_state_dim_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_state_dim_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_state_dim_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_state_dim_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_state_dim_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_step_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_step_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_step_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_step_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_step_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_step_with_ports_delegates_to_the_constant_accel_variant ... ok
+test drm::attitude::tests::a_wheel_driven_past_its_limit_stops_accumulating_momentum_and_the_body_responds_accordingly ... ok
+test drm::binding::tests::any_model_step_with_ports_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_step_with_ports_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_step_with_ports_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_step_with_ports_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_step_with_stm_returns_a_typed_capability_missing_error_for_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_step_with_stm_returns_a_typed_capability_missing_error_for_the_attitude_variant ... ok
+test drm::binding::tests::any_model_step_with_stm_returns_a_typed_capability_missing_error_for_the_controller_variant ... ok
+test drm::binding::tests::any_model_step_with_stm_returns_a_typed_capability_missing_error_for_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_stm_capable_delegates_to_the_attitude_variant ... ok
+test drm::binding::tests::any_model_step_with_stm_returns_a_typed_capability_missing_error_for_the_imu_variant ... ok
+test drm::binding::tests::any_model_stm_capable_delegates_to_the_constant_accel_variant ... ok
+test drm::binding::tests::any_model_stm_capable_delegates_to_the_controller_variant ... ok
+test drm::binding::tests::any_model_stm_capable_delegates_to_the_star_tracker_variant ... ok
+test drm::binding::tests::any_model_stm_capable_delegates_to_the_imu_variant ... ok
+test drm::binding::tests::any_model_stm_derivatives_returns_a_typed_capability_missing_error_for_the_attitude_variant ... ok
+test drm::binding::tests::any_model_stm_derivatives_returns_a_typed_capability_missing_error_for_the_constant_accel_variant ... ok
+test drm::attitude::tests::torque_free_axisymmetric_precession_matches_the_closed_form ... ok
+test drm::binding::tests::any_model_stm_derivatives_returns_a_typed_capability_missing_error_for_the_controller_variant ... ok
+test drm::binding::tests::any_model_stm_derivatives_returns_a_typed_capability_missing_error_for_the_imu_variant ... ok
+test drm::binding::tests::any_model_stm_derivatives_returns_a_typed_capability_missing_error_for_the_star_tracker_variant ... ok
+test drm::binding::tests::classify_binding_refuses_a_star_tracker_instance_whose_codec_is_missing_a_required_field ... ok
+test drm::binding::tests::classify_binding_refuses_an_attitude_instance_whose_wheel_momentum_component_is_labelled_with_the_torque_unit ... ok
+test drm::binding::tests::condition_above_fires_exactly_once_on_the_crossing_step_and_never_again ... ok
+test drm::binding::tests::condition_below_fires_when_the_value_drops_to_or_under_threshold_never_on_a_silent_step ... ok
+test drm::binding::tests::condition_mode_below_is_carried_as_above_false ... ok
+test drm::binding::tests::condition_mode_naming_an_unrecognized_value_is_a_typed_refusal_at_load_time ... ok
+test drm::binding::tests::condition_mode_without_threshold_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::condition_threshold_without_mode_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::condition_without_port_consume_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::condition_without_port_emit_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::consume_parameter_naming_a_non_writable_field_is_a_typed_refusal_at_load_time ... ok
+test drm::binding::tests::consume_parameter_without_consume_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::consume_without_consume_parameter_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::container_binding_missing_address_is_a_typed_error ... ok
+test drm::binding::tests::container_binding_tls_without_ca_file_is_a_typed_error ... ok
+test drm::binding::tests::container_binding_missing_seed_key_is_a_typed_error ... ok
+test drm::binding::tests::container_binding_unknown_parameter_name_is_a_typed_error_not_a_silent_drop ... ok
+test drm::binding::tests::container_binding_with_a_non_loopback_address_and_tls_still_classifies ... ok
+test drm::binding::tests::container_binding_with_a_non_loopback_plaintext_address_is_refused_at_load ... ok
+test drm::binding::tests::container_binding_with_a_non_loopback_plaintext_hostname_is_refused_at_load ... ok
+test drm::binding::tests::container_binding_with_a_plaintext_localhost_address_still_classifies ... ok
+test drm::binding::tests::container_binding_with_valid_container_parameters_classifies ... ok
+test drm::binding::tests::drag_model_alone_without_its_weather_companions_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::drag_weather_fields_without_drag_model_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::emit_output_naming_an_unrecognized_key_is_a_typed_refusal_at_load_time ... ok
+test drm::binding::tests::emit_output_without_emit_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::emit_without_emit_output_is_a_typed_missing_parameter_error ... ok
+test drm::binding::tests::gmat_binding_accepts_the_integration_frame_itself ... ok
+test drm::binding::tests::gmat_binding_accepts_a_registry_realizable_coordinate_system_other_than_the_integration_frame ... ok
+test drm::binding::tests::gmat_binding_refuses_a_coordinate_system_the_registry_cannot_realize ... ok
+test drm::binding::tests::gmat_binding_accepts_covariance_combined_with_a_non_integration_frame ... ok
+test drm::binding::tests::gmat_settings_changes_when_drag_is_declared_and_survives_a_rebind ... ok
+test drm::binding::tests::gmat_settings_is_unchanged_across_two_rebinds_at_different_physical_states ... ok
+test drm::binding::tests::gmat_settings_still_changes_when_a_real_ballistic_parameter_differs ... ok
+test drm::binding::tests::is_loopback_address_recognizes_the_documented_spellings ... ok
+test drm::binding::tests::is_loopback_address_refuses_everything_else_including_unresolved_hostnames ... ok
+test drm::binding::tests::gmat_settings_still_changes_when_gravity_order_differs_after_a_rebind ... ok
+test drm::binding::tests::gmat_settings_is_unchanged_across_a_rebind_that_changed_only_state_representation ... ok
+test drm::binding::tests::missing_binding_is_refused_with_a_typed_error ... ok
+test drm::binding::tests::no_condition_parameters_at_all_still_classifies_with_condition_none ... ok
+test drm::binding::tests::no_drag_parameters_at_all_still_classifies_with_drag_model_none ... ok
+test drm::attitude::tests::angular_momentum_is_conserved_in_the_inertial_frame_over_a_long_run ... ok
+test drm::binding::tests::no_port_parameters_at_all_still_classifies_with_both_fields_none ... ok
+test drm::binding::tests::output_dot_parameters_classify_without_being_stripped_first ... ok
+test drm::binding::tests::relativistic_correction_with_covariance_is_refused_unless_accepted ... ok
+test drm::binding::tests::renode_binding_is_refused_with_a_typed_error_never_silently ... ok
+test drm::binding::tests::unknown_parameter_name_is_a_typed_error_not_a_silent_drop ... ok
+test drm::controller::tests::a_malformed_command_packet_is_a_typed_error_not_a_panic ... ok
+test drm::controller::tests::commanded_attitude_decodes_a_command_packet_and_threads_it_through_as_controls ... ok
+test drm::controller::tests::a_malformed_star_packet_is_a_typed_error_not_a_panic ... ok
+test drm::controller::tests::commanded_attitude_with_a_command_configured_defaults_to_zero_before_the_first_packet_arrives ... ok
+test drm::controller::tests::commanded_attitude_with_no_command_configured_passes_controls_through_unchanged ... ok
+test drm::controller::tests::commanded_z_torque_flips_sign_with_the_error_sign ... ok
+test drm::controller::tests::commanded_z_torque_has_the_stabilizing_sign_for_a_positive_z_rotation_error ... ok
+test drm::controller::tests::new_refuses_a_command_codec_missing_a_wheel_torque_field ... ok
+test drm::controller::tests::controller_emits_nothing_before_the_first_measurement_arrives ... ok
+test drm::controller::tests::new_refuses_a_star_codec_missing_a_required_field ... ok
+test drm::controller::tests::parse_attitude_controller_spec_accepts_a_well_formed_spec ... ok
+test drm::controller::tests::parse_attitude_controller_spec_refuses_a_non_positive_kp ... ok
+test drm::controller::tests::controller_emits_at_its_own_declared_rate_not_the_caller_step_size ... ok
+test drm::controller::tests::parse_attitude_controller_spec_refuses_a_non_unit_target_quaternion ... ok
+test drm::controller::tests::parse_attitude_controller_spec_refuses_an_unrecognized_parameter ... ok
+test drm::controller::tests::signed_error_vector_recovers_the_exact_rotation_angle_for_a_pure_z_rotation ... ok
+test drm::events::tests::declared_events_includes_a_container_power_cycle_hardware_fault ... ok
+test drm::events::tests::declared_events_skips_a_fault_outside_the_executed_span ... ok
+test drm::events::tests::declared_events_skips_a_maneuver_outside_the_executed_span_and_includes_one_in_range ... ok
+test drm::events::tests::dropped_messages_event_carries_the_real_count_and_no_single_entity ... ok
+test drm::events::tests::fault_event_carries_the_fault_id_and_its_params_verbatim ... ok
+test drm::events::tests::lifecycle_pair_has_matching_instance_and_start_before_end ... ok
+test drm::events::tests::epoch_id_order_sorts_by_epoch_then_by_id ... ok
+test drm::events::tests::maneuver_event_carries_the_declared_dv_and_frame ... ok
+test drm::events::tests::maneuver_event_records_the_execution_error_mode_on_provenance_attributes ... ok
+test drm::events::tests::maneuver_event_with_a_sampled_realization_adds_the_applied_vector_and_draws ... ok
+test drm::events::tests::port_command_event_carries_all_five_required_attributes ... ok
+test drm::events::tests::port_command_event_reports_an_empty_sender_string_when_the_sender_is_unknown ... ok
+test drm::executor::fixed_rotation_math_tests::a_genuine_unit_quaternion_is_valid ... ok
+test drm::executor::fixed_rotation_math_tests::a_norm_just_outside_the_tolerance_is_refused ... ok
+test drm::executor::fixed_rotation_math_tests::empty_fixed_rotation_q_is_valid ... ok
+test drm::executor::fixed_rotation_math_tests::ninety_degrees_about_z_matches_the_textbook_quaternion ... ok
+test drm::executor::fixed_rotation_math_tests::non_unit_norm_is_a_typed_error_never_silently_renormalized ... ok
+test drm::executor::fixed_rotation_math_tests::one_hundred_eighty_degrees_about_x_matches_the_textbook_quaternion_up_to_sign ... ok
+test drm::executor::fixed_rotation_math_tests::wrong_length_is_a_typed_error_never_truncated_or_padded ... ok
+test drm::executor::frame_registry_tests::a_native_instance_with_no_central_body_contributes_no_mandatory_frames ... ok
+test drm::executor::frame_registry_tests::collect_frames_ignores_trajectories_with_no_frame_id ... ok
+test drm::executor::frame_registry_tests::collect_frames_deduplicates_and_sorts_by_id ... ok
+test drm::executor::frame_registry_tests::collect_frames_prefers_a_declared_scenario_frame_over_the_registry_default ... ok
+test drm::executor::frame_registry_tests::mandatory_frames_appear_for_the_central_body_even_when_no_trajectory_referenced_them ... ok
+test drm::executor::frame_registry_tests::mandatory_frames_are_added_per_distinct_central_body_and_sorted ... ok
+test drm::executor::frame_registry_tests::mandatory_frames_never_overwrite_an_already_present_frame_for_the_same_id ... ok
+test drm::executor::frame_registry_tests::registry_default_frame_description_is_a_human_description_of_the_frame_not_a_process_note ... ok
+test drm::executor::frame_registry_tests::registry_default_frame_recognizes_earth_mj2000eq ... ok
+test drm::executor::frame_registry_tests::registry_default_frame_recognizes_every_body_axes_suffix ... ok
+test drm::executor::frame_registry_tests::registry_default_frame_requires_a_nonempty_body_prefix ... ok
+test drm::executor::frame_registry_tests::registry_default_frame_returns_none_for_an_opaque_native_frame_id ... ok
+test drm::executor::to_proto_tests::every_score_result_name_matches_its_own_map_key ... ok
+test drm::executor::to_proto_tests::run_id_comes_from_provenance_run_id_not_a_constant ... ok
+test drm::executor::merge_adjacent_segments_tests::differing_hashes_never_merge_even_with_no_own_maneuver ... ok
+test drm::executor::merge_adjacent_segments_tests::three_segments_sharing_one_hash_with_no_own_maneuver_merge_into_one ... ok
+test drm::executor::merge_adjacent_segments_tests::identical_hash_across_a_maneuver_boundary_still_does_not_merge ... ok
+test drm::executor::merge_adjacent_segments_tests::a_fault_then_a_maneuver_back_to_the_same_hash_still_keeps_three_segments ... ok
+test drm::executor::merge_adjacent_segments_tests::an_empty_segment_list_merges_to_empty ... ok
+test drm::executor::to_proto_tests::dropped_count_and_frames_survive_a_real_byte_round_trip ... ok
+test drm::executor::to_proto_tests::trajectories_events_and_provenance_pass_through_unchanged ... ok
+test drm::executor::to_proto_tests::passed_none_and_some_false_stay_distinguishable_through_a_real_byte_round_trip ... ok
+test drm::fault::tests::a_dynamics_fault_on_a_star_tracker_instance_changes_its_declared_noise_sigma ... ok
+test drm::fault::tests::a_dynamics_fault_on_a_controller_instance_naming_a_non_gain_field_is_a_typed_error ... ok
+test drm::fault::tests::a_dynamics_fault_on_a_controller_instance_changes_each_declared_gain_independently ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_changes_a_diagonal_inertia_component ... ok
+test drm::fault::tests::a_dynamics_fault_on_a_star_tracker_instance_naming_a_non_noise_field_is_a_typed_error ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_changes_an_off_diagonal_inertia_component_symmetrically ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_disables_a_wheel ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_halves_a_wheel_momentum_limit ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_naming_an_out_of_range_wheel_index_is_a_typed_error ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_attitude_instance_naming_an_unrecognized_target_is_a_typed_error ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_imu_instance_changes_each_declared_noise_sigma_independently ... ok
+test drm::fault::tests::a_dynamics_fault_on_an_imu_instance_naming_a_non_noise_field_is_a_typed_error ... ok
+test drm::fault::tests::a_non_parameter_fault_kind_is_a_typed_error ... ok
+test drm::fault::tests::a_parameter_fault_on_a_native_binding_changes_only_the_named_axis ... ok
+test drm::fault::tests::a_port_fault_missing_its_scenario_seed_is_a_typed_error ... ok
+test drm::fault::tests::a_seeded_port_fault_is_refused_explicitly_not_silently_skipped ... ok
+test drm::fault::tests::a_seeded_sensor_fault_is_refused_explicitly_not_silently_skipped ... ok
+test drm::fault::tests::an_unrecognized_port_kind_is_a_typed_error_before_any_seed_lookup ... ok
+test drm::fault::tests::epoch_id_order_sorts_by_epoch_then_by_id ... ok
+test drm::fault::tests::is_container_power_cycle_matches_hardware_power_cycle_only ... ok
+test drm::fault::tests::is_legacy_dynamics_power_cycle_matches_only_the_retired_shape ... ok
+test drm::fault::tests::rebind_at_state_drops_keplerian_fields_and_sets_cartesian_km ... ok
+test drm::fault::tests::the_refusal_carries_the_deterministic_draw_reproducibly ... ok
+test drm::hash::tests::hash_changes_when_content_changes ... ok
+test drm::hash::tests::hash_is_stable_and_excludes_the_hash_field_itself ... ok
+test drm::hash::tests::map_field_ordering_does_not_affect_the_hash ... ok
+test drm::hash::tests::verify_drm_hash_accepts_a_correct_hash_and_refuses_a_tampered_one ... ok
+test drm::maneuver::tests::a_missing_dv_component_is_a_typed_error ... ok
+test drm::maneuver::tests::a_missing_frame_id_is_a_typed_error ... ok
+test drm::hash::tests::verify_sos_hash_and_verify_system_hash_refuse_a_tampered_copy_too ... ok
+test drm::maneuver::tests::a_non_maneuver_kind_is_a_typed_error ... ok
+test drm::maneuver::tests::a_recognized_but_unsupported_frame_is_a_typed_error ... ok
+test drm::maneuver::tests::an_extra_attribute_key_is_a_typed_error ... ok
+test drm::maneuver::tests::an_unknown_values_key_is_a_typed_error_not_silently_ignored ... ok
+test drm::maneuver::tests::an_unrecognized_frame_name_is_a_typed_error ... ok
+test drm::maneuver::tests::burn_triad_falls_back_to_the_canonical_basis_for_a_zero_dv ... ok
+test drm::maneuver::tests::an_unrealized_frame_panics_rather_than_silently_transforming - should panic ... ok
+test drm::maneuver::tests::burn_triad_is_orthonormal_and_right_handed_with_u_along_dv ... ok
+test drm::maneuver::tests::different_event_ids_perturb_the_same_dv_differently ... ok
+test drm::maneuver::tests::dv_to_apply_under_either_mode_is_a_no_op_for_a_perfect_burn ... ok
+test drm::maneuver::tests::dv_to_apply_under_nominal_never_perturbs_even_with_a_non_zero_execution_error_block ... ok
+test drm::maneuver::tests::dv_to_apply_under_sampled_draws_a_realization_when_execution_error_is_declared ... ok
+test drm::maneuver::tests::execution_error_mode_defaults_to_nominal ... ok
+test drm::maneuver::tests::gates_sigmas_are_exactly_zero_for_a_zero_sigma_block_at_any_dv ... ok
+test drm::maneuver::tests::gates_sigmas_combine_fixed_and_proportional_in_quadrature ... ok
+test drm::maneuver::tests::gates_sigmas_scale_with_dv_magnitude_for_a_proportional_only_block ... ok
+test drm::maneuver::tests::inertial_frame_is_identity ... ok
+test drm::maneuver::tests::inertial_triad_stays_orthonormal_through_a_vnb_rotation ... ok
+test drm::maneuver::tests::inject_gates_covariance_adds_rather_than_overwrites ... ok
+test drm::maneuver::tests::inject_gates_covariance_is_a_zero_matrix_for_zero_sigmas ... ok
+test drm::maneuver::tests::inject_gates_covariance_matches_the_hand_derived_isotropic_case ... ok
+test drm::maneuver::tests::missing_instance_is_a_typed_error ... ok
+test drm::fault::tests::calling_realize_unapplied_fault_on_a_dynamics_fault_panics - should panic ... ok
+test drm::maneuver::tests::parse_accepts_a_present_zero_sigma_execution_error_block ... ok
+test drm::maneuver::tests::parse_leaves_execution_error_none_when_absent_never_defaulting_it ... ok
+test drm::maneuver::tests::parse_refuses_a_non_finite_sigma ... ok
+test drm::maneuver::tests::parses_a_well_formed_vnb_maneuver ... ok
+test drm::maneuver::tests::ric_cross_track_burn_equals_n_plus_z ... ok
+test drm::maneuver::tests::ric_in_track_burn_is_n_cross_r_equals_plus_y ... ok
+test drm::maneuver::tests::ric_radial_burn_adds_along_x ... ok
+test drm::maneuver::tests::sample_execution_error_is_deterministic_for_the_same_seed_and_id ... ok
+test drm::maneuver::tests::sample_execution_error_with_zero_sigma_reproduces_the_commanded_dv_exactly ... ok
+test drm::maneuver::tests::validate_execution_error_seed_accepts_a_known_key ... ok
+test drm::maneuver::tests::validate_execution_error_seed_is_a_no_op_for_a_perfect_burn ... ok
+test drm::maneuver::tests::validate_execution_error_seed_refuses_an_unknown_key ... ok
+test drm::maneuver::tests::vnb_binormal_burn_is_v_cross_n_equals_plus_x ... ok
+test drm::maneuver::tests::vnb_normal_burn_adds_along_orbit_normal_plus_z ... ok
+test drm::maneuver::tests::vnb_prograde_burn_adds_along_velocity ... ok
+test drm::maneuver::tests::vvlh_matches_its_documented_axes ... ok
+test drm::schema::tests::a_port_with_an_unknown_direction_name_is_a_typed_error ... ok
+test drm::schema::tests::a_port_with_an_unknown_kind_name_is_a_typed_error ... ok
+test drm::schema::tests::a_packet_field_bit_width_disagreeing_with_a_fixed_width_type_is_a_typed_load_error ... ok
+test drm::schema::tests::a_packet_field_extent_past_user_data_bytes_is_a_typed_load_error ... ok
+test drm::schema::tests::a_system_definition_with_no_state_space_leaves_it_unset ... ok
+test drm::schema::tests::an_empty_packet_codecs_list_still_parses_exactly_like_before_this_field_was_typed ... ok
+test drm::schema::tests::a_scenario_event_of_an_unmodeled_kind_is_a_typed_load_error ... ok
+test drm::schema::tests::a_maneuver_event_with_an_unrecognized_frame_is_a_typed_load_error ... ok
+test drm::schema::tests::an_empty_frames_list_still_parses_exactly_like_before_this_field_was_typed ... ok
+test drm::schema::tests::an_absent_execution_error_block_stays_none_not_defaulted ... ok
+test drm::schema::tests::an_empty_port_list_still_parses_exactly_like_before_this_field_was_typed ... ok
+test drm::schema::tests::duplicate_apids_within_one_system_definition_are_a_typed_load_error ... ok
+test drm::schema::tests::a_frame_declaring_two_origin_fields_at_once_is_a_typed_load_error ... ok
+test drm::schema::tests::a_frame_with_an_unrecognized_axes_name_is_a_typed_load_error ... ok
+test drm::schema::tests::a_maneuver_execution_error_with_a_non_finite_sigma_is_a_typed_load_error ... ok
+test drm::schema::tests::a_maneuver_execution_error_seed_absent_from_scenario_seeds_is_a_typed_load_error ... ok
+test drm::schema::tests::parses_a_declared_packet_codec_and_round_trips_through_the_typed_loader ... ok
+test drm::schema::tests::an_execution_error_block_missing_one_sigma_field_is_a_hard_yaml_error_not_a_silent_zero ... ok
+test drm::schema::tests::parses_a_declared_scenario_frame_with_a_body_origin ... ok
+test drm::schema::tests::container_binding_round_trips_through_the_oneof ... ok
+test drm::schema::tests::parses_a_declared_state_space_with_id_equal_to_state_space_id ... ok
+test drm::schema::tests::parses_a_minimal_drm_and_maps_enums_by_their_proto_names ... ok
+test drm::schema::tests::parses_a_typed_maneuver_scenario_event ... ok
+test drm::schema::tests::parses_a_typed_maneuver_execution_error_block ... ok
+test drm::schema::tests::parses_a_typed_port_list_with_timing_and_matches_enums_by_their_proto_names ... ok
+test drm::schema::tests::state_space_component_unknown_unit_name_is_a_typed_error ... ok
+test drm::schema::tests::refuses_an_unmodeled_nonempty_field_rather_than_dropping_it ... ok
+test drm::schema::tests::unknown_enum_name_is_a_typed_error_not_a_silent_zero ... ok
+test drm::sensors::tests::composing_by_quaternion_multiplication_not_add_and_renormalize_is_structurally_required ... ok
+test drm::sensors::tests::imu_emits_at_its_own_declared_rate_not_the_kernel_step_rate ... ok
+test drm::sensors::tests::different_seed_produces_different_star_tracker_output ... ok
+test drm::sensors::tests::attitude_instance_is_measured_by_both_sensors_through_the_real_router ... ok
+test drm::sensors::tests::imu_constructed_at_a_realistic_epoch_emits_exactly_once_per_declared_period ... ok
+test drm::sensors::tests::imu_new_refuses_a_malformed_codec_via_validate_codec ... ok
+test drm::sensors::tests::different_seed_produces_different_imu_output ... ok
+test drm::sensors::tests::parse_imu_spec_accepts_a_well_formed_spec_with_defaults ... ok
+test drm::sensors::tests::parse_imu_spec_refuses_a_negative_bias_rw_sigma ... ok
+test drm::sensors::tests::parse_imu_spec_refuses_a_partial_true_specific_force_group ... ok
+test drm::sensors::tests::parse_imu_spec_refuses_a_wrong_declared_unit ... ok
+test drm::sensors::tests::parse_imu_spec_refuses_an_unrecognized_parameter ... ok
+test drm::sensors::tests::parse_star_tracker_spec_accepts_a_well_formed_spec_with_default_identity_mount ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_a_missing_seed ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_a_non_integer_seed ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_a_non_positive_update_rate ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_a_non_unit_mount_quaternion ... ok
+test drm::sensors::tests::measured_quaternion_is_always_unit_norm_to_machine_precision ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_an_unrecognized_parameter ... ok
+test drm::sensors::tests::parse_star_tracker_spec_refuses_a_partial_mount_quaternion_group ... ok
+test drm::sensors::tests::quat_mul_identity_is_a_no_op_on_either_side ... ok
+test drm::sensors::tests::quat_mul_of_a_quaternion_and_its_conjugate_is_identity_for_a_unit_quaternion ... ok
+test drm::sensors::tests::rotate_vector_by_quat_matches_the_textbook_rotation_about_z ... ok
+test drm::sensors::tests::small_angle_to_quat_and_back_round_trips ... ok
+test drm::sensors::tests::star_tracker_constructed_at_a_realistic_epoch_emits_exactly_once_per_declared_period ... ok
+test drm::attitude::tests::quaternion_norm_drift_over_a_long_run_is_bounded_and_disclosed ... ok
+test drm::sensors::tests::star_tracker_emits_at_its_own_declared_rate_not_the_kernel_step_rate ... ok
+test drm::sensors::tests::star_tracker_emits_nothing_before_any_truth_has_arrived ... ok
+test drm::sensors::tests::same_seed_produces_byte_identical_imu_output_across_two_runs ... ok
+test drm::sensors::tests::star_tracker_new_refuses_a_codec_missing_a_required_field ... ok
+test drm::sensors::tests::same_seed_produces_byte_identical_star_tracker_output_across_two_runs ... ok
+test expr::eval::tests::a_bare_reference_outside_an_aggregate_is_a_typed_error_not_a_series_dump ... ok
+test expr::eval::tests::a_top_level_comparison_evaluates_to_0_or_1_dimensionless ... ok
+test expr::eval::tests::duration_of_a_condition_that_holds_for_part_of_the_run ... ok
+test expr::eval::tests::duration_of_the_worked_example_over_a_condition_that_holds_throughout ... ok
+test expr::eval::tests::duration_requires_a_comparison_argument ... ok
+test expr::eval::tests::evaluates_arithmetic_with_unit_propagation ... ok
+test expr::eval::tests::evaluates_entity_refs_and_aggregates_over_a_straight_line ... ok
+test expr::eval::tests::interpolates_at_a_time_between_native_samples ... ok
+test expr::eval::tests::range_and_duration_are_now_recognized_functions_unlike_before_the_amendment ... ok
+test expr::eval::tests::range_at_a_time_is_the_euclidean_distance_between_two_entities ... ok
+test expr::lexer::tests::lexes_a_bare_number_as_dimensionless ... ok
+test expr::lexer::tests::lexes_a_compound_unit_only_when_contiguous ... ok
+test expr::lexer::tests::lexes_a_leading_dot_fraction ... ok
+test expr::lexer::tests::lexes_a_number_with_a_simple_unit ... ok
+test expr::lexer::tests::lexes_dotted_refs_calls_and_at_time ... ok
+test expr::lexer::tests::lexes_every_comparison_operator_including_the_two_char_forms ... ok
+test expr::lexer::tests::refuses_an_unrecognized_character ... ok
+test expr::lexer::tests::word_boundary_stops_a_false_partial_match ... ok
+test expr::objective::tests::a_malformed_expression_is_returned_as_a_parse_error_not_folded_into_pass_false ... ok
+test expr::objective::tests::moe_evaluates_to_a_value_with_a_unit ... ok
+test expr::objective::tests::objective_fails_outside_tolerance ... ok
+test expr::objective::tests::objective_passes_within_tolerance ... ok
+test expr::objective::tests::objective_with_a_wrong_declared_unit_is_a_typed_error_before_evaluation ... ok
+test expr::parser::tests::comparison_is_non_associative_a_lt_b_lt_c_is_a_parse_error ... ok
+test expr::parser::tests::disambiguates_call_from_dotted_ref ... ok
+test expr::parser::tests::parses_a_number_with_unit ... ok
+test expr::parser::tests::parses_a_ref_with_at_time_forms ... ok
+test expr::parser::tests::parses_arithmetic_with_precedence_and_left_associativity ... ok
+test expr::parser::tests::parses_at_time_on_a_call_the_amendments_fix_for_the_pre_amendment_gap ... ok
+test expr::parser::tests::parses_every_comparison_operator ... ok
+test expr::parser::tests::parses_nested_calls_and_multiple_arguments ... ok
+test expr::parser::tests::parses_the_sec_6_worked_example_comparison_and_duration ... ok
+test expr::parser::tests::parses_unary_minus_and_parens ... ok
+test expr::parser::tests::reports_position_on_a_dangling_operator ... ok
+test expr::runproducts::tests::counts_events_by_kind_and_finds_an_event_epoch_by_name ... ok
+test expr::runproducts::tests::resolves_an_entity_component_at_an_exact_sample ... ok
+test expr::runproducts::tests::unknown_entity_and_component_are_typed_errors ... ok
+test expr::typecheck::tests::a_bare_range_outside_duration_or_an_aggregate_is_refused ... ok
+test expr::typecheck::tests::a_bare_reference_outside_an_aggregate_is_refused ... ok
+test expr::typecheck::tests::a_comparison_across_mismatched_units_is_refused ... ok
+test expr::typecheck::tests::a_top_level_comparison_of_two_meter_quantities_is_dimensionless ... ok
+test expr::typecheck::tests::a_unit_mismatch_is_caught_before_any_evaluation ... ok
+test expr::typecheck::tests::at_time_on_something_other_than_a_reference_or_range_is_refused ... ok
+test expr::typecheck::tests::duration_of_the_sec_6_worked_example_typechecks_to_seconds ... ok
+test expr::typecheck::tests::duration_requires_a_comparison_argument ... ok
+test expr::typecheck::tests::integral_of_a_velocity_is_a_distance ... ok
+test expr::typecheck::tests::range_at_time_typechecks_to_meter ... ok
+test expr::typecheck::tests::scaling_by_a_dimensionless_literal_is_fine ... ok
+test expr::units::tests::add_sub_requires_identical_units ... ok
+test expr::units::tests::div_by_self_is_dimensionless ... ok
+test expr::units::tests::mul_div_follows_declared_si_relationships ... ok
+test expr::units::tests::mul_div_refuses_an_undeclared_composition_rather_than_invent_a_unit ... ok
+test expr::units::tests::mul_div_scales_freely_by_dimensionless ... ok
+test expr::units::tests::parses_every_documented_example_token ... ok
+test interpolate::tests::classify_places_a_bare_6_component_space_as_position_velocity_only ... ok
+test interpolate::tests::classify_recognizes_a_mode_or_counter_label_as_zero_order_hold ... ok
+test interpolate::tests::classify_recognizes_rates_masses_and_other_scalars_as_linear ... ok
+test interpolate::tests::classify_refuses_an_stm_looking_label_as_never_interpolated_not_unclassifiable ... ok
+test interpolate::tests::classify_refuses_an_undeclared_unit_rather_than_guess ... ok
+test interpolate::tests::classify_splits_a_10_component_attitude_space_into_hermite_then_quaternion ... ok
+test interpolate::tests::components_past_six_pass_through_the_nearer_endpoint ... ok
+test interpolate::tests::exact_for_a_true_cubic_position_function ... ok
+test interpolate::tests::exact_for_constant_velocity_motion ... ok
+test interpolate::tests::interpolate_by_state_space_discrete_group_holds_the_nearer_endpoint ... ok
+test interpolate::tests::interpolate_by_state_space_full_10_component_attitude_sample_combines_hermite_and_slerp ... ok
+test interpolate::tests::interpolate_by_state_space_position_velocity_group_matches_plain_hermite_velocity ... ok
+test interpolate::tests::interpolate_by_state_space_rejects_a_length_mismatch ... ok
+test interpolate::tests::interpolate_by_state_space_rejects_a_non_unit_norm_quaternion_sample ... ok
+test interpolate::tests::interpolate_by_state_space_scalar_group_is_exactly_linear ... ok
+test interpolate::tests::reproduces_the_endpoints_exactly ... ok
+test interpolate::tests::slerp_between_antipodal_representations_takes_the_short_path_and_stays_unit_norm ... ok
+test interpolate::tests::rejects_non_increasing_time - should panic ... ok
+test kernel::tests::covariance_reads_none_for_an_empty_wire_cov_and_round_trips_a_populated_one ... ok
+test kernel::tests::hetero_kernel_outputs_carries_step_result_outputs_through_run ... ok
+test kernel::tests::hetero_kernel_run_succeeds_through_the_base_period_gate_with_non_harmonic_rates ... ok
+test kernel::tests::hetero_kernel_run_produces_one_trajectory_per_system_sampled_at_the_output_rate ... ok
+test kernel::tests::hetero_kernel_run_rejects_a_horizon_that_does_not_land_on_the_output_rate - should panic ... ok
+test kernel::tests::hetero_kernel_run_with_covariance_panics_on_a_system_missing_from_physical_dims - should panic ... ok
+test kernel::tests::hetero_kernel_run_with_covariance_returns_a_typed_hygiene_error_for_an_indefinite_covariance_and_counts_it ... ok
+test kernel::tests::hetero_kernel_run_with_ports_populates_native_interpolated_and_held_kind_across_a_multi_rate_run ... ok
+test kernel::tests::hetero_kernel_run_with_covariance_repairs_an_indefinite_covariance_when_projection_is_opted_into ... ok
+test kernel::tests::hetero_kernel_run_with_covariance_matches_the_closed_form_rotation_and_leaves_unrequested_systems_empty ... ok
+test kernel::tests::hetero_kernel_run_with_covariance_at_a_coarser_instance_period_propagates_only_on_the_native_grid ... ok
+test kernel::tests::kernel_outputs_carries_step_result_outputs_through_run ... ok
+test kernel::tests::run_produces_one_trajectory_per_system_sampled_at_the_output_rate ... ok
+test kernel::tests::run_rejects_a_horizon_that_does_not_land_on_the_output_rate - should panic ... ok
+test kernel::tests::run_with_covariance_at_a_coarser_instance_period_propagates_only_on_the_native_grid ... ok
+test kernel::tests::run_with_covariance_populates_native_at_the_instance_grid_and_interpolated_between ... ok
+test kernel::tests::run_with_covariance_matches_the_closed_form_rotation_and_leaves_unrequested_systems_empty ... ok
+test kernel::tests::run_with_covariance_repairs_an_indefinite_covariance_when_projection_is_opted_into ... ok
+test kernel::tests::run_with_covariance_returns_a_typed_hygiene_error_for_an_indefinite_covariance_and_counts_it ... ok
+test ports::tests::decode_ccsds_message_of_an_unknown_apid_is_a_typed_error ... ok
+test ports::tests::encode_and_decode_ccsds_message_round_trip_through_a_port_message ... ok
+test ports::tests::sorted_inbox_of_empty_input_is_an_empty_inbox ... ok
+test ports::tests::sorted_inbox_orders_by_port_then_sender_epoch_then_sender_instance ... ok
+test registry::tests::construct_attitude_builds_a_usable_handle_matching_the_declared_state ... ok
+test registry::tests::construct_attitude_controller_builds_a_usable_zero_dimensional_handle ... ok
+test registry::tests::construct_attitude_returns_a_typed_error_for_a_mismatched_state_space ... ok
+test registry::tests::construct_imu_builds_a_usable_six_dimensional_handle_with_zero_initial_bias ... ok
+test registry::tests::construct_native_builds_a_usable_boxed_model_matching_the_declared_state ... ok
+test registry::tests::construct_native_over_an_empty_spec_builds_a_zero_dimensional_handle ... ok
+test registry::tests::construct_remote_is_a_typed_refusal_naming_the_model_id ... ok
+test registry::tests::construct_star_tracker_builds_a_usable_zero_dimensional_handle ... ok
+test registry::tests::construct_star_tracker_returns_a_typed_error_for_a_codec_missing_a_required_field ... ok
+test registry::tests::into_boxed_erases_a_controller_and_preserves_its_step_with_ports_marker_outputs ... ok
+test registry::tests::into_boxed_erases_an_attitude_instance_and_a_wheel_torque_command_changes_the_propagated_wheel_momentum ... ok
+test registry::tests::kind_for_classifies_by_prefix ... ok
+test registry::tests::stm_seed_matches_stm_augmented_seed_shape ... ok
+test rng::tests::bernoulli_has_the_right_rate ... ok
+test rng::tests::bernoulli_of_zero_and_one_are_absolute ... ok
+test rng::tests::different_seeds_give_uncorrelated_streams ... ok
+test rng::tests::event_rng_is_deterministic_for_the_same_base_seed_and_id ... ok
+test rng::tests::event_substream_is_independent_of_other_events ... ok
+test rng::tests::oneseq_pcg64_matches_the_published_reference_vector ... ok
+test rng::tests::seed_for_is_a_direct_keyed_lookup_independent_of_how_the_map_was_built ... ok
+test rng::tests::low_entropy_seeds_are_well_separated ... ok
+test rng::tests::standard_normal_is_deterministic_for_the_same_seed ... ok
+test rng::tests::the_same_seed_gives_the_same_stream ... ok
+test rng::tests::uniform_range_maps_correctly ... ok
+test router::tests::a_connection_to_an_undeclared_port_is_a_typed_refusal ... ok
+test router::tests::a_connection_with_a_direction_mismatch_is_a_typed_refusal ... ok
+test router::tests::a_connection_with_a_kind_mismatch_is_a_typed_refusal ... ok
+test router::tests::a_connection_with_a_non_latency_link_model_is_a_typed_refusal ... ok
+test router::tests::a_message_on_a_port_with_no_matching_connection_is_dropped_not_an_error ... ok
+test router::tests::a_valid_connection_with_no_link_model_builds_and_delivers_with_zero_latency ... ok
+test router::tests::an_empty_connections_list_builds_trivially ... ok
+test router::tests::inout_ports_satisfy_either_end_of_a_connection ... ok
+test router::tests::pending_count_is_the_total_number_of_queued_messages_not_merely_whether_any_are_pending ... ok
+test router::tests::take_inbox_delivers_on_the_boundary_epoch_equal_to_availability_not_only_strictly_after ... ok
+test router::tests::take_inbox_holds_a_not_yet_available_message_across_multiple_calls_then_delivers_it_at_or_after_availability ... ok
+test router::tests::take_inbox_never_loses_messages_across_many_calls_regardless_of_latency ... ok
+test router::tests::the_latency_link_model_sums_both_ports_declared_latency ... ok
+test schedule::tests::advance_to_catches_a_coarser_system_up_past_the_target_rather_than_leaving_it_short ... ok
+test schedule::tests::a_system_stepped_faster_than_the_sample_rate_needs_no_interpolation_at_its_own_boundaries ... ok
+test schedule::tests::hetero_scheduler_advance_to_catches_a_coarser_system_up_past_the_target ... ok
+test schedule::tests::hetero_scheduler_base_period_ns_computes_the_gcd_and_passes_its_own_check ... ok
+test rng::tests::uniform_stays_in_range_and_has_the_right_moments ... ok
+test schedule::tests::hetero_scheduler_errors_carry_model_error_naming_the_model_id ... ok
+test schedule::tests::hetero_scheduler_model_error_from_a_failing_step_names_the_offending_model ... ok
+test schedule::tests::hetero_scheduler_out_of_range_sample_is_a_typed_error_not_extrapolation ... ok
+test schedule::tests::hetero_scheduler_sample_kind_is_native_at_recorded_step_times_and_between_strictly_inside ... ok
+test schedule::tests::hetero_scheduler_sample_held_is_fresh_at_the_seed_and_held_strictly_after_with_no_bracket_needed ... ok
+test schedule::tests::hetero_scheduler_system_ids_are_visited_in_sorted_order_regardless_of_registration_order ... ok
+test schedule::tests::sample_kind_is_native_at_recorded_step_times_and_between_strictly_inside ... ok
+test schedule::tests::sampling_between_native_steps_interpolates ... ok
+test schedule::tests::sampling_before_the_first_step_or_after_the_last_is_an_error_not_extrapolation ... ok
+test schedule::tests::system_ids_are_visited_in_sorted_order ... ok
+test schedule::tests::unknown_system_is_a_typed_error ... ok
+test trajectory::tests::attitude_wheels_state_space_declares_labels_and_units_for_every_component_and_classifies_cleanly ... ok
+test trajectory::tests::builds_a_trajectory_with_the_hermite_velocity_contract_declared ... ok
+test trajectory::tests::native_controller_empty_resolves_to_zero_components_and_classifies_cleanly ... ok
+test trajectory::tests::resolve_state_space_a_declared_override_is_never_checked_against_the_registrys_own_shape_for_the_same_id ... ok
+test trajectory::tests::resolve_state_space_accepts_a_declared_override_matching_the_id ... ok
+test trajectory::tests::resolve_state_space_falls_back_to_the_registry_when_absent ... ok
+test trajectory::tests::resolve_state_space_refuses_a_declared_component_the_interpolator_cannot_classify ... ok
+test trajectory::tests::resolve_state_space_refuses_an_id_mismatch_between_state_space_id_and_the_declared_id ... ok
+test trajectory::tests::resolve_state_space_refuses_an_unknown_id_when_nothing_is_declared ... ok
+test trajectory::tests::state_space_for_declares_the_10_component_attitude_shape_and_classifies_cleanly ... ok
+test schedule::tests::hetero_scheduler_drives_two_different_model_kinds_from_one_clock ... ok
+test trajectory::tests::state_space_for_declares_the_6_component_cartesian_shape ... ok
+test trajectory::tests::state_space_for_refuses_an_unknown_id_rather_than_guess ... ok
+test schedule::tests::two_systems_at_different_rates_are_both_driven_correctly_from_one_clock ... ok
+test rng::tests::standard_normal_has_zero_mean_and_unit_variance ... ok
+test drm::sensors::tests::imu_accel_white_noise_matches_its_declared_sigma_statistically ... ok
+test drm::sensors::tests::imu_gyro_white_noise_matches_its_declared_sigma_statistically ... ok
+test drm::sensors::tests::star_tracker_noise_sampling_matches_its_declared_sigma_statistically ... ok
+test drm::sensors::tests::imu_bias_single_step_variance_scales_linearly_with_dt_not_its_square_root_or_unscaled ... ok
+test drm::sensors::tests::imu_bias_variance_grows_linearly_with_elapsed_time ... ok
+test drm::executor::fixed_rotation_measurement_interval_tests::a_day_long_separation_would_have_failed_the_constancy_check_for_earthicrf ... ok
+test drm::executor::fixed_rotation_measurement_interval_tests::repeating_the_identical_epoch_gives_a_bit_identical_rotation_matrix ... ok
+test drm::sensors::tests::star_tracker_recovered_boresight_error_matches_its_declared_sigma_statistically ... ok
+
+test result: ok. 515 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.24s
+
+     Running tests/covariance_frame_conversion.rs (target/debug/deps/covariance_frame_conversion-01d79fa1bf76e1d8)
+
+running 1 test
+test drm_covariance_matches_r_p_rt_built_from_gmats_own_reported_rotation_in_earthbodyfixed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.97s
+
+     Running tests/demo_two_instance.rs (target/debug/deps/demo_two_instance-73dd84f32054a8e8)
+
+running 14 tests
+test demo_two_instance_earthicrf_fixed_rotation_q_is_filled_and_unit ... ok
+test declared_scenario_frame_wins_over_the_registry_default_through_the_real_loader ... ok
+test demo_two_instance_matches_the_golden_and_scores_its_objective ... ok
+test demo_two_instance_produces_a_small_number_of_port_command_events_not_thousands ... ok
+test demo_two_instance_signal_port_delivers_a_drag_sail_command_that_measurably_changes_the_arc ... ok
+test icrf_conversion_matches_the_genuine_gmat_reportfile ... ok
+test demo_two_instance_bystander_invariance_against_real_single_instance_gmat_runs ... ok
+test demo_ctrl_declares_an_empty_state_space_and_emits_no_trajectory_but_keeps_its_events ... ok
+test demo_two_instance_earthmj2000eq_fixed_rotation_q_stays_empty ... ok
+test covariance_is_declared_on_demo_mvr_only_and_the_asymmetry_is_load_bearing ... ok
+test demo_two_instance_earthbodyfixed_fixed_rotation_q_stays_empty ... ok
+test demo_two_instance_run_products_frames_include_icrf_and_the_mandatory_central_body_frames ... ok
+test icrf_round_trip_through_mj2000eq_is_the_identity_to_1e_minus_9_m ... ok
+test mandatory_frames_appear_even_when_the_instance_propagated_in_icrf_not_mj2000eq ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.67s
+
+     Running tests/drm_attitude.rs (target/debug/deps/drm_attitude-235864774be0f560)
+
+running 9 tests
+test attitude_state_space_classifies_quaternion_then_linear_scalar_body_rate ... ok
+test an_unclassifiable_component_in_an_attitude_shaped_state_space_is_a_typed_refusal ... ok
+test a_wheel_limit_fault_drm_runs_through_execute ... ok
+test execute_refuses_a_wheel_momentum_component_declared_with_the_torque_unit ... ok
+test covariance_requested_against_an_attitude_instance_is_a_typed_refusal_through_execute ... ok
+test a_torque_free_precession_drm_runs_through_execute_and_matches_the_closed_form ... ok
+test run_products_from_a_real_attitude_run_slerp_the_quaternion_and_linearly_interpolate_the_rest ... ok
+test a_dynamics_fault_halving_a_wheel_limit_changes_the_arc_by_the_precomputed_magnitude ... ok
+test a_maneuver_event_targeting_an_attitude_only_instance_is_a_typed_load_error_through_execute ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s
+
+     Running tests/drm_attitude_control.rs (target/debug/deps/drm_attitude_control-d59988ab4668e6e8)
+
+running 9 tests
+test sanity_the_fixtures_own_declared_gains_are_exactly_critically_damped ... ok
+test expected_theta_ratio_matches_hand_computed_values ... ok
+test the_final_pointing_error_is_meaningfully_smaller_than_the_initial_one_and_is_not_exactly_zero ... ok
+test the_error_never_overshoots_past_the_closed_form_envelope ... ok
+test the_wheel_never_approaches_its_declared_saturation_limit ... ok
+test a_maneuver_targeting_the_controller_instance_is_a_typed_load_error_through_execute ... ok
+test a_different_star_tracker_seed_changes_the_propagated_pointing_error_curve ... ok
+test the_measured_pointing_error_tracks_the_closed_form_decay_at_two_widely_separated_checkpoints ... ok
+test two_runs_of_the_control_drm_with_the_same_seed_are_byte_identical_for_the_imu_bias_trajectory ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.13s
+
+     Running tests/drm_attitude_control_cfs.rs (target/debug/deps/drm_attitude_control_cfs-512bd40af288966c)
+
+running 3 tests
+test the_cfs_bound_loop_settles_and_tracks_the_native_run ... ok
+test byte_identical_run_products_across_two_separately_spawned_cfs_containers ... ok
+test a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues has been running for over 60 seconds
+test a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 154.18s
+
+     Running tests/drm_attitude_control_renode.rs (target/debug/deps/drm_attitude_control_renode-c7ba7dd1b4dde118)
+
+running 1 test
+test byte_identical_port_traffic_between_posix_container_and_renode has been running for over 60 seconds
+test byte_identical_port_traffic_between_posix_container_and_renode ... FAILED
+
+failures:
+
+---- byte_identical_port_traffic_between_posix_container_and_renode stdout ----
+posix-container run: 1s @ 10Hz in 16.31s wall time
+Renode scratch dir (socket, monitor/uart0 logs, shim+bridge stdout/stderr): /tmp/av-renode-m24c-46637
+Renode bridge ready (boot + HELLO/BIND handshake path primed) in 23.61s wall time
+
+thread 'byte_identical_port_traffic_between_posix_container_and_renode' (15982107) panicked at crates/av-kernel/tests/drm_attitude_control_renode.rs:515:128:
+the Renode-bound run must execute end to end through the real RTEMS/cFE/IO_LOCKSTEP guest: ContainerProtocol { instance: "controller", source: StepRpc { detail: "status: Aborted, message: \"the peer closed the connection cleanly between frames\", details: [], metadata: MetadataMap { headers: {\"content-type\": \"application/grpc\", \"date\": \"Mon, 07 Sep 2026 04:00:23 GMT\", \"content-length\": \"0\"} }" } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    byte_identical_port_traffic_between_posix_container_and_renode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 149.01s
+
+error: test failed, to rerun pass `-p av-kernel --test drm_attitude_control_renode`

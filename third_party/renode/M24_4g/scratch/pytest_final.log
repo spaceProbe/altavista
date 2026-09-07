@@ -1,0 +1,265 @@
+........................................................................ [ 17%]
+........................................................................ [ 34%]
+........................................................................ [ 51%]
+........................................................................ [ 68%]
+..................
+globe LOD tile selection (web/js/globe_lod_check.mjs):
+  residentBudget=32 maxResidentObserved=32 budgetRespected=True
+  cancelledCount=24 evictedCount=5
+  maxLevelFar(GEO)=0 maxLevelNear(LEO)=5
+  step 0: alt=  35786000 m  tiles=  2  maxLevel=0  resident=  2  pending=  0
+  step 1: alt=  20000000 m  tiles=  2  maxLevel=0  resident=  2  pending=  0
+  step 2: alt=   2000000 m  tiles= 14  maxLevel=3  resident= 10  pending=  5
+  step 3: alt=    400000 m  tiles= 26  maxLevel=5  resident= 18  pending=  9
+  step 4: alt=    400000 m  tiles= 26  maxLevel=5  resident= 26  pending= 17
+  step 5: alt=    380000 m  tiles= 29  maxLevel=6  resident= 32  pending= 12
+  step 6: alt=   5000000 m  tiles=  8  maxLevel=2  resident= 32  pending=  0
+  step 7: alt=  36000000 m  tiles=  2  maxLevel=0  resident= 32  pending=  0
+....
+RPO precision with the globe present (web/js/scene_jitter_harness.mjs):
+  errWithM (globe present)  = 3.385367e-06 m  (bound 0.01 m)
+  errWithM (no-globe baseline) = 3.385367e-06 m
+  matchesBaselineExactly = True
+  globe tiles selected at RPO/LEO camera distance = 38
+  globe tile vertex max magnitude = 6.378137 scene units (bound 65.0)
+.....
+3D Tiles overlay LOD tile selection (web/js/tiles3d_check.mjs):
+  residentBudget=24 maxResidentObserved=24 budgetRespected=True
+  cancelledCount=50 evictedCount=14
+  maxLevelFar=0 maxLevelNear=3 tilesetTileCount=85
+           far: count=  1  maxLevel=0  resident=  1  pending=  0
+    descending: count=  1  maxLevel=0  resident=  1  pending=  0
+           mid: count=  4  maxLevel=1  resident=  5  pending=  0
+      close-sw: count= 43  maxLevel=3  resident= 13  pending= 35
+    close-sw-2: count= 49  maxLevel=3  resident= 21  pending= 33
+       jump-ne: count= 43  maxLevel=3  resident= 24  pending= 35
+     jump-ne-2: count= 49  maxLevel=3  resident= 24  pending= 29
+         far-2: count=  1  maxLevel=0  resident= 24  pending=  0
+....
+3D Tiles overlay geo-reference (web/js/tiles3d_geo_check.mjs):
+  ecefFromTransform = {'x': -1288674.490281889, 'y': -4720147.653414082, 'z': 4080322.2260798607}
+  ecefFromMetadata  = {'x': -1288674.490281889, 'y': -4720147.653414082, 'z': 4080322.2260798607}
+  translationErrM   = 0.000e+00 m
+  geoReference      = {'lonDeg': -105.2705, 'latDeg': 40.015, 'heightM': 1650, 'note': "root.transform's translation column (indices 12-14) is geodeticToEcef(lonDeg, latDeg, heightM); its 3 rotation columns (indices 0-2, 4-6, 8-10) are the East/North/Up unit basis at that point. web/js/tiles_layer.js and tests/test_viewer_globe.py cross-check this against web/js/globe_lod.js's geodeticToEcef -- see gen_3dtiles_fixture.py."}
+  allPass = True (14 checks)
+...
+globe imagery source (web/js/globe_imagery_check.mjs):
+  configured template: https://tiles.example.test/v3/{z}/{x}/{y}.png?session=abc123&fmt=webp
+  configured tiles requested: 20
+  first configured URL: https://tiles.example.test/v3/1/0/0.png?session=abc123&fmt=webp
+  default imageryUrl used: ./fixtures/tiles/{z}/{x}/{y}.png
+  default tiles requested: 20
+  verbatimTemplateUsed=True defaultProfileUsesTheOfflineFixture=True
+........
+measured jitter (metres) -- origin.js arithmetic in isolation:
+scene            with FO      without FO       bound
+LEO         1.014328e-06    1.340913e-01      1.0000
+Moon        3.235945e-07    9.349892e-01      1.0000
+Mars        1.150430e-05    5.446781e+02      1.0000
+RPO         2.526868e-07    1.358032e-02      0.0100
+.......
+measured jitter (metres) -- live trajectory-geometry code path:
+scene            with FO      without FO       bound
+LEO         1.014226e-06    1.154087e-01      1.0000
+Moon        3.235945e-07    2.058587e+00      1.0000
+Mars        7.770726e-06    1.877735e+03      1.0000
+RPO         3.385367e-06    1.358032e-02      0.0100
+..
+RIC/VNB/VVLH axes vs GMAT (web/js/fixtures/ric_axes_fixture.json): worst residual = 4.710e-16 (bound 1e-09) at {'t': 31041.573345305344, 'kind': 'vvlh'}
+t (A1MJD)           kind      axesResidual    quatResidual
+31041.500429        ric          1.665e-16       1.755e-16
+31041.500429        vnb          1.110e-16       2.483e-16
+31041.500429        vvlh         1.665e-16       2.483e-16
+31041.519873        ric          1.110e-16       2.238e-16
+31041.519873        vnb          1.110e-16       1.144e-16
+31041.519873        vvlh         1.110e-16       1.570e-16
+31041.549040        ric          1.110e-16       1.110e-16
+31041.549040        vnb          2.220e-16       1.570e-16
+31041.549040        vvlh         1.110e-16       1.241e-16
+31041.573345        ric          1.110e-16       4.154e-16
+31041.573345        vnb          1.110e-16       2.220e-16
+31041.573345        vvlh         1.110e-16       4.710e-16
+31041.597512        ric          1.110e-16       4.441e-16
+31041.597512        vnb          1.110e-16       2.517e-16
+31041.597512        vvlh         1.110e-16       4.175e-16
+...
+NadirPointing coarse-slerp vs fine-GMAT-truth (241 fine samples @ 5s, 21 coarse samples @ 60s spacing): max error = 4.713573e-05 deg, mean error = 1.894365e-05 deg (bound 0.01 deg)
+....
+fixed_rotation_q (question 129): EarthICRF vs EarthMJ2000Eq, demo run's own last sample:
+  rotation angle from the quaternion = 2.269677e-07 rad
+  orbit radius = 6870517.489 m
+  expected displacement (angle * radius, stated before measuring) = 1.559386 m
+  precise expected displacement (geometry-corrected) = 1.328729 m
+  measured displacement (real viewer frame graph) = 1.329660 m
+  residual vs. GMAT's own direct conversion = 8.126203e-04 m
+.............. [ 85%]
+..........
+M26.2 windowing core checks (web/js/layout/layout_tree_check.mjs):
+  [PASS] split.resultHasThreeLeaves
+  [PASS] split.originalLeafSurvivesWithSamePanelId
+  [PASS] split.newLeafHasRequestedPanelId
+  [PASS] split.autoGeneratedIdsUseThePlainPrefixedCounterScheme
+  [PASS] split.resultIsAValidTree
+  [PASS] close.returnsToTwoLeaves
+  [PASS] close.survivingSiblingIsUnchanged
+  [PASS] close.rootStructureMatchesOriginalBase
+  [PASS] close.rejectsLastPane
+  [PASS] close.rejectsLastPaneWithLayoutValidationError
+  [PASS] resize.updatesExactRatio
+  [PASS] resize.clampsAboveMax
+  [PASS] resize.clampsBelowMin
+  [PASS] resize.unknownSplitIdThrows
+  [PASS] collapse.setsCollapsedTrue
+  [PASS] collapse.preservesAncestorRatio
+  [PASS] collapse.restoreSetsCollapsedFalse
+  [PASS] collapse.restorePreservesAncestorRatioExactly
+  [PASS] collapse.restoreReproducesPreCollapseTreeExactly
+  [PASS] roundtrip.deserializedEqualsOriginalByValue
+  [PASS] roundtrip.reserializedJsonIsByteIdentical
+  [PASS] roundtrip.collapsedFlagSurvives
+  [PASS] invalidRejected.malformedJsonText
+  [PASS] invalidRejected.missingChildrenOnSplit
+  [PASS] invalidRejected.oneChildInsteadOfTwo
+  [PASS] invalidRejected.duplicateIds
+  [PASS] invalidRejected.ratioOutOfRange
+  [PASS] invalidRejected.ratioZero
+  [PASS] invalidRejected.unknownNodeType
+  [PASS] invalidRejected.unknownDirection
+  [PASS] invalidRejected.leafMissingPanelId
+  [PASS] invalidRejected.nullTree
+  [PASS] persistence.roundTripsAValidSavedLayout
+  [PASS] persistence.emptyStorageYieldsDefaultWithNoError
+  [PASS] persistence.corruptStoredLayoutYieldsNonNullError
+  [PASS] persistence.corruptStoredLayoutStillReturnsAUsableDefaultTree
+  [PASS] persistence.corruptStoredStringIsNeverOverwritten
+  [PASS] defaultLayout.knownProfileImageryResolvesToBaseLayout
+  [PASS] defaultLayout.unrecognizedImageryFallsBackToAValidLayoutRatherThanThrowing
+  [PASS] defaultLayout.registeringANewSignatureActuallyChangesTheResult
+  [PASS] assignPanel.setsTheTargetLeafsPanelId
+  [PASS] assignPanel.leavesOtherLeavesAlone
+  [PASS] assignPanel.movingAnAlreadyPlacedSingletonKeepsPanelIdsUnique
+  [PASS] assignPanel.displacedLeafGetsAFreshEmptyPlaceholderNotTheOldPanelId
+  [PASS] assignPanel.targetLeafActuallyGotTheMovedPanel
+  [PASS] assignPanel.unknownLeafIdThrowsLayoutValidationError
+  [PASS] availablePanelChoices.factoryTypeAlwaysOffered
+  [PASS] availablePanelChoices.singletonAlreadyUsedByANOTHERLeafIsNotOffered
+  [PASS] availablePanelChoices.singletonUsedByTHISSAMELeafIsStillOffered(notANoOpBlock)
+  [PASS] availablePanelChoices.everyRegisteredTypeAccountedFor
+  allPass = True (50 checks)
+...............
+panels_check.mjs: 38 checks, allPass=True
+  [PASS] ecefToGeodeticDeg: equatorial point on +Y axis is lon=90, lat=0 (hand-derived, not round-tripped)
+  [PASS] ecefToGeodeticDeg: equatorial point on -X axis is lon=180 or -180, lat=0
+  [PASS] ecefToGeodeticDeg: north pole (0,0,polar radius) is lat=90 (hand-derived from ellipsoid symmetry)
+  [PASS] ecefToGeodeticDeg: south pole is lat=-90
+  [PASS] ecefToGeodeticDeg: round-trips geodeticToEcef to within 1e-6 deg / 1e-3 m
+  [PASS] bodyFixedPositionKm: identity body quaternion + zero body position is the identity transform
+  [PASS] groundTrack: real demo_flt sample 0 lonDeg matches independent Python computation
+  [PASS] groundTrack: real demo_flt sample 0 latDeg matches independent Python computation
+  [PASS] groundTrack: same sample via lonLatFromScenarioFramePosition (single-point API) agrees with the batch API
+  [PASS] groundTrack: returns one entry per recorded trajectory sample
+  [PASS] objectiveRows: exactly 3 rows for the real fixture (demo_flt_rmag_at_end, demo_mvr_rmag_at_end, demo_flt_cd_at_end)
+  [PASS] objectiveRows: demo_flt_rmag_at_end is a PASSED objective (real fixture value)
+  [PASS] objectiveRows: the other two real scores are measures with passed === null (never coerced to false)
+  [PASS] objectiveRows: absent scores (e.g. a pre-M26.4b cached scenario) yields an empty array, not a throw
+  [PASS] timelineEvents: exactly the fault + port_command events from the real fixture (2 total)
+  [PASS] timelineEvents: excludes lifecycle/maneuver (not this panel's "linked to timeline" kinds)
+  [PASS] timelineEvents: the fault event's epoch (t) is passed through UNCHANGED from sc.events (linked to the correct epoch)
+  [PASS] eventTimelinePercent: matches hand arithmetic (ev.t - t0) / (t1 - t0) * 100 computed directly from the real t0/t1/ev.t
+  [PASS] eventTimelinePercent: degenerate zero-length span returns null, never divides by zero
+  [PASS] provenanceLines: real config hash from the fixture's Provenance reaches the console panel
+  [PASS] provenanceLines: run id present
+  [PASS] provenanceLines: absent scenario yields no lines, not a throw
+  [PASS] map tiles: exactly 8 tiles at level 1 (the globe's own tile-count formula)
+  [PASS] map tiles: every URL is the offline fixture path (relative, no host -- "no network")
+  [PASS] mosaicRows: row 0 (rendered at the top) is the NORTHERNMOST tile row
+  [PASS] mosaicRows: the last row is the SOUTHERNMOST tile row
+  [PASS] lonLatToPercent: (lon=-180, lat=0) is (xPct=0, yPct=50) (hand-derived from the linear projection's own definition)
+  [PASS] lonLatToPercent: (lon=180, lat=90) is (xPct=100, yPct=0)
+  [PASS] attachM264Panels: buildBaseSidebarViewportLayout() itself is UNCHANGED (still exactly sidebar+viewport) -- not regressed by this task
+  [PASS] attachM264Panels: buildRpoTripleViewportLayout() itself is UNCHANGED (still exactly 4 leaves) -- not regressed by this task
+  [PASS] attachM264Panels: adds exactly the 3 new panel leaves on top of an unrelated tree, keeping the original leaves intact
+  [PASS] attachM264Panels: works generically over the RPO 4-leaf tree too (7 leaves total, RPO leaves untouched)
+  [PASS] attachM264Panels: defaultLayoutForScenario() itself (not wrapped) is still exactly the pre-M26.4 2-leaf default for an ordinary scenario
+  [PASS] server-threaded scores: meta.scoresSource says RunProducts.scores
+  [PASS] server-threaded scores: wire-level passed is true for the real pointing objective
+  [PASS] server-threaded scores: wire-level passed is exactly null (not false/absent) for the measure of effectiveness
+  [PASS] server-threaded scores: objectiveRows shows the real pointing objective as a PASSED objective
+  [PASS] server-threaded scores: objectiveRows shows the seq measure with passed === null, never coerced to false
+.................
+viewport_check.mjs: 51 checks, allPass=True
+  [PASS] viewport layers are mutually distinct
+  [PASS] viewport layers never collide with SHARED_LAYER(0)
+  [PASS] viewport layers never collide with PRIMARY_LAYER(1)
+  [PASS] camera has its own layer enabled
+  [PASS] camera also has the shared default layer enabled
+  [PASS] camera does NOT have another viewport's layer enabled
+  [PASS] each viewport gets its own FloatingOrigin instance
+  [PASS] picking through viewport A's camera resolves sphere A
+  [PASS] picking through viewport B's camera resolves sphere B (not A)
+  [PASS] BREAKS: a picker hardcoded to one camera would resolve viewport B's click to sphere A, not B
+  [PASS] computeOriginShift: identical enabled origins -> unchanged
+  [PASS] computeOriginShift: different origins -> changed, correct delta
+  [PASS] computeOriginShift: a disabled OLD origin contributes zero, not its raw value
+  [PASS] computeOriginShift: a disabled NEW origin contributes zero (degrades to no shift)
+  [PASS] RPO baseline matches the pinned figure exactly
+  [PASS] RPO figure for viewport 'icrf' is bit-identical to baseline (errWithM ===)
+  [PASS] RPO figure for viewport 'icrf' is bit-identical to baseline (errWithoutM ===)
+  [PASS] RPO figure for viewport 'ric' is bit-identical to baseline (errWithM ===)
+  [PASS] RPO figure for viewport 'ric' is bit-identical to baseline (errWithoutM ===)
+  [PASS] RPO figure for viewport 'globe' is bit-identical to baseline (errWithM ===)
+  [PASS] RPO figure for viewport 'globe' is bit-identical to baseline (errWithoutM ===)
+  [PASS] BREAKS: sharing one FloatingOrigin across two viewports moves the RPO figure past the centimetre bound
+  [PASS] BREAKS: the shared-origin RPO error differs from the correct per-viewport figure (not merely "still under bound")
+  [PASS] BREAKS: the shared-origin contamination reproduces exactly the documented "no floating origin" error (origin.js's own equivalence)
+  [PASS] shared clock @ t0: RIC frame position matches its own origin track at t0
+  [PASS] shared clock @ t1: RIC frame position moved to match the SAME track at the new epoch
+  [PASS] entities frame (ICRF viewport's parent) has no motion of its own -- unperturbed by the RIC frame's track
+  [PASS] both cameras' world transforms are current after the SAME single graph.update(t1) call (no separate re-sync needed)
+  [PASS] BREAKS: two independent per-viewport clocks CAN diverge (posA at t1 != posB at t0) -- exactly what one shared graph.update() call prevents by construction
+  [PASS] hasRicFrame: false for an ordinary scenario with no RIC frame
+  [PASS] hasRicFrame: true for a scenario that declares a RIC frame (examples/05_rpo_ric.py-shaped)
+  [PASS] ordinary scenario still gets the pre-M26.3 sidebar+viewport default (unchanged)
+  [PASS] RPO-shaped scenario gets exactly 4 leaves: sidebar + 3 viewport panes (sidebar is NOT dropped)
+  [PASS] RPO default layout is sidebar beside (ICRF beside (RIC beside globe)), in that left-to-right order
+  [PASS] hasRicFrame: false (not a throw) for a scenario with no frames array
+  [PASS] defaultLayoutForScenario: null scenario (page boot, before any load) falls back cleanly
+  [PASS] split creates a genuinely empty pane (no registered content for its panelId)
+  [PASS] empty pane is offered "3D Viewport" (the factory type, always available)
+  [PASS] empty pane is NOT offered "Sidebar" (already placed in the OTHER pane)
+  [PASS] empty pane is offered every singleton type not yet placed anywhere (Map/Run Products/Console)
+  [PASS] a newly-minted viewport gets its own THREE.Layers bit, distinct from an existing viewport
+  [PASS] a newly-minted viewport gets its OWN FloatingOrigin instance, never the existing viewport's
+  [PASS] two independently-minted viewports keep independent cameraFrameId
+  [PASS] two independently-minted viewports keep independent focus
+  [PASS] assignPanel gives the empty pane the newly-minted viewport's panelId
+  [PASS] every leaf's panelId is unique after assigning a viewport (no pane silently orphaned/duplicated)
+  [PASS] swapping in an already-placed singleton (sidebar) keeps every panelId unique
+  [PASS] the pane that used to hold "sidebar" is now empty again (a fresh placeholder, not "sidebar")
+  [PASS] the target pane now genuinely holds "sidebar" (the swap actually happened)
+  [PASS] the displaced pane is NOT offered "Sidebar" again (it now lives on the other pane)
+  [PASS] the displaced pane is still offered "3D Viewport" (always available)
+...................            [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/fastapi/testclient.py:1
+  /Users/probe/code/AltaVista/.venv/lib/python3.13/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_dynamics_service_rs.py:218
+  /Users/probe/code/AltaVista/tests/test_dynamics_service_rs.py:218: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests/test_dynamics_service_rs.py:255
+  /Users/probe/code/AltaVista/tests/test_dynamics_service_rs.py:255: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests/test_gmat_service.py:181
+  /Users/probe/code/AltaVista/tests/test_gmat_service.py:181: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+tests/test_gmat_service.py:216
+  /Users/probe/code/AltaVista/tests/test_gmat_service.py:216: PytestUnknownMarkWarning: Unknown pytest.mark.slow - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.slow
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+421 passed, 5 warnings in 157.20s (0:02:37)

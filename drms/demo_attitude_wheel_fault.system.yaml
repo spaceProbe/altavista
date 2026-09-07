@@ -1,0 +1,80 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.1b
+# (docs/open-questions.md question 152, decided by the lead). A single reaction wheel on a
+# principal (isotropic) inertia axis -- field-for-field the same setup crate::drm::attitude::
+# tests::a_wheel_driven_past_its_limit_stops_accumulating_momentum_and_the_body_responds_
+# accordingly already pins in isolation (J = diag(10,10,10), one wheel on the x axis,
+# momentum_limit = 1.0), extended with a declared, constant `attitude.wheel.1.commanded_torque`
+# (0.4 N*m) so this instance's wheel actually accumulates momentum through a real DRM run:
+# crate::schedule's own module doc comment discloses "Controls are not yet wired -- every step
+# call passes an empty control slice", so crate::drm::attitude::AttitudeWheelsModel::derivatives
+# falls back to this declared, hashed torque (M22.1b, question 152) rather than ever exerting
+# zero torque the way an unmodified M22.1 model would have in a real DRM-driven run.
+#
+# demo_attitude_wheel_fault.drm.yaml's own FAULT_TARGET_KIND_DYNAMICS fault halves
+# attitude.wheel.1.momentum_limit (1.0 -> 0.5) at t=0.5s -- see that file's own header comment
+# for the exact, written-down-before-running expected magnitude this changes the arc by.
+id: attitude_wheel_fault_sys
+version: "1"
+name: Single reaction wheel, constant commanded torque (M22.1b DYNAMICS fault demo)
+dynamics_model: attitude.wheel_fault_demo
+state_space_id: attitude.wheel_fault_demo.space
+state_space:
+  id: attitude.wheel_fault_demo.space
+  components:
+    - label: q_x
+      unit: UNIT_DIMENSIONLESS
+    - label: q_y
+      unit: UNIT_DIMENSIONLESS
+    - label: q_z
+      unit: UNIT_DIMENSIONLESS
+    - label: q_w
+      unit: UNIT_DIMENSIONLESS
+    - label: body_rate_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_z
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: wheel_h_1
+      unit: UNIT_NEWTON_METER_SECOND
+parameters:
+  - name: attitude.inertia.jxx
+    value: 10.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jyy
+    value: 10.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jzz
+    value: 10.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.q0.x
+    value: 0.0
+  - name: attitude.q0.y
+    value: 0.0
+  - name: attitude.q0.z
+    value: 0.0
+  - name: attitude.q0.w
+    value: 1.0
+  - name: attitude.omega0.x
+    value: 0.0
+  - name: attitude.omega0.y
+    value: 0.0
+  - name: attitude.omega0.z
+    value: 0.0
+  - name: attitude.wheel.1.axis_x
+    value: 1.0
+  - name: attitude.wheel.1.axis_y
+    value: 0.0
+  - name: attitude.wheel.1.axis_z
+    value: 0.0
+  - name: attitude.wheel.1.momentum_limit
+    value: 1.0
+  - name: attitude.wheel.1.commanded_torque
+    value: 0.4
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_wheel_fault.system.yaml
+hash: "c8da9ea26e9368e2428f42abed7d10540bfb11015400f499f418af0b1358c423"

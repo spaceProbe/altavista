@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+// Trajectories and events (ADR-001, ADR-002).
+//
+// A Trajectory is a design-time product: sampled states with an interpolation contract, so
+// sparse samples still reproduce smooth motion (Hermite with velocity, as Alta Vista's viewer does).
+// Covariance samples are present only when the DRM asked for them (question 11).
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/envelope.proto";
+
+enum Interpolation {
+  INTERPOLATION_UNSPECIFIED = 0;
+  // Cubic Hermite using the velocity components of each sample. Requires a state space whose
+  // first six components are position and velocity.
+  INTERPOLATION_HERMITE_VELOCITY = 1;
+  INTERPOLATION_LINEAR = 2;
+  // Samples are exact only at their epochs (e.g. discrete events); do not interpolate.
+  INTERPOLATION_NONE = 3;
+}
+
+// How a TrajectorySample's mean was produced (question 116).
+enum SampleKind {
+  SAMPLE_KIND_UNSPECIFIED = 0;
+  // The sample lands exactly on the producing instance's own native step grid: not
+  // interpolated, not held.
+  SAMPLE_KIND_NATIVE = 1;
+  // The sample falls strictly between two native steps and was interpolated according to
+  // the declared component class (ADR-005 sec 3): cubic Hermite with velocity for
+  // position/velocity, slerp for a unit quaternion, linear for a scalar. Never used for a
+  // state transition matrix or covariance -- those are available only at native samples.
+  SAMPLE_KIND_INTERPOLATED = 2;
+  // The sample was produced by zero-order hold: the last native value repeated flat,
+  // because the producing instance has no physical state to interpolate (ADR-005 sec 3,
+  // e.g. a container binding).
+  SAMPLE_KIND_HELD = 3;
+}
+
+message TrajectorySample {
+  // Nanoseconds on TAI.
+  int64 tai_ns = 1;
+  // Length n, in the trajectory's state space and frame.
+  repeated double mean = 2 [packed = true];
+  // Row-major n x n covariance, SPD; empty when the DRM did not request covariance.
+  repeated double cov = 3 [packed = true];
+  // How `mean` was produced (question 116): NATIVE on the producing instance's own grid,
+  // INTERPOLATED per the declared component class (ADR-005 sec 3), HELD by zero-order hold.
+  SampleKind kind = 4;
+}
+
+// A contiguous span produced by one propagation with one dynamics configuration.
+message TrajectorySegment {
+  string name = 1;
+  int64 start_tai_ns = 2;
+  int64 end_tai_ns = 3;
+  // Dynamics model id and version that produced it (ADR-002 `ModelInfo.id`).
+  string dynamics_model = 4;
+  // SHA-256 of the force-model / integrator settings in effect.
+  string dynamics_hash = 5;
+  // Depth at which GMAT contributed (ADR-002): "gmat-api", "gmat-ffi", "native", or "" for
+  // non-space models.
+  string dynamics_depth = 6;
+}
+
+message Trajectory {
+  string id = 1;
+  string entity_id = 2;
+  string state_space_id = 3;
+  string frame_id = 4;
+  Interpolation interpolation = 5;
+  repeated TrajectorySample samples = 6;
+  repeated TrajectorySegment segments = 7;
+  // Ids of Events that occurred along this trajectory (maneuvers, contacts, faults).
+  repeated string event_ids = 8;
+  Label label = 9;
+  Provenance provenance = 10;
+  // SHA-256 of the DRM configuration this trajectory was produced from.
+  string config_hash = 11;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_MANEUVER = 1;
+  EVENT_KIND_CONTACT_START = 2;
+  EVENT_KIND_CONTACT_END = 3;
+  EVENT_KIND_ECLIPSE_START = 4;
+  EVENT_KIND_ECLIPSE_END = 5;
+  // Track lifecycle (spoore LifecycleEvent projected onto an entity).
+  EVENT_KIND_LIFECYCLE = 6;
+  EVENT_KIND_COMMAND_TRANSITION = 7;
+  EVENT_KIND_FAULT = 8;
+  EVENT_KIND_MODE_CHANGE = 9;
+  EVENT_KIND_MARKER = 10;
+  EVENT_KIND_CUSTOM = 11;
+  // Question 130: a port command applied to a bound instance's declared writable
+  // parameter (instance, parameter, value, epoch and sender in the event's attributes).
+  // `dynamics_hash` stays the configuration hash; commands are recorded here so equal
+  // configuration plus equal command events means equal dynamics.
+  EVENT_KIND_PORT_COMMAND = 12;
+}
+
+// A point-in-time annotation with provenance. Events are first-class: the viewer shows
+// them, the log stores them, the assistant cites them.
+message Event {
+  string id = 1;
+  string entity_id = 2;
+  int64 tai_ns = 3;
+  EventKind kind = 4;
+  string name = 5;
+  // Human-readable detail, e.g. "dv = 20.00 m/s (VNB)".
+  string detail = 6;
+  // Structured values, SI: {"dv_mps": 20.0, "dv_v": 20.0, "dv_n": 0, "dv_b": 0}.
+  map<string, double> values = 7;
+  // Frame the vector values are expressed in, if any.
+  string frame_id = 8;
+  // For command transitions: the Command id; for faults: the Fault id in the DRM.
+  string reference_id = 9;
+  Label label = 10;
+  Provenance provenance = 11;
+}

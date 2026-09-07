@@ -1,0 +1,995 @@
+>>> include @/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/ticker_noquit.resc -> 'include @/Users/probe/code/AltaVista/third_party/rtems-container/run-renode/ticker_noquit.resc'
+=== t=0 (post-reset, pre-run) ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: 
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): 
+  TTC0.COUNT_VALUE (0xff110018): 
+  TTC0.INTERVAL_VAL (0xff110024): (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x40
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 ExecutedInstructions
+0x0000000000000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c
+0x00000001
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110018
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (0B): b''
+--- RunFor step 1 (cumulative virtual ~1s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~1s ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: 
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): 
+  TTC0.COUNT_VALUE (0xff110018): 
+  TTC0.INTERVAL_VAL (0xff110024): 
+  TTC0.MATCH_0 (0xff110030): 
+  TTC0.ISR (0xff110054): 
+  TTC0.IER (0xff110060): 
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 2 (cumulative virtual ~2s), wall 0.56s, reply '(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) rpu0 PC\n\r0x400045e6\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) rpu0 IsHalted\n\rFalse\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) rpu0 ExecutedInstructions\n\r0x00000000000112CA\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions\n\rThere was an error executing command \'rpu0 GetTotalExecutedInstructions\'\r\nsysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c\n\r0x00000008\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110018\n\r0x01FC7946\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110024\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110030\n\r0x0206CC80\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110054\n\r0x00000000\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110060\n\r0x00000002\r\r\n(zynqmp-rpu-ticker) \n\r(zynqmp-rpu-ticker) emulation RunFor "1"' ---
+=== t~2s ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: 
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): 
+  TTC0.COUNT_VALUE (0xff110018): 
+  TTC0.INTERVAL_VAL (0xff110024): 
+  TTC0.MATCH_0 (0xff110030): 
+  TTC0.ISR (0xff110054): 
+  TTC0.IER (0xff110060): 
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 3 (cumulative virtual ~3s), wall 0.40s, reply '' ---
+=== t~3s ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: 
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): 
+  TTC0.COUNT_VALUE (0xff110018): 
+  TTC0.INTERVAL_VAL (0xff110024): (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 ExecutedInstructions
+0x000000000001363D
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110018
+0x03F90C96
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110030
+0x03FE56C0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) emulation RunFor "1"
+  TTC0.MATCH_0 (0xff110030): 
+  TTC0.ISR (0xff110054): 
+  TTC0.IER (0xff110060): 
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 4 (cumulative virtual ~4s), wall 0.40s, reply '' ---
+=== t~4s ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: 
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): 
+  TTC0.COUNT_VALUE (0xff110018): 
+  TTC0.INTERVAL_VAL (0xff110024): 
+  TTC0.MATCH_0 (0xff110030): 
+  TTC0.ISR (0xff110054): (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 ExecutedInstructions
+0x00000000000159B0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110018
+0x05F59FE6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110030
+0x05F5E100
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) emulation RunFor "1"
+  TTC0.IER (0xff110060): 
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 5 (cumulative virtual ~5s), wall 0.40s, reply '' ---
+=== t~5s ===
+  rpu0 PC: 
+  rpu0 IsHalted: 
+  rpu0 ExecutedInstructions: 
+  rpu0 GetTotalExecutedInstructions: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 ExecutedInstructions
+0x0000000000017E3A
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110018
+0x07F23336
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110030
+0x07FCAD80
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) emulation RunFor "1"
+  TTC0.CLK_CNTRL (0xff110000): 
+  TTC0.CNT_CNTRL (0xff11000c): (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 ExecutedInstructions
+0x000000000001A1AD
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x09EEC686
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x09F437C0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 6 (cumulative virtual ~6s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~6s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000001C520
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x0BEB59D6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x0BEBC200
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 7 (cumulative virtual ~7s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~7s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000001E9AA
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x0DE7ED26
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x0DF28E80
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 8 (cumulative virtual ~8s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~8s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000020D1D
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x0FE48076
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x0FEA18C0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 9 (cumulative virtual ~9s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~9s ===
+  rpu0 PC: 
+  rpu0 IsHalted: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000023090
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x11E113C6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x11E1A300
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 10 (cumulative virtual ~10s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~10s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000002551A
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x13DDA716
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x13E86F80
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 11 (cumulative virtual ~11s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~11s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000002788D
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x15DA3A66
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x15DFF9C0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 12 (cumulative virtual ~12s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~12s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000029C00
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x17D6CDB6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x17D78400
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 13 (cumulative virtual ~13s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~13s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000002C08A
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x19D36106
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x19DE5080
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 14 (cumulative virtual ~14s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~14s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000002E3FD
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x1BCFF456
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x1BD5DAC0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 15 (cumulative virtual ~15s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~15s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000030770
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x1DCC87A6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x1DCD6500
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (352B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\n'
+--- RunFor step 16 (cumulative virtual ~16s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~16s ===
+  rpu0 PC: 
+  rpu0 IsHalted: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000033F3B
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x1FC91AF6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x1FD43180
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (404B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\n'
+--- RunFor step 17 (cumulative virtual ~17s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~17s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x00000000000362AE
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x21C5AE46
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x21CBBBC0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (404B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\n'
+--- RunFor step 18 (cumulative virtual ~18s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~18s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x0000000000038621
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x23C24196
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x23C34600
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (404B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\n'
+--- RunFor step 19 (cumulative virtual ~19s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~19s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000003AAAB
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x25BED4E6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x25CA1280
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (404B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\n'
+--- RunFor step 20 (cumulative virtual ~20s), wall 0.40s, reply 'emulation RunFor "1"' ---
+=== t~20s ===
+  rpu0 PC: (zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker) rpu0 PC
+0x400045e6
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 IsHalted: rpu0 IsHalted
+False
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 ExecutedInstructions: rpu0 ExecutedInstructions
+0x000000000003CE1E
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  rpu0 GetTotalExecutedInstructions: rpu0 GetTotalExecutedInstructions
+There was an error executing command 'rpu0 GetTotalExecutedInstructions'
+sysbus.cluster1.rpu0 does not provide a field, method or property GetTotalExecutedInstructions.
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CLK_CNTRL (0xff110000): sysbus ReadDoubleWord 0xff110000
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.CNT_CNTRL (0xff11000c): sysbus ReadDoubleWord 0xff11000c
+0x00000008
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.COUNT_VALUE (0xff110018): sysbus ReadDoubleWord 0xff110018
+0x27BB6836
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.INTERVAL_VAL (0xff110024): sysbus ReadDoubleWord 0xff110024
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.MATCH_0 (0xff110030): sysbus ReadDoubleWord 0xff110030
+0x27C19CC0
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.ISR (0xff110054): sysbus ReadDoubleWord 0xff110054
+0x00000000
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  TTC0.IER (0xff110060): sysbus ReadDoubleWord 0xff110060
+0x00000002
+(zynqmp-rpu-ticker) 
+(zynqmp-rpu-ticker)
+  UART so far (404B): b'\r\n\r\n*** BEGIN OF TEST CLOCK TICK ***\r\n*** TEST VERSION: 6.0.0.not-released\r\n*** TEST STATE: EXPECTED_PASS\r\n*** TEST BUILD:\r\n*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)\r\nTA1  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA2  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA3  - rtems_clock_get_tod - 09:00:00   12/31/1988\r\nTA1  - rtems_clock_get_tod - 09:00:04   12/31/1988\r\n'
+renode final returncode: 0

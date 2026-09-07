@@ -1,0 +1,49 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.2.
+#
+# The demo's ground-segment instance: a `"native."`-dispatched `crate::drm::binding::
+# ConstantAccelModel` with an EMPTY declared state space (`state_dim() == 0`, the identical
+# `native.controller.empty` shape `drms/demo_two_instance_ctrl.system.yaml`'s own header comment
+# explains) -- it carries no physical trajectory and its own `step_with_ports` is never what sends
+# the telecommand this demo dispatches. `crate::drm::executor::run_shared_group`'s own new command-
+# dispatch code (M25.2) hands the encoded CCSDS telecommand straight to `crate::router::Router::
+# deliver` *as if* it were this instance's own `Outbox` emission on the declared `cmd_out` port, at
+# the epoch `drms/demo_command.drm.yaml`'s own declared `command` Scenario.event names -- there is
+# no live model logic on this instance's own side that constructs the packet (see `crate::drm::
+# command`'s own module doc comment for exactly why: `command::COMMAND_DISPATCH_PORT` is a fixed
+# port-name convention, not a `"port.*"` parameter naming something a real model would parse, since
+# the dispatch is synthetic, from the executor directly, never a real model's own step). `ack_in` is
+# declared purely so the flight instance's own ack telemetry (`ack_out`) is genuinely delivered
+# through the router (with its own declared latency) rather than silently dropped for want of a
+# matching connection -- nothing on this instance decodes it; see `drms/demo_command.drm.yaml`'s own
+# header comment for exactly how this executor derives the ACKED transition without that decode.
+id: command_demo_ground_sys
+version: "1"
+name: Ground-segment dispatch instance for the ground-issued-telecommand demo (M25.2)
+dynamics_model: native.command_demo_ground
+state_space_id: native.controller.empty
+ports:
+  - name: cmd_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+  - name: ack_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+state_space:
+  id: native.controller.empty
+  components: []
+parameters:
+  - name: frame_id
+    string_value: command_demo_frame
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_command_ground.system.yaml
+hash: "75969a31e86d5fc677fdd2c5ebc8ac7dce83a3204811b17906576d16c2135084"

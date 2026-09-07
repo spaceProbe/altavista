@@ -1,0 +1,160 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.4
+# (docs/sil-plan.md's M22 milestone paragraph: "A native 'controller' instance closes the loop
+# first so the whole chain is proven before any external binary is involved"; its Decisions
+# (2026-09-05) decision A, "attitude control first"; docs/open-questions.md questions 142, 149,
+# 151, 152).
+#
+# The closed-loop plant: three reaction wheels, one per principal (isotropic-in-x/y) body axis
+# (crate::drm::controller's own fixed "wheel k = body axis k" convention), inertia
+# J = diag(100, 100, 50) kg*m^2 (Jz = 50 matches drms/demo_attitude_sensors_truth.system.yaml's
+# own Jz for continuity with that fixture's numbers), a declared 0.2 rad (~11.46 deg) initial
+# pointing error about +z (q0 = [0, 0, sin(0.1), cos(0.1)]), zero initial body rate, target
+# attitude = identity (crate::drm::controller_control's own demo.sos.yaml / .drm.yaml carry the
+# actual expected-vs-measured settling analysis -- see this fixture's own .drm.yaml header for
+# the full derivation and the numbers this file's own kp/kd/inertia choice was sized against).
+#
+# The `wheel_torque_in` FRAMED IN port (schema "ccsds.spp") plus its own declared PacketCodec
+# (three FLOAT64 tau_1/tau_2/tau_3 fields, is_command=true, UNIT_NEWTON_METER --
+# crate::drm::controller::wheel_torque_command_packet_codec's own fixed shape) is what
+# crate::drm::controller::CommandedAttitude decodes each step and threads through as this
+# model's own `controls` argument (crate::drm::attitude::AttitudeWheelsModel::derivatives) --
+# see crate::drm::binding::resolve_attitude_wheel_command_input's own doc comment for exactly
+# how this optional port/codec pair is detected.
+id: attitude_control_truth_sys
+version: "1"
+name: Three-wheel attitude plant, closed loop (M22.4)
+dynamics_model: attitude.control_demo
+state_space_id: attitude.control_demo.space
+state_space:
+  id: attitude.control_demo.space
+  components:
+    - label: q_x
+      unit: UNIT_DIMENSIONLESS
+    - label: q_y
+      unit: UNIT_DIMENSIONLESS
+    - label: q_z
+      unit: UNIT_DIMENSIONLESS
+    - label: q_w
+      unit: UNIT_DIMENSIONLESS
+    - label: body_rate_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_z
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: wheel_h_1
+      unit: UNIT_NEWTON_METER_SECOND
+    - label: wheel_h_2
+      unit: UNIT_NEWTON_METER_SECOND
+    - label: wheel_h_3
+      unit: UNIT_NEWTON_METER_SECOND
+ports:
+  - name: truth_qx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_qw
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: truth_wz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+  - name: wheel_torque_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+packet_codecs:
+  - id: wheel_torque_codec
+    apid: 300
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "reaction wheel torque command, wheel k aligned with body axis k (M22.4)"
+    fields:
+      - name: tau_1
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_2
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_3
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: attitude.inertia.jxx
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jyy
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jzz
+    value: 50.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.q0.x
+    value: 0.0
+  - name: attitude.q0.y
+    value: 0.0
+  - name: attitude.q0.z
+    value: 0.09983341664682815
+  - name: attitude.q0.w
+    value: 0.9950041652780258
+  - name: attitude.omega0.x
+    value: 0.0
+  - name: attitude.omega0.y
+    value: 0.0
+  - name: attitude.omega0.z
+    value: 0.0
+  - name: attitude.wheel.1.axis_x
+    value: 1.0
+  - name: attitude.wheel.1.axis_y
+    value: 0.0
+  - name: attitude.wheel.1.axis_z
+    value: 0.0
+  - name: attitude.wheel.1.momentum_limit
+    value: 20.0
+  - name: attitude.wheel.2.axis_x
+    value: 0.0
+  - name: attitude.wheel.2.axis_y
+    value: 1.0
+  - name: attitude.wheel.2.axis_z
+    value: 0.0
+  - name: attitude.wheel.2.momentum_limit
+    value: 20.0
+  - name: attitude.wheel.3.axis_x
+    value: 0.0
+  - name: attitude.wheel.3.axis_y
+    value: 0.0
+  - name: attitude.wheel.3.axis_z
+    value: 1.0
+  - name: attitude.wheel.3.momentum_limit
+    value: 20.0
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_control_truth.system.yaml
+hash: "51f6363c07b0b29b37acc49251b9371055733404f094a027d8d7dd40dbe21968"

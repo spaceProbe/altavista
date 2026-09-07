@@ -1,0 +1,13 @@
+[package]
+name = "av-dynamics"
+publish = false
+description = "The shared dynamics contract and integrator (ADR-002): DynamicsModel trait, Dopri5. No GMAT dependency -- must build without GMAT."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+sha2.workspace = true

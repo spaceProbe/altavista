@@ -1,0 +1,47 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M25.2.
+#
+# Two instances: `flight` (drms/demo_command_flight.system.yaml, native ConstantAccelModel
+# consuming a ground-issued telecommand) and `ground` (drms/demo_command_ground.system.yaml, a
+# non-physical dispatch instance -- see that file's own header comment for why it needs no live
+# model logic of its own). Two FRAMED connections, both `link_model: "latency"`
+# (`crate::router::Router::effective_latency_ns` sums both ports' own declared `PortTiming.
+# latency_ns`, 1.5 s each, 3 s total each way -- "a link with the existing latency model", reused,
+# not reimplemented, `docs/sil-plan.md`'s own M25 instruction):
+#   ground.cmd_out -> flight.cmd_in   (the telecommand)
+#   flight.ack_out -> ground.ack_in   (the flight software's own ack telemetry)
+id: demo_command_sos
+version: "1"
+name: "Ground-issued telecommand demo (M25.2): a command dispatched through the router reaches a real FRAMED consumer"
+instances:
+  - name: flight
+    system_id: command_demo_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: command_demo_flight_sys
+    step_rate_hz: 1.0
+  - name: ground
+    system_id: command_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: command_demo_ground_sys
+    step_rate_hz: 1.0
+connections:
+  - from_instance: ground
+    from_port: cmd_out
+    to_instance: flight
+    to_port: cmd_in
+    link_model: "latency"
+  - from_instance: flight
+    from_port: ack_out
+    to_instance: ground
+    to_port: ack_in
+    link_model: "latency"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_command.sos.yaml
+hash: "80fe2164e143cbccce5e534851b9bf144e118d168c8bc43cab335171b59f4f7c"

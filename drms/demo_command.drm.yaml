@@ -1,0 +1,59 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M25.2
+# (docs/sil-plan.md's M25 milestone: "DRM command events become CDM Commands, framed as CCSDS
+# telecommands, delivered through the router with the link model; ... acknowledged by the flight
+# software's telemetry").
+#
+# 100 s run at 1 Hz, no faults, no maneuvers, no covariance. One `Scenario.events` entry of
+# `kind: "command"` (`crate::drm::command::COMMAND_KIND`, M25.2's own new typed contract,
+# `crate::drm::command::parse`): dispatched at t=50s (`command_demo_ground_sys`'s own declared
+# `cmd_out` port), commanding `flight`'s own `accel_scale` to `3.0` -- `flight`'s own declared
+# `accel.z = 1.0` m/s^2 (drms/demo_command_flight.system.yaml) is scaled by that value the moment
+# it is decoded (`ConstantAccelModel::derivatives`), a real, measurable change to the propagated
+# arc, closing the loop this task's own brief names end to end:
+#
+#   Scenario.events[kind=command] --propose/check/authorize--> CDM Command (COMMAND_STATE_AUTHORIZED)
+#     --dispatch, t=50s--> CCSDS telecommand (apid 700, is_command=true) on ground.cmd_out
+#     --Router::deliver, 3s latency--> flight.cmd_in, decoded, applied (accel_scale=3.0)
+#     --ack, same step--> CCSDS ack (apid 701) on flight.ack_out --Router::deliver, 3s latency--> ground.ack_in
+#   Every transition (PROPOSED, CHECKED, AUTHORIZED, DISPATCHED, ACKED) is one
+#   EVENT_KIND_COMMAND_TRANSITION event, all sharing reference_id "cmd1", in that order.
+#
+# Expected result (stated before running -- crates/av-kernel/tests/drm_command.rs checks it):
+# exactly 5 EVENT_KIND_COMMAND_TRANSITION events for "cmd1", in COMMAND_STATE order; exactly one
+# EVENT_KIND_PORT_COMMAND event on `flight` naming field "accel_scale", value 3.0; `flight`'s own
+# final propagated position measurably differs from what `accel.z = 1.0` alone (never commanded)
+# would have produced -- see that test's own module doc comment for the exact closed-form
+# comparison, computed from the REAL observed applied_tai_ns, not a hand-predicted one (mirroring
+# `crates/av-kernel/tests/demo_two_instance.rs`'s own methodology for its drag-sail command).
+id: command_demo_drm
+version: "1"
+name: "Ground-issued telecommand demo (M25.2): the drag-sail-style command moves from a native controller to a real CCSDS telecommand"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+  events:
+    - id: cmd1
+      tai_ns: 1700000050000000000
+      kind: command
+      instance: flight
+      values:
+        value: 3.0
+      attributes:
+        field: accel_scale
+        from: ground
+        command_class: demo
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_command.drm.yaml
+hash: "e45a4f1eccc06010c742f0b2d027e7ce97a12c15e93af199b6c08ad9b68677d6"

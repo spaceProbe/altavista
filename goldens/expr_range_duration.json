@@ -1,0 +1,51 @@
+{
+  "name": "expr_range_duration",
+  "generated": "1788454414.395774s",
+  "reason": "M9.3 (question 95): the DRM executor now emits real CDM Events (EVENT_KIND_LIFECYCLE run start/end, EVENT_KIND_FAULT for every applied DYNAMICS fault) instead of always returning RunProducts.events == []; expr_fault_split_accel's three event.*-referencing expressions move onto DesignReferenceMission.objectives/.measures now that they resolve against real events (renamed the fault id / event name from f1 to accel_change, and the maneuver_count measure to fault_count / count(event.fault), since a DYNAMICS parameter fault is EVENT_KIND_FAULT, not EVENT_KIND_MANEUVER); removes the synthetic caller-supplied Event this generator previously stood in with",
+  "drm_id": "range_duration_drm",
+  "drm_hash": "67e744e8d23f820f6907cb6f63ca204ed787738e6876a3095ac805802d562a63",
+  "instance": "a,b",
+  "objectives": [
+    {
+      "name": "duration_within_100m_near_5_8s",
+      "expression": "duration(range(a, b) < 100 m)",
+      "target": 5.8,
+      "tolerance": 0.05,
+      "unit": "s",
+      "value": 5.799999999999995,
+      "computed_unit": "s",
+      "pass": true
+    }
+  ],
+  "measures": [
+    {
+      "name": "range_at_end",
+      "expression": "range(a, b)@end",
+      "unit": "m",
+      "value": 2.8421709430404007e-13,
+      "computed_unit": "m"
+    },
+    {
+      "name": "range_at_start",
+      "expression": "range(a, b)@start",
+      "unit": "m",
+      "value": 200.0,
+      "computed_unit": "m"
+    },
+    {
+      "name": "min_range",
+      "expression": "min(range(a, b))",
+      "unit": "m",
+      "value": 2.8421709430404007e-13,
+      "computed_unit": "m"
+    },
+    {
+      "name": "max_range",
+      "expression": "max(range(a, b))",
+      "unit": "m",
+      "value": 200.0,
+      "computed_unit": "m"
+    }
+  ],
+  "sha256": "1217c888cbb8a69c5f9bc5d9bceafdc3bf187e959820f7c3269b055989ecab83"
+}

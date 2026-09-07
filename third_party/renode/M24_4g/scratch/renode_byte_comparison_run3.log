@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/drm_attitude_control_renode.rs (target/debug/deps/drm_attitude_control_renode-c7ba7dd1b4dde118)
+
+running 1 test
+test byte_identical_port_traffic_between_posix_container_and_renode ... posix-container run: 1s @ 10Hz in 16.18s wall time
+Renode scratch dir (socket, monitor/uart0 logs, shim+bridge stdout/stderr): /tmp/av-renode-m24c-56716
+Renode bridge ready (boot + HELLO/BIND handshake path primed) in 17.68s wall time
+
+thread 'byte_identical_port_traffic_between_posix_container_and_renode' (16092481) panicked at crates/av-kernel/tests/drm_attitude_control_renode.rs:524:128:
+the Renode-bound run must execute end to end through the real RTEMS/cFE/IO_LOCKSTEP guest: ContainerProtocol { instance: "controller", source: StepRpc { detail: "status: Aborted, message: \"the peer closed the connection cleanly between frames\", details: [], metadata: MetadataMap { headers: {\"content-type\": \"application/grpc\", \"date\": \"Mon, 07 Sep 2026 05:26:20 GMT\", \"content-length\": \"0\"} }" } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    byte_identical_port_traffic_between_posix_container_and_renode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 130.92s
+
+error: test failed, to rerun pass `-p av-kernel --test drm_attitude_control_renode`

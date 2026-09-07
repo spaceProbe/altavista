@@ -1,0 +1,109 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M19.4
+# (docs/open-questions.md question 131, closing question 131's decision text): "the demo gets a
+# native controller instance that commands a drag-sail Cd change on the flight instance when a
+# declared range condition holds". This is that native controller's own declaration -- a
+# BINDING_KIND_MODEL instance dispatched to crate::registry::ModelKind::Native (dynamics_model
+# does not start with "gmat."/"remote."), so it materializes as a
+# crate::drm::binding::ConstantAccelModel with a==[0,0,0] (this instance carries no physical
+# trajectory of its own -- it is a pure port controller, exactly the "native SIGNAL
+# producer/consumer" role M14.1 already established this same model type for) and
+# ConstantAccelSpec.condition set (M19.4, crate::drm::binding::RangeCondition).
+#
+# Wiring (see drms/demo_two_instance.sos.yaml's own header comment for the full three-instance
+# picture):
+#   demo_mvr --(cd_cmd_out, rmag)--> demo_ctrl --(cd_sail_cmd_out, drag-sail Cd)--> demo_flt
+#
+# demo_ctrl consumes demo_mvr's own live output.rmag on "range_in", evaluates it against the
+# declared range condition below, and emits the declared drag-sail Cd command on
+# "cd_sail_cmd_out" the first native step (10 Hz, this instance's own step_rate_hz in
+# demo_two_instance.sos.yaml) the consumed value is >= condition.threshold_m -- edge-triggered
+# and latched (crate::drm::binding::ConstantAccelModel::step_with_ports's own doc comment): never
+# re-emitted again within one materialization.
+#
+# condition.threshold_m = 6,884,300 m is chosen deliberately close to demo_mvr's own orbit's true
+# apoapsis radius (SMA=6,878,000 m, ECC=0.001 -> r_apo = a(1+e) = 6,884,878 m, `leo_demo_sys`'s
+# own declared elements, demo_two_instance.system.yaml). Measured against the real committed DRM
+# (not merely reasoned about from idealized two-body Keplerian timing, which put the first
+# apoapsis crossing near t=2838 s -- J8x8 gravity plus the 20 m/s VNB burn at t=5400 s perturb the
+# real orbit enough that the threshold is not actually reached until t=6207.4 s, inside this
+# DRM's own [5400 s, 7200 s) tail segment): the condition is FALSE at both re-materialization
+# boundaries (t=1800 s, t=5400 s) and crosses exactly once, at t=6207.4 s, so this demo produces
+# exactly one applied-command event for the whole 7200 s run, not a burst re-armed at every
+# boundary (see crate::drm::binding::ConstantAccelModel's own doc comment on why a
+# re-materialization boundary resets this latch, and why that is only ever observable here if the
+# condition already held at the moment of rebinding). See crates/av-kernel/tests/
+# demo_two_instance.rs's own port-command-count test (pins the count and the exact epoch) and
+# goldens/gen_demo_two_instance.py's own independent, from-scratch re-derivation of this same
+# epoch (a fine-resolution propagation + threshold search over demo_mvr's own arc, not a copy of
+# the Rust executor's own output).
+#
+# port.emit_value = 220.0 (a drag-sail deployment: 100x demo_flt's own baseline spacecraft.Cd =
+# 2.2 declared in demo_two_instance.system.yaml) -- see drms/demo_two_instance.sos.yaml's own
+# header comment for the expected-order-of-magnitude reasoning (M18.3's own calibration, scaled
+# for this orbit's much thinner ~500 km-altitude atmosphere against M18.3's ~250 km fixture).
+id: demo_ctrl_sys
+version: "1"
+name: Native range-condition drag-sail controller (M19.4 two-instance demo coupling)
+dynamics_model: native.range_condition_controller
+# M21.3 (docs/open-questions.md question 141, decided by the lead, closing question 133's own
+# escalation): this instance carries no physical trajectory of its own -- it is a pure port
+# controller (see the module header above) -- so it declares an EMPTY state space,
+# native.controller.empty, zero components, rather than M20.1's own six-scalar
+# native.controller.scalar6 compromise. Through M21.1/M20.1, crate::drm::binding::
+# ConstantAccelModel::state_dim() was a fixed 6 regardless of what a fixture declared, so a
+# genuinely non-physical instance still had to claim six independent unitless scalars just to
+# satisfy that constant. M21.3 removes the constant: a native model's own materialized dimension
+# is now taken from its declared state space, with a typed load-time error
+# (crate::drm::binding::DrmError::StateSpaceDimensionMismatch, via
+# crate::drm::executor::classify_binding) when the instance's own configuration (here: zero
+# declared "state.*" parameters below) cannot honour what it declares. Zero components -> zero
+# configured state.* parameters -> crate::drm::binding::ConstantAccelModel materializes at
+# state_dim() == 0, and crate::drm::executor::execute emits NO trajectory entry at all for this
+# instance in RunProducts.trajectories (not a zero-width one, not an empty-sample one) -- while
+# its own run_start/run_end lifecycle events and the port_command it sends remain on the
+# timeline, entity-tagged independently of trajectories (RunProducts.events is never filtered by
+# trajectory presence). None of this instance's own zero components is named pos_x/vel_x/etc
+# (there are none), so crate::interpolate::classify trivially never places anything in a
+# PositionVelocity group. See crates/av-kernel/src/trajectory.rs::NATIVE_CONTROLLER_EMPTY_ID for
+# the matching built-in registry declaration.
+state_space_id: native.controller.empty
+ports:
+  - name: range_in
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: cd_sail_cmd_out
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_OUT
+state_space:
+  id: native.controller.empty
+  components: []
+parameters:
+  - name: frame_id
+    string_value: EarthMJ2000Eq
+  # M21.3: no state.px/py/pz/vx/vy/vz parameters at all -- this instance's own declared state
+  # space is empty (zero components), so crate::drm::binding::parse_constant_accel_spec builds
+  # ConstantAccelSpec.x0_si as a genuinely empty Vec (never six hidden zeros); declaring any of
+  # the six here without declaring all six would be refused (DrmError::MissingParameter), and
+  # declaring all six would disagree with the empty declared state space above
+  # (DrmError::StateSpaceDimensionMismatch) -- see ConstantAccelModel's own doc comment
+  # (CONSTANT_ACCEL_STATE_DIM) for the full account of the two widths this binding kind can
+  # honour.
+  - name: port.consume
+    string_value: range_in
+  - name: port.emit
+    string_value: cd_sail_cmd_out
+  - name: port.emit_value
+    value: 220.0
+  - name: condition.threshold_m
+    value: 6884300.0
+  - name: condition.mode
+    string_value: above
+  - name: output.received
+    unit: UNIT_METER
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M21.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_two_instance_ctrl.system.yaml
+hash: "1a95524576b122961ab6a29b402582f146d730ef468107dffd2debe2a5b0835b"

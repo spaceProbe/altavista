@@ -1,0 +1,30 @@
+# M24.4b -- identical wiring to third_party/renode/M24_4/cfs_handshake_test.resc (the proven
+# UART1-to-TCP bridge pattern), used here so uart1_register_probe.py can instrument uart1's
+# real registers (control/channel_sts/irq_sts/tx_rx_fifo) directly via the monitor while a live
+# TCP peer sends HELLO frames, to see whether bytes ever reach the peripheral's RX FIFO at all.
+
+:name: av-m24-4b-uart1-register-probe
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4b-uart1-register-probe"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/uart1_register_probe_uart0.log true
+
+emulation CreateServerSocketTerminal $bridgeport "uart1_bridge" false
+connector Connect sysbus.uart1 uart1_bridge
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe cpu=rpu0
+"""
+
+runMacro $reset

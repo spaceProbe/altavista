@@ -1,0 +1,5 @@
+/Users/probe/code/AltaVista/third_party/renode/M24_4g/evidence/run3_uart1_raw_crosscheck.log: 71 bytes total
+  frame 1: offset=0 length=7 frame_type=HELLO raw_payload=b'\x01AVL1\x01\x00'
+  frame 2: offset=11 length=39 frame_type=BIND_ACK raw_payload=b'\x03\x08\x01\x12\x11io_lockstep/M23.2\x1a\x0fio_lockstep/0.1'
+  frame 3: offset=54 length=13 frame_type=STEP_DONE raw_payload=b'\x05\x08\x01\x10\x80\xa6\xbc\x8a\xa9\xcb\x9c\xc3\x18'
+total frames parsed: 3, bytes consumed: 71/71

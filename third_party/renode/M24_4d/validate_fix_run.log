@@ -1,0 +1,8 @@
+bridge: Renode booted, include reply: include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/validate_fix_scratch/renode_bridge_generated.27933.resc
+bridge: connected to uart1's outbound terminal socket
+start() succeeded in 3.74s
+expected per-run resc path exists: True (/Users/probe/code/AltaVista/third_party/renode/M24_4d/validate_fix_scratch/renode_bridge_generated.27933.resc)
+scratch dir contents: ['renode_bridge_generated.27933.resc', 'renode_monitor.log', 'uart0.log']
+old hardcoded path existed before: True (mtime 1788744306.737651)
+old hardcoded path exists after:   True (mtime 1788744306.737651)
+old hardcoded path UNTOUCHED by this run: True

@@ -1,0 +1,360 @@
+syntax = "proto3";
+
+// System definitions, system-of-systems configurations and design reference missions
+// (ADR-001 shapes; ADR-005 semantics).
+//
+// These are the declared, hashed design artifacts. A DRM is a configuration plus a scenario
+// plus objectives. Everything that affects a result lives here and in SystemDefinition —
+// never in a profile (ADR-000 rule 1). Ports are bus-neutral from day one (question 26).
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/envelope.proto";
+import "altavista/v1/packet.proto";
+
+// ---------------------------------------------------------------------------
+// System definition: what a system is
+// ---------------------------------------------------------------------------
+
+enum PortKind {
+  PORT_KIND_UNSPECIFIED = 0;
+  // Raw byte stream (UART, TCP). Framing is the flight software's business.
+  PORT_KIND_BYTE_STREAM = 1;
+  // Framed messages (CAN frames, CCSDS space packets, UDP datagrams, SpaceWire packets).
+  PORT_KIND_FRAMED = 2;
+  // Discrete or analog signal (GPIO line, analog voltage).
+  PORT_KIND_SIGNAL = 3;
+  // A CDM message type (schema names the fully-qualified type, e.g. "altavista.v1.Measurement").
+  PORT_KIND_CDM = 4;
+}
+
+enum PortDirection {
+  PORT_DIRECTION_UNSPECIFIED = 0;
+  PORT_DIRECTION_IN = 1;
+  PORT_DIRECTION_OUT = 2;
+  PORT_DIRECTION_INOUT = 3;
+}
+
+// Declared timing properties of a port. Rates and latencies are part of the system, not of
+// where it runs.
+message PortTiming {
+  double rate_hz = 1;
+  int64 latency_ns = 2;
+  int64 jitter_ns = 3;
+  // True if the port's traffic is a pure function of simulated time (lockstep-safe).
+  bool deterministic = 4;
+}
+
+message Port {
+  string name = 1;
+  PortKind kind = 2;
+  PortDirection direction = 3;
+  // CDM type name, framing name ("ccsds.spp", "can.2b", "mavlink.v2"), or signal type.
+  string schema = 4;
+  PortTiming timing = 5;
+  // Physical interface class when bound to hardware: "uart", "ethernet", "can",
+  // "spacewire", "mil1553", "rs422", "gpio". Advisory until a BoardBinding fixes it.
+  string interface_class = 6;
+}
+
+message Parameter {
+  string name = 1;
+  Unit unit = 2;
+  double value = 3;
+  // For non-numeric parameters (file names, enumerations).
+  string string_value = 4;
+  double min = 5;
+  double max = 6;
+  string description = 7;
+}
+
+// A named set of parameter overrides.
+message Variant {
+  string name = 1;
+  repeated Parameter overrides = 2;
+}
+
+message SystemDefinition {
+  string id = 1;
+  string version = 2;
+  string name = 3;
+  // Ids of subsystems (themselves SystemDefinitions).
+  repeated string subsystem_ids = 4;
+  repeated Port ports = 5;
+  repeated Parameter parameters = 6;
+  repeated Variant variants = 7;
+  // Dynamics model id (ADR-002 ModelInfo.id) this system's physical behaviour comes from.
+  string dynamics_model = 8;
+  // State space of that dynamics model.
+  string state_space_id = 9;
+  // Question 94: the state space declared in the artifact itself (labels, units, frame).
+  // When present it is authoritative and its `id` must equal `state_space_id`; when absent
+  // the id must name a built-in space the kernel's registry knows. Nothing exists only by
+  // convention (ADR-001).
+  StateSpace state_space = 15;
+  // Question 149: codecs for this system's FRAMED ports (one per APID), declared in the
+  // artifact and hashed with it. See packet.proto.
+  repeated PacketCodec packet_codecs = 16;
+  // Sensor and actuator models attached to this system, by model id.
+  repeated string sensor_models = 10;
+  repeated string actuator_models = 11;
+  Label label = 12;
+  Provenance provenance = 13;
+  // SHA-256 of the canonical serialization of this definition (excluding this field).
+  string hash = 14;
+}
+
+// ---------------------------------------------------------------------------
+// Bindings: where a system runs (ADR-005)
+// ---------------------------------------------------------------------------
+
+enum BindingKind {
+  BINDING_KIND_UNSPECIFIED = 0;
+  // A dynamics model inside the kernel.
+  BINDING_KIND_MODEL = 1;
+  // Flight or ground software in a container (cFS, ROS 2, custom).
+  BINDING_KIND_CONTAINER = 2;
+  // The real binary on an emulated MCU / SoC in Renode, virtual time slaved to the kernel.
+  BINDING_KIND_RENODE = 3;
+  // The real binary on real hardware through an edge node's I/O.
+  BINDING_KIND_BOARD = 4;
+}
+
+message ModelBinding {
+  string model_id = 1;
+}
+
+message ContainerBinding {
+  // OCI image reference and its digest (pinned; the deploy audit records it).
+  string image = 1;
+  string image_digest = 2;
+  repeated string command = 3;
+  // Port name -> transport endpoint the kernel connects, e.g. "tm" -> "udp://0.0.0.0:1234".
+  map<string, string> port_endpoints = 4;
+  // True if the container honours the kernel's lockstep protocol.
+  bool lockstep_capable = 5;
+}
+
+message RenodeBinding {
+  // Renode platform description (.repl) reference.
+  string platform = 1;
+  // Firmware binary and its SHA-256.
+  string binary_uri = 2;
+  string binary_sha256 = 3;
+  // Renode script (.resc) reference.
+  string script = 4;
+  // Port name -> Renode peripheral bridge ("uart0", "can0", "eth0").
+  map<string, string> port_bridges = 5;
+}
+
+message BoardBinding {
+  // Edge node that hosts the physical interfaces.
+  string edge_node_id = 1;
+  // Port name -> physical device, e.g. "tm" -> "/dev/ttyUSB0@115200", "tc" -> "udp://10.0.0.7:5000".
+  map<string, string> port_devices = 2;
+  // Edge-node power control channel for reset / power-cycle faults, if any.
+  string power_control = 3;
+}
+
+message Binding {
+  BindingKind kind = 1;
+  oneof config {
+    ModelBinding model = 2;
+    ContainerBinding container = 3;
+    RenodeBinding renode = 4;
+    BoardBinding board = 5;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// System-of-systems configuration: which systems, connected how, bound where
+// ---------------------------------------------------------------------------
+
+message SystemInstance {
+  // Instance name, unique within the configuration ("gnc", "adcs", "ground").
+  string name = 1;
+  string system_id = 2;
+  string variant = 3;
+  Binding binding = 4;
+  // Kernel step rate for this instance's dynamics, Hz (question 19). 0 = DRM default.
+  double step_rate_hz = 5;
+  // Entity this instance embodies, if it is a vehicle or platform.
+  string entity_id = 6;
+  repeated Parameter parameter_overrides = 7;
+  // Question 89: the covariance the DRM seeds this instance with when DrmOptions.covariance
+  // is set. Row-major n x n in SI over the instance's state space (n = state dimension);
+  // empty means "no covariance for this instance". Symmetric positive definite; the
+  // executor rejects anything else with a typed error (question 83 governs projection).
+  repeated double initial_covariance = 8 [packed = true];
+}
+
+message Connection {
+  string from_instance = 1;
+  string from_port = 2;
+  string to_instance = 3;
+  string to_port = 4;
+  // Optional link model (latency, loss, bandwidth) applied by the port router; a dynamics
+  // model id.
+  string link_model = 5;
+}
+
+message SosConfiguration {
+  string id = 1;
+  string version = 2;
+  string name = 3;
+  repeated SystemInstance instances = 4;
+  repeated Connection connections = 5;
+  Label label = 6;
+  Provenance provenance = 7;
+  string hash = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Design reference mission: configuration + scenario + objectives
+// ---------------------------------------------------------------------------
+
+enum FaultTargetKind {
+  FAULT_TARGET_KIND_UNSPECIFIED = 0;
+  // A port: drop, delay, corrupt, duplicate.
+  FAULT_TARGET_KIND_PORT = 1;
+  // A dynamics or environment parameter change.
+  FAULT_TARGET_KIND_DYNAMICS = 2;
+  // Hardware: Renode peripheral fault, board reset, power cycle.
+  FAULT_TARGET_KIND_HARDWARE = 3;
+  // Sensor: bias, noise, dropout, misalignment.
+  FAULT_TARGET_KIND_SENSOR = 4;
+}
+
+message Fault {
+  string id = 1;
+  int64 tai_ns = 2;
+  // Duration; 0 = persistent until cleared by another Fault with `clear = true`.
+  int64 duration_ns = 3;
+  FaultTargetKind target_kind = 4;
+  // Instance and port / parameter / peripheral / sensor the fault acts on.
+  string instance = 5;
+  string target = 6;
+  // Fault kind within the target: "drop", "delay", "corrupt", "duplicate", "bias", "noise",
+  // "dropout", "misalign", "reset", "power_cycle", "parameter".
+  string kind = 7;
+  map<string, double> params = 8;
+  bool clear = 9;
+}
+
+message ScenarioEvent {
+  string id = 1;
+  int64 tai_ns = 2;
+  // "maneuver", "mode", "contact", "custom"...
+  string kind = 3;
+  string instance = 4;
+  map<string, double> values = 5;
+  map<string, string> attributes = 6;
+  // Question 100 (user decision 2026-09-03): Gates execution error for kind = "maneuver".
+  // Absent means a perfect burn; the executor never defaults it.
+  ManeuverExecutionError execution_error = 7;
+}
+
+// Gates model (Gates 1963) of impulsive-burn execution error: four 1-sigma terms,
+// each applied to the commanded delta-v. Magnitude terms act along the commanded
+// direction; pointing terms act in the plane normal to it. Sweep runs sample from the
+// seeded stream named by `seed`; a single deterministic run injects the covariance
+// analytically at the burn epoch (P+ = P- + G Q G^T). All four must be present and
+// finite; a zero is an explicit zero, not a default.
+message ManeuverExecutionError {
+  // Fixed magnitude error, m/s.
+  double sigma_magnitude_fixed_mps = 1;
+  // Proportional magnitude error, dimensionless fraction of |dv|.
+  double sigma_magnitude_proportional = 2;
+  // Fixed pointing error, m/s (per axis, in the plane normal to dv).
+  double sigma_pointing_fixed_mps = 3;
+  // Proportional pointing error, radians (per axis).
+  double sigma_pointing_proportional_rad = 4;
+  // Key into Scenario.seeds; required for sweep runs, ignored for analytic injection.
+  string seed = 5;
+}
+
+message Scenario {
+  int64 start_tai_ns = 1;
+  int64 end_tai_ns = 2;
+  // SHA-256 of the environment data pack (gravity, ephemerides, weather, basemaps).
+  string data_pack_hash = 3;
+  // Frames this scenario declares beyond the registry defaults.
+  repeated FrameDefinition frames = 4;
+  repeated ScenarioEvent events = 5;
+  repeated Fault faults = 6;
+  // Seeds are inputs (spoore ADR-004): every stochastic element names its seed here.
+  map<string, uint64> seeds = 7;
+}
+
+message Objective {
+  string name = 1;
+  // Metric expression over trajectories, events and outputs (grammar defined with ADR-005).
+  string expression = 2;
+  double target = 3;
+  double tolerance = 4;
+  Unit unit = 5;
+}
+
+message MeasureOfEffectiveness {
+  string name = 1;
+  string expression = 2;
+  Unit unit = 3;
+}
+
+// Numerical options that would otherwise be tempting to put in a profile. They live here so
+// they are hashed with the design (ADR-000 rule 1).
+message DrmOptions {
+  // Propagate covariance through the STM and carry it on trajectories.
+  bool covariance = 1;
+  // Default kernel step rate when a SystemInstance does not set one, Hz.
+  double default_step_rate_hz = 2;
+  // Trajectory sampling interval for stored products, seconds.
+  double sample_interval_s = 3;
+  // Lockstep (deterministic) or real-time pacing; real-time is forced when a board is bound.
+  bool real_time = 4;
+  // Question 83: when a propagated covariance fails the Cholesky SPD check, project it to
+  // the nearest SPD matrix instead of failing. Off by default; the projection is counted
+  // and logged whenever it fires.
+  bool nearest_spd_projection = 5;
+  // Question 82: accept covariance from force models whose state transition matrix is
+  // known to omit terms (GMAT's RelativisticCorrection fills zeros; SRP omits shadow
+  // partials inside a penumbra). Off by default: such a request is a typed error.
+  bool accept_missing_stm_terms = 6;
+}
+
+message DesignReferenceMission {
+  string id = 1;
+  string version = 2;
+  string name = 3;
+  string sos_configuration_id = 4;
+  Scenario scenario = 5;
+  repeated Objective objectives = 6;
+  repeated MeasureOfEffectiveness measures = 7;
+  DrmOptions options = 8;
+  Label label = 9;
+  Provenance provenance = 10;
+  // SHA-256 of the canonical serialization (excluding this field), together with the
+  // referenced configuration's hash. Every run records it.
+  string hash = 11;
+}
+
+// A feasibility study: a DRM fanned out over a parameter space (question 5, section 3).
+message ParameterSweep {
+  string id = 1;
+  string drm_id = 2;
+  // Instance.parameter -> list of values, or a range.
+  repeated SweepAxis axes = 3;
+  // Number of Monte Carlo draws per point; seeds are derived from Scenario.seeds and recorded.
+  uint32 monte_carlo_draws = 4;
+  Provenance provenance = 5;
+  string hash = 6;
+}
+
+message SweepAxis {
+  string instance = 1;
+  string parameter = 2;
+  repeated double values = 3 [packed = true];
+  double min = 4;
+  double max = 5;
+  uint32 steps = 6;
+}

@@ -1,0 +1,12 @@
+renode pid=26911 monitor_port=58163 uart_port=58164
+overwrote /Users/probe/code/AltaVista/third_party/renode/M24_4d/truncation_probe.resc with TRUNCATED content at t+0.152s after include was sent
+include reply (0.303s after send): 'include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/truncation_probe.resc'
+tcp connect to uart_port succeeded: True
+lsof first_listen_offset: 2.377140666008927
+final lsof LISTEN lines for this pid: ['renode  26911 probe  429u  IPv4 0x9b2ef90e7b7a182f      0t0  TCP *:58163 (LISTEN)', 'renode  26911 probe  432u  IPv4 0x9e3ba962bc2b691a      0t0  TCP *:58164 (LISTEN)']
+connector Connections -> (av-m24-4d-trunc) 
+(av-m24-4d-trunc) connector Connections
+There was an error executing command 'connector Connections'
+connector does not provide a field, method or property Connections.
+(av-m24-4d-trunc) 
+(av-m24-4d-trunc)

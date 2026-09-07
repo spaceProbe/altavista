@@ -1,0 +1,73 @@
+# M24.2b -- run RTEMS's own `hello` sample, built for zynqmp_rpu_lock_step with the
+# container-built toolchain (third_party/rtems-container/output), on Renode's mainline Zynq
+# UltraScale+ Cortex-R5 platform (docs/open-questions.md question 144), on rpu0 only
+# (lock-step BSP; apu*/rpu1 left halted). Adapted from the read-only host reference
+# third_party/rtems/run-renode/hello.resc (only the source ELF differs; the platform/reset
+# convention is identical to that script and to the M24.1 spike's setup.resc). UART0 output
+# is captured to a file via `CreateFileBackend` (headless-safe; `showAnalyzer` needs a GUI
+# window and is not used here).
+#
+# `hello` explicitly disables the clock driver (testsuites/samples/hello/init.c:
+# CONFIGURE_APPLICATION_DOES_NOT_NEED_CLOCK_DRIVER) and only prints a few lines once, so a
+# short virtual run is ample. Expected output stated in REPORT.md before running (guessed from
+# the sample's name/purpose):
+#   *** HELLO WORLD TEST ***
+#   Hello World
+#   *** END OF HELLO WORLD TEST ***
+# ACTUAL captured output differs in exact banner text (RTEMS 6's own test-banner macros use
+# "BEGIN OF TEST <name>"/"END OF TEST <name>", not "<NAME> TEST"/"END OF <NAME> TEST", and the
+# run also prints an RTEMS version/shutdown banner the guess did not anticipate) -- see
+# REPORT.md's "Renode runs" section for the real, captured text. Recorded as a finding, not
+# silently corrected in the comment to look like the guess was right.
+
+:name: zynqmp-rpu-lockstep-hello
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "zynqmp-rpu-hello"
+
+machine LoadPlatformDescription @platforms/cpus/zynqmp.repl
+
+# NOTE (bug found and fixed in this task, see REPORT.md): `@$ORIGIN/...` combines the `@`
+# literal-path-token marker with the `$ORIGIN` variable -- `@` makes the parser take the
+# whole following text as a literal string, which suppresses `$ORIGIN` substitution, so
+# Renode tried to create a file in a literal directory named `$ORIGIN` and failed ("File
+# $ORIGIN/hello_uart.log could not be created"), aborting the rest of this script before
+# `quit` -- this, not the `start`/`RunFor` ordering above, was the actual cause of the
+# hang (confirmed with a raw byte-level dump of the monitor's response). `LoadELF
+# $ORIGIN/hello.exe` below has no `@` and substitutes correctly; the fix here is the same:
+# drop the `@` so `$ORIGIN` is substituted before the path is used.
+uart0 CreateFileBackend $ORIGIN/hello_uart.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF $ORIGIN/hello.exe cpu=rpu0
+"""
+
+runMacro $reset
+
+# NOTE (bug found and fixed in this task, see REPORT.md): do NOT call `start` before
+# `emulation RunFor` -- `start` puts the emulation into continuous free-run mode, and RunFor
+# then fails ("This action is not available when emulation is already started"). Because
+# that error aborts the rest of an `include`d/CLI-run script before reaching `quit`, Renode
+# is left idling at the monitor prompt forever with no further input coming -- this is
+# exactly the hang this task hit first (5m46s wall, ~5s CPU, zero UART output, process never
+# exited). `RunFor` starts the (paused, freshly-reset) emulation itself; confirmed against
+# the M24.1 spike's own working driver (measure_virtual_time.py), which never calls `start`
+# either and reliably measured 0 ns drift over 1000 RunFor steps.
+# RunFor duration reduced from the original 2s (see REPORT.md "Renode wall-clock cost is far
+# from real-time for the full BSP/platform, not the M24.1 spike's bare-loop firmware" --
+# RunFor "2" alone exceeded a 120s real-time budget and had to be killed mid-run, even though
+# the UART output shows the guest program had already reached "[ RTEMS shutdown ]" long
+# before that: the platform keeps burning real wall time simulating idle virtual time after
+# the guest program's own work is done, and that idle-simulation cost is what dominates, not
+# the actual program logic). `hello` disables the clock driver and finishes almost instantly
+# in virtual time, so 0.3s of virtual runtime is ample margin.
+emulation RunFor "0.3"
+quit

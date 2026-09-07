@@ -1,0 +1,120 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M22.4
+# (docs/sil-plan.md's M22 milestone paragraph: "A native 'controller' instance closes the loop
+# first"). Four BINDING_KIND_MODEL instances -- "attitude" (the three-wheel plant), "startracker"
+# and "imu" (both measuring it), and "controller" (the native attitude controller closing the
+# loop) -- wired by seventeen `Connection`s:
+#   - Fourteen SIGNAL connections (the same `crate::drm::sensors::TRUTH_PORT_NAMES` x two sensor
+#     instances topology drms/demo_attitude_sensors.sos.yaml already established): "attitude" ->
+#     "startracker" and "attitude" -> "imu".
+#   - Two FRAMED connections carrying each sensor's own CCSDS measurement packet to the
+#     controller's own declared IN ports: "startracker" -> "controller" (port `startracker_in`),
+#     "imu" -> "controller" (port `imu_in`).
+#   - One FRAMED connection carrying the controller's own commanded wheel-torque packet back to
+#     the plant: "controller" -> "attitude" (port `wheel_torque_in`) -- this is the loop-closing
+#     edge; without it the plant never sees a command and the "attitude" instance would behave
+#     exactly as if `crate::drm::controller::CommandedAttitude` were never wrapped at all (see
+#     that type's own "provably inert wherever nothing is connected" doc comment).
+id: attitude_control_sos
+version: "1"
+name: Closed-loop attitude control demo (star tracker + IMU in, native controller, wheel torques out)
+instances:
+  - name: attitude
+    system_id: attitude_control_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_truth_sys
+  - name: startracker
+    system_id: attitude_control_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_startracker_sys
+  - name: imu
+    system_id: attitude_control_imu_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_imu_sys
+  - name: controller
+    system_id: attitude_control_controller_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_controller_sys
+connections:
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: startracker
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: startracker
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: startracker
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: startracker
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: startracker
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: startracker
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: startracker
+    to_port: truth_wz
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: imu
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: imu
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: imu
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: imu
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: imu
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: imu
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: imu
+    to_port: truth_wz
+  - from_instance: startracker
+    from_port: st_meas
+    to_instance: controller
+    to_port: startracker_in
+  - from_instance: imu
+    from_port: imu_meas
+    to_instance: controller
+    to_port: imu_in
+  - from_instance: controller
+    from_port: wheel_torque_out
+    to_instance: attitude
+    to_port: wheel_torque_in
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_attitude_control.sos.yaml
+hash: "d1dc83df8215e9e389b8cabf4a57d6caf9b88cafbe064904c355295ba55056f7"

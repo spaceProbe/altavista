@@ -1,0 +1,17 @@
+
+
+*** BEGIN OF TEST HELLO WORLD ***
+*** TEST VERSION: 6.0.0.not-released
+*** TEST STATE: EXPECTED_PASS
+*** TEST BUILD:
+*** TEST TOOLS: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)
+Hello World
+
+*** END OF TEST HELLO WORLD ***
+
+
+[ RTEMS shutdown ]
+RTEMS version: 6.0.0.not-released
+RTEMS tools: 13.3.0 20240521 (RTEMS 6, RSB no-repo, Newlib 1b3dcfd)
+executing thread ID: 0x0a010001
+executing thread name: UI1 

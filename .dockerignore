@@ -1,0 +1,22 @@
+# Repo-root .dockerignore -- added by M15.3 (question 118) so `docker build -f
+# services/lockstep-ref/Dockerfile .` does not ship this whole workspace (Rust `target/` alone
+# runs into the tens of GB) as build context. Only `altavista/pb/**` and
+# `services/lockstep-ref/**` are actually read by that Dockerfile; everything below is excluded
+# because it is either huge, irrelevant to that image, or (GMAT R2026a) explicitly off limits
+# to modify -- excluding it from a build context is not a modification, but it costs nothing to
+# also leave it alone entirely.
+target/
+# M23.4: the scratch target dir a `docker run rust:1.85-bookworm cargo build --release
+# -p av-lockstep-shim --target-dir target-docker-linux` cross-build writes to (see
+# services/cfs/Dockerfile's own top comment for that command) -- never referenced by any
+# Dockerfile COPY (services/cfs/bin/av-lockstep-shim, a stripped copy of just the resulting
+# binary, is what gets COPYed), so excluding the whole scratch dir from every build context
+# costs nothing.
+target-docker-linux/
+.venv/
+GMAT R2026a/
+.git/
+node_modules/
+web/node_modules/
+**/__pycache__/
+**/*.pyc

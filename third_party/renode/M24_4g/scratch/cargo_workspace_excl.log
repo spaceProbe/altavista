@@ -1,0 +1,386 @@
+   Compiling hyper-openssl v0.10.2
+   Compiling av-dynamics-service v0.1.0 (/Users/probe/code/AltaVista/crates/av-dynamics-service)
+   Compiling av-grpc v0.1.0 (/Users/probe/code/AltaVista/crates/av-grpc)
+   Compiling av-lockstep v0.1.0 (/Users/probe/code/AltaVista/crates/av-lockstep)
+   Compiling av-kernel v0.1.0 (/Users/probe/code/AltaVista/crates/av-kernel)
+   Compiling av-lockstep-shim v0.1.0 (/Users/probe/code/AltaVista/crates/av-lockstep-shim)
+   Compiling av-run v0.1.0 (/Users/probe/code/AltaVista/crates/av-run)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.41s
+     Running unittests src/lib.rs (target/debug/deps/av_cdm-69df379fe75be608)
+
+running 47 tests
+test covariance::tests::non_finite_entry_is_rejected_and_counted ... ok
+test covariance::tests::asymmetric_matrix_is_rejected_with_the_typed_error_and_counted ... ok
+test covariance::tests::equivalence_asymmetric_matrix_is_rejected_by_both ... ok
+test covariance::tests::row_major_wrong_length_is_a_dimension_mismatch_not_a_panic ... ok
+test spoore_v0::frame::tests::empty_frame_id_is_rejected_rather_than_defaulted ... ok
+test spoore_v0::frame::tests::every_frame_round_trips_through_its_frame_id ... ok
+test covariance::tests::equivalence_indefinite_matrix_is_rejected_by_both ... ok
+test covariance::tests::a_well_conditioned_diagonal_matrix_passes ... ok
+test covariance::tests::min_cholesky_diag_sq_is_computed_from_the_actual_factor_on_a_diagonal_matrix ... ok
+test covariance::tests::equivalence_a_well_conditioned_matrix_is_accepted_by_both ... ok
+test covariance::tests::equivalence_singular_matrix_is_rejected_by_both ... ok
+test covariance::tests::equivalence_symmetry_tolerance_is_relative_to_magnitude_on_both_sides ... ok
+test spoore_v0::frame::tests::frame_ids_are_pairwise_distinct ... ok
+test covariance::tests::indefinite_matrix_is_rejected_with_the_typed_error_and_counted ... ok
+test spoore_v0::frame::tests::unknown_frame_id_is_a_typed_error_not_a_default ... ok
+test spoore_v0::tests::belief_missing_component_state_is_a_typed_error ... ok
+test spoore_v0::tests::belief_wire_bytes_match_spoore_v0 ... ok
+test covariance::tests::nearest_spd_of_an_indefinite_matrix_passes_the_check_afterward ... ok
+test covariance::tests::nearest_spd_leaves_an_already_spd_matrix_close_to_unchanged ... ok
+test spoore_v0::tests::gaussian_state_epoch_shift_is_the_tai_utc_offset_in_force ... ok
+test spoore_v0::tests::gaussian_state_missing_state_space_dimension_is_a_typed_error ... ok
+test spoore_v0::tests::belief_round_trips ... ok
+test spoore_v0::tests::gaussian_state_epoch_shift_straddles_a_leap_second_boundary ... ok
+test spoore_v0::tests::gaussian_state_round_trips_mean_cov_space_and_epoch ... ok
+test spoore_v0::tests::gaussian_state_wire_bytes_match_spoore_v0 ... ok
+test spoore_v0::tests::innovation_dimension_mismatch_is_a_typed_error_not_a_panic ... ok
+test spoore_v0::tests::innovation_round_trips ... ok
+test spoore_v0::tests::innovation_wire_bytes_match_spoore_v0 ... ok
+test covariance::tests::the_golden_arcs_own_p0_and_propagated_cov_t1_both_pass ... ok
+test spoore_v0::tests::measurement_round_trips_including_frame_and_meta ... ok
+test spoore_v0::tests::measurement_unknown_frame_id_is_a_typed_error ... ok
+test spoore_v0::tests::measurement_wire_bytes_match_spoore_v0_when_frame_id_is_unset ... ok
+test time::tests::a1_mjd_of_the_tai_origin_matches_the_documented_constant ... ok
+test time::tests::a1_mjd_round_trips_within_a_microsecond ... ok
+test time::tests::from_utc_nanos_just_before_and_at_every_boundary ... ok
+test time::tests::from_utc_nanos_resolves_the_leap_second_collision_to_the_post_insertion_reading ... ok
+test time::tests::gps_round_trips_and_matches_the_constant_offset ... ok
+test time::tests::post_table_extrapolates_the_last_offset ... ok
+test time::tests::pre_1972_clamps_to_the_first_offset ... ok
+test time::tests::table_has_the_expected_span ... ok
+test time::tests::to_utc_nanos_is_exact_at_every_boundary ... ok
+test time::tests::to_utc_nanos_just_before_and_just_after_every_boundary ... ok
+test time::tests::tt_round_trips_and_matches_the_iau_constant ... ok
+test units::tests::scalar_conversions_are_exact_for_round_numbers ... ok
+test units::tests::scalar_round_trips ... ok
+test units::tests::state_conversion_scales_position_and_velocity_independently ... ok
+test units::tests::state_round_trips ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/epoch_fixture.rs (target/debug/deps/epoch_fixture-ad6a060b9b044ffc)
+
+running 2 tests
+test the_fixture_pins_the_leap_second_steps_it_claims_to ... ok
+test rust_reproduces_every_entry_of_the_shared_epoch_fixture ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/spoore_v0.rs (target/debug/deps/spoore_v0-13f3445d029edf6f)
+
+running 12 tests
+test every_spoore_frame_has_a_frame_id_and_round_trips ... ok
+test an_unregistered_frame_id_is_a_typed_error ... ok
+test innovation_bytes_match_spoore_v0 ... ok
+test gaussian_state_bytes_match_spoore_v0 ... ok
+test measurement_bytes_match_spoore_v0_when_v1_only_fields_are_default ... ok
+test belief_bytes_match_spoore_v0 ... ok
+test innovation_round_trip_is_identity ... ok
+test epoch_shift_adds_the_tai_utc_offset_going_to_v1 ... ok
+test gaussian_state_round_trip_is_identity ... ok
+test measurement_round_trip_is_identity ... ok
+test belief_round_trip_is_identity ... ok
+test epoch_shift_straddles_the_2006_leap_second_boundary ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/av_dynamics-ac8df1cd8e8e3d94)
+
+running 34 tests
+test erase::tests::erased_model_reaches_inner_stm_capable ... ok
+test erase::tests::erased_model_reaches_inner_state_dim ... ok
+test erase::tests::erased_model_reaches_inner_integrator ... ok
+test erase::tests::erased_model_reaches_inner_derivatives ... ok
+test erase::tests::erased_model_reaches_inner_step ... ok
+test erase::tests::erased_model_reaches_inner_describe ... ok
+test erase::tests::erased_model_delegates_a_wrapped_models_own_step_override ... ok
+test erase::tests::erased_model_reaches_inner_step_with_stm ... ok
+test erase::tests::erased_model_maps_the_inner_error_type_into_model_error_carrying_the_model_id ... ok
+test erase::tests::erased_model_reaches_inner_step_with_ports ... ok
+test erase::tests::erased_model_delegates_state_dim_and_describe_unchanged ... ok
+test erase::tests::erased_model_delegates_a_wrapped_models_own_step_with_ports_override ... ok
+test erase::tests::erased_model_reaches_inner_stm_derivatives ... ok
+test erase::tests::erased_model_stm_derivatives_returns_a_typed_capability_missing_error_instead_of_panicking_when_stm_capable_is_false ... ok
+test erase::tests::erased_models_default_step_still_drives_dopri5_over_derivatives ... ok
+test error::tests::every_variant_carries_and_exposes_the_model_id ... ok
+test stm::tests::phi_t0_t0_is_the_exact_identity ... ok
+test stm::tests::propagate_covariance_matches_the_rotation_closed_form_and_preserves_trace ... ok
+test stm::tests::propagate_covariance_of_identity_phi_returns_p0_unchanged ... ok
+test stm::tests::propagate_covariance_symmetrizes_and_reports_a_manufactured_asymmetry ... ok
+test stm::tests::stm_augmented_reports_the_wrapped_models_state_dim_squared_plus_itself ... ok
+test stm::tests::stm_derivatives_leaves_the_physical_block_identical_to_derivatives ... ok
+test tests::default_step_matches_the_closed_form_solution_for_constant_acceleration ... ok
+test tests::derivatives_sees_absolute_tai_ns_not_a_step_relative_offset ... ok
+test tests::encode_signal_and_decode_signal_round_trip ... ok
+test tests::inbox_for_port_filters_by_name_and_preserves_order ... ok
+test tests::inbox_new_leaves_every_sender_unknown ... ok
+test stm::tests::stm_augmented_refuses_a_model_that_does_not_declare_the_capability - should panic ... ok
+test tests::inbox_new_with_senders_attaches_the_right_sender_to_each_message ... ok
+test tests::the_default_step_with_ports_ignores_the_inbox_and_matches_plain_step_exactly ... ok
+test tests::settings_hash_is_stable_and_order_independent ... ok
+test stm::tests::step_with_stm_matches_the_closed_form_rotation_matrix ... ok
+test stm::tests::stm_augmented_step_delegates_to_step_with_stm_and_carries_its_outputs ... ok
+test stm::tests::stm_augmented_step_composes_the_local_stm_with_the_accumulated_one_over_two_native_periods ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/av_dynamics_service-95832ce664f79f1b)
+
+running 16 tests
+test config::tests::settings_hash_is_stable_and_hex ... ok
+test fips::tests::detect_reports_a_real_openssl_version_string ... ok
+test fips::tests::detect_is_idempotent ... ok
+test propagate::tests::sample_epochs_adds_a_short_final_leg_when_the_interval_does_not_divide_evenly ... ok
+test propagate::tests::sample_epochs_always_includes_both_endpoints_and_is_evenly_spaced_when_it_divides_exactly ... ok
+test propagate::tests::sample_epochs_with_interval_longer_than_the_horizon_is_just_the_two_endpoints ... ok
+test evidence::tests::verify_reports_the_empty_log_as_ok ... ok
+test evidence::tests::first_record_chains_from_the_genesis_sentinel ... ok
+test evidence::tests::record_appends_one_sorted_key_json_line_per_call ... ok
+test evidence::tests::verify_detects_a_severed_prev_hash_link ... ok
+test evidence::tests::later_records_chain_prev_hash_to_the_previous_records_hash ... ok
+test evidence::tests::evidence_log_survives_reopen_and_continues_the_same_chain ... ok
+test evidence::tests::verify_reports_ok_on_an_untampered_chain ... ok
+test evidence::tests::verify_detects_a_tampered_record_and_reports_its_sequence_number ... ok
+test evidence::tests::hash_message_differs_for_different_messages ... ok
+test evidence::tests::hash_message_is_stable_and_hex ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/bin/server.rs (target/debug/deps/av_dynamics_service-f97d9fc83df5ab6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/av_grpc-32d97c5cc32dc766)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/describe_client.rs (target/debug/deps/describe_client-01e67b9e841a5083)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/av_lockstep-9bb5fc3341df791b)
+
+running 6 tests
+test docker::tests::sysctls_are_emitted_sorted_by_key_between_env_and_the_image_reference ... ok
+test docker::tests::no_sysctls_means_no_sysctl_flag ... ok
+test docker::tests::test_label_args_shape ... ok
+test docker::tests::labels_are_emitted_sorted_by_key_between_sysctls_and_the_image_reference ... ok
+test docker::tests::a_malformed_port_endpoint_is_a_typed_error_before_any_docker_call ... ok
+test tests::connect_plaintext_to_nothing_listening_fails_with_a_typed_connect_error ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/docker_lifecycle.rs (target/debug/deps/docker_lifecycle-fa05cca576853e9e)
+
+running 2 tests
+test docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove ... ok
+test prune_stale_test_resources_removes_orphaned_labeled_containers_and_images has been running for over 60 seconds
+test prune_stale_test_resources_removes_orphaned_labeled_containers_and_images ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.51s
+
+     Running unittests src/lib.rs (target/debug/deps/av_lockstep_shim-c5acebdf45bb465a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/av-lockstep-shim.rs (target/debug/deps/av_lockstep_shim-329e8cf23b201bb0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/end_to_end_kernel_path.rs (target/debug/deps/end_to_end_kernel_path-9721cc73d23b16ad)
+
+running 1 test
+test the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/frame_bytes.rs (target/debug/deps/frame_bytes-6d24ce348a9c94d9)
+
+running 4 tests
+test error_frame_matches_hand_computed_bytes ... ok
+test shutdown_frame_matches_hand_computed_bytes ... ok
+test hello_frame_matches_hand_computed_bytes ... ok
+test step_frame_with_a_port_message_matches_hand_computed_bytes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/protocol_errors.rs (target/debug/deps/protocol_errors-3b3d796e707f2914)
+
+running 6 tests
+test bad_hello_magic_also_fails_loudly ... ok
+test sequence_mismatch_on_step_is_a_typed_error_naming_both_values ... ok
+test reached_tai_ns_mismatch_from_the_peer_is_a_protocol_error ... ok
+test version_handshake_mismatch_fails_loudly ... ok
+test sequence_mismatch_on_reset_is_a_typed_error_naming_both_values ... ok
+test a_second_step_while_one_is_outstanding_is_a_protocol_error_not_a_queue ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/round_trip.rs (target/debug/deps/round_trip-ded3e16f2a0d2188)
+
+running 10 tests
+test bind_ack_round_trips ... ok
+test error_round_trips ... ok
+test shutdown_round_trips ... ok
+test reset_ack_round_trips ... ok
+test bind_round_trips ... ok
+test step_round_trips_with_a_port_message ... ok
+test hello_round_trips ... ok
+test step_done_round_trips_with_named_outputs ... ok
+test shutdown_ack_round_trips ... ok
+test reset_round_trips ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/av_run-ffd5f19a1bc7ae93)
+
+running 8 tests
+test tests::parses_a_minimal_command_line ... ok
+test tests::refuses_when_neither_server_nor_out_is_given ... ok
+test tests::refuses_a_non_http_scheme ... ok
+test tests::parses_host_port_and_path ... ok
+test tests::defaults_path_to_root_and_port_to_80 ... ok
+test tests::av_run_bytes_carry_the_real_config_hash_not_a_constant ... ok
+test tests::av_run_bytes_are_real_run_products_protobuf_not_the_old_avrun1_framing ... ok
+test tests::refuses_a_duplicate_system_id ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/gmat_sys-c54a21eb4a1edc49)
+
+running 1 test
+test model::tests::epoch_tai_ns_and_describe_do_not_need_gmat_state_beyond_construction ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/convert.rs (target/debug/deps/convert-6efaac947f7c3d66)
+
+running 5 tests
+test convert_matches_the_genuine_gmat_reportfile_for_earthicrf ... ok
+test convert_refuses_an_unregistered_coordinate_system_name ... ok
+test round_trip_from_mj2000eq_to_icrf_and_back_is_the_identity_to_1e_minus_9_m ... ok
+test convert_refuses_a_registered_object_that_is_not_a_coordinate_system ... ok
+test convert_matches_the_genuine_gmat_reportfile_for_earthbodyfixed ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.78s
+
+     Running tests/convert_rotation.rs (target/debug/deps/convert_rotation-ce557512bfda80f5)
+
+running 6 tests
+test full_transform_disagrees_with_gmat_reportfile_in_velocity_and_cross_blocks_due_to_missing_rdot ... ok
+test measure_the_per_call_cost_of_convert_with_rotation_vs_plain_convert ... ok
+test convert_with_rotation_state_output_matches_plain_convert ... ok
+test rotation_dot_matches_a_finite_difference_of_the_rotation_matrix ... ok
+test convert_with_rotation_refuses_an_unregistered_coordinate_system_name ... ok
+test convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.71s
+
+     Running tests/drag_srp_stm.rs (target/debug/deps/drag_srp_stm-4b1074d5b2e3cb84)
+
+running 4 tests
+test dragforce_without_a_referenced_atmosphere_still_fails_to_initialize ... ok
+test finite_difference_a_matrix_isolates_srp_contribution ... ok
+test drag_srp_6state_matches_the_golden ... ok
+test drag_srp_42state_stm_and_covariance_match_the_golden ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.94s
+
+     Running tests/epoch_writeback.rs (target/debug/deps/epoch_writeback-09d0563cdfcce002)
+
+running 1 test
+test epoch_is_written_back_and_an_earth_fixed_longitude_matches_a_genuine_gmat_reportfile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.58s
+
+     Running tests/gmat_port_cd_command.rs (target/debug/deps/gmat_port_cd_command-380118262c800a36)
+
+running 8 tests
+test commanded_and_baseline_trajectories_differ_with_an_equal_dynamics_hash ... ok
+test emit_sends_the_models_own_named_output_as_a_signal_message ... ok
+test step_with_ports_reports_exactly_the_expected_applied_commands ... ok
+test step_with_ports_suppresses_a_repeated_identical_command_after_the_first_application ... ok
+test signal_commanded_cd_change_matches_a_genuine_gmat_script_reference ... ok
+test step_with_ports_records_only_the_first_application_and_genuine_changes_in_a_controlled_command_stream ... ok
+test baseline_arc_and_commanded_arc_genuinely_differ ... ok
+test step_with_ports_the_first_application_emits_even_when_its_value_equals_the_configured_default ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.06s
+
+     Running tests/leo_golden.rs (target/debug/deps/leo_golden-558582acac0b8030)
+
+running 2 tests
+test two_models_in_one_process_do_not_interfere ... ok
+test rust_integrator_over_gmat_derivatives_matches_gmat_propagator ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.44s
+
+     Running tests/model_stm.rs (target/debug/deps/model_stm-b3e5dc7627d23918)
+
+running 2 tests
+test relativistic_correction_withholds_the_stm_capability_unless_accepted ... ok
+test gmat_model_wraps_the_stm_capable_derivative_model_and_matches_the_golden ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.62s
+
+     Running tests/stm_spike.rs (target/debug/deps/stm_spike-d5ccd413b01cc9b7)
+
+running 1 test
+test rust_driven_42state_stm_matches_gmat_and_is_internally_consistent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.85s
+
+   Doc-tests av_cdm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests av_dynamics
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests av_dynamics_service
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests av_grpc
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests av_lockstep
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests av_lockstep_shim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests gmat_sys
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0

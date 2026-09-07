@@ -1,0 +1,1519 @@
+{
+  "asset": {
+    "version": "1.1"
+  },
+  "geometricError": 400.0,
+  "extras": {
+    "geoReference": {
+      "lonDeg": -105.2705,
+      "latDeg": 40.015,
+      "heightM": 1650.0,
+      "note": "root.transform's translation column (indices 12-14) is geodeticToEcef(lonDeg, latDeg, heightM); its 3 rotation columns (indices 0-2, 4-6, 8-10) are the East/North/Up unit basis at that point. web/js/tiles_layer.js and tests/test_viewer_globe.py cross-check this against web/js/globe_lod.js's geodeticToEcef -- see gen_3dtiles_fixture.py."
+    }
+  },
+  "root": {
+    "boundingVolume": {
+      "region": [
+        -1.8376658960710894,
+        0.6980444343351321,
+        -1.8369677643702915,
+        0.6987425660359298,
+        0,
+        100
+      ]
+    },
+    "geometricError": 400.0,
+    "refine": "REPLACE",
+    "content": {
+      "uri": "tile.glb"
+    },
+    "children": [
+      {
+        "boundingVolume": {
+          "region": [
+            -1.8376658960710894,
+            0.6980444343351321,
+            -1.8373168302206906,
+            0.6983935001855309,
+            0,
+            100
+          ]
+        },
+        "geometricError": 200.0,
+        "refine": "REPLACE",
+        "content": {
+          "uri": "tile.glb"
+        },
+        "children": [
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8376658960710894,
+                0.6980444343351321,
+                -1.83749136314589,
+                0.6982189672603315,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6980444343351321,
+                    -1.8375786296084897,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6980444343351321,
+                    -1.8374913631458902,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6981317007977318,
+                    -1.8375786296084897,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6981317007977318,
+                    -1.8374913631458902,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.83749136314589,
+                0.6980444343351321,
+                -1.8373168302206904,
+                0.6982189672603315,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6980444343351321,
+                    -1.8374040966832903,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6980444343351321,
+                    -1.8373168302206906,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6981317007977318,
+                    -1.8374040966832903,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6981317007977318,
+                    -1.8373168302206906,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8376658960710894,
+                0.6982189672603315,
+                -1.83749136314589,
+                0.6983935001855308,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6982189672603315,
+                    -1.8375786296084897,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6982189672603315,
+                    -1.8374913631458902,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6983062337229312,
+                    -1.8375786296084897,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6983062337229312,
+                    -1.8374913631458902,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.83749136314589,
+                0.6982189672603315,
+                -1.8373168302206904,
+                0.6983935001855308,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6982189672603315,
+                    -1.8374040966832903,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6982189672603315,
+                    -1.8373168302206906,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6983062337229312,
+                    -1.8374040966832903,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6983062337229312,
+                    -1.8373168302206906,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "boundingVolume": {
+          "region": [
+            -1.8373168302206906,
+            0.6980444343351321,
+            -1.836967764370292,
+            0.6983935001855309,
+            0,
+            100
+          ]
+        },
+        "geometricError": 200.0,
+        "refine": "REPLACE",
+        "content": {
+          "uri": "tile.glb"
+        },
+        "children": [
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8373168302206906,
+                0.6980444343351321,
+                -1.8371422972954912,
+                0.6982189672603315,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6980444343351321,
+                    -1.837229563758091,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6980444343351321,
+                    -1.8371422972954912,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6981317007977318,
+                    -1.837229563758091,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6981317007977318,
+                    -1.8371422972954912,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8371422972954912,
+                0.6980444343351321,
+                -1.8369677643702915,
+                0.6982189672603315,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6980444343351321,
+                    -1.8370550308328915,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6980444343351321,
+                    -1.836967764370292,
+                    0.6981317007977318,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6981317007977318,
+                    -1.8370550308328915,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6981317007977318,
+                    -1.836967764370292,
+                    0.6982189672603316,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8373168302206906,
+                0.6982189672603315,
+                -1.8371422972954912,
+                0.6983935001855308,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6982189672603315,
+                    -1.837229563758091,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6982189672603315,
+                    -1.8371422972954912,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6983062337229312,
+                    -1.837229563758091,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6983062337229312,
+                    -1.8371422972954912,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8371422972954912,
+                0.6982189672603315,
+                -1.8369677643702915,
+                0.6983935001855308,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6982189672603315,
+                    -1.8370550308328915,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6982189672603315,
+                    -1.836967764370292,
+                    0.6983062337229312,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6983062337229312,
+                    -1.8370550308328915,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6983062337229312,
+                    -1.836967764370292,
+                    0.6983935001855309,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "boundingVolume": {
+          "region": [
+            -1.8376658960710894,
+            0.6983935001855309,
+            -1.8373168302206906,
+            0.6987425660359299,
+            0,
+            100
+          ]
+        },
+        "geometricError": 200.0,
+        "refine": "REPLACE",
+        "content": {
+          "uri": "tile.glb"
+        },
+        "children": [
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8376658960710894,
+                0.6983935001855309,
+                -1.83749136314589,
+                0.6985680331107303,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6983935001855309,
+                    -1.8375786296084897,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6983935001855309,
+                    -1.8374913631458902,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6984807666481306,
+                    -1.8375786296084897,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6984807666481306,
+                    -1.8374913631458902,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.83749136314589,
+                0.6983935001855309,
+                -1.8373168302206904,
+                0.6985680331107303,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6983935001855309,
+                    -1.8374040966832903,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6983935001855309,
+                    -1.8373168302206906,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6984807666481306,
+                    -1.8374040966832903,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6984807666481306,
+                    -1.8373168302206906,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8376658960710894,
+                0.6985680331107303,
+                -1.83749136314589,
+                0.6987425660359298,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6985680331107303,
+                    -1.8375786296084897,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6985680331107303,
+                    -1.8374913631458902,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8376658960710894,
+                    0.6986552995733301,
+                    -1.8375786296084897,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8375786296084897,
+                    0.6986552995733301,
+                    -1.8374913631458902,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.83749136314589,
+                0.6985680331107303,
+                -1.8373168302206904,
+                0.6987425660359298,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6985680331107303,
+                    -1.8374040966832903,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6985680331107303,
+                    -1.8373168302206906,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.83749136314589,
+                    0.6986552995733301,
+                    -1.8374040966832903,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8374040966832903,
+                    0.6986552995733301,
+                    -1.8373168302206906,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "boundingVolume": {
+          "region": [
+            -1.8373168302206906,
+            0.6983935001855309,
+            -1.836967764370292,
+            0.6987425660359299,
+            0,
+            100
+          ]
+        },
+        "geometricError": 200.0,
+        "refine": "REPLACE",
+        "content": {
+          "uri": "tile.glb"
+        },
+        "children": [
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8373168302206906,
+                0.6983935001855309,
+                -1.8371422972954912,
+                0.6985680331107303,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6983935001855309,
+                    -1.837229563758091,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6983935001855309,
+                    -1.8371422972954912,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6984807666481306,
+                    -1.837229563758091,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6984807666481306,
+                    -1.8371422972954912,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8371422972954912,
+                0.6983935001855309,
+                -1.8369677643702915,
+                0.6985680331107303,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6983935001855309,
+                    -1.8370550308328915,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6983935001855309,
+                    -1.836967764370292,
+                    0.6984807666481307,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6984807666481306,
+                    -1.8370550308328915,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6984807666481306,
+                    -1.836967764370292,
+                    0.6985680331107303,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8373168302206906,
+                0.6985680331107303,
+                -1.8371422972954912,
+                0.6987425660359298,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6985680331107303,
+                    -1.837229563758091,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6985680331107303,
+                    -1.8371422972954912,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8373168302206906,
+                    0.6986552995733301,
+                    -1.837229563758091,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8372295637580909,
+                    0.6986552995733301,
+                    -1.8371422972954912,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          },
+          {
+            "boundingVolume": {
+              "region": [
+                -1.8371422972954912,
+                0.6985680331107303,
+                -1.8369677643702915,
+                0.6987425660359298,
+                0,
+                100
+              ]
+            },
+            "geometricError": 100.0,
+            "refine": "REPLACE",
+            "content": {
+              "uri": "tile.glb"
+            },
+            "children": [
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6985680331107303,
+                    -1.8370550308328915,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6985680331107303,
+                    -1.836967764370292,
+                    0.6986552995733302,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8371422972954912,
+                    0.6986552995733301,
+                    -1.8370550308328915,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              },
+              {
+                "boundingVolume": {
+                  "region": [
+                    -1.8370550308328915,
+                    0.6986552995733301,
+                    -1.836967764370292,
+                    0.6987425660359298,
+                    0,
+                    100
+                  ]
+                },
+                "geometricError": 50.0,
+                "refine": "REPLACE",
+                "content": {
+                  "uri": "tile.glb"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "transform": [
+      0.9646931514820498,
+      -0.26337639127991497,
+      0.0,
+      0.0,
+      0.16934789532280733,
+      0.6202862528486234,
+      0.7658761354662705,
+      0.0,
+      -0.20171369272651363,
+      -0.7388354627678498,
+      0.6429881376224998,
+      0.0,
+      -1288674.490281889,
+      -4720147.653414082,
+      4080322.2260798607,
+      1.0
+    ]
+  }
+}

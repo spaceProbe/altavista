@@ -1,0 +1,10 @@
+--- a/source-builder/config/gdb-common-1.cfg	2026-09-06 04:34:26
++++ b/source-builder/config/gdb-common-1.cfg	2026-09-06 04:34:08
+@@ -285,6 +285,7 @@
+     %{!?gdb-disable-sim:--enable-sim}%{?gdb-disable-sim:--disable-sim} \
+     %{?gdb-sim-options:%{gdb-sim-options}} \
+     --without-zlib \
++    --with-system-zlib \
+     --with-expat \
+     --with-guile=no \
+     %{iconv_opts} \

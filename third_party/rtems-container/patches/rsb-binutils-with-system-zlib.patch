@@ -1,0 +1,10 @@
+--- a/source-builder/config/binutils-2-1.cfg	2026-09-06 04:34:26
++++ b/source-builder/config/binutils-2-1.cfg	2026-09-06 04:34:04
+@@ -84,6 +84,7 @@
+     --without-included-gettext \
+     --disable-win32-registry \
+     --disable-werror \
++    --with-system-zlib \
+     --prefix=%{_prefix} --bindir=%{_bindir} \
+     --exec-prefix=%{_exec_prefix} \
+     --includedir=%{_includedir} --libdir=%{_libdir} \

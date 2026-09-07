@@ -1,0 +1,49 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M11.3
+# (docs/open-questions.md question 102): pins altavista's RIC burn path (a real GMAT
+# ImpulsiveBurn whose CoordinateSystem is an ObjectReferenced RIC system built through
+# altavista.frames.FrameRegistry, question 73's X=R,Z=N convention) against
+# crates/av-kernel/src/drm/maneuver.rs::dv_to_inertial's AxesKind::Ric branch. See
+# drms/README.md's "leo_1day_maneuver_ric / leo_1day_maneuver_vvlh" section for how the numbers
+# below were derived and goldens/gen_leo_1day_maneuver_ric.py for how the golden itself was
+# generated (altavista's own Scenario.maneuver, frame="RIC").
+#
+# start_tai_ns: the same "01 Jan 2026 00:00:00Z" epoch leo_1day_golden.drm.yaml /
+# leo_1day_maneuver_vnb.drm.yaml use -- 1767225637000000000. The burn is declared 3600 s
+# (goldens/gen_leo_1day_maneuver_ric.py's PRE_BURN_S) after that, and the scenario ends 3600 s
+# (POST_BURN_S) after the burn: end_tai_ns = start_tai_ns + 7200e9.
+#
+# dv_x/dv_y/dv_z: 0.0, 20.0, 0.0 m/s -- 20 m/s in-track (RIC's Y component; XAxis=R, ZAxis=N,
+# GMAT derives YAxis=N x R), matching goldens/leo_1day_maneuver_ric.json's dv_ric_km_s = [0.0,
+# 0.02, 0.0].
+id: drm_leo_1day_maneuver_ric
+version: "1"
+name: LEO maneuver golden (RIC burn)
+sos_configuration_id: leo_sos_maneuver_ric
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  events:
+    - id: burn1
+      tai_ns: 1767229237000000000
+      kind: maneuver
+      instance: leo_mvr_ric
+      values:
+        dv_x: 0.0
+        dv_y: 20.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_RIC
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M11.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/leo_1day_maneuver_ric.drm.yaml
+hash: "27695c5b7037cffa4db6d54f49416a86e27934364219c328e38eb5c8a6deb0bf"

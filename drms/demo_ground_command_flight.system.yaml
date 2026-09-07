@@ -1,0 +1,140 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.2b
+# (docs/sil-plan.md's M25 milestone: migrating the demo's drag-sail command from a native SIGNAL
+# controller to a ground-issued CCSDS telecommand; docs/open-questions.md questions 126/137/149).
+#
+# **Not a modification of drms/demo_two_instance.system.yaml -- a deliberate byte-for-byte
+# physics clone under a new id, exactly like that file's own header comment explains for its own
+# relationship to leo_1day_golden.system.yaml.** demo_two_instance.system.yaml is an existing,
+# hash-pinned, multi-test fixture (11+ tests, a committed golden) this task must not perturb; this
+# file reproduces its exact central body / gravity model / point masses / spacecraft elements /
+# ballistic properties AND demo_flt's own drag override (drms/demo_two_instance.sos.yaml's own
+# `force_model.drag_*` parameter_overrides, folded in here directly since this fixture has only
+# one instance) -- the same "never drifting apart on the vehicle's physics" intent, just with the
+# SIGNAL command ports (`cd_cmd_out`/`cd_cmd_in`, question 126) replaced by a single FRAMED
+# telecommand-in port (`cd_cmd_in`, PORT_KIND_FRAMED) plus an ack-out port (`cd_ack_out`) -- the
+# flight-side half of the M25.2b migration (`crate::drm::gmat_command::GmatFramedCommandModel`).
+#
+# `packet_codecs[0]`'s one field is named "value" (matching `crate::drm::command::
+# COMMAND_DISPATCH_PORT`'s dispatch encoding, which always writes under that key -- see
+# `crate::drm::executor::run_shared_group`'s own command-dispatch block) and targets "Cd"
+# (`PacketField.target`, question 149's "mapping layer" -- `crate::drm::binding::
+# resolve_gmat_command_port` finds this field by its `target`, not by its `name`).
+id: leo_demo_ground_sys
+version: "1"
+name: LEO JGM2 8x8 + Sun/Moon + drag (M25.2b ground-issued-telecommand demo, physics clone of leo_demo_sys)
+dynamics_model: gmat.earth.jgm2_8x8.sun_moon
+state_space_id: gmat.orbital.cartesian6
+ports:
+  - name: cd_cmd_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: cd_ack_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: ground_command_flight_cmd_in_codec
+    apid: 950
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 8
+    description: "ground-issued command telecommand: commanded Cd value (M25.2b)"
+    fields:
+      - name: value
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+        target: Cd
+  - id: ground_command_flight_ack_out_codec
+    apid: 951
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 2
+    description: "flight-software command ack: acknowledged packet's own CCSDS sequence_count (M25.2b)"
+    fields:
+      - name: cmd_seq
+        bit_offset: 0
+        bit_width: 16
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+state_space:
+  id: gmat.orbital.cartesian6
+  components:
+    - label: pos_x
+      unit: UNIT_METER
+    - label: pos_y
+      unit: UNIT_METER
+    - label: pos_z
+      unit: UNIT_METER
+    - label: vel_x
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_y
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_z
+      unit: UNIT_METER_PER_SECOND
+parameters:
+  - name: force_model.central_body
+    string_value: Earth
+  - name: force_model.gravity_file
+    string_value: JGM2.cof
+  - name: force_model.gravity_degree
+    value: 8
+  - name: force_model.gravity_order
+    value: 8
+  - name: force_model.point_masses
+    string_value: "Luna,Sun"
+  - name: force_model.drag_model
+    string_value: JacchiaRoberts
+  - name: force_model.drag_historic_weather_source
+    string_value: CSSISpaceWeatherFile
+  - name: force_model.drag_predicted_weather_source
+    string_value: CSSISpaceWeatherFile
+  - name: force_model.drag_cssi_space_weather_file
+    string_value: SpaceWeather-All-v1.2.txt
+  - name: spacecraft.CoordinateSystem
+    string_value: EarthMJ2000Eq
+  - name: spacecraft.DisplayStateType
+    string_value: Keplerian
+  - name: spacecraft.SMA
+    value: 6878.0
+  - name: spacecraft.ECC
+    value: 0.001
+  - name: spacecraft.INC
+    value: 51.6
+  - name: spacecraft.RAAN
+    value: 30.0
+  - name: spacecraft.AOP
+    value: 0.0
+  - name: spacecraft.TA
+    value: 0.0
+  - name: spacecraft.DryMass
+    value: 500.0
+  - name: spacecraft.Cd
+    value: 2.2
+  - name: spacecraft.Cr
+    value: 1.8
+  - name: spacecraft.DragArea
+    value: 5.0
+  - name: spacecraft.SRPArea
+    value: 5.0
+  - name: output.rmag
+    unit: UNIT_METER
+  - name: output.cd
+    unit: UNIT_DIMENSIONLESS
+  - name: port.consume_framed
+    string_value: cd_cmd_in
+  - name: port.ack_framed
+    string_value: cd_ack_out
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_ground_command_flight.system.yaml
+hash: "2878dd680d8a05fecc876d6e94e347736c6a60107380eda275712b7453862e1c"

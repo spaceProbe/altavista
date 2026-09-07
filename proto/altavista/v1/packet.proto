@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+// Packet codecs for FRAMED ports (question 149; SIL plan M22.3). A FRAMED port whose
+// `Port.schema` is "ccsds.spp" carries one CCSDS Space Packet (CCSDS 133.0-B) per
+// PortMessage. A PacketCodec, declared in the SystemDefinition that owns the port and
+// hashed with it (ADR-001: nothing exists only as a native type), says how the packet's
+// user data field maps to CDM measurements and commands. The primary header is fixed by
+// the standard and is not declared here; `apid` selects the codec.
+//
+// Decode rules (ADR-005 §4, question 108): the APID -> codec map is ordered; an unknown
+// APID, a length that does not match the declared fields, or a field outside the packet
+// is a typed port fault recorded on the run, never a silent drop.
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+
+enum PacketFieldType {
+  PACKET_FIELD_TYPE_UNSPECIFIED = 0;
+  // Big-endian unsigned integer of `bit_width` bits (1..64).
+  PACKET_FIELD_TYPE_UINT = 1;
+  // Big-endian two's-complement integer of `bit_width` bits (2..64).
+  PACKET_FIELD_TYPE_INT = 2;
+  // IEEE-754 binary32, big-endian; bit_width must be 32.
+  PACKET_FIELD_TYPE_FLOAT32 = 3;
+  // IEEE-754 binary64, big-endian; bit_width must be 64.
+  PACKET_FIELD_TYPE_FLOAT64 = 4;
+  // Raw bits copied as bytes, big-endian, bit_width a multiple of 8.
+  PACKET_FIELD_TYPE_BYTES = 5;
+}
+
+message PacketField {
+  string name = 1;
+  // Offset from the start of the user data field (after the 6-byte primary header and
+  // any declared secondary header), in bits.
+  uint32 bit_offset = 2;
+  uint32 bit_width = 3;
+  PacketFieldType type = 4;
+  // Unit of the engineering value after `scale` and `offset` are applied.
+  Unit unit = 5;
+  // engineering = raw * scale + offset; scale defaults to 1 when 0 is given.
+  double scale = 6;
+  double offset = 7;
+  // For telemetry: the CDM measurement component this field fills, "<state_space_id>/<label>"
+  // (e.g. "altavista.attitude_q4/qx"). For commands: the declared writable parameter or port
+  // signal it drives (question 126). Empty for fields recorded but not mapped.
+  string target = 8;
+}
+
+message PacketCodec {
+  string id = 1;
+  // CCSDS APID (11 bits).
+  uint32 apid = 2;
+  // True for telecommands (packet type 1), false for telemetry (packet type 0).
+  bool is_command = 3;
+  // Declared secondary header length in bytes, skipped before `PacketField.bit_offset` 0.
+  uint32 secondary_header_bytes = 4;
+  repeated PacketField fields = 5;
+  // Total user data length in bytes the codec expects; a packet whose length field
+  // disagrees is a typed port fault.
+  uint32 user_data_bytes = 6;
+  string description = 7;
+}

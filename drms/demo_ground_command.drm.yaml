@@ -1,0 +1,88 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M25.2b
+# (docs/sil-plan.md's M25 milestone: migrating the demo's drag-sail command from a native SIGNAL
+# controller to a ground-issued CCSDS telecommand; docs/open-questions.md questions 126/137/149).
+#
+# Same window, same fault, as drms/demo_two_instance.drm.yaml (start=1767225637000000000,
+# end=1767232837000000000, force_model.gravity_order fault on demo_flt at start+1800s) -- a
+# byte-for-byte-comparable arc for `demo_flt`, with the drag-sail Cd command delivered by a
+# ground-issued CCSDS telecommand (`kind: command`, `crate::drm::command`'s own M25.2 state
+# machine, generalized to a GMAT-bound target by M25.2b) instead of the native SIGNAL relay
+# chain (`demo_mvr` -> `demo_ctrl` -> `demo_flt`) drms/demo_two_instance.sos.yaml uses. No
+# `demo_mvr`/maneuver here at all: this fixture isolates the command-path substitution -- the
+# only variable under test -- from every other difference between the two DRMs.
+#
+# `COMMAND_TAI_NS = 1767231844400000000` is not invented for this fixture: it is the exact
+# epoch `crates/av-kernel/tests/demo_two_instance.rs`'s own `COMMAND_TAI_NS` constant records as
+# where `demo_ctrl`'s own range condition crosses in the REAL, committed SIGNAL-commanded DRM
+# (start + 6207.4 s) -- reused verbatim here so the two runs' commands land at the identical
+# epoch.
+#
+# **Stated expectation (crates/av-kernel/tests/demo_ground_command.rs checks it, before running
+# this DRM for the first time):** the ground->demo_flt connection is declared `link_model: ""`
+# (zero latency), the identical convention `demo_two_instance.sos.yaml`'s own `demo_ctrl ->
+# demo_flt` SIGNAL connection already uses -- so delivery should be immediate (no added step of
+# latency), and the command should apply within the SAME step `COMMAND_TAI_NS` falls in, exactly
+# as the SIGNAL-commanded run's own `EVENT_KIND_PORT_COMMAND` records
+# (`applied_tai_ns == COMMAND_TAI_NS`, `demo_two_instance.rs`'s own test). If that holds, `demo_
+# flt`'s own propagated arc in THIS run should be byte-identical to the SIGNAL-commanded run's
+# own `demo_flt` arc (identical fault, identical drag, identical commanded Cd, identical apply
+# epoch -- only the wire mechanism that carried the command differs). A nonzero declared latency
+# would instead delay the apply epoch by (at least) that much, past the step `COMMAND_TAI_NS`
+# itself falls in -- in that case the two arcs would NOT be byte-identical from the later actual
+# apply epoch on, and the correct comparison would be made at each run's own actual apply epoch,
+# not at a shared wall-clock schedule time. This fixture deliberately chooses zero latency to
+# test the command PATH's own equivalence, not a real link's timing.
+id: ground_command_demo_drm
+version: "1"
+name: "Ground-issued telecommand demo (M25.2b): the GMAT-target drag-sail command moves from a native SIGNAL relay to a real CCSDS telecommand"
+sos_configuration_id: ground_command_demo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  faults:
+    - id: fault1
+      tai_ns: 1767227437000000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: demo_flt
+      target: force_model.gravity_order
+      kind: parameter
+      params:
+        value: 0.0
+  events:
+    - id: cmd1
+      tai_ns: 1767231844400000000
+      kind: command
+      instance: demo_flt
+      values:
+        value: 220.0
+      attributes:
+        field: Cd
+        from: demo_ground
+        command_class: drag_sail
+measures:
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  # M25.2b: `crate::drm::executor::execute` requires every command/fault/maneuver epoch to land
+  # exactly on the `sample_interval_s` output grid (checked up front, `DrmError::
+  # CommandEpochNotOnSampleGrid` -- discovered running this fixture for the first time, not
+  # something the SIGNAL-commanded run's own condition-triggered epoch was ever subject to,
+  # since that command was never a declared Scenario boundary at all). `COMMAND_TAI_NS`'s own
+  # 6207.4 s is not a multiple of the original demo's 60 s grid; 0.2 s is the largest interval
+  # that evenly divides both the 7200 s scenario duration and 6207.4 s (and the fault's own
+  # 1800 s) -- gcd(72000, 62074) in units of 0.1 s is 2, i.e. 0.2 s -- so this is the coarsest
+  # grid this exact epoch can sit on, not an arbitrarily fine one chosen to dodge the check.
+  sample_interval_s: 0.2
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.2b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_ground_command.drm.yaml
+hash: "9d1e0d5fec7dd42664bb42dbbe1d7fb78076dfb60b83d0002948ac5dace2da06"

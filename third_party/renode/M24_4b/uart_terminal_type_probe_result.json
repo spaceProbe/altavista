@@ -1,0 +1,17 @@
+[
+  {
+    "variant": "A_flag_false_no_eol",
+    "rxen_seen": false,
+    "worked": null
+  },
+  {
+    "variant": "B_flag_true",
+    "rxen_seen": false,
+    "worked": null
+  },
+  {
+    "variant": "C_flag_false_with_eol",
+    "rxen_seen": false,
+    "worked": null
+  }
+]

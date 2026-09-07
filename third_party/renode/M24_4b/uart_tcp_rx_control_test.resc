@@ -1,0 +1,28 @@
+# M24.4b control test -- wires uart0 (the console, which has a live RTEMS shell reading
+# stdin) to a TCP terminal instead of a plain file backend, to test whether Renode's
+# CreateServerSocketTerminal/connector Connect RX path works at all on this platform+ELF,
+# independent of io_lockstep/uart1 entirely.
+
+:name: av-m24-4b-uart-tcp-rx-control
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4b-uart-tcp-rx-control"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+emulation CreateServerSocketTerminal $consoleport "console_bridge" false
+connector Connect sysbus.uart0 console_bridge
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe cpu=rpu0
+"""
+
+runMacro $reset

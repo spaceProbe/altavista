@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+// One DRM run's products as a declared CDM message (ADR-001: nothing exists only as a
+// native type; question 121). This is the wire form of the kernel's `RunProducts`
+// (`crates/av-kernel/src/drm/executor.rs`, question 93): the same unmodified
+// Trajectory / Event / Provenance messages that were previously concatenated by hand.
+//
+// A RunProducts is reproducible from its provenance: `provenance.config_hash` is the DRM
+// hash, `provenance.run_id` names the run, and every trajectory and event carries its own
+// provenance so a consumer can verify each part independently.
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/trajectory.proto";
+
+// One evaluated Objective or MeasureOfEffectiveness (ADR-005 §6).
+message ScoreResult {
+  // Objective.name or MeasureOfEffectiveness.name.
+  string name = 1;
+  double value = 2;
+  Unit unit = 3;
+  // Set for an Objective (|value - target| <= tolerance); unset for a measure of
+  // effectiveness, which has no pass criterion.
+  optional bool passed = 4;
+}
+
+message RunProducts {
+  string run_id = 1;
+  // One per SystemInstance, keyed by SystemInstance.id.
+  map<string, Trajectory> trajectories = 2;
+  // Sorted (tai_ns, id), the executor's own order.
+  repeated Event events = 3;
+  // Keyed by score name.
+  map<string, ScoreResult> scores = 4;
+  Provenance provenance = 5;
+  // Count of in-flight port messages dropped at end_tai_ns (question 117); zero when the
+  // run drained naturally. Also present in provenance.attributes for older consumers.
+  uint64 dropped_in_flight_messages = 6;
+  // Frame definitions every Trajectory.frame_id in this bundle resolves against
+  // (question 122): the DRM's Scenario.frames plus the registry defaults the producer
+  // used. A consumer needs nothing outside the bundle to place a trajectory.
+  repeated FrameDefinition frames = 7;
+  // Question 173: measurements produced during the run (telemetry decoded by the declared
+  // PacketCodecs into CDM Measurements, sensor outputs), sorted (epoch_ns, measurement_id).
+  // A measurement is its own CDM type; it is never smuggled into an Event's attributes.
+  repeated Measurement measurements = 8;
+}

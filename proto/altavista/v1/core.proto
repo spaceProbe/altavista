@@ -1,0 +1,319 @@
+syntax = "proto3";
+
+// AltaVista Common Data Model, version 1 — core types (ADR-001).
+//
+// This package is the source of truth: Rust, Python and TypeScript bindings are generated
+// from it, and nothing in the CDM exists only as a native type.
+//
+// Lineage: `spoore.v0` (github: spoore/proto/spoore/v0/cdm.proto) is a compatible subset.
+// Messages reused from it keep their names and field numbers; new fields use new numbers;
+// the one semantic tightening is that `epoch_ns` is declared to be on the TAI scale.
+//
+// Rules carried over from spoore ADR-000:
+//   - continuous state      -> Gaussian
+//   - discrete belief       -> calibrated categorical
+//   - joint belief          -> labeled Gaussian mixture
+//
+// Rules added by ADR-001:
+//   - time is int64 nanoseconds on TAI; other scales exist only at the boundary
+//   - units are SI (metres, seconds, radians, kilograms)
+//   - frames are registry entries whose origin may be a body, a platform or an entity
+//   - every artifact carries provenance; every message on the wire carries an envelope
+package altavista.v1;
+
+// ---------------------------------------------------------------------------
+// Time
+// ---------------------------------------------------------------------------
+
+// Time scales the platform can convert between at its boundary. Internally every
+// `epoch_ns` / `tai_ns` field is TAI; UTC needs the platform's versioned leap-second table.
+enum TimeScale {
+  TIME_SCALE_UNSPECIFIED = 0;
+  TIME_SCALE_TAI = 1;
+  TIME_SCALE_UTC = 2;
+  TIME_SCALE_TT = 3;
+  TIME_SCALE_TDB = 4;
+  TIME_SCALE_GPS = 5;
+  TIME_SCALE_UT1 = 6;
+  // GMAT's A.1 atomic time: TAI + 0.0343817 s. Converted inside the GMAT adapter only.
+  TIME_SCALE_A1 = 7;
+}
+
+// An epoch expressed in a declared scale — the boundary form. Anything crossing into the
+// platform is converted to TAI nanoseconds on ingest; this message never appears in a
+// stored state.
+message EpochIn {
+  int64 ns = 1;
+  TimeScale scale = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Units
+// ---------------------------------------------------------------------------
+
+// Physical unit of one state component. SI only; kilometres are not a CDM unit (ADR-001).
+enum Unit {
+  UNIT_UNSPECIFIED = 0;
+  UNIT_DIMENSIONLESS = 1;
+  UNIT_METER = 2;
+  UNIT_METER_PER_SECOND = 3;
+  UNIT_METER_PER_SECOND_SQUARED = 4;
+  UNIT_RADIAN = 5;
+  UNIT_RADIAN_PER_SECOND = 6;
+  UNIT_SECOND = 7;
+  UNIT_KILOGRAM = 8;
+  // Added in v1.
+  UNIT_KILOGRAM_PER_SECOND = 9;
+  UNIT_NEWTON = 10;
+  UNIT_NEWTON_METER = 11;
+  UNIT_WATT = 12;
+  UNIT_JOULE = 13;
+  UNIT_KELVIN = 14;
+  UNIT_PASCAL = 15;
+  UNIT_VOLT = 16;
+  UNIT_AMPERE = 17;
+  UNIT_HERTZ = 18;
+  UNIT_DECIBEL = 19;
+  // Question 151 (SIL plan M22.1): angular momentum, kg·m²/s = N·m·s. Distinct from
+  // UNIT_NEWTON_METER (torque); a wheel-momentum component must never carry the torque unit.
+  UNIT_NEWTON_METER_SECOND = 20;
+  // Moment of inertia, kg·m².
+  UNIT_KILOGRAM_METER_SQUARED = 21;
+}
+
+// ---------------------------------------------------------------------------
+// Frames (registry entries, ADR-001)
+// ---------------------------------------------------------------------------
+
+// Axes kinds the frame registry accepts on day one (question 10). Each has a GMAT
+// realization that the frame service uses to validate the definition.
+enum AxesKind {
+  AXES_KIND_UNSPECIFIED = 0;
+  // International Celestial Reference Frame.
+  AXES_KIND_ICRF = 1;
+  // Mean-of-J2000 equatorial (GMAT `MJ2000Eq`).
+  AXES_KIND_MJ2000_EQ = 2;
+  // Mean-of-J2000 ecliptic (GMAT `MJ2000Ec`).
+  AXES_KIND_MJ2000_EC = 3;
+  // Body-fixed of the origin body (ITRF for Earth; GMAT `BodyFixed`).
+  AXES_KIND_BODY_FIXED = 4;
+  // Local tangent plane, east-north-up, about `origin_geodetic`.
+  AXES_KIND_ENU = 5;
+  // Local tangent plane, north-east-down, about `origin_geodetic`.
+  AXES_KIND_NED = 6;
+  // The body frame of a platform or entity (attitude-carrying).
+  AXES_KIND_PLATFORM_BODY = 7;
+  // Radial / in-track / cross-track of `reference_entity_id` about `reference_body`
+  // (GMAT `ObjectReferenced`, X = R, Z = N). RPO / OSAM relative frame.
+  AXES_KIND_RIC = 8;
+  // Velocity / normal / binormal of `reference_entity_id` (GMAT `ObjectReferenced`, X = V, Y = N).
+  AXES_KIND_VNB = 9;
+  // Vehicle-Velocity-Local-Horizontal of `reference_entity_id`: Z = -R (nadir, toward
+  // `reference_body`), Y = -N (negative orbit normal), X = Y x Z = N x R (in-track, which
+  // equals the velocity direction only on a circular orbit). This is our platform's ratified
+  // local-vertical/local-horizontal convention for rendezvous and proximity operations;
+  // GMAT realizes it as `ObjectReferenced` with YAxis = -N, ZAxis = -R (ratified 2026-09-02,
+  // question 73). Renamed from `AXES_KIND_LVLH` (question 106) because GMAT's own
+  // `ImpulsiveBurn Axes = LVLH` is a *different* convention — X = R, Y = N x R, Z = N —
+  // which is numerically `AXES_KIND_RIC` here, not this one. Authors who want GMAT's literal
+  // LVLH burn axes should use `AXES_KIND_RIC`.
+  AXES_KIND_VVLH = 10;
+  // Frameless cartesian space (simulation and unit tests).
+  AXES_KIND_LOCAL_CARTESIAN = 11;
+  reserved "AXES_KIND_LVLH";
+}
+
+// A geodetic point on a body, used as the origin of ENU / NED frames.
+message Geodetic {
+  // Body name as GMAT knows it: "Earth", "Luna", "Mars", ...
+  string body = 1;
+  double latitude_rad = 2;
+  double longitude_rad = 3;
+  double height_m = 4;
+}
+
+// One entry of the frame registry. `id` is what every `frame_id` field references.
+message FrameDefinition {
+  string id = 1;
+  // Where the frame's origin is. Exactly one is set.
+  oneof origin {
+    // A solar-system body ("Earth", "Luna", "Mars", "Sun", ...).
+    string body = 2;
+    // A platform (ground station, vehicle) known to the catalog.
+    string platform_id = 3;
+    // An entity (spacecraft, target) whose state defines the origin at each epoch.
+    string entity_id = 4;
+  }
+  AxesKind axes = 5;
+  // Required for ENU / NED.
+  Geodetic origin_geodetic = 6;
+  // Required for RIC / VNB / VVLH / PLATFORM_BODY: the entity whose state (and attitude)
+  // defines the axes. May equal the origin entity.
+  string reference_entity_id = 7;
+  // Required for RIC / VNB / VVLH: the central body the reference entity orbits.
+  string reference_body = 8;
+  // GMAT CoordinateSystem name that realizes this frame, set by the frame service after
+  // validation. Empty until validated.
+  string gmat_name = 9;
+  // Free-form description for people.
+  string description = 10;
+  // Required for PLATFORM_BODY (question 72, decided 2026-09-02): where the body axes'
+  // orientation comes from. Absent on every other axes kind. Realized by the attitude
+  // service (P2); until then the frame service declares the frame but refuses to convert.
+  AttitudeSource attitude_source = 11;
+  // The frame this one is defined relative to, for the viewer's frame graph (question 76,
+  // decided 2026-09-02). Optional on input: the frame service fills it deterministically
+  // from axes and origin when absent (RIC/VNB/VVLH -> the reference body's MJ2000_EQ frame;
+  // ENU/NED -> the body's BODY_FIXED frame; body-centred inertial and fixed frames -> the
+  // registry root, spelled ""). Always set on a registered definition.
+  string parent_frame_id = 12;
+  // Question 129: for a frame whose rotation relative to `parent_frame_id` is constant
+  // (ICRF against MJ2000 equatorial is the frame bias; a fixed sensor mount against its
+  // platform body), the unit quaternion parent -> this, scalar-first [w, x, y, z], filled
+  // by the producer through the dynamics contract's `convert` (ADR-002 fourth amendment).
+  // Empty for time-varying frames, which are realized from attitude and ephemeris streams.
+  // Exactly 0 or 4 entries.
+  repeated double fixed_rotation_q = 13 [packed = true];
+}
+
+// How a PLATFORM_BODY frame is oriented (additive, v1). Exactly one source is set.
+message AttitudeSource {
+  oneof source {
+    // An attitude stream in the CDM: the id of the entity whose attitude state (a unit
+    // quaternion body-from-`reference_frame_id`, scalar-last [x, y, z, w]) is published
+    // as a state space named by `state_space_id`.
+    string entity_attitude_stream = 1;
+    // A GMAT attitude model configured on the entity (e.g. "NadirPointing",
+    // "CoordinateSystemFixed", "Spinner", or a named CCSDS AEM file), realized by GMAT.
+    string gmat_attitude_model = 2;
+  }
+  // Frame the attitude is expressed relative to (a FrameDefinition.id), e.g. the entity's
+  // MJ2000Eq or RIC frame.
+  string reference_frame_id = 3;
+  // State space of the attitude stream, when `entity_attitude_stream` is used.
+  string state_space_id = 4;
+}
+
+// ---------------------------------------------------------------------------
+// State spaces and beliefs (spoore.v0 shapes, kept)
+// ---------------------------------------------------------------------------
+
+// One scalar slot of a state vector.
+message StateComponent {
+  // Component name, e.g. "pos_x", "vel_z", "turn_rate". Unique within a space.
+  string label = 1;
+  Unit unit = 2;
+}
+
+// A declared state space. `id` is referenced by GaussianState rather than inlined.
+message StateSpace {
+  string id = 1;
+  // Ordered: components[i] describes element i of every mean in this space.
+  repeated StateComponent components = 2;
+  // spoore.v0 field 3 was an enum Frame; v1 references the registry.
+  reserved 3;
+  reserved "frame";
+  // References FrameDefinition.id.
+  string frame_id = 4;
+}
+
+// A Gaussian belief over a continuous state vector.
+message GaussianState {
+  // Length n.
+  repeated double mean = 1 [packed = true];
+  // Row-major n x n, symmetric positive definite. Dense: n is small for every model we ship.
+  repeated double cov = 2 [packed = true];
+  // References StateSpace.id.
+  string state_space_id = 3;
+  // Event time, nanoseconds on TAI (ADR-001). Named as in spoore.v0 for wire compatibility.
+  int64 epoch_ns = 4;
+}
+
+// One labeled component of a joint belief.
+message MixtureComponent {
+  // Hypothesis this component is conditioned on: a model-tree node id for arbitration.
+  string hypothesis_label = 1;
+  // Categorical weight. Weights over a Belief sum to 1.
+  double weight = 2;
+  GaussianState state = 3;
+}
+
+// A joint belief: a labeled Gaussian mixture.
+message Belief {
+  repeated MixtureComponent components = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Measurements and the comparison currency (spoore.v0 shapes, kept)
+// ---------------------------------------------------------------------------
+
+message Measurement {
+  string measurement_id = 1;
+  // Length m.
+  repeated double z = 2 [packed = true];
+  // Row-major m x m measurement noise covariance, SPD.
+  repeated double r = 3 [packed = true];
+  // Event time, nanoseconds on TAI.
+  int64 epoch_ns = 4;
+  // Selects the MeasurementModel (h, Jacobian) to apply.
+  string sensor_id = 5;
+  // Partition key (spoore scaling model). Present from day one.
+  string shard_key = 6;
+  // spoore.v0 field 7 was an enum Frame; converted to `frame_id` by the adapter.
+  reserved 7;
+  reserved "frame";
+  // Free-form provenance from the ingest plugin.
+  map<string, string> meta = 8;
+  // References FrameDefinition.id.
+  string frame_id = 9;
+  // Optional: the entity this measurement is claimed to belong to (e.g. a cooperative
+  // transponder id resolved through the catalog). Association still decides.
+  string entity_hint = 10;
+}
+
+// The result of scoring a measurement against a belief (spoore ADR-001).
+message Innovation {
+  // nu = z - z_hat, length m.
+  repeated double nu = 1 [packed = true];
+  // Row-major m x m innovation covariance S, SPD.
+  repeated double s = 2 [packed = true];
+  // logL = -0.5 * (nu^T S^-1 nu + log det(2 pi S)).
+  double log_likelihood = 3;
+  // Normalized innovation squared.
+  double nis = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Provenance (ADR-001): who or what authored an artifact, from what.
+// ---------------------------------------------------------------------------
+
+enum AuthorKind {
+  AUTHOR_KIND_UNSPECIFIED = 0;
+  AUTHOR_KIND_HUMAN = 1;
+  // An LLM agent (design assistant) acting through the platform's tools.
+  AUTHOR_KIND_AGENT = 2;
+  // A platform service (kernel, GMAT service, tiler, export job).
+  AUTHOR_KIND_SERVICE = 3;
+  // An external system through an ingest plugin.
+  AUTHOR_KIND_EXTERNAL = 4;
+}
+
+message Provenance {
+  AuthorKind author_kind = 1;
+  // OIDC `sub` for a human or service subject; agent or service identity otherwise.
+  string principal = 2;
+  // Tool or service (and version) that produced the artifact.
+  string tool = 3;
+  // SHA-256 of the configuration (DRM, system definition, profile) the artifact came from.
+  string config_hash = 4;
+  // SHA-256 of the environment data pack in effect.
+  string data_pack_hash = 5;
+  // SHA-256 of the training dataset, for model versions.
+  string dataset_hash = 6;
+  // Creation epoch, nanoseconds on TAI.
+  int64 created_tai_ns = 7;
+  // Identifier of the run (kernel run, job, script execution) that produced the artifact.
+  string run_id = 8;
+  // Free-form, e.g. the assistant's prompt id or the reviewer who accepted a draft.
+  map<string, string> attributes = 9;
+}

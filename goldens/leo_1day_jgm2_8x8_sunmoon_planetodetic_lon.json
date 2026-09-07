@@ -1,0 +1,29 @@
+{
+  "epoch_a1mjd": 31042.50042863867,
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-04T02:11:37+00:00",
+  "gmat_version": "R2026a",
+  "latitude_deg": 51.65916100382592,
+  "longitude_deg": 14.79393893747989,
+  "name": "leo_1day_jgm2_8x8_sunmoon_planetodetic_lon",
+  "note": "GMAT's own Earth-fixed Longitude/Latitude (PlanetData::GetPlanetReal, a genuinely epoch-dependent real parameter -- Longitude moves ~360.9856 deg/day at fixed inertial position, unlike RMAG/Cd which do not depend on epoch at all), read from a genuine GMAT ReportFile (script run, SolverIterations=Current -- never Execute() through the object API, per this repository's documented ReportFile quirk) for the identical arc leo_1day_jgm2_8x8_sunmoon.json pins. Question 105/M12.2: this golden exists to verify gmat_sys::model::GmatModel::step/step_with_stm's epoch write-back (gmat_sys::DerivativeModel::sync_spacecraft_epoch_a1mjd) against a genuinely different GMAT code path -- the script engine's own Longitude/Latitude Parameter evaluation (this file), versus the Rust test's own mirror-spacecraft read of PlanetodeticLON/PlanetodeticLAT through gmat_sys::DerivativeModel::real_parameter / crate::Object::real_parameter (crates/gmat-sys/tests/epoch_writeback.rs).",
+  "reason": "question 105/M12.2: independent GMAT ReportFile ground truth for the epoch write-back test (crates/gmat-sys/tests/epoch_writeback.rs), an Earth-fixed longitude genuinely dependent on epoch unlike RMAG/Cd",
+  "report_last_row": {
+    "epoch_a1mjd": 31042.50042863867,
+    "latitude_deg": 51.65916100382592,
+    "longitude_deg": 14.79393893747989,
+    "vx_kmps": -6.873114692272363,
+    "vy_kmps": -3.277540234874902,
+    "vz_kmps": -0.04502077105809715,
+    "x_km": -1869.022450937179,
+    "y_km": 3841.870677714497,
+    "z_km": 5380.309814761908
+  },
+  "source_golden": "leo_1day_jgm2_8x8_sunmoon",
+  "units": {
+    "latitude": "deg",
+    "longitude": "deg",
+    "position": "km",
+    "velocity": "km/s"
+  }
+}

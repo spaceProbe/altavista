@@ -1,0 +1,32 @@
+# M24.4 item 3 -- confirms the UART1-to-TCP-terminal wiring syntax (this Renode build's own
+# `scripts/complex/hci_uart/hci_uart.resc` pattern, adapted from `sysbus.uart1`/"hci" to our
+# own uart1/"uart1_bridge") actually attaches without error against our platform file and the
+# real cFS ELF, independent of whether the guest-side lockstep app is running yet (item 3's
+# "not done": the /cf filesystem gap blocks app startup). This is a wiring-mechanism check,
+# not a protocol test.
+
+:name: av-m24-4-uart1-bridge-wiring-test
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4-uart1-bridge-wiring-test"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/uart1_bridge_wiring_uart0.log true
+
+emulation CreateServerSocketTerminal $bridgeport "uart1_bridge" false
+connector Connect sysbus.uart1 uart1_bridge
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe cpu=rpu0
+"""
+
+runMacro $reset

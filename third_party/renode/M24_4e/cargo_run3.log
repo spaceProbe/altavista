@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/drm_attitude_control_renode.rs (target/debug/deps/drm_attitude_control_renode-c7ba7dd1b4dde118)
+
+running 1 test
+posix-container run: 1s @ 10Hz in 16.22s wall time
+Renode scratch dir (socket, monitor/uart0 logs, shim+bridge stdout/stderr): /tmp/av-renode-m24c-37693
+Renode bridge ready (boot + HELLO/BIND handshake path primed) in 24.44s wall time
+test byte_identical_port_traffic_between_posix_container_and_renode has been running for over 60 seconds

@@ -1,0 +1,28 @@
+# M24.4 item 2 -- WFI-idle-after-exit test. Loads the FRESH ticker.exe built with
+# BSP_RESET_BOARD_AT_EXIT=0 (third_party/renode/M24_4/rtems-bsp-noreset/, isolated rebuild,
+# not the shared toolchain output) against AltaVista's own platform file (item 1's fix, TTC
+# frequency corrected -- both fixes must be in effect together since item 1's gate blocks
+# everything downstream). No RunFor/quit here; the driving Python script owns stepping.
+
+:name: av-m24-4-wfi-idle-test
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4-wfi-idle-test"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/wfi_idle_uart.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/renode/M24_4/rtems-bsp-noreset/myout/rtems-build/arm/zynqmp_rpu_lock_step/testsuites/samples/ticker.exe cpu=rpu0
+"""
+
+runMacro $reset

@@ -1,0 +1,22 @@
+[package]
+name = "av-run"
+publish = false
+description = "M16.3: a small CLI that loads a DRM bundle (DesignReferenceMission + SosConfiguration + SystemDefinitions, drms/*.yaml), runs it end to end through av_kernel::drm::execute, and emits the resulting RunProducts (trajectories, events, run provenance) as CDM v1 on the wire -- to a file, and/or over a hand-rolled localhost HTTP POST (no new HTTP-client dependency -- see src/main.rs's module doc comment) to altavista's POST /api/cdm/run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+# M16.3's only reason this binary exists: av_kernel::drm::{schema, execute, RunConfig,
+# RunProducts, ExecutionErrorMode} -- see src/main.rs's module doc comment for why this is a
+# standalone binary rather than a run_drm RPC (proto/** is read-only to this task, and
+# av-dynamics-service's altavista.v1.DynamicsService proto has no DRM-level RPC to extend
+# without a proto change).
+av-kernel = { path = "../av-kernel" }
+# Constructing the one live Gmat handle a DRM run needs (crates/av-kernel/tests/drm_maneuver.rs
+# and golden_acceptance.rs's own established pattern: Gmat::setup + gmat_sys::engine_lock()).
+gmat-sys = { path = "../gmat-sys" }
+prost.workspace = true

@@ -1,0 +1,170 @@
+{
+  "ballistics": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0
+  },
+  "burn_epoch_a1mjd": 31041.562928638676,
+  "cd_after_command": 220.0,
+  "cd_before_command": 2.2,
+  "command_crossing_epoch_s": 6207.400000000001,
+  "command_epoch_s": 6207.6,
+  "command_rmag_at_crossing_m": 6884301.062806158,
+  "command_threshold_m": 6884300.0,
+  "dv_vnb_km_s": [
+    0.02,
+    0.0,
+    0.0
+  ],
+  "end_epoch_s": 7200.0,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "fault_epoch_s": 1800.0,
+  "force_model_demo_flt_post_fault": {
+    "central_body": "Earth",
+    "cssi_space_weather_file": "SpaceWeather-All-v1.2.txt",
+    "drag": "JacchiaRoberts",
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 0
+    },
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "force_model_demo_flt_pre_fault": {
+    "central_body": "Earth",
+    "cssi_space_weather_file": "SpaceWeather-All-v1.2.txt",
+    "drag": "JacchiaRoberts",
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "force_model_demo_mvr": {
+    "central_body": "Earth",
+    "drag": null,
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [
+      "Luna",
+      "Sun"
+    ]
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-06T13:19:08+00:00",
+  "gmat_version": "R2026a",
+  "initial_state_demo_flt": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "initial_state_demo_mvr": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "keplerian": {
+    "AOP": 0.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "TA": 0.0
+  },
+  "maneuver_epoch_s": 5400.0,
+  "measured_command_arc_divergence_m": 20.067765110596365,
+  "name": "demo_two_instance",
+  "note": "state_final_demo_flt comes from altavista's own from-scratch ForceModel/Propagator construction (this script's own _force_model_with_drag, a DragForce+JacchiaRoberts atmosphere referenced through Object.SetReference, the packaged CSSI space-weather file, plus GravityField/PointMassForce identical to altavista.Scenario.force_model's own construction), reconstructed at the fault epoch with Order=0 -- the same mechanism crates/av-kernel/src/drm/fault.rs's apply_gmat_target(\"force_model.gravity_order\") + binding.rs's materialize_gmat re-binding is pinned against, now extended to also carry drag through the rebind (crate::drm::binding::GmatSystemSpec's own drag_* fields, threaded through fault::rebind_gmat_spec_at_state's full-spec clone). The Cd command at command_epoch_s is a live SetField, matching gmat_sys::DerivativeModel::set_real_parameter's own in-place mutation (question 130: no segment opens per command). command_epoch_s is independently derived (this script's own _find_command_epoch_s), not copied from the Rust executor's own output -- see this module's own docstring for the method and its own ~5 mm/0.1 s timing-sensitivity bound, which is what tolerance_m is sized against. state_pre_burn_demo_mvr/state_post_burn_demo_mvr/state_final_demo_mvr come from altavista.scenario.Scenario.maneuver's own VNB path, not a hand re-derivation of its V/N/B basis formula -- crates/av-kernel/src/drm/maneuver.rs::dv_to_inertial's AxesKind::Vnb branch is pinned against this same function field-for-field, exactly as goldens/gen_leo_1day_maneuver_vnb.py already pins it for the single-instance golden.",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "reason": "M26.1 (question 160): rename the old package/identifier prefix to altavista in golden metadata (note/reason text only); physics unchanged, regenerated to keep the file's self sha256 consistent",
+  "rmag_at_end_flt_m": 6870517.499129293,
+  "sha256": "32c67f6fc667c9c09ac5c442d1c01d37eff16aebf83d7e6aee9858bf757b08c2",
+  "state_at_fault_demo_flt": [
+    -4399.74917686668,
+    1957.5480203384705,
+    4901.335520845414,
+    -5.039560239321876,
+    -5.149931867310917,
+    -2.4631018270982312
+  ],
+  "state_final_demo_flt": [
+    -2876.8529340288474,
+    3235.530337063339,
+    5334.704428527811,
+    -6.256845981489471,
+    -4.268435030986293,
+    -0.7829812347859844
+  ],
+  "state_final_demo_flt_baseline_uncommanded": [
+    -2876.869649007759,
+    3235.5300933651547,
+    5334.715531017969,
+    -6.256877289885125,
+    -4.268435108414715,
+    -0.7829607714389981
+  ],
+  "state_final_demo_mvr": [
+    -2862.935527058735,
+    3283.642894705696,
+    5378.424721154615,
+    -6.261849411293726,
+    -4.208755986557164,
+    -0.7145042864395514
+  ],
+  "state_post_burn_demo_mvr": [
+    6325.827989449022,
+    2181.817173949147,
+    -1560.8571361242466,
+    -0.3248012119527561,
+    5.043092484917235,
+    5.729495286864876
+  ],
+  "state_pre_burn_demo_mvr": [
+    6325.827989449022,
+    2181.817173949147,
+    -1560.8571361242466,
+    -0.3239509163632566,
+    5.0298901964418254,
+    5.714496067671113
+  ],
+  "state_pre_command_demo_flt": [
+    3724.6565947002473,
+    4903.94459545231,
+    3047.1215395948793,
+    -5.67948930563721,
+    1.2543351725199272,
+    4.920721446605495
+  ],
+  "tolerance_m": 0.05,
+  "tolerance_m_demo_mvr": 0.05,
+  "tolerance_mps": 5e-05,
+  "tolerance_mps_demo_mvr": 5e-05,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}

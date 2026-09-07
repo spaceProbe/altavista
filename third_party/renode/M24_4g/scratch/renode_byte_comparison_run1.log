@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/drm_attitude_control_renode.rs (target/debug/deps/drm_attitude_control_renode-c7ba7dd1b4dde118)
+
+running 1 test
+test byte_identical_port_traffic_between_posix_container_and_renode ... posix-container run: 1s @ 10Hz in 11.99s wall time
+
+thread 'byte_identical_port_traffic_between_posix_container_and_renode' (16078821) panicked at crates/av-kernel/tests/drm_attitude_control_renode.rs:415:9:
+av-lockstep-shim's LockstepService never became ready on 127.0.0.1:60028 within 180s (renode_bridge.py may have failed -- see /tmp/av-renode-m24c-55393/renode_monitor.log, /tmp/av-renode-m24c-55393/bridge_stdout.log, /tmp/av-renode-m24c-55393/bridge_stderr.log)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    byte_identical_port_traffic_between_posix_container_and_renode
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 192.80s
+
+error: test failed, to rerun pass `-p av-kernel --test drm_attitude_control_renode`

@@ -1,0 +1,38 @@
+[A_flag_false_no_eol] CreateServerSocketTerminal reply: '(variant-A_flag_false_no_eol) \n\r(variant-A_flag_false_no_eol) emulation CreateServerSocketTerminal 15071 "term_A_flag_false_no_eol" false\n\r(variant-A_flag_false_no_eol) \n\r(variant-A_flag_false_no_eol)'
+[A_flag_false_no_eol] externals: externals
+No such command or device: externals
+(variant-A_flag_false_no_eol) 
+(variant-A_flag_false_no_eol)
+[A_flag_false_no_eol] bridge client connected
+[A_flag_false_no_eol] RXEN never observed
+[B_flag_true] CreateServerSocketTerminal reply: '(variant-B_flag_true) \n\r(variant-B_flag_true) emulation CreateServerSocketTerminal 15073 "term_B_flag_true" true\n\r(variant-B_flag_true) \n\r(variant-B_flag_true)'
+[B_flag_true] externals: externals
+No such command or device: externals
+(variant-B_flag_true) 
+(variant-B_flag_true)
+[B_flag_true] bridge client connected
+[B_flag_true] RXEN never observed
+[C_flag_false_with_eol] CreateServerSocketTerminal reply: '(variant-C_flag_false_with_eol) \n\r(variant-C_flag_false_with_eol) emulation CreateServerSocketTerminal 15075 "term_C_flag_false_with_eol" false\n\r(variant-C_flag_false_with_eol) \n\r(variant-C_flag_false_with_eol)'
+[C_flag_false_with_eol] externals: externals
+No such command or device: externals
+(variant-C_flag_false_with_eol) 
+(variant-C_flag_false_with_eol)
+[C_flag_false_with_eol] bridge client connected
+[C_flag_false_with_eol] RXEN never observed
+[
+  {
+    "variant": "A_flag_false_no_eol",
+    "rxen_seen": false,
+    "worked": null
+  },
+  {
+    "variant": "B_flag_true",
+    "rxen_seen": false,
+    "worked": null
+  },
+  {
+    "variant": "C_flag_false_with_eol",
+    "rxen_seen": false,
+    "worked": null
+  }
+]

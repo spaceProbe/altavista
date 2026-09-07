@@ -1,0 +1,141 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M25.3 (question 173).
+# A byte-for-byte clone of drms/demo_attitude_sensors_imu.system.yaml's own physics and port
+# shape, under a new `id` -- see demo_measurements_startracker.system.yaml's own header comment
+# for why a clone rather than an in-place edit of the M22.2 fixture.
+#
+# The one real difference: `packet_codecs[0].fields[*].target` is populated -- `wx,wy,wz` share
+# one measurement id (`altavista.imu_gyro3`), `ax,ay,az` share another (`altavista.imu_accel3`),
+# matching `crate::drm::sensors::imu_packet_codec`'s own default field layout as of M25.3. Unlike
+# the star tracker's unit quaternion, gyro/accel noise is genuine independent per-axis white
+# noise, so this instance's own measurements additionally carry a non-empty, SPD `r` (`diag(
+# gyro_noise_sigma^2)` / `diag(accel_noise_sigma^2)`) -- see `ImuModel::step_with_ports`'s own doc
+# comment.
+id: measurements_demo_imu_sys
+version: "1"
+name: IMU measuring the M25.3 measurements demo's truth attitude (M25.3)
+dynamics_model: imu.measurements_demo
+state_space_id: imu.measurements_demo.space
+state_space:
+  id: imu.measurements_demo.space
+  components:
+    - label: bias_gyro_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_gyro_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_gyro_z
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: bias_accel_x
+      unit: UNIT_METER_PER_SECOND_SQUARED
+    - label: bias_accel_y
+      unit: UNIT_METER_PER_SECOND_SQUARED
+    - label: bias_accel_z
+      unit: UNIT_METER_PER_SECOND_SQUARED
+ports:
+  - name: truth_qx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_qw
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wx
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wy
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: truth_wz
+    kind: PORT_KIND_SIGNAL
+    direction: PORT_DIRECTION_IN
+  - name: imu_meas
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: imu_meas_codec
+    apid: 101
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement (M25.3)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_gyro3/wx
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_gyro3/wy
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_gyro3/wz
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_accel3/ax
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_accel3/ay
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+        target: altavista.imu_accel3/az
+parameters:
+  - name: imu.update_rate_hz
+    value: 2.0
+    unit: UNIT_HERTZ
+  - name: imu.seed
+    value: 2.0
+  - name: imu.gyro_noise_sigma
+    value: 0.0001
+    unit: UNIT_RADIAN_PER_SECOND
+  - name: imu.gyro_bias_rw_sigma
+    value: 0.000001
+    unit: UNIT_RADIAN_PER_SECOND
+  - name: imu.accel_noise_sigma
+    value: 0.001
+    unit: UNIT_METER_PER_SECOND_SQUARED
+  - name: imu.accel_bias_rw_sigma
+    value: 0.00001
+    unit: UNIT_METER_PER_SECOND_SQUARED
+  - name: output.seq
+    unit: UNIT_DIMENSIONLESS
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_measurements_imu.system.yaml
+hash: "956d08cddf78a3c1a924968094e5a6452a8a3bee00218485e69f539bcadf48e9"

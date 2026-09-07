@@ -1,0 +1,32 @@
+# M24.4 item 3 -- boots the M24.4-fixed core-cpu1.exe (the /cf startup-file patch, item 3's
+# own root-cause fix) with uart1 wired to a TCP terminal (the same
+# CreateServerSocketTerminal/connector pattern uart1_bridge_wiring_test.resc already proved
+# live), so an external process (this task's own minimal test peer, standing in for the real
+# bridge+shim which is not yet built) can attempt the lockstep-local v1 HELLO handshake
+# IO_LOCKSTEP is waiting to perform on /dev/ttyS1.
+
+:name: av-m24-4-cfs-handshake-test
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "av-m24-4-cfs-handshake-test"
+
+machine LoadPlatformDescription @/Users/probe/code/AltaVista/third_party/renode/platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend $ORIGIN/cfs_handshake_uart0.log true
+
+emulation CreateServerSocketTerminal $bridgeport "uart1_bridge" false
+connector Connect sysbus.uart1 uart1_bridge
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF @/Users/probe/code/AltaVista/third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe cpu=rpu0
+"""
+
+runMacro $reset

@@ -1,0 +1,162 @@
+[
+  {
+    "idx": 104,
+    "monitor_port": 58352,
+    "uart_port": 58355,
+    "pid": 27041,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_104_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.30282145796809345,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-104) \n\r(av-m24-4d-race-104)",
+    "extra_wait_elapsed_s": 6.115083875018172,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 6.418160041910596,
+    "lsof_first_listen_offset_from_poll_start_s": 5.071664334041998,
+    "lsof_sample_count": 67,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.125,
+        "hit": false
+      },
+      {
+        "t": 5.072,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  27041 probe  429u  IPv4 0x418395426eee65d2      0t0  TCP *:58352 (LISTEN)",
+      "renode  27041 probe  432u  IPv4 0xb8c733051b65ab2e      0t0  TCP *:58355 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  27041 probe  429u  IPv4 0x418395426eee65d2      0t0  TCP *:58352 (LISTEN)",
+      "renode  27041 probe  432u  IPv4 0xb8c733051b65ab2e      0t0  TCP *:58355 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 101,
+    "monitor_port": 58347,
+    "uart_port": 58353,
+    "pid": 27042,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_101_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.30168316699564457,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-101) \n\r(av-m24-4d-race-101)",
+    "extra_wait_elapsed_s": 6.369581707986072,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 6.6716141670476645,
+    "lsof_first_listen_offset_from_poll_start_s": 5.157659291988239,
+    "lsof_sample_count": 68,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.115,
+        "hit": false
+      },
+      {
+        "t": 5.158,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  27042 probe  429u  IPv4 0xd96bf2f462b714f0      0t0  TCP *:58347 (LISTEN)",
+      "renode  27042 probe  432u  IPv4 0x9b2ef90e7b7a182f      0t0  TCP *:58353 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  27042 probe  429u  IPv4 0xd96bf2f462b714f0      0t0  TCP *:58347 (LISTEN)",
+      "renode  27042 probe  432u  IPv4 0x9b2ef90e7b7a182f      0t0  TCP *:58353 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 102,
+    "monitor_port": 58348,
+    "uart_port": 58349,
+    "pid": 27038,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_102_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.30950025003403425,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-102) \n\r(av-m24-4d-race-102)",
+    "extra_wait_elapsed_s": 6.749864540994167,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 7.059626832953654,
+    "lsof_first_listen_offset_from_poll_start_s": 5.380910707986914,
+    "lsof_sample_count": 70,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.102,
+        "hit": false
+      },
+      {
+        "t": 5.381,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  27038 probe  429u  IPv4 0x1d8b7f0198f94712      0t0  TCP *:58348 (LISTEN)",
+      "renode  27038 probe  432u  IPv4 0x24ec5b0ef09268b8      0t0  TCP *:58349 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  27038 probe  429u  IPv4 0x1d8b7f0198f94712      0t0  TCP *:58348 (LISTEN)",
+      "renode  27038 probe  432u  IPv4 0x24ec5b0ef09268b8      0t0  TCP *:58349 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 100,
+    "monitor_port": 58346,
+    "uart_port": 58351,
+    "pid": 27039,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_100_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3063383330591023,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-100) \n\r(av-m24-4d-race-100)",
+    "extra_wait_elapsed_s": 6.917630249983631,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 7.224211708060466,
+    "lsof_first_listen_offset_from_poll_start_s": 5.469065916026011,
+    "lsof_sample_count": 72,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.103,
+        "hit": false
+      },
+      {
+        "t": 5.469,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  27039 probe  429u  IPv4 0x9adfd162aed9439f      0t0  TCP *:58346 (LISTEN)",
+      "renode  27039 probe  432u  IPv4 0xcf961346fba9550c      0t0  TCP *:58351 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  27039 probe  429u  IPv4 0x9adfd162aed9439f      0t0  TCP *:58346 (LISTEN)",
+      "renode  27039 probe  432u  IPv4 0xcf961346fba9550c      0t0  TCP *:58351 (LISTEN)"
+    ]
+  },
+  {
+    "idx": 103,
+    "monitor_port": 58350,
+    "uart_port": 58354,
+    "pid": 27040,
+    "include_reply_first_pass": "include @/Users/probe/code/AltaVista/third_party/renode/M24_4d/race_probe_103_generated.resc",
+    "include_reply_first_pass_elapsed_s": 0.3087096670642495,
+    "extra_monitor_output_after_first_reply": "(av-m24-4d-race-103) \n\r(av-m24-4d-race-103)",
+    "extra_wait_elapsed_s": 6.958592499955557,
+    "tcp_connect_succeeded_within_15s": true,
+    "tcp_connect_elapsed_from_include_sent_s": 7.267573042074218,
+    "lsof_first_listen_offset_from_poll_start_s": 5.705521917087026,
+    "lsof_sample_count": 72,
+    "lsof_hit_transitions": [
+      {
+        "t": 0.104,
+        "hit": false
+      },
+      {
+        "t": 5.706,
+        "hit": true
+      }
+    ],
+    "lsof_final_sample_lines": [
+      "renode  27040 probe  429u  IPv4 0xd0a610eb38b556cf      0t0  TCP *:58350 (LISTEN)",
+      "renode  27040 probe  432u  IPv4 0xb735ce003725da7d      0t0  TCP *:58354 (LISTEN)"
+    ],
+    "final_lsof_listen_lines": [
+      "renode  27040 probe  429u  IPv4 0xd0a610eb38b556cf      0t0  TCP *:58350 (LISTEN)",
+      "renode  27040 probe  432u  IPv4 0xb735ce003725da7d      0t0  TCP *:58354 (LISTEN)"
+    ]
+  }
+]

@@ -1,0 +1,5 @@
+CreateUartPtyTerminal reply: '(pty-probe) \n\r(pty-probe) emulation CreateUartPtyTerminal "ptyterm" "/tmp/av_m24_4b_uart1.pty" true\n\r(pty-probe) \n\r(pty-probe)'
+connect reply: 'connector Connect sysbus.uart1 ptyterm\n\r(pty-probe) \n\r(pty-probe)'
+RXEN observed at step 22, control=0x00000114
+pre-send channel_sts=0x0000000a
+post-send channel_sts=0x0000000a worked=False

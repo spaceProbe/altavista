@@ -1,0 +1,112 @@
+# nginx-gmat-grpc.conf.template -- the TLS+mTLS front for gmat-service's plaintext gRPC
+# (M5.3, ADR-004's crypto rule; the secproxy pattern -- see secrouter/secproxy's README
+# "Why nginx" and nginx-secproxy.conf.example, fetched 2026-09-02 while building this).
+#
+# WHY THIS EXISTS SEPARATELY FROM secproxy ITSELF
+# -------------------------------------------------
+# ADR-003 says "gRPC sidecars ... are not fronted [by secproxy], like secllm" -- secproxy's
+# own topology.toml-driven config only ever emits `proxy_pass http://host:port` blocks for
+# the suite's HTTP/web services (secsso, secrouter, secagent, secchat, secrecorder), never
+# a `grpc_pass`. gmat-service needs TLS termination anyway, for a reason specific to it:
+# `grpcio` (the Python gRPC library gmat-service is built on) bundles BoringSSL, so
+# terminating TLS *inside* gmat-service itself would violate ADR-004's crypto rule ("the
+# system FIPS OpenSSL only, no bundled crypto") the moment mTLS was wired up in Python --
+# see services/gmat-service/README.md's "TLS front door" / FIPS-accounting sections. The
+# fix used here is the SAME MATERIAL secproxy uses (nginx linking the host OpenSSL, a
+# seccert-issued cert, ssl_verify_client for mTLS) applied as this service's own dedicated
+# front, not routed through secproxy's shared one. Whether this should instead become a
+# new fronted-component *class* secdeploy's generator understands (rather than a
+# service-owned template like this one) is exactly the question this milestone escalates
+# to the lead -- see the README section above.
+#
+# WHAT secdeploy WOULD TEMPLATE HERE
+# -------------------------------------
+# Every `__UPPER_SNAKE__` placeholder below is a hook a real secdeploy generator would
+# fill from topology.toml / secsite.toml and the seccert-issued material at deploy time,
+# the same way `wiring.nginx_conf_text()` fills secproxy's config from the same inputs.
+# tests/test_grpc_tls.py fills them itself (a local two-tier ECDSA P-384 test CA, ephemeral
+# loopback ports) to prove the shape works end to end; it does not call any secdeploy code
+# (there isn't a Rust/Python secdeploy in this repo to call -- this milestone's job is the
+# template and the proof, not the generator).
+#
+# This file is a COMPLETE, standalone nginx config, exactly like the secproxy example:
+#   nginx -c <rendered-from-this-template>.conf -g 'daemon off;'
+# Nothing reads this .template file directly; it is not valid nginx syntax as-is (the
+# placeholders aren't).
+
+worker_processes 1;
+pid __PID_FILE__;
+error_log __ERROR_LOG__ info;
+
+events {
+    worker_connections 128;
+}
+
+http {
+    # Keep every writable path inside the deploy-owned state dir (mirrors secproxy's
+    # ProtectSystem=strict note: no default nginx temp/log/pid path is touched). In this
+    # test, the harness points these at tests/test_grpc_tls.py's tmp_path.
+    access_log __ACCESS_LOG__;
+    client_body_temp_path __CLIENT_BODY_TEMP__;
+
+    server {
+        # gmat-service is never reached from outside the host (ADR-002/README: "Do not
+        # bind this to a non-loopback address"). The TLS front keeps that property: it
+        # listens on loopback too, on its own port, in front of gmat-service's own
+        # loopback-only plaintext port -- the network boundary this crosses is the crypto
+        # rule (plaintext grpcio/BoringSSL hop -> host OpenSSL mTLS), not host reachability.
+        listen 127.0.0.1:__LISTEN_PORT__ ssl;
+        http2 on;
+
+        # --- secdeploy hook: server_name ---
+        # A real deployment names the seccert-issued SAN cert's FQDN here (e.g.
+        # "gmat-service.<site-domain>", secdeploy's usual per-component hostname
+        # convention). There is no DNS in this test environment, so the harness both
+        # dials and issues the server cert for the loopback IP itself; see
+        # tests/test_grpc_tls.py's server certificate SAN (IP:127.0.0.1, DNS:localhost).
+        server_name __SERVER_NAME__;
+
+        # --- secdeploy hook: server identity (secproxy's TLS section, applied here) ---
+        # secdeploy issues ONE cert from seccert's CA (certbot) and installs the fullchain
+        # (leaf + intermediate) + key pair; every fronted server block reads that same
+        # pair, exactly like secproxy's /etc/secsuite/secproxy/{fullchain,privkey}.pem.
+        ssl_certificate __SSL_CERTIFICATE__;
+        ssl_certificate_key __SSL_CERTIFICATE_KEY__;
+
+        # --- secdeploy hook: mTLS trust anchor ---
+        # gmat-service goes further than the components secproxy already fronts: every
+        # caller must present a seccert-issued client certificate (ADR-004, "Identity and
+        # trust": "mTLS between services uses those certificates"). secdeploy installs
+        # seccert's own CA chain (intermediate + root) here; the harness installs its local
+        # test CA's equivalent chain.
+        ssl_client_certificate __SSL_CLIENT_CERTIFICATE__;
+        ssl_verify_client on;
+        ssl_verify_depth 2; # leaf -> intermediate -> root, the two-tier CA ADR-004 assumes
+
+        # TLS 1.2 kept alongside 1.3, not 1.3-only -- see services/gmat-service/README.md's
+        # "TLS front door" section for the justification (NIST SP 800-52r2's baseline still
+        # names 1.2, and it costs nothing here: both are FIPS-approved through nginx's
+        # linked OpenSSL FIPS provider, and the cipher/curve restrictions below apply to
+        # 1.2 exactly as they do to 1.3's fixed AEAD suite list).
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers on;
+        # ECDSA-only suites: every seccert leaf here is ECDSA P-384 (ADR-004's own signing
+        # algorithm choice for the edge, reused for TLS identity), so naming
+        # ECDHE-ECDSA-* explicitly documents that instead of leaving nginx's default,
+        # RSA-inclusive cipher list in place to simply never match.
+        ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256';
+        ssl_ecdh_curve secp384r1;
+        # ssl_ciphers only governs <=TLSv1.2; TLSv1.3's ciphersuites are a separate OpenSSL
+        # list, reached here via SSL_CONF_cmd (nginx links the host/Homebrew OpenSSL, so
+        # this reaches the same FIPS-approved AEAD suites as the 1.2 list above).
+        ssl_conf_command Ciphersuites TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256;
+
+        location / {
+            # The plaintext gmat-service backend (grpcio, add_insecure_port, loopback
+            # only -- services/gmat-service/gmat_service/server.py). "grpc://" (not
+            # "grpcs://") because the backend hop is intentionally plaintext-on-loopback,
+            # not a second TLS leg -- the crypto-rule-relevant TLS boundary is this one.
+            grpc_pass grpc://127.0.0.1:__BACKEND_PORT__;
+        }
+    }
+}

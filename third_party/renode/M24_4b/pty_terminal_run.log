@@ -1,0 +1,3 @@
+CreateUartPtyTerminal reply: '(pty-probe) \n\r(pty-probe) emulation CreateUartPtyTerminal "ptyterm" "/tmp/av_m24_4b_uart1.pty" true\n\r(pty-probe) \n\r(pty-probe)'
+connect reply: 'connector Connect sysbus.uart1 ptyterm\n\r(pty-probe) \n\r(pty-probe)'
+RXEN never observed

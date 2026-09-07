@@ -1,0 +1,96 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M17.3
+# (docs/open-questions.md question 123): "a two-instance DRM fixture with a real fault on one
+# instance and a maneuver on the other becomes a golden and is the demo bundle." See
+# drms/README.md's "demo_two_instance" section for the full account and
+# goldens/gen_demo_two_instance.py for how the golden itself was generated.
+#
+# start_tai_ns: the same "01 Jan 2026 00:00:00Z" epoch leo_1day_golden.drm.yaml/
+# leo_1day_maneuver_vnb.drm.yaml use -- 1767225637000000000.
+#   fault (demo_flt):     start + 1800 s  (00:30:00) -- force_model.gravity_order 8 -> 0
+#   maneuver (demo_mvr):  start + 5400 s  (01:30:00) -- 20 m/s prograde VNB burn
+#   end_tai_ns:            start + 7200 s  (02:00:00)
+# Both boundary epochs land exactly on the sample_interval_s = 60 s output grid.
+id: demo_two_instance_drm
+version: "1"
+name: Two-instance demo (fault on demo_flt, maneuver on demo_mvr)
+sos_configuration_id: demo_two_instance_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  # Question 124/M18.1: declare ICRF explicitly, on top of the mandatory frames the executor
+  # now always adds for this run's own central body (Earth) regardless of the coordinate system
+  # either instance actually propagated in (EarthMJ2000Eq, spacecraft.CoordinateSystem in
+  # demo_two_instance.system.yaml). This is the fixture the lead drives, so it demonstrates the
+  # typed Scenario.frames path end to end, not only the mandatory-frame fallback -- both are
+  # exercised by crates/av-kernel/tests/demo_two_instance.rs. Question 136 (M20.1): `description`
+  # is a human description of the frame itself -- what it is, its origin, its axes -- never a
+  # process note or a question-number citation; matches `executor::human_axes_description`'s own
+  # ICRF/Earth text verbatim, since a declared frame and the identical registry default describe
+  # the same physical frame.
+  frames:
+    - id: EarthICRF
+      body: Earth
+      axes: AXES_KIND_ICRF
+      description: "International Celestial Reference Frame (ICRF): an inertial frame whose axes are fixed to distant quasar positions, origin at Earth's centre of mass."
+  faults:
+    - id: fault1
+      tai_ns: 1767227437000000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: demo_flt
+      target: force_model.gravity_order
+      kind: parameter
+      params:
+        value: 0.0
+  events:
+    - id: burn1
+      tai_ns: 1767231037000000000
+      kind: maneuver
+      instance: demo_mvr
+      values:
+        dv_x: 20.0
+        dv_y: 0.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_VNB
+objectives:
+  - name: demo_flt_rmag_at_end
+    expression: "output.demo_flt.rmag@end"
+    # Target/tolerance filled in from goldens/demo_two_instance.json's own recorded
+    # "rmag_at_end_flt_m" (generated through the executor, not hand-picked). M19.4 (question 131)
+    # regenerated this golden when demo_flt's force model gained atmospheric drag and a
+    # SIGNAL-commanded drag-sail Cd change, and widened this tolerance from 0.05 m to 1.0 m. The
+    # M19.4 manager review reverted that widening: the measured residual is 0.0108 m, so 1.0 m
+    # carried a 93x margin and would not have caught a real regression. Back to 0.05 m, which
+    # leaves ~4.6x margin over the measured residual and matches the tolerance demo_mvr keeps.
+    # See gen_demo_two_instance.py's own `--tolerance-m` help text for the full reasoning.
+    target: 6870517.499129293
+    tolerance: 0.05
+    unit: UNIT_METER
+# M18.3 (question 126) declared two MeasuresOfEffectiveness (no target/tolerance -- these report
+# a raw run-time value, not a golden comparison) so a test could check the SIGNAL connection
+# delivered a real value. M19.4 (question 131) rewired the connection through a native controller
+# (demo_mvr -> demo_ctrl -> demo_flt, drms/demo_two_instance.sos.yaml) that commands a drag-sail
+# Cd (220.0), not demo_mvr's own live rmag, directly -- demo_flt_cd_at_end now reports that
+# commanded value; demo_mvr_rmag_at_end is kept as harmless, still-meaningful telemetry (demo_mvr's
+# own final range) but the two are no longer expected to agree with each other.
+measures:
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+  - name: demo_mvr_rmag_at_end
+    expression: "output.demo_mvr.rmag@end"
+    unit: UNIT_METER
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M17.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_two_instance.drm.yaml
+hash: "c10e51b464424c2a210833eecfced042ce686f87e0b590bcb947d7d1068fbbd3"

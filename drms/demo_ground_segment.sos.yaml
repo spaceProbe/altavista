@@ -1,0 +1,44 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- M25.1
+# (docs/sil-plan.md's M25 milestone: "the demo grows a ground instance connected to the flight
+# instance").
+#
+# Two instances: `flight` (drms/demo_ground_segment_flight.system.yaml, native ConstantAccelModel
+# broadcasting its own Earth-fixed position) and `ground` (drms/demo_ground_segment_ground.
+# system.yaml, native GroundStationModel). One FRAMED connection, `flight.tm_out -> ground.tm_in`,
+# `link_model: "latency"` -- crate::router::Router::effective_latency_ns sums both ports' own
+# declared PortTiming.latency_ns (50 ms each, 100 ms total): bullet 1's "a link with the existing
+# latency model", reused, not reimplemented. `ground.tc_out` is declared (bullet 2's own FRAMED
+# telecommand-port requirement) but not connected to anything in this demo -- see
+# drms/demo_ground_segment_ground.system.yaml's own header comment for why (ConstantAccelModel
+# has no FRAMED-consume capability today).
+id: demo_ground_segment_sos
+version: "1"
+name: "Ground segment demo (M25.1): a ground station connected to a flight telemetry source"
+instances:
+  - name: flight
+    system_id: ground_segment_flight_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_segment_flight_sys
+    step_rate_hz: 1.0
+  - name: ground
+    system_id: ground_station_demo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_station_demo_sys
+    step_rate_hz: 1.0
+connections:
+  - from_instance: flight
+    from_port: tm_out
+    to_instance: ground
+    to_port: tm_in
+    link_model: "latency"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_ground_segment.sos.yaml
+hash: "111ed78f4e7a0a0055bffddc320a142a5ffde3881161649ca9875ee5a8fae4f2"

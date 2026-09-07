@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-kernel", "crates/av-grpc", "crates/av-dynamics-service", "crates/av-lockstep", "crates/av-lockstep-shim", "crates/av-run"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/altavista"
+
+[workspace.dependencies]
+prost = "0.13"
+prost-build = "0.13"
+prost-types = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# Pure-Rust SHA-256 (no bundled C crypto), for settings/config hashes only (ADR-004's
+# crypto rule: SHA-256 only, system OpenSSL only for anything asymmetric -- this crate
+# never touches that path).
+sha2 = "0.10"
+# Matches spoore/Cargo.toml's pin: av-cdm's spoore.v0 adapter needs to name
+# `nalgebra::DMatrix<f64>` (the type spoore-cdm's own accessors return) directly.
+nalgebra = "0.33"
+# Path dependency onto spoore's own CDM crate (question 12: spoore crates by
+# path dependency). Versions above are kept aligned with spoore/Cargo.toml
+# (edition 2021, rust-version 1.85, prost 0.13) so the two workspaces can share
+# a lockfile-free path dependency without a version conflict.
+spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }
+
+[profile.release]
+debug = 1

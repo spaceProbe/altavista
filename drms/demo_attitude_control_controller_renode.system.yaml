@@ -1,0 +1,197 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M24.4b
+# (docs/sil-plan.md's M24 exit criterion: "identical port traffic, posix container against
+# Renode, under lockstep"; docs/open-questions.md questions 144, 145, 147, 148, 153, 157, 164).
+#
+# Mechanical variant of `demo_attitude_control_controller_cfs.system.yaml` (M23.4): the identical
+# `services/cfs/apps/adcs` control law, the identical `ports`/`packet_codecs` (copied verbatim,
+# unchanged from the cFS variant -- this is the SAME cFS source tree, same app, same packet
+# shapes; only the OSAL/platform underneath it differs, per question 147: "same app source,
+# different OSAL; the P2 identical-traffic criterion becomes a portability test"), now bound to
+# the SAME `core-cpu1.exe` cross-built for RTEMS 6's `zynqmp_rpu_lock_step` BSP, running under
+# Renode (`third_party/renode/M24_4_REPORT.md`, `third_party/renode/M24_4b_REPORT.md`) instead of
+# OSAL-posix in a Docker container. `container.address` (not `ContainerBinding.image`/
+# `image_digest`) is used deliberately: this is `binding::classify_binding`'s pre-M15.3
+# already-running-process path (M24_4_REPORT.md's own "What already exists and is directly
+# reusable" section) -- `av-kernel/tests/drm_attitude_control_renode.rs` starts
+# `crates/av-lockstep-shim` and `third_party/renode/M24_4b/renode_bridge.py` itself (which in turn
+# owns the real Renode process and the real, root-cause-fixed `core-cpu1.exe`) and points
+# `container.address` at wherever the shim happens to publish its gRPC port -- there is no Docker
+# image lifecycle for a Renode-bound instance; `docker run` is never invoked for it.
+#
+#   - `dynamics_model`/`state_space_id`/`state_space` -- left empty/unused, identical reasoning to
+#     the cFS variant (`binding::classify_binding`'s `BindingKind::Container` arm never reads
+#     these for ANY container-bound instance, `container.address`-only included).
+#   - `parameters` -- `container.address` (the shim's real, dynamically-chosen gRPC loopback
+#     address for this run -- `drm_attitude_control_renode.rs` rewrites this field at load time
+#     the same way M13.2's own `container.address`-only fixtures already do, since the shim binds
+#     an OS-chosen ephemeral port) and `container.seed_key` (question 107, unused by this app
+#     today but still a required declared parameter for every container-bound instance, ADR-004).
+#     No `container.sysctl.*` entries: those only apply to the Docker image-lifecycle path
+#     (`ManagedContainer::pull_and_run`'s own `docker run --sysctl`) -- a `container.address`-only
+#     instance is an already-running process, `docker run` is never invoked for it, so a sysctl
+#     parameter here would be refused at load (`binding.rs`'s own "container.sysctl.* is set but
+#     ContainerBinding.image is not" check).
+#   - No `"output.*"` declarations, for the same reason as the cFS variant: `io_lockstep` (which
+#     `connect_to_shim`'s UART branch now correctly speaks to over `/dev/ttyS1`, M24.4b's own
+#     root-caused fix) never populates `LockstepStepResponse.named_outputs` regardless of
+#     transport -- the pointing-error comparison reads truth's own quaternion state directly, the
+#     same way the cFS variant's own comparison does.
+id: attitude_control_controller_renode_sys
+version: "1"
+name: Renode-bound attitude controller (M24.4b) -- services/cfs/apps/adcs, RTEMS 6 zynqmp_rpu_lock_step under Renode
+dynamics_model: ""
+# `"container.none"` -- the zero-component declared state space every other
+# BINDING_KIND_CONTAINER fixture in this repository uses (e.g.
+# crates/av-kernel/tests/drm_container.rs's own `docker_container_system` helper): a container
+# instance's state is opaque to this kernel (M14.4's own "zero-order hold, no interpolation"
+# rule), so there is nothing to declare beyond "zero-dimensional."
+state_space_id: "container.none"
+state_space:
+  id: "container.none"
+  components: []
+ports:
+  - name: startracker_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: imu_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: wheel_torque_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: controller_star_in_codec
+    apid: 200
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "star tracker attitude measurement, decoded (M23.4, copied from M22.4)"
+    fields:
+      - name: qx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qw
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: controller_imu_in_codec
+    apid: 201
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement, decoded (M23.4, copied from M22.4)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+  - id: controller_wheel_torque_out_codec
+    apid: 300
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "reaction wheel torque command, wheel k aligned with body axis k (M23.4, copied from M22.4)"
+    fields:
+      - name: tau_1
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_2
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_3
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+parameters:
+  # `container.address` is rewritten at load time by
+  # `crates/av-kernel/tests/drm_attitude_control_renode.rs` to wherever this run's own
+  # `crates/av-lockstep-shim` process actually bound its ephemeral gRPC port (the shim always
+  # picks an OS-assigned loopback port, matching the Docker image-lifecycle path's own
+  # "letting Docker pick a free host port" precedent -- `ManagedContainer::pull_and_run`'s own
+  # doc comment). The placeholder below is never dialed as-is.
+  - name: container.address
+    string_value: "127.0.0.1:1"
+  - name: container.seed_key
+    string_value: controller
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M24.4b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_control_controller_renode.system.yaml
+# Real output of that exact command against this file (confirms this YAML parses cleanly
+# through crate::drm::schema, not just that it looks plausible by eye).
+hash: "49fa073d6eaa46c96a0f2e80857d882ec84babd52413a98b674df9d69ff08ced"

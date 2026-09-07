@@ -1,0 +1,11 @@
+3d-tiles-renderer 0.5.2 (NASA AMMOS 3DTilesRendererJS), Apache-2.0.
+Source: https://registry.npmjs.org/3d-tiles-renderer/-/3d-tiles-renderer-0.5.2.tgz
+sha256: d08a154eab097f11a6c38ef0e92bf3c574c9d4b33c1597c92035c70200ea87f3
+
+Only the 'three' entry point is vendored (build/index.three.js ->
+renderer-3xKvdklX.js -> renderer-tyqPdeD-.js, which has zero external npm
+dependencies of its own) -- the pmtiles/vector-tile plugin bundles (which pull
+in extra npm dependencies this project does not want: pbf, pmtiles,
+@mapbox/vector-tile) are neither vendored nor imported.
+
+vendored: 2026-09-04

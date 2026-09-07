@@ -1,0 +1,81 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- see
+# crates/av-kernel/src/drm/schema.rs's module doc comment for the authoring-format rationale
+# and crates/av-kernel/src/drm/binding.rs's module doc comment for the `force_model.*` /
+# `spacecraft.*` parameter vocabulary this file uses.
+#
+# Reproduces the same GMAT force model and spacecraft as goldens/leo_1day_jgm2_8x8_sunmoon.json
+# / tests/golden_acceptance.rs (JGM2 8x8 Earth gravity, Sun + Moon point masses, one day) --
+# including the golden's own recorded ballistic properties (DryMass/Cd/Cr/DragArea/SRPArea,
+# question 81: "a seed is a vehicle, not a state vector").
+id: leo_sys
+version: "1"
+name: LEO JGM2 8x8 + Sun/Moon (golden-pinned)
+dynamics_model: gmat.earth.jgm2_8x8.sun_moon
+state_space_id: gmat.orbital.cartesian6
+# Question 94 (M9.2): the declared StateSpace itself, additive to and authoritative over
+# state_space_id above -- id must equal state_space_id (crates/av-kernel/src/trajectory.rs
+# ::resolve_state_space checks this at load). Field-for-field identical to what that same
+# module's built-in registry already declares for this id (its own cartesian_pos_vel_6
+# builder) -- declaring it here does not change the shape, only makes it an artifact
+# property rather than something that exists only by the registry's convention (ADR-001).
+state_space:
+  id: gmat.orbital.cartesian6
+  components:
+    - label: pos_x
+      unit: UNIT_METER
+    - label: pos_y
+      unit: UNIT_METER
+    - label: pos_z
+      unit: UNIT_METER
+    - label: vel_x
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_y
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_z
+      unit: UNIT_METER_PER_SECOND
+parameters:
+  - name: force_model.central_body
+    string_value: Earth
+  - name: force_model.gravity_file
+    string_value: JGM2.cof
+  - name: force_model.gravity_degree
+    value: 8
+  - name: force_model.gravity_order
+    value: 8
+  - name: force_model.point_masses
+    string_value: "Luna,Sun"
+  - name: force_model.golden_ref
+    string_value: leo_1day_jgm2_8x8_sunmoon
+  - name: spacecraft.CoordinateSystem
+    string_value: EarthMJ2000Eq
+  - name: spacecraft.DisplayStateType
+    string_value: Keplerian
+  - name: spacecraft.SMA
+    value: 6878.0
+  - name: spacecraft.ECC
+    value: 0.001
+  - name: spacecraft.INC
+    value: 51.6
+  - name: spacecraft.RAAN
+    value: 30.0
+  - name: spacecraft.AOP
+    value: 0.0
+  - name: spacecraft.TA
+    value: 0.0
+  - name: spacecraft.DryMass
+    value: 500.0
+  - name: spacecraft.Cd
+    value: 2.2
+  - name: spacecraft.Cr
+    value: 1.8
+  - name: spacecraft.DragArea
+    value: 5.0
+  - name: spacecraft.SRPArea
+    value: 5.0
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M6.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed once, checked in --
+# a tampered copy of this file is refused, not silently accepted (see tests/drm_executor.rs).
+hash: "bf49e03be4e63ced9b7442058544d427776e257af88bfeecb343b840220c0f25"

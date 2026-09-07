@@ -1,0 +1,35 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M25.3
+# (`docs/open-questions.md` question 173). 6 s run at 1 Hz default step rate, matching
+# drms/demo_attitude_sensors_truth.system.yaml's own torque-free precession physics (reused
+# unmodified). No faults, no maneuvers, no covariance.
+#
+# **Why this fixture exists alongside the untouched drms/demo_attitude_sensors.*`: that fixture's
+# own packet_codecs declare no `PacketField.target` on any field (M22.2 predates question 173),
+# so telemetry-to-Measurement mapping produces nothing for it by design -- see
+# `crates/av-kernel/tests/drm_attitude_sensors.rs`'s own
+# `existing_sensor_telemetry_with_no_declared_target_produces_no_measurement` for that exact,
+# real, zero-fixture-risk negative proof. This fixture's own two sensor systems
+# (drms/demo_measurements_{startracker,imu}.system.yaml) are the positive case: their codecs DO
+# declare targets, so `crates/av-kernel/tests/demo_measurements.rs` can assert real `Measurement`s
+# with the right ids/epochs actually appear in `RunProducts.measurements`.
+id: measurements_demo_drm
+version: "1"
+name: Star tracker + IMU telemetry decoded into CDM Measurements (M25.3)
+sos_configuration_id: measurements_demo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225643000000000
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M25.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_measurements.drm.yaml
+hash: "e8d184b42a7c9fefa88571bb61b22d5a71232a4b58233df395907f495f10a656"

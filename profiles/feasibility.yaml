@@ -1,0 +1,77 @@
+# Feasibility profile (docs/architecture.md section 5, "Configurability: four profiles", the
+# Feasibility column). See profiles/design.yaml's header comment for the shared rules
+# (profiles select components, never numerical behaviour -- ADR-000 rule 1) and
+# profiles/README.md for the schema and the "status: not_yet_built" convention.
+id: feasibility
+name: Feasibility profile
+architecture_ref: 'docs/architecture.md section 5, "Configurability: four profiles", Feasibility column'
+rule: "Profiles select components; they never change numerical behaviour (ADR-000 rule 1)."
+
+# The globe's imagery source (M19.5, question 132 -- decided by the lead, applying
+# question 11's rule: a profile selects *which* tile source the viewer points at, never
+# how the viewer behaves once it has one). See profiles/design.yaml's own imagery entry
+# for the full rationale; every profile defaults to the same offline fixture for now.
+imagery:
+  url_template: './fixtures/tiles/{z}/{x}/{y}.png'
+  attribution: 'Offline fixture tiles (web/fixtures/gen_globe_tiles.py) -- no public basemap wired yet (question 132)'
+  max_level: 2
+
+dynamics_backend:
+  - name: av-dynamics-service
+    kind: rust_service
+    path: crates/av-dynamics-service
+    role: >-
+      altavista.v1.DynamicsService, hosted in Rust -- present in every profile (question 85 /
+      ADR-003's amendment); see profiles/design.yaml's own entry for the full rationale.
+
+planes:
+  ingestion:
+    per_architecture: none
+    components: []
+
+  hot_track:
+    per_architecture: "off"
+    components: []
+
+  heavy_track:
+    per_architecture: "DRM sweeps, Monte Carlo, MoE aggregation"
+    components:
+      - name: av-kernel::drm
+        kind: rust_crate
+        path: crates/av-kernel/src/drm
+        role: >-
+          The single-DRM-run substrate a sweep or Monte Carlo driver would call repeatedly,
+          one run per point (crates/av-kernel/README.md's "The DRM executor" section). Not a
+          sweep orchestrator itself -- see "not_yet_built" below.
+      - name: gmat-service
+        kind: python_service
+        path: services/gmat-service
+        role: >-
+          GMAT solves feeding individual sweep points, design-time only (question 85) --
+          the same component profiles/design.yaml lists, listed again here because
+          architecture.md places Feasibility's heavy-track work on the same GMAT-solves
+          substrate as Design's. Never in analysis.yaml or execution.yaml.
+    status: partial
+    not_yet_built:
+      - "A parameter-sweep orchestrator: architecture.md's phase P1 exit criteria name \"parameter sweeps on the job runner\", but no job runner exists in this repository yet -- av-kernel::drm::execute runs exactly one DRM per call."
+      - "Monte Carlo sampling over a DRM's inputs."
+      - "MoE aggregation: DesignReferenceMission.objectives/measures_of_effectiveness parse and hash (crates/av-kernel/src/drm/schema.rs) but are not evaluated by anything in this repository -- no metric-expression grammar exists yet (ADR-005 is Proposed, not accepted; see crates/av-kernel/README.md's \"Known limitations\" section, and this task's own instructions: ADR-005's scheduler refactor and expression evaluator are explicitly out of scope until it is accepted)."
+
+  viewer:
+    per_architecture: "envelopes, outliers, trade dashboards"
+    components: []
+    status: not_yet_built
+    note: >-
+      No envelope/outlier/trade-dashboard rendering exists in web/ yet -- only the base
+      scene+trajectory viewer (profiles/design.yaml's own web viewer entry) is built, and it
+      has no sweep-result visualization.
+
+  ai:
+    per_architecture: "surrogates, optimizers over the sweep"
+    components: []
+    status: not_yet_built
+    note: "No surrogate-model or sweep-optimizer component exists in this repository yet (and there is no sweep to optimize over -- see heavy_track above)."
+
+  command:
+    per_architecture: none
+    components: []

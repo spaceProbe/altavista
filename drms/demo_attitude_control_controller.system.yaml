@@ -1,0 +1,193 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.4
+# (docs/sil-plan.md's M22 milestone paragraph: "A native 'controller' instance closes the loop
+# first"; docs/open-questions.md questions 142, 149, 151, 152).
+#
+# The native attitude controller: `crate::drm::controller::AttitudeControllerModel`, dispatched
+# via `attctrl.` (`crate::registry::ModelKind::AttitudeController`). Consumes the star tracker's
+# and IMU's own measurement packets over its two declared FRAMED IN ports (`startracker_in`,
+# `imu_in` -- `crate::drm::controller`'s own fixed name convention), decoded through the
+# declared `PacketCodec`s below (apid 200/201, field-for-field identical to
+# drms/demo_attitude_control_startracker.system.yaml's/`_imu.system.yaml`'s own codecs -- the
+# same apid on both ends is what lets `crate::codec::decode_packet` find the right codec for an
+# inbound packet), and commands reaction wheel torques back to
+# drms/demo_attitude_control_truth.system.yaml's own `wheel_torque_in` port over its own declared
+# FRAMED OUT port (`wheel_torque_out`), framed via the apid-300 codec that instance's own
+# `wheel_torque_in` port decodes.
+#
+# Control law (crate::drm::controller's own module doc comment has the full derivation): a
+# quaternion-feedback PD regulator, `tau_k = kp*qv_k + kd*omega_k` per body axis (target = the
+# identity quaternion declared below -- "point the body frame at its own inertial starting
+# frame"). `kp`/`kd` are sized for **exact critical damping** against the truth plant's own
+# declared `attitude.inertia.jzz = 50` (drms/demo_attitude_control_truth.system.yaml): critical
+# damping (zeta = 1) requires `kp = kd^2 / (2*Jz)`; with `kd = 5.0`, `Jz = 50`,
+# `kp = 25 / 100 = 0.25` exactly. The resulting closed-form envelope time constant is
+# `tau = 2*Jz/kd = 20 s` (see this fixture's own `.drm.yaml` header for the full expected-vs-
+# measured account crates/av-kernel/tests/drm_attitude_control.rs checks against).
+#
+# The declared `output.seq`/`output.pointing_error_rad` parameters expose this instance's own
+# CCSDS sequence count and its own computed pointing-error angle (the exact quantity the control
+# law above acts on -- `crate::drm::controller::AttitudeControllerModel::step_with_ports`'s own
+# doc comment explains why this is scored from the controller's own measured belief, never the
+# plant's truth) as `output.controller.seq@<time>` / `output.controller.pointing_error_rad@<time>`
+# -- the pointing-error Objective drms/demo_attitude_control.drm.yaml declares reads the latter.
+id: attitude_control_controller_sys
+version: "1"
+name: Native attitude controller closing the loop (M22.4)
+dynamics_model: attctrl.control_demo
+state_space_id: attctrl.control_demo.space
+state_space:
+  id: attctrl.control_demo.space
+  components: []
+ports:
+  - name: startracker_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: imu_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: wheel_torque_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+packet_codecs:
+  - id: controller_star_in_codec
+    apid: 200
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "star tracker attitude measurement, decoded (M22.4)"
+    fields:
+      - name: qx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qw
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: controller_imu_in_codec
+    apid: 201
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement, decoded (M22.4)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+  - id: controller_wheel_torque_out_codec
+    apid: 300
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "reaction wheel torque command, wheel k aligned with body axis k (M22.4)"
+    fields:
+      - name: tau_1
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_2
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_3
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: controller.kp
+    value: 0.25
+  - name: controller.kd
+    value: 5.0
+  - name: controller.target_q.x
+    value: 0.0
+  - name: controller.target_q.y
+    value: 0.0
+  - name: controller.target_q.z
+    value: 0.0
+  - name: controller.target_q.w
+    value: 1.0
+  - name: controller.update_rate_hz
+    value: 10.0
+    unit: UNIT_HERTZ
+  - name: output.seq
+    unit: UNIT_DIMENSIONLESS
+  - name: output.pointing_error_rad
+    unit: UNIT_RADIAN
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_control_controller.system.yaml
+hash: "b4fb75cc88c91fca097b5162e1e92648fcf7b8c0e8a7c0c186dd947d741f1250"

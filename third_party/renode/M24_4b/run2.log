@@ -1,0 +1,329 @@
+include reply: include @/Users/probe/code/AltaVista/third_party/renode/M24_4b/uart1_register_probe.resc
+BASELINE (pre-boot) control=0x00000128 channel_sts=0x0000000a
+bridge client connected
+sent HELLO frame (attempt 1): b'\x07\x00\x00\x00\x01AVL1\x01\x00'
+step  0: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  1: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  2: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  3: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  4: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  5: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  6: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  7: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  8: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step  9: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 10: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 11: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 12: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 13: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 14: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 15: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 16: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 17: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 18: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 19: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 20: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 21: control=0x00000128 (RXEN=False TXEN=False) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000000a (RTRIG=False)
+step 22: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 23: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 24: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 25: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 26: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 27: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 28: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 29: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 30: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 31: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 32: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 33: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 34: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 35: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 36: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 37: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 38: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 39: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 40: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 41: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+step 42: control=0x00000114 (RXEN=True TXEN=True) channel_sts=0x0000000a (REMPTY=True RFUL=False RTRIG=False) irq_sts=0x0000010a (RTRIG=False)
+RXEN first observed at step 22
+FINAL: control=0x00000114 channel_sts=0x0000000a irq_sts=0x0000010a
+POPPED FROM RX FIFO: [] (0 bytes)
+guest sent 0 bytes on the bridge TCP port: b''
+UART0 'handshake failed' present: True
+{
+  "samples": [
+    {
+      "phase": "pre-boot",
+      "control": 296,
+      "channel_sts": 10
+    },
+    {
+      "phase": "step0",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step1",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step2",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step3",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step4",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step5",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step6",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step7",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step8",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step9",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step10",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step11",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step12",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step13",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step14",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step15",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step16",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step17",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step18",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step19",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step20",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step21",
+      "control": 296,
+      "channel_sts": 10,
+      "irq_sts": 10
+    },
+    {
+      "phase": "step22",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step23",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step24",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step25",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step26",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step27",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step28",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step29",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step30",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step31",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step32",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step33",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step34",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step35",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step36",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step37",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step38",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step39",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step40",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step41",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    },
+    {
+      "phase": "step42",
+      "control": 276,
+      "channel_sts": 10,
+      "irq_sts": 266
+    }
+  ],
+  "rxen_first_observed_at_step": 22,
+  "final": {
+    "control": 276,
+    "channel_sts": 10,
+    "irq_sts": 266
+  },
+  "popped_fifo_bytes": [],
+  "guest_bytes_len": 0,
+  "guest_bytes_hex": "",
+  "handshake_failed_in_log": true
+}

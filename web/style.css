@@ -1,0 +1,202 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #131824;
+  --panel-2: #1a2130;
+  --border: #263044;
+  --text: #dfe6f2;
+  --muted: #8b97ad;
+  --accent: #54a0ff;
+  --ok: #1dd1a1;
+  --bad: #ff6b6b;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 var(--font); }
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+/* M26.2 windowing core (docs/open-questions.md question 161): #layout-root holds the
+   binary split tree of panes; #sidebar/#viewport are moved into it, unchanged, by
+   web/js/layout_bootstrap.js (see index.html's #pane-content-pool comment). The old
+   fixed 280px-sidebar CSS grid is gone -- pane sizing is entirely the split tree's
+   `ratio` now (web/js/layout/layout_manager.js), so these two ids only need to fill
+   whatever pane wrapper currently holds them. */
+#layout-toolbar {
+  display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+  background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+}
+#layout-toolbar button { font-size: 12px; padding: 3px 8px; }
+#layout-error {
+  color: var(--bad); font-size: 12px; flex: 1;
+}
+#layout-root { flex: 1; min-height: 0; position: relative; overflow: hidden; display: flex; }
+.av-split { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.av-split-row { flex-direction: row; }
+.av-split-column { flex-direction: column; }
+.av-split-child { min-width: 0; min-height: 0; display: flex; overflow: hidden; }
+.av-split-child > * { flex: 1; min-width: 0; min-height: 0; }
+.av-handle {
+  flex: none; background: var(--border); position: relative; z-index: 2;
+}
+.av-handle-row { width: 5px; cursor: col-resize; }
+.av-handle-column { height: 5px; cursor: row-resize; }
+.av-handle:hover, .av-handle:focus { background: var(--accent); outline: none; }
+.av-handle-disabled { cursor: default; pointer-events: none; opacity: 0.4; }
+.av-pane {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1;
+  background: var(--panel); overflow: hidden;
+}
+.av-pane-header {
+  display: flex; align-items: center; justify-content: space-between; flex: none;
+  padding: 3px 8px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted);
+}
+.av-pane-btns { display: flex; gap: 2px; }
+.av-pane-btn {
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  padding: 0 5px; font-size: 12px; line-height: 1.6;
+}
+.av-pane-btn:hover { color: var(--text); border-color: var(--border); }
+/* Question 167: the pane header's "swap panel" menu -- offered on every expanded pane
+   (see web/js/layout/layout_manager.js's own comment on why this and the body chooser
+   below both exist). Sized down to match the header's own compact controls. */
+.av-pane-swap {
+  background: var(--panel-2); color: var(--muted); border: 1px solid transparent;
+  font-size: 10px; max-width: 110px; margin-right: 4px;
+}
+.av-pane-swap:hover { color: var(--text); border-color: var(--border); }
+.av-pane-body { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: auto; }
+.av-pane-body > * { flex: 1; min-width: 0; min-height: 0; }
+.av-pane-placeholder {
+  display: flex; align-items: center; justify-content: center; width: 100%;
+  color: var(--muted); font-size: 12px; font-style: italic; text-align: center; padding: 8px;
+}
+/* Question 167: an empty pane's chooser -- replaces the old inert placeholder text with
+   one button per currently-available registered panel type. */
+.av-pane-chooser {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 100%; gap: 6px; padding: 12px;
+}
+.av-pane-chooser-label { color: var(--muted); font-size: 12px; }
+.av-pane-chooser-empty { color: var(--muted); font-size: 11px; font-style: italic; }
+.av-pane-chooser-btn {
+  border: 1px solid var(--border); border-radius: 3px; padding: 5px 12px;
+  background: var(--panel-2); color: var(--text); font-size: 12px;
+}
+.av-pane-chooser-btn:hover { border-color: var(--accent); color: var(--accent); }
+.av-pane-collapsed {
+  flex-direction: row; cursor: pointer;
+}
+.av-pane-collapsed .av-pane-header {
+  writing-mode: vertical-rl; border-bottom: none; height: 100%; justify-content: flex-start;
+  gap: 10px; padding: 8px 4px;
+}
+#sidebar {
+  background: var(--panel);
+  overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 14px;
+}
+#sidebar header { display: flex; align-items: center; justify-content: space-between; }
+#sidebar h1 { font-size: 18px; margin: 0; letter-spacing: 0.5px; }
+#sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 6px; }
+#sidebar section { display: flex; flex-direction: column; gap: 4px; }
+#sidebar label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+#sidebar label.row { justify-content: space-between; }
+#sidebar select, #timebar select {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px;
+  max-width: 170px;
+}
+button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+  padding: 5px 10px; cursor: pointer; font: inherit;
+}
+button:hover { border-color: var(--accent); }
+.badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); color: var(--muted); }
+.badge.on { background: rgba(29, 209, 161, 0.15); color: var(--ok); }
+.badge.off { background: rgba(255, 107, 107, 0.15); color: var(--bad); }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+/* M5.2: a body frame with no attitude stream, showing nadir-pointing VVLH as a
+   labelled fallback (never silent -- the text itself already says "fallback",
+   web/js/app.js's buildLists(); this just makes it visually distinct too). */
+.frame-fallback { color: #feca57; font-style: italic; }
+.mono { font-family: var(--mono); }
+.objlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.objlist li { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; }
+.objlist li:hover { background: var(--panel-2); }
+.objlist .swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.objlist .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.objlist .go { color: var(--muted); font-size: 11px; cursor: pointer; }
+.objlist .go:hover { color: var(--accent); }
+.objlist .empty { color: var(--muted); font-style: italic; }
+
+/* #viewport is the single legacy 3D pane (unchanged since before M26.3). M26.3's extra
+   viewport panes (web/js/layout/default_layouts.js's ICRF/RIC/globe triple layout) reuse
+   the identical rules via the .av-viewport3d class -- id selectors can't repeat, and this
+   avoids a second, hand-duplicated copy of the same layout/typography rules per pane. */
+#viewport, .av-viewport3d { position: relative; overflow: hidden; background: #000; width: 100%; height: 100%; }
+#canvas, .av-viewport3d canvas { width: 100%; height: 100%; display: block; }
+#labels, .av-viewport3d .labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#labels .label, .av-viewport3d .labels .label {
+  position: absolute; transform: translate(8px, -50%); white-space: nowrap; font-size: 12px;
+  text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none;
+}
+#labels .label.body, .av-viewport3d .labels .label.body { color: #cfd8e6; }
+#labels .label.event, .av-viewport3d .labels .label.event { color: #ffd166; font-size: 11px; }
+.overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center;
+  color: var(--muted); background: rgba(0,0,0,0.35); pointer-events: none;
+}
+.overlay code { color: var(--text); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+#hud, .av-viewport3d .av-viewport3d-hud { position: absolute; left: 10px; bottom: 8px; color: var(--muted); pointer-events: none; font-size: 11px; }
+
+#timebar {
+  flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px; height: 56px;
+  background: var(--panel); border-top: 1px solid var(--border);
+}
+#btn-play { width: 40px; }
+#slider-wrap { flex: 1; position: relative; height: 28px; }
+#slider { position: absolute; left: 0; right: 0; top: 6px; width: 100%; margin: 0; }
+#event-ticks { position: absolute; left: 0; right: 0; top: 0; height: 6px; pointer-events: none; }
+#event-ticks .tick { position: absolute; top: 0; width: 2px; height: 6px; background: #ffd166; transform: translateX(-1px); }
+#epoch { min-width: 215px; text-align: right; }
+
+/* The pre-M26.2 narrow-screen (<=800px) stacked layout is not preserved: pane
+   arrangement is now entirely the split tree's own data (row/column direction +
+   ratio, web/js/layout/split_tree.js), not CSS grid-template-areas -- a user (or a
+   future viewport-aware default layout) can drag the sidebar/viewport split to a
+   'column' direction, but nothing does that automatically today. Disclosed, not
+   fixed, in web/js/layout/REPORT.md -- no narrow-screen test existed before this
+   task and none was required by its brief. */
+
+/* M26.4: the three panels (docs/ui-rework-plan.md). */
+.av-panel { width: 100%; height: 100%; overflow: auto; padding: 8px 10px; box-sizing: border-box; background: var(--panel); color: var(--text); font-size: 12px; }
+.av-panel-section { margin-bottom: 12px; }
+.av-panel-section h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.av-panel-notice { color: var(--muted); font-style: italic; margin: 0; }
+.av-scores-table { width: 100%; border-collapse: collapse; }
+.av-scores-table td { padding: 2px 4px; border-bottom: 1px solid var(--border); }
+.av-pass { color: var(--ok); font-weight: 600; }
+.av-fail { color: var(--bad); font-weight: 600; }
+.av-measure { color: var(--muted); }
+.av-timeline-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.av-timeline-events li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 4px; border-radius: 4px; }
+.av-timeline-events li:hover { background: var(--panel-2); }
+.av-timeline-event-fault .name { color: var(--bad); }
+.av-timeline-event-port_command .name { color: #ffd166; }
+.av-timeline-events .go { color: var(--muted); font-size: 11px; cursor: pointer; }
+
+.av-map-wrap { position: relative; width: 100%; height: 100%; min-height: 120px; }
+.av-map-mosaic { position: absolute; inset: 0; display: grid; }
+.av-map-tile { width: 100%; height: 100%; object-fit: fill; display: block; }
+.av-map-overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.av-map-track { fill: none; stroke-width: 0.4; vector-effect: non-scaling-stroke; opacity: 0.85; }
+.av-map-current { stroke: #000; stroke-width: 0.2; }
+
+.av-console-conn { display: inline-block; margin-bottom: 8px; }
+.av-console-provenance { margin: 0 0 10px; font-size: 11px; }
+.av-console-provenance dt { color: var(--muted); float: left; clear: left; width: 90px; }
+.av-console-provenance dd { margin-left: 96px; word-break: break-all; }
+.av-console-log { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow: auto; font-family: monospace; font-size: 11px; display: flex; flex-direction: column; gap: 1px; }

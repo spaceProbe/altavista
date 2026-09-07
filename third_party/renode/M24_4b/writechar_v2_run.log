@@ -1,0 +1,10 @@
+include reply: include @/Users/probe/code/AltaVista/third_party/renode/M24_4b/uart1_register_probe_v3_no_uart0_backend.resc
+RXEN observed at step 22, control=0x00000114
+pre-WriteChar channel_sts=0x0000000a REMPTY=True
+WriteChar reply: 'sysbus.uart1 WriteChar 0x41\n\r(av-m24-4b-uart1-register-probe) \n\r(av-m24-4b-uart1-register-probe)'
+post-WriteChar channel_sts=0x00000009 REMPTY=False
+popped from RX FIFO after WriteChar: 0x41 ('A')
+{
+  "rxen_first_observed_at_step": 22,
+  "writechar_worked": true
+}

@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+// Commands and the authority state machine (ADR-001 shape; ADR-004 policy; ADR-007 owner).
+//
+//   PROPOSED -> CHECKED -> AUTHORIZED -> DISPATCHED -> ACKED
+//                 \-> REJECTED   \-> EXPIRED      \-> FAILED
+//
+// A model or agent may create PROPOSED and nothing else. Every transition is an event on
+// the log (Event.kind = COMMAND_TRANSITION), so a replay reproduces the decision trail.
+package altavista.v1;
+
+import "google/protobuf/any.proto";
+import "altavista/v1/core.proto";
+import "altavista/v1/envelope.proto";
+
+enum CommandState {
+  COMMAND_STATE_UNSPECIFIED = 0;
+  COMMAND_STATE_PROPOSED = 1;
+  COMMAND_STATE_CHECKED = 2;
+  COMMAND_STATE_AUTHORIZED = 3;
+  COMMAND_STATE_DISPATCHED = 4;
+  COMMAND_STATE_ACKED = 5;
+  COMMAND_STATE_REJECTED = 6;
+  COMMAND_STATE_EXPIRED = 7;
+  COMMAND_STATE_FAILED = 8;
+}
+
+// What "acked" means, per what the asset protocol can report (question 55).
+enum AckLevel {
+  ACK_LEVEL_UNSPECIFIED = 0;
+  // The edge node received the command.
+  ACK_LEVEL_EDGE = 1;
+  // The asset acknowledged receipt (e.g. CCSDS COP-1 accept, MAVLink COMMAND_ACK).
+  ACK_LEVEL_ASSET_RECEIVED = 2;
+  // The asset reported execution.
+  ACK_LEVEL_ASSET_EXECUTED = 3;
+}
+
+message CommandTransition {
+  CommandState state = 1;
+  int64 tai_ns = 2;
+  // OIDC subject, service subject or agent identity that caused the transition.
+  string principal = 3;
+  // Policy decision id, authorization reason, failure text.
+  string reason = 4;
+  AckLevel ack_level = 5;
+  // For AUTHORIZED: the delegation under which the principal acted, if any.
+  string delegation_id = 6;
+}
+
+message Command {
+  string id = 1;
+  // Idempotency key: the edge never dispatches the same key twice.
+  string idempotency_key = 2;
+  string entity_id = 3;
+  // Command class, the unit of authorization policy: "burn", "mode", "payload", "safe"...
+  string command_class = 4;
+  // Flagged hazardous in the DRM; policy may require additional authorization.
+  bool hazardous = 5;
+  // Protocol-specific payload (a CCSDS TC, a MAVLink command, a cFS message), typed by Any.
+  google.protobuf.Any payload = 6;
+  // Deadline after which the command expires undispatched, nanoseconds on TAI.
+  int64 deadline_tai_ns = 7;
+  // Earliest dispatch time, for scheduled commands. 0 = immediately.
+  int64 not_before_tai_ns = 8;
+  CommandState state = 9;
+  repeated CommandTransition transitions = 10;
+  // Envelope policy the command claims to fall under, if any (empty until envelopes exist).
+  string envelope_id = 11;
+  Label label = 12;
+  Provenance provenance = 13;
+}
+
+// The only message a model or agent may emit toward the command path.
+message CommandProposal {
+  Command command = 1;
+  // Why, in the proposer's words; cited run ids and event ids as evidence.
+  string rationale = 2;
+  repeated string evidence_ids = 3;
+}

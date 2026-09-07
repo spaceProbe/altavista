@@ -1,0 +1,82 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- M22.1b
+# (docs/open-questions.md questions 151/152, decided by the lead; docs/sil-plan.md's M22
+# milestone). Wires crate::drm::attitude::AttitudeWheelsModel (M22.1) into the DRM binding path
+# for the first time: dynamics_model = "attitude.precession_demo" dispatches to
+# crate::registry::ModelKind::Attitude (crate::registry::kind_for's own "attitude." prefix).
+#
+# Physics: torque-free axisymmetric precession, field-for-field the same fixture
+# crate::drm::attitude::tests::torque_free_axisymmetric_precession_matches_the_closed_form
+# already pins in isolation (Jt=Jz=100/100, Jz=50 -- an axisymmetric body about z, no wheels, no
+# external torque) -- q0 = identity, omega0 = [0.05, 0.03, 0.2] rad/s. Closed form (Euler's
+# equations for an axisymmetric body): omega_z(t) = omega_z(0) exactly for all t, and the
+# transverse rate vector rotates rigidly at lambda = omega_z(0) * (Jz - Jt) / Jt = -0.1 rad/s.
+# crates/av-kernel/tests/drm_attitude.rs reproduces this same closed form end to end through
+# av_kernel::drm::execute (exit criterion "the torque-free precession pin reproduces through the
+# full executor path"), and separately proves ADR-005 sec 3's SLERP/linear sampling contract
+# against this run's own real RunProducts.
+#
+# No wheels (n_wheels = 0): the declared state space is the 7-component
+# crate::trajectory::attitude_wheels_state_space("attitude.precession_demo.space", 0) shape --
+# quaternion (scalar-last) + body rate, no wheel-momentum components at all.
+#
+# Zero declared step_rate_hz on the instance (demo_attitude_precession.sos.yaml) means this
+# instance runs at DrmOptions.default_step_rate_hz (1.0 Hz, demo_attitude_precession.drm.yaml),
+# exactly the 1 s native step golden 1 itself uses -- and DrmOptions.sample_interval_s is the
+# identical 1.0 s, so every output tick lands exactly on a native step (SampleKind::Native
+# throughout the raw kernel pipeline; crates/av-kernel/tests/drm_attitude.rs's own SLERP proof
+# separately re-interpolates between two of these real, Native RunProducts samples via
+# crate::interpolate::interpolate_by_state_space, ADR-005 sec 3's general off-grid contract, not
+# by relying on an in-kernel Hermite path this task does not touch).
+id: attitude_precession_sys
+version: "1"
+name: Torque-free axisymmetric precession demo (M22.1b attitude binding wiring)
+dynamics_model: attitude.precession_demo
+state_space_id: attitude.precession_demo.space
+state_space:
+  id: attitude.precession_demo.space
+  components:
+    - label: q_x
+      unit: UNIT_DIMENSIONLESS
+    - label: q_y
+      unit: UNIT_DIMENSIONLESS
+    - label: q_z
+      unit: UNIT_DIMENSIONLESS
+    - label: q_w
+      unit: UNIT_DIMENSIONLESS
+    - label: body_rate_x
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_y
+      unit: UNIT_RADIAN_PER_SECOND
+    - label: body_rate_z
+      unit: UNIT_RADIAN_PER_SECOND
+parameters:
+  - name: attitude.inertia.jxx
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jyy
+    value: 100.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.inertia.jzz
+    value: 50.0
+    unit: UNIT_KILOGRAM_METER_SQUARED
+  - name: attitude.q0.x
+    value: 0.0
+  - name: attitude.q0.y
+    value: 0.0
+  - name: attitude.q0.z
+    value: 0.0
+  - name: attitude.q0.w
+    value: 1.0
+  - name: attitude.omega0.x
+    value: 0.05
+  - name: attitude.omega0.y
+    value: 0.03
+  - name: attitude.omega0.z
+    value: 0.2
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_precession.system.yaml
+hash: "360ab06aced530da452369323a8f6031162bb61117ff584b8c58810c7f3b1b30"

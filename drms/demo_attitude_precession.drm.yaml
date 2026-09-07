@@ -1,0 +1,28 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- M22.1b
+# (docs/open-questions.md questions 151/152). 30 s run at 1 Hz (default_step_rate_hz = 1.0,
+# sample_interval_s = 1.0 -- every output tick lands exactly on this instance's own native step,
+# matching crate::drm::attitude::tests::torque_free_axisymmetric_precession_matches_the_closed_
+# form's own 30 one-second steps exactly). No faults, no maneuvers, no covariance -- the baseline
+# arc crates/av-kernel/tests/drm_attitude.rs checks against the closed form and uses as the
+# "before" half of the SLERP-sampling proof.
+id: attitude_precession_drm
+version: "1"
+name: Torque-free axisymmetric precession demo
+sos_configuration_id: attitude_precession_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225667000000000
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (M22.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_precession.drm.yaml
+hash: "244091769bbe062717bddd97835f3e3bdf4b2a2df62902e3a2f5124b48e8e25c"

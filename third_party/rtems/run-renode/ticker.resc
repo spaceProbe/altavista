@@ -1,0 +1,56 @@
+# M24.2 -- run RTEMS's own `ticker` sample (testsuites/samples/ticker) on Renode's mainline
+# Zynq UltraScale+ Cortex-R5 platform (docs/open-questions.md question 144), on rpu0 only,
+# same platform/reset convention as hello.resc. `ticker` exercises the clock driver (M24's
+# stated reason this sample "matters more than hello" -- M24.3/M24.4 depend on the clock
+# driver working), unlike `hello` which explicitly disables it.
+#
+# Expected output, stated before running (from testsuites/samples/ticker/ticker.scn, the
+# sample's own reference transcript, and tasks.c/init.c's logic: clock set to 09:00:00
+# 12/31/1988; TA1/TA2/TA3 wake every 5/10/15s respectively and print the time; the test exits
+# once a task observes second >= 35):
+#   *** CLOCK TICK TEST ***
+#   TA1 - clock_get_tod - 09:00:00   12/31/1988
+#   TA2 - clock_get_tod - 09:00:00   12/31/1988
+#   TA3 - clock_get_tod - 09:00:00   12/31/1988
+#   TA1 - clock_get_tod - 09:00:05   12/31/1988
+#   TA1 - clock_get_tod - 09:00:10   12/31/1988
+#   TA2 - clock_get_tod - 09:00:10   12/31/1988
+#   TA1 - clock_get_tod - 09:00:15   12/31/1988
+#   TA3 - clock_get_tod - 09:00:15   12/31/1988
+#   TA1 - clock_get_tod - 09:00:20   12/31/1988
+#   TA2 - clock_get_tod - 09:00:20   12/31/1988
+#   TA1 - clock_get_tod - 09:00:25   12/31/1988
+#   TA1 - clock_get_tod - 09:00:30   12/31/1988
+#   TA2 - clock_get_tod - 09:00:30   12/31/1988
+#   TA3 - clock_get_tod - 09:00:30   12/31/1988
+#   *** END OF CLOCK TICK TEST ***
+#
+# The test needs >=35s of simulated time to reach its own exit condition; 60s of virtual
+# RunFor is used for margin (not tuned to the minimum -- this is slack, not a tolerance).
+
+:name: zynqmp-rpu-lockstep-ticker
+
+using sysbus
+using sysbus.cluster0
+using sysbus.cluster1
+
+mach create "zynqmp-rpu-ticker"
+
+machine LoadPlatformDescription @platforms/cpus/zynqmp.repl
+
+uart0 CreateFileBackend @$ORIGIN/ticker_uart.log true
+
+macro reset
+"""
+    cluster0 ForEach IsHalted true
+    cluster1 ForEach IsHalted true
+    rpu0 IsHalted false
+
+    sysbus LoadELF $ORIGIN/ticker.exe cpu=rpu0
+"""
+
+runMacro $reset
+
+start
+emulation RunFor "60"
+quit
