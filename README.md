@@ -58,6 +58,33 @@ The GMAT folder is found automatically when it sits next to this repository
 writes `bin/api_startup_file.txt` inside the GMAT folder (absolute paths), exactly as
 GMAT's own `api/BuildApiStartupFile.py` does.
 
+## Building the Rust workspace
+
+The kernel, the GMAT shim and the services are a Cargo workspace. Two third-party trees
+are fetched, not committed (`third_party/README.md`):
+
+```bash
+sh third_party/fetch-gmat-src.sh
+sh third_party/fetch-cspice.sh
+```
+
+Then, with the GMAT install beside the repository (or `GMAT_ROOT` set):
+
+```bash
+cargo build --workspace
+cargo test --workspace --exclude av-kernel
+cargo test -p av-kernel
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check
+```
+
+`cargo deny` needs the `cargo-deny` tool installed. The kernel suite runs GMAT in-process
+and takes several minutes; run it alone rather than beside other heavy jobs. Tests that need
+Docker or Renode skip with a visible reason when those are absent. The flight-software
+container (`services/cfs/`) and the RTEMS toolchain (`third_party/rtems-container/`) have
+their own recorded build recipes, each fetching over the network exactly once at image
+build time.
+
 ## Run
 
 Terminal 1 — the viewer server (binds all interfaces so other machines can connect):

@@ -348,6 +348,7 @@ mod tests {
             provenance: Provenance { config_hash: "run-hash".to_string(), run_id: "r1".to_string(), ..Default::default() },
             dropped_in_flight_messages: 0,
             frames: vec![],
+            measurements: vec![],
         }
     }
 
