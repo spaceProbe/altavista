@@ -275,6 +275,12 @@ pub enum DrmError {
     /// mismatch, or an unsupported `link_model`. Checked at load, before any instance runs,
     /// exactly like every other pre-propagation refusal in this executor.
     Router(crate::router::RouterError),
+    /// `docs/open-questions.md` question 175 (M25.4a): writing the `PortTrafficLog` sidecar
+    /// (`RunConfig.products_dir.join("port_traffic.pb")`) failed -- creating `products_dir`
+    /// itself or writing `port_traffic.pb` under it. Never a panic, never a silently-empty
+    /// `RunProducts.port_traffic_hash` -- see `executor::execute`'s own module doc comment's
+    /// "Port traffic sidecar" section.
+    PortTrafficSidecarIo { path: std::path::PathBuf, detail: String },
     /// `docs/open-questions.md` question 107 (M13.2): connecting to a `BINDING_KIND_CONTAINER`
     /// instance's declared `container.address` failed, before any `Bind` was even attempted.
     ContainerConnect { instance: String, address: String, detail: String },
@@ -477,6 +483,21 @@ pub enum DrmError {
     /// `DrmError::SensorPortConfiguration`'s own reasoning, applied to the ground station's own
     /// two-port (not one-port) convention.
     GroundPortConfiguration { instance: String, reason: String },
+    /// `docs/open-questions.md` question 178: a `Fault` with `target_kind ==
+    /// FAULT_TARGET_KIND_PORT` or `FAULT_TARGET_KIND_SENSOR` was declared. Through M25.3,
+    /// `execute()` never called `fault::realize_unapplied_fault` at all, so a PORT/SENSOR fault
+    /// was a silent no-op -- seeded and validated by nothing, applied by nothing, and never
+    /// mentioned in `RunProducts`. Question 178 decides: until the port and sensor fault
+    /// runtimes exist (`fault`'s own module doc comment's "Integration note"), such a DRM is a
+    /// typed LOAD REFUSAL instead, checked up front in `execute()`'s own fault-validation loop
+    /// (alongside `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`), before any
+    /// binding or GMAT call. Distinct from [`DrmError::FaultTargetKindNotSupported`]: that
+    /// variant is `fault::realize_unapplied_fault`'s own *realization-time* result (seeded,
+    /// validated, and a deterministic draw computed, but nothing to apply it to) for a caller
+    /// that actually invokes it -- `execute()` has no such caller today, so this variant exists
+    /// instead, raised earlier (at load, before any seed is even looked up) and for a different
+    /// reason (a load-time policy refusal, not "I tried and there is nothing to apply this to").
+    PortOrSensorFaultNotYetSupported { fault_id: String, instance: String, target_kind: String },
     // M14.1 (question 109) added `ContainerPeriodExceedsSampleInterval` here: a
     // BINDING_KIND_CONTAINER instance's own effective step period had to evenly divide
     // `DrmOptions.sample_interval_s`'s own output period, because the shared kernel run
@@ -602,6 +623,11 @@ impl std::fmt::Display for DrmError {
             DrmError::SensorPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid sensor port/codec configuration: {reason}"),
             DrmError::InvalidGroundStationSpec { instance, reason } => write!(f, "instance {instance:?}: invalid ground station spec: {reason}"),
             DrmError::GroundPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid ground station port/codec configuration: {reason}"),
+            DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } => write!(
+                f,
+                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults are not realized by this kernel yet (docs/open-questions.md question 178) -- the port and sensor fault runtimes are the next kernel item, not merely \"unsupported\""
+            ),
+            DrmError::PortTrafficSidecarIo { path, detail } => write!(f, "writing the port traffic sidecar to {}: {detail}", path.display()),
         }
     }
 }

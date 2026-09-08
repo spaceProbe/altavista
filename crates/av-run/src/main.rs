@@ -149,6 +149,24 @@ fn read_to_string(path: &PathBuf) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))
 }
 
+/// `av_kernel::drm::RunConfig::products_dir` (`docs/open-questions.md` question 175, M25.4a),
+/// derived from `--out`: `Some(out.parent())` when `--out` was given, `None` when it was not
+/// (a `--server`-only run writes no port traffic sidecar either, since it has nowhere local to
+/// put one). **A bare filename (`--out out.bin`, no path separator at all) has an *empty*, not
+/// *missing*, parent** -- `Path::parent`'s own documented behaviour returns `Some("")` for a
+/// single-component relative path, never `None` -- so this maps that (and the only shape that
+/// really does return `None`, a bare filesystem root) explicitly to `"."`, the current
+/// directory, rather than ever unwrapping a `None` this function does not treat as an error.
+fn products_dir_for_out(out: Option<&PathBuf>) -> Option<PathBuf> {
+    let out = out?;
+    match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => Some(parent.to_path_buf()),
+        // `Some("")` (bare filename) or `None` (a bare root, e.g. "/") -- both mean "no real
+        // parent component", i.e. the current directory.
+        _ => Some(PathBuf::from(".")),
+    }
+}
+
 /// Load every `--system` file and index by `SystemDefinition.id` (the same keying
 /// `RunConfig::systems` documents and every `crates/av-kernel/tests/drm_*.rs` fixture loader
 /// builds by hand) -- refuses two files declaring the same id rather than silently letting the
@@ -179,7 +197,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let startup = cli.gmat_startup.clone().unwrap_or_else(Gmat::default_startup_file);
     let gmat = Gmat::setup(&startup).map_err(|e| format!("GMAT setup ({startup}): {e}"))?;
 
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()) };
     let products = execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))?;
 
     eprintln!(
@@ -297,6 +315,33 @@ mod tests {
         assert!(err.contains("--server / --out"), "{err}");
     }
 
+    // -------------------------------------------------------------------------------- products_dir (question 175, M25.4a)
+
+    /// `--out` with a real parent directory component: `products_dir` is exactly that parent,
+    /// not `--out` itself and not hardcoded to `"."`.
+    #[test]
+    fn products_dir_for_out_is_the_parent_directory_when_out_has_one() {
+        assert_eq!(products_dir_for_out(Some(&PathBuf::from("/tmp/run-1/out.bin"))), Some(PathBuf::from("/tmp/run-1")));
+        assert_eq!(products_dir_for_out(Some(&PathBuf::from("relative/dir/out.bin"))), Some(PathBuf::from("relative/dir")));
+    }
+
+    /// A bare filename -- no path separator at all -- has an empty parent (`Path::parent`'s own
+    /// documented behaviour: `Some("")`, never `None`), which means "the current directory",
+    /// not "no directory". Fails against an implementation that unwraps `.parent()` and panics,
+    /// or one that returns `Some(PathBuf::from(""))` (an empty path is not a usable directory
+    /// argument to `std::fs::create_dir_all`/`Path::join` the way `"."` is).
+    #[test]
+    fn products_dir_for_out_is_the_current_directory_for_a_bare_filename() {
+        assert_eq!(products_dir_for_out(Some(&PathBuf::from("out.bin"))), Some(PathBuf::from(".")));
+    }
+
+    /// No `--out` at all (a `--server`-only run): `products_dir` is `None`, not some default
+    /// directory -- `RunConfig::products_dir`'s own contract ("`None` -- no file is written").
+    #[test]
+    fn products_dir_for_out_is_none_when_out_is_absent() {
+        assert_eq!(products_dir_for_out(None), None);
+    }
+
     #[test]
     fn refuses_a_duplicate_system_id() {
         let dir = std::env::temp_dir().join(format!("av-run-test-{}", std::process::id()));
@@ -349,6 +394,7 @@ mod tests {
             dropped_in_flight_messages: 0,
             frames: vec![],
             measurements: vec![],
+            port_traffic_hash: String::new(),
         }
     }
 

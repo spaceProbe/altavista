@@ -117,7 +117,7 @@ fn model_binding(system_id: &str) -> Binding {
     Binding { kind: BindingKind::Model as i32, config: Some(av_cdm::pb::binding::Config::Model(ModelBinding { model_id: system_id.to_string() })) }
 }
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None }
 }
 
 /// A native `ConstantAccelModel`-classified `SystemDefinition` with zero acceleration and a

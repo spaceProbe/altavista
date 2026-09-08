@@ -277,9 +277,33 @@
 //! process-global (`gmat_sys`'s own module docs), so two *separate* `execute` calls in the
 //! same test binary reusing the same instance name would collide -- exactly the reason
 //! `crates/gmat-sys/tests/*.rs` already gives every test's spacecraft a distinct name.
+//!
+//! ## Port traffic sidecar (`docs/open-questions.md` question 175, M25.4a)
+//!
+//! `crate::router::Router` is the single choke point every FRAMED/BYTE_STREAM frame this run
+//! ever carries passes through (`crate::router`'s own module doc comment), so it is also the
+//! sole recorder of `altavista.v1.PortTrafficLog` -- see `Router::deliver`/`begin_step`/
+//! `take_port_traffic`'s own doc comments for exactly what is recorded and when. This module's
+//! own part is only: call `Router::take_port_traffic` once, at the same place [`Router::
+//! pending_count`] is already read (after every span of the run has finished); sort the result
+//! `(sequence, instance, port)`, stably; and, only when [`RunConfig::products_dir`] is `Some`,
+//! serialize it as `altavista.v1.PortTrafficLog` (`prost::Message::encode_to_vec`, the same
+//! encoding path `RunProducts::to_proto` already uses), write it to `<products_dir>/
+//! port_traffic.pb` (creating the directory if needed), and hash the exact bytes written
+//! (`hash::sha256_hex`, this crate's one SHA-256 primitive -- no new crate, no `ring`) into
+//! `RunProducts.port_traffic_hash`. `RunProducts.provenance.attributes["port_traffic_uri"]`
+//! names the file. `products_dir: None` writes no file at all: `port_traffic_hash` stays
+//! empty and `provenance.attributes["port_traffic"] = "not recorded"` records that explicitly
+//! -- the two attributes are mutually exclusive, never both present, so a consumer can tell "no
+//! sidecar was requested" from "a sidecar was requested and genuinely carried nothing" (the
+//! empty-but-`Some`-`products_dir` case still writes a valid, empty-`records` `PortTrafficLog`
+//! and a real hash of it, never conflated with the `None` case). Any I/O failure along the way
+//! (creating the directory, writing the file) is [`super::DrmError::PortTrafficSidecarIo`], a
+//! typed refusal -- never a panic, never a silently-empty hash.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -291,6 +315,7 @@ use av_cdm::time::Tai;
 use av_cdm::units;
 use av_dynamics::{BoxedModel, ModelError};
 use gmat_sys::Gmat;
+use prost::Message as _;
 
 use super::binding::{self, BindingPlan, ContainerError, SharedContainerModel};
 use super::command;
@@ -335,6 +360,17 @@ pub struct RunConfig<'a> {
     /// the one function either path calls to select the applied dv, so the two paths can never
     /// disagree about what a given mode means.
     pub error_mode: ExecutionErrorMode,
+    /// `docs/open-questions.md` question 175 (M25.4a): where this run's own out-of-band
+    /// products go. `Some(dir)` -- the `PortTrafficLog` sidecar (`RunProducts.
+    /// port_traffic_hash`'s own wire doc comment) is written to `dir.join("port_traffic.pb")`
+    /// (`dir` created if needed), `RunProducts.port_traffic_hash` is set to its real SHA-256,
+    /// and `RunProducts.provenance.attributes["port_traffic_uri"]` names the file.  `None` --
+    /// no file is written, `port_traffic_hash` stays empty, and `provenance.attributes[
+    /// "port_traffic"] = "not recorded"` instead (absence is explicit, never silent -- see
+    /// [`execute`]'s own "Port traffic sidecar" doc section). `crates/av-run/src/main.rs`
+    /// derives this from `--out`'s own parent directory; every test in this crate that does not
+    /// care about the sidecar passes `None`.
+    pub products_dir: Option<PathBuf>,
 }
 
 /// One `Objective`'s or `MeasureOfEffectiveness`'s evaluated result (`docs/open-questions.md`
@@ -398,11 +434,21 @@ pub struct RunProducts {
     /// `step_with_ports` call, before the packet ever reaches `crate::router::Router`, so a
     /// telemetry packet the router later never delivers (no declared `Connection` for
     /// its port, or a `"latency"` connection whose delivery never lands before the run ends) still
-    /// contributes its `Measurement` here -- and, as of this task, a declared PORT-targeted
-    /// `"drop"` fault (`av_cdm::pb::FaultTargetKind::Port`) has no effect on this field at all,
-    /// since `execute()` does not realize PORT/SENSOR faults yet (`crate::drm::fault`'s own module
-    /// doc comment).
+    /// contributes its `Measurement` here. **A declared PORT/SENSOR-targeted fault
+    /// (`av_cdm::pb::FaultTargetKind::Port`/`Sensor`) can no longer reach this field at all --
+    /// as of M25.4a (`docs/open-questions.md` question 178), `execute()` refuses such a DRM at
+    /// load** (`DrmError::PortOrSensorFaultNotYetSupported`, raised in the same up-front
+    /// fault-validation loop as `DrmError::UnknownFaultInstance`), before any binding or GMAT
+    /// call -- so through M25.4a this field's own "no effect" no-op was the observed behaviour,
+    /// and it is no longer reachable: no run that produces a `RunProducts` at all ever carried
+    /// a PORT/SENSOR fault while doing so.
     pub measurements: Vec<pb::Measurement>,
+    /// `docs/open-questions.md` question 175 (M25.4a): SHA-256 (lowercase hex) of the exact
+    /// bytes written to this run's `PortTrafficLog` sidecar -- empty when [`RunConfig::
+    /// products_dir`] was `None` (no sidecar was requested; `RunProducts::to_proto`'s own wire
+    /// field doc comment). See this module's own "Port traffic sidecar" doc section for exactly
+    /// how this is computed and written.
+    pub port_traffic_hash: String,
 }
 
 /// [`RunProducts::measurements`]'s own required order (question 173): `(epoch_ns,
@@ -453,9 +499,10 @@ impl RunProducts {
             // `RunProducts` construction so every reader of this struct, not just `to_proto`,
             // sees the required order).
             measurements: self.measurements.clone(),
-            // Question 175: filled by M25.4 once the executor writes the PortTrafficLog
-            // sidecar; empty until then, never synthesized.
-            port_traffic_hash: String::new(),
+            // Question 175 (M25.4a): the real SHA-256 of the PortTrafficLog sidecar this run
+            // wrote (empty when RunConfig::products_dir was None) -- computed once, by
+            // execute(), and carried on this struct rather than recomputed here.
+            port_traffic_hash: self.port_traffic_hash.clone(),
         }
     }
 }
@@ -2395,6 +2442,129 @@ fn declared_shape_trajectory(instance_name: &str, state_space_id: &str) -> Traje
     Trajectory { entity_id: instance_name.to_string(), state_space_id: state_space_id.to_string(), samples: vec![], ..Default::default() }
 }
 
+/// [`av_cdm::pb::PortTrafficLog::records`]'s own required order (question 175, M25.4a):
+/// `(sequence, instance, port)`, ascending, a STABLE sort so two records that tie on all three
+/// (only possible for two frames on the very same port in the very same step -- `Router::
+/// deliver` never produces more than one OUT + one IN per `(from_instance, port)` per call, so
+/// this needs at least two separate `deliver` calls sharing one `sequence`, or one call
+/// carrying two messages on the same port) keep [`crate::router::Router::take_port_traffic`]'s
+/// own emission order rather than being reordered by this call.
+fn sort_port_traffic(records: &mut [pb::PortTrafficRecord]) {
+    records.sort_by(|a, b| (a.sequence, a.instance.as_str(), a.port.as_str()).cmp(&(b.sequence, b.instance.as_str(), b.port.as_str())));
+}
+
+/// Question 175 (M25.4a): write this run's `PortTrafficLog` sidecar when `products_dir` is
+/// `Some`, and record the outcome on a fresh copy of `base_provenance` either way -- see
+/// `execute`'s own module doc comment's "Port traffic sidecar" section for the full contract.
+/// Returns `(port_traffic_hash, updated_provenance)`; `port_traffic_hash` is empty exactly when
+/// `products_dir` is `None`. `base_provenance` is what `PortTrafficLog.provenance` itself
+/// carries (a snapshot from *before* either `"port_traffic_uri"` or `"port_traffic"` is added --
+/// the sidecar's own provenance describes the run, not itself), never mutated in place; the
+/// returned `Provenance` is what `RunProducts.provenance` becomes.
+fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &str, mut records: Vec<pb::PortTrafficRecord>, undeclared_port_emissions: u64, base_provenance: &Provenance) -> Result<(String, Provenance), DrmError> {
+    let mut provenance = base_provenance.clone();
+    let Some(dir) = products_dir else {
+        // Absence is explicit, never both attributes at once (see this function's own doc
+        // comment and the module doc comment's "Port traffic sidecar" section).
+        provenance.attributes.insert("port_traffic".to_string(), "not recorded".to_string());
+        return Ok((String::new(), provenance));
+    };
+    sort_port_traffic(&mut records);
+    // The sidecar's own provenance is the run's, plus one fact that is about the recording
+    // rather than about the run: how many emissions this run's router saw on a port with no
+    // declared `PortKind` and therefore could not classify (`crate::router::Router::deliver`'s
+    // own doc comment). Written only when non-zero -- there is no zero-valued attribute, the
+    // same convention `events::dropped_messages_event` follows for in-flight messages -- so its
+    // presence always means something, and its absence means nothing was skipped.
+    let mut log_provenance = base_provenance.clone();
+    if undeclared_port_emissions > 0 {
+        log_provenance.attributes.insert("undeclared_port_emissions".to_string(), undeclared_port_emissions.to_string());
+    }
+    let log = pb::PortTrafficLog { run_id: run_id.to_string(), records, provenance: Some(log_provenance) };
+    // Same encoding path `RunProducts::to_proto`'s own callers already use for the main
+    // RunProducts bundle (`prost::Message::encode_to_vec`) -- reused, not hand-rolled.
+    let bytes = log.encode_to_vec();
+    std::fs::create_dir_all(dir).map_err(|e| DrmError::PortTrafficSidecarIo { path: dir.to_path_buf(), detail: format!("creating directory: {e}") })?;
+    let path = dir.join("port_traffic.pb");
+    std::fs::write(&path, &bytes).map_err(|e| DrmError::PortTrafficSidecarIo { path: path.clone(), detail: format!("writing {} byte(s): {e}", bytes.len()) })?;
+    // This crate's one SHA-256 primitive (`hash::sha256_hex`) -- no new crate, no `ring` -- over
+    // the EXACT bytes just written, not the in-memory `log` value re-serialized a second time
+    // (which could theoretically disagree with what actually landed on disk).
+    let port_traffic_hash = hash::sha256_hex(&bytes);
+    provenance.attributes.insert("port_traffic_uri".to_string(), path.display().to_string());
+    Ok((port_traffic_hash, provenance))
+}
+
+/// Question 175 (M25.4a): [`sort_port_traffic`] alone, with no GMAT/kernel/router machinery
+/// involved -- `tests/port_traffic_sidecar.rs`'s own module doc comment explains why
+/// `demo_command` itself cannot exercise the `(sequence, instance, port)` tie-break (its own
+/// two connections never put two records on the same `(sequence, instance)` pair), so this is
+/// the one place that tie-break is actually proven, directly against the sort function real
+/// runs also use.
+#[cfg(test)]
+mod sort_port_traffic_tests {
+    use super::*;
+
+    fn rec(sequence: u64, instance: &str, port: &str, payload: &[u8]) -> pb::PortTrafficRecord {
+        pb::PortTrafficRecord { instance: instance.to_string(), port: port.to_string(), direction: 0, tai_ns: 0, payload: payload.to_vec(), sequence }
+    }
+
+    /// The primary key is `sequence`, ascending -- unaffected by `instance`/`port` sorting
+    /// "earlier" alphabetically for a later sequence.
+    #[test]
+    fn sorts_by_sequence_first() {
+        let mut records = vec![rec(5, "a", "a", b""), rec(1, "z", "z", b"")];
+        sort_port_traffic(&mut records);
+        assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), vec![1, 5]);
+    }
+
+    /// Two records sharing one `sequence` break the tie by `instance`, ascending.
+    #[test]
+    fn breaks_a_sequence_tie_by_instance() {
+        let mut records = vec![rec(1, "zebra", "p", b""), rec(1, "alpha", "p", b"")];
+        sort_port_traffic(&mut records);
+        assert_eq!(records.iter().map(|r| r.instance.as_str()).collect::<Vec<_>>(), vec!["alpha", "zebra"]);
+    }
+
+    /// Two records sharing one `(sequence, instance)` -- the case `tests/
+    /// port_traffic_sidecar.rs`'s own module doc comment says `demo_command` cannot produce --
+    /// break the tie by `port`, ascending. Proven here, directly against the sort function
+    /// itself, since no fixture in this crate happens to exercise it end to end.
+    #[test]
+    fn breaks_a_sequence_and_instance_tie_by_port() {
+        let mut records = vec![rec(7, "ground", "zzz_port", b""), rec(7, "ground", "aaa_port", b"")];
+        sort_port_traffic(&mut records);
+        assert_eq!(records.iter().map(|r| r.port.as_str()).collect::<Vec<_>>(), vec!["aaa_port", "zzz_port"]);
+    }
+
+    /// A full tie on `(sequence, instance, port)` -- only possible for two frames on the exact
+    /// same port in the exact same step -- keeps the router's own emission order (a stable
+    /// sort), never reordered by payload or anything else.
+    ///
+    /// **Measured, not assumed: `slice::sort_unstable_by` does NOT actually fail this test on
+    /// this toolchain (Rust 1.97.0).** The obvious "wrong implementation" to break this against
+    /// is `sort_unstable_by` (`slice::sort_by`'s own rustdoc: unstable makes no order guarantee
+    /// for equal elements) -- tried directly, at 3, 40, and 2000 fully-tied elements, and none
+    /// of the three reordered anything (this toolchain's pattern-defeating quicksort evidently
+    /// leaves an all-equal-key partition untouched in practice, even though nothing in its own
+    /// contract promises that). Reported honestly rather than kept as a test that looks like it
+    /// proves something it does not: this test instead fails against a wrong implementation that
+    /// actually IS observable -- one that reverses `records` before its own (otherwise correctly
+    /// stable) sort, which order-preserving-among-ties definitionally cannot undo. This still
+    /// pins the real contract (`RunProducts.provenance` -- no, `PortTrafficLog.records`'s own
+    /// proto doc comment -- "keep the router's own emission order"); it just cannot be pinned
+    /// against `sort_unstable_by` specifically on this toolchain, a fact worth recording rather
+    /// than silently working around.
+    #[test]
+    fn a_full_tie_keeps_the_original_emission_order_stable_sort() {
+        let mut records: Vec<pb::PortTrafficRecord> = (0..40).map(|i| rec(3, "a", "p", format!("{i}").as_bytes())).collect();
+        sort_port_traffic(&mut records);
+        let order: Vec<String> = records.iter().map(|r| String::from_utf8(r.payload.clone()).unwrap()).collect();
+        let expected: Vec<String> = (0..40).map(|i| i.to_string()).collect();
+        assert_eq!(order, expected, "a full (sequence, instance, port) tie must keep the router's own emission order -- a stable sort's own guarantee");
+    }
+}
+
 /// Parse and unit-typecheck one `Objective`/`MeasureOfEffectiveness.expression` against `run`
 /// -- [`super::DrmError::InvalidExpression`] on either failure. Never touches
 /// `Trajectory.samples` (`crate::expr::typecheck::check`'s own guarantee), so this is safe to
@@ -2479,6 +2649,20 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     for f in &scenario.faults {
         if !cfg.sos.instances.iter().any(|i| i.name == f.instance) {
             return Err(DrmError::UnknownFaultInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
+        }
+        // `docs/open-questions.md` question 178 (M25.4a): a PORT/SENSOR fault is a typed load
+        // refusal, not a silent no-op -- `fault::realize_unapplied_fault` already has the
+        // seeded-draw realization logic for these two kinds, but nothing in this executor ever
+        // called it, so through M25.4a such a fault simply never applied, with no error and no
+        // trace in `RunProducts` at all. Checked here, before any binding or GMAT call, the
+        // same "checked up front" pattern `DrmError::UnknownFaultInstance`/
+        // `FaultEpochNotOnSampleGrid` (immediately above/below) already follow.
+        if f.target_kind == FaultTargetKind::Port as i32 || f.target_kind == FaultTargetKind::Sensor as i32 {
+            return Err(DrmError::PortOrSensorFaultNotYetSupported {
+                fault_id: f.id.clone(),
+                instance: f.instance.clone(),
+                target_kind: FaultTargetKind::try_from(f.target_kind).map(|k| k.as_str_name().to_string()).unwrap_or_else(|_| format!("<unknown FaultTargetKind {}>", f.target_kind)),
+            });
         }
         if (f.target_kind == FaultTargetKind::Dynamics as i32 || f.target_kind == FaultTargetKind::Hardware as i32) && (f.tai_ns - scenario.start_tai_ns) % output_period_ns != 0 {
             return Err(DrmError::FaultEpochNotOnSampleGrid { fault_id: f.id.clone(), tai_ns: f.tai_ns, sample_interval_s: options.sample_interval_s });
@@ -2863,6 +3047,19 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     }
     all_events.sort_by_key(events::epoch_id_order);
 
+    // Question 175 (M25.4a): every FRAMED/BYTE_STREAM frame this run's `router` carried, taken
+    // once, here, right alongside `pending_count` -- both are read only after every span of the
+    // run has finished (the covariance path never drives `router` at all, so this is always
+    // empty there, honestly, exactly like `dropped_in_flight_messages` above). Written to the
+    // `PortTrafficLog` sidecar (or not) below, once `provenance` exists to snapshot into it.
+    let port_traffic_records = router.take_port_traffic();
+    // Question 175 (M25.4a): emissions this router could not classify because the port carries
+    // no declared `PortKind` -- `crate::router::Router::deliver`'s own doc comment for the real,
+    // legitimate case (`sensors::TRUTH_PORT_NAMES`, broadcast every step by
+    // `sensors::TruthBroadcastAttitude` whether or not the instance declares them). Recorded on
+    // the sidecar so the skip is never silent; no zero-valued attribute, by design.
+    let undeclared_port_emissions = router.undeclared_port_emissions();
+
     // Question 130 ("the event is referenced from the trajectory's event_ids, the same way
     // existing events are"): every event this run produced that is tied to a single instance
     // (`entity_id` non-empty -- lifecycle/fault/maneuver/port-command events all set it; only
@@ -2911,6 +3108,10 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     }
 
     let provenance = build_run_provenance(&computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, cfg.error_mode, options.covariance, dropped_in_flight_messages);
+    // Question 175 (M25.4a): writes the sidecar (or not) and folds "port_traffic_uri"/
+    // "port_traffic" into a fresh copy of `provenance` -- see `write_port_traffic_sidecar`'s
+    // own doc comment and this module's own "Port traffic sidecar" doc section.
+    let (port_traffic_hash, provenance) = write_port_traffic_sidecar(cfg.products_dir.as_deref(), &cfg.run_id, port_traffic_records, undeclared_port_emissions, &provenance)?;
     // Question 121/122 (M17.2): frames every Trajectory.frame_id in this run resolves against
     // -- see collect_frames's own doc comment. Computed from the real, final `trajectories` map
     // (after every instance has run), not the load-time `declared_trajectories` shell, so a
@@ -2927,7 +3128,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     // known, so a frame added by either earlier pass is covered too.
     let frames = fill_fixed_rotations(cfg.gmat, &gmat_ns, frames, scenario.start_tai_ns)?;
     sort_measurements(&mut all_measurements);
-    Ok(RunProducts { trajectories, events: all_events, scores, provenance, dropped_in_flight_messages: dropped_in_flight_messages as u64, frames, measurements: all_measurements })
+    Ok(RunProducts { trajectories, events: all_events, scores, provenance, dropped_in_flight_messages: dropped_in_flight_messages as u64, frames, measurements: all_measurements, port_traffic_hash })
 }
 
 /// M15.1 (`docs/open-questions.md` question 115): unit tests for [`merge_adjacent_segments`]
@@ -3226,6 +3427,7 @@ mod to_proto_tests {
                 pb::Measurement { measurement_id: "m1".to_string(), z: vec![1.0, 2.0], r: vec![0.1, 0.0, 0.0, 0.1], epoch_ns: 100, sensor_id: "veh".to_string(), ..Default::default() },
                 pb::Measurement { measurement_id: "m2".to_string(), z: vec![3.0], epoch_ns: 200, sensor_id: "veh".to_string(), ..Default::default() },
             ],
+            port_traffic_hash: "sample-port-traffic-hash".to_string(),
         }
     }
 
@@ -3339,6 +3541,19 @@ mod to_proto_tests {
         assert_eq!(proto.trajectories, products.trajectories);
         assert_eq!(proto.events, products.events);
         assert_eq!(proto.provenance, Some(products.provenance));
+    }
+
+    /// Question 175 (M25.4a): `RunProducts.port_traffic_hash` survives `to_proto` and a real
+    /// byte round trip unchanged -- fails against an implementation that still hardcodes
+    /// `String::new()` (the pre-M25.4a stub this test would have caught) or copies some other
+    /// field into this one by mistake.
+    #[test]
+    fn port_traffic_hash_survives_to_proto_and_a_real_byte_round_trip() {
+        let products = sample();
+        assert_eq!(products.to_proto().port_traffic_hash, "sample-port-traffic-hash");
+        let bytes = products.to_proto().encode_to_vec();
+        let decoded = pb::RunProducts::decode(bytes.as_slice()).expect("valid altavista.v1.RunProducts bytes");
+        assert_eq!(decoded.port_traffic_hash, "sample-port-traffic-hash");
     }
 }
 

@@ -44,7 +44,7 @@ fn native_instance(name: &str, system_id: &str, step_rate_hz: f64) -> SystemInst
     SystemInstance { name: name.to_string(), system_id: system_id.to_string(), binding: Some(model_binding(system_id)), step_rate_hz, ..Default::default() }
 }
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None }
 }
 
 fn signal_port(name: &str, direction: PortDirection, latency_ns: i64) -> Port {

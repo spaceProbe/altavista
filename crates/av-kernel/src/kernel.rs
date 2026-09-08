@@ -722,6 +722,13 @@ impl HeteroKernel {
 
         let mut t = start_tai_ns;
         loop {
+            // Question 175 (M25.4a): this loop -- one output tick per iteration -- is this
+            // codebase's own definition of a "step" for `PortTrafficRecord.sequence`
+            // (`crate::router::Router::begin_step`'s own doc comment). Called once per
+            // iteration, before `advance_to_with_ports` (which may itself call `Router::deliver`
+            // zero, one, or several times for this tick, once per system whose own native
+            // cadence lands here -- every one of them shares this tick's own sequence number).
+            router.begin_step();
             self.scheduler.advance_to_with_ports(t, router)?;
             for id in &ids {
                 let (mean, kind) = if self.scheduler.state_dim(id) == Some(0) {

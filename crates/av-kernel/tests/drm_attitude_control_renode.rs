@@ -127,7 +127,7 @@ fn container_drm(id: &str, sos_id: &str, duration_s: i64, faults: Vec<Fault>) ->
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None }
 }
 
 fn systems_map(sysvec: &[&SystemDefinition]) -> BTreeMap<String, SystemDefinition> {

@@ -31,7 +31,7 @@ fn straight_accel_objectives_and_moes_match_the_closed_form_solution() {
     let _engine = gmat_sys::engine_lock();
     let case = straight_accel_case();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-straight-accel".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-straight-accel".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
 
     let scenario = case.drm.scenario.as_ref().unwrap();
@@ -95,7 +95,7 @@ fn fault_split_accel_objectives_resolve_at_time_by_event_name() {
     let _engine = gmat_sys::engine_lock();
     let case = fault_split_accel_case();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-fault-split".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-fault-split".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
 
     // RunProducts.events (question 95, M9.3): the one applied DYNAMICS fault (EVENT_KIND_FAULT,
@@ -145,7 +145,7 @@ fn an_unknown_entity_in_a_declared_objective_is_refused_at_load() {
     case.drm.hash = av_kernel::drm::hash::canonical_drm_hash(&case.drm);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-unknown-entity".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-unknown-entity".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     match err {
         av_kernel::drm::DrmError::InvalidExpression { name, reason } => {
@@ -164,7 +164,7 @@ fn an_unknown_entity_against_a_real_run_is_a_typed_expr_error() {
     let _engine = gmat_sys::engine_lock();
     let case = straight_accel_case();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-unknown-entity-2".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: "test-expr-unknown-entity-2".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
     let scenario = case.drm.scenario.as_ref().unwrap();
     let run = ExprRunProducts::new(scenario.start_tai_ns, scenario.end_tai_ns, &products.trajectories, &[]);

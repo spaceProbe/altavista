@@ -115,7 +115,7 @@ fn two_runs_of_the_same_drm_produce_byte_identical_trajectories() {
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
     let run = || {
-        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-determinism".to_string(), error_mode: Default::default() };
+        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-determinism".to_string(), error_mode: Default::default() , products_dir: None };
         let mut products = execute(cfg).expect("DRM executes end to end");
         products.trajectories.remove("veh").expect("instance produced a trajectory")
     };
@@ -149,11 +149,11 @@ fn a_freshly_rebuilt_but_content_identical_drm_produces_the_same_bytes() {
     let (drm_b, sos_b, systems_b) = seeded_fault_bundle();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
-    let cfg_a = RunConfig { gmat: &gmat, drm: &drm_a, sos: &sos_a, systems: &systems_a, run_id: "test-run-determinism-fresh".to_string(), error_mode: Default::default() };
+    let cfg_a = RunConfig { gmat: &gmat, drm: &drm_a, sos: &sos_a, systems: &systems_a, run_id: "test-run-determinism-fresh".to_string(), error_mode: Default::default() , products_dir: None };
     let mut products_a = execute(cfg_a).expect("DRM executes end to end");
     let a = products_a.trajectories.remove("veh").unwrap();
 
-    let cfg_b = RunConfig { gmat: &gmat, drm: &drm_b, sos: &sos_b, systems: &systems_b, run_id: "test-run-determinism-fresh".to_string(), error_mode: Default::default() };
+    let cfg_b = RunConfig { gmat: &gmat, drm: &drm_b, sos: &sos_b, systems: &systems_b, run_id: "test-run-determinism-fresh".to_string(), error_mode: Default::default() , products_dir: None };
     let mut products_b = execute(cfg_b).expect("DRM executes end to end");
     let b = products_b.trajectories.remove("veh").unwrap();
 

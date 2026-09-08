@@ -197,7 +197,7 @@ fn a_command_reapplied_after_a_fault_rematerialization_emits_a_second_event_even
     let _engine = gmat_sys::engine_lock();
     let (sos, drm, systems) = build("test-port-cmd-rematerialize");
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-port-cmd-rematerialize".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-port-cmd-rematerialize".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("the rematerialization-boundary DRM executes end to end");
 
     let port_events: Vec<&av_cdm::pb::Event> = products.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32).collect();

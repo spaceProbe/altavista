@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use av_cdm::pb::{DesignReferenceMission, Fault, FaultTargetKind, Measurement, SosConfiguration, SystemDefinition};
-use av_kernel::drm::{execute, hash, schema, RunConfig};
+use av_kernel::drm::{execute, hash, schema, DrmError, RunConfig};
 use gmat_sys::Gmat;
 
 fn drms_path(name: &str) -> PathBuf {
@@ -102,7 +102,7 @@ fn load_measurements_bundle() -> (DesignReferenceMission, SosConfiguration, BTre
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: "test-run-demo-measurements".to_string(), error_mode: Default::default() }
+    RunConfig { gmat, drm, sos, systems, run_id: "test-run-demo-measurements".to_string(), error_mode: Default::default() , products_dir: None }
 }
 
 const START_TAI_NS: i64 = 1_767_225_637_000_000_000;
@@ -329,14 +329,19 @@ fn dropped_measurement_packets_still_decode_at_the_emitter_with_decoded_at_namin
 // was pushed onto the `Outbox`. All 36 measurements still appeared. That is the experiment.
 //
 // **Experiment 2 (below): a *declared* PORT "drop" fault against the star tracker instance.**
-// `crate::drm::fault`'s own module doc comment states PORT/SENSOR faults are "validated, seeded,
-// and explicitly refused" at the *unit* level but "a PORT/SENSOR fault declared in a real DRM
-// today is still silently dropped before this module ever sees it" -- `crate::drm::executor`
-// only ever branches on `FaultTargetKind::Dynamics`/`::Hardware` (grepped, not assumed: neither
-// `FaultTargetKind::Port` nor `::Sensor` appears in any `if f.target_kind == ...` guard in that
-// file). [`a_declared_port_drop_fault_against_the_star_tracker_instance_has_no_effect_on_measurements_today`]
-// below is the real, run experiment: it adds exactly this `Fault` to a mutated copy of this
-// file's own DRM and confirms `RunProducts.measurements` is untouched.
+// Through M25.3c, `crate::drm::fault`'s own module doc comment stated PORT/SENSOR faults were
+// "validated, seeded, and explicitly refused" at the *unit* level but "a PORT/SENSOR fault
+// declared in a real DRM today is still silently dropped before this module ever sees it" --
+// `crate::drm::executor` only ever branched on `FaultTargetKind::Dynamics`/`::Hardware`, and
+// [`a_declared_port_drop_fault_against_the_star_tracker_instance_has_no_effect_on_measurements_today`]
+// (this test's own prior name) proved that silent no-op by actually running it.
+//
+// **M25.4a (`docs/open-questions.md` question 178) closes that gap with a typed load refusal,
+// not a runtime.** [`a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_
+// load_refusal`] below now proves the *new* real behaviour instead: `execute()` refuses this
+// exact DRM, at load, before any binding or GMAT call, naming question 178, the fault's own id,
+// its instance, and its target kind (`DrmError::PortOrSensorFaultNotYetSupported`) -- so a run
+// that reaches this far never carries a PORT/SENSOR fault while producing measurements at all.
 
 /// Re-hash a `DesignReferenceMission` after mutating it in memory -- mirrors `tests/drm_attitude.
 /// rs::rehash`'s own doc comment (not a way to bypass `execute`'s tamper check; the opposite:
@@ -346,28 +351,32 @@ fn rehash_drm(mut drm: DesignReferenceMission) -> DesignReferenceMission {
     drm
 }
 
-/// **Drop semantics, pinned.** A `Fault { target_kind: FAULT_TARGET_KIND_PORT, kind: "drop",
-/// instance: "startracker", target: "st_meas" }` declared in `scenario.faults` -- exactly the
-/// shape ADR-005 sec 5 documents for a PORT fault's "drop" kind -- changes **nothing** about this
-/// run's `RunProducts.measurements`: same length, same ids, same epochs, same `z`/`r`. This is
-/// not a design choice this task makes or defends; it is the *current, unimplemented* state of
-/// PORT faults (`crate::drm::fault`'s own module doc comment says so; `crate::drm::executor`'s
-/// fault-dispatch `if` guards, grepped, never mention `FaultTargetKind::Port`) -- reported
-/// verbatim under "Drop semantics" for the lead to escalate, not redesigned here.
+/// **Load refusal, pinned (M25.4a, `docs/open-questions.md` question 178).** A `Fault {
+/// target_kind: FAULT_TARGET_KIND_PORT, kind: "drop", instance: "startracker", target: "st_meas"
+/// }` declared in `scenario.faults` -- exactly the shape ADR-005 sec 5 documents for a PORT
+/// fault's "drop" kind -- now makes `execute()` refuse the whole run, at load, before any
+/// binding or GMAT call, rather than silently ignoring it (`a_declared_port_drop_fault_against_
+/// the_star_tracker_instance_has_no_effect_on_measurements_today`, this test's own prior name and
+/// prior assertion, pinned the old no-op; question 178 replaces that no-op with a typed refusal,
+/// so this test now pins the refusal instead). The unfaulted baseline is still run first, and
+/// still must succeed -- this test is about the declared PORT fault specifically, not about this
+/// fixture being broken some other way.
 ///
-/// **Fails against a future implementation that wires `FaultTargetKind::Port`'s `"drop"` kind
-/// into the router or the sensor models** without also updating this test's own expectation: the
-/// moment a PORT drop fault starts actually suppressing a packet (or the `Measurement` derived
-/// from it), this test's `assert_eq!` against the unfaulted baseline fails, by design -- exactly
-/// the semantics-pinning contract the task brief asks for ("write a test that pins whichever
-/// behaviour is real").
+/// **Fails against** an implementation that still lets this DRM execute (the M25.3c-era no-op
+/// regressing back in), one that refuses it with the wrong error variant (in particular
+/// `DrmError::FaultTargetKindNotSupported`, `fault::realize_unapplied_fault`'s own
+/// *realization-time* result for a caller that actually invokes it -- see `DrmError::
+/// PortOrSensorFaultNotYetSupported`'s own doc comment for why that is a different error, for a
+/// different reason, raised at a different time), or one that names the wrong fault id/instance/
+/// target_kind in the refusal.
 #[test]
-fn a_declared_port_drop_fault_against_the_star_tracker_instance_has_no_effect_on_measurements_today() {
+fn a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_load_refusal() {
     let _engine = gmat_sys::engine_lock();
     let (drm, sos, systems) = load_measurements_bundle();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
     let baseline = execute(run_config(&gmat, &drm, &sos, &systems)).expect("baseline (no fault) run executes");
+    assert!(!baseline.measurements.is_empty(), "sanity: the baseline fixture must actually produce measurements for this test to mean anything");
 
     let mut faulted = drm;
     {
@@ -384,8 +393,10 @@ fn a_declared_port_drop_fault_against_the_star_tracker_instance_has_no_effect_on
         });
     }
     let faulted = rehash_drm(faulted);
-    let faulted_products = execute(run_config(&gmat, &faulted, &sos, &systems)).expect("the same DRM, plus a declared PORT drop fault, still executes (the fault is currently a no-op, not a load-time refusal)");
-
-    assert_eq!(faulted_products.measurements.len(), baseline.measurements.len(), "a declared PORT \"drop\" fault currently has zero effect on RunProducts.measurements -- see this section's own comment for why (PORT faults are validated/seeded but never realized by execute() today)");
-    assert_eq!(faulted_products.measurements, baseline.measurements, "byte-for-byte identical to the unfaulted baseline: same ids, epochs, z, r, sensor_id, frame_id");
+    let err = execute(run_config(&gmat, &faulted, &sos, &systems))
+        .expect_err("a declared PORT fault must be a typed load refusal now (question 178), not a run that silently ignores it");
+    assert!(
+        matches!(&err, DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } if fault_id == "st_meas_drop" && instance == "startracker" && target_kind == "FAULT_TARGET_KIND_PORT"),
+        "expected DrmError::PortOrSensorFaultNotYetSupported naming fault_id=\"st_meas_drop\" instance=\"startracker\" target_kind=\"FAULT_TARGET_KIND_PORT\", got {err:?}"
+    );
 }

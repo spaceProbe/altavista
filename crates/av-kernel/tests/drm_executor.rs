@@ -68,7 +68,7 @@ fn drm_matches_the_golden_arc() {
     let (drm, sos, systems) = load_golden_bundle();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-drm-golden-1".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-drm-golden-1".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
 
     let traj = products.trajectories.get("leo").expect("the \"leo\" instance produced a trajectory");
@@ -280,7 +280,7 @@ fn drm_rmag_output_matches_a_genuine_gmat_reportfile() {
     systems_map.insert(sys.id.clone(), sys);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &rmag_drm, sos: &sos, systems: &systems_map, run_id: "test-run-rmag".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &rmag_drm, sos: &sos, systems: &systems_map, run_id: "test-run-rmag".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
 
     let score = &products.scores["rmag_at_end"];
@@ -370,7 +370,7 @@ fn drm_covariance_matches_the_golden_stm_and_propagated_cov() {
     });
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-drm-covariance".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-drm-covariance".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("covariance DRM executes end to end");
 
     let traj = products.trajectories.get("leo_cov").expect("the \"leo_cov\" instance produced a trajectory");
@@ -441,7 +441,7 @@ fn covariance_at_a_coarser_step_rate_than_the_sample_interval_succeeds_end_to_en
     });
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-coarse-cov".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-coarse-cov".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("a covariance step coarser than the sample interval must now succeed end to end (M13.3)");
 
     let traj = products.trajectories.get("leo_coarse_cov").expect("instance produced a trajectory");
@@ -514,7 +514,7 @@ fn covariance_requested_without_initial_covariance_is_refused() {
     let (drm, sos) = short_covariance_drm("leo_sos_missing_p0", "leo_drm_missing_p0", "leo_missing_p0", vec![]);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-missing-p0".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-missing-p0".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::MissingInitialCovariance { ref instance } if instance == "leo_missing_p0"), "{err:?}");
 }
@@ -540,7 +540,7 @@ fn a_non_spd_initial_covariance_is_refused_with_the_typed_hygiene_error_and_coun
 
     let before = av_cdm::covariance::spd_check_failures();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-bad-p0".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-bad-p0".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::CovarianceHygiene(_)), "{err:?}");
     assert!(av_cdm::covariance::spd_check_failures() > before, "the load-time SPD failure must be counted (other tests may increment it concurrently, hence '>' not '== before + 1')");
@@ -559,7 +559,7 @@ fn a_tampered_drm_hash_is_refused() {
     drm.hash = chars.into_iter().collect();
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-tampered".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-tampered".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::HashMismatch { artifact: "DesignReferenceMission", .. }), "{err:?}");
 }
@@ -575,7 +575,7 @@ fn a_drm_whose_content_no_longer_matches_its_declared_hash_is_refused() {
     drm.name = format!("{} (edited after hashing)", drm.name);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-content-tampered".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-content-tampered".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::HashMismatch { artifact: "DesignReferenceMission", .. }), "{err:?}");
 }
@@ -647,7 +647,7 @@ fn covariance_with_relativistic_correction_is_refused_unless_accepted() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-rc".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-rc".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::MissingStmTermsNotAccepted { .. }), "{err:?}");
 }
@@ -731,9 +731,9 @@ fn running_the_identical_drm_twice_in_one_process_produces_byte_identical_produc
 
     // The identical run_id both times -- see this test's own doc comment for why.
     let run_id = "test-replay-same-run-id".to_string();
-    let cfg1 = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default() };
+    let cfg1 = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default() , products_dir: None };
     let products1 = execute(cfg1).expect("the first execute() call succeeds");
-    let cfg2 = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default() };
+    let cfg2 = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default() , products_dir: None };
     let products2 = execute(cfg2).expect("the SECOND execute() call, reusing the identical gmat.*-bound instance name and run_id, must also succeed -- this is exactly the M18.4 fix");
 
     // Sanity: a real, non-vacuous run happened both times (at least one sample, one segment --
@@ -781,7 +781,7 @@ fn a_renode_binding_is_refused_through_the_full_executor() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-renode".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-renode".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::UnsupportedBinding { .. }), "{err:?}");
 }
@@ -824,7 +824,7 @@ fn a_connection_to_an_undeclared_port_is_refused_through_the_full_executor() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-router".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-router".to_string(), error_mode: Default::default() , products_dir: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::Router(av_kernel::router::RouterError::UndeclaredPort { .. })), "{err:?}");
 }
@@ -896,7 +896,7 @@ fn a_dynamics_fault_splits_the_run_into_two_segments_with_continuous_state() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-accel-fault".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-accel-fault".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("fault-split DRM executes end to end");
 
     let traj = products.trajectories.get("veh").expect("instance produced a trajectory");
@@ -989,7 +989,7 @@ fn output_speed_resolves_against_a_real_gmat_bound_instance() {
     });
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-output-speed".to_string(), error_mode: Default::default() };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-output-speed".to_string(), error_mode: Default::default() , products_dir: None };
     let products = execute(cfg).expect("DRM executes end to end");
 
     let traj = products.trajectories.get("leo_out").expect("instance produced a trajectory");
@@ -1121,10 +1121,10 @@ fn covariance_and_plain_paths_produce_the_same_named_output_set() {
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
-    let cfg_plain = RunConfig { gmat: &gmat, drm: &drm_plain, sos: &sos_plain, systems: &systems_map, run_id: "test-run-outputs-plain".to_string(), error_mode: Default::default() };
+    let cfg_plain = RunConfig { gmat: &gmat, drm: &drm_plain, sos: &sos_plain, systems: &systems_map, run_id: "test-run-outputs-plain".to_string(), error_mode: Default::default() , products_dir: None };
     let products_plain = execute(cfg_plain).expect("plain-path DRM executes end to end and scores every declared output measure -- if this fails with InvalidExpression, the plain path's own output set regressed");
 
-    let cfg_cov = RunConfig { gmat: &gmat, drm: &drm_cov, sos: &sos_cov, systems: &systems_map, run_id: "test-run-outputs-cov".to_string(), error_mode: Default::default() };
+    let cfg_cov = RunConfig { gmat: &gmat, drm: &drm_cov, sos: &sos_cov, systems: &systems_map, run_id: "test-run-outputs-cov".to_string(), error_mode: Default::default() , products_dir: None };
     let products_cov = execute(cfg_cov).expect(
         "covariance-path DRM executes end to end and scores every declared output measure -- if this fails with InvalidExpression, the covariance path is not carrying StepResult.outputs through (question 101)",
     );

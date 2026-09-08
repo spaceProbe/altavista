@@ -61,10 +61,21 @@
 //!   zero.
 //! - anything else -- [`RouterError::UnsupportedLinkModel`], a typed refusal (question 108: "a
 //!   link_model naming anything else is a typed refusal, not a silent ignore").
+//!
+//! ## Port traffic recording (`docs/open-questions.md` question 175, M25.4a)
+//!
+//! [`Router`] is also the sole recorder of `altavista.v1.PortTrafficLog`, the sidecar
+//! `crate::drm::executor::execute` writes beside a run's `RunProducts` (`RunProducts.
+//! port_traffic_hash`): [`Router::deliver`] is the single choke point every frame this
+//! Router ever carries passes through (this module's own doc comment, above), so it is also
+//! the one place that can record every one of them without a second, independently
+//! maintained tap. See [`Router::deliver`]'s own doc comment for exactly what is and is not
+//! recorded, [`Router::begin_step`] for the `sequence` field's own source, and
+//! [`Router::take_port_traffic`] for how a caller drains what has been recorded so far.
 
 use std::collections::BTreeMap;
 
-use av_cdm::pb::{Connection, Port, PortDirection, PortKind, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Connection, Port, PortDirection, PortKind, PortTrafficRecord, SosConfiguration, SystemDefinition};
 use av_dynamics::Outbox;
 
 use crate::ports::{sorted_inbox, Inbox, QueuedMessage};
@@ -140,6 +151,27 @@ pub struct Router {
     edges: BTreeMap<(String, String), Vec<Edge>>,
     /// to_instance -> messages queued, not yet drained by that instance's own next step.
     pending: BTreeMap<String, Vec<QueuedMessage>>,
+    /// (instance, port) -> that port's own declared `PortKind`, covering EVERY declared port
+    /// of every `SosConfiguration.instances` entry's own `SystemDefinition` -- not only ports
+    /// a `Connection` names (question 175: an emitter's own port may have no connection at
+    /// all). Built once, by [`Router::build`]. [`Router::deliver`] consults this to decide
+    /// whether an emitted message is FRAMED/BYTE_STREAM (recorded into `port_traffic`) or
+    /// SIGNAL/CDM (never recorded), and to detect an emission on a port this Router has no
+    /// record of at all.
+    port_kinds: BTreeMap<(String, String), PortKind>,
+    /// Monotonic step counter (question 175, M25.4a) -- see [`Router::begin_step`]'s own doc
+    /// comment for exactly when this advances and why it is never reset mid-run.
+    step: u64,
+    /// Every FRAMED/BYTE_STREAM frame this Router has recorded so far this run (question
+    /// 175). See [`Router::deliver`]'s own doc comment for exactly what is and is not
+    /// recorded, and [`Router::take_port_traffic`] for how a caller drains this.
+    port_traffic: Vec<PortTrafficRecord>,
+    /// How many messages [`Router::deliver`] has seen on a port with no declared `PortKind` at
+    /// all, and therefore could not classify as recordable or not -- see that method's own doc
+    /// comment for the real, legitimate case this counts (`crate::drm::sensors`'s truth
+    /// broadcast ports) and why skipping them loses nothing. Never reset; read by
+    /// [`Router::undeclared_port_emissions`].
+    undeclared_port_emissions: u64,
 }
 
 fn direction_name(raw: i32) -> String {
@@ -227,7 +259,23 @@ impl Router {
             });
         }
 
-        Ok(Router { edges, pending: BTreeMap::new() })
+        // Question 175 (M25.4a): every declared port of every instance, not only ports a
+        // Connection names -- see `port_kinds`'s own field doc comment. An instance whose
+        // `system_id` names no supplied `SystemDefinition` contributes no ports here; that is
+        // not this function's own refusal to raise (a `Connection`-touched instance already
+        // gets `RouterError::UnknownSystemDefinition` above; an instance no `Connection` ever
+        // names is `execute()`'s Pass 1 (`DrmError::UnknownSystemDefinition`) to refuse, before
+        // this Router is ever asked to deliver anything).
+        let mut port_kinds: BTreeMap<(String, String), PortKind> = BTreeMap::new();
+        for instance in &sos.instances {
+            let Some(sys) = systems.get(&instance.system_id) else { continue };
+            for port in &sys.ports {
+                let kind = PortKind::try_from(port.kind).unwrap_or(PortKind::Unspecified);
+                port_kinds.insert((instance.name.clone(), port.name.clone()), kind);
+            }
+        }
+
+        Ok(Router { edges, pending: BTreeMap::new(), port_kinds, step: 0, port_traffic: Vec::new(), undeclared_port_emissions: 0 })
     }
 
     /// An empty router with no connections -- every `Outbox` handed to [`Router::deliver`] on
@@ -242,12 +290,88 @@ impl Router {
     /// every connected receiver's pending queue, applying that connection's own latency -- see
     /// the module doc comment's "Delivery model"/"Link model" sections. A message on a port
     /// with no matching connection is dropped, not an error (see the module doc comment).
+    ///
+    /// **Port traffic recording (question 175, M25.4a).** For every message whose emitting
+    /// port's own declared `PortKind` is FRAMED or BYTE_STREAM, this records exactly one OUT
+    /// `PortTrafficRecord` (`instance = from_instance`, `port = message.port`, `tai_ns =
+    /// emission_tai_ns`) plus, for every connected receiver edge, exactly one IN record
+    /// (`instance = edge.to_instance`, `port = edge.to_port`). **The IN record's own `tai_ns`
+    /// is `emission_tai_ns` too, not the receiver's later arrival epoch** -- `PortTrafficRecord
+    /// .tai_ns`'s own proto doc comment ("the emission epoch") makes this the field's
+    /// contract, not an oversight: the arrival epoch is always `emission_tai_ns + that
+    /// connection's own declared latency`, entirely derivable from the `SosConfiguration` a
+    /// replay already has, so storing it twice would only be a second, redundant place for the
+    /// two numbers to silently disagree. Both records share one `sequence` (`self.step`,
+    /// [`Router::begin_step`]'s own doc comment), since both come from the one `deliver` call
+    /// that this step's own emission produced.
+    ///
+    /// A message on a FRAMED/BYTE_STREAM port with **no** connection still gets its own OUT
+    /// record and no IN record at all -- deliberate, the identical "a port with no connection
+    /// is not wired anywhere, not an error" rule this method already applies to delivery
+    /// itself, restated for recording (mirrors question 176's identical fact for `Measurement`
+    /// production: a packet the router never delivers still gets recorded at its own emitting
+    /// end). A SIGNAL or CDM port is never recorded, at either end, regardless of connections
+    /// -- question 175's own scope is FRAMED/BYTE_STREAM only (`RunProducts.port_traffic_hash`'s
+    /// own proto doc comment).
+    ///
+    /// **An emission on a port this Router has no declared `PortKind` for at all is recorded as
+    /// nothing, and is not an error.** M25.4a's own first implementation made this a
+    /// `debug_assert!`, on the reasoning that a model can only ever emit on a port it was itself
+    /// configured with. **That reasoning is wrong, and the manager's own gate run proved it:**
+    /// [`crate::drm::sensors::TruthBroadcastAttitude`] broadcasts the truth quaternion and body
+    /// rates every step on the seven fixed conventional port names
+    /// [`crate::drm::sensors::TRUTH_PORT_NAMES`] (`truth_qx`..`truth_wz`) whether or not the
+    /// emitting instance's own `SystemDefinition` declares them -- so `drms/
+    /// demo_attitude_precession` and `drms/demo_attitude_wheel_fault`, which declare no ports at
+    /// all, legitimately emit seven undeclared-port messages per step, and five
+    /// `crates/av-kernel/tests/drm_attitude.rs` tests panicked on that assertion.
+    ///
+    /// Skipping such a message loses nothing a replay could ever have used, and that is
+    /// checkable rather than merely plausible: [`Router::build`] refuses any `Connection` naming
+    /// a port the endpoint's own `SystemDefinition` does not declare
+    /// ([`RouterError::UndeclaredPort`]), so an undeclared port is guaranteed to have no `edges`
+    /// entry -- nothing is ever delivered from it, to anyone, and there is therefore nothing for
+    /// a replay binding to play back.
+    ///
+    /// It is skipped, but never *silently*: every such emission is counted
+    /// ([`Router::undeclared_port_emissions`]) and `crate::drm::executor::execute` carries a
+    /// non-zero count into the sidecar's own `PortTrafficLog.provenance.attributes[
+    /// "undeclared_port_emissions"]`, so a reader of a sidecar can always tell how much traffic
+    /// this Router saw and could not classify. There is no zero-valued attribute, by design --
+    /// the same convention `crate::drm::events::dropped_messages_event` already follows for
+    /// in-flight messages.
     pub fn deliver(&mut self, from_instance: &str, emission_tai_ns: i64, outbox: Outbox) {
         for message in outbox.into_messages() {
+            let kind = self.port_kinds.get(&(from_instance.to_string(), message.port.clone())).copied();
+            if kind.is_none() {
+                self.undeclared_port_emissions += 1;
+            }
+            let recordable = matches!(kind, Some(PortKind::Framed) | Some(PortKind::ByteStream));
+            if recordable {
+                self.port_traffic.push(PortTrafficRecord {
+                    instance: from_instance.to_string(),
+                    port: message.port.clone(),
+                    direction: PortDirection::Out as i32,
+                    tai_ns: emission_tai_ns,
+                    payload: message.payload.clone(),
+                    sequence: self.step,
+                });
+            }
+
             let Some(targets) = self.edges.get(&(from_instance.to_string(), message.port.clone())) else {
                 continue;
             };
             for edge in targets {
+                if recordable {
+                    self.port_traffic.push(PortTrafficRecord {
+                        instance: edge.to_instance.clone(),
+                        port: edge.to_port.clone(),
+                        direction: PortDirection::In as i32,
+                        tai_ns: emission_tai_ns,
+                        payload: message.payload.clone(),
+                        sequence: self.step,
+                    });
+                }
                 let delivered = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: emission_tai_ns + edge.latency_ns, payload: message.payload.clone() };
                 self.pending.entry(edge.to_instance.clone()).or_default().push(QueuedMessage {
                     message: delivered,
@@ -256,6 +380,51 @@ impl Router {
                 });
             }
         }
+    }
+
+    /// Advance this Router's own port-traffic step counter by one (question 175, M25.4a) --
+    /// called exactly once per output tick, by [`crate::kernel::HeteroKernel::run_with_ports`]'s
+    /// own loop, immediately before it calls [`crate::schedule::HeteroScheduler::
+    /// advance_to_with_ports`] -- that loop is this codebase's own definition of a "step". The
+    /// counter starts at 0 (`Router::build`/`Router::empty`), so the very first call makes it
+    /// 1: the first output tick of a run is `PortTrafficRecord.sequence` 1, never 0. **Never
+    /// reset**: `crate::drm::executor::run_shared_group` threads one `Router` across every
+    /// fault/maneuver-bounded span of a run (`run_one_span` builds a fresh `HeteroKernel` per
+    /// span but is handed the identical `&mut Router` every time -- verified by reading both
+    /// functions, not assumed), so this counter stays monotonic across the whole run, not just
+    /// within one span.
+    ///
+    /// **Not every [`Router::deliver`] call happens inside a step this counter has counted.**
+    /// `run_shared_group`'s own command-dispatch pass (`docs/sil-plan.md`'s M25 milestone) calls
+    /// `Router::deliver` directly, once per declared `command` `Scenario.event`, before this
+    /// method is ever called for the run at all -- so a dispatched command's own OUT/IN
+    /// `PortTrafficRecord`s carry `sequence = 0`, distinguishably earlier than any real output
+    /// tick's own sequence (which is always >= 1). This was measured, not designed around --
+    /// see `tests/port_traffic_sidecar.rs`'s own module doc comment for the concrete case
+    /// (`demo_command`'s own dispatched telecommand).
+    pub fn begin_step(&mut self) {
+        self.step += 1;
+    }
+
+    /// Drain and return every [`PortTrafficRecord`] this Router has recorded so far (question
+    /// 175, M25.4a) -- in this Router's own emission order (unsorted: `crate::drm::executor::
+    /// execute` imposes `PortTrafficLog.records`'s required `(sequence, instance, port)` order
+    /// itself, with a stable sort, so this call's own order survives as that sort's tie-break).
+    /// `execute()` calls this exactly once, at the same place it reads [`Router::pending_count`]
+    /// (after every span of the run has finished) -- so the returned `Vec` is the whole run's
+    /// own port traffic, never a partial slice a caller has to remember to merge.
+    pub fn take_port_traffic(&mut self) -> Vec<PortTrafficRecord> {
+        std::mem::take(&mut self.port_traffic)
+    }
+
+    /// How many emissions this Router saw on a port with no declared `PortKind` and therefore
+    /// recorded nothing for (question 175, M25.4a) -- see [`Router::deliver`]'s own doc comment
+    /// for the real case this counts (`crate::drm::sensors::TRUTH_PORT_NAMES`, broadcast every
+    /// step whether or not the emitting instance declares those ports) and why skipping them
+    /// loses nothing a replay could have used. Not drained by [`Router::take_port_traffic`]:
+    /// this is a run-total, read once by `crate::drm::executor::execute` alongside it.
+    pub fn undeclared_port_emissions(&self) -> u64 {
+        self.undeclared_port_emissions
     }
 
     /// Drain and sort every message currently queued for `to_instance` whose availability
@@ -507,10 +676,23 @@ mod tests {
 
     #[test]
     fn a_message_on_a_port_with_no_matching_connection_is_dropped_not_an_error() {
-        let (sos, systems) = two_signal_instances(PortDirection::Out, PortDirection::In);
+        // The emitted port ("unwired") must still be a *declared* port of the sender's own
+        // SystemDefinition -- an entirely undeclared port is a different case (question 175's
+        // own "unknown (instance, port) pair", which `Router::deliver` flags with a
+        // `debug_assert!` -- see that method's own doc comment and `an_emission_on_an_
+        // undeclared_port_trips_the_debug_assertion`, below). This test's own point is
+        // narrower: a real, declared port with no `Connection` naming it at all.
+        let sender = sys("sender_sys", vec![port("out", PortKind::Signal, PortDirection::Out), port("unwired", PortKind::Signal, PortDirection::Out)]);
+        let receiver = sys("receiver_sys", vec![port("in", PortKind::Signal, PortDirection::In)]);
+        let sos = SosConfiguration {
+            instances: vec![instance("sender", "sender_sys"), instance("receiver", "receiver_sys")],
+            connections: vec![conn("sender", "out", "receiver", "in", "")],
+            ..Default::default()
+        };
+        let systems = systems_map(vec![sender, receiver]);
         let mut router = Router::build(&sos, &systems).expect("valid connection");
         let mut outbox = Outbox::new();
-        outbox.push_signal("some_other_port", 1_000, 1.0);
+        outbox.push_signal("unwired", 1_000, 1.0);
         router.deliver("sender", 1_000, outbox);
         assert!(router.take_inbox("receiver", 1_000).is_empty());
         assert!(!router.has_pending());
@@ -575,5 +757,194 @@ mod tests {
         }
         assert_eq!(delivered, total_queued, "every queued message must eventually be delivered, exactly once, none lost");
         assert!(!router.has_pending(), "nothing left holding once as_of has run past every message's own availability");
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Port traffic recording (question 175, M25.4a) -- see the module doc comment's "Port
+    // traffic recording" section and `Router::deliver`/`Router::begin_step`'s own doc comments.
+    // `tests/port_traffic_sidecar.rs` covers the whole `execute()`-level sidecar (file, hash,
+    // provenance); these are the Router-level unit tests for the recording mechanism itself.
+    // ------------------------------------------------------------------------------------
+
+    fn framed_port(name: &str, direction: PortDirection) -> Port {
+        Port { name: name.to_string(), kind: PortKind::Framed as i32, direction: direction as i32, ..Default::default() }
+    }
+
+    fn two_framed_instances() -> (SosConfiguration, BTreeMap<String, SystemDefinition>) {
+        let sender = sys("sender_sys", vec![framed_port("out", PortDirection::Out)]);
+        let receiver = sys("receiver_sys", vec![framed_port("in", PortDirection::In)]);
+        let sos = SosConfiguration {
+            instances: vec![instance("sender", "sender_sys"), instance("receiver", "receiver_sys")],
+            connections: vec![conn("sender", "out", "receiver", "in", "")],
+            ..Default::default()
+        };
+        (sos, systems_map(vec![sender, receiver]))
+    }
+
+    /// [`Router::begin_step`]'s own documented contract: the counter starts at 0
+    /// (`Router::build`), so the very first call makes it 1 -- never 0 -- and every later call
+    /// keeps incrementing by exactly one, monotonically. Would catch an off-by-one
+    /// implementation (e.g. one that returns the post-increment value starting at 0, or one
+    /// that only increments every other call).
+    #[test]
+    fn begin_step_starts_the_first_output_ticks_sequence_at_one_not_zero() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_000, vec![1, 2, 3]);
+        router.deliver("sender", 1_000, outbox);
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 2, "one OUT + one IN record");
+        assert!(recorded.iter().all(|r| r.sequence == 1), "the first begin_step() call must produce sequence 1, not 0: {recorded:?}");
+
+        router.begin_step();
+        router.begin_step();
+        let mut outbox2 = Outbox::new();
+        outbox2.push("out", 2_000, vec![4]);
+        router.deliver("sender", 2_000, outbox2);
+        let recorded2 = router.take_port_traffic();
+        assert!(recorded2.iter().all(|r| r.sequence == 3), "two more begin_step() calls: sequence must be 3, not 2 or 4: {recorded2:?}");
+    }
+
+    /// A FRAMED connection's own [`Router::deliver`] call records exactly one OUT record (the
+    /// sender's own emission) and one IN record per connected receiver edge, both carrying the
+    /// *emission* epoch (not the receiver's later arrival epoch) and the same `sequence`. Fails
+    /// against a wrong implementation that records only the OUT side, records the arrival
+    /// epoch instead of the emission epoch on the IN record, or gives the two records
+    /// different `sequence` values.
+    #[test]
+    fn deliver_records_out_and_in_port_traffic_for_a_framed_connection_sharing_one_sequence() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push("out", 5_000, vec![9, 9]);
+        router.deliver("sender", 5_000, outbox);
+
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        let out_rec = recorded.iter().find(|r| r.direction == PortDirection::Out as i32).expect("an OUT record");
+        let in_rec = recorded.iter().find(|r| r.direction == PortDirection::In as i32).expect("an IN record");
+        assert_eq!(out_rec.instance, "sender");
+        assert_eq!(out_rec.port, "out");
+        assert_eq!(out_rec.tai_ns, 5_000);
+        assert_eq!(out_rec.payload, vec![9, 9]);
+        assert_eq!(in_rec.instance, "receiver");
+        assert_eq!(in_rec.port, "in");
+        assert_eq!(in_rec.tai_ns, 5_000, "the IN record's tai_ns is the EMISSION epoch, not emission + latency");
+        assert_eq!(in_rec.payload, vec![9, 9]);
+        assert_eq!(out_rec.sequence, 1);
+        assert_eq!(in_rec.sequence, 1, "both records from one deliver() call share one sequence");
+    }
+
+    /// A FRAMED/BYTE_STREAM message on a port with no matching `Connection` still gets its own
+    /// OUT record -- no IN record, since nothing is wired to receive it (mirrors this module's
+    /// own "a message on a port with no connection is dropped, not an error" delivery rule).
+    #[test]
+    fn a_framed_port_with_no_connection_still_gets_an_out_record_and_no_in_record() {
+        let sender = sys("sender_sys", vec![framed_port("out", PortDirection::Out), framed_port("unwired", PortDirection::Out)]);
+        let receiver = sys("receiver_sys", vec![framed_port("in", PortDirection::In)]);
+        let sos = SosConfiguration {
+            instances: vec![instance("sender", "sender_sys"), instance("receiver", "receiver_sys")],
+            connections: vec![conn("sender", "out", "receiver", "in", "")],
+            ..Default::default()
+        };
+        let systems = systems_map(vec![sender, receiver]);
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push("unwired", 1_000, vec![7]);
+        router.deliver("sender", 1_000, outbox);
+
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 1, "an OUT record only, no IN: {recorded:?}");
+        assert_eq!(recorded[0].direction, PortDirection::Out as i32);
+        assert_eq!(recorded[0].instance, "sender");
+        assert_eq!(recorded[0].port, "unwired");
+    }
+
+    /// SIGNAL and CDM ports are never recorded, connected or not -- question 175's own scope is
+    /// FRAMED/BYTE_STREAM only.
+    #[test]
+    fn signal_and_cdm_ports_are_never_recorded() {
+        let sender = sys("sender_sys", vec![port("sig_out", PortKind::Signal, PortDirection::Out), port("cdm_out", PortKind::Cdm, PortDirection::Out)]);
+        let receiver = sys("receiver_sys", vec![port("sig_in", PortKind::Signal, PortDirection::In), port("cdm_in", PortKind::Cdm, PortDirection::In)]);
+        let sos = SosConfiguration {
+            instances: vec![instance("sender", "sender_sys"), instance("receiver", "receiver_sys")],
+            connections: vec![conn("sender", "sig_out", "receiver", "sig_in", ""), conn("sender", "cdm_out", "receiver", "cdm_in", "")],
+            ..Default::default()
+        };
+        let systems = systems_map(vec![sender, receiver]);
+        let mut router = Router::build(&sos, &systems).expect("valid connections");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push_signal("sig_out", 1_000, 1.0);
+        outbox.push("cdm_out", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+
+        assert!(router.take_port_traffic().is_empty(), "SIGNAL/CDM ports must never be recorded");
+        // Delivery itself is unaffected by recording -- both messages still actually queue.
+        assert_eq!(router.take_inbox("receiver", 1_000).messages().len(), 2);
+    }
+
+    /// [`Router::take_port_traffic`] drains what has been recorded and leaves nothing behind
+    /// for a second call -- the identical "destructive drain" contract [`Router::take_inbox`]
+    /// already has. Would catch an implementation that clones rather than drains, or that
+    /// never actually clears its own accumulator.
+    #[test]
+    fn take_port_traffic_drains_and_does_not_repeat_on_a_second_call() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+        assert_eq!(router.take_port_traffic().len(), 2);
+        assert!(router.take_port_traffic().is_empty(), "a second call with nothing new recorded must be empty, not a repeat of the first");
+    }
+
+    /// Question 175's own "an unknown (instance, port) pair must not silently record or silently
+    /// skip" requirement, as it actually resolved (see [`Router::deliver`]'s own doc comment):
+    /// an emission on a port with no declared `PortKind` records nothing, does not panic, still
+    /// delivers nothing (an undeclared port can have no `edges` -- `Router::build` refuses any
+    /// `Connection` naming one), and is COUNTED, so the skip is never silent.
+    ///
+    /// This replaces M25.4a's own first attempt, a `debug_assert!` that a port must always be
+    /// declared. That assertion was wrong and five `tests/drm_attitude.rs` tests proved it:
+    /// `crate::drm::sensors::TruthBroadcastAttitude` broadcasts on the seven
+    /// `TRUTH_PORT_NAMES` every step whether or not the instance declares them. Fails against
+    /// an implementation that records an undeclared port anyway (it cannot know its kind), that
+    /// panics on it, or that skips it without counting.
+    #[test]
+    fn an_emission_on_an_undeclared_port_records_nothing_and_is_counted_not_silent() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        // Exactly the shape `TruthBroadcastAttitude` produces on an instance whose own
+        // SystemDefinition declares no truth ports (drms/demo_attitude_precession).
+        outbox.push_signal(crate::drm::sensors::TRUTH_PORT_QX, 1_000, 0.5);
+        outbox.push("nobody_declared_this_port", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+
+        assert!(router.take_port_traffic().is_empty(), "an undeclared port has no PortKind, so nothing can be classified as recordable");
+        assert!(!router.has_pending(), "an undeclared port can have no edges, so nothing is ever delivered from it");
+        assert_eq!(router.undeclared_port_emissions(), 2, "both undeclared emissions must be counted -- the skip is never silent");
+    }
+
+    /// The counter stays at zero for a run whose every emission is on a declared port -- there
+    /// is no zero-valued attribute in the sidecar, by design (`Router::deliver`'s own doc
+    /// comment), so this is the case that must produce nothing to report.
+    #[test]
+    fn a_declared_port_emission_never_counts_as_an_undeclared_one() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        router.begin_step();
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+        assert_eq!(router.undeclared_port_emissions(), 0);
+        assert_eq!(router.take_port_traffic().len(), 2);
     }
 }

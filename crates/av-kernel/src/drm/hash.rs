@@ -22,7 +22,13 @@ use av_cdm::pb::{DesignReferenceMission, SosConfiguration, SystemDefinition};
 
 use super::DrmError;
 
-fn sha256_hex(bytes: &[u8]) -> String {
+/// SHA-256 hex digest of arbitrary bytes -- `pub(crate)` (question 175, M25.4a) so `executor::
+/// execute` can reuse this crate's one SHA-256 helper for `RunProducts.port_traffic_hash`
+/// (the `PortTrafficLog` sidecar's own hash) rather than hand-rolling a second call to `sha2`
+/// or pulling in a new crate. Every other caller in this module still goes through the
+/// `canonical_*_hash` wrappers below, which additionally clear a message's own `hash` field
+/// first -- this is the one raw primitive underneath all of them.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())

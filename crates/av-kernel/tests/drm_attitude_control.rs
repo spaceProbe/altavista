@@ -78,7 +78,7 @@ fn load_control_bundle() -> (DesignReferenceMission, SosConfiguration, BTreeMap<
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-attitude-control".to_string(), error_mode: Default::default() }
+    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-attitude-control".to_string(), error_mode: Default::default() , products_dir: None }
 }
 
 fn rehash_drm(mut drm: DesignReferenceMission) -> DesignReferenceMission {
