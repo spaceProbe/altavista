@@ -1,0 +1,66 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R4.1a
+# (docs/open-questions.md question 178, ADR-005 sec 5: the PORT fault runtime, `crate::router`).
+#
+# Identical to drms/demo_command.drm.yaml (same sos_configuration_id -- drms/demo_command.sos.yaml
+# is reused unchanged, same two systems) with exactly one addition: a FAULT_TARGET_KIND_PORT
+# "delay" fault on the EMITTING port of the command dispatch (instance="ground",
+# target="cmd_out"), persistent (duration_ns=0) so it covers the whole run, with
+# params.delay_s = 1.0 -- exactly one native step (both instances step at 1 Hz,
+# options.sample_interval_s = 1.0), chosen so the delayed round trip lands exactly one step later
+# than drms/demo_command.drm.yaml's own unfaulted run (crates/av-kernel/tests/port_faults.rs
+# states and derives this before measuring, then counts it from the real records/events).
+#
+# ground.cmd_out -> flight.cmd_in already carries 3s of declared connection latency
+# (drms/demo_command.sos.yaml's own header comment: 1.5s each way, "latency" link_model). Adding
+# this fault's own 1s delay makes the message available at dispatch + 4s instead of + 3s -- one
+# whole 1s output period later, so flight's own next native step whose result epoch is >= that new
+# availability lands exactly one step after the unfaulted run's own (crates/av-kernel/tests/
+# port_traffic_sidecar.rs's own module doc comment already measured the unfaulted case:
+# AppliedCommand.applied_tai_ns = dispatch + 2s = 1700000052000000000, ack emitted at dispatch +
+# 3s = 1700000053000000000 -- this fixture's own faulted run must therefore show applied_tai_ns =
+# dispatch + 3s = 1700000053000000000, ack at dispatch + 4s = 1700000054000000000, EXACTLY one 1s
+# step later than the unfaulted run's own real, measured values -- never eyeballed).
+id: command_demo_port_delay_drm
+version: "1"
+name: "Port fault runtime demo (R4.1a): a PORT delay fault pushes command delivery exactly one step later"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+  seeds:
+    delay_ground_cmd: 555
+  events:
+    - id: cmd1
+      tai_ns: 1700000050000000000
+      kind: command
+      instance: flight
+      values:
+        value: 3.0
+      attributes:
+        field: accel_scale
+        from: ground
+        command_class: demo
+  faults:
+    - id: delay_ground_cmd
+      tai_ns: 1700000000000000000
+      duration_ns: 0
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: ground
+      target: cmd_out
+      kind: delay
+      params:
+        delay_s: 1.0
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R4.1a)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_command_port_delay.drm.yaml
+hash: "8693e24f6b7c977f6b2f03a02b8e80b69a55227e934095200e242e83d2470927"

@@ -1,9 +1,11 @@
 //! Injecting `Scenario.faults` (ADR-005 section 5, `docs/adr/005-simulation-kernel.md`) at
 //! their declared epochs, for the kinds this crate can act on: `FAULT_TARGET_KIND_DYNAMICS`
-//! (fully applied), `_PORT` and `_SENSOR` (validated, seeded, and explicitly refused -- see
-//! "PORT and SENSOR" below), and `_HARDWARE` (a container power cycle only -- see "Container
-//! power-cycle (HARDWARE)" below; any other `_HARDWARE` use is a typed refusal, not silently
-//! dropped).
+//! (fully applied), `_PORT` (R4.1a: `"drop"`/`"delay"` are fully applied too, by
+//! `crate::router::Router`, not this module -- `"corrupt"`/`"duplicate"` stay a typed refusal,
+//! R4.1b's own scope), `_SENSOR` (validated, seeded, and explicitly refused -- see "SENSOR --
+//! seeded, validated, and explicitly refused; PORT -- now a real runtime (R4.1a)" below), and
+//! `_HARDWARE` (a container power cycle only -- see "Container power-cycle (HARDWARE)" below; any
+//! other `_HARDWARE` use is a typed refusal, not silently dropped).
 //!
 //! ## DYNAMICS (question 87's "What to build" item 5) -- applied
 //!
@@ -84,16 +86,32 @@
 //! board to reset, only its own process to power-cycle. See `executor::execute`'s own load-time
 //! validation pass for both checks.
 //!
-//! ## PORT and SENSOR -- seeded, validated, and explicitly refused
+//! ## SENSOR -- seeded, validated, and explicitly refused; PORT -- now a real runtime (R4.1a)
 //!
 //! Section 5 also names `FAULT_TARGET_KIND_PORT` ("acts in the router: drop, delay, corrupt,
 //! duplicate") and `FAULT_TARGET_KIND_SENSOR` ("acts in sensor models: bias, noise, dropout,
-//! misalignment"). Neither has a runtime this crate can act on yet: there is no port router
-//! (`binding`'s module doc comment: `CONTAINER`/`RENODE`/`BOARD` bindings, and the router that
-//! would sit between them, are all still Planned/P2) and no sensor-model binding kind exists
-//! at all. Applying either kind "end to end" is therefore impossible today, and this module
-//! never claims otherwise: [`realize_unapplied_fault`] validates the fault's `kind` against
-//! the names section 5 documents for its `target_kind`, resolves its seed from
+//! misalignment"). Through M25.4a, neither had a runtime this crate could act on: there was no
+//! port router with a fault-aware `deliver` and no sensor-model binding kind at all.
+//!
+//! **R4.1a (`docs/open-questions.md` question 178) gives PORT a real runtime for two of its four
+//! kinds.** `crate::router::Router::install_port_faults`/`deliver` now actually applies a
+//! `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"` or `"delay"` -- see that module's own doc
+//! comment's "Port fault runtime" section for the complete contract. `"corrupt"`/`"duplicate"`
+//! remain unimplemented (R4.1b's own scope, on the identical machinery); `executor::execute`'s
+//! own load-time fault-validation loop refuses them with a message naming R4.1b, distinct from a
+//! `kind` outside section 5's vocabulary entirely. **This module's own [`realize_unapplied_fault`]
+//! is unchanged and still validates the full four-kind PORT vocabulary** (it is a generic,
+//! target-kind-agnostic "validate, seed, draw one canonical value, refuse" helper -- see its own
+//! doc comment) **but `executor::execute` never calls it for PORT any more**: `crate::router`'s
+//! own runtime does its own, kind-specific validation and realization instead, so
+//! `realize_unapplied_fault`'s PORT-kind path is exercised only by this module's own tests and by
+//! `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call it directly -- never by a
+//! real `execute()` run any more.
+//!
+//! **SENSOR is unchanged**: `execute()` still refuses any `FAULT_TARGET_KIND_SENSOR` fault at
+//! load ([`DrmError::PortOrSensorFaultNotYetSupported`], now SENSOR-only in practice), before any
+//! binding or GMAT call. [`realize_unapplied_fault`] validates the fault's `kind` against the
+//! names section 5 documents for its `target_kind`, resolves its seed from
 //! `Scenario.seeds[fault.id]` (via [`crate::rng::seed_for`]), draws the first `u64` from that
 //! fault's own [`crate::rng::Pcg64`] stream -- proving the seeded stream is correctly keyed and
 //! reproducible, exactly what section 5 promises -- and then **always** returns
@@ -102,24 +120,16 @@
 //! skip; see this module's own tests, and the crate's `tests/faults_seeded.rs`, for exactly
 //! what each failure mode looks like.
 //!
-//! **What this module does *not* invent.** Neither the proto nor ADR-005 defines a per-kind
-//! parameter schema for a PORT/SENSOR fault's actual effect (e.g. what a `"bias"` fault's
-//! magnitude/units would be, or a `"drop"` fault's probability parameter name) -- that belongs
-//! to the router/sensor-model bindings themselves, which are still Planned. Inventing one here,
-//! ahead of those bindings, would be scope this task does not have the authority to set (it
+//! **What this module does *not* invent (SENSOR, and PORT's own remaining `"corrupt"`/
+//! `"duplicate"` kinds).** Neither the proto nor ADR-005 defines a per-kind parameter schema for
+//! a SENSOR fault's actual effect (e.g. what a `"bias"` fault's magnitude/units would be), or for
+//! PORT's own `"corrupt"`/`"duplicate"` kinds -- that belongs to the sensor-model binding /
+//! R4.1b's own PORT-fault extension respectively, neither of which exists yet. Inventing one
+//! here, ahead of that work, would be scope this task does not have the authority to set (it
 //! would become part of ADR-005's own contract the moment a caller started relying on it).
 //! [`realize_unapplied_fault`] therefore draws one canonical value per fault (proof of a
-//! correctly-keyed, reproducible stream) rather than a kind-specific realization.
-//!
-//! **Integration note (still open, out of scope for M16.2).** [`realize_unapplied_fault`] is
-//! not yet called from `executor::execute`: that function's own fault-collecting loops only
-//! ever look at DYNAMICS and (as of M16.2) HARDWARE faults, so a PORT/SENSOR fault declared in
-//! a real DRM today is still silently dropped before this module ever sees it. `executor.rs` is
-//! this task's own file to edit (unlike at M15.3), but M16.2's scope is the HARDWARE move
-//! (question 120) alone -- wiring PORT/SENSOR realization into `execute()` is unrelated feature
-//! work this task does not extend to, and is left exactly as escalated before. The suggested
-//! integration point is unchanged: the same place `DrmError::FaultEpochNotOnSampleGrid` is
-//! already checked, before any binding/GMAT call.
+//! correctly-keyed, reproducible stream) rather than a kind-specific realization, for every kind
+//! it still covers.
 
 use std::collections::BTreeMap;
 
@@ -137,7 +147,7 @@ use crate::rng::{seed_for, Pcg64};
 /// `Fault.kind` values ADR-005 section 5 documents for `FAULT_TARGET_KIND_PORT`: "acts in the
 /// router (drop, delay, corrupt, duplicate)". Matches `proto/altavista/v1/system.proto`'s own
 /// `Fault.kind` doc comment.
-const PORT_KINDS: [&str; 4] = ["drop", "delay", "corrupt", "duplicate"];
+pub(crate) const PORT_KINDS: [&str; 4] = ["drop", "delay", "corrupt", "duplicate"];
 /// `Fault.kind` values ADR-005 section 5 documents for `FAULT_TARGET_KIND_SENSOR`: "acts in
 /// sensor models (bias, noise, dropout, misalignment)". `"misalign"`, not `"misalignment"`,
 /// per `proto/altavista/v1/system.proto`'s `Fault.kind` doc comment, which spells out the
@@ -198,7 +208,10 @@ fn kinds_for(target_kind: FaultTargetKind) -> Option<&'static [&'static str]> {
 
 /// Validate, seed, and deterministically (but never actually) realize a
 /// `FAULT_TARGET_KIND_PORT` or `FAULT_TARGET_KIND_SENSOR` fault -- see this module's own doc
-/// comment's "PORT and SENSOR" section for exactly what this does and does not claim.
+/// comment's "SENSOR -- seeded, validated, and explicitly refused; PORT -- now a real runtime
+/// (R4.1a)" section for exactly what this does and does not claim, and why `executor::execute`
+/// no longer calls this for a PORT fault at all (as of R4.1a, `crate::router::Router` does its
+/// own PORT-specific validation and realization instead).
 ///
 /// # Panics
 ///

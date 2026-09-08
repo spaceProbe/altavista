@@ -1,0 +1,63 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R4.1a
+# (docs/open-questions.md question 178, ADR-005 sec 5: the PORT fault runtime, `crate::router`).
+#
+# Identical to drms/demo_command.drm.yaml (same sos_configuration_id -- drms/demo_command.sos.yaml
+# is reused unchanged, same two systems) with exactly one addition: a FAULT_TARGET_KIND_PORT
+# "drop" fault covering the command dispatch's own window, on the EMITTING port
+# (instance="ground", target="cmd_out" -- crate::router's own "Port fault runtime" doc section:
+# a PORT fault matches the emitting pair, not a Connection).
+#
+# Window: [1700000050000000000, 1700000051000000000) -- exactly 1s, covering the command's own
+# declared dispatch epoch (t=50s) and nothing else in this 100s/1Hz run. rate is left unset
+# (defaults to 1.0: every candidate frame in the window is dropped) but still requires its own
+# Scenario.seeds entry (question 178, rule 6: uniform and honest, even at rate 1.0).
+#
+# Expected result (crates/av-kernel/tests/port_faults.rs states this before running, the same way
+# port_traffic_sidecar.rs's own module doc comment derives its expectations): the command dispatch
+# on ground.cmd_out is genuinely emitted (one OUT PortTrafficRecord) but never reaches `flight`
+# (no IN record, no delivery) -- so `flight` never applies accel_scale, never sends an ack, and
+# `RunProducts.events` carries the four COMMAND_TRANSITION events up through DISPATCHED (never
+# ACKED), no EVENT_KIND_PORT_COMMAND event, and exactly one EVENT_KIND_FAULT event for
+# "drop_ground_cmd" at tai_ns=1700000050000000000 (the one frame the fault actually dropped).
+id: command_demo_port_drop_drm
+version: "1"
+name: "Port fault runtime demo (R4.1a): a PORT drop fault suppresses the command dispatch's own delivery"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+  seeds:
+    drop_ground_cmd: 777
+  events:
+    - id: cmd1
+      tai_ns: 1700000050000000000
+      kind: command
+      instance: flight
+      values:
+        value: 3.0
+      attributes:
+        field: accel_scale
+        from: ground
+        command_class: demo
+  faults:
+    - id: drop_ground_cmd
+      tai_ns: 1700000050000000000
+      duration_ns: 1000000000
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: ground
+      target: cmd_out
+      kind: drop
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R4.1a)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_command_port_drop.drm.yaml
+hash: "90a8ec56defa5fa573937b928c12b7a39ced850ac8528226482ea9e0f6759d25"

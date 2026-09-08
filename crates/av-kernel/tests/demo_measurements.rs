@@ -336,12 +336,20 @@ fn dropped_measurement_packets_still_decode_at_the_emitter_with_decoded_at_namin
 // [`a_declared_port_drop_fault_against_the_star_tracker_instance_has_no_effect_on_measurements_today`]
 // (this test's own prior name) proved that silent no-op by actually running it.
 //
-// **M25.4a (`docs/open-questions.md` question 178) closes that gap with a typed load refusal,
-// not a runtime.** [`a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_
-// load_refusal`] below now proves the *new* real behaviour instead: `execute()` refuses this
-// exact DRM, at load, before any binding or GMAT call, naming question 178, the fault's own id,
-// its instance, and its target kind (`DrmError::PortOrSensorFaultNotYetSupported`) -- so a run
-// that reaches this far never carries a PORT/SENSOR fault while producing measurements at all.
+// **M25.4a (`docs/open-questions.md` question 178) closed that gap with a typed load refusal,
+// not a runtime -- for every PORT kind, through R4.1a.** [`a_declared_port_corrupt_fault_
+// against_the_star_tracker_instance_is_a_typed_load_refusal_pending_r4_1b`] below (this test's
+// own prior name was `a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_
+// load_refusal`, asserting `kind: "drop"` was refused) now proves the NARROWER real behaviour
+// R4.1a leaves: a PORT fault of `kind == "drop"`/`"delay"` now has a real runtime
+// (`crate::router::Router`, `docs/open-questions.md` question 178) and is no longer refused at
+// all -- see `crates/av-kernel/tests/port_faults.rs` for that new, real behaviour, including its
+// own effect on `RunProducts.measurements` (this field's own doc comment's updated "Drop
+// semantics" section). `kind == "corrupt"` (R4.1b's own scope, not yet implemented, on the
+// identical machinery) is what THIS test now declares instead, still refused at load, before any
+// binding or GMAT call, naming question 178/R4.1b, the fault's own id, its instance, and its kind
+// (`DrmError::PortFaultKindNotYetSupported`) -- so a run declaring an UNIMPLEMENTED PORT fault
+// kind still never reaches far enough to produce measurements at all.
 
 /// Re-hash a `DesignReferenceMission` after mutating it in memory -- mirrors `tests/drm_attitude.
 /// rs::rehash`'s own doc comment (not a way to bypass `execute`'s tamper check; the opposite:
@@ -351,26 +359,27 @@ fn rehash_drm(mut drm: DesignReferenceMission) -> DesignReferenceMission {
     drm
 }
 
-/// **Load refusal, pinned (M25.4a, `docs/open-questions.md` question 178).** A `Fault {
-/// target_kind: FAULT_TARGET_KIND_PORT, kind: "drop", instance: "startracker", target: "st_meas"
-/// }` declared in `scenario.faults` -- exactly the shape ADR-005 sec 5 documents for a PORT
-/// fault's "drop" kind -- now makes `execute()` refuse the whole run, at load, before any
-/// binding or GMAT call, rather than silently ignoring it (`a_declared_port_drop_fault_against_
-/// the_star_tracker_instance_has_no_effect_on_measurements_today`, this test's own prior name and
-/// prior assertion, pinned the old no-op; question 178 replaces that no-op with a typed refusal,
-/// so this test now pins the refusal instead). The unfaulted baseline is still run first, and
-/// still must succeed -- this test is about the declared PORT fault specifically, not about this
-/// fixture being broken some other way.
+/// **Load refusal, pinned (M25.4a, `docs/open-questions.md` question 178; narrowed by R4.1a).**
+/// A `Fault { target_kind: FAULT_TARGET_KIND_PORT, kind: "corrupt", instance: "startracker",
+/// target: "st_meas" }` declared in `scenario.faults` -- exactly the shape ADR-005 sec 5
+/// documents for a PORT fault's "corrupt" kind, R4.1b's own not-yet-implemented scope -- makes
+/// `execute()` refuse the whole run, at load, before any binding or GMAT call. This test's own
+/// prior name/fixture (`kind: "drop"`) is retired: R4.1a gave `"drop"` a real runtime, so it is
+/// no longer refused at all (see `crates/av-kernel/tests/port_faults.rs` for its own real
+/// behaviour) -- `"corrupt"` is what still exercises "an unimplemented PORT fault kind is a
+/// typed load refusal" honestly. The unfaulted baseline is still run first, and still must
+/// succeed -- this test is about the declared PORT fault specifically, not about this fixture
+/// being broken some other way.
 ///
-/// **Fails against** an implementation that still lets this DRM execute (the M25.3c-era no-op
-/// regressing back in), one that refuses it with the wrong error variant (in particular
-/// `DrmError::FaultTargetKindNotSupported`, `fault::realize_unapplied_fault`'s own
-/// *realization-time* result for a caller that actually invokes it -- see `DrmError::
-/// PortOrSensorFaultNotYetSupported`'s own doc comment for why that is a different error, for a
-/// different reason, raised at a different time), or one that names the wrong fault id/instance/
-/// target_kind in the refusal.
+/// **Fails against** an implementation that still lets this DRM execute, one that refuses it with
+/// the wrong error variant (in particular `DrmError::FaultTargetKindNotSupported`, `fault::
+/// realize_unapplied_fault`'s own *realization-time* result for a caller that actually invokes
+/// it -- a different error, for a different reason, raised at a different time; or
+/// `DrmError::UnknownPortFaultKind`, which would mean `"corrupt"` was not even recognized as part
+/// of ADR-005 section 5's own vocabulary), or one that names the wrong fault id/instance/kind in
+/// the refusal.
 #[test]
-fn a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_load_refusal() {
+fn a_declared_port_corrupt_fault_against_the_star_tracker_instance_is_a_typed_load_refusal_pending_r4_1b() {
     let _engine = gmat_sys::engine_lock();
     let (drm, sos, systems) = load_measurements_bundle();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
@@ -382,21 +391,20 @@ fn a_declared_port_drop_fault_against_the_star_tracker_instance_is_a_typed_load_
     {
         let scenario = faulted.scenario.as_mut().expect("this DRM declares a scenario");
         scenario.faults.push(Fault {
-            id: "st_meas_drop".to_string(),
+            id: "st_meas_corrupt".to_string(),
             tai_ns: START_TAI_NS,
             duration_ns: 0, // persistent (0 = "until cleared", proto doc comment)
             target_kind: FaultTargetKind::Port as i32,
             instance: "startracker".to_string(),
             target: "st_meas".to_string(),
-            kind: "drop".to_string(),
+            kind: "corrupt".to_string(),
             ..Default::default()
         });
     }
     let faulted = rehash_drm(faulted);
-    let err = execute(run_config(&gmat, &faulted, &sos, &systems))
-        .expect_err("a declared PORT fault must be a typed load refusal now (question 178), not a run that silently ignores it");
+    let err = execute(run_config(&gmat, &faulted, &sos, &systems)).expect_err("an unimplemented PORT fault kind (\"corrupt\", R4.1b's own scope) must still be a typed load refusal");
     assert!(
-        matches!(&err, DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } if fault_id == "st_meas_drop" && instance == "startracker" && target_kind == "FAULT_TARGET_KIND_PORT"),
-        "expected DrmError::PortOrSensorFaultNotYetSupported naming fault_id=\"st_meas_drop\" instance=\"startracker\" target_kind=\"FAULT_TARGET_KIND_PORT\", got {err:?}"
+        matches!(&err, DrmError::PortFaultKindNotYetSupported { fault_id, instance, kind } if fault_id == "st_meas_corrupt" && instance == "startracker" && kind == "corrupt"),
+        "expected DrmError::PortFaultKindNotYetSupported naming fault_id=\"st_meas_corrupt\" instance=\"startracker\" kind=\"corrupt\", got {err:?}"
     );
 }

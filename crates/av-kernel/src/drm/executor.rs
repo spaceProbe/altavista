@@ -443,14 +443,19 @@ pub struct RunProducts {
     /// `step_with_ports` call, before the packet ever reaches `crate::router::Router`, so a
     /// telemetry packet the router later never delivers (no declared `Connection` for
     /// its port, or a `"latency"` connection whose delivery never lands before the run ends) still
-    /// contributes its `Measurement` here. **A declared PORT/SENSOR-targeted fault
-    /// (`av_cdm::pb::FaultTargetKind::Port`/`Sensor`) can no longer reach this field at all --
-    /// as of M25.4a (`docs/open-questions.md` question 178), `execute()` refuses such a DRM at
-    /// load** (`DrmError::PortOrSensorFaultNotYetSupported`, raised in the same up-front
-    /// fault-validation loop as `DrmError::UnknownFaultInstance`), before any binding or GMAT
-    /// call -- so through M25.4a this field's own "no effect" no-op was the observed behaviour,
-    /// and it is no longer reachable: no run that produces a `RunProducts` at all ever carried
-    /// a PORT/SENSOR fault while doing so.
+    /// contributes its `Measurement` here. **A declared SENSOR-targeted fault
+    /// (`av_cdm::pb::FaultTargetKind::Sensor`) can still never reach this field at all** --
+    /// `execute()` refuses such a DRM at load (`DrmError::PortOrSensorFaultNotYetSupported`,
+    /// raised in the same up-front fault-validation loop as `DrmError::UnknownFaultInstance`),
+    /// before any binding or GMAT call, unchanged since M25.4a (`docs/open-questions.md` question
+    /// 178). **A PORT-targeted fault is different as of R4.1a**: `kind == "drop"` now genuinely
+    /// CAN reach this field, honestly -- a dropped FRAMED packet never leaves `crate::router::
+    /// Router::deliver`'s own OUT recording, which happens entirely independently of, and after,
+    /// `Measurement` decoding at the emitter's own `step_with_ports` call (this doc comment's own
+    /// first sentence, above), so a dropped packet's own `Measurement` still appears here exactly
+    /// like an unconnected port's own packet already did before this task. `kind ==
+    /// "corrupt"`/`"duplicate"` (R4.1b's own scope) and every `FAULT_TARGET_KIND_SENSOR` fault
+    /// are still refused at load, so those two shapes still never reach a real run at all.
     pub measurements: Vec<pb::Measurement>,
     /// `docs/open-questions.md` question 175 (M25.4a): SHA-256 (lowercase hex) of the exact
     /// bytes written to this run's `PortTrafficLog` sidecar -- empty when [`RunConfig::
@@ -2792,24 +2797,55 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         if !cfg.sos.instances.iter().any(|i| i.name == f.instance) {
             return Err(DrmError::UnknownFaultInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
         }
-        // `docs/open-questions.md` question 178 (M25.4a): a PORT/SENSOR fault is a typed load
-        // refusal, not a silent no-op -- `fault::realize_unapplied_fault` already has the
-        // seeded-draw realization logic for these two kinds, but nothing in this executor ever
-        // called it, so through M25.4a such a fault simply never applied, with no error and no
-        // trace in `RunProducts` at all. Checked here, before any binding or GMAT call, the
-        // same "checked up front" pattern `DrmError::UnknownFaultInstance`/
-        // `FaultEpochNotOnSampleGrid` (immediately above/below) already follow.
-        if f.target_kind == FaultTargetKind::Port as i32 || f.target_kind == FaultTargetKind::Sensor as i32 {
-            return Err(DrmError::PortOrSensorFaultNotYetSupported {
-                fault_id: f.id.clone(),
-                instance: f.instance.clone(),
-                target_kind: FaultTargetKind::try_from(f.target_kind).map(|k| k.as_str_name().to_string()).unwrap_or_else(|_| format!("<unknown FaultTargetKind {}>", f.target_kind)),
-            });
+        // `docs/open-questions.md` question 178: a SENSOR fault is still a typed load refusal,
+        // not a silent no-op -- the sensor fault runtime is task R4.2's own scope, not this
+        // crate's today. Checked here, before any binding or GMAT call, the same "checked up
+        // front" pattern `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`
+        // (immediately above/below) already follow.
+        if f.target_kind == FaultTargetKind::Sensor as i32 {
+            return Err(DrmError::PortOrSensorFaultNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), target_kind: FaultTargetKind::Sensor.as_str_name().to_string() });
+        }
+        // R4.1a (question 178): PORT now has a real runtime for two of its four documented
+        // kinds -- `crate::router::Router::install_port_faults` (below, once `router` and
+        // `scenario` both exist) does the REST of a PORT fault's own load-time validation
+        // (declared port, FRAMED/BYTE_STREAM, seed, delay_s, rate, clear); this loop's own job is
+        // only to sort a PORT fault's `kind` into one of its three distinct outcomes before that
+        // call ever runs, each a typed refusal named for exactly what is wrong: outside ADR-005
+        // section 5's whole vocabulary ([`DrmError::UnknownPortFaultKind`]), inside it but not
+        // yet implemented by this crate ([`DrmError::PortFaultKindNotYetSupported`], naming
+        // R4.1b), or implemented (`"drop"`/`"delay"`), in which case this loop does nothing
+        // further -- in particular, it does NOT apply the DYNAMICS/HARDWARE sample-grid check
+        // below: a PORT fault splits no segment, so it need not land on that grid
+        // (`crate::router`'s own module doc comment, "Port fault runtime," "Epoch grid").
+        if f.target_kind == FaultTargetKind::Port as i32 {
+            if !fault::PORT_KINDS.contains(&f.kind.as_str()) {
+                return Err(DrmError::UnknownPortFaultKind { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
+            }
+            if f.kind == "corrupt" || f.kind == "duplicate" {
+                return Err(DrmError::PortFaultKindNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
+            }
+            continue;
         }
         if (f.target_kind == FaultTargetKind::Dynamics as i32 || f.target_kind == FaultTargetKind::Hardware as i32) && (f.tai_ns - scenario.start_tai_ns) % output_period_ns != 0 {
             return Err(DrmError::FaultEpochNotOnSampleGrid { fault_id: f.id.clone(), tai_ns: f.tai_ns, sample_interval_s: options.sample_interval_s });
         }
     }
+    // R4.1a (question 178): resolve and install every FAULT_TARGET_KIND_PORT fault (kind ==
+    // "drop"/"delay" -- the loop just above already refused every other PORT shape) onto
+    // `router` -- see `crate::router`'s own module doc comment's "Port fault runtime" section
+    // for the full validation this performs (declared port, FRAMED/BYTE_STREAM, seed, delay_s,
+    // rate, clear). Before any binding or GMAT call, and before Pass 1's own classification --
+    // `router` (built above, right after the canonical hash checks) already has every declared
+    // port's own PortKind, from every `SosConfiguration.instances` entry's own `SystemDefinition`,
+    // so nothing further needs to happen first. `RouterError::MissingFaultSeed` is mapped to the
+    // crate-wide `DrmError::MissingFaultSeed` (reusing the existing variant, per this crate's own
+    // convention for a seed check -- ADR-004 "seeds are logged inputs"); every other `RouterError`
+    // wraps generically through `DrmError::Router`, the same way `Router::build`'s own connection
+    // validation already does, immediately above.
+    router.install_port_faults(&scenario.faults, &scenario.seeds).map_err(|e| match e {
+        crate::router::RouterError::MissingFaultSeed { fault_id } => DrmError::MissingFaultSeed { fault_id },
+        other => DrmError::Router(other),
+    })?;
 
     // Question 97: every `Scenario.events` entry is parsed as a typed maneuver, EXCEPT a
     // `kind == "command"` entry (M25.2, `docs/sil-plan.md`'s M25 milestone), which gets `command::
@@ -3210,6 +3246,23 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     if dropped_in_flight_messages > 0 {
         all_events.push(events::dropped_messages_event(scenario.end_tai_ns, dropped_in_flight_messages, &computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id));
     }
+
+    // R4.1a (question 178): every PORT fault `router` genuinely applied at least once (a frame
+    // actually dropped or delayed) becomes exactly one EVENT_KIND_FAULT event, at the epoch of
+    // its own first real effect -- see `crate::router::Router::take_applied_port_faults`'s own
+    // doc comment and `events::port_fault_event`'s own doc comment for why PORT gets its own
+    // builder instead of reusing `events::fault_event`. Read once, here, alongside
+    // `pending_count` (both only make sense once every span of the run has finished; the
+    // covariance path never drives `router` at all, so this is always empty there, honestly,
+    // exactly like `dropped_in_flight_messages` above).
+    for applied in router.take_applied_port_faults() {
+        let fault = scenario.faults.iter().find(|f| f.id == applied.fault_id).expect("Router only ever reports a fault id it was itself installed with, from scenario.faults");
+        let instance = cfg.sos.instances.iter().find(|i| i.name == applied.instance).expect("Router only ever reports an instance its own port_kinds table knows, built from cfg.sos.instances");
+        let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
+        let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
+        all_events.push(events::port_fault_event(fault, applied.applied_tai_ns, events::event_provenance(&computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id, sys_hash, &sys.id)));
+    }
+
     all_events.sort_by_key(events::epoch_id_order);
 
     // Question 175 (M25.4a): every FRAMED/BYTE_STREAM frame this run's `router` carried, taken

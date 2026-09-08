@@ -283,6 +283,32 @@ pub fn fault_event(fault: &Fault, instance: &str, provenance: Provenance) -> Eve
     }
 }
 
+/// One `EVENT_KIND_FAULT` event for a `FAULT_TARGET_KIND_PORT` fault (`kind == "drop"`/`"delay"`)
+/// `crate::router::Router` genuinely applied at least once (question 178, R4.1a) -- see
+/// `crate::router`'s own module doc comment's "Port fault runtime" section, "Events," for why
+/// this is a separate builder from [`fault_event`] rather than a reuse of it: a PORT fault has no
+/// single discrete "changed a parameter" epoch the way a DYNAMICS fault's own `Fault.tai_ns`
+/// already is (it recurs, gated per candidate frame, over a whole window) -- so the one event
+/// this executor emits per PORT fault records the epoch of its FIRST genuinely applied frame
+/// (`applied_tai_ns`, from `crate::router::AppliedPortFault`), never the window's own declared
+/// start (`fault.tai_ns`) and never one entry per frame (question 137's "record changes only").
+/// `values` is `fault.params` verbatim, same as [`fault_event`] -- so `event.<fault id>.
+/// values.rate`/`.delay_s` are both readable from the real event, not only the declared DRM.
+pub fn port_fault_event(fault: &Fault, applied_tai_ns: i64, provenance: Provenance) -> Event {
+    Event {
+        id: format!("fault:{}", fault.id),
+        entity_id: fault.instance.clone(),
+        tai_ns: applied_tai_ns,
+        kind: EventKind::Fault as i32,
+        name: fault.id.clone(),
+        detail: format!("FAULT_TARGET_KIND_PORT fault {:?} (kind {:?}) on instance {:?} port {:?} first applied at tai_ns={applied_tai_ns}", fault.id, fault.kind, fault.instance, fault.target),
+        values: fault.params.clone(),
+        reference_id: fault.id.clone(),
+        provenance: Some(provenance),
+        ..Default::default()
+    }
+}
+
 /// M25.1 (`docs/sil-plan.md`'s M25 milestone; `EVENT_KIND_CONTACT_START`/`_END` already exist in
 /// `trajectory.proto`): a ground-station visibility transition (`crate::drm::ground::
 /// GroundStationModel::step_with_ports`'s own reserved [`crate::drm::ground::
@@ -413,7 +439,21 @@ pub fn declared_events(scenario: &Scenario, instance_names: &[String], maneuvers
         // shape that really does reach a real run -- without this, a `MeasureOfEffectiveness`
         // expression naming this event by name would fail load-time typecheck even though the
         // real run goes on to produce it.
-        if f.target_kind != FaultTargetKind::Dynamics as i32 && !fault::is_container_power_cycle(f) {
+        //
+        // R4.1a (question 178): a `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/`"delay"`
+        // is included too, for the identical reason -- `crate::router::Router` now genuinely
+        // applies it (see that module's own "Port fault runtime" doc section), so a
+        // `MeasureOfEffectiveness` naming its event must see it at load time too. This is
+        // deliberately narrower than "every PORT fault": `kind == "corrupt"`/`"duplicate"` (or
+        // anything outside ADR-005 section 5's vocabulary) is refused at load by `execute()`
+        // BEFORE this function's own caller ever runs, so a real run never reaches that shape --
+        // including it here would advertise an event no real run could ever produce. This is the
+        // one deliberate case `declared_events_skips_a_fault_outside_the_executed_span`'s own
+        // `"not_dynamics"` PORT fixture (`kind` left at its proto zero value, `""`) still,
+        // correctly, stays excluded: `""` is not `"drop"`/`"delay"`, so it is filtered out by
+        // `kind`, not merely by `target_kind` -- see that test's own updated comment.
+        let is_applicable_port_fault = f.target_kind == FaultTargetKind::Port as i32 && matches!(f.kind.as_str(), "drop" | "delay");
+        if f.target_kind != FaultTargetKind::Dynamics as i32 && !fault::is_container_power_cycle(f) && !is_applicable_port_fault {
             continue;
         }
         if f.tai_ns <= scenario.start_tai_ns || f.tai_ns >= scenario.end_tai_ns {
@@ -475,6 +515,33 @@ mod tests {
         assert_eq!(e.kind, EventKind::Fault as i32);
         assert_eq!(e.tai_ns, 5_000_000_000);
         assert_eq!(e.values.get("value"), Some(&5.0));
+    }
+
+    /// [`port_fault_event`]'s own unit test (question 178, R4.1a): `tai_ns`/`reference_id`/`name`
+    /// come from `applied_tai_ns`/`fault.id`, NOT `fault.tai_ns` (the window's declared start) --
+    /// the whole point of a separate builder from [`fault_event`]. Fails against an
+    /// implementation that reuses `fault.tai_ns` for the event's own epoch (would see `10_000`,
+    /// not the real applied epoch `12_345`).
+    #[test]
+    fn port_fault_event_uses_the_applied_epoch_not_the_faults_own_declared_window_start() {
+        let fault = Fault {
+            id: "f_drop".to_string(),
+            tai_ns: 10_000,
+            target_kind: FaultTargetKind::Port as i32,
+            instance: "ground".to_string(),
+            target: "cmd_out".to_string(),
+            kind: "drop".to_string(),
+            params: BTreeMap::from([("rate".to_string(), 0.5)]),
+            ..Default::default()
+        };
+        let e = port_fault_event(&fault, 12_345, Provenance::default());
+        assert_eq!(e.id, "fault:f_drop");
+        assert_eq!(e.name, "f_drop");
+        assert_eq!(e.reference_id, "f_drop");
+        assert_eq!(e.entity_id, "ground");
+        assert_eq!(e.kind, EventKind::Fault as i32);
+        assert_eq!(e.tai_ns, 12_345, "must be the applied epoch, not fault.tai_ns (10_000)");
+        assert_eq!(e.values.get("rate"), Some(&0.5));
     }
 
     /// [`port_command_event`]'s own unit test (question 130): every one of the five required
@@ -549,6 +616,13 @@ mod tests {
                 Fault { id: "in_range".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "before_start".to_string(), tai_ns: -1, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "at_or_after_end".to_string(), tai_ns: 10_000_000_000, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
+                // R4.1a (question 178): this fixture's own `kind` is left at its proto zero
+                // value (`""`), never set to `"drop"`/`"delay"` -- so, deliberately revisited
+                // (not merely left as-is), this stays excluded because its `kind` does not match
+                // either applicable PORT kind, NOT merely because `target_kind != Dynamics` --
+                // see `an_in_range_applicable_port_fault_is_included_but_an_unimplemented_kind_
+                // is_not`, immediately below, for the case where `target_kind == Port` really
+                // IS included.
                 Fault { id: "not_dynamics".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, instance: "veh".to_string(), ..Default::default() },
             ],
             ..Default::default()
@@ -558,6 +632,34 @@ mod tests {
         assert_eq!(events.len(), 3);
         assert!(events.iter().any(|e| e.name == "in_range" && e.kind == EventKind::Fault as i32));
         assert!(!events.iter().any(|e| e.name == "before_start" || e.name == "at_or_after_end" || e.name == "not_dynamics"));
+    }
+
+    /// R4.1a (question 178): an in-range `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/
+    /// `"delay"` IS included in `declared_events` now (unlike the `""`-kind PORT fixture in the
+    /// test just above, which stays excluded on `kind` alone) -- `crate::router::Router` really
+    /// does apply these now, so a `MeasureOfEffectiveness` naming the event must see it at load
+    /// time. A `"corrupt"` PORT fault (R4.1b's own, not-yet-implemented scope) stays excluded:
+    /// `execute()`'s own load-time loop refuses that shape before a real run could ever reach it,
+    /// so declaring the event here would advertise something no real run could produce. Fails
+    /// against an implementation that still filters PORT out unconditionally (the pre-R4.1a
+    /// behaviour) or one that includes every PORT kind indiscriminately (the `"corrupt"` fixture
+    /// would then wrongly appear too).
+    #[test]
+    fn an_in_range_applicable_port_fault_is_included_but_an_unimplemented_kind_is_not() {
+        let scenario = Scenario {
+            start_tai_ns: 0,
+            end_tai_ns: 10_000_000_000,
+            faults: vec![
+                Fault { id: "port_drop".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "drop".to_string(), instance: "veh".to_string(), ..Default::default() },
+                Fault { id: "port_delay".to_string(), tai_ns: 6_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "delay".to_string(), instance: "veh".to_string(), ..Default::default() },
+                Fault { id: "port_corrupt".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "corrupt".to_string(), instance: "veh".to_string(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let events = declared_events(&scenario, &["veh".to_string()], &[], ExecutionErrorMode::Nominal);
+        assert!(events.iter().any(|e| e.name == "port_drop" && e.kind == EventKind::Fault as i32), "{events:?}");
+        assert!(events.iter().any(|e| e.name == "port_delay" && e.kind == EventKind::Fault as i32), "{events:?}");
+        assert!(!events.iter().any(|e| e.name == "port_corrupt"), "{events:?}");
     }
 
     /// M16.2 (question 120): a container power cycle is `FAULT_TARGET_KIND_HARDWARE` now, and a

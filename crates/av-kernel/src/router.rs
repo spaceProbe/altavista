@@ -72,13 +72,123 @@
 //! maintained tap. See [`Router::deliver`]'s own doc comment for exactly what is and is not
 //! recorded, [`Router::begin_step`] for the `sequence` field's own source, and
 //! [`Router::take_port_traffic`] for how a caller drains what has been recorded so far.
+//!
+//! ## Port fault runtime (`docs/open-questions.md` question 178, ADR-005 sec 5, R4.1a)
+//!
+//! [`Router::install_port_faults`] resolves every `FAULT_TARGET_KIND_PORT` fault of `kind ==
+//! "drop"` or `"delay"` -- the two kinds this task builds; `"corrupt"`/`"duplicate"` are R4.1b's
+//! own scope, on the identical machinery -- into an `InstalledPortFault`, and [`Router::
+//! deliver`] is where every one of them actually acts, since it is already this crate's one
+//! choke point for every frame a run carries (this module's own doc comment, above).
+//! `crate::drm::executor::execute` calls `install_port_faults` once, after [`Router::build`],
+//! with `Scenario.faults` filtered to `FAULT_TARGET_KIND_PORT` and `Scenario.seeds` -- before any
+//! binding or GMAT call, the same "checked up front" pattern every other load-time refusal in
+//! this crate follows.
+//!
+//! **Matching.** A PORT fault matches the EMITTING pair `(Fault.instance, Fault.target)` --
+//! `Fault.target` names the port, not a `Connection`. `install_port_faults` validates, at load,
+//! that the named instance actually declares that port (via this Router's own `port_kinds`,
+//! already built by [`Router::build`] from every `SosConfiguration.instances` entry's own
+//! `SystemDefinition`, not merely the ports a `Connection` happens to name) and that its own
+//! `PortKind` is FRAMED or BYTE_STREAM -- [`Router::deliver`] never records or delivers anything
+//! else, so a fault naming a SIGNAL/CDM port would have nothing to act on. Either failure is a
+//! distinct typed [`RouterError`], never a silent no-op.
+//!
+//! **Window.** `[Fault.tai_ns, Fault.tai_ns + duration_ns)`, half-open, compared against the
+//! frame's own emission epoch (never the receiver's later arrival epoch). `duration_ns == 0`
+//! means persistent to the end of the run, per the proto's own `Fault.duration_ns` doc comment.
+//! **`Fault.clear == true` on a PORT fault is refused** ([`RouterError::
+//! PortFaultClearNotSupported`]), not honoured: which field would tie a later "clear" `Fault` to
+//! the earlier one it ends -- the same `id` at a later `tai_ns`? a shared `instance`/`target`?
+//! something else? -- is undefined by both the proto and ADR-005 section 5, and guessing would
+//! silently become an unreviewed part of the contract the moment a caller relied on it. Refusing
+//! it, typed, keeps that decision open for the manager rather than baking in a guess (see this
+//! crate's own `R4_1A_REPORT.md` for the escalation).
+//!
+//! **Rate and the seeded stream (question 137-style per-fault substreams).** `Fault.params
+//! ["rate"]` is the per-candidate-frame probability the fault actually applies, in `[0.0, 1.0]`
+//! ([`RouterError::InvalidPortFaultRate`] otherwise); absent means `1.0` (every frame in the
+//! window). Every PORT fault requires its own `Scenario.seeds[fault.id]` entry, checked at load
+//! ([`RouterError::MissingFaultSeed`], which `crate::drm::executor::execute` maps to the
+//! crate-wide `crate::drm::DrmError::MissingFaultSeed`) -- **even at `rate == 1.0`**: uniform and
+//! honest, so declaring a `"rate"` later never changes whether a DRM loads. `install_port_faults`
+//! constructs exactly one [`crate::rng::Pcg64`] per installed fault, once, from that seed; every
+//! candidate frame on the fault's own `(instance, port)` inside its window draws exactly one
+//! `bernoulli(rate)` from that fault's own stream, in [`Router::deliver`]'s own deterministic
+//! per-message order -- **even at `rate == 1.0`**, so a run's own stream position, and therefore
+//! every OTHER fault's own draws, never depends on any one fault's realized outcome. Two PORT
+//! faults never share a stream (each gets its own `Pcg64`, seeded independently from its own
+//! `Scenario.seeds` entry), so changing one fault's seed changes only that fault's own outcomes
+//! -- pinned directly, with many candidate frames and a hand-computed reference stream, by this
+//! module's own `mod tests`.
+//!
+//! **What the log records ("keep the OUT, gate the IN").** `"drop"` suppresses delivery AND
+//! every IN [`PortTrafficRecord`] for the affected message, but KEEPS the OUT record -- the
+//! emitter genuinely emitted; the router is what dropped it. This is the SAME rule this module
+//! already applies to a message on a port with no `Connection` at all ([`Router::deliver`]'s own
+//! doc comment: "a FRAMED port with no connection still gets an OUT record and no IN record") --
+//! a drop fault is simply another reason delivery does not happen, recorded identically. This is
+//! also what keeps replay of the EMITTING instance honest: replay plays back OUT frames, and an
+//! interior gap in the emitter's own OUT record sequence would trip the missing-frame refusal for
+//! the wrong reason (`crate::drm::replay`'s own module doc comment). `"delay"` leaves BOTH
+//! records exactly as an unfaulted delivery would -- `PortTrafficRecord.tai_ns` is always the
+//! emission epoch, for the IN record too ([`Router::deliver`]'s own doc comment), so a fault delay
+//! never appears there at all -- but the *delivered* [`av_cdm::pb::PortMessage`]'s own
+//! availability epoch is later: `Fault.params["delay_s"]` (seconds, `f64`, required for `kind ==
+//! "delay"` -- [`RouterError::MissingPortFaultDelay`] if absent) converts to ns and is ADDED to
+//! that connection's own already-declared latency (this module's own "Link model" section,
+//! above), for every edge the emitting port connects to alike (a port-level fault, not a
+//! per-connection one) -- question 110's existing delivery rule then applies completely
+//! unchanged: available at emission plus TOTAL latency (connection latency + fault delay),
+//! delivered at the first receiver step at or after that, never earlier.
+//!
+//! **Multiple applicable faults on one port.** Every installed PORT fault whose `(instance,
+//! port)` matches and whose window contains the emission epoch draws, unconditionally (the
+//! determinism rule above) -- there is no short-circuit on an earlier fault's own outcome. A drop
+//! from ANY applying fault drops the message; delays from every applying fault sum. This crate's
+//! own fixtures never declare two PORT faults on the identical `(instance, port)` with
+//! overlapping windows, so this combination is implemented for internal consistency (no fault's
+//! own draw is skipped just because an earlier one already decided the frame's fate) but not
+//! exercised by a test -- see `R4_1A_REPORT.md`.
+//!
+//! **Events ("one per fault, at its first real effect").** Every PORT fault [`Router::deliver`]
+//! genuinely applies at least once (a frame actually dropped or delayed, not merely a frame that
+//! passed through its declared window) is drained, once, by [`Router::take_applied_port_faults`]
+//! -- one `AppliedPortFault` per fault id, carrying the epoch of its FIRST applied frame, never
+//! one entry per frame. `crate::drm::executor::execute` turns each into exactly one
+//! `EVENT_KIND_FAULT` `Event` (`crate::drm::events::port_fault_event`), `reference_id = Fault.id`
+//! (the proto's own `Event.reference_id` doc comment: "for faults: the Fault id in the DRM"). A
+//! fault that never actually applies (its window never coincided with a real frame, or `rate <
+//! 1.0` and every draw missed) produces no event at all -- symmetric with a DYNAMICS fault
+//! outside its executed span (`crate::drm::events::declared_events`). This is a deliberate choice
+//! among several honest options (one event per applied frame; one per fault regardless of
+//! whether it ever fired) -- "first real effect" is what keeps a drop fault active for hundreds
+//! of steps from producing hundreds of indistinguishable events (`docs/open-questions.md`
+//! question 137's "record changes only" rule, applied here the same way `crate::drm::events`'s
+//! own `EVENT_KIND_PORT_COMMAND`/`EVENT_KIND_CONTACT_START`/`_END` already apply it to a
+//! continuously-driven signal) while still being real (never fabricated for a fault that had no
+//! effect). **`PortTrafficRecord` itself carries no attribute tying a record back to the fault
+//! that caused it** -- deliberately: the join is `(tai_ns, instance, port)` plus the fault's own
+//! declared window, entirely derivable from the DRM a replay already has (mirrors this module's
+//! own "the arrival epoch is derivable, not stored twice" reasoning for latency). If two PORT
+//! faults on the same port ever had overlapping windows, that join *would* become genuinely
+//! ambiguous -- see the "escalations" section of `R4_1A_REPORT.md`.
+//!
+//! **Epoch grid.** Unlike a DYNAMICS/HARDWARE fault (which must land on the trajectory's own
+//! output sampling grid, since it splits a real propagation segment), a PORT fault's own
+//! `Fault.tai_ns`/`duration_ns` need NOT land on that grid: it splits no segment, only gates
+//! individual frames already flowing through `Router::deliver` at their own real emission epochs
+//! -- `crate::drm::executor::execute`'s own load-time loop does not apply
+//! `DrmError::FaultEpochNotOnSampleGrid` to a PORT fault, pinned by
+//! `tests/port_faults.rs::a_port_fault_off_the_sample_grid_still_loads_and_applies`.
 
 use std::collections::BTreeMap;
 
-use av_cdm::pb::{Connection, Port, PortDirection, PortKind, PortTrafficRecord, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Connection, Fault, FaultTargetKind, Port, PortDirection, PortKind, PortTrafficRecord, SosConfiguration, SystemDefinition};
 use av_dynamics::Outbox;
 
 use crate::ports::{sorted_inbox, Inbox, QueuedMessage};
+use crate::rng::{seed_for, Pcg64};
 
 /// The one named link model phase one implements (see the module doc comment's "Link model"
 /// section). Any other non-empty `Connection.link_model` is [`RouterError::UnsupportedLinkModel`].
@@ -107,6 +217,38 @@ pub enum RouterError {
     /// doc comment's "Link model" section) -- question 108's "a link_model naming anything else
     /// is a typed refusal".
     UnsupportedLinkModel { connection_index: usize, link_model: String },
+    /// A `FAULT_TARGET_KIND_PORT` fault's own `target` named no declared port of `instance`'s
+    /// own `SystemDefinition` -- question 178, [`Router::install_port_faults`]'s own "validate at
+    /// load that the instance declares that port" rule.
+    UndeclaredPortFaultTarget { fault_id: String, instance: String, port: String },
+    /// A `FAULT_TARGET_KIND_PORT` fault named a real, declared port whose own `PortKind` is
+    /// neither FRAMED nor BYTE_STREAM -- [`Router::deliver`] only ever records/delivers frames on
+    /// those two kinds, so a fault naming a SIGNAL/CDM port would have nothing to act on.
+    PortFaultTargetNotFramed { fault_id: String, instance: String, port: String, kind: String },
+    /// A `FAULT_TARGET_KIND_PORT` fault's own `kind` was not `"drop"` or `"delay"` -- the two
+    /// kinds this Router's own runtime implements (R4.1a; `"corrupt"`/`"duplicate"` are R4.1b's
+    /// own scope, and anything else is outside ADR-005 section 5's vocabulary entirely).
+    /// `crate::drm::executor::execute`'s own load-time loop refuses `"corrupt"`/`"duplicate"`
+    /// earlier, with a message naming R4.1b specifically, so a caller going through `execute()`
+    /// only ever reaches this variant for a kind outside the whole documented vocabulary; a
+    /// caller reaching [`Router::install_port_faults`] directly (as this module's own unit tests
+    /// do) gets it for any unimplemented kind.
+    UnsupportedPortFaultKind { fault_id: String, kind: String },
+    /// `kind == "delay"` but `Fault.params` has no `"delay_s"` entry -- required, never defaulted
+    /// (the module doc comment's "Rate and the seeded stream" section).
+    MissingPortFaultDelay { fault_id: String },
+    /// `Fault.params["rate"]` is set but outside `[0.0, 1.0]` -- not a valid probability.
+    InvalidPortFaultRate { fault_id: String, rate: f64 },
+    /// `Fault.clear == true` on a `FAULT_TARGET_KIND_PORT` fault -- refused, not silently
+    /// ignored. See the module doc comment's "Port fault runtime" section, "Window," for why this
+    /// design does not honour `clear` for a PORT fault.
+    PortFaultClearNotSupported { fault_id: String },
+    /// No `Scenario.seeds[fault.id]` entry for a `FAULT_TARGET_KIND_PORT` fault -- every PORT
+    /// fault requires a seed, even at `rate == 1.0` (the module doc comment's "Rate and the
+    /// seeded stream" section). `crate::drm::executor::execute` maps this one variant to
+    /// `crate::drm::DrmError::MissingFaultSeed`, reusing the crate-wide variant, rather than
+    /// wrapping it generically through `DrmError::Router` -- see that call site's own comment.
+    MissingFaultSeed { fault_id: String },
 }
 
 impl std::fmt::Display for RouterError {
@@ -130,6 +272,27 @@ impl std::fmt::Display for RouterError {
             RouterError::UnsupportedLinkModel { connection_index, link_model } => {
                 write!(f, "connection[{connection_index}]: link_model {link_model:?} is not supported yet (phase one is latency only: \"\" or {LATENCY_LINK_MODEL:?})")
             }
+            RouterError::UndeclaredPortFaultTarget { fault_id, instance, port } => {
+                write!(f, "fault {fault_id:?}: instance {instance:?} declares no port named {port:?}")
+            }
+            RouterError::PortFaultTargetNotFramed { fault_id, instance, port, kind } => {
+                write!(f, "fault {fault_id:?}: instance {instance:?} port {port:?} has kind {kind} but a PORT fault can only target a FRAMED or BYTE_STREAM port")
+            }
+            RouterError::UnsupportedPortFaultKind { fault_id, kind } => {
+                write!(f, "fault {fault_id:?}: kind {kind:?} is not a PORT fault kind this Router's runtime implements (\"drop\", \"delay\")")
+            }
+            RouterError::MissingPortFaultDelay { fault_id } => {
+                write!(f, "fault {fault_id:?}: kind \"delay\" requires params[\"delay_s\"], which is absent")
+            }
+            RouterError::InvalidPortFaultRate { fault_id, rate } => {
+                write!(f, "fault {fault_id:?}: params[\"rate\"] = {rate} is outside [0.0, 1.0]")
+            }
+            RouterError::PortFaultClearNotSupported { fault_id } => {
+                write!(f, "fault {fault_id:?}: clear = true on a FAULT_TARGET_KIND_PORT fault is not supported")
+            }
+            RouterError::MissingFaultSeed { fault_id } => {
+                write!(f, "fault {fault_id:?} needs a random draw but Scenario.seeds has no entry keyed by its id")
+            }
         }
     }
 }
@@ -140,6 +303,51 @@ struct Edge {
     to_instance: String,
     to_port: String,
     latency_ns: i64,
+}
+
+/// The two `Fault.kind` values this Router's own runtime implements (R4.1a; see the module doc
+/// comment's "Port fault runtime" section). `"corrupt"`/`"duplicate"` are R4.1b's own scope, on
+/// this identical machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortFaultKind {
+    Drop,
+    Delay,
+}
+
+/// One resolved `FAULT_TARGET_KIND_PORT` fault, built once by [`Router::install_port_faults`]
+/// from a `Fault` + its own `Scenario.seeds` entry -- see the module doc comment's "Port fault
+/// runtime" section for exactly what each field means and how [`Router::deliver`] consults it.
+#[derive(Debug, Clone)]
+struct InstalledPortFault {
+    id: String,
+    instance: String,
+    port: String,
+    kind: PortFaultKind,
+    start_tai_ns: i64,
+    /// `None` == persistent to the end of the run (`Fault.duration_ns == 0`).
+    end_tai_ns: Option<i64>,
+    rate: f64,
+    /// Only meaningful for `PortFaultKind::Delay` (`Fault.params["delay_s"]`, converted to ns).
+    delay_ns: i64,
+    rng: Pcg64,
+    /// `None` until [`Router::deliver`] first genuinely applies this fault (a frame actually
+    /// dropped or delayed); set once, to that first epoch, and never overwritten again -- see
+    /// [`Router::take_applied_port_faults`]'s own doc comment for why only the first epoch is
+    /// kept.
+    first_applied_tai_ns: Option<i64>,
+}
+
+/// One `FAULT_TARGET_KIND_PORT` fault [`Router::deliver`] genuinely applied at least once during
+/// this run -- [`Router::take_applied_port_faults`]'s own return element. See the module doc
+/// comment's "Events" section for exactly what "genuinely applied" and "first epoch only" mean.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedPortFault {
+    pub fault_id: String,
+    pub instance: String,
+    pub port: String,
+    /// The epoch of this fault's FIRST applied frame -- never the fault's own declared
+    /// `Fault.tai_ns` window start, and never repeated for a later applied frame.
+    pub applied_tai_ns: i64,
 }
 
 /// `SosConfiguration.connections` realized as a routing table, plus the pending-delivery
@@ -172,6 +380,14 @@ pub struct Router {
     /// broadcast ports) and why skipping them loses nothing. Never reset; read by
     /// [`Router::undeclared_port_emissions`].
     undeclared_port_emissions: u64,
+    /// Every `FAULT_TARGET_KIND_PORT` fault [`Router::install_port_faults`] has resolved and
+    /// installed (question 178, R4.1a) -- see the module doc comment's "Port fault runtime"
+    /// section. Empty for every Router built before this field existed and for one no caller
+    /// ever installs faults onto (`Router::empty`, every existing test that does not construct
+    /// this list). Sorted `(tai_ns, id)` at install time, so [`Router::deliver`]'s own iteration
+    /// order over faults matching one `(instance, port)` is deterministic and stable regardless
+    /// of the order `Scenario.faults` happened to declare them in.
+    port_faults: Vec<InstalledPortFault>,
 }
 
 fn direction_name(raw: i32) -> String {
@@ -275,7 +491,90 @@ impl Router {
             }
         }
 
-        Ok(Router { edges, pending: BTreeMap::new(), port_kinds, step: 0, port_traffic: Vec::new(), undeclared_port_emissions: 0 })
+        Ok(Router { edges, pending: BTreeMap::new(), port_kinds, step: 0, port_traffic: Vec::new(), undeclared_port_emissions: 0, port_faults: Vec::new() })
+    }
+
+    /// Resolve and install every `FAULT_TARGET_KIND_PORT` fault in `faults` (a caller typically
+    /// passes the whole `Scenario.faults`; every non-PORT entry is simply skipped) against
+    /// `seeds` (`Scenario.seeds`) -- question 178, R4.1a. See the module doc comment's "Port
+    /// fault runtime" section for the full contract: matching, window, rate/seed, `clear`. Called
+    /// once, by `crate::drm::executor::execute`, after [`Router::build`] and before any
+    /// binding/GMAT call; replaces whatever this Router previously had installed (idempotent for
+    /// a caller that calls it exactly once, which is every real caller today).
+    ///
+    /// All-or-nothing on error: `self.port_faults` is only ever replaced once every fault in
+    /// `faults` has validated successfully, so a caller never ends up with a partially-installed
+    /// set (mirrors [`Router::build`]'s own all-or-nothing contract for `SosConfiguration.
+    /// connections`) -- the first fault (in `(tai_ns, id)` order) that fails validation is the one
+    /// named in the returned error, and nothing after it is even checked.
+    pub fn install_port_faults(&mut self, faults: &[Fault], seeds: &BTreeMap<String, u64>) -> Result<(), RouterError> {
+        let mut relevant: Vec<&Fault> = faults.iter().filter(|f| f.target_kind == FaultTargetKind::Port as i32).collect();
+        // ADR-005 sec 5's `(epoch, id)` tie-break (`crate::drm::fault::epoch_id_order`'s own
+        // rule, restated here rather than imported to keep this module free of a dependency on
+        // `crate::drm` -- see the module doc comment's own note on layering).
+        relevant.sort_by(|a, b| (a.tai_ns, a.id.as_str()).cmp(&(b.tai_ns, b.id.as_str())));
+
+        let mut installed: Vec<InstalledPortFault> = Vec::with_capacity(relevant.len());
+        for f in relevant {
+            if f.clear {
+                return Err(RouterError::PortFaultClearNotSupported { fault_id: f.id.clone() });
+            }
+            let kind = match f.kind.as_str() {
+                "drop" => PortFaultKind::Drop,
+                "delay" => PortFaultKind::Delay,
+                other => return Err(RouterError::UnsupportedPortFaultKind { fault_id: f.id.clone(), kind: other.to_string() }),
+            };
+            let port_kind = self.port_kinds.get(&(f.instance.clone(), f.target.clone())).copied();
+            let Some(port_kind) = port_kind else {
+                return Err(RouterError::UndeclaredPortFaultTarget { fault_id: f.id.clone(), instance: f.instance.clone(), port: f.target.clone() });
+            };
+            if !matches!(port_kind, PortKind::Framed | PortKind::ByteStream) {
+                return Err(RouterError::PortFaultTargetNotFramed { fault_id: f.id.clone(), instance: f.instance.clone(), port: f.target.clone(), kind: kind_name(port_kind as i32) });
+            }
+            let rate = f.params.get("rate").copied().unwrap_or(1.0);
+            if !(0.0..=1.0).contains(&rate) {
+                return Err(RouterError::InvalidPortFaultRate { fault_id: f.id.clone(), rate });
+            }
+            let delay_ns = match kind {
+                PortFaultKind::Delay => {
+                    let delay_s = f.params.get("delay_s").copied().ok_or_else(|| RouterError::MissingPortFaultDelay { fault_id: f.id.clone() })?;
+                    (delay_s * 1e9).round() as i64
+                }
+                PortFaultKind::Drop => 0,
+            };
+            let seed = seed_for(seeds, &f.id).ok_or_else(|| RouterError::MissingFaultSeed { fault_id: f.id.clone() })?;
+            let end_tai_ns = if f.duration_ns == 0 { None } else { Some(f.tai_ns + f.duration_ns) };
+            installed.push(InstalledPortFault {
+                id: f.id.clone(),
+                instance: f.instance.clone(),
+                port: f.target.clone(),
+                kind,
+                start_tai_ns: f.tai_ns,
+                end_tai_ns,
+                rate,
+                delay_ns,
+                rng: Pcg64::new(seed),
+                first_applied_tai_ns: None,
+            });
+        }
+        self.port_faults = installed;
+        Ok(())
+    }
+
+    /// Drain and return every [`AppliedPortFault`] this Router genuinely applied at least once so
+    /// far (question 178, R4.1a) -- see the module doc comment's "Port fault runtime" section,
+    /// "Events," for exactly what "genuinely applied" and "first epoch only" mean.
+    /// `crate::drm::executor::execute` calls this exactly once, alongside [`Router::
+    /// pending_count`]/[`Router::take_port_traffic`], once every span of the run has finished.
+    /// **Destructive**: a fault already drained here, and never applied again before a second
+    /// call, does not reappear -- mirrors [`Router::take_port_traffic`]'s own "drain, do not
+    /// repeat" contract. A fault installed but never applied at all contributes nothing, ever
+    /// (never a zero/empty placeholder entry).
+    pub fn take_applied_port_faults(&mut self) -> Vec<AppliedPortFault> {
+        self.port_faults
+            .iter_mut()
+            .filter_map(|pf| pf.first_applied_tai_ns.take().map(|applied_tai_ns| AppliedPortFault { fault_id: pf.id.clone(), instance: pf.instance.clone(), port: pf.port.clone(), applied_tai_ns }))
+            .collect()
     }
 
     /// An empty router with no connections -- every `Outbox` handed to [`Router::deliver`] on
@@ -340,6 +639,12 @@ impl Router {
     /// this Router saw and could not classify. There is no zero-valued attribute, by design --
     /// the same convention `crate::drm::events::dropped_messages_event` already follows for
     /// in-flight messages.
+    ///
+    /// **Port faults (question 178, R4.1a).** After recording the OUT record above, this method
+    /// consults every [`Router::install_port_faults`]-installed fault matching this message's own
+    /// `(from_instance, message.port)` -- see the module doc comment's "Port fault runtime"
+    /// section for the complete contract (matching, window, rate/seed, what a "drop" vs. "delay"
+    /// fault changes about the OUT/IN records and delivery below).
     pub fn deliver(&mut self, from_instance: &str, emission_tai_ns: i64, outbox: Outbox) {
         for message in outbox.into_messages() {
             let kind = self.port_kinds.get(&(from_instance.to_string(), message.port.clone())).copied();
@@ -358,6 +663,44 @@ impl Router {
                 });
             }
 
+            // Question 178 (R4.1a): the port fault runtime -- see the module doc comment's "Port
+            // fault runtime" section for the full contract. Every installed PORT fault whose
+            // `(instance, port)` matches this emission and whose window contains
+            // `emission_tai_ns` draws exactly one `bernoulli(rate)` from its own seeded
+            // substream, UNCONDITIONALLY (even at `rate == 1.0`, even after another fault
+            // already decided this frame's fate) -- so a run's own stream position never depends
+            // on any fault's realized outcome.
+            let mut dropped = false;
+            let mut extra_delay_ns: i64 = 0;
+            for pf in &mut self.port_faults {
+                if pf.instance != from_instance || pf.port != message.port {
+                    continue;
+                }
+                if emission_tai_ns < pf.start_tai_ns || pf.end_tai_ns.is_some_and(|end| emission_tai_ns >= end) {
+                    continue;
+                }
+                let applies = pf.rng.bernoulli(pf.rate);
+                if !applies {
+                    continue;
+                }
+                if pf.first_applied_tai_ns.is_none() {
+                    pf.first_applied_tai_ns = Some(emission_tai_ns);
+                }
+                match pf.kind {
+                    PortFaultKind::Drop => dropped = true,
+                    PortFaultKind::Delay => extra_delay_ns += pf.delay_ns,
+                }
+            }
+
+            if dropped {
+                // The OUT record above already recorded the emitter's own genuine emission; a
+                // "drop" fault suppresses everything past that point -- no IN record, no
+                // delivery -- the identical "a message on a port with no connection is dropped,
+                // not an error" recording rule this module already applies, restated for a fault
+                // instead of missing wiring (module doc comment, "What the log records").
+                continue;
+            }
+
             let Some(targets) = self.edges.get(&(from_instance.to_string(), message.port.clone())) else {
                 continue;
             };
@@ -372,7 +715,11 @@ impl Router {
                         sequence: self.step,
                     });
                 }
-                let delivered = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: emission_tai_ns + edge.latency_ns, payload: message.payload.clone() };
+                // A "delay" fault's own extra_delay_ns is ADDED to this connection's own already-
+                // declared latency, for every edge alike (a port-level fault, not a per-
+                // connection one) -- question 110's existing delivery rule applies unchanged from
+                // there (module doc comment, "What the log records").
+                let delivered = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: emission_tai_ns + edge.latency_ns + extra_delay_ns, payload: message.payload.clone() };
                 self.pending.entry(edge.to_instance.clone()).or_default().push(QueuedMessage {
                     message: delivered,
                     sender_emission_tai_ns: emission_tai_ns,
@@ -947,5 +1294,261 @@ mod tests {
         router.deliver("sender", 1_000, outbox);
         assert_eq!(router.undeclared_port_emissions(), 0);
         assert_eq!(router.take_port_traffic().len(), 2);
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Port fault runtime (question 178, R4.1a) -- see the module doc comment's "Port fault
+    // runtime" section. `crates/av-kernel/tests/port_faults.rs` covers the whole `execute()`-
+    // level acceptance path (real DRMs, real events, byte-identical determinism); these are the
+    // Router-level unit tests for the mechanism itself.
+    // ------------------------------------------------------------------------------------
+
+    fn port_fault(id: &str, instance: &str, port: &str, kind: &str, tai_ns: i64, duration_ns: i64) -> Fault {
+        Fault { id: id.to_string(), tai_ns, duration_ns, target_kind: FaultTargetKind::Port as i32, instance: instance.to_string(), target: port.to_string(), kind: kind.to_string(), ..Default::default() }
+    }
+    fn with_param(mut f: Fault, key: &str, value: f64) -> Fault {
+        f.params.insert(key.to_string(), value);
+        f
+    }
+    fn seeds_with(id: &str, seed: u64) -> BTreeMap<String, u64> {
+        BTreeMap::from([(id.to_string(), seed)])
+    }
+
+    #[test]
+    fn install_port_faults_refuses_an_undeclared_port_target() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f1", "sender", "nonexistent", "drop", 0, 0);
+        let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+        assert!(matches!(err, RouterError::UndeclaredPortFaultTarget { ref fault_id, ref instance, ref port } if fault_id == "f1" && instance == "sender" && port == "nonexistent"), "{err:?}");
+    }
+
+    #[test]
+    fn install_port_faults_refuses_a_non_framed_port_target() {
+        let (sos, systems) = two_signal_instances(PortDirection::Out, PortDirection::In);
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f1", "sender", "out", "drop", 0, 0);
+        let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+        assert!(matches!(err, RouterError::PortFaultTargetNotFramed { ref fault_id, ref instance, ref port, .. } if fault_id == "f1" && instance == "sender" && port == "out"), "{err:?}");
+    }
+
+    #[test]
+    fn install_port_faults_refuses_an_unrecognized_kind() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f1", "sender", "out", "not_a_real_kind", 0, 0);
+        let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+        assert!(matches!(err, RouterError::UnsupportedPortFaultKind { ref fault_id, ref kind } if fault_id == "f1" && kind == "not_a_real_kind"), "{err:?}");
+    }
+
+    /// R4.1b's own two kinds (`"corrupt"`/`"duplicate"`) are in ADR-005 section 5's vocabulary
+    /// but not yet implemented by this Router -- at the Router level (unlike
+    /// `crate::drm::executor::execute`'s own earlier, R4.1b-specific refusal) they get the
+    /// identical generic `UnsupportedPortFaultKind` any other unimplemented kind does.
+    #[test]
+    fn install_port_faults_refuses_corrupt_and_duplicate_the_same_generic_way_at_the_router_level() {
+        let (sos, systems) = two_framed_instances();
+        for bad_kind in ["corrupt", "duplicate"] {
+            let mut router = Router::build(&sos, &systems).expect("valid connection");
+            let f = port_fault("f1", "sender", "out", bad_kind, 0, 0);
+            let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+            assert!(matches!(err, RouterError::UnsupportedPortFaultKind { ref fault_id, ref kind } if fault_id == "f1" && kind == bad_kind), "kind {bad_kind:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn install_port_faults_refuses_a_missing_seed() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f_unseeded", "sender", "out", "drop", 0, 0);
+        let err = router.install_port_faults(&[f], &BTreeMap::new()).unwrap_err();
+        assert!(matches!(err, RouterError::MissingFaultSeed { ref fault_id } if fault_id == "f_unseeded"), "{err:?}");
+    }
+
+    /// A `"delay"` fault requires `params["delay_s"]`, even at the default `rate == 1.0` -- never
+    /// defaulted silently.
+    #[test]
+    fn install_port_faults_refuses_a_delay_fault_missing_delay_s() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f1", "sender", "out", "delay", 0, 0);
+        let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+        assert!(matches!(err, RouterError::MissingPortFaultDelay { ref fault_id } if fault_id == "f1"), "{err:?}");
+    }
+
+    #[test]
+    fn install_port_faults_refuses_a_rate_outside_zero_one() {
+        let (sos, systems) = two_framed_instances();
+        for bad_rate in [-0.1, 1.1, 2.0] {
+            let mut router = Router::build(&sos, &systems).expect("valid connection");
+            let f = with_param(port_fault("f1", "sender", "out", "drop", 0, 0), "rate", bad_rate);
+            let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+            assert!(matches!(err, RouterError::InvalidPortFaultRate { ref fault_id, rate } if fault_id == "f1" && rate == bad_rate), "rate {bad_rate}: {err:?}");
+        }
+    }
+
+    /// `Fault.clear == true` on a PORT fault is refused, not silently ignored -- see the module
+    /// doc comment's "Window" section for why this design does not honour `clear`.
+    #[test]
+    fn install_port_faults_refuses_clear_true() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let mut f = port_fault("f1", "sender", "out", "drop", 0, 0);
+        f.clear = true;
+        let err = router.install_port_faults(&[f], &seeds_with("f1", 1)).unwrap_err();
+        assert!(matches!(err, RouterError::PortFaultClearNotSupported { ref fault_id } if fault_id == "f1"), "{err:?}");
+    }
+
+    /// A rate-1.0 "drop" fault whose window covers the emission suppresses the IN record AND
+    /// delivery but KEEPS the OUT record -- the module doc comment's "What the log records"
+    /// section, pinned directly. An emission OUTSIDE the fault's own window is unaffected: both
+    /// records appear and the message is delivered, proving the window bound is real, not merely
+    /// "the fault always applies once installed."
+    #[test]
+    fn a_drop_fault_suppresses_the_in_record_and_delivery_but_keeps_the_out_record() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f_drop", "sender", "out", "drop", 1_000, 1_000); // window [1000, 2000)
+        router.install_port_faults(&[f], &seeds_with("f_drop", 42)).expect("valid fault");
+
+        router.begin_step();
+        let mut inside = Outbox::new();
+        inside.push("out", 1_000, vec![9]);
+        router.deliver("sender", 1_000, inside);
+
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 1, "OUT only, no IN: {recorded:?}");
+        assert_eq!(recorded[0].direction, PortDirection::Out as i32);
+        assert_eq!(recorded[0].instance, "sender");
+        assert!(router.take_inbox("receiver", 1_000).is_empty(), "delivery must be suppressed");
+        assert!(!router.has_pending());
+
+        // Outside the fault's own window (>= 2_000): unaffected, both records, real delivery.
+        router.begin_step();
+        let mut outside = Outbox::new();
+        outside.push("out", 5_000, vec![9]);
+        router.deliver("sender", 5_000, outside);
+        let recorded2 = router.take_port_traffic();
+        assert_eq!(recorded2.len(), 2, "OUT + IN outside the fault's own window: {recorded2:?}");
+        assert_eq!(router.take_inbox("receiver", 5_000).messages().len(), 1, "delivered once the fault's window has passed");
+
+        // Applied exactly once, at the first (only) frame it actually dropped.
+        let applied = router.take_applied_port_faults();
+        assert_eq!(applied, vec![AppliedPortFault { fault_id: "f_drop".to_string(), instance: "sender".to_string(), port: "out".to_string(), applied_tai_ns: 1_000 }]);
+        assert!(router.take_applied_port_faults().is_empty(), "a second drain with nothing newly applied must be empty, not a repeat");
+    }
+
+    /// A "delay" fault's own `params["delay_s"]` is ADDED to the connection's own already-
+    /// declared latency (here zero, no `link_model`) -- pinned the same "held until, and
+    /// delivered exactly at, availability" way `take_inbox_delivers_on_the_boundary_epoch_
+    /// equal_to_availability_not_only_strictly_after` already pins the base latency case.
+    /// `duration_ns == 0` (persistent) is exercised here too: a message far past any "reasonable"
+    /// window still gets the fault.
+    #[test]
+    fn a_delay_fault_adds_its_own_delay_to_the_connections_declared_latency() {
+        let (sos, systems) = two_framed_instances(); // zero declared connection latency
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = with_param(port_fault("f_delay", "sender", "out", "delay", 0, 0 /* persistent */), "delay_s", 0.05); // 50 ms
+        router.install_port_faults(&[f], &seeds_with("f_delay", 7)).expect("valid fault");
+
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+        let available_at = 1_000 + 50_000_000;
+        assert!(router.take_inbox("receiver", available_at - 1).is_empty(), "not yet available: held");
+        let inbox = router.take_inbox("receiver", available_at);
+        assert_eq!(inbox.messages().len(), 1, "delivered exactly when as_of reaches emission + connection latency (0) + fault delay (50ms)");
+
+        // Persistent (duration_ns == 0): a message far in the future still gets the fault.
+        let far_future = 1_000_000_000_000;
+        let mut outbox2 = Outbox::new();
+        outbox2.push("out", far_future, vec![2]);
+        router.deliver("sender", far_future, outbox2);
+        assert!(router.take_inbox("receiver", far_future + 49_999_999).is_empty(), "persistent fault still applies far in the future");
+        assert_eq!(router.take_inbox("receiver", far_future + 50_000_000).messages().len(), 1);
+    }
+
+    /// Two DELAY faults installed on the SAME port both apply to the same emission: their own
+    /// delays SUM (module doc comment, "Multiple applicable faults on one port"). Both use
+    /// `rate == 1.0` (the implicit default) so the outcome is deterministic regardless of the
+    /// actual bernoulli draw (`uniform() < 1.0` is always true).
+    #[test]
+    fn two_delay_faults_on_the_same_port_sum_their_own_delays() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f1 = with_param(port_fault("f1", "sender", "out", "delay", 0, 0), "delay_s", 0.01);
+        let f2 = with_param(port_fault("f2", "sender", "out", "delay", 0, 0), "delay_s", 0.02);
+        router.install_port_faults(&[f1, f2], &BTreeMap::from([("f1".to_string(), 1u64), ("f2".to_string(), 2u64)])).expect("valid faults");
+
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_000, vec![1]);
+        router.deliver("sender", 1_000, outbox);
+        let available_at = 1_000 + 10_000_000 + 20_000_000; // 10ms + 20ms
+        assert!(router.take_inbox("receiver", available_at - 1).is_empty());
+        assert_eq!(router.take_inbox("receiver", available_at).messages().len(), 1, "both delay faults' own delays must sum, not overwrite each other");
+    }
+
+    /// The core determinism/independence claim (question 178, rule 6, "question 137-style
+    /// substreams"): two PORT faults on two DIFFERENT ports each draw from their OWN seeded
+    /// `Pcg64` stream, unconditionally, once per candidate frame -- reconstructed by hand here
+    /// (a fresh `Pcg64::new(seed)`, the same `bernoulli(rate)` calls in the same order) and
+    /// compared, exactly, against what `Router::deliver` actually decided. Run TWICE, with fault
+    /// B's own seed changed between runs: fault A's own reconstructed-and-matched sequence is
+    /// identical both times, proving its outcomes depend on nothing about fault B (not its seed,
+    /// not its presence) -- the exact property "changing one fault's seed changes only that
+    /// fault's own outcomes" requires. Fails against an implementation that shares one Pcg64
+    /// across every installed fault (fault A's sequence would shift when fault B's seed changes),
+    /// or one that skips a fault's own draw once another fault on the same candidate frame has
+    /// already decided its fate (rate would then depend on installation order).
+    #[test]
+    fn two_port_faults_on_different_ports_draw_from_independent_seeded_substreams() {
+        let sender = sys("sender_sys", vec![framed_port("p1", PortDirection::Out), framed_port("p2", PortDirection::Out)]);
+        let receiver = sys("receiver_sys", vec![framed_port("p1", PortDirection::In), framed_port("p2", PortDirection::In)]);
+        let sos = SosConfiguration {
+            instances: vec![instance("sender", "sender_sys"), instance("receiver", "receiver_sys")],
+            connections: vec![conn("sender", "p1", "receiver", "p1", ""), conn("sender", "p2", "receiver", "p2", "")],
+            ..Default::default()
+        };
+        let systems = systems_map(vec![sender, receiver]);
+
+        const SEED_A: u64 = 12345;
+        const N: i64 = 25;
+
+        fn run_with(systems: &BTreeMap<String, SystemDefinition>, sos: &SosConfiguration, seed_b: u64) -> (Vec<bool>, Vec<bool>) {
+            let mut router = Router::build(sos, systems).expect("valid connections");
+            let fa = with_param(port_fault("fA", "sender", "p1", "drop", 0, 0), "rate", 0.5);
+            let fb = with_param(port_fault("fB", "sender", "p2", "drop", 0, 0), "rate", 0.5);
+            router.install_port_faults(&[fa, fb], &BTreeMap::from([("fA".to_string(), SEED_A), ("fB".to_string(), seed_b)])).expect("valid faults");
+
+            let mut a_dropped = Vec::new();
+            let mut b_dropped = Vec::new();
+            for k in 0..N {
+                let t = k * 1_000_000;
+                let mut oa = Outbox::new();
+                oa.push("p1", t, vec![1]);
+                router.deliver("sender", t, oa);
+                a_dropped.push(router.take_inbox("receiver", t).is_empty());
+
+                let mut ob = Outbox::new();
+                ob.push("p2", t, vec![2]);
+                router.deliver("sender", t, ob);
+                b_dropped.push(router.take_inbox("receiver", t).is_empty());
+            }
+            (a_dropped, b_dropped)
+        }
+
+        fn reconstruct(seed: u64) -> Vec<bool> {
+            let mut rng = Pcg64::new(seed);
+            (0..N).map(|_| rng.bernoulli(0.5)).collect()
+        }
+
+        let (a1, b1) = run_with(&systems, &sos, 999);
+        let (a2, b2) = run_with(&systems, &sos, 111_111);
+
+        let expected_a = reconstruct(SEED_A);
+        assert_eq!(a1, expected_a, "fault A's own outcome sequence must match its own seeded stream exactly");
+        assert_eq!(a2, expected_a, "fault A's outcomes must be identical regardless of fault B's own seed -- independent substreams");
+        assert_eq!(b1, reconstruct(999), "fault B's own outcome sequence (seed 999) must match its own seeded stream exactly");
+        assert_eq!(b2, reconstruct(111_111), "fault B's own outcome sequence (seed 111_111) must match its own seeded stream exactly");
     }
 }

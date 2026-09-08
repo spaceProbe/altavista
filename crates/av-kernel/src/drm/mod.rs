@@ -486,20 +486,49 @@ pub enum DrmError {
     /// two-port (not one-port) convention.
     GroundPortConfiguration { instance: String, reason: String },
     /// `docs/open-questions.md` question 178: a `Fault` with `target_kind ==
-    /// FAULT_TARGET_KIND_PORT` or `FAULT_TARGET_KIND_SENSOR` was declared. Through M25.3,
-    /// `execute()` never called `fault::realize_unapplied_fault` at all, so a PORT/SENSOR fault
-    /// was a silent no-op -- seeded and validated by nothing, applied by nothing, and never
-    /// mentioned in `RunProducts`. Question 178 decides: until the port and sensor fault
-    /// runtimes exist (`fault`'s own module doc comment's "Integration note"), such a DRM is a
-    /// typed LOAD REFUSAL instead, checked up front in `execute()`'s own fault-validation loop
-    /// (alongside `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`), before any
-    /// binding or GMAT call. Distinct from [`DrmError::FaultTargetKindNotSupported`]: that
-    /// variant is `fault::realize_unapplied_fault`'s own *realization-time* result (seeded,
-    /// validated, and a deterministic draw computed, but nothing to apply it to) for a caller
-    /// that actually invokes it -- `execute()` has no such caller today, so this variant exists
-    /// instead, raised earlier (at load, before any seed is even looked up) and for a different
-    /// reason (a load-time policy refusal, not "I tried and there is nothing to apply this to").
+    /// FAULT_TARGET_KIND_SENSOR` was declared. Through M25.3, `execute()` never called
+    /// `fault::realize_unapplied_fault` at all, so a SENSOR fault was a silent no-op -- seeded
+    /// and validated by nothing, applied by nothing, and never mentioned in `RunProducts`.
+    /// Question 178 decided: until the sensor fault runtime exists (`fault`'s own module doc
+    /// comment's "Integration note"; that runtime is task R4.2's own scope, not this crate's
+    /// today), such a DRM is a typed LOAD REFUSAL instead, checked up front in `execute()`'s own
+    /// fault-validation loop (alongside `DrmError::UnknownFaultInstance`/
+    /// `FaultEpochNotOnSampleGrid`), before any binding or GMAT call. Distinct from
+    /// [`DrmError::FaultTargetKindNotSupported`]: that variant is `fault::
+    /// realize_unapplied_fault`'s own *realization-time* result (seeded, validated, and a
+    /// deterministic draw computed, but nothing to apply it to) for a caller that actually
+    /// invokes it -- `execute()` has no such caller today, so this variant exists instead, raised
+    /// earlier (at load, before any seed is even looked up) and for a different reason (a
+    /// load-time policy refusal, not "I tried and there is nothing to apply this to").
+    ///
+    /// **R4.1a (`crate::router`'s own module doc comment's "Port fault runtime" section) narrows
+    /// this variant to SENSOR only.** A `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/
+    /// `"delay"` now has a real runtime (`crate::router::Router::install_port_faults`/
+    /// `deliver`) and no longer reaches this variant at all; `kind == "corrupt"`/`"duplicate"`
+    /// (R4.1b's own scope, on the identical machinery) reaches [`DrmError::
+    /// PortFaultKindNotYetSupported`] instead, and any other `kind` reaches
+    /// [`DrmError::UnknownPortFaultKind`] -- see `execute()`'s own load-time fault-validation
+    /// loop for exactly how the three are told apart. `target_kind` is always
+    /// `"FAULT_TARGET_KIND_SENSOR"` now; the field is kept (rather than dropped) so this remains
+    /// the same wire/`Debug` shape it always was, for any caller already matching on it.
     PortOrSensorFaultNotYetSupported { fault_id: String, instance: String, target_kind: String },
+    /// R4.1a (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's own
+    /// `kind` was `"corrupt"` or `"duplicate"` -- both are in ADR-005 section 5's own PORT
+    /// vocabulary (`crate::drm::fault::PORT_KINDS`), but this crate's own port fault runtime
+    /// (`crate::router`) implements only `"drop"`/`"delay"` so far; `"corrupt"`/`"duplicate"` are
+    /// R4.1b's own scope, on the identical machinery R4.1a built. Distinct from
+    /// [`DrmError::UnknownPortFaultKind`] (a `kind` outside the documented vocabulary entirely)
+    /// and from [`DrmError::PortOrSensorFaultNotYetSupported`] (now SENSOR-only, which has no
+    /// runtime at all).
+    PortFaultKindNotYetSupported { fault_id: String, instance: String, kind: String },
+    /// R4.1a (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's own
+    /// `kind` was not one of ADR-005 section 5's own four documented PORT kinds
+    /// (`crate::drm::fault::PORT_KINDS`: `"drop"`, `"delay"`, `"corrupt"`, `"duplicate"`) at all --
+    /// refused at load, before any binding or GMAT call, the same "checked up front" pattern
+    /// every other fault-validation refusal in this executor follows. Distinct from
+    /// [`DrmError::PortFaultKindNotYetSupported`] (a real, documented kind this crate simply has
+    /// not implemented yet).
+    UnknownPortFaultKind { fault_id: String, instance: String, kind: String },
     /// M25.4b (question 175's own follow-on): `RunConfig.replay.log_path` could not be read,
     /// or its bytes (once hash-verified -- see [`DrmError::ReplayLogHashMismatch`]) did not
     /// decode as a `PortTrafficLog` -- `crate::drm::replay::verify_and_load`'s own doc comment
@@ -652,7 +681,15 @@ impl std::fmt::Display for DrmError {
             DrmError::GroundPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid ground station port/codec configuration: {reason}"),
             DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } => write!(
                 f,
-                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults are not realized by this kernel yet (docs/open-questions.md question 178) -- the port and sensor fault runtimes are the next kernel item, not merely \"unsupported\""
+                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults are not realized by this kernel yet (docs/open-questions.md question 178) -- the sensor fault runtime is task R4.2's own scope, not merely \"unsupported\" (a PORT fault's own \"drop\"/\"delay\" kinds DO have a runtime now, R4.1a -- see crate::router's own module doc comment)"
+            ),
+            DrmError::PortFaultKindNotYetSupported { fault_id, instance, kind } => write!(
+                f,
+                "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_PORT kind {kind:?} is in ADR-005 section 5's own vocabulary but this crate's port fault runtime (crate::router) implements only \"drop\"/\"delay\" so far -- {kind:?} is task R4.1b's own scope, on the identical machinery"
+            ),
+            DrmError::UnknownPortFaultKind { fault_id, instance, kind } => write!(
+                f,
+                "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_PORT kind {kind:?} is not one of ADR-005 section 5's own documented PORT kinds (\"drop\", \"delay\", \"corrupt\", \"duplicate\")"
             ),
             DrmError::PortTrafficSidecarIo { path, detail } => write!(f, "writing the port traffic sidecar to {}: {detail}", path.display()),
             DrmError::ReplayLogIo { path, detail } => write!(f, "replay log {}: {detail}", path.display()),
