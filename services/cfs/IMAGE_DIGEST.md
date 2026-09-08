@@ -17,13 +17,16 @@ docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .
 docker image inspect altavista-cfs-lockstep:local --format '{{.Id}}'
 ```
 
-Recorded digest (rebuilt 2026-09-06 for M24.4b -- see "Rebuilt for M24.4b" below --
-`third_party/cfs` still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see
-`third_party/fetch-cfs.sh`):
+Recorded digest (re-pinned 2026-09-08 for M25.4a / question 179 -- see "Re-pinned 2026-09-08"
+below for the named cause -- `third_party/cfs` still pinned at
+`088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:27ed4ff89dee381258a9ccb8410fa8aae19312defc79bf815ddc2e2c509d21ae
+sha256:29eb1bec64b7e826de157468c79dd82103b80d42b7debc5fa809727dea994cde
 ```
+
+Previous digest (M24.4b, 2026-09-06):
+`sha256:27ed4ff89dee381258a9ccb8410fa8aae19312defc79bf815ddc2e2c509d21ae`.
 
 Previous digest (M24.3, this file's own record was stale by the time M24.4b started --
 confirmed live: `docker image inspect altavista-cfs-lockstep:local` returned
@@ -33,10 +36,58 @@ local build already existed on this host): `sha256:baac4535533094bbfddced8637797
 
 Previous digest (M26.1 rename, superseded above): `sha256:3bae6444cbb371a79d2e4b327c21b03764c57778c215ddf4b82614642c1f5c0d`.
 
-`services/cfs/tests/test_image_digest.py` rebuilds the image (Docker's own layer cache makes a
-repeat build of an unchanged tree fast) and asserts `docker image inspect`'s `.Id` matches the
-value recorded above -- gated on `docker info` succeeding, with a printed skip reason otherwise
-(M15.3's own convention, `crates/av-lockstep/src/docker.rs::docker_available`).
+**As of M25.4a (question 179) the image is built ONLY by `services/cfs/build-image.sh`**, by
+hand, once -- that script is the one network window question 154 permits. It also writes
+`services/cfs/IMAGE_CONTEXT_MANIFEST.txt`: the SHA-256 of every host file the Dockerfile's
+`COPY` steps read from (directories expanded recursively, the COPY list parsed out of the
+Dockerfile itself so it cannot drift in a second hardcoded place). `services/cfs/tests/
+test_image_digest.py` no longer builds anything: it inspects an already-built image, skips
+visibly (naming `build-image.sh`) when Docker is absent or the image is not built, and on a
+mismatch prints which manifest entries changed so drift is attributable rather than merely
+detected. A second, non-Docker-gated test asserts the manifest itself is still accurate.
+
+## Re-pinned 2026-09-08 (M25.4a, `docs/open-questions.md` question 179): the cause, named
+
+Question 179 asked why the pin drifted "with an untouched source tree". It is not the build
+context, and the manifest proves it rather than a mtime argument alone: the build-context
+manifest written by this same build (38 file entries across the 11 host `COPY` paths) matches
+the tree, `git status` reports no modification to any COPYed path, and the only commit to touch
+`services/cfs/` since the previous pin (`8191ead`) merely started *tracking* three
+`services/cfs/build/*.cmake` files that a stray unanchored `build/` line in `.gitignore` had
+been swallowing -- it changed no bytes.
+
+**The cause is that this image is not reproducible by construction, and cFE says so itself.**
+`third_party/cfs/cfe/cmake/generate_build_env.cmake` lines 15-23:
+
+```
+set(BUILDDATE $ENV{BUILDDATE})
+if (NOT BUILDDATE)
+    execute_process(COMMAND date "+%Y%m%d%H%M" OUTPUT_VARIABLE BUILDDATE ...)
+endif(NOT BUILDDATE)
+```
+
+with upstream's own comment directly above it: "All 3 of these may be passed via environment
+variables to force a particular date, user, or hostname i.e. if hoping to reproduce an exact
+binary of a prior build." `BUILDDATE`, `BUILDUSER` and `BUILDHOST` are linked into cFE's
+`CONFIGDATA` object. `services/cfs/Dockerfile` sets none of them (checked: no `BUILDDATE`,
+`BUILDUSER`, `BUILDHOST` or `SOURCE_DATE_EPOCH` anywhere in the Dockerfile or under
+`services/cfs/build/`), so **every build that actually re-executes the builder stage bakes the
+current minute into `cpu1`, and the image's content-addressed `.Id` changes even when every
+COPYed byte is identical.** Two rebuilds in quick succession agree -- which is exactly the
+"deterministic (same digest twice)" observation question 179 recorded -- because they either
+land in the same minute or are served whole from Docker's layer cache; a rebuild after the
+cache has been evicted does not.
+
+The base image was excluded as the cause rather than assumed: the local `ubuntu:22.04` resolves
+to `sha256:2edbbc5dc405...`, created 2026-08-10, i.e. before the previous pin, and this build's
+log shows the second-stage `apt-get` layer served from cache while the builder stage genuinely
+re-ran.
+
+**Recommendation, not done here (it changes the image, so it is the lead's call):** set
+`BUILDDATE`, `BUILDUSER` and `BUILDHOST` to fixed values in `services/cfs/Dockerfile`, rebuild
+once, and pin that. The image would then be reproducible from an identical build context and
+the digest would stop drifting on cache eviction. Until that is decided, the pin above is
+correct for the image on this host and a future mismatch is attributable via the manifest.
 
 ## M23.4 changes since the digest above was first recorded
 
