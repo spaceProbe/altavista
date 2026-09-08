@@ -308,6 +308,14 @@ impl<M: DynamicsModel> DynamicsModel for TruthBroadcastAttitude<M> {
         let outbox = truth_outbox(q, omega, result.t_tai_ns);
         Ok((result, outbox, Vec::new()))
     }
+
+    /// Delegates to `self.inner.last_measurements` -- "every other method delegates to the
+    /// wrapped model unchanged" (this struct's own doc comment), and this is no exception: the
+    /// wrapped `AttitudeWheelsModel` never produces one today, but if a future wrapped model did,
+    /// this wrapper must not silently swallow it.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        self.inner.last_measurements()
+    }
 }
 
 // ============================================================================================

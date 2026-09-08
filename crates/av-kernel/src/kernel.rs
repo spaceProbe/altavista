@@ -802,6 +802,10 @@ mod tests {
         fn describe(&self) -> ModelInfo {
             ModelInfo { id: "test.constant_accel".to_string(), state_space_id: "test.6d".to_string(), frame_id: "test.frame".to_string(), ..Default::default() }
         }
+        // Test-only closed-form model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     /// An STM-capable, 6-state constant-acceleration model (M13.3): `x' = v`, `v' = a`
@@ -847,6 +851,10 @@ mod tests {
                 }
             }
             Ok(())
+        }
+        // Test-only closed-form STM model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
@@ -972,6 +980,10 @@ mod tests {
             outputs.insert("rmag".to_string(), rmag);
             Ok(av_dynamics::StepResult { state: out.to_vec(), t_tai_ns: t_tai_ns + dt_ns, outputs })
         }
+        // Test-only closed-form model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -1042,6 +1054,10 @@ mod tests {
                 }
             }
             Ok(())
+        }
+        // Test-only closed-form rotation model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
@@ -1306,6 +1322,10 @@ mod tests {
                 }
             }
             Ok(())
+        }
+        // Test-only closed-form rotation model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
@@ -1606,6 +1626,10 @@ mod tests {
         }
         fn describe(&self) -> ModelInfo {
             ModelInfo { id: "test.zero_dim".to_string(), ..Default::default() }
+        }
+        // Test-only zero-dimensional model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 

@@ -190,6 +190,14 @@ impl DynamicsModel for GmatFramedCommandModel {
         }
         Ok((result, outbox, applied))
     }
+
+    /// Delegates to `self.inner.last_measurements` -- this wrapper decorates command/ack
+    /// handling only; `GmatModel` never produces a CDM measurement today (see its own
+    /// `last_measurements` doc comment), but this must not silently diverge from whatever the
+    /// wrapped model reports if that ever changes.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        self.inner.last_measurements()
+    }
 }
 
 #[cfg(test)]

@@ -387,13 +387,25 @@ pub trait DynamicsModel {
     }
 
     /// CDM `Measurement`s (`docs/open-questions.md` question 173, M25.3) this model's own most
-    /// recent [`step_with_ports`](DynamicsModel::step_with_ports) call actually produced --
-    /// empty by default, for every model in this workspace that never emits telemetry mapped to
-    /// a CDM measurement (which is most of them). A model that does (a sensor whose declared
+    /// recent [`step_with_ports`](DynamicsModel::step_with_ports) call actually produced. A
+    /// model that emits telemetry mapped to a CDM measurement (a sensor whose declared
     /// `PacketCodec` fields carry a non-empty `PacketField.target`) overrides this to return
     /// what it just computed, typically cached in a `RefCell` cleared and repopulated at the top
     /// of every `step_with_ports` call (mirrors `gmat_sys::model::GmatModel::last_applied`'s own
-    /// interior-mutable "what did the last call produce" cache shape).
+    /// interior-mutable "what did the last call produce" cache shape). Every other model in this
+    /// workspace -- which is most of them -- returns `Vec::new()` explicitly, each with its own
+    /// one-line comment saying why that model produces no CDM measurement.
+    ///
+    /// **Required, not defaulted (M25.3c standing rule: no trait default that returns a valid
+    /// empty result).** Through M25.3 this had a `Vec::new()` default -- exactly the failure mode
+    /// the rule exists to prevent: a future sensor model that forgets to override it would
+    /// silently emit no telemetry, indistinguishable from "this model genuinely has none",
+    /// caught by nothing (not a compiler error, not a test, not a review diff against a method
+    /// nobody had to touch). Making it required costs every implementer one honest line and
+    /// changes no call site -- unlike widening `step_with_ports`'s own tuple (see that method's
+    /// own doc comment's "a third tuple element" section for why *that* widening is not done
+    /// lightly): a new required method on an existing trait touches only `impl` blocks, not
+    /// callers.
     ///
     /// **Why a separate method, not a fourth `step_with_ports` tuple element** (the shape
     /// `Vec<AppliedCommand>` itself took when it was added, M19.3): that widening's own
@@ -403,15 +415,10 @@ pub trait DynamicsModel {
     /// `step_with_ports` has 16 overrides and 60+ call sites across `av-dynamics`, `gmat-sys`
     /// and `av-kernel` (most of them test-only tuple destructuring, `let (result, outbox,
     /// applied) = ...`), so widening the tuple again would touch every one of them for a
-    /// capability only two models (`StarTrackerModel`/`ImuModel`, question 173) actually use.
-    /// A new default method needs zero of them to change -- exactly the "MODEL bindings get a
-    /// default no-port implementation so nothing existing changes" rule
-    /// [`step_with_ports`](DynamicsModel::step_with_ports)'s own doc comment states for itself,
-    /// applied a second time here for the identical reason, now that the blast radius of the
-    /// alternative is measured rather than assumed.
-    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
-        Vec::new()
-    }
+    /// capability only two models (`StarTrackerModel`/`ImuModel`, question 173) actually use. A
+    /// required method with no default needs none of those call sites to change -- only the
+    /// (much smaller) set of `impl DynamicsModel for ...` blocks.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement>;
 
     /// Whether this model can also propagate its own state transition matrix (STM)
     /// alongside the state (ADR-002 second amendment, `docs/adr/002-dynamics-contract.md`).
@@ -526,6 +533,11 @@ mod tests {
 
         fn describe(&self) -> av_cdm::pb::ModelInfo {
             av_cdm::pb::ModelInfo::default()
+        }
+
+        // Test-only closed-form model; never emits telemetry, so never produces a CDM measurement.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 

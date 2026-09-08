@@ -557,8 +557,24 @@ impl HeteroScheduler {
                 // like `applied` above -- `sensor_id` filled in from `id` (this model itself
                 // does not know its own instance name; see `HeteroSystemEntry::measurements`'s
                 // own doc comment).
+                //
+                // Question 176 (M25.3c), pinned by the lead: "decoding happens at the emitting
+                // sensor through its own codec, so a packet the router later drops still yields a
+                // measurement... `Measurement.meta["decoded_at"]` naming the instance." Stamped
+                // here, in the same place and for the same reason `sensor_id` is: this model
+                // computed `z`/`r` from the values it *itself* just encoded into the outbound
+                // packet a few lines above (`StarTrackerModel`/`ImuModel::step_with_ports`), before
+                // that packet is handed to `router.deliver` below -- so this measurement exists
+                // regardless of whether the router goes on to actually deliver it anywhere.
+                // `decoded_at` is the emitting instance `id`, identical to `sensor_id` today (no
+                // receiver-side decode exists yet -- that is a later task's scope, not this one's),
+                // but a distinct field because a future receiver-side `Measurement` (question 176's
+                // own "receiver... decodes... into its own measurements with its own decoded_at")
+                // would carry a *different* `sensor_id` (the model the measurement is *about*) from
+                // `decoded_at` (the instance that *decoded* it).
                 for mut measurement in sys.model.last_measurements() {
                     measurement.sensor_id = id.clone();
+                    measurement.meta.insert("decoded_at".to_string(), id.clone());
                     sys.measurements.push(measurement);
                 }
                 sys.history.prev = Some(sys.history.curr.clone());
@@ -738,6 +754,10 @@ mod tests {
         }
         fn describe(&self) -> ModelInfo {
             ModelInfo::default()
+        }
+        // Test-only closed-form model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
@@ -929,6 +949,10 @@ mod tests {
         fn describe(&self) -> av_cdm::pb::ModelInfo {
             av_cdm::pb::ModelInfo { id: "test.rotator".to_string(), ..Default::default() }
         }
+        // Test-only closed-form rotation model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     fn erased_constant_accel(model_id: &str, a: [f64; 3]) -> BoxedModel {
@@ -1036,6 +1060,10 @@ mod tests {
         fn describe(&self) -> av_cdm::pb::ModelInfo {
             av_cdm::pb::ModelInfo::default()
         }
+        // Test-only zero-dimensional model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     /// M14.4 (lifting `DrmError::ContainerPeriodExceedsSampleInterval`): [`HeteroScheduler::
@@ -1096,6 +1124,10 @@ mod tests {
             }
             fn describe(&self) -> av_cdm::pb::ModelInfo {
                 av_cdm::pb::ModelInfo::default()
+            }
+            // Test-only failing model; never emits telemetry.
+            fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+                Vec::new()
             }
         }
         let boxed: BoxedModel = av_dynamics::erase_with_id("test.always_fails", AlwaysFails, |model_id, detail| ModelError::Numerical { model_id, detail });

@@ -392,6 +392,16 @@ pub struct RunProducts {
     /// measurements`'s own proto doc comment states this ordering as part of the contract) --
     /// [`sort_measurements`] is the one place this crate imposes it. Empty, never synthesized,
     /// for a packet whose declared codec maps no field.
+    ///
+    /// **Drop semantics (M25.3c, pinned by `crates/av-kernel/tests/demo_measurements.rs`'s own
+    /// "Work item 3" section):** a `Measurement` is decoded at the emitting instance's own
+    /// `step_with_ports` call, before the packet ever reaches `crate::router::Router`, so a
+    /// telemetry packet the router later never delivers (no declared `Connection` for
+    /// its port, or a `"latency"` connection whose delivery never lands before the run ends) still
+    /// contributes its `Measurement` here -- and, as of this task, a declared PORT-targeted
+    /// `"drop"` fault (`av_cdm::pb::FaultTargetKind::Port`) has no effect on this field at all,
+    /// since `execute()` does not realize PORT/SENSOR faults yet (`crate::drm::fault`'s own module
+    /// doc comment).
     pub measurements: Vec<pb::Measurement>,
 }
 

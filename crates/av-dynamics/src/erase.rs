@@ -203,6 +203,10 @@ mod tests {
         fn describe(&self) -> av_cdm::pb::ModelInfo {
             av_cdm::pb::ModelInfo { id: "test.flaky".to_string(), ..Default::default() }
         }
+        // A synthetic error-path model; never emits telemetry mapped to a CDM measurement.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -263,6 +267,11 @@ mod tests {
             outputs.insert("marker".to_string(), 42.0);
             Ok(StepResult { state: state.to_vec(), t_tai_ns: t_tai_ns + dt_ns, outputs })
         }
+        // This model's own override is about StepResult.outputs, not telemetry -- no CDM
+        // measurement here.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -305,6 +314,10 @@ mod tests {
             outbox.push_signal("out", stepped.t_tai_ns, 7.0);
             let applied = vec![AppliedCommand { port: "in".to_string(), field: "marker_field".to_string(), value: 3.0, applied_tai_ns: t_tai_ns }];
             Ok((stepped, outbox, applied))
+        }
+        // This model's own override is about port traffic, not telemetry -- no CDM measurement.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
@@ -396,6 +409,12 @@ mod tests {
             let applied = vec![AppliedCommand { port: "all_overridden_in".to_string(), field: "all_overridden_field".to_string(), value: 66.0, applied_tai_ns: t_tai_ns }];
             Ok((StepResult { state: state.to_vec(), t_tai_ns: t_tai_ns + dt_ns, outputs: std::collections::BTreeMap::new() }, outbox, applied))
         }
+        // A marker measurement no default/inherited path could produce by coincidence -- the
+        // `last_measurements` counterpart of every other `..._marker`/distinguishable-value
+        // override above (question 173, M25.3c: this method is now required, not defaulted).
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            vec![av_cdm::pb::Measurement { measurement_id: "all_overridden_measurement".to_string(), z: vec![123.0], epoch_ns: 0, sensor_id: String::new(), frame_id: String::new(), ..Default::default() }]
+        }
     }
 
     fn all_overridden_boxed() -> BoxedModel {
@@ -466,6 +485,21 @@ mod tests {
         assert_eq!(sent[0].port, "all_overridden_port");
         assert_eq!(applied.len(), 1, "must reach AllOverridden::step_with_ports's own applied-commands override, not the trait default's empty Vec");
         assert_eq!(applied[0].field, "all_overridden_field");
+    }
+
+    /// M25.3c: `ErasedModel::last_measurements` must reach the wrapped model's own override, not
+    /// silently fall back to some other empty result -- the identical delegation-recurring-defect
+    /// concern this file's own "Full per-method delegation coverage" section doc comment
+    /// describes for `step`/`step_with_stm`/`step_with_ports`, now proven for the newest trait
+    /// method too. Fails against an `ErasedModel::last_measurements` that returns `Vec::new()`
+    /// unconditionally instead of delegating to `self.inner.last_measurements()`.
+    #[test]
+    fn erased_model_reaches_inner_last_measurements() {
+        let boxed = all_overridden_boxed();
+        let got = boxed.last_measurements();
+        assert_eq!(got.len(), 1, "must reach AllOverridden::last_measurements's own override, not the wrong empty result");
+        assert_eq!(got[0].measurement_id, "all_overridden_measurement");
+        assert_eq!(got[0].z, vec![123.0]);
     }
 
     #[test]

@@ -563,6 +563,13 @@ impl DynamicsModel for ConstantAccelModel {
         }
         Ok((result, outbox, applied))
     }
+
+    // `emit_framed` above encodes a raw CCSDS packet (x/y/z) but its codec declares no
+    // `PacketField.target` -- this model never calls `crate::codec::measurements_from_field_values`
+    // and so never produces a CDM measurement.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -878,10 +885,16 @@ impl DynamicsModel for AnyModel {
 
     /// Delegates to each variant's own `last_measurements` (question 173, M25.3) -- only
     /// `StarTracker`/`Imu` ever return anything non-empty today; every other variant's own
-    /// `last_measurements` is the trait's inherited default (`Vec::new()`), reached honestly
-    /// here rather than `AnyModel` itself silently short-circuiting to empty for everything.
-    /// See `AnyModel::step_with_ports`'s own doc comment for why an explicit arm per variant,
-    /// not the trait default on `AnyModel` itself, is this enum's own standing convention.
+    /// `last_measurements` is that model's own explicit `Vec::new()` override, each with its own
+    /// one-line "why no measurement" comment (M25.3c: `av_dynamics::DynamicsModel::
+    /// last_measurements` is a required method now, not a defaulted one -- see that method's own
+    /// doc comment), reached honestly here rather than `AnyModel` itself silently
+    /// short-circuiting to empty for everything. See `AnyModel::step_with_ports`'s own doc
+    /// comment for why an explicit arm per variant, not a blanket default on `AnyModel` itself,
+    /// is this enum's own standing convention -- and `any_model_arm_count_for_ground_station_
+    /// matches_star_tracker` (this module's own test) for the executable arm-count symmetry
+    /// check that covers this method too (it counts every `AnyModel::<Variant>(` occurrence in
+    /// this file regardless of which method's match arm it belongs to).
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         match self {
             AnyModel::Gmat(m) => m.last_measurements(),
@@ -1055,6 +1068,13 @@ impl DynamicsModel for ContainerModel {
         let step_result = StepResult { state: state.to_vec(), t_tai_ns: until_tai_ns, outputs: response.named_outputs };
         Ok((step_result, outbox, Vec::new()))
     }
+
+    // `lockstep.proto`'s `LockstepStepResponse` carries `outputs`/`named_outputs`, not a
+    // `Measurement` -- the lockstep wire protocol has no CDM measurement concept yet, so this
+    // binding kind never produces one.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 impl ContainerModel {
@@ -1150,6 +1170,11 @@ impl DynamicsModel for SharedContainerModel {
     }
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         self.0.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox)
+    }
+    /// Delegates, same as every other method here (this struct's own doc comment: "a plain
+    /// passthrough wrapper exactly like `ErasedModel`/`AnyModel`").
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        self.0.last_measurements()
     }
 }
 
@@ -5156,6 +5181,31 @@ mod tests {
         // measuring, per this task's own "state the exact expected count" rule.
         assert_eq!(outbox.messages().len(), 2, "2 Hz declared rate over a 1s kernel step = 2 emissions (due at 0.5s and 1.0s)");
         assert!(applied.is_empty());
+    }
+
+    /// M25.3c defect D2: `AnyModel::last_measurements` must reach `StarTrackerModel`'s own real
+    /// cache, not silently return an empty `Vec` -- the `last_measurements` counterpart of
+    /// [`any_model_step_with_ports_delegates_to_the_star_tracker_variant`] immediately above.
+    /// Feeds the identical real truth inbox that test does, so a genuine, non-fixture measurement
+    /// is actually cached, then reads it back through `AnyModel` (not `StarTrackerModel`
+    /// directly). **Fails against an `AnyModel::last_measurements` match arm that returns
+    /// `Vec::new()` for `StarTracker` instead of `m.last_measurements()`** (broken-and-restored:
+    /// see this task's own report).
+    #[test]
+    fn any_model_last_measurements_delegates_to_the_star_tracker_variant() {
+        let mat = test_star_tracker_mat(&simple_star_tracker_spec());
+        let mut outbox = av_dynamics::Outbox::new();
+        for (i, port) in sensors::TRUTH_PORT_NAMES.iter().enumerate() {
+            let v = if i == 3 { 1.0 } else { 0.0 }; // identity quaternion, zero rate
+            outbox.push_signal(*port, mat.t0_tai_ns, v);
+        }
+        let inbox = Inbox::new(outbox.into_messages());
+        let _ = mat.model.step_with_ports(&[], mat.t0_tai_ns, &[], 1_000_000_000, &inbox).unwrap();
+        let measurements = mat.model.last_measurements();
+        assert_eq!(measurements.len(), 2, "2 Hz declared rate over a 1s kernel step = 2 emissions, same as the outbox count above");
+        for m in &measurements {
+            assert_eq!(m.measurement_id, "altavista.attitude_q4");
+        }
     }
 
     // -- Full per-method AnyModel::Imu delegation coverage -- the IMU counterpart of the block

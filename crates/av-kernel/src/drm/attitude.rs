@@ -623,6 +623,14 @@ impl DynamicsModel for AttitudeWheelsModel {
         out[base..base + n_wheels].copy_from_slice(&dh);
         Ok(())
     }
+
+    // Pure attitude/wheel dynamics -- no declared `PacketCodec`, so never emits telemetry mapped
+    // to a CDM measurement. `sensors::TruthBroadcastAttitude<AttitudeWheelsModel>` (the wrapper
+    // every "attitude." instance actually binds through) broadcasts truth via SIGNAL ports, not
+    // through this measurement path.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

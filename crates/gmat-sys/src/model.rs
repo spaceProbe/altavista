@@ -574,6 +574,14 @@ impl DynamicsModel for GmatModel {
         }
         Ok((result, outbox, applied))
     }
+
+    /// Question 173 (M25.3) never wired a GMAT-backed model into telemetry-to-`Measurement`
+    /// mapping -- only the two native sensor models (`StarTrackerModel`/`ImuModel`,
+    /// `av_kernel::drm::sensors`) declare a `PacketCodec` with a non-empty `PacketField.target`.
+    /// A `GmatModel` instance never produces a CDM measurement.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

@@ -503,6 +503,14 @@ impl DynamicsModel for GroundStationModel {
         outputs.insert("in_contact".to_string(), if self.in_contact.get() { 1.0 } else { 0.0 });
         Ok((StepResult { state: Vec::new(), t_tai_ns: end, outputs }, outbox, applied))
     }
+
+    // Neither `tm_codec` nor `tc_codec` declares a `PacketField.target` (both built above with
+    // `target: String::new()`) -- this model decodes telemetry for its own elevation/contact
+    // logic only, never through `crate::codec::measurements_from_field_values`, so it never
+    // produces a CDM measurement.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

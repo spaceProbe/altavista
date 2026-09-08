@@ -407,6 +407,15 @@ impl DynamicsModel for AttitudeControllerModel {
         }
         Ok((StepResult { state: Vec::new(), t_tai_ns: end, outputs }, outbox, applied))
     }
+
+    // Decodes star tracker/IMU telemetry for its own control law (`last_star_q`/`last_imu_omega`)
+    // and emits a wheel-torque *command* packet (`command_codec.is_command == true`), never
+    // telemetry mapped through `crate::codec::measurements_from_field_values` -- no CDM
+    // measurement. Question 176 pins receiver-side decode-into-measurement as a later task's
+    // scope, not this one's.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 /// `q_err = target_q^-1 (x) measured_q`, then sign-flipped for the shortest rotational path
@@ -521,6 +530,12 @@ impl<M: DynamicsModel> DynamicsModel for CommandedAttitude<M> {
         let (result, outbox, mut applied) = self.inner.step_with_ports(state, t_tai_ns, &effective_controls, dt_ns, inbox).map_err(CommandedAttitudeError::Inner)?;
         applied.extend(extra_applied);
         Ok((result, outbox, applied))
+    }
+
+    /// Delegates to `self.inner.last_measurements` -- "every other `DynamicsModel` method
+    /// delegates to the wrapped model unchanged" (this struct's own doc comment).
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        self.inner.last_measurements()
     }
 }
 
@@ -734,6 +749,10 @@ mod tests {
         fn step(&self, _state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64) -> Result<StepResult, Self::Error> {
             *self.last_controls.borrow_mut() = controls.to_vec();
             Ok(StepResult { state: Vec::new(), t_tai_ns: t_tai_ns + dt_ns, outputs: BTreeMap::new() })
+        }
+        // Test-only recorder; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 

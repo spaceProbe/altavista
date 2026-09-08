@@ -94,6 +94,10 @@ impl DynamicsModel for SignalSender {
         }
         Ok((StepResult { state: state.to_vec(), t_tai_ns: t1, outputs: BTreeMap::new() }, outbox, Vec::new()))
     }
+    // Test-only SIGNAL sender; never emits telemetry mapped to a CDM measurement.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 /// Like [`SignalSender`], but a genuinely physical (`state_dim() == 6`, `[pos x3; vel x3]`,
@@ -131,6 +135,10 @@ impl DynamicsModel for PhysicalSignalSender {
         outbox.push_signal(&self.port, t1, t1 as f64);
         Ok((StepResult { state: state.to_vec(), t_tai_ns: t1, outputs: BTreeMap::new() }, outbox, Vec::new()))
     }
+    // Test-only SIGNAL sender; never emits telemetry mapped to a CDM measurement.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
+    }
 }
 
 /// A model with one or more IN ports: logs every delivered `PortMessage` (in the order its own
@@ -154,6 +162,10 @@ impl DynamicsModel for SignalReceiver {
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         self.log.borrow_mut().extend(inbox.messages().iter().cloned());
         Ok((StepResult { state: state.to_vec(), t_tai_ns: t_tai_ns + dt_ns, outputs: BTreeMap::new() }, Outbox::new(), Vec::new()))
+    }
+    // Test-only receiver; only ever logs inbound messages, never emits telemetry.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
     }
 }
 
@@ -370,6 +382,10 @@ impl DynamicsModel for SignalReceiverStepLog {
         let t1 = t_tai_ns + dt_ns;
         self.log.borrow_mut().push((t1, inbox.messages().len()));
         Ok((StepResult { state: state.to_vec(), t_tai_ns: t1, outputs: BTreeMap::new() }, Outbox::new(), Vec::new()))
+    }
+    // Test-only receiver; only ever logs inbound message counts, never emits telemetry.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        Vec::new()
     }
 }
 

@@ -178,6 +178,20 @@ pub enum CodecError {
     /// A caller bug (a badly-built diagonal, or a dimension that does not match `z`), never a
     /// condition a well-formed DRM run should hit -- see that function's own doc comment.
     MeasurementNoiseNotSpd { measurement_id: String, reason: String },
+    /// [`measurements_from_field_values`] found `field` (a non-empty `PacketField.target`, so a
+    /// measurement component is expected from it) with no entry at all in the `values` map it was
+    /// given -- question 149's own no-silent-drop rule: a targeted field losing its component
+    /// silently would quietly shrink a `Measurement.z` with nothing to say so. A caller bug (every
+    /// declared field should always be present in what [`decode_packet`] returns), never a
+    /// condition a well-formed caller should hit -- see that function's own doc comment. An
+    /// empty-`target` field is not this: it is still skipped silently, by design.
+    MeasurementFieldValueMissing { codec_id: String, field: String },
+    /// [`measurements_from_field_values`] found `field` (a non-empty `PacketField.target`) whose
+    /// decoded value was [`FieldValue::Bytes`], not [`FieldValue::Numeric`] -- a `Measurement`'s
+    /// `z` is `f64` components only, and question 149's own no-silent-drop rule means this is a
+    /// typed refusal, not a quietly-shrunk `z`. An empty-`target` field is not this: it is still
+    /// skipped silently, by design, regardless of its value's type.
+    MeasurementFieldValueNotNumeric { codec_id: String, field: String },
 }
 
 impl std::fmt::Display for CodecError {
@@ -215,6 +229,8 @@ impl std::fmt::Display for CodecError {
                 "apid {apid} (codec {codec_id:?}): expected a {expected_total_bytes}-byte packet (primary header + secondary header + user data), got {actual_total_bytes}"
             ),
             CodecError::MeasurementNoiseNotSpd { measurement_id, reason } => write!(f, "measurement {measurement_id:?}: declared noise covariance is not SPD: {reason}"),
+            CodecError::MeasurementFieldValueMissing { codec_id, field } => write!(f, "codec {codec_id:?}: measurement field {field:?} declares a target but has no decoded value"),
+            CodecError::MeasurementFieldValueNotNumeric { codec_id, field } => write!(f, "codec {codec_id:?}: measurement field {field:?} declares a target but its decoded value is not Numeric"),
         }
     }
 }
@@ -622,10 +638,16 @@ pub fn decode_packet(apid_map: &ApidMap, data: &[u8]) -> Result<DecodedPacket, C
 /// Every field sharing one measurement id becomes that one `Measurement`'s `z`, in the order
 /// those fields were declared -- so one packet with fields mapped to two different measurement
 /// ids (not used by any codec in this workspace today, but not refused either) produces two
-/// `Measurement`s. A field with an empty `target`, a `Bytes` value (this module's `z` is `f64`
-/// only), or no entry in `values` at all (should not happen -- every declared field is always
-/// present in what [`decode_packet`] returns, and every caller here supplies exactly the values
-/// it is about to -- or just did -- pass to [`encode_packet`]) is skipped, not defaulted.
+/// `Measurement`s. A field with an empty `target` is skipped, not defaulted -- that is the
+/// declared "recorded but not mapped" case, and is silent by design. A field with a **non-empty**
+/// `target` (a measurement component is expected from it) whose value is absent from `values`, or
+/// whose value is [`FieldValue::Bytes`] (this module's `z` is `f64` only), is a typed error
+/// ([`CodecError::MeasurementFieldValueMissing`] / [`CodecError::MeasurementFieldValueNotNumeric`])
+/// -- question 149's own no-silent-drop rule: unlike the empty-`target` case, this is a caller bug
+/// (should not happen -- every declared field is always present in what [`decode_packet`] returns,
+/// and every caller here supplies exactly the values it is about to -- or just did -- pass to
+/// [`encode_packet`]), and a well-formed measurement component quietly disappearing from `z` must
+/// never pass silently.
 ///
 /// **`r` (SPD, checked) only where the caller can honestly declare it.** `noise_by_measurement_id`
 /// supplies a row-major covariance for a measurement id the caller knows a genuine noise model
@@ -660,12 +682,14 @@ pub fn measurements_from_field_values(
             Some((id, _label)) => id.to_string(),
             None => field.target.clone(),
         };
-        let Some(FieldValue::Numeric(v)) = values.get(&field.name) else {
-            continue;
+        let value = values.get(&field.name).ok_or_else(|| CodecError::MeasurementFieldValueMissing { codec_id: codec.id.clone(), field: field.name.clone() })?;
+        let v = match value {
+            FieldValue::Numeric(v) => *v,
+            FieldValue::Bytes(_) => return Err(CodecError::MeasurementFieldValueNotNumeric { codec_id: codec.id.clone(), field: field.name.clone() }),
         };
         match groups.iter_mut().find(|(id, _)| *id == measurement_id) {
-            Some((_, z)) => z.push(*v),
-            None => groups.push((measurement_id, vec![*v])),
+            Some((_, z)) => z.push(v),
+            None => groups.push((measurement_id, vec![v])),
         }
     }
     let mut out = Vec::with_capacity(groups.len());
@@ -1115,5 +1139,60 @@ mod tests {
         noise.insert("imu.gyro3".to_string(), vec![-1.0]);
         let err = measurements_from_field_values(&c, &values, 1, "imu_1", "", &noise).unwrap_err();
         assert!(matches!(err, CodecError::MeasurementNoiseNotSpd { ref measurement_id, .. } if measurement_id == "imu.gyro3"), "{err:?}");
+    }
+
+    /// Defect D1 (question 149's no-silent-drop rule): a field with a non-empty `target` whose
+    /// value is entirely absent from `values` is a typed error, never a quietly-shrunk `z`.
+    /// **Fails against the pre-fix implementation** (`let Some(FieldValue::Numeric(v)) = ... else
+    /// { continue; }`), which would silently skip `wy` and return `Ok` with a 2-component `z`
+    /// instead of refusing -- confirmed by reverting this one line locally and re-running: the old
+    /// code returns `Ok([1.0, 3.0])`, not an error (break-and-restore evidence in the task report).
+    #[test]
+    fn a_targeted_field_with_no_value_at_all_is_a_typed_error_not_a_silent_drop() {
+        let c = codec("imu", 101, false, 0, 24, vec![targeted_field("wx", "imu.gyro3/wx"), targeted_field("wy", "imu.gyro3/wy"), targeted_field("wz", "imu.gyro3/wz")]);
+        // `wy` is deliberately missing from `values` -- e.g. a caller bug that built the map from
+        // a stale field list.
+        let values = numeric_values(&[("wx", 1.0), ("wz", 3.0)]);
+        let err = measurements_from_field_values(&c, &values, 1, "imu_1", "", &BTreeMap::new()).unwrap_err();
+        assert!(matches!(err, CodecError::MeasurementFieldValueMissing { ref codec_id, ref field } if codec_id == "imu" && field == "wy"), "{err:?}");
+    }
+
+    /// Defect D1's other silent-drop path: a field with a non-empty `target` whose decoded value
+    /// is present but is [`FieldValue::Bytes`] (not `Numeric`) is a typed error, never silently
+    /// skipped. **Fails against the pre-fix implementation**, which would silently skip `wy` (the
+    /// `let Some(FieldValue::Numeric(v)) = values.get(...) else { continue }` pattern matches
+    /// `None` on a `Bytes` value too) and return `Ok([1.0, 3.0])` instead of refusing.
+    #[test]
+    fn a_targeted_field_with_a_bytes_value_is_a_typed_error_not_a_silent_drop() {
+        let c = codec("imu", 101, false, 0, 24, vec![targeted_field("wx", "imu.gyro3/wx"), targeted_field("wy", "imu.gyro3/wy"), targeted_field("wz", "imu.gyro3/wz")]);
+        let mut values = numeric_values(&[("wx", 1.0), ("wz", 3.0)]);
+        values.insert("wy".to_string(), FieldValue::Bytes(vec![0, 1, 2]));
+        let err = measurements_from_field_values(&c, &values, 1, "imu_1", "", &BTreeMap::new()).unwrap_err();
+        assert!(matches!(err, CodecError::MeasurementFieldValueNotNumeric { ref codec_id, ref field } if codec_id == "imu" && field == "wy"), "{err:?}");
+    }
+
+    /// Regression: an empty-`target` field is still skipped silently (never an error) even when it
+    /// sits alongside targeted fields whose own values are present and fine -- the empty-`target`
+    /// "recorded but not mapped" case (already covered alone by
+    /// [`a_codec_with_no_declared_target_produces_no_measurement`]) must not be caught by the two
+    /// new typed errors above just because it shares a codec with targeted fields. The empty-target
+    /// field's own value is a `Bytes` value here specifically to prove the type-mismatch check
+    /// above is gated on a non-empty `target`, not merely on `FieldValue::Bytes` appearing anywhere
+    /// in `values`.
+    #[test]
+    fn an_empty_target_field_is_still_skipped_silently_alongside_targeted_fields() {
+        let c = codec(
+            "imu",
+            101,
+            false,
+            0,
+            32,
+            vec![targeted_field("wx", "imu.gyro3/wx"), field("raw_status", 64, 64, pb::PacketFieldType::Bytes, 1.0, 0.0), targeted_field("wz", "imu.gyro3/wz")],
+        );
+        let mut values = numeric_values(&[("wx", 1.0), ("wz", 3.0)]);
+        values.insert("raw_status".to_string(), FieldValue::Bytes(vec![0xAB]));
+        let out = measurements_from_field_values(&c, &values, 1, "imu_1", "", &BTreeMap::new()).expect("empty-target field must not error");
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].z, vec![1.0, 3.0], "raw_status (empty target) contributes nothing to z");
     }
 }

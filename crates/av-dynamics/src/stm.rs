@@ -137,6 +137,13 @@ impl<M: DynamicsModel> DynamicsModel for StmAugmented<M> {
         out_state.extend_from_slice(&phi_new);
         Ok(StepResult { state: out_state, t_tai_ns: stm_result.t_tai_ns, outputs: stm_result.outputs })
     }
+
+    /// Delegates to the wrapped model, exactly like every other passthrough method above --
+    /// `StmAugmented` changes only the state shape (augmented with `vec(Phi)`), never what the
+    /// wrapped model itself reports having measured.
+    fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+        self.0.last_measurements()
+    }
 }
 
 /// `P(t) = Phi P0 Phi^T`, `n x n` row-major throughout. Explicitly symmetrizes the result
@@ -246,6 +253,11 @@ mod tests {
             }
             Ok(())
         }
+
+        // Test-only rotation model; never emits telemetry, so never produces a CDM measurement.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -318,6 +330,10 @@ mod tests {
             }
             fn describe(&self) -> av_cdm::pb::ModelInfo {
                 av_cdm::pb::ModelInfo::default()
+            }
+            // Test-only stand-in for a non-STM-capable model; never emits telemetry.
+            fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+                Vec::new()
             }
         }
         let _ = StmAugmented::new(NotStmCapable);
@@ -431,6 +447,11 @@ mod tests {
             let mut outputs = std::collections::BTreeMap::new();
             outputs.insert("calls".to_string(), self.step_with_stm_calls.get() as f64);
             Ok(crate::StmStepResult { state: state1.to_vec(), phi: phi.to_vec(), t_tai_ns: t_tai_ns + dt_ns, outputs })
+        }
+
+        // Test-only rotation model; never emits telemetry.
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
         }
     }
 
