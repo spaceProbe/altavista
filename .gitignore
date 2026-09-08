@@ -12,8 +12,6 @@ third_party/cfs/
 # GMAT run products
 GMAT*/output/
 GMAT*/bin/api_startup_file.txt
-# node-only module-resolution shim for the headless viewer tests (web/VIEWER.md)
-web/node_modules/
 
 # --- added 2026-09-07 when the repository went under git ---
 # The GMAT R2026a install lives beside the code; it is a vendor install, never committed.
