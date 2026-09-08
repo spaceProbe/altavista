@@ -64,7 +64,7 @@
 
 use std::collections::BTreeMap;
 
-use av_cdm::pb::{ModelInfo, PacketCodec, StateSpace};
+use av_cdm::pb::{ModelInfo, PacketCodec, PortTrafficLog, StateSpace};
 use av_dynamics::{erase_with_id, BoxedModel, DynamicsModel, ModelError, StmAugmented};
 use gmat_sys::Gmat;
 
@@ -72,6 +72,7 @@ use crate::drm::attitude::AttitudeWheelsSpec;
 use crate::drm::binding::{self, AnyModel, ConstantAccelSpec, GmatSystemSpec, Materialized};
 use crate::drm::controller::AttitudeControllerSpec;
 use crate::drm::ground::GroundStationSpec;
+use crate::drm::replay::ReplayModel;
 use crate::drm::sensors::{ImuSpec, StarTrackerSpec};
 use crate::drm::DrmError;
 
@@ -211,6 +212,18 @@ impl ModelHandle {
             // already ran at `classify_binding`/`GroundStationModel::new`) -- same erasure shape
             // as ConstantAccel/StarTracker/Imu.
             AnyModel::GroundStation(inner) => erase_with_id(erase_id, inner, |_id, never: std::convert::Infallible| match never {}),
+            // M25.4b: `ReplayModel::Error` is `crate::drm::replay::ReplayError` -- genuinely
+            // fallible at run time (the missing-frame refusal, `ReplayError::MissingFrame`) --
+            // mapped into `ModelError::InvalidSpec` by `Display`, the same "stringify the
+            // model-specific error" convention `AnyModel::Controller`/`AnyModel::Attitude`'s own
+            // arms immediately above already use for their own genuinely-fallible wrapped
+            // models. This is the erasure boundary that actually matters for the non-covariance
+            // path every replay test in this crate drives (`crate::drm::executor::
+            // run_shared_group`'s own construction sites both call `ModelHandle::into_boxed`,
+            // never `into_boxed_stm` -- `RunConfig.replay` combined with `DrmOptions.covariance`
+            // is refused before either boundary is reached, `DrmError::
+            // ReplayWithCovarianceNotSupported`).
+            AnyModel::Replay(inner) => erase_with_id(erase_id, inner, |id, e: crate::drm::replay::ReplayError| ModelError::InvalidSpec { model_id: id, detail: e.to_string() }),
         }
     }
 
@@ -350,6 +363,47 @@ impl ModelRegistry {
         let Materialized { model, t0_tai_ns, x0_si, settings } =
             binding::materialize_ground_station(spec, tm_codec, tm_port, tc_codec, tc_port, epoch_tai_ns, model_id).map_err(|e| ModelError::InvalidSpec { model_id: model_id.to_string(), detail: e.to_string() })?;
         Ok(ModelHandle { model, t0_tai_ns, x0_si, settings })
+    }
+
+    /// M25.4b (question 175's own follow-on): wrap an already-constructed [`ModelHandle`] --
+    /// built exactly as a non-replayed run would build it, by whichever `construct_*` the
+    /// instance's own `BindingPlan` dispatches to -- in a [`ReplayModel`], so its `step`/
+    /// `step_with_ports` plays `log`'s own recorded frames back instead of running the real
+    /// model. `handle.describe()`/`handle.state_dim()` are read BEFORE the wrap and carried
+    /// into the replacement `ModelHandle` unchanged (`t0_tai_ns`/`x0_si`/`settings` too) --
+    /// see `crate::drm::replay`'s own module doc comment's "Reconstructing the ORIGINAL model's
+    /// own ModelInfo" section for exactly why this is what lets a replayed `Trajectory` come out
+    /// byte-identical to the original run's: `TrajectorySegment.dynamics_model`/`.dynamics_hash`/
+    /// `.dynamics_depth` are stamped straight from `ModelInfo.id`/`.settings_hash`/`.depth`
+    /// (`crate::trajectory::build_trajectory`), and this function is what keeps those three
+    /// values exactly what the real, un-replayed model would have reported.
+    pub fn wrap_replay(handle: ModelHandle, instance: &str, log: &PortTrafficLog) -> ModelHandle {
+        let info = handle.describe();
+        let state_dim = handle.state_dim();
+        let model = AnyModel::Replay(ReplayModel::new(instance, info, state_dim, log));
+        ModelHandle { model, t0_tai_ns: handle.t0_tai_ns, x0_si: handle.x0_si, settings: handle.settings }
+    }
+
+    /// M25.4b: the container counterpart of [`ModelRegistry::wrap_replay`] -- built for an
+    /// instance whose `SosConfiguration` binding is `BINDING_KIND_CONTAINER`, where there is no
+    /// real [`ModelHandle`] to wrap AT ALL (a container's own `ModelInfo`/`binding_hash` come
+    /// only from a live `Bind` RPC -- `crate::drm::binding::materialize_container` -- and the
+    /// entire point of replaying a container instance is running it Docker-free, so this
+    /// function never makes that call). `info` is therefore SYNTHETIC, built directly from the
+    /// instance's own declared `SystemDefinition.dynamics_model`/`.state_space_id` rather than
+    /// read off a real model -- a disclosed, unavoidable difference from the original recorded
+    /// run's own container segment (`.settings_hash`/`.dynamics_hash` cannot be reconstructed
+    /// without contacting the real process); see `crate::drm::executor::run_shared_group`'s own
+    /// "replay" section for exactly where this is called and how a caller is expected to compare
+    /// the resulting `Trajectory` (excluding that one segment field, explicitly). `state_dim` is
+    /// always `0`: `BINDING_KIND_CONTAINER`'s own `ContainerModel::state_dim()` is always `0`
+    /// too (this module's own doc comment's "Container (lockstep) binding" section), so this is
+    /// not a replay-specific approximation, just the same fact every container instance already
+    /// has.
+    pub fn construct_replay_container(instance: &str, dynamics_model_id: &str, state_space_id: &str, epoch_tai_ns: i64, log: &PortTrafficLog) -> ModelHandle {
+        let info = ModelInfo { id: dynamics_model_id.to_string(), version: "1".to_string(), state_space_id: state_space_id.to_string(), frame_id: String::new(), settings_hash: String::new(), depth: "container_replay".to_string(), ..Default::default() };
+        let model = AnyModel::Replay(ReplayModel::new(instance, info, 0, log));
+        ModelHandle { model, t0_tai_ns: epoch_tai_ns, x0_si: Vec::new(), settings: BTreeMap::new() }
     }
 
     /// Build a real `gmat_sys::model::GmatModel` (`crate::drm::binding::materialize_gmat`,

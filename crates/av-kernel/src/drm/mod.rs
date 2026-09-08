@@ -70,11 +70,13 @@ pub mod gmat_command;
 pub mod ground;
 pub mod hash;
 pub mod maneuver;
+pub mod replay;
 pub mod schema;
 pub mod sensors;
 
 pub use executor::{execute, RunConfig, RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
+pub use replay::ReplayConfig;
 
 /// Every way a DRM run can be refused or fail, typed rather than a caller ever discovering a
 /// silently-dropped option or a silently-skipped refusal (question 87's central complaint).
@@ -498,6 +500,31 @@ pub enum DrmError {
     /// instead, raised earlier (at load, before any seed is even looked up) and for a different
     /// reason (a load-time policy refusal, not "I tried and there is nothing to apply this to").
     PortOrSensorFaultNotYetSupported { fault_id: String, instance: String, target_kind: String },
+    /// M25.4b (question 175's own follow-on): `RunConfig.replay.log_path` could not be read,
+    /// or its bytes (once hash-verified -- see [`DrmError::ReplayLogHashMismatch`]) did not
+    /// decode as a `PortTrafficLog` -- `crate::drm::replay::verify_and_load`'s own doc comment
+    /// explains why this is a separate variant from a hash mismatch (two genuinely different
+    /// failures: "not the file the run producer named" vs. "could not even be read/parsed").
+    ReplayLogIo { path: std::path::PathBuf, detail: String },
+    /// M25.4b: `RunConfig.replay.log_path`'s exact bytes did not hash to `RunConfig.replay.
+    /// expected_hash` -- checked BEFORE any binding, any GMAT call, and any step
+    /// (`crate::drm::replay::verify_and_load`, called first thing inside `executor::execute`
+    /// whenever `RunConfig.replay` is `Some`). Never loosened, never a warning: a replay run
+    /// refuses to even start against a log it cannot verify came from the run it claims to.
+    ReplayLogHashMismatch { path: std::path::PathBuf, expected: String, computed: String },
+    /// M25.4b: `RunConfig.replay.instances` named an instance absent from `SosConfiguration.
+    /// instances` -- a typed load refusal, checked before any binding, mirroring every other
+    /// "named instance does not exist" refusal in this executor (`DrmError::
+    /// UnknownFaultInstance`, `DrmError::UnknownManeuverInstance`, ...).
+    UnknownReplayInstance { instance: String },
+    /// M25.4b: `RunConfig.replay` and `DrmOptions.covariance` were both requested. Not
+    /// supported together -- the covariance path (`executor::run_covariance_instance`) is
+    /// unchanged by this task (see `executor`'s own module doc comment's "One shared kernel
+    /// run" section) and never consults `RunConfig.replay` at all, so combining the two would
+    /// otherwise silently ignore the replay request on the covariance path while honouring it
+    /// on the plain path -- refused explicitly instead, the same "never silently drop a
+    /// request" rule every other combination refusal in this executor already follows.
+    ReplayWithCovarianceNotSupported,
     // M14.1 (question 109) added `ContainerPeriodExceedsSampleInterval` here: a
     // BINDING_KIND_CONTAINER instance's own effective step period had to evenly divide
     // `DrmOptions.sample_interval_s`'s own output period, because the shared kernel run
@@ -628,6 +655,12 @@ impl std::fmt::Display for DrmError {
                 "fault {fault_id:?} on instance {instance:?}: {target_kind} faults are not realized by this kernel yet (docs/open-questions.md question 178) -- the port and sensor fault runtimes are the next kernel item, not merely \"unsupported\""
             ),
             DrmError::PortTrafficSidecarIo { path, detail } => write!(f, "writing the port traffic sidecar to {}: {detail}", path.display()),
+            DrmError::ReplayLogIo { path, detail } => write!(f, "replay log {}: {detail}", path.display()),
+            DrmError::ReplayLogHashMismatch { path, expected, computed } => {
+                write!(f, "replay log {}: declared hash {expected:?} does not match its own computed hash {computed:?}; refusing to replay from a log that cannot be verified", path.display())
+            }
+            DrmError::UnknownReplayInstance { instance } => write!(f, "RunConfig.replay.instances names instance {instance:?}, which is not in this SosConfiguration"),
+            DrmError::ReplayWithCovarianceNotSupported => write!(f, "RunConfig.replay and DrmOptions.covariance were both requested; not yet supported together"),
         }
     }
 }

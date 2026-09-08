@@ -91,7 +91,7 @@ fn together_products() -> &'static RunProducts {
     ONCE.get_or_init(|| {
         let (drm, sos, systems) = load_demo_bundle();
         let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-demo-together".to_string(), error_mode: Default::default() , products_dir: None };
+        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-demo-together".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
         execute(cfg).expect("the two-instance demo DRM executes end to end")
     })
 }
@@ -245,7 +245,7 @@ fn demo_two_instance_signal_port_delivers_a_drag_sail_command_that_measurably_ch
     let scenario = Scenario { start_tai_ns: START_TAI_NS, end_tai_ns: END_TAI_NS, faults: vec![demo_fault_named("demo_flt_uncommanded")], ..Default::default() };
     let (sos_nc, drm_nc) = one_instance_drm("demo_flt_uncommanded", model_instance("demo_flt_uncommanded", vec![], real_flt.parameter_overrides.clone()), scenario, demo_options());
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg_nc = RunConfig { gmat: &gmat, drm: &drm_nc, sos: &sos_nc, systems: &systems, run_id: "test-demo-flt-uncommanded".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_nc = RunConfig { gmat: &gmat, drm: &drm_nc, sos: &sos_nc, systems: &systems, run_id: "test-demo-flt-uncommanded".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_nc = execute(cfg_nc).expect("demo_flt, run alone with the identical fault and drag but no SIGNAL wiring, executes");
     let traj_nc = products_nc.trajectories.get("demo_flt_uncommanded").unwrap();
     let traj_commanded = products.trajectories.get("demo_flt").unwrap();
@@ -622,9 +622,9 @@ fn demo_two_instance_bystander_invariance_against_real_single_instance_gmat_runs
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
     let products_together = together_products();
-    let cfg_flt = RunConfig { gmat: &gmat, drm: &drm_flt, sos: &sos_flt, systems: &systems, run_id: "test-demo-flt-alone".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_flt = RunConfig { gmat: &gmat, drm: &drm_flt, sos: &sos_flt, systems: &systems, run_id: "test-demo-flt-alone".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_flt_alone = execute(cfg_flt).expect("demo_flt, run alone with the same fault as the together run's own demo_flt, executes -- reusing the identical gmat.*-bound instance name in a second execute() call is exactly M18.4's own fix");
-    let cfg_mvr = RunConfig { gmat: &gmat, drm: &drm_mvr, sos: &sos_mvr, systems: &systems, run_id: "test-demo-mvr-alone".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_mvr = RunConfig { gmat: &gmat, drm: &drm_mvr, sos: &sos_mvr, systems: &systems, run_id: "test-demo-mvr-alone".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_mvr_alone = execute(cfg_mvr).expect("demo_mvr, run alone with the same maneuver as demo_mvr, executes");
 
     let traj_flt_alone = products_flt_alone.trajectories.get("demo_flt").unwrap();
@@ -722,7 +722,7 @@ fn demo_two_instance_bystander_invariance_against_real_single_instance_gmat_runs
     // effect; if it dropped drag too, the comparison would conflate the fault effect with the
     // drag-vs-no-drag effect instead).
     let (sos_flt_nf, drm_flt_nf) = one_instance_drm("demo_flt_no_fault", model_instance("demo_flt_nofault", vec![], real_flt.parameter_overrides.clone()), scenario_flt_no_fault, demo_options());
-    let cfg_nf = RunConfig { gmat: &gmat, drm: &drm_flt_nf, sos: &sos_flt_nf, systems: &systems, run_id: "test-demo-flt-no-fault".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_nf = RunConfig { gmat: &gmat, drm: &drm_flt_nf, sos: &sos_flt_nf, systems: &systems, run_id: "test-demo-flt-no-fault".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_nf = execute(cfg_nf).expect("demo_flt_nofault, run alone with NO fault, executes");
     let traj_nf = products_nf.trajectories.get("demo_flt_nofault").unwrap();
     let last_faulted = traj_flt_alone.samples.last().unwrap();
@@ -787,7 +787,7 @@ fn covariance_is_declared_on_demo_mvr_only_and_the_asymmetry_is_load_bearing() {
     let drm_cov = hashed_drm(DesignReferenceMission { id: "demo_two_instance_cov_probe_drm".to_string(), sos_configuration_id: sos_probe.id.clone(), scenario: Some(scenario), options: Some(options), ..Default::default() });
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm_cov, sos: &sos_probe, systems: &systems, run_id: "test-demo-cov-probe".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm_cov, sos: &sos_probe, systems: &systems, run_id: "test-demo-cov-probe".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).expect_err("global covariance against this sos must be refused: demo_flt_covprobe has no declared initial_covariance");
     match err {
         DrmError::MissingInitialCovariance { instance } => {
@@ -804,7 +804,7 @@ fn covariance_is_declared_on_demo_mvr_only_and_the_asymmetry_is_load_bearing() {
     let scenario_mvr_cov = Scenario { start_tai_ns: START_TAI_NS, end_tai_ns: MANEUVER_TAI_NS, events: vec![demo_maneuver_named("demo_mvr_covcheck")], ..Default::default() };
     let options_mvr_cov = DrmOptions { covariance: true, default_step_rate_hz: 10.0, sample_interval_s: 60.0, ..Default::default() };
     let (sos_mvr_cov, drm_mvr_cov) = one_instance_drm("demo_mvr_cov", model_instance("demo_mvr_covcheck", demo_mvr.initial_covariance.clone(), vec![]), scenario_mvr_cov, options_mvr_cov);
-    let cfg_mvr_cov = RunConfig { gmat: &gmat, drm: &drm_mvr_cov, sos: &sos_mvr_cov, systems: &systems, run_id: "test-demo-mvr-cov".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_mvr_cov = RunConfig { gmat: &gmat, drm: &drm_mvr_cov, sos: &sos_mvr_cov, systems: &systems, run_id: "test-demo-mvr-cov".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_mvr_cov = execute(cfg_mvr_cov).expect("demo_mvr's own declared covariance propagates end to end (with its own maneuver applied)");
     let traj_mvr_cov = products_mvr_cov.trajectories.get("demo_mvr_covcheck").unwrap();
     let last = traj_mvr_cov.samples.last().expect("at least one sample");
@@ -904,7 +904,7 @@ hash: ""
     drm.hash = hash::canonical_drm_hash(&drm);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-declared-frame-wins".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-declared-frame-wins".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("executes end to end with a declared Scenario.frames entry");
 
     let mj2000eq = products.frames.iter().find(|f| f.id == "EarthMJ2000Eq").expect("EarthMJ2000Eq present (both declared AND this instance's own propagation frame)");
@@ -987,7 +987,7 @@ fn icrf_products() -> &'static RunProducts {
         let (sos, drm) = one_instance_drm("icrf_probe", instance, scenario, demo_options());
 
         let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &all_systems, run_id: "test-icrf-probe".to_string(), error_mode: Default::default() , products_dir: None };
+        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &all_systems, run_id: "test-icrf-probe".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
         execute(cfg).expect("the ICRF-bound probe instance executes end to end")
     })
 }

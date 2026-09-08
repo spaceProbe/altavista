@@ -59,7 +59,7 @@ fn load_ground_segment_bundle() -> (DesignReferenceMission, SosConfiguration, BT
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-ground-segment".to_string(), error_mode: Default::default() , products_dir: None }
+    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-ground-segment".to_string(), error_mode: Default::default() , products_dir: None, replay: None }
 }
 
 /// Mirrors `tests/drm_attitude_sensors.rs::rehash_drm`'s own doc comment: not a way to bypass

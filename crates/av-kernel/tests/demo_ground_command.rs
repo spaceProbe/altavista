@@ -124,11 +124,11 @@ fn ground_issued_telecommand_applies_at_the_same_epoch_and_produces_a_byte_ident
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
     let (drm_signal, sos_signal, systems_signal) = load_signal_bundle();
-    let cfg_signal = RunConfig { gmat: &gmat, drm: &drm_signal, sos: &sos_signal, systems: &systems_signal, run_id: "test-ground-cmd-signal-reference".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_signal = RunConfig { gmat: &gmat, drm: &drm_signal, sos: &sos_signal, systems: &systems_signal, run_id: "test-ground-cmd-signal-reference".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_signal = execute(cfg_signal).expect("the real, committed SIGNAL-commanded demo_two_instance DRM executes");
 
     let (drm_ground, sos_ground, systems_ground) = load_ground_bundle();
-    let cfg_ground = RunConfig { gmat: &gmat, drm: &drm_ground, sos: &sos_ground, systems: &systems_ground, run_id: "test-ground-cmd-ground-issued".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_ground = RunConfig { gmat: &gmat, drm: &drm_ground, sos: &sos_ground, systems: &systems_ground, run_id: "test-ground-cmd-ground-issued".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_ground = execute(cfg_ground).expect("the ground-issued-telecommand DRM executes");
 
     // ---- 1. Both runs applied the identical commanded Cd -- MEASURED result: NOT at the

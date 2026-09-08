@@ -75,7 +75,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, EventKind, Fault, FaultTargetKind, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, EventKind, Fault, FaultTargetKind, Provenance, SosConfiguration, SystemDefinition};
+use av_kernel::drm::replay::ReplayConfig;
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
 use gmat_sys::Gmat;
 
@@ -170,7 +171,7 @@ fn container_drm(id: &str, sos_id: &str, duration_s: i64, faults: Vec<Fault>) ->
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -462,6 +463,142 @@ fn run_byte_identical_run_products_across_two_separately_spawned_cfs_containers(
     assert_eq!(products_a.events, products_b.events);
     assert_eq!(products_a.scores, products_b.scores);
     assert_eq!(products_a.provenance, products_b.provenance);
+}
+
+// ------------------------------------------------------------------------------------------
+// T4 (M25.4b, question 175's own follow-on): replaying the container-bound "controller" is
+// Docker-free -- record one real run against the cFS container above, then replay it from
+// nothing but the recorded PortTrafficLog, and compare.
+// ------------------------------------------------------------------------------------------
+
+/// A fresh, empty scratch directory under the OS temp dir, unique per call within this process
+/// (mirrors `tests/port_traffic_sidecar.rs::scratch_dir`'s own convention).
+fn replay_scratch_dir(label: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("av-kernel-cfs-replay-test-{}-{label}-{n}", std::process::id()));
+    assert!(!dir.exists(), "scratch dir {dir:?} must not already exist");
+    dir
+}
+
+/// `a == b`, except `attributes[key]` is allowed to differ (and be present in only one of the
+/// two) -- used below for exactly one key, `"container_binding_hash"`, on exactly one instance's
+/// own `Trajectory.provenance` (see [`run_byte_identical_products_when_the_container_bound_
+/// controller_is_replayed_docker_free`]'s own doc comment for why that one key cannot survive a
+/// Docker-free replay).
+fn provenance_matches_except_attribute(a: &Provenance, b: &Provenance, excluded_key: &str) -> bool {
+    let mut a2 = a.clone();
+    let mut b2 = b.clone();
+    a2.attributes.remove(excluded_key);
+    b2.attributes.remove(excluded_key);
+    a2 == b2
+}
+
+const REPLAY_DURATION_S: i64 = 10;
+
+#[test]
+fn byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free() {
+    if let Some(reason) = cfs_image_unavailable_reason() {
+        println!("SKIPPED byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free: {reason}");
+        return;
+    }
+    run_byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free();
+}
+
+/// **Hypothesis, stated before running:** recording one real run against the cFS container,
+/// then replaying `"controller"` (`RunConfig.replay.instances` left EMPTY -- question 175's own
+/// "empty means every `BINDING_KIND_CONTAINER` instance" default, exercised here rather than
+/// naming `"controller"` explicitly, so this test also proves that default resolves correctly
+/// against a real container-bound `SosConfiguration`) from nothing but the recorded
+/// `PortTrafficLog`, produces a second `RunProducts` matching the first -- with the SAME one
+/// class of exclusion `[run_byte_identical_run_products_across_two_separately_spawned_cfs_
+/// containers]` immediately above already established for this exact instance, PLUS one more,
+/// both disclosed here rather than silently dropped:
+///
+/// 1. `"controller"`'s own `segments[].dynamics_hash` -- unchanged reason from the sibling test
+///    above (`container.address`'s own ephemeral Docker host port folds into `ModelInfo.
+///    settings_hash`, and is never itself observable at the port boundary).
+/// 2. `"controller"`'s own `segments[].dynamics_model`/`.dynamics_depth`, and its `Trajectory.
+///    provenance.attributes["container_binding_hash"]` -- NEW for this test, and unavoidable by
+///    construction: `crate::registry::ModelRegistry::construct_replay_container`'s own doc
+///    comment explains why a Docker-free replay of a container instance can never know these
+///    (they come only from a live `Bind` response this replay path deliberately never makes).
+///
+/// **Nothing else is excluded.** `"attitude"` and `"imu"` are real, unreplayed, deterministic
+/// native instances in both runs (identical seeds, identical wheel-torque commands received --
+/// the recorded, then replayed, `wheel_torque_out` frames are byte-identical by construction),
+/// so their own trajectories, and every `Event`/`Score`, are expected to match exactly.
+fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free() {
+    let _engine = gmat_sys::engine_lock();
+    let (systems, base_sos) = load_systems_and_base_sos();
+    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry();
+    let sos = container_sos("attitude_control_cfs_replay_sos", &base_sos, &image, &digest);
+    let drm = container_drm("attitude_control_cfs_replay_drm", &sos.id, REPLAY_DURATION_S, vec![]);
+
+    let dir = replay_scratch_dir("t4");
+    let run_id = "test-run-cfs-replay".to_string();
+
+    // Run 1: the real container. This is the ONLY run in this test that touches Docker at all.
+    let gmat_real = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let cfg_real = RunConfig { gmat: &gmat_real, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let run_real = execute(cfg_real).expect("real container run must execute end to end");
+    assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was actually recorded");
+
+    // Run 2: replay, from the recorded log alone. No `_registry_guards`/container/image
+    // plumbing is created for this call -- if this run needed Docker, it would have nothing to
+    // reach (the registry/image guards above go out of scope only at the very end of this
+    // function, but nothing in this second `execute()` call ever touches `image`/`digest`
+    // again: `sos`/`drm` are the SAME values, byte-identical `ContainerBinding.image`/
+    // `.image_digest` fields included, but `RunConfig.replay` is what makes `execute()` never
+    // dial them for the "controller" instance this run).
+    let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec![] };
+    let gmat_replay = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let cfg_replay = RunConfig { gmat: &gmat_replay, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let run_replayed = execute(cfg_replay).expect("replay run must execute end to end, Docker-free");
+
+    // The declared binding kind is unaffected by replay (question 175's own "the binding kind
+    // in the artifact stays as declared") -- pinned directly against the loaded
+    // SosConfiguration, not anything a run produced.
+    let controller_instance = sos.instances.iter().find(|i| i.name == "controller").expect("controller instance exists");
+    assert_eq!(controller_instance.binding.as_ref().unwrap().kind, BindingKind::Container as i32, "the replayed controller instance's own SosConfiguration entry must still declare BINDING_KIND_CONTAINER");
+
+    assert_eq!(run_real.trajectories.keys().collect::<Vec<_>>(), run_replayed.trajectories.keys().collect::<Vec<_>>(), "the same entities must be present in both runs");
+    for (name, traj_real) in &run_real.trajectories {
+        let traj_replayed = &run_replayed.trajectories[name];
+        assert_eq!(traj_real.samples, traj_replayed.samples, "instance {name:?}: samples must be byte-identical");
+        assert_eq!(traj_real.event_ids, traj_replayed.event_ids, "instance {name:?}: event_ids must be byte-identical");
+        assert_eq!(traj_real.state_space_id, traj_replayed.state_space_id);
+        assert_eq!(traj_real.segments.len(), traj_replayed.segments.len(), "instance {name:?}: segment count must match");
+        for (seg_real, seg_replayed) in traj_real.segments.iter().zip(traj_replayed.segments.iter()) {
+            assert_eq!(seg_real.start_tai_ns, seg_replayed.start_tai_ns);
+            assert_eq!(seg_real.end_tai_ns, seg_replayed.end_tai_ns);
+            if name == "controller" {
+                // seg_real.dynamics_hash/.dynamics_model/.dynamics_depth deliberately not
+                // compared for the replayed container instance -- see this test's own doc
+                // comment above.
+            } else {
+                assert_eq!(seg_real.dynamics_model, seg_replayed.dynamics_model, "instance {name:?}");
+                assert_eq!(seg_real.dynamics_hash, seg_replayed.dynamics_hash, "instance {name:?}");
+                assert_eq!(seg_real.dynamics_depth, seg_replayed.dynamics_depth, "instance {name:?}");
+            }
+        }
+        if name == "controller" {
+            let (Some(prov_real), Some(prov_replayed)) = (&traj_real.provenance, &traj_replayed.provenance) else {
+                panic!("instance {name:?}: both runs must set Trajectory.provenance");
+            };
+            assert!(
+                provenance_matches_except_attribute(prov_real, prov_replayed, "container_binding_hash"),
+                "instance {name:?}: provenance must match except container_binding_hash (see this test's own doc comment) -- real={prov_real:?} replayed={prov_replayed:?}"
+            );
+        } else {
+            assert_eq!(traj_real.provenance, traj_replayed.provenance, "instance {name:?}");
+        }
+    }
+    assert_eq!(run_real.events, run_replayed.events, "no event should be missing or extra: the container instance never reports its own AppliedCommand or CDM Measurement either way (ContainerModel::step_with_ports's own Vec::new() -- see crates/av-kernel/src/drm/binding.rs), so replay has nothing model-internal to fail to reproduce here, unlike the native controller this task's own module doc comment (tests/replay.rs) explains");
+    assert_eq!(run_real.scores, run_replayed.scores, "both empty: container_drm clears objectives/measures the same way the sibling determinism test's own container_drm call does");
+    assert_eq!(run_real.dropped_in_flight_messages, run_replayed.dropped_in_flight_messages);
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ------------------------------------------------------------------------------------------

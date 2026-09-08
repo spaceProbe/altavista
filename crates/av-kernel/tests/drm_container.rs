@@ -197,7 +197,7 @@ fn container_drm(sos_id: &str, instance_name: &str, sys: SystemDefinition, seeds
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None }
 }
 
 fn one_system_map(sys: &SystemDefinition) -> BTreeMap<String, SystemDefinition> {

@@ -331,6 +331,7 @@ use super::events;
 use super::fault;
 use super::hash;
 use super::maneuver::{self, ExecutionErrorMode, ParsedManeuver};
+use super::replay;
 use super::DrmError;
 use crate::kernel::{HeteroKernel, HeteroKernelError};
 
@@ -371,6 +372,14 @@ pub struct RunConfig<'a> {
     /// derives this from `--out`'s own parent directory; every test in this crate that does not
     /// care about the sidecar passes `None`.
     pub products_dir: Option<PathBuf>,
+    /// M25.4b (question 175's own follow-on): `Some` replays one or more instances' own
+    /// recorded port traffic instead of running their bound process -- see
+    /// [`super::replay::ReplayConfig`]'s own doc comment for the exact fields and
+    /// `crate::drm::replay`'s own module doc comment for the full contract (what is and is not
+    /// replayed, the missing-frame rule). `None` -- every test in this crate that does not care
+    /// about replay, and `crates/av-run/src/main.rs` (no `--replay` CLI flag is added by this
+    /// task; `av-run` always passes `None` here) -- runs exactly as before this field existed.
+    pub replay: Option<super::replay::ReplayConfig>,
 }
 
 /// One `Objective`'s or `MeasureOfEffectiveness`'s evaluated result (`docs/open-questions.md`
@@ -1564,12 +1573,34 @@ fn run_shared_group(
     run_id: &str,
     gmat_ns: &str,
     router: &mut crate::router::Router,
+    replay_targets: &std::collections::BTreeSet<String>,
+    replay_log: Option<&pb::PortTrafficLog>,
 ) -> Result<SharedGroupResult, DrmError> {
+    // M25.4b: `replay_targets` non-empty implies `replay_log` is `Some` -- `execute()`'s own
+    // resolution of `replay_targets` (Pass 1's own tail) only ever produces a non-empty set when
+    // `cfg.replay` was `Some`, in which case `replay_log` was already read by `replay::
+    // verify_and_load` before this function was ever called. An empty `replay_targets` with
+    // `replay_log` still `None` is exactly the "no replay requested" case every existing test in
+    // this crate exercises.
+    debug_assert!(replay_targets.is_empty() || replay_log.is_some(), "run_shared_group: replay_targets is non-empty but replay_log is None -- execute() should never construct this combination");
+
     let mut model_spans: BTreeMap<String, ModelSpanState> = BTreeMap::new();
     for (name, (plan, period_ns)) in plans {
         let instance = instances_by_name[name];
         let sys = systems.get(&instance.system_id).expect("validated in pass 1");
         let initial = materialize_plan(gmat, plan, sys, scenario.start_tai_ns, /* with_stm */ false, options.accept_missing_stm_terms, gmat_ns, &format!("{name}_0"))?;
+        // M25.4b: this instance's construction is replaced, wholesale, with a replay binding
+        // that plays its own recorded OUT frames back -- see `crate::drm::replay`'s own module
+        // doc comment. `initial.describe()`/`.state_dim()` (read inside `wrap_replay`, BEFORE
+        // this substitution) are exactly what the real, non-replayed `initial` above would have
+        // reported, so `TrajectorySegment.dynamics_model`/`.dynamics_hash`/`.dynamics_depth` for
+        // this instance still come out identical to a non-replayed run's -- only `step`/
+        // `step_with_ports`'s own behaviour changes.
+        let initial = if replay_targets.contains(name) {
+            ModelRegistry::wrap_replay(initial, name, replay_log.expect("checked by the debug_assert! above"))
+        } else {
+            initial
+        };
         model_spans.insert(
             name.clone(),
             ModelSpanState {
@@ -1607,6 +1638,41 @@ fn run_shared_group(
         if duration_ns % period_ns != 0 {
             return Err(DrmError::ContainerPeriodNotOnGrid { instance: name.clone(), period_ns: *period_ns, duration_ns });
         }
+
+        if replay_targets.contains(name) {
+            // M25.4b: replaying a BINDING_KIND_CONTAINER instance means never dialing it at all
+            // -- the whole point is running Docker-free (`crate::drm::replay`'s own module doc
+            // comment). Registered as a `ModelSpanState` (not a `ContainerSpanState`), through
+            // the identical shared `HeteroKernel`/`Router` machinery every `BINDING_KIND_MODEL`
+            // instance already uses -- see `crate::registry::ModelRegistry::
+            // construct_replay_container`'s own doc comment for the synthetic `ModelInfo` this
+            // builds (a disclosed difference from the original run's own real container
+            // `ModelInfo`, which only a live `Bind` response could ever supply) and this
+            // function's own caller (`execute()`'s `ContainerFaultsOrManeuversNotSupported`
+            // check, before this function is ever reached) for why `cur_plan` below is never
+            // actually read: a container instance -- replayed or not -- can never be a
+            // fault/maneuver boundary's own target.
+            let handle = ModelRegistry::construct_replay_container(name, &sys.dynamics_model, &sys.state_space_id, scenario.start_tai_ns, replay_log.expect("checked by the debug_assert! above"));
+            model_spans.insert(
+                name.clone(),
+                ModelSpanState {
+                    period_ns: *period_ns,
+                    cur_plan: BindingPlan::ConstantAccel(binding::ConstantAccelSpec::default()),
+                    x0: Vec::new(),
+                    handle: Some(handle),
+                    all_samples: Vec::new(),
+                    all_segments: Vec::new(),
+                    segment_preceded_by_own_maneuver: Vec::new(),
+                    shell: None,
+                    all_outputs: BTreeMap::new(),
+                    applied_commands: Vec::new(),
+                    measurements: Vec::new(),
+                    seg_start_is_post_maneuver: false,
+                },
+            );
+            continue;
+        }
+
         let seed = *scenario.seeds.get(&spec.seed_key).ok_or_else(|| DrmError::UnknownContainerSeed { instance: name.clone(), seed_key: spec.seed_key.clone() })?;
         let bind_parameters: BTreeMap<String, String> = binding::effective_parameters(sys, instance)
             .into_iter()
@@ -1819,7 +1885,13 @@ fn run_shared_group(
                 span.seg_start_is_post_maneuver = false;
             }
             let name_suffix = format!("{name}_{}", span.all_segments.len());
-            span.handle = Some(materialize_plan_at_boundary(gmat, &span.cur_plan, sys, boundary, &span.x0, /* with_stm */ false, options.accept_missing_stm_terms, gmat_ns, &name_suffix)?);
+            let rebound = materialize_plan_at_boundary(gmat, &span.cur_plan, sys, boundary, &span.x0, /* with_stm */ false, options.accept_missing_stm_terms, gmat_ns, &name_suffix)?;
+            // M25.4b: every span re-materializes every registered instance's own handle, even one
+            // this particular boundary did not target (`span.cur_plan`/`span.x0` are simply
+            // unchanged in that case, above) -- so a replayed instance's handle must be
+            // re-wrapped here too, on every boundary, the same way its FIRST span's handle was
+            // wrapped above this loop.
+            span.handle = Some(if replay_targets.contains(name) { ModelRegistry::wrap_replay(rebound, name, replay_log.expect("checked by the debug_assert! above")) } else { rebound });
         }
 
         // M15.3 (question 118), a FAULT_TARGET_KIND_HARDWARE fault as of M16.2 (question 120):
@@ -2583,6 +2655,31 @@ fn validate_expression_at_load(name: &str, expression: &str, run: &crate::expr::
 /// doc comment for exactly how `DrmOptions` fields map to kernel behaviour and how scoring
 /// works.
 pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
+    // M25.4b: `RunConfig.replay` combined with `DrmOptions.covariance` is refused first, before
+    // even opening `RunConfig.replay.log_path` -- cheaper than the hash check just below (no
+    // I/O), and there is no reason to make a caller supply, or this executor read, a real replay
+    // log at all for a combination that will be refused regardless of what that file contains.
+    // Question 107/M14.1's own "covariance path is unchanged" limitation, extended here:
+    // `run_covariance_instance` never consults `RunConfig.replay` at all, so honouring it only on
+    // the plain path while silently ignoring it under `DrmOptions.covariance` would be exactly
+    // the "say so, never drop it quietly" failure mode this executor refuses everywhere else.
+    // `cfg.drm.options` is read directly (not the `options` local a few lines below, parsed only
+    // once Pass 0's other checks have run) since this is the very first thing this function does.
+    if cfg.replay.is_some() && cfg.drm.options.as_ref().is_some_and(|o| o.covariance) {
+        return Err(DrmError::ReplayWithCovarianceNotSupported);
+    }
+
+    // M25.4b: the replay log's hash is verified next -- before the canonical DRM/SOS/system hash
+    // checks below, before any binding, before any GMAT call, and before any step
+    // (`crate::drm::replay::verify_and_load`'s own doc comment). `replay_log` is `None` for
+    // every non-replay run (unchanged behaviour); `Some(log)` is threaded down into
+    // `run_shared_group` once `replay_targets` (below, after Pass 1) resolves which instances it
+    // actually applies to.
+    let replay_log: Option<pb::PortTrafficLog> = match &cfg.replay {
+        Some(rc) => Some(replay::verify_and_load(rc)?),
+        None => None,
+    };
+
     // M18.4 (`docs/open-questions.md` question 127): namespace every GMAT object this call's own
     // model materializations construct, so this `execute()` invocation can never collide with a
     // GMAT object another invocation (in this same process, GMAT's configuration being
@@ -2766,6 +2863,27 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             }
         }
     }
+
+    // M25.4b: which instances this run replays -- resolved here, once, now that `container_plans`
+    // (needed for the "empty means every BINDING_KIND_CONTAINER instance" default) is fully
+    // populated. `RunConfig.replay.instances` naming an instance absent from `SosConfiguration.
+    // instances` is refused BEFORE this (checked against `cfg.sos.instances` directly, not
+    // `plans`/`container_plans`, so it also catches a name that classified into neither map --
+    // structurally impossible today since every instance classifies into exactly one, but this
+    // keeps the check meaningful even if that ever changes) -- see `crate::drm::replay`'s own
+    // module doc comment for the full "instances" contract.
+    let replay_targets: std::collections::BTreeSet<String> = match &cfg.replay {
+        None => std::collections::BTreeSet::new(),
+        Some(rc) if rc.instances.is_empty() => container_plans.keys().cloned().collect(),
+        Some(rc) => {
+            for name in &rc.instances {
+                if !cfg.sos.instances.iter().any(|i| &i.name == name) {
+                    return Err(DrmError::UnknownReplayInstance { instance: name.clone() });
+                }
+            }
+            rc.instances.iter().cloned().collect()
+        }
+    };
 
     // Question 107: a BINDING_KIND_CONTAINER instance does not yet support DYNAMICS faults or
     // maneuvers (a container instance is never itself a fault/maneuver boundary's own target --
@@ -2960,6 +3078,8 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             &cfg.run_id,
             &gmat_ns,
             &mut router,
+            &replay_targets,
+            replay_log.as_ref(),
         )?;
         all_events.extend(shared_events);
         all_measurements.extend(shared_measurements);

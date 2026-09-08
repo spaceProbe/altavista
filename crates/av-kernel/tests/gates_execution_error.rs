@@ -186,11 +186,11 @@ fn sampled_runs_are_byte_identical_across_two_runs_with_the_same_seed() {
     let event = maneuver_event_ee("burn1", 1_000_000_000, "veh", [0.0, 5.0, 0.0], "AXES_KIND_ICRF", Some(ee));
 
     let (sos_a, drm_a) = accel_sos_drm("gates_det_sos_a", "gates_det_drm_a", "veh", "gates_det_sys", vec![event.clone()], seeds.clone());
-    let cfg_a = RunConfig { gmat: &gmat, drm: &drm_a, sos: &sos_a, systems: &systems, run_id: "gates-det-a".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_a = RunConfig { gmat: &gmat, drm: &drm_a, sos: &sos_a, systems: &systems, run_id: "gates-det-a".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_a = execute(cfg_a).expect("run A executes");
 
     let (sos_b, drm_b) = accel_sos_drm("gates_det_sos_b", "gates_det_drm_b", "veh", "gates_det_sys", vec![event], seeds);
-    let cfg_b = RunConfig { gmat: &gmat, drm: &drm_b, sos: &sos_b, systems: &systems, run_id: "gates-det-b".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_b = RunConfig { gmat: &gmat, drm: &drm_b, sos: &sos_b, systems: &systems, run_id: "gates-det-b".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_b = execute(cfg_b).expect("run B executes");
 
     let traj_a = products_a.trajectories.get("veh").expect("run A produced a trajectory");
@@ -239,7 +239,7 @@ fn a_zero_sigma_execution_error_block_reproduces_the_perfect_burn_golden_bit_for
 
     let (sos_perfect, drm_perfect) =
         leo_gates_sos_drm("gates_zero_sigma_sos_perfect", "gates_zero_sigma_drm_perfect", "leo_gates_perfect", start, maneuver_event_ee("burn1", burn_tai, "leo_gates_perfect", [20.0, 0.0, 0.0], "AXES_KIND_VNB", None), BTreeMap::new());
-    let cfg_perfect = RunConfig { gmat: &gmat, drm: &drm_perfect, sos: &sos_perfect, systems: &systems, run_id: "gates-perfect".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_perfect = RunConfig { gmat: &gmat, drm: &drm_perfect, sos: &sos_perfect, systems: &systems, run_id: "gates-perfect".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_perfect = execute(cfg_perfect).expect("perfect burn executes");
 
     let zero_ee = ManeuverExecutionError { sigma_magnitude_fixed_mps: 0.0, sigma_magnitude_proportional: 0.0, sigma_pointing_fixed_mps: 0.0, sigma_pointing_proportional_rad: 0.0, seed: "burn_seed".to_string() };
@@ -251,7 +251,7 @@ fn a_zero_sigma_execution_error_block_reproduces_the_perfect_burn_golden_bit_for
         maneuver_event_ee("burn1", burn_tai, "leo_gates_zero", [20.0, 0.0, 0.0], "AXES_KIND_VNB", Some(zero_ee)),
         BTreeMap::from([("burn_seed".to_string(), 1u64)]),
     );
-    let cfg_zero = RunConfig { gmat: &gmat, drm: &drm_zero, sos: &sos_zero, systems: &systems, run_id: "gates-zero".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_zero = RunConfig { gmat: &gmat, drm: &drm_zero, sos: &sos_zero, systems: &systems, run_id: "gates-zero".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_zero = execute(cfg_zero).expect("zero-sigma execution_error burn executes");
 
     let traj_perfect = products_perfect.trajectories.get("leo_gates_perfect").expect("perfect-burn trajectory");
@@ -439,7 +439,7 @@ fn a_nominal_plain_run_with_a_non_zero_gates_block_reproduces_the_perfect_burn_g
         maneuver_event_ee("burn1", burn_tai, "leo_gates_nom_perfect", [20.0, 0.0, 0.0], "AXES_KIND_VNB", None),
         BTreeMap::new(),
     );
-    let cfg_perfect = RunConfig { gmat: &gmat, drm: &drm_perfect, sos: &sos_perfect, systems: &systems, run_id: "gates-nominal-nonzero-perfect".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_perfect = RunConfig { gmat: &gmat, drm: &drm_perfect, sos: &sos_perfect, systems: &systems, run_id: "gates-nominal-nonzero-perfect".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_perfect = execute(cfg_perfect).expect("perfect burn executes");
 
     // A substantial, NON-zero Gates block on a *plain* (non-covariance) run under
@@ -457,7 +457,7 @@ fn a_nominal_plain_run_with_a_non_zero_gates_block_reproduces_the_perfect_burn_g
         maneuver_event_ee("burn1", burn_tai, "leo_gates_nom_nonzero", [20.0, 0.0, 0.0], "AXES_KIND_VNB", Some(nonzero_ee)),
         BTreeMap::from([("burn_seed".to_string(), 1u64)]),
     );
-    let cfg_nonzero = RunConfig { gmat: &gmat, drm: &drm_nonzero, sos: &sos_nonzero, systems: &systems, run_id: "gates-nominal-nonzero".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_nonzero = RunConfig { gmat: &gmat, drm: &drm_nonzero, sos: &sos_nonzero, systems: &systems, run_id: "gates-nominal-nonzero".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_nonzero = execute(cfg_nonzero).expect("nominal run with a non-zero execution_error block executes");
 
     let traj_perfect = products_perfect.trajectories.get("leo_gates_nom_perfect").expect("perfect-burn trajectory");
@@ -500,7 +500,7 @@ fn a_sampled_covariance_run_injects_nothing() {
     let seeds = BTreeMap::from([("s".to_string(), 99u64)]);
 
     let (sos_none, drm_none) = cov_leo_sos_drm("gates_sampled_cov_sos_none", "gates_sampled_cov_drm_none", "leo_sampled_cov_none", dv, None, BTreeMap::new());
-    let cfg_none = RunConfig { gmat: &gmat, drm: &drm_none, sos: &sos_none, systems: &systems, run_id: "gates-sampled-cov-none".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_none = RunConfig { gmat: &gmat, drm: &drm_none, sos: &sos_none, systems: &systems, run_id: "gates-sampled-cov-none".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_none = execute(cfg_none).expect("no-execution-error covariance run executes");
 
     // Same non-zero block as the covariance-wiring test, but this time under
@@ -508,7 +508,7 @@ fn a_sampled_covariance_run_injects_nothing() {
     // **nothing** is injected into P -- the dispersion is already realized in the applied
     // dv/mean, so injecting G Q G^T on top would double-count the same uncertainty.
     let (sos_ee, drm_ee) = cov_leo_sos_drm("gates_sampled_cov_sos_ee", "gates_sampled_cov_drm_ee", "leo_sampled_cov_ee", dv, Some(ee), seeds);
-    let cfg_ee = RunConfig { gmat: &gmat, drm: &drm_ee, sos: &sos_ee, systems: &systems, run_id: "gates-sampled-cov-ee".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_ee = RunConfig { gmat: &gmat, drm: &drm_ee, sos: &sos_ee, systems: &systems, run_id: "gates-sampled-cov-ee".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_ee = execute(cfg_ee).expect("with-execution-error covariance run executes under Sampled");
 
     let mev_none = products_none.events.iter().find(|e| e.name == "burn1").expect("no-EE maneuver event");
@@ -554,7 +554,7 @@ fn adding_a_second_maneuver_event_does_not_shift_the_first_ones_sampled_draw() {
         options: Some(DrmOptions { default_step_rate_hz: 10.0, sample_interval_s: 0.1, ..Default::default() }),
         ..Default::default()
     });
-    let cfg_solo = RunConfig { gmat: &gmat, drm: &drm_solo, sos: &sos_solo, systems: &systems, run_id: "gates-indep-solo".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_solo = RunConfig { gmat: &gmat, drm: &drm_solo, sos: &sos_solo, systems: &systems, run_id: "gates-indep-solo".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_solo = execute(cfg_solo).expect("solo run executes");
 
     // Run "both": burn_a's and burn_b's own instances and events are both present, and both
@@ -573,7 +573,7 @@ fn adding_a_second_maneuver_event_does_not_shift_the_first_ones_sampled_draw() {
         options: Some(DrmOptions { default_step_rate_hz: 10.0, sample_interval_s: 0.1, ..Default::default() }),
         ..Default::default()
     });
-    let cfg_both = RunConfig { gmat: &gmat, drm: &drm_both, sos: &sos_both, systems: &systems, run_id: "gates-indep-both".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None };
+    let cfg_both = RunConfig { gmat: &gmat, drm: &drm_both, sos: &sos_both, systems: &systems, run_id: "gates-indep-both".to_string(), error_mode: ExecutionErrorMode::Sampled , products_dir: None, replay: None };
     let products_both = execute(cfg_both).expect("both run executes");
 
     let mev_solo = products_solo.events.iter().find(|e| e.name == "burn_a").expect("solo run's maneuver event");
@@ -625,11 +625,11 @@ fn the_covariance_path_injects_exactly_the_analytic_gates_term_at_the_burn_epoch
     let seeds = BTreeMap::from([("s".to_string(), 99u64)]);
 
     let (sos_none, drm_none) = cov_leo_sos_drm("gates_cov_wiring_sos_none", "gates_cov_wiring_drm_none", "leo_cov_wiring_none", dv, None, BTreeMap::new());
-    let cfg_none = RunConfig { gmat: &gmat, drm: &drm_none, sos: &sos_none, systems: &systems, run_id: "gates-cov-none".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_none = RunConfig { gmat: &gmat, drm: &drm_none, sos: &sos_none, systems: &systems, run_id: "gates-cov-none".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_none = execute(cfg_none).expect("no-execution-error covariance run executes");
 
     let (sos_ee, drm_ee) = cov_leo_sos_drm("gates_cov_wiring_sos_ee", "gates_cov_wiring_drm_ee", "leo_cov_wiring_ee", dv, Some(ee.clone()), seeds);
-    let cfg_ee = RunConfig { gmat: &gmat, drm: &drm_ee, sos: &sos_ee, systems: &systems, run_id: "gates-cov-ee".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None };
+    let cfg_ee = RunConfig { gmat: &gmat, drm: &drm_ee, sos: &sos_ee, systems: &systems, run_id: "gates-cov-ee".to_string(), error_mode: ExecutionErrorMode::Nominal , products_dir: None, replay: None };
     let products_ee = execute(cfg_ee).expect("with-execution-error covariance run executes");
 
     let mev_none = products_none.events.iter().find(|e| e.name == "burn1").expect("no-EE maneuver event");

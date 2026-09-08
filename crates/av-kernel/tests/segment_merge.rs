@@ -139,7 +139,7 @@ fn a_maneuver_never_merges_its_own_boundary_even_when_the_dynamics_hash_is_uncha
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-segment-merge-maneuver".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-segment-merge-maneuver".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("fault-then-maneuver DRM executes end to end");
 
     let traj = products.trajectories.get("veh").expect("instance produced a trajectory");

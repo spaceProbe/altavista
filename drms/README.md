@@ -669,3 +669,60 @@ mandatory-frame augmentation above, exactly like the two Rust golden tests were.
 here: this task's own environment rules exclude `altavista/`/`web/` and running `pytest`, and
 `tests/test_*.py` is explicitly owned by the concurrent Python-side worker this round (see the
 section just above).
+
+## The port traffic sidecar, and replaying a DRM (M25.4a/M25.4b, `docs/open-questions.md`
+## question 175)
+
+Every FRAMED/BYTE_STREAM frame `crate::router::Router` ever carries during a run -- who sent
+it, on which port, in which direction relative to that instance, and the raw bytes -- can be
+recorded as a sidecar beside a run's `RunProducts`: pass `RunConfig.products_dir: Some(dir)` and
+`execute()` writes `dir/port_traffic.pb` (an `altavista.v1.PortTrafficLog`, sorted `(sequence,
+instance, port)`), sets `RunProducts.port_traffic_hash` to its SHA-256, and records the file's
+own location in `RunProducts.provenance.attributes["port_traffic_uri"]`. `products_dir: None`
+(every fixture/test in this crate that does not care) writes nothing and leaves
+`port_traffic_hash` empty, with `provenance.attributes["port_traffic"] = "not recorded"`
+instead -- absence is always explicit, never silently inferred from an empty hash.
+
+**Replaying a DRM** means playing one or more instances' own recorded OUT frames back through a
+`crate::drm::replay::ReplayModel`, instead of running whatever process (native or a real bound
+container) actually produced them -- set `RunConfig.replay: Some(ReplayConfig { log_path,
+expected_hash, instances })`:
+
+- `log_path` -- the recorded `port_traffic.pb` from the ORIGINAL run.
+- `expected_hash` -- that original run's own `RunProducts.port_traffic_hash`. Verified against
+  `log_path`'s exact bytes before anything else in `execute()` happens (before binding, before
+  any GMAT call, before any step) -- a byte mismatch or an unparseable file is a typed refusal
+  (`DrmError::ReplayLogHashMismatch`/`ReplayLogIo`), never a warning.
+- `instances` -- which instances to replay. Empty means every `BINDING_KIND_CONTAINER`
+  instance; naming one or more instances explicitly replays exactly those, of ANY binding kind
+  -- naming a `BINDING_KIND_MODEL` instance is what makes a Docker-free (or GMAT-free,
+  Renode-free, board-free) replay test possible at all. An instance name absent from the loaded
+  `SosConfiguration` is a typed load refusal (`DrmError::UnknownReplayInstance`).
+
+**What is, and is not, replayed.** Only OUT frames (a replayed instance's own emissions) are
+ever played back -- an IN record is the receiver's own view of the identical frame some OTHER
+instance sent, and replaying it too would double every frame the instance ever received. A
+model's own physical state (`StepResult.state`, for any instance that has one), any named
+`StepResult.outputs`, and any CDM `Measurement` are never reconstructed -- these are
+model-internal computations that were never serialized onto any port, so a port-traffic-only
+replay has no honest way to reproduce them (`crate::drm::replay`'s own module doc comment has
+the full account, including why `drms/demo_attitude_control.*.yaml`'s own `controller` instance
+is a real, worked example of exactly this limitation: its own `pointing_error_rad`/`seq`
+outputs and its own self-reported `AppliedCommand` on `wheel_torque_out` cannot survive a
+generic replay, so `crates/av-kernel/tests/replay.rs`'s own acceptance test replays
+`drms/demo_attitude_sensors.*.yaml`'s `startracker` instead, where no such side channel exists).
+A `BINDING_KIND_CONTAINER` instance's own `dynamics_hash`/`binding_hash` likewise cannot survive
+a Docker-free replay (they come only from a live `Bind` response) -- `crates/av-kernel/tests/
+drm_attitude_control_cfs.rs`'s own replay test discloses and excludes exactly those two fields
+when it compares a real cFS-container run against its own Docker-free replay.
+
+**The missing-frame rule.** A step whose own emission epoch has no recorded frame is a typed
+error (`crate::drm::replay::ReplayError::MissingFrame`, surfaced as `DrmError::Schedule`)
+exactly when that epoch falls strictly between the replayed instance's own first and last
+recorded epoch; before the first or after the last is legitimate silence. This detects a
+deleted or corrupted INTERIOR record and cannot detect one deleted from the leading or trailing
+edge -- disclosed, not claimed away, in the module's own doc comment.
+
+Reading the sidecar directly (e.g. to build a `ReplayConfig` or to inspect what a run actually
+carried): `av_cdm::pb::PortTrafficLog::decode(&bytes)` (`prost::Message`), the same wire type
+`execute()` itself writes.

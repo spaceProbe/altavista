@@ -119,7 +119,7 @@ fn load_sensors_bundle() -> (DesignReferenceMission, SosConfiguration, BTreeMap<
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-attitude-sensors".to_string(), error_mode: Default::default() , products_dir: None }
+    RunConfig { gmat, drm, sos, systems, run_id: "test-run-drm-attitude-sensors".to_string(), error_mode: Default::default() , products_dir: None, replay: None }
 }
 
 /// Re-hash a `DesignReferenceMission` after a test has mutated it in memory -- mirrors

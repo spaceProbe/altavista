@@ -102,7 +102,7 @@ fn load_measurements_bundle() -> (DesignReferenceMission, SosConfiguration, BTre
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: "test-run-demo-measurements".to_string(), error_mode: Default::default() , products_dir: None }
+    RunConfig { gmat, drm, sos, systems, run_id: "test-run-demo-measurements".to_string(), error_mode: Default::default() , products_dir: None, replay: None }
 }
 
 const START_TAI_NS: i64 = 1_767_225_637_000_000_000;

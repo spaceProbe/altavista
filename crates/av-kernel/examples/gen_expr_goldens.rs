@@ -291,7 +291,7 @@ struct Golden {
 }
 
 fn run_case(gmat: &Gmat, case: &GoldenCase, reason: &str) -> Result<Golden, DrmError> {
-    let cfg = RunConfig { gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: format!("gen-{}", case.name), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: format!("gen-{}", case.name), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg)?;
     let scenario = case.drm.scenario.as_ref().expect("every case declares a scenario");
     let run = ExprRunProducts::new(scenario.start_tai_ns, scenario.end_tai_ns, &products.trajectories, &products.events);

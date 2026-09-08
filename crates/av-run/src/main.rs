@@ -197,7 +197,11 @@ fn run(args: &[String]) -> Result<(), String> {
     let startup = cli.gmat_startup.clone().unwrap_or_else(Gmat::default_startup_file);
     let gmat = Gmat::setup(&startup).map_err(|e| format!("GMAT setup ({startup}): {e}"))?;
 
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()) };
+    // M25.4b (question 175's own successor task, replay): no `--replay` CLI flag is added by this
+    // task -- `av-run` always passes `None` here. Wiring a flag through to `ReplayConfig::{log_path,
+    // expected_hash, instances}` is deliberately left for a later task; this line only keeps
+    // `av-run` compiling against `RunConfig`'s new field.
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None };
     let products = execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))?;
 
     eprintln!(

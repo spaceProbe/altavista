@@ -216,6 +216,7 @@ use super::controller::{self, AttitudeControllerModel, AttitudeControllerSpec, C
 use super::fault::{CARTESIAN_FIELDS, DISPLAY_STATE_TYPE_FIELD, KEPLERIAN_FIELDS};
 use super::gmat_command::{self, FramedAck, FramedCommandInput, GmatFramedCommandModel};
 use super::ground::{self, GroundSpecError, GroundStationModel, GroundStationSpec};
+use super::replay::ReplayModel;
 use super::sensors::{self, ImuModel, ImuSpec, SensorSpecError, StarTrackerModel, StarTrackerSpec, TruthBroadcastAttitude};
 use super::DrmError;
 
@@ -295,6 +296,16 @@ pub(crate) enum AnyModel {
     /// system"): a real `crate::drm::ground::GroundStationModel`, dispatched via
     /// `crate::registry::kind_for`.
     GroundStation(ground::GroundStationModel),
+    /// M25.4b (question 175's own follow-on): a [`ReplayModel`] standing in for whatever
+    /// instance `RunConfig.replay.instances` named -- see that module's own doc comment for the
+    /// full contract. Unlike every other variant above, dispatch into this one is never decided
+    /// by `SystemDefinition.dynamics_model`'s own prefix (`crate::registry::kind_for` knows
+    /// nothing about replay): `crate::registry::ModelRegistry::wrap_replay` builds this variant
+    /// directly, from a `ModelHandle` any of the OTHER constructors already produced, only when
+    /// `crate::drm::executor::execute` has decided this particular instance is being replayed
+    /// this run -- so a DRM/SOS/SystemDefinition triple is completely unaware replay ever
+    /// happens; only `RunConfig` says so.
+    Replay(ReplayModel),
 }
 
 /// A closed-form constant-acceleration model, parameterized entirely from declared
@@ -592,6 +603,11 @@ pub(crate) enum AnyModelError {
     /// `Display`" convention, since this enum cannot itself depend on every model-specific error
     /// type without becoming as wide as `AnyModel` itself.
     PortCodec { model_id: String, detail: String },
+    /// M25.4b: `crate::drm::replay::ReplayError` (a replayed instance's own missing-frame
+    /// refusal), stringified -- a genuinely new failure shape this enum did not have before,
+    /// not folded into `PortCodec` (which names a specific, different cause) just to avoid
+    /// adding a variant.
+    Replay { model_id: String, detail: String },
 }
 impl fmt::Display for AnyModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -599,6 +615,7 @@ impl fmt::Display for AnyModelError {
             AnyModelError::Gmat(e) => write!(f, "{e}"),
             AnyModelError::CapabilityMissing { model_id, capability } => write!(f, "model {model_id:?}: capability {capability:?} was invoked but is not declared"),
             AnyModelError::PortCodec { model_id, detail } => write!(f, "model {model_id:?}: port codec error: {detail}"),
+            AnyModelError::Replay { model_id, detail } => write!(f, "model {model_id:?}: {detail}"),
         }
     }
 }
@@ -616,6 +633,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::StarTracker(m) => m.state_dim(),
             AnyModel::Imu(m) => m.state_dim(),
             AnyModel::GroundStation(m) => m.state_dim(),
+            AnyModel::Replay(m) => m.state_dim(),
         }
     }
     fn derivatives(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
@@ -644,6 +662,12 @@ impl DynamicsModel for AnyModel {
                 Ok(()) => Ok(()),
                 Err(never) => match never {},
             },
+            // M25.4b: `ReplayModel::derivatives` never fails (always a zero-order-hold Ok(())),
+            // but its `Error` is `replay::ReplayError`, not `Infallible` (the missing-frame
+            // refusal lives in `step_with_ports` -- see that arm below), so this still needs a
+            // real `map_err`, mirroring the `Attitude`/`Controller` arms' shape rather than the
+            // `match never {}` shape.
+            AnyModel::Replay(m) => m.derivatives(state, t_tai_ns, controls, out).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
     fn describe(&self) -> ModelInfo {
@@ -655,6 +679,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::StarTracker(m) => m.describe(),
             AnyModel::Imu(m) => m.describe(),
             AnyModel::GroundStation(m) => m.describe(),
+            AnyModel::Replay(m) => m.describe(),
         }
     }
     fn stm_capable(&self) -> bool {
@@ -693,6 +718,14 @@ impl DynamicsModel for AnyModel {
             // ground-station-specific covariance code (see `crate::drm::ground`'s own module doc
             // comment, "Fault / maneuver / covariance").
             AnyModel::GroundStation(_) => false,
+            // M25.4b: a replayed instance never declares STM capability -- there is no bound
+            // process left behind it to propagate a state transition matrix from, replayed or
+            // not. `crate::drm::executor` refuses `RunConfig.replay` combined with
+            // `DrmOptions.covariance` before this could ever matter in practice (`DrmError::
+            // ReplayWithCovarianceNotSupported`), but this stays `false` unconditionally, the
+            // same "the invariant, not merely the call site that happens to enforce it today"
+            // reasoning every other variant's own arm above already follows.
+            AnyModel::Replay(_) => false,
         }
     }
     fn stm_derivatives(&self, augmented_state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
@@ -715,6 +748,9 @@ impl DynamicsModel for AnyModel {
             AnyModel::Controller(m) => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "stm_derivatives".to_string() }),
             // Same typed guard, same reason: GroundStationModel::stm_capable() is always false.
             AnyModel::GroundStation(m) => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "stm_derivatives".to_string() }),
+            // Same typed guard, same reason: a replayed instance's stm_capable() is always
+            // false (see that arm above).
+            AnyModel::Replay(m) => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "stm_derivatives".to_string() }),
         }
     }
 
@@ -734,6 +770,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::StarTracker(m) => m.integrator(),
             AnyModel::Imu(m) => m.integrator(),
             AnyModel::GroundStation(m) => m.integrator(),
+            AnyModel::Replay(m) => m.integrator(),
         }
     }
 
@@ -768,6 +805,11 @@ impl DynamicsModel for AnyModel {
                 Ok(r) => Ok(r),
                 Err(never) => match never {},
             },
+            // M25.4b: see `AnyModel::derivatives`'s own identical-shaped `Replay` arm's comment
+            // -- `ReplayModel::step` cannot fail on its own (it only ever calls `step_with_ports`
+            // with an empty inbox, which CAN fail on a missing frame), but the error type is not
+            // `Infallible`, so this needs a real `map_err` too.
+            AnyModel::Replay(m) => m.step(state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -817,6 +859,12 @@ impl DynamicsModel for AnyModel {
                 Ok(r) => Ok(r),
                 Err(never) => match never {},
             },
+            // Same typed guard, same reason: a replayed instance's stm_capable() is always
+            // false (see that arm above) -- dead in practice (the guard is always taken), but
+            // must still typecheck against ReplayModel's real Error type, mirroring the
+            // Attitude/Controller arms' identical "dead but must typecheck" shape.
+            AnyModel::Replay(m) if !m.stm_capable() => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "step_with_stm".to_string() }),
+            AnyModel::Replay(m) => m.step_with_stm(augmented_state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -880,6 +928,11 @@ impl DynamicsModel for AnyModel {
                 Ok(r) => Ok(r),
                 Err(never) => match never {},
             },
+            // M25.4b: the playback itself happens here -- see `crate::drm::replay`'s own module
+            // doc comment for the missing-frame rule this can refuse against, and
+            // `AnyModelError::Replay`'s own doc comment for why that refusal gets its own
+            // variant rather than reusing `PortCodec`.
+            AnyModel::Replay(m) => m.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -904,6 +957,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::StarTracker(m) => m.last_measurements(),
             AnyModel::Imu(m) => m.last_measurements(),
             AnyModel::GroundStation(m) => m.last_measurements(),
+            AnyModel::Replay(m) => m.last_measurements(),
         }
     }
 }
@@ -5570,5 +5624,36 @@ mod tests {
         // Sanity floor: catches a needle typo (e.g. renaming the variant) silently passing an
         // `0 == 0` comparison.
         assert!(star_tracker_arms >= 10, "expected at least the nine AnyModel trait-method arms plus this test file's own occurrences; got {star_tracker_arms}");
+    }
+
+    /// M25.4b's own instance of the identical executable check above, updated for the
+    /// `AnyModel::Replay` variant this task adds (this task's own standing rule: "the
+    /// executable arm-count check updated if you add an `AnyModel` variant"). Not a direct
+    /// text-count-equality-with-`GroundStation` check like the sibling test above: `Replay` is
+    /// CONSTRUCTED in a different file than every other variant (`crate::registry::
+    /// ModelRegistry::wrap_replay`, not a `materialize_*` function in this one -- see
+    /// `AnyModel::Replay`'s own doc comment: dispatch into it is a `RunConfig.replay` decision,
+    /// not anything `classify_binding` in this file ever makes), so this file's own `AnyModel::
+    /// Replay(` text count is not directly comparable to the `GroundStation` variant's own.
+    /// Instead: a leading-indentation-anchored needle (`"\n            AnyModel::Replay("`, twelve spaces
+    /// -- the exact indentation every real `match self { ... }` arm in this file's own `impl
+    /// DynamicsModel for AnyModel` block uses) counts ONLY real match arms, never a comment or
+    /// this test's own strings (neither is indented that way), so the expected count -- eleven,
+    /// one per `DynamicsModel` method, `stm_derivatives`/`step_with_stm` each split into a guard
+    /// arm plus a dead-but-typechecking delegate arm mirroring `Attitude`/`Controller` -- can be
+    /// asserted directly rather than by comparison. Fails against a future edit that removes an
+    /// arm (the count drops below 11) or duplicates one (the sibling `registry.rs` check below
+    /// would also need `wrap_replay`'s own construction site to still exist).
+    #[test]
+    fn any_model_arm_count_for_replay_covers_every_dynamics_model_match_site() {
+        let binding_source = include_str!("binding.rs");
+        let indented_arm_count = binding_source.matches("\n            AnyModel::Replay(").count();
+        assert_eq!(indented_arm_count, 11, "AnyModel::Replay( must appear as a real match arm (12-space indent) exactly 11 times: one per DynamicsModel method, with stm_derivatives/step_with_stm each split into a guard + delegate pair");
+
+        // The one construction site this variant has, which -- unlike every other variant's own
+        // `materialize_*` function -- lives in `crate::registry::ModelRegistry::wrap_replay`,
+        // not in this file (see this test's own doc comment).
+        let registry_source = include_str!("../registry.rs");
+        assert!(registry_source.contains("AnyModel::Replay("), "crate::registry::ModelRegistry::wrap_replay must construct AnyModel::Replay(...) directly -- this is Replay's one construction call site, the counterpart of every other variant's own materialize_* function in THIS file");
     }
 }

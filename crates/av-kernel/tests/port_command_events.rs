@@ -137,7 +137,7 @@ fn build(run_id: &str) -> (SosConfiguration, DesignReferenceMission, BTreeMap<St
 fn run(run_id: &str) -> RunProducts {
     let (sos, drm, systems) = build(run_id);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     execute(cfg).expect("the port-command DRM executes end to end")
 }
 

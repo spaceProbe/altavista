@@ -53,7 +53,7 @@ fn check_case(case: &GoldenCase) {
 
     let _engine = gmat_sys::engine_lock();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: format!("golden-check-{}", case.name), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: format!("golden-check-{}", case.name), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).unwrap_or_else(|e| panic!("case {:?}: DRM execution failed: {e}", case.name));
     let scenario = case.drm.scenario.as_ref().unwrap();
     // Built from execute()'s own real RunProducts.events (question 95, M9.3) -- not a

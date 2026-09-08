@@ -146,7 +146,7 @@ fn drm_matches_the_maneuver_golden_vnb_burn() {
     let sos = schema::parse_sos_yaml(&std::fs::read_to_string(drms_path("leo_1day_maneuver_vnb.sos.yaml")).unwrap()).expect("SosConfiguration parses");
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("maneuver DRM executes end to end");
 
     let traj = products.trajectories.get("leo_mvr").expect("the \"leo_mvr\" instance produced a trajectory");
@@ -238,7 +238,7 @@ fn drm_matches_the_maneuver_golden_ric_burn() {
     let sos = schema::parse_sos_yaml(&std::fs::read_to_string(drms_path("leo_1day_maneuver_ric.sos.yaml")).unwrap()).expect("SosConfiguration parses");
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-ric".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-ric".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("RIC maneuver DRM executes end to end");
 
     let traj = products.trajectories.get("leo_mvr_ric").expect("the \"leo_mvr_ric\" instance produced a trajectory");
@@ -285,7 +285,7 @@ fn drm_maneuver_axes_kind_vvlh_does_not_reproduce_gmats_native_lvlh_burn() {
     assert_eq!(drm.scenario.as_ref().unwrap().events[0].attributes.get("frame_id").map(String::as_str), Some("AXES_KIND_VVLH"));
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-vvlh-as-vvlh".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-vvlh-as-vvlh".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("VVLH-tagged maneuver DRM executes end to end (the mismatch is numerical, not a load/run error)");
 
     let traj = products.trajectories.get("leo_mvr_vvlh").expect("the \"leo_mvr_vvlh\" instance produced a trajectory");
@@ -363,7 +363,7 @@ fn drm_maneuver_axes_kind_ric_reproduces_gmats_native_lvlh_burn() {
     });
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-vvlh-as-ric".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-maneuver-golden-vvlh-as-ric".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("RIC-retagged maneuver DRM executes end to end");
 
     let traj = products.trajectories.get("leo_mvr_vvlh_as_ric").expect("the instance produced a trajectory");
@@ -467,7 +467,7 @@ fn a_maneuver_splits_the_run_and_the_kept_boundary_sample_is_the_post_burn_one()
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-accel-maneuver".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-accel-maneuver".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products = execute(cfg).expect("maneuver-split DRM executes end to end");
 
     let traj = products.trajectories.get("veh").expect("instance produced a trajectory");
@@ -541,7 +541,7 @@ fn a_maneuver_epoch_off_the_sample_grid_is_refused_before_any_binding() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-offgrid".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-offgrid".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::ManeuverEpochNotOnSampleGrid { ref id, .. } if id == "burn1"), "{err:?}");
 }
@@ -553,7 +553,7 @@ fn a_maneuver_naming_an_unknown_instance_is_refused() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-unknown".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-unknown".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::UnknownManeuverInstance { ref id, ref instance } if id == "burn1" && instance == "not_a_real_instance"), "{err:?}");
 }
@@ -565,7 +565,7 @@ fn a_maneuver_with_an_unsupported_frame_is_refused_through_the_full_executor() {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-frame".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-frame".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).unwrap_err();
     assert!(matches!(err, DrmError::ManeuverFrameNotSupported { ref id, .. } if id == "burn1"), "{err:?}");
 }
@@ -614,7 +614,7 @@ fn a_maneuver_naming_a_native_instance_with_an_empty_state_space_is_a_typed_refu
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-empty".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-mvr-empty".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).unwrap_err();
     assert!(
         matches!(err, DrmError::ManeuverTargetNotSixDimensional { ref instance, ref maneuver_id, state_dim: 0 } if instance == "ctrl" && maneuver_id == "burn1"),
@@ -676,13 +676,13 @@ fn covariance_is_unchanged_across_a_no_execution_error_burn() {
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
 
     let (sos_burn, drm_burn) = cov_drm("leo_sos_cov_zero_burn", "leo_drm_cov_zero_burn", "leo_cov_zero_burn", vec![maneuver_event("burn1", 1_767_225_637_200_000_000, "leo_cov_zero_burn", [0.0, 0.0, 0.0], "AXES_KIND_ICRF")]);
-    let cfg_burn = RunConfig { gmat: &gmat, drm: &drm_burn, sos: &sos_burn, systems: &systems, run_id: "test-run-cov-zero-burn".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_burn = RunConfig { gmat: &gmat, drm: &drm_burn, sos: &sos_burn, systems: &systems, run_id: "test-run-cov-zero-burn".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_burn = execute(cfg_burn).expect("covariance DRM with a zero-dv maneuver executes end to end");
     let traj_burn = products_burn.trajectories.get("leo_cov_zero_burn").unwrap();
     assert_eq!(traj_burn.segments.len(), 2, "the zero-dv maneuver still splits the run into two segments");
 
     let (sos_plain, drm_plain) = cov_drm("leo_sos_cov_no_burn", "leo_drm_cov_no_burn", "leo_cov_no_burn", vec![]);
-    let cfg_plain = RunConfig { gmat: &gmat, drm: &drm_plain, sos: &sos_plain, systems: &systems, run_id: "test-run-cov-no-burn".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg_plain = RunConfig { gmat: &gmat, drm: &drm_plain, sos: &sos_plain, systems: &systems, run_id: "test-run-cov-no-burn".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let products_plain = execute(cfg_plain).expect("covariance DRM with no maneuver executes end to end");
     let traj_plain = products_plain.trajectories.get("leo_cov_no_burn").unwrap();
     assert_eq!(traj_plain.segments.len(), 1);
@@ -754,7 +754,7 @@ fn a_maneuver_on_the_sample_grid_but_off_a_coarser_covariance_grid_is_refused() 
         ..Default::default()
     });
 
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-cov-offgrid-burn".to_string(), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-run-cov-offgrid-burn".to_string(), error_mode: Default::default() , products_dir: None, replay: None };
     let err = execute(cfg).unwrap_err();
     assert!(
         matches!(err, DrmError::ManeuverEpochNotOnCovarianceGrid { ref id, ref instance, tai_ns, period_ns } if id == "burn1" && instance == "leo_cov_offgrid_burn" && tai_ns == start + 300_000_000 && period_ns == 500_000_000),

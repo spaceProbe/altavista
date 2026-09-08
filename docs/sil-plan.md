@@ -77,6 +77,41 @@ the router with the link model; telemetry framed back into CDM measurements and 
 viewer's timeline. A run replays bit-identically from its `RunProducts` and logged port
 traffic with the flight software removed (P3 criterion brought forward for SIL).
 
+**M25.4b closes the "flight software removed" half of that criterion.** `RunConfig.replay`
+(`crates/av-kernel/src/drm/replay.rs`) plays one or more instances' own recorded port traffic
+(`RunProducts.port_traffic_hash`'s own `PortTrafficLog` sidecar, M25.4a) back through a
+`ReplayModel` in place of the process that produced it -- a `BINDING_KIND_MODEL` instance (a
+native controller/sensor, no external process at all) or a `BINDING_KIND_CONTAINER` instance
+(the real bound process, container included), named explicitly or -- for every
+`BINDING_KIND_CONTAINER` instance at once -- left as the default. The log's own hash is
+verified before any binding, any GMAT call, or any step; only FRAMED/BYTE_STREAM OUT frames are
+replayed (an IN record is the receiver's own view of the same frame, never replayed a second
+time), and every replayed instance's declared binding kind stays exactly what the artifact
+declares (a replayed container instance still reports `BINDING_KIND_CONTAINER` everywhere it is
+reported). **Verified against a real, posix-userspace cFS container**
+(`crates/av-kernel/tests/drm_attitude_control_cfs.rs`, Docker-gated with a visible skip): one
+run against the real container, then a second, Docker-free run replaying the same
+`"controller"` instance from nothing but the recorded log, produce identical trajectory samples,
+segment epochs, `event_ids`, events and `dropped_in_flight_messages` -- excluding only the
+fields that can only ever come from a live `Bind` response a Docker-free replay deliberately
+never makes (the replayed container segment's own `dynamics_hash`/`dynamics_model`/
+`dynamics_depth`, and its `container_binding_hash` provenance attribute), each excluded field
+named at its own assertion. That test's `scores` comparison is real but vacuous -- its DRM
+declares no objectives -- so the scored half of the claim rests on
+`crates/av-kernel/tests/replay.rs`'s own `t1b_...`, where a replayed sensor drives a closed
+loop and the ENTIRE encoded `RunProducts` (trajectories, events, measurements, scores and the
+port-traffic hash) matches byte for byte with nothing excluded at all. Not yet verified against
+Renode or a physical board.
+
+**The missing-frame rule, and its honest limit.** A step whose own emission epoch has no
+recorded frame is a typed refusal (never interpolated, held, or synthesized) exactly when that
+epoch falls strictly between the replayed instance's own first and last recorded epoch -- an
+interior gap, most likely a deleted or corrupted record. A step before the first, or after the
+last, recorded epoch is legitimate silence. This detects a deleted or corrupted INTERIOR
+record; it cannot detect one deleted from the leading or trailing edge (an instance that
+genuinely emitted nothing on its own first or last step is, from the log alone,
+indistinguishable from one whose very first or very last record was quietly removed).
+
 ## Forks for the user
 
 A. **First closed loop.** Orbit maintenance (GPS in, burn commands out; reuses the maneuver

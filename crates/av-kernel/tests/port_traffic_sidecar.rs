@@ -112,7 +112,7 @@ fn load_command_bundle() -> (DesignReferenceMission, SosConfiguration, BTreeMap<
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str, products_dir: Option<PathBuf>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir, replay: None }
 }
 
 /// A fresh, empty scratch directory under the OS temp dir, unique per call within this process

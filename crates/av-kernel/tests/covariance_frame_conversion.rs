@@ -187,7 +187,7 @@ fn run_probe(coordinate_system: &str, instance_name: &str, gmat: &Gmat) -> RunPr
         ..Default::default()
     });
 
-    let cfg = RunConfig { gmat, drm: &drm, sos: &sos, systems: &systems, run_id: format!("test-run-covariance-frame-conversion-{instance_name}"), error_mode: Default::default() , products_dir: None };
+    let cfg = RunConfig { gmat, drm: &drm, sos: &sos, systems: &systems, run_id: format!("test-run-covariance-frame-conversion-{instance_name}"), error_mode: Default::default() , products_dir: None, replay: None };
     execute(cfg).unwrap_or_else(|e| panic!("{instance_name} (coordinate_system={coordinate_system:?}) must execute end to end: {e}"))
 }
 
