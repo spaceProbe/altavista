@@ -832,13 +832,29 @@ def cdm_event_to_viewer_event(ev: trajectory_pb2.Event) -> Event:
     ``crates/av-kernel/src/drm/events.rs`` from the same values) already states the number in
     human-readable form (e.g. the maneuver detail's own summary) for every kind this
     function maps.
+
+    M25.3e (question 177): ``reference_id`` and ``provenance.attributes`` are now also
+    carried through (-> ``referenceId``/``attributes`` on the wire) -- see
+    :class:`~altavista.model.Event`'s own docstring for the exact contract. Before this
+    task, both were dropped here, forcing ``web/js/timeline_events.js`` to recover a
+    command transition's id and ack level (when at all possible) from ``detail``'s free
+    text; that recovery code stays as a fallback (a scenario with no ``referenceId``,
+    e.g. one built before this task, still degrades gracefully) but is no longer the
+    primary path.
     """
     label = _VIEWER_EVENT_TYPE_BY_KIND.get(ev.kind)
     if label is None:
         name = trajectory_pb2.EventKind.Name(ev.kind)
         label = name[len("EVENT_KIND_"):].lower() if name.startswith("EVENT_KIND_") else "custom"
+    # M25.3e (question 177): ev.reference_id (for a command transition, the Command.id)
+    # and ev.provenance.attributes (where ack_level lives on a command's ACKED
+    # transition) now reach the viewer -- see altavista.model.Event's own docstring
+    # section on this. Both additive: reference_id defaults to "" on the proto (-> None
+    # here, matching every other optional string field this function already maps),
+    # attributes defaults to an empty map (never None -- Event.attributes' own default).
     return Event(name=ev.name or ev.id, t=tai_ns_to_a1mjd(ev.tai_ns), type=label,
-                spacecraft=ev.entity_id or None, detail=ev.detail or None)
+                spacecraft=ev.entity_id or None, detail=ev.detail or None,
+                reference_id=ev.reference_id or None, attributes=dict(ev.provenance.attributes))
 
 
 def event_to_cdm(ev: Event, *, entity_id: Optional[str] = None, event_id: Optional[str] = None,

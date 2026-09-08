@@ -2,6 +2,13 @@
 import { Viewer } from './scene.js';
 import { Net } from './net.js';
 import { formatScenarioInfo, frameOptionLabel, hudText, viewportPaneTitle } from './cdm_run.js';
+// M25.3d (docs/sil-plan.md's M25 milestone: "telemetry into the viewer"): contact
+// windows and command-state transitions get their own timeline treatment instead of
+// the generic opaque-label tick every event kind used to get -- see
+// web/js/timeline_events.js's own module doc comment for exactly what real,
+// Rust-emitted CDM data this recovers from `detail` and why (`reference_id`/
+// `provenance` never reach the viewer's own `Event` wire shape).
+import { timelineTickPlan } from './timeline_events.js';
 // M26.3 (docs/ui-rework-plan.md): multiple 3D viewports. hasRicFrame() is the same,
 // real detection web/js/layout/default_layouts.js's defaultLayoutForScenario() already
 // uses to pick the ICRF/RIC/globe triple-viewport default layout -- reused here (not
@@ -13,7 +20,10 @@ import { hasRicFrame, ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID } from './layo
 // (docs/open-questions.md question 165, web/js/REPORT_M26_4b.md) `altavista/server.py`'s
 // POST /api/cdm/run threads `RunProducts.scores` into every published scenario, so
 // `sc.scores` is a real (possibly empty) object for every scenario the server publishes.
-import { render as renderRunProducts } from './panels/run_products_panel.js';
+// M25.3e (question 174): `sc.measurements` is the same story -- a real (possibly
+// empty) list of {id, epoch, sensorId, frameId, z, r} for every scenario the server
+// publishes (drms/M25_3E_REPORT.md).
+import { render as renderRunProducts, timelineMeasurementTicks } from './panels/run_products_panel.js';
 import { render as renderMap } from './panels/map_panel.js';
 import { render as renderConsole } from './panels/console_panel.js';
 
@@ -180,7 +190,7 @@ function loadScenario(sc) {
   // declared no scores) -- run_products_panel.js's own render() shows an honest "no
   // objectives or measures" notice only for that empty case, never invented data.
   renderRunProducts(els.runProductsPanel, {
-    scores: sc.scores, events: sc.events, t0: clock.t0, t1: clock.t1,
+    scores: sc.scores, events: sc.events, measurements: sc.measurements, t0: clock.t0, t1: clock.t1,
     onJumpToEvent: (ev) => setTime(ev.t, true),
   });
   renderMap(els.mapPanel, { sc, level: 1, t: clock.t });
@@ -275,14 +285,48 @@ function buildLists(sc) {
   }
 }
 
+// M25.3d: a contact_start/contact_end pair for the same station/counterpart reads as
+// ONE spanned window (not two unrelated point ticks), an unmatched contact event is
+// shown distinctly rather than silently dropped or mispaired, and a command_transition
+// tick is visually AND textually distinct (real CommandState name) from a contact
+// window and from every other event kind. Every other kind's rendering (a single
+// 'tick' point positioned at ev.t, titled ev.name) is unchanged -- all of the new
+// grouping/labelling logic lives in the pure, headlessly-tested web/js/timeline_events.js
+// (`timelineTickPlan`); this function is only the DOM loop over its output.
 function buildTicks(sc) {
   els.ticks.innerHTML = '';
   const span = clock.t1 - clock.t0;
   if (span <= 0) return;
-  for (const ev of sc.events || []) {
-    const d = document.createElement('div'); d.className = 'tick';
-    d.style.left = ((ev.t - clock.t0) / span * 100) + '%';
-    d.title = ev.name;
+  const plan = timelineTickPlan(sc.events || []);
+
+  for (const w of plan.windows) {
+    const d = document.createElement('div'); d.className = 'tick tick-contact-window';
+    d.style.left = ((w.startT - clock.t0) / span * 100) + '%';
+    d.style.width = Math.max((w.endT - w.startT) / span * 100, 0.15) + '%';
+    const durationText = fmtDuration((w.endT - w.startT) * SEC_PER_DAY);
+    d.title = `contact: ${w.spacecraft || '?'}${w.counterpart ? ' ↔ ' + w.counterpart : ''} · ${durationText}`;
+    els.ticks.appendChild(d);
+  }
+  for (const u of plan.unmatched) {
+    const d = document.createElement('div'); d.className = 'tick tick-contact-unmatched';
+    d.style.left = ((u.event.t - clock.t0) / span * 100) + '%';
+    d.title = `${u.event.name} — unmatched (${u.reason})`;
+    els.ticks.appendChild(d);
+  }
+  for (const p of plan.points) {
+    const d = document.createElement('div'); d.className = p.className ? `tick ${p.className}` : 'tick';
+    d.style.left = ((p.event.t - clock.t0) / span * 100) + '%';
+    d.title = p.label;
+    els.ticks.appendChild(d);
+  }
+  // M25.3e (question 174): one small tick per real measurement epoch (sc.measurements),
+  // via the same pure timelineMeasurementTicks() the Run Products panel's own
+  // "Telemetry" section is built from -- never a second, independently-derived
+  // placement for the same data.
+  for (const m of timelineMeasurementTicks(sc.measurements)) {
+    const d = document.createElement('div'); d.className = 'tick tick-measurement';
+    d.style.left = ((m.t - clock.t0) / span * 100) + '%';
+    d.title = `${m.id}${m.sensorId ? ' · ' + m.sensorId : ''}`;
     els.ticks.appendChild(d);
   }
 }

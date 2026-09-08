@@ -311,14 +311,17 @@ def test_scenario_with_no_config_hash_is_unaffected():
 
 # --------------------------------------------------------------------------- FAULT kind (synthetic)
 def _build_run_products(trajectories, events, provenance: core_pb2.Provenance, *, run_id: str = "",
-                        dropped_in_flight_messages: int = 0, frames=()) -> run_pb2.RunProducts:
+                        dropped_in_flight_messages: int = 0, frames=(), measurements=()) -> run_pb2.RunProducts:
     """A `run_pb2.RunProducts` built directly from the real generated bindings (never a
     hand-rolled byte layout -- question 121 deleted the old `AVRUN1` framing this file used to
     hand-encode/decode) -- `trajectories` is a list of `(instance_id, Trajectory)` pairs, since
-    `RunProducts.trajectories` is a proto map keyed by `SystemInstance.id`.
+    `RunProducts.trajectories` is a proto map keyed by `SystemInstance.id`. `measurements`
+    (M25.3e, question 174) is a plain iterable of `core_pb2.Measurement` -- additive, defaults
+    to `()` so every existing caller is unaffected.
     """
     rp = run_pb2.RunProducts(run_id=run_id, events=list(events), provenance=provenance,
-                             dropped_in_flight_messages=dropped_in_flight_messages, frames=list(frames))
+                             dropped_in_flight_messages=dropped_in_flight_messages, frames=list(frames),
+                             measurements=list(measurements))
     for instance_id, traj in trajectories:
         rp.trajectories[instance_id].CopyFrom(traj)
     return rp
@@ -1494,3 +1497,227 @@ def test_scores_is_additive_and_empty_by_default_meta_still_stamps_scoressource(
     scenario = resp.json()
     assert scenario["scores"] == {}
     assert scenario["meta"]["scoresSource"] == "RunProducts.scores"
+
+
+# ==================================================================================
+# M25.3e (docs/open-questions.md question 174, "Mirrors question 165"): POST
+# /api/cdm/run now threads RunProducts.measurements into the published scenario as an
+# additive `measurements` list, each entry `{id, epoch, sensorId, frameId, z, r}`, plus
+# `meta.measurementsSource = "RunProducts.measurements"`.
+#
+# These tests build small, explicitly-synthetic `core_pb2.Measurement` messages
+# directly through the real generated bindings (never a hand-rolled byte layout, same
+# `_build_run_products` convention this file already established for FAULT/scores
+# above) and POST them through the real, unmodified `POST /api/cdm/run` route -- so the
+# SERVER CODE PATH under test is entirely real, even though the specific numbers are
+# small and hand-picked for clarity rather than drawn from a real DRM run.
+#
+# The ACCEPTANCE test the lead asked for -- "a real av-run bundle proves the demo's
+# telemetry appears with the right ids and epochs", specifically against the
+# `demo_measurements` DRM (`crates/av-kernel/tests/demo_measurements.rs`'s own 36
+# measurements) -- is deliberately NOT faked here with hand-built numbers dressed up to
+# look like that DRM's real output; see `test_demo_measurements_real_bundle_...` below,
+# which documents why it is skipped in this environment and what running it for real
+# requires.
+# ==================================================================================
+def _measurement(*, measurement_id: str, epoch_ns: int, sensor_id: str, z, r=(), frame_id: str = "") -> core_pb2.Measurement:
+    return core_pb2.Measurement(measurement_id=measurement_id, epoch_ns=epoch_ns, sensor_id=sensor_id,
+                                z=list(z), r=list(r), frame_id=frame_id)
+
+
+def test_measurements_is_additive_and_empty_by_default_meta_still_stamps_measurementssource(client: TestClient):
+    """Mirrors test_scores_is_additive_and_empty_by_default_meta_still_stamps_scoressource
+    exactly: a RunProducts with no measurements at all must still publish a
+    `measurements` key -- empty, not absent -- and `meta.measurementsSource` is stamped
+    even when there is nothing to report. Fails against an implementation that only adds
+    the key when the list is non-empty.
+    """
+    provenance = core_pb2.Provenance(config_hash="measurements-fixture-hash", run_id="test-measurements-empty")
+    rp = _build_run_products([], [], provenance, run_id="test-measurements-empty")
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    resp = client.get(f"/api/scenario/{name}")
+    assert resp.status_code == 200, resp.text
+    scenario = resp.json()
+    assert scenario["measurements"] == [], "a run with no measurements must publish an empty list, never omit the key"
+    assert scenario["meta"]["measurementsSource"] == "RunProducts.measurements"
+
+
+def test_measurements_published_with_the_approved_wire_shape_ids_and_epochs(client: TestClient):
+    """The core of question 174: each published measurement is exactly
+    `{id, epoch, sensorId, frameId, z, r}`, checked against the SAME real
+    `core_pb2.Measurement` messages this test built (never a value invented on the
+    client side of this test) -- `epoch` independently recomputed here with the same
+    `cdm_adapter.tai_ns_to_a1mjd` the server uses, matching this file's own
+    "hand-computed in Python" convention (tests/test_viewer_timeline.py's
+    `expectedWindowStartT`/`expectedWindowEndT`).
+
+    Fails against: the pre-M25.3e implementation (`"measurements"` key absent --
+    KeyError here); a handler that reports the wrong field under the wrong wire name
+    (e.g. `measurementId` instead of `id`, or `sensor_id` instead of `sensorId`); one
+    that leaves `epoch` as raw `epoch_ns` instead of converting it; or one that drops
+    `z`/`r`.
+    """
+    epoch_ns_1 = 1767225637500000000
+    epoch_ns_2 = 1767225638000000000
+    m1 = _measurement(measurement_id="altavista.attitude_q4", epoch_ns=epoch_ns_1, sensor_id="startracker",
+                      z=[0.01, 0.02, 0.03, 0.9994], r=())  # star tracker: r deliberately empty (no covariance declared)
+    m2 = _measurement(measurement_id="altavista.imu_gyro3", epoch_ns=epoch_ns_2, sensor_id="imu",
+                      z=[0.05, 0.03, 0.2], r=[1e-8, 0.0, 0.0, 0.0, 1e-8, 0.0, 0.0, 0.0, 1e-8])
+    provenance = core_pb2.Provenance(config_hash="measurements-fixture-hash", run_id="test-measurements-shape")
+    rp = _build_run_products([], [], provenance, run_id="test-measurements-shape", measurements=[m1, m2])
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    resp = client.get(f"/api/scenario/{name}")
+    assert resp.status_code == 200, resp.text
+    measurements = resp.json()["measurements"]
+    assert len(measurements) == 2, measurements
+
+    w1 = measurements[0]
+    assert set(w1.keys()) == {"id", "epoch", "sensorId", "frameId", "z", "r"}, sorted(w1.keys())
+    assert w1["id"] == "altavista.attitude_q4"
+    assert w1["epoch"] == cdm_adapter.tai_ns_to_a1mjd(epoch_ns_1)
+    assert w1["sensorId"] == "startracker"
+    assert w1["frameId"] == ""
+    assert w1["z"] == [0.01, 0.02, 0.03, 0.9994]
+    assert w1["r"] == [], \
+        "star tracker measurement declared no covariance -- r must be an empty list, never a fabricated identity/zero matrix"
+
+    w2 = measurements[1]
+    assert w2["id"] == "altavista.imu_gyro3"
+    assert w2["epoch"] == cdm_adapter.tai_ns_to_a1mjd(epoch_ns_2)
+    assert w2["sensorId"] == "imu"
+    assert w2["z"] == [0.05, 0.03, 0.2]
+    assert w2["r"] == [1e-8, 0.0, 0.0, 0.0, 1e-8, 0.0, 0.0, 0.0, 1e-8]
+
+
+def test_measurements_order_is_preserved_never_resorted_by_the_server(client: TestClient):
+    """`RunProducts.measurements` is already sorted by (epoch, id) by the executor
+    (question 173) -- the server trusts that and does not re-sort (same posture as
+    `events`, already sorted by the executor per this file's own module docstring).
+    Proven here by feeding measurements in a DELIBERATELY WRONG (descending-epoch)
+    order and confirming the server publishes them in that exact same order, never
+    silently re-sorted into ascending order. Fails against an implementation that
+    (perhaps well-intentioned) re-sorts server-side, which would silently mask a real
+    executor ordering bug instead of surfacing it.
+    """
+    m_late = _measurement(measurement_id="b", epoch_ns=2_000_000_000, sensor_id="s", z=[1.0])
+    m_early = _measurement(measurement_id="a", epoch_ns=1_000_000_000, sensor_id="s", z=[2.0])
+    provenance = core_pb2.Provenance(config_hash="measurements-fixture-hash", run_id="test-measurements-order")
+    rp = _build_run_products([], [], provenance, run_id="test-measurements-order", measurements=[m_late, m_early])
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    resp = client.get(f"/api/scenario/{name}")
+    assert resp.status_code == 200, resp.text
+    ids = [m["id"] for m in resp.json()["measurements"]]
+    assert ids == ["b", "a"], f"server must preserve RunProducts.measurements' own order verbatim, got {ids}"
+
+
+def test_cdm_trajectory_route_is_unchanged_by_question_174(client: TestClient):
+    """Question 174's own literal requirement: "/api/cdm/trajectory unchanged." Proven
+    directly: POST /api/cdm/trajectory's published scenario still gets the additive
+    default `"measurements": []` (ScenarioData's own dataclass default, unconditional
+    on every publish path) and, unlike POST /api/cdm/run, never stamps
+    `meta.measurementsSource` at all -- that handler was not touched by this task.
+    """
+    traj = trajectory_pb2.Trajectory(id="unaffected-traj", entity_id="veh", frame_id="EarthMJ2000Eq")
+    resp = client.post("/api/cdm/trajectory", content=traj.SerializeToString(),
+                       headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    resp = client.get(f"/api/scenario/{name}")
+    assert resp.status_code == 200, resp.text
+    scenario = resp.json()
+    assert scenario["measurements"] == []
+    assert "measurementsSource" not in scenario["meta"], \
+        "POST /api/cdm/trajectory must be untouched by question 174 -- it never populates measurements at all"
+
+
+# ---------------------------------------------------------------- the acceptance test
+FROZEN_DEMO_MEASUREMENTS_BUNDLE_PATH = REPO_ROOT / "tests" / "fixtures" / "demo_measurements.runproducts.bin"
+
+
+def test_demo_measurements_real_bundle_publishes_36_measurements_with_right_ids_and_epochs(tmp_path):
+    """THE acceptance test the lead asked for: "test with a real av-run bundle that the
+    demo's telemetry appears with the right ids and epochs" -- against the real
+    `demo_measurements` DRM (`drms/demo_measurements.{drm,sos}.yaml` +
+    `drms/demo_measurements_{startracker,imu}.system.yaml`), whose real, kernel-level
+    behaviour `crates/av-kernel/tests/demo_measurements.rs` already proves: exactly 36
+    measurements (12 epochs x 3 ids), `epoch_ns = 1767225637000000000 + k*500_000_000`
+    for k=1..=12, ids `altavista.attitude_q4`/`altavista.imu_accel3`/
+    `altavista.imu_gyro3` in that order per epoch, `frame_id` empty for all 36.
+
+    **This task's environment forbids running `cargo` at all** (a heavy Rust gate runs
+    concurrently on this host; a second worker owns `crates/av-kernel` this batch) --
+    there is no `av-run` binary available and none may be built here. Every other real
+    fixture this test file uses that needed a real DRM run
+    (`tests/fixtures/demo_two_instance.runproducts.bin`,
+    `tests/fixtures/demo_attitude_control.runproducts.bin`) is a FROZEN bundle, produced
+    once by a real `av-run` invocation and committed -- no such frozen bundle exists yet
+    for `demo_measurements` (grepped: no `*.runproducts.bin` anywhere in this repo names
+    it). Per this task's own brief ("do not hand-build a fake bundle and call it real,
+    and do not silently substitute a different DRM without saying so prominently"),
+    this test is a real, would-pass-if-fed-the-real-bundle acceptance test, gated on
+    that frozen fixture existing -- SKIPPED, not faked, until it does.
+
+    **To produce it** (mirrors `tests/fixtures/demo_attitude_control.runproducts.bin`'s
+    own recorded recipe, `test_cdm_run.py`'s own module docstring section above it):
+        cargo build -p av-run --bin av-run
+        target/debug/av-run --drm drms/demo_measurements.drm.yaml \\
+            --sos drms/demo_measurements.sos.yaml \\
+            --system drms/demo_attitude_sensors_truth.system.yaml \\
+            --system drms/demo_measurements_startracker.system.yaml \\
+            --system drms/demo_measurements_imu.system.yaml \\
+            --run-id demo-measurements-frozen \\
+            --out tests/fixtures/demo_measurements.runproducts.bin
+    Once committed, this test needs no further changes: it decodes the frozen bytes
+    directly (independent of the server, matching this file's own
+    `attitude_control_run_products`-style direct-decode fixtures) for the id/epoch/
+    count assertions, then re-derives the same facts from the published scenario JSON
+    (`POST /api/cdm/run` + `GET /api/scenario/{name}`) for the actual "the viewer's own
+    payload shows the right ids and epochs" claim.
+    """
+    if not FROZEN_DEMO_MEASUREMENTS_BUNDLE_PATH.is_file():
+        pytest.skip(
+            f"{FROZEN_DEMO_MEASUREMENTS_BUNDLE_PATH} does not exist and this task's "
+            f"environment forbids running cargo/av-run to produce it -- see this test's "
+            f"own docstring for the exact command to freeze it. BLOCKED, reported to the "
+            f"manager, not faked with a hand-built substitute."
+        )
+
+    rp = run_pb2.RunProducts()
+    rp.ParseFromString(FROZEN_DEMO_MEASUREMENTS_BUNDLE_PATH.read_bytes())
+
+    start_tai_ns = 1767225637000000000
+    period_ns = 500_000_000
+    expected_ids_per_epoch = ["altavista.attitude_q4", "altavista.imu_accel3", "altavista.imu_gyro3"]
+
+    assert len(rp.measurements) == 36, f"expected 36 measurements (12 epochs x 3 ids): got {len(rp.measurements)}"
+    for k in range(1, 13):
+        expected_epoch_ns = start_tai_ns + k * period_ns
+        chunk = rp.measurements[3 * (k - 1):3 * k]
+        assert [m.measurement_id for m in chunk] == expected_ids_per_epoch, f"k={k}"
+        for m in chunk:
+            assert m.epoch_ns == expected_epoch_ns, f"k={k} id={m.measurement_id}"
+            assert m.frame_id == "", f"k={k} id={m.measurement_id}"
+
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)
+    test_client = TestClient(app)
+    resp = test_client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    resp = test_client.get(f"/api/scenario/{name}")
+    assert resp.status_code == 200, resp.text
+    published = resp.json()["measurements"]
+
+    assert len(published) == 36
+    for k in range(1, 13):
+        expected_epoch_ns = start_tai_ns + k * period_ns
+        chunk = published[3 * (k - 1):3 * k]
+        assert [m["id"] for m in chunk] == expected_ids_per_epoch, f"k={k}"
+        for m in chunk:
+            assert m["epoch"] == cdm_adapter.tai_ns_to_a1mjd(expected_epoch_ns), f"k={k} id={m['id']}"
+            assert m["frameId"] == ""

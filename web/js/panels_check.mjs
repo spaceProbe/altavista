@@ -12,7 +12,7 @@
 // runproducts.bin`, decoded and re-attached), so `run_products_panel.js`'s binding
 // logic is proven against the real fixture's own scores even though no current server
 // code path actually sends them.
-import { objectiveRows, timelineEvents, eventTimelinePercent } from './panels/run_products_panel.js';
+import { objectiveRows, timelineEvents, eventTimelinePercent, measurementRows, measurementCountsBySensor, timelineMeasurementTicks } from './panels/run_products_panel.js';
 import { provenanceLines } from './panels/console_panel.js';
 import { groundTrack, lonLatFromScenarioFramePosition, bodyFixedPositionKm } from './ground_track.js';
 import { ecefToGeodeticDeg, geodeticToEcef, tileCountX, tileCountY, WGS84_A_M, WGS84_B_M } from './globe_lod.js';
@@ -123,6 +123,50 @@ function approxEqual(a, b, tol) { return Math.abs(a - b) <= tol; }
     measures.length === 2 && measures.every((m) => m.passed === null));
   check('objectiveRows: absent scores (e.g. a pre-M26.4b cached scenario) yields an empty array, not a throw',
     Array.isArray(objectiveRows(undefined)) && objectiveRows(undefined).length === 0);
+}
+
+// =============================== 4b. measurementRows / measurementCountsBySensor / timelineMeasurementTicks (M25.3e, question 174)
+// Synthetic, hand-built input (no real demo_measurements bundle is available in this
+// environment -- see tests/test_cdm_run.py's own acceptance-test section for why, and
+// tests/test_cdm_run.py's real, server-threaded plumbing tests for the actual
+// end-to-end wire proof); this section only proves the PURE binding logic these three
+// functions apply on top of whatever `sc.measurements` the server sends, using values
+// shaped like -- but not claiming to be -- the demo_measurements DRM's own three ids.
+{
+  // Ordering is deliberate, not incidental: the FIRST sensor encountered by insertion
+  // is 'startracker', the second is 'imu' -- alphabetical order ('imu' < 'startracker')
+  // is the OPPOSITE of insertion order, so the measurementCountsBySensor sort-by-name
+  // check below only passes for an implementation that actually sorts (an
+  // insertion-order-only implementation would report ['startracker', 'imu'] and fail
+  // the check's exact-array assertion).
+  const measurements = [
+    { id: 'altavista.attitude_q4', epoch: 1.5, sensorId: 'startracker', frameId: '', z: [0, 0, 0, 1], r: [] },
+    { id: 'altavista.imu_gyro3', epoch: 2.5, sensorId: 'imu', frameId: '', z: [0.05, 0.03, 0.2], r: [1e-8, 0, 0, 0, 1e-8, 0, 0, 0, 1e-8] },
+    { id: 'altavista.imu_accel3', epoch: 1.5, sensorId: 'imu', frameId: '', z: [0, 0, 0], r: [1e-6, 0, 0, 0, 1e-6, 0, 0, 0, 1e-6] },
+  ];
+  const rows = measurementRows(measurements);
+  check('measurementRows: sorted by epoch ascending (input was NOT already sorted)',
+    rows.map((r) => r.id).join(',') === 'altavista.attitude_q4,altavista.imu_accel3,altavista.imu_gyro3');
+  check('measurementRows: id/epoch/sensorId/frameId carried through unchanged',
+    rows[0].id === 'altavista.attitude_q4' && rows[0].epoch === 1.5 && rows[0].sensorId === 'startracker' && rows[0].frameId === '');
+  check('measurementRows: zLen/rLen are real array lengths, not a fabricated non-zero value for an empty r',
+    rows[0].zLen === 4 && rows[0].rLen === 0);
+  check('measurementRows: a measurement with a real (non-empty) r reports the real rLen',
+    rows.find((r) => r.id === 'altavista.imu_gyro3').rLen === 9);
+  check('measurementRows: absent measurements yields an empty array, not a throw',
+    Array.isArray(measurementRows(undefined)) && measurementRows(undefined).length === 0);
+
+  const counts = measurementCountsBySensor(measurements);
+  check('measurementCountsBySensor: two sensors, correct counts, sorted by sensorId',
+    JSON.stringify(counts) === JSON.stringify([{ sensorId: 'imu', count: 2 }, { sensorId: 'startracker', count: 1 }]));
+  check('measurementCountsBySensor: a measurement with no sensorId is grouped under an honest placeholder, never silently dropped',
+    measurementCountsBySensor([{ sensorId: '' }, {}]).some((c) => c.sensorId === '(no sensorId)' && c.count === 2));
+
+  const ticks = timelineMeasurementTicks(measurements);
+  check('timelineMeasurementTicks: one tick per measurement (never merged/deduplicated by epoch -- two ids share epoch 1.5 here)',
+    ticks.length === 3 && ticks.filter((t) => t.t === 1.5).length === 2);
+  check('timelineMeasurementTicks: t is the measurement\'s own epoch (same field app.js\'s buildTicks places every other tick by)',
+    ticks.every((t, i) => t.t === measurements[i].epoch && t.id === measurements[i].id));
 }
 
 // ======================================================== 5. timeline-linked events

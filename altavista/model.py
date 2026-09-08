@@ -47,6 +47,39 @@ effectiveness, never coerced to ``False``. Purely additive: defaults to ``{}``, 
 every other publish path (``POST /api/scenario``, ``POST /api/cdm/trajectory``) and
 every scenario built before M26.4b still round-trips with ``"scores": {}`` and nothing
 else changes.
+
+``measurements`` (M25.3e, docs/open-questions.md question 174)
+------------------------------------------------------------------
+``ScenarioData.to_dict()`` carries an **additive** ``measurements`` key: a list of
+plain dicts, each ``{"id": <str>, "epoch": <float A1MJD>, "sensorId": <str>,
+"frameId": <str>, "z": [<float>...], "r": [<float>...]}`` -- the wire shape the lead
+approved for threading ``altavista.v1.RunProducts.measurements`` (question 173's
+``Measurement`` list, sorted by epoch and id by the executor) into the viewer payload.
+``altavista/server.py``'s ``POST /api/cdm/run`` handler builds these dicts
+(``_measurement_to_dict``, mirroring ``_score_result_to_dict``'s own hand-built-dict
+convention). ``epoch`` is ``Measurement.epoch_ns`` converted through the same
+``cdm_adapter.tai_ns_to_a1mjd`` every other epoch on the payload uses, so a
+measurement lines up on the same timeline as everything else. ``z``/``r`` are plain
+lists copied verbatim off the proto's own repeated ``double`` fields -- an empty ``r``
+(a sensor that declares no covariance for a given measurement, e.g. a star tracker's
+raw unit-quaternion component) is published as an empty list, never a fabricated
+identity or zero matrix (nothing is ever synthesized). Purely additive: defaults to
+``[]``, so every other publish path and every scenario built before M25.3e still
+round-trips with ``"measurements": []`` and nothing else changes.
+
+``referenceId``/``attributes`` on an event (M25.3e, docs/open-questions.md question 177)
+--------------------------------------------------------------------------------------------
+:class:`Event` carries two more **additive** fields on top of the pre-existing
+``{name, t, type, spacecraft, detail}`` wire shape: ``referenceId`` (the real CDM
+``Event.reference_id`` -- for a command transition, the ``Command.id``) and
+``attributes`` (the real CDM ``Event.provenance.attributes`` as a plain string map --
+where ``ack_level`` lives on a command's ACKED transition). Both default to falsy/empty
+(``None`` / ``{}``) so a caller that builds an :class:`Event` without them, and every
+scenario published before M25.3e, still round-trips unchanged. See
+``altavista/cdm.py``'s ``cdm_event_to_viewer_event`` for where these are populated from
+a real ``altavista.v1.Event``, and ``web/js/timeline_events.js`` for the viewer-side
+consumer (command grouping keyed on ``referenceId`` instead of parsing ``detail``,
+the acknowledgement panel reading the real ``ack_level`` out of ``attributes``).
 """
 from __future__ import annotations
 
@@ -179,10 +212,20 @@ class Event:
     type: str = "marker"
     spacecraft: Optional[str] = None
     detail: Optional[str] = None
+    # Additive, M25.3e (docs/open-questions.md question 177): the real CDM Event's own
+    # `reference_id` (for a command transition, the Command.id) and
+    # `provenance.attributes` (a plain string map -- `ack_level` lives here on a
+    # command's ACKED transition). See this module's own docstring, "referenceId /
+    # attributes on an event" section, for the full contract. Both default to
+    # falsy/empty so an Event built without them (every caller before M25.3e) is
+    # unaffected.
+    reference_id: Optional[str] = None
+    attributes: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {"name": self.name, "t": self.t, "type": self.type,
-                "spacecraft": self.spacecraft, "detail": self.detail}
+                "spacecraft": self.spacecraft, "detail": self.detail,
+                "referenceId": self.reference_id, "attributes": dict(self.attributes)}
 
 
 @dataclass
@@ -262,6 +305,11 @@ class ScenarioData:
     # -- see the module docstring's "scores" section above for the exact wire shape and why
     # `passed` must be an explicit `None`, not an absent key, for a measure of effectiveness.
     scores: Dict[str, dict] = field(default_factory=dict)
+    # Additive, M25.3e (docs/open-questions.md question 174): a list of
+    # {id, epoch, sensorId, frameId, z, r} dicts -- see the module docstring's
+    # "measurements" section above for the exact wire shape and why `r` is published
+    # empty (never fabricated) when the producer declared no covariance.
+    measurements: List[dict] = field(default_factory=list)
 
     def span(self):
         ts = [tr.t0 for tr in self.spacecraft if tr.t] + [tr.t1 for tr in self.spacecraft if tr.t]
@@ -286,6 +334,7 @@ class ScenarioData:
             "footprints": [f.to_dict() for f in self.footprints],
             "stateSpaces": list(self.state_spaces),
             "scores": dict(self.scores),
+            "measurements": list(self.measurements),
             "meta": {"published": datetime.now(timezone.utc).isoformat(timespec="seconds"), **self.meta},
         }
 

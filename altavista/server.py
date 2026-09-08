@@ -332,6 +332,18 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         viewer_frame_for``), not the previous hardcoded Earth/MJ2000Eq fallback every frame
         this endpoint could not resolve used to silently take.
 
+        ``measurements`` (M25.3e, question 174, "Mirrors question 165"): ``RunProducts.
+        measurements`` (question 173's ``repeated Measurement``, sorted by epoch and id
+        by the executor -- no re-sort needed here, same posture as ``events`` above) is
+        converted with ``_measurement_to_dict`` below into ``ScenarioData.measurements``
+        -- a plain list, each entry ``{"id", "epoch", "sensorId", "frameId", "z", "r"}``
+        -- published additively. ``meta["measurementsSource"] = "RunProducts.
+        measurements"`` records where they came from, matching the ``scoresSource``/
+        ``bodiesSource`` convention. Nothing is ever synthesized: a run with no
+        measurements publishes ``"measurements": []``, and a measurement with an empty
+        ``r`` (a sensor that declares no covariance) publishes an empty list, never a
+        fabricated one.
+
         ``bodies`` (M18.2, question 125): the CDM ingest path had no bodies handling at
         all before this task, so the viewer's globe (which needs an ``Earth`` body
         entry -- ``web/js/scene.js``'s ``enableGlobe``) was unavailable for every
@@ -380,6 +392,10 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         # three keys instead of delegating to json_format.MessageToDict.
         viewer_scores = {name: _score_result_to_dict(run_products.scores[name])
                          for name in sorted(run_products.scores)}
+        # M25.3e (question 174): RunProducts.measurements is a repeated field the
+        # executor already sorts by (epoch, id) (question 173) -- no re-sort here, same
+        # posture as `viewer_events` above.
+        viewer_measurements = [_measurement_to_dict(m) for m in run_products.measurements]
 
         # The entities frame (ScenarioData.frame, web/js/scene.js's _originFrameId): the
         # first trajectory (in sorted-key order, for determinism) declaring a frame_id wins
@@ -404,12 +420,16 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             spacecraft=viewer_trajs,
             events=viewer_events,
             scores=viewer_scores,
+            measurements=viewer_measurements,
             meta={"configHash": run_products.provenance.config_hash, "runId": run_id,
                   # M26.4b (question 165): additive, present even when RunProducts declared
                   # no scores at all (viewer_scores == {}) -- same honest-provenance posture
                   # as bodiesSource below ("a reader of meta must be able to tell where the
                   # (possibly empty) value came from").
-                  "scoresSource": "RunProducts.scores"},
+                  "scoresSource": "RunProducts.scores",
+                  # M25.3e (question 174): same posture -- present even when
+                  # viewer_measurements == [] (a run that declared no measurements).
+                  "measurementsSource": "RunProducts.measurements"},
         )
 
         # M18.2 (question 125): the globe needs an `Earth` body entry, and the CDM
@@ -452,9 +472,9 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             hub.clock = None
         await hub.broadcast({"type": "list", "names": hub.names()})
         await hub.broadcast({"type": "scenario", "scenario": scenario})
-        log.info("published RunProducts %r (%d trajectories, %d events, %d bodies, config_hash %s) to %d client(s)",
-                 run_id, len(run_products.trajectories), len(run_products.events), len(scenario_data.bodies),
-                 run_products.provenance.config_hash, len(hub.clients))
+        log.info("published RunProducts %r (%d trajectories, %d events, %d measurements, %d bodies, config_hash %s) to %d client(s)",
+                 run_id, len(run_products.trajectories), len(run_products.events), len(viewer_measurements),
+                 len(scenario_data.bodies), run_products.provenance.config_hash, len(hub.clients))
         return {"ok": True, "name": name, "clients": len(hub.clients)}
 
     @app.delete("/api/scenario/{name}")
@@ -535,6 +555,31 @@ def _score_result_to_dict(sr: run_pb2.ScoreResult) -> dict:
         "value": sr.value,
         "unit": core_pb2.Unit.Name(sr.unit),
         "passed": sr.passed if sr.HasField("passed") else None,
+    }
+
+
+def _measurement_to_dict(m: core_pb2.Measurement) -> dict:
+    """``altavista.v1.Measurement`` -> the wire dict question 174 approved: ``{"id",
+    "epoch", "sensorId", "frameId", "z", "r"}``. Mirrors ``_score_result_to_dict``'s own
+    hand-built-dict convention (question 174's own text: "Mirrors question 165").
+
+    ``epoch`` is ``m.epoch_ns`` converted through the same ``tai_ns_to_a1mjd`` every
+    other epoch on this endpoint's own payload uses (trajectory samples, events) -- so a
+    measurement lines up on the viewer's timeline exactly like everything else, never a
+    second, raw ``tai_ns`` unit silently mixed onto the same payload. ``z``/``r`` are
+    plain lists, copied verbatim off the proto's own repeated ``double`` fields: an
+    empty ``r`` (e.g. a star tracker's unit-quaternion measurement, which declares no
+    covariance -- ``crates/av-kernel/src/codec.rs``'s own ``measurements_from_field_
+    values`` doc comment) is published as an empty list, never a fabricated identity or
+    zero matrix (question 174's own "nothing is ever synthesized" rule).
+    """
+    return {
+        "id": m.measurement_id,
+        "epoch": cdm_adapter.tai_ns_to_a1mjd(m.epoch_ns),
+        "sensorId": m.sensor_id,
+        "frameId": m.frame_id,
+        "z": list(m.z),
+        "r": list(m.r),
     }
 
 
