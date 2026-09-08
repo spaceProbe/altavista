@@ -67,7 +67,10 @@ message PortTrafficRecord {
 
 // The run's port traffic, written as a sidecar beside the RunProducts rather than inside
 // them: framed traffic at step rate is orders of magnitude larger than the products. Sorted
-// (sequence, instance, port). Hashed as a whole; the hash lives in RunProducts.port_traffic_hash.
+// (tai_ns, sequence, instance, port): epoch first, because frames the router carried before
+// the first output tick (declared command dispatches) have sequence 0 while their epoch is
+// mid-run (question 181); a reader keyed on epoch sees a monotonic log. Hashed as a whole;
+// the hash lives in RunProducts.port_traffic_hash.
 message PortTrafficLog {
   string run_id = 1;
   repeated PortTrafficRecord records = 2;
