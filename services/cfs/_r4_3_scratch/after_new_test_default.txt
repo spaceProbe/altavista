@@ -1,0 +1,4 @@
+......s.............                                                     [100%]
+=========================== short test summary info ============================
+SKIPPED [1] services/cfs/tests/test_image_reproducibility.py:128: AV_CFS_RUN_REPRO_BUILD is not set -- this test performs two full `docker build --no-cache` runs of services/cfs/Dockerfile (each 10+ minutes on this host, and each uses the network, same as `services/cfs/build-image.sh`), so the default suite skips it. Set AV_CFS_RUN_REPRO_BUILD=1 to opt in and actually run it.
+19 passed, 1 skipped in 48.78s

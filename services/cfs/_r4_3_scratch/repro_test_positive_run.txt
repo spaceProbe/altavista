@@ -1,0 +1,30 @@
+F
+=================================== FAILURES ===================================
+____________ test_two_independent_builds_produce_the_same_image_id _____________
+
+    @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
+    def test_two_independent_builds_produce_the_same_image_id() -> None:
+        run_id = str(int(time.time()))
+        tag_1 = f"altavista-cfs-repro-test-1-{run_id}:local"
+        tag_2 = f"altavista-cfs-repro-test-2-{run_id}:local"
+        try:
+            _docker_build_no_cache(tag_1)
+            digest_1 = _image_id(tag_1)
+            _docker_build_no_cache(tag_2)
+            digest_2 = _image_id(tag_2)
+>           assert digest_1 == digest_2, (
+                f"two independent `docker build --no-cache` runs of {DOCKERFILE} produced DIFFERENT "
+                f"image IDs ({digest_1!r} vs {digest_2!r}) -- the image is not reproducible from an "
+                "identical build context. This is exactly the question-182 regression this test "
+                "exists to catch (services/cfs/Dockerfile's builder-stage BUILDDATE/USER/HOSTNAME "
+                "ENV pins missing, removed, or no longer fixed); see IMAGE_DIGEST.md's 'Re-pinned "
+                "2026-09-08 (R4.3, question 182)' section for the fix this asserts stays in place."
+            )
+E           AssertionError: two independent `docker build --no-cache` runs of /Users/probe/code/AltaVista/services/cfs/Dockerfile produced DIFFERENT image IDs ('sha256:841a01b176171c7ab1ab3402e16bce4142c761a9473e56c1ab887b9025b00a73' vs 'sha256:08808106bae5c1b56d87b625356cf46eb310cfda252a6b0b9aefd538dabee17f') -- the image is not reproducible from an identical build context. This is exactly the question-182 regression this test exists to catch (services/cfs/Dockerfile's builder-stage BUILDDATE/USER/HOSTNAME ENV pins missing, removed, or no longer fixed); see IMAGE_DIGEST.md's 'Re-pinned 2026-09-08 (R4.3, question 182)' section for the fix this asserts stays in place.
+E           assert 'sha256:841a0...87b9025b00a73' == 'sha256:08808...fd538dabee17f'
+E             
+E             - sha256:08808106bae5c1b56d87b625356cf46eb310cfda252a6b0b9aefd538dabee17f
+E             + sha256:841a01b176171c7ab1ab3402e16bce4142c761a9473e56c1ab887b9025b00a73
+
+services/cfs/tests/test_image_reproducibility.py:138: AssertionError
+1 failed in 540.83s (0:09:00)

@@ -1,0 +1,118 @@
+[build-image] building altavista-cfs-lockstep:local from /Users/probe/code/AltaVista/services/cfs/Dockerfile (context: /Users/probe/code/AltaVista) -- this is the one permitted network window (question 154)
+DEPRECATED: The legacy builder is deprecated and will be removed in a future release.
+            Install the buildx component to build images with BuildKit:
+            https://docs.docker.com/go/buildx/
+
+Sending build context to Docker daemon  4.614GB
+Step 1/27 : FROM ubuntu:22.04 AS builder
+ ---> 2edbbc5dc405
+Step 2/27 : ENV BUILDDATE=202609080000
+ ---> Using cache
+ ---> 93270aa78873
+Step 3/27 : ENV USER=altavista
+ ---> Using cache
+ ---> 03a3f84ac2a8
+Step 4/27 : ENV HOSTNAME=altavista-build
+ ---> Using cache
+ ---> 03210b598f98
+Step 5/27 : RUN apt-get update && apt-get install -y --no-install-recommends         build-essential cmake git ca-certificates python3     && rm -rf /var/lib/apt/lists/*
+ ---> Using cache
+ ---> 4450d097b312
+Step 6/27 : WORKDIR /build
+ ---> Using cache
+ ---> 357f90d3c113
+Step 7/27 : COPY third_party/fetch-cfs.sh third_party/fetch-cfs.sh
+ ---> Using cache
+ ---> 20242f00bf4b
+Step 8/27 : RUN sh third_party/fetch-cfs.sh
+ ---> Using cache
+ ---> 8e0063d1d5be
+Step 9/27 : COPY services/cfs/apps/io_lockstep third_party/cfs/apps/io_lockstep
+ ---> Using cache
+ ---> 46feb3406b4b
+Step 10/27 : COPY services/cfs/apps/sch_lockstep third_party/cfs/apps/sch_lockstep
+ ---> Using cache
+ ---> be51f25123cd
+Step 11/27 : COPY services/cfs/apps/adcs third_party/cfs/apps/adcs
+ ---> Using cache
+ ---> 5f6c6eb393af
+Step 12/27 : COPY services/cfs/apps/shared third_party/cfs/apps/shared
+ ---> Using cache
+ ---> 617bc686292c
+Step 13/27 : COPY services/cfs/psp-lockstep third_party/cfs/psp-lockstep
+ ---> Using cache
+ ---> e2dbf17b9102
+Step 14/27 : COPY services/cfs/build/targets.cmake third_party/cfs/sample_defs/targets.cmake
+ ---> Using cache
+ ---> 7a7105262d27
+Step 15/27 : COPY services/cfs/build/generate_startup.cmake third_party/cfs/sample_defs/generate_startup.cmake
+ ---> Using cache
+ ---> 34f6a57f4091
+Step 16/27 : COPY services/cfs/build/cpu1_install_custom.cmake third_party/cfs/sample_defs/cpu1/install_custom.cmake
+ ---> Using cache
+ ---> ecbd92852710
+Step 17/27 : WORKDIR /build/third_party/cfs
+ ---> Using cache
+ ---> 612532cf1eee
+Step 18/27 : RUN make native_std.prep
+ ---> Using cache
+ ---> 00ab75ab52db
+Step 19/27 : RUN make native_std.compile
+ ---> Using cache
+ ---> c0ef22ee944b
+Step 20/27 : RUN make native_std.install
+ ---> Using cache
+ ---> 62669878ef61
+Step 21/27 : FROM ubuntu:22.04
+ ---> 2edbbc5dc405
+Step 22/27 : RUN apt-get update && apt-get install -y --no-install-recommends libc6 && rm -rf /var/lib/apt/lists/*
+ ---> Running in 2e85d3a367bb
+Get:1 http://ports.ubuntu.com/ubuntu-ports jammy InRelease [270 kB]
+Get:2 http://ports.ubuntu.com/ubuntu-ports jammy-updates InRelease [128 kB]
+Get:3 http://ports.ubuntu.com/ubuntu-ports jammy-backports InRelease [127 kB]
+Get:4 http://ports.ubuntu.com/ubuntu-ports jammy-security InRelease [129 kB]
+Get:5 http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 Packages [1758 kB]
+Get:6 http://ports.ubuntu.com/ubuntu-ports jammy/multiverse arm64 Packages [224 kB]
+Get:7 http://ports.ubuntu.com/ubuntu-ports jammy/restricted arm64 Packages [24.2 kB]
+Get:8 http://ports.ubuntu.com/ubuntu-ports jammy/universe arm64 Packages [17.2 MB]
+Get:9 http://ports.ubuntu.com/ubuntu-ports jammy-updates/universe arm64 Packages [1703 kB]
+Get:10 http://ports.ubuntu.com/ubuntu-ports jammy-updates/restricted arm64 Packages [8081 kB]
+Get:11 http://ports.ubuntu.com/ubuntu-ports jammy-updates/multiverse arm64 Packages [70.2 kB]
+Get:12 http://ports.ubuntu.com/ubuntu-ports jammy-updates/main arm64 Packages [4427 kB]
+Get:13 http://ports.ubuntu.com/ubuntu-ports jammy-backports/main arm64 Packages [82.4 kB]
+Get:14 http://ports.ubuntu.com/ubuntu-ports jammy-backports/universe arm64 Packages [33.7 kB]
+Get:15 http://ports.ubuntu.com/ubuntu-ports jammy-security/universe arm64 Packages [1406 kB]
+Get:16 http://ports.ubuntu.com/ubuntu-ports jammy-security/multiverse arm64 Packages [62.9 kB]
+Get:17 http://ports.ubuntu.com/ubuntu-ports jammy-security/restricted arm64 Packages [7777 kB]
+Get:18 http://ports.ubuntu.com/ubuntu-ports jammy-security/main arm64 Packages [4110 kB]
+Fetched 47.6 MB in 35s (1366 kB/s)
+Reading package lists...
+Reading package lists...
+Building dependency tree...
+Reading state information...
+libc6 is already the newest version (2.35-0ubuntu3.14).
+0 upgraded, 0 newly installed, 0 to remove and 24 not upgraded.
+ ---> Removed intermediate container 2e85d3a367bb
+ ---> 6f2699221598
+Step 23/27 : COPY --from=builder /build/third_party/cfs/build-native_std/exe/cpu1 /cfs/cpu1
+ ---> a40e75412eb4
+Step 24/27 : COPY services/cfs/bin/av-lockstep-shim /cfs/av-lockstep-shim
+ ---> 2bac3dc224b2
+Step 25/27 : COPY services/cfs/container-entrypoint.sh /cfs/container-entrypoint.sh
+ ---> e5fc9e76b09b
+Step 26/27 : RUN chmod +x /cfs/av-lockstep-shim /cfs/container-entrypoint.sh
+ ---> Running in 8b3ffb9eef00
+ ---> Removed intermediate container 8b3ffb9eef00
+ ---> ca83c9e9a5c3
+Step 27/27 : ENTRYPOINT ["/cfs/container-entrypoint.sh"]
+ ---> Running in 27eb714d951a
+ ---> Removed intermediate container 27eb714d951a
+ ---> a1303bcef95d
+Successfully built a1303bcef95d
+Successfully tagged altavista-cfs-lockstep:local
+[build-image] built image ID: sha256:a1303bcef95d870d609c1965d09ec26807030d197ea36d559748e71398081e0a
+[build-image] skipping intra-image copy (not a host path): COPY --from=builder /build/third_party/cfs/build-native_std/exe/cpu1 /cfs/cpu1
+[build-image] parsed 11 host COPY source path(s) from /Users/probe/code/AltaVista/services/cfs/Dockerfile
+[build-image] wrote /Users/probe/code/AltaVista/services/cfs/IMAGE_CONTEXT_MANIFEST.txt (38 file entries)
+[build-image] done. Image ID: sha256:a1303bcef95d870d609c1965d09ec26807030d197ea36d559748e71398081e0a
+sha256:a1303bcef95d870d609c1965d09ec26807030d197ea36d559748e71398081e0a

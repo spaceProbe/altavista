@@ -49,6 +49,31 @@
 
 FROM ubuntu:22.04 AS builder
 
+# Reproducibility (docs/open-questions.md question 182, following on from question 179's own
+# root cause recorded in services/cfs/IMAGE_DIGEST.md's "Re-pinned 2026-09-08" section):
+# third_party/cfs/cfe/cmake/generate_build_env.cmake bakes a build date, user, and hostname into
+# cFE's CONFIGDATA object, defaulting to `date +%Y%m%d%H%M`/`whoami`/`hostname` whenever the
+# corresponding environment variable is unset -- that file's own top comment: "may be passed via
+# environment variables to force a particular date, user, or hostname ... if hoping to reproduce
+# an exact binary of a prior build." Pinned here to fixed, deliberately-chosen values so two
+# builds from an identical build context produce byte-identical CONFIGDATA instead of drifting
+# on the wall-clock minute or the builder host's identity. `ENV` (not `ARG`) is required: these
+# must be real environment variables so `RUN make native_std.compile` below (which is what
+# actually invokes cFE's cmake and runs generate_build_env.cmake, per that file's own "runs at
+# build time, not prep time" comment) inherits them via getenv() -- an `ARG` is build-time-only
+# and is not implicitly exported into a later RUN's process environment.
+#
+# NOTE the env-var names generate_build_env.cmake actually reads do NOT all match cFE's own
+# CONFIGDATA field names -- confirmed by reading that file's full 48 lines, not just its
+# BUILDDATE excerpt: `set(BUILDDATE $ENV{BUILDDATE})` reads env var BUILDDATE, but
+# `set(BUILDHOST $ENV{HOSTNAME})` reads env var HOSTNAME (not BUILDHOST) and
+# `set(BUILDUSER $ENV{USER})` reads env var USER (not BUILDUSER). Pinning `ENV BUILDHOST=...` /
+# `ENV BUILDUSER=...` here would compile but have no effect. USER/HOSTNAME are otherwise unused
+# anywhere else in third_party/fetch-cfs.sh or the fetched third_party/cfs/ tree (grepped).
+ENV BUILDDATE=202609080000
+ENV USER=altavista
+ENV HOSTNAME=altavista-build
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/*
