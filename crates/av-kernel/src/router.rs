@@ -408,8 +408,9 @@ impl Router {
 
     /// Drain and return every [`PortTrafficRecord`] this Router has recorded so far (question
     /// 175, M25.4a) -- in this Router's own emission order (unsorted: `crate::drm::executor::
-    /// execute` imposes `PortTrafficLog.records`'s required `(sequence, instance, port)` order
-    /// itself, with a stable sort, so this call's own order survives as that sort's tie-break).
+    /// execute` imposes `PortTrafficLog.records`'s required `(tai_ns, sequence, instance, port)`
+    /// order itself -- epoch first, question 181 -- with a stable sort, so this call's own order
+    /// survives as that sort's tie-break).
     /// `execute()` calls this exactly once, at the same place it reads [`Router::pending_count`]
     /// (after every span of the run has finished) -- so the returned `Vec` is the whole run's
     /// own port traffic, never a partial slice a caller has to remember to merge.

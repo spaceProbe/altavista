@@ -2514,15 +2514,24 @@ fn declared_shape_trajectory(instance_name: &str, state_space_id: &str) -> Traje
     Trajectory { entity_id: instance_name.to_string(), state_space_id: state_space_id.to_string(), samples: vec![], ..Default::default() }
 }
 
-/// [`av_cdm::pb::PortTrafficLog::records`]'s own required order (question 175, M25.4a):
-/// `(sequence, instance, port)`, ascending, a STABLE sort so two records that tie on all three
-/// (only possible for two frames on the very same port in the very same step -- `Router::
-/// deliver` never produces more than one OUT + one IN per `(from_instance, port)` per call, so
-/// this needs at least two separate `deliver` calls sharing one `sequence`, or one call
-/// carrying two messages on the same port) keep [`crate::router::Router::take_port_traffic`]'s
-/// own emission order rather than being reordered by this call.
+/// [`av_cdm::pb::PortTrafficLog::records`]'s own required order: **`(tai_ns, sequence,
+/// instance, port)`, epoch first** (`docs/open-questions.md` question 181, decided by the lead
+/// after M25.4a measured the problem). M25.4a originally sorted `(sequence, instance, port)`,
+/// matching the proto's own doc comment at the time; that order is not epoch-monotonic, because
+/// `run_shared_group` hands every declared `command` `Scenario.event` to `crate::router::
+/// Router::deliver` *before* the run's first output tick, so those records carry `sequence = 0`
+/// while their `tai_ns` is mid-run (`drms/demo_command`'s telecommand, dispatched at t = 50 s of
+/// a 100 s run, is the concrete case, pinned by `tests/port_traffic_sidecar.rs`). Epoch first
+/// means a reader keyed on epoch -- which is what a replay is (`crate::drm::replay`) -- sees a
+/// monotonic log.
+///
+/// `sequence` remains the first tie-break, so two frames carried at the same epoch by different
+/// ticks still order by tick. The sort is STABLE, so records tying on all four (two frames on
+/// the very same port at the very same epoch in the very same step) keep
+/// [`crate::router::Router::take_port_traffic`]'s own emission order rather than being
+/// reordered here.
 fn sort_port_traffic(records: &mut [pb::PortTrafficRecord]) {
-    records.sort_by(|a, b| (a.sequence, a.instance.as_str(), a.port.as_str()).cmp(&(b.sequence, b.instance.as_str(), b.port.as_str())));
+    records.sort_by(|a, b| (a.tai_ns, a.sequence, a.instance.as_str(), a.port.as_str()).cmp(&(b.tai_ns, b.sequence, b.instance.as_str(), b.port.as_str())));
 }
 
 /// Question 175 (M25.4a): write this run's `PortTrafficLog` sidecar when `products_dir` is
@@ -2577,20 +2586,56 @@ fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &s
 mod sort_port_traffic_tests {
     use super::*;
 
+    /// Every record with the same `tai_ns` unless a test says otherwise, so the
+    /// `sequence`/`instance`/`port` tie-breaks below are exercised in isolation from the
+    /// epoch key (question 181 made `tai_ns` the primary key; see [`sort_port_traffic`]).
     fn rec(sequence: u64, instance: &str, port: &str, payload: &[u8]) -> pb::PortTrafficRecord {
-        pb::PortTrafficRecord { instance: instance.to_string(), port: port.to_string(), direction: 0, tai_ns: 0, payload: payload.to_vec(), sequence }
+        rec_at(0, sequence, instance, port, payload)
     }
 
-    /// The primary key is `sequence`, ascending -- unaffected by `instance`/`port` sorting
-    /// "earlier" alphabetically for a later sequence.
+    fn rec_at(tai_ns: i64, sequence: u64, instance: &str, port: &str, payload: &[u8]) -> pb::PortTrafficRecord {
+        pb::PortTrafficRecord { instance: instance.to_string(), port: port.to_string(), direction: 0, tai_ns, payload: payload.to_vec(), sequence }
+    }
+
+    /// **The primary key is `tai_ns`, ascending** (question 181), even when the lower-priority
+    /// keys all point the other way: the record here with the LATER epoch has the smaller
+    /// `sequence` and the alphabetically-earlier `instance`/`port`, so an implementation still
+    /// sorting `(sequence, instance, port)` -- exactly what M25.4a shipped -- puts it first and
+    /// fails this test.
     #[test]
-    fn sorts_by_sequence_first() {
-        let mut records = vec![rec(5, "a", "a", b""), rec(1, "z", "z", b"")];
+    fn sorts_by_epoch_first_even_when_sequence_disagrees() {
+        let mut records = vec![rec_at(2_000, 0, "a", "a", b"late-epoch-seq-0"), rec_at(1_000, 9, "z", "z", b"early-epoch-seq-9")];
+        sort_port_traffic(&mut records);
+        assert_eq!(records.iter().map(|r| r.tai_ns).collect::<Vec<_>>(), vec![1_000, 2_000], "epoch is the primary key, ahead of sequence");
+        assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), vec![9, 0], "and sequence really did disagree, so this could not have passed by coincidence");
+    }
+
+    /// This is the real shape question 181 exists for, in miniature: a declared command dispatch
+    /// is handed to the router before the first output tick, so it carries `sequence = 0` with a
+    /// mid-run epoch, while every tick-driven record around it has a real sequence. Epoch-first
+    /// puts the dispatch where its epoch says it belongs rather than at the very front of the
+    /// whole log.
+    #[test]
+    fn a_sequence_zero_dispatch_sorts_by_its_epoch_not_at_the_front_of_the_log() {
+        let mut records = vec![
+            rec_at(53_000, 54, "flight", "ack_out", b"ack"),
+            rec_at(50_000, 0, "ground", "cmd_out", b"cmd"),
+            rec_at(1_000, 1, "ground", "tick", b"first-tick"),
+        ];
+        sort_port_traffic(&mut records);
+        assert_eq!(records.iter().map(|r| r.tai_ns).collect::<Vec<_>>(), vec![1_000, 50_000, 53_000], "the sequence-0 dispatch belongs between the first tick and the ack, by epoch");
+    }
+
+    /// Records sharing one `tai_ns` break the tie by `sequence`, ascending -- two frames the
+    /// router carried at the same epoch in different ticks still order by tick.
+    #[test]
+    fn breaks_an_epoch_tie_by_sequence() {
+        let mut records = vec![rec_at(7_000, 5, "a", "p", b""), rec_at(7_000, 1, "a", "p", b"")];
         sort_port_traffic(&mut records);
         assert_eq!(records.iter().map(|r| r.sequence).collect::<Vec<_>>(), vec![1, 5]);
     }
 
-    /// Two records sharing one `sequence` break the tie by `instance`, ascending.
+    /// Two records sharing `(tai_ns, sequence)` break the tie by `instance`, ascending.
     #[test]
     fn breaks_a_sequence_tie_by_instance() {
         let mut records = vec![rec(1, "zebra", "p", b""), rec(1, "alpha", "p", b"")];
@@ -2598,7 +2643,7 @@ mod sort_port_traffic_tests {
         assert_eq!(records.iter().map(|r| r.instance.as_str()).collect::<Vec<_>>(), vec!["alpha", "zebra"]);
     }
 
-    /// Two records sharing one `(sequence, instance)` -- the case `tests/
+    /// Two records sharing `(tai_ns, sequence, instance)` -- the case `tests/
     /// port_traffic_sidecar.rs`'s own module doc comment says `demo_command` cannot produce --
     /// break the tie by `port`, ascending. Proven here, directly against the sort function
     /// itself, since no fixture in this crate happens to exercise it end to end.
@@ -2609,9 +2654,9 @@ mod sort_port_traffic_tests {
         assert_eq!(records.iter().map(|r| r.port.as_str()).collect::<Vec<_>>(), vec!["aaa_port", "zzz_port"]);
     }
 
-    /// A full tie on `(sequence, instance, port)` -- only possible for two frames on the exact
-    /// same port in the exact same step -- keeps the router's own emission order (a stable
-    /// sort), never reordered by payload or anything else.
+    /// A full tie on `(tai_ns, sequence, instance, port)` -- only possible for two frames on the
+    /// exact same port at the exact same epoch in the exact same step -- keeps the router's own
+    /// emission order (a stable sort), never reordered by payload or anything else.
     ///
     /// **Measured, not assumed: `slice::sort_unstable_by` does NOT actually fail this test on
     /// this toolchain (Rust 1.97.0).** The obvious "wrong implementation" to break this against
@@ -2623,17 +2668,17 @@ mod sort_port_traffic_tests {
     /// proves something it does not: this test instead fails against a wrong implementation that
     /// actually IS observable -- one that reverses `records` before its own (otherwise correctly
     /// stable) sort, which order-preserving-among-ties definitionally cannot undo. This still
-    /// pins the real contract (`RunProducts.provenance` -- no, `PortTrafficLog.records`'s own
-    /// proto doc comment -- "keep the router's own emission order"); it just cannot be pinned
-    /// against `sort_unstable_by` specifically on this toolchain, a fact worth recording rather
-    /// than silently working around.
+    /// pins the real contract (`PortTrafficLog.records`'s own proto doc comment: keep the
+    /// router's own emission order); it just cannot be pinned against `sort_unstable_by`
+    /// specifically on this toolchain, a fact worth recording rather than silently working
+    /// around. Recorded by the lead alongside question 181.
     #[test]
     fn a_full_tie_keeps_the_original_emission_order_stable_sort() {
         let mut records: Vec<pb::PortTrafficRecord> = (0..40).map(|i| rec(3, "a", "p", format!("{i}").as_bytes())).collect();
         sort_port_traffic(&mut records);
         let order: Vec<String> = records.iter().map(|r| String::from_utf8(r.payload.clone()).unwrap()).collect();
         let expected: Vec<String> = (0..40).map(|i| i.to_string()).collect();
-        assert_eq!(order, expected, "a full (sequence, instance, port) tie must keep the router's own emission order -- a stable sort's own guarantee");
+        assert_eq!(order, expected, "a full (tai_ns, sequence, instance, port) tie must keep the router's own emission order -- a stable sort's own guarantee");
     }
 }
 

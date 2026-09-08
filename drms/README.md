@@ -676,8 +676,10 @@ section just above).
 Every FRAMED/BYTE_STREAM frame `crate::router::Router` ever carries during a run -- who sent
 it, on which port, in which direction relative to that instance, and the raw bytes -- can be
 recorded as a sidecar beside a run's `RunProducts`: pass `RunConfig.products_dir: Some(dir)` and
-`execute()` writes `dir/port_traffic.pb` (an `altavista.v1.PortTrafficLog`, sorted `(sequence,
-instance, port)`), sets `RunProducts.port_traffic_hash` to its SHA-256, and records the file's
+`execute()` writes `dir/port_traffic.pb` (an `altavista.v1.PortTrafficLog`, sorted `(tai_ns,
+sequence, instance, port)` -- epoch first, `docs/open-questions.md` question 181, because a
+declared command dispatch is carried before the run's first output tick and so has `sequence =
+0` with a mid-run epoch), sets `RunProducts.port_traffic_hash` to its SHA-256, and records the file's
 own location in `RunProducts.provenance.attributes["port_traffic_uri"]`. `products_dir: None`
 (every fixture/test in this crate that does not care) writes nothing and leaves
 `port_traffic_hash` empty, with `provenance.attributes["port_traffic"] = "not recorded"`

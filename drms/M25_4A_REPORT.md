@@ -441,7 +441,55 @@ files (not piped through `tail`, which on the manager's own first attempt hid a 
    keyed on epoch is unaffected -- but `PortTrafficLog.records`'s `(sequence, instance, port)`
    order is therefore not epoch-monotonic. Left as measured and documented; M25.4b must key
    replay on `tai_ns`, not on `sequence` alone.
+   **Closed as question 181** (see the section below).
 2. **`sort_unstable_by` is not a usable wrong implementation on this toolchain** for the
    stable-sort test -- measured at 3, 40 and 2000 fully-tied elements, it reordered none. The
    test is pinned against a `records.reverse()` break instead, and says so. Recorded because it
    is a limit on the break-and-restore standard, not a gap someone should quietly re-open.
+   **Recorded by the lead alongside question 181.**
+
+## Question 181: the log's order becomes epoch first (implemented, 2026-09-08)
+
+The lead read point 1 above and decided question 181 mid-round, committing the proto doc-comment
+change in `da3f019`: `PortTrafficLog.records` is sorted **`(tai_ns, sequence, instance, port)`**,
+epoch first, with the sidecar writer to follow "in the next round".
+
+**The manager implemented it this round instead, deliberately.** The reason is not impatience:
+`da3f019` changed only the proto's own doc comment, so between that commit and this one
+`develop` carried a proto that *declared* an order the code did not *implement* -- exactly the
+"a description of the artifact is not the artifact" failure this team keeps rediscovering, and
+worse than either the old or the new order consistently applied. A full kernel gate was already
+required anyway (to cover the tree `da3f019` had changed underneath the previous run), so
+implementing it cost one edit and no extra gate. Flagged plainly for the lead as a deviation
+from the stated sequencing, not from the decision.
+
+- `sort_port_traffic` now keys `(tai_ns, sequence, instance, port)`. `sequence` stays the first
+  tie-break, so frames carried at one epoch by different ticks still order by tick.
+- `sort_port_traffic_tests` restated per the lead's instruction, 4 tests -> 6. The two new ones
+  are the ones the old order could not pass: `sorts_by_epoch_first_even_when_sequence_disagrees`
+  (the later-epoch record deliberately has the *smaller* sequence and the alphabetically-earlier
+  instance and port, so nothing but the epoch key can order it correctly) and
+  `a_sequence_zero_dispatch_sorts_by_its_epoch_not_at_the_front_of_the_log` (the real
+  `demo_command` shape in miniature: a sequence-0 dispatch between a first tick and a later ack).
+- `tests/port_traffic_sidecar.rs`'s Test A now states the new key. **Its expectation did not
+  change**: for `demo_command` the two orders happen to agree, because the sequence-0 dispatch is
+  also the earlier epoch. Said in the test itself, so nobody later mistakes agreement for proof.
+
+**Break-and-restore (manager's own).** Wrong implementation: the M25.4a order,
+`(sequence, instance, port)` -- i.e. exactly what shipped in `685af17`.
+
+```
+thread '...a_sequence_zero_dispatch_sorts_by_its_epoch_not_at_the_front_of_the_log' panicked:
+assertion `left == right` failed: the sequence-0 dispatch belongs between the first tick and the ack, by epoch
+  left: [50000, 1000, 53000]
+ right: [1000, 50000, 53000]
+
+thread '...sorts_by_epoch_first_even_when_sequence_disagrees' panicked:
+assertion `left == right` failed: epoch is the primary key, ahead of sequence
+  left: [2000, 1000]
+ right: [1000, 2000]
+test result: FAILED. 4 passed; 2 failed
+```
+
+The other four sort tests passed against the break, correctly: they tie on `tai_ns`, so the two
+orders agree for them. Restored; 6 passed. `grep -rn "BREAK-TEST" crates/` returns nothing.

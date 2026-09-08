@@ -200,7 +200,14 @@ fn demo_command_sidecar_records_match_an_independent_reconstruction_from_fixture
         (PortDirection::Out as i32, "flight".to_string(), "ack_out".to_string(), ack_tai_ns, ack_sequence),
         (PortDirection::In as i32, "ground".to_string(), "ack_in".to_string(), ack_tai_ns, ack_sequence),
     ];
-    expected.sort_by(|a, b| (a.4, a.1.as_str(), a.2.as_str()).cmp(&(b.4, b.1.as_str(), b.2.as_str())));
+    // `PortTrafficLog.records`'s own declared order, question 181: (tai_ns, sequence, instance,
+    // port), EPOCH FIRST. The tuples here are (direction, instance, port, tai_ns, sequence), so
+    // the key is (.3, .4, .1, .2). For this fixture specifically the epoch-first and the old
+    // sequence-first order happen to agree -- the sequence-0 dispatch is also the earlier epoch
+    // -- so this line's change is a restatement of the contract, not a change of expectation;
+    // `crate::drm::executor::sort_port_traffic_tests` is where the two orders are actually
+    // distinguished, against records built to disagree.
+    expected.sort_by(|a, b| (a.3, a.4, a.1.as_str(), a.2.as_str()).cmp(&(b.3, b.4, b.1.as_str(), b.2.as_str())));
 
     let log = read_port_traffic_log(&dir.join("port_traffic.pb"));
     assert_eq!(log.records.len(), 4, "{:#?}", log.records);
