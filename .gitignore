@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
-build/
+/build/
 target/
 third_party/gmat-src/
 third_party/cspice/

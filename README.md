@@ -53,6 +53,10 @@ python3.13 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
 
+The `dev` extra includes `grpcio` because the test suite covers the design-time gRPC
+services; the runtime package itself needs only `protobuf`, and a deployment that wants the
+gRPC service without the test tools installs the `grpc` extra instead.
+
 The GMAT folder is found automatically when it sits next to this repository
 (`AltaVista/GMAT R2026a`); otherwise set `GMAT_ROOT=/path/to/GMAT`. The first import
 writes `bin/api_startup_file.txt` inside the GMAT folder (absolute paths), exactly as

@@ -12,10 +12,17 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "websockets>=12",
     "numpy>=1.24",
+    # The frame registry and the CDM adapter import the committed protobuf bindings at
+    # import time, so protobuf is a runtime dependency, not a dev extra.
+    "protobuf>=5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27", "protobuf>=5"]
+# The design-time gRPC service and the *_pb2_grpc stubs (question 85: Python is design-time
+# only; grpcio bundles its own TLS stack, so it is never a runtime dependency of the package).
+grpc = ["grpcio>=1.60"]
+# The test suite covers the gRPC services, so a dev install carries the grpc extra too.
+dev = ["pytest>=8", "httpx>=0.27", "grpcio>=1.60"]
 
 [project.scripts]
 altavista = "altavista.__main__:main"
