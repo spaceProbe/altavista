@@ -25,6 +25,20 @@ This version:
     catches manifest/tree drift (e.g. someone edited a COPYed file but forgot to re-run
     build-image.sh) independent of whether anyone has a local image built at all.
 
+Amended for docs/open-questions.md question 179's unindexed amendment (2026-09-08, recorded
+right after question 183 in that file) and its restatement right after question 183 itself:
+`services/cfs/bin/av-lockstep-shim` is a compiled cross-build artifact, deliberately git-ignored
+(`.gitignore` line 35) rather than tracked, so it is present on a host that has run this
+Dockerfile's own header-documented cross-build recipe and absent on a clean checkout that has
+not. `services/cfs/IMAGE_CONTEXT_MANIFEST.txt` still lists it (its bytes are still part of the
+image's build context when present), but `build-image.sh` now marks any manifest entry whose
+path `git check-ignore` reports as ignored with a third token, `BUILD_ARTIFACT` -- a property of
+the path (is it git-ignored?), not a hardcoded filename list living a second time in this file.
+`test_manifest_paths_exist_and_hash_match` below verifies a BUILD_ARTIFACT entry's hash only when
+the file is present, and skips VISIBLY (naming the file and pointing at the Dockerfile's own
+rebuild recipe) when it is not; every other (non-build-artifact) manifest entry is still verified
+strictly and a mismatch or a missing non-build-artifact entry still fails the test outright.
+
 Per question 164 (a diagnostic that matched the wrong banner substring and silently never
 matched): every assertion here is pinned against a captured real artifact -- the manifest file
 `build-image.sh` actually wrote and the Dockerfile's actual COPY lines -- never against a
@@ -118,25 +132,34 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def parse_manifest(text: str) -> dict[str, str]:
-    """path -> sha256. Lines starting with '#' and blank lines are ignored (the header
-    build-image.sh writes). Format: '<sha256>  <path>' (two spaces), one per line."""
+def parse_manifest(text: str) -> tuple[dict[str, str], set[str]]:
+    """(path -> sha256, set of paths marked BUILD_ARTIFACT). Lines starting with '#' and blank
+    lines are ignored (the header build-image.sh writes). Format: '<sha256>  <path>' (two
+    spaces), optionally followed by a third token 'BUILD_ARTIFACT' for a path git-ignores (see
+    this module's own docstring amendment)."""
     entries: dict[str, str] = {}
+    build_artifacts: set[str] = set()
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = raw.rstrip("\n")
         if not line.strip() or line.lstrip().startswith("#"):
             continue
-        parts = line.split(None, 1)
-        assert len(parts) == 2, f"{MANIFEST_PATH}:{lineno}: unparsable manifest line: {raw!r}"
-        sha, path = parts
+        parts = line.split(None, 2)
+        assert len(parts) in (2, 3), f"{MANIFEST_PATH}:{lineno}: unparsable manifest line: {raw!r}"
+        sha, path = parts[0], parts[1]
         assert re.fullmatch(r"[0-9a-f]{64}", sha), (
             f"{MANIFEST_PATH}:{lineno}: {sha!r} does not look like a sha256 hex digest"
         )
+        if len(parts) == 3:
+            assert parts[2] == "BUILD_ARTIFACT", (
+                f"{MANIFEST_PATH}:{lineno}: unrecognized third token {parts[2]!r} in {raw!r} "
+                "-- only 'BUILD_ARTIFACT' is recognized, extend this parser before proceeding"
+            )
+            build_artifacts.add(path)
         entries[path] = sha
-    return entries
+    return entries, build_artifacts
 
 
-def load_manifest() -> dict[str, str]:
+def load_manifest() -> tuple[dict[str, str], set[str]]:
     assert MANIFEST_PATH.exists(), (
         f"{MANIFEST_PATH} does not exist -- run `{BUILD_SCRIPT}` to generate it."
     )
@@ -220,12 +243,19 @@ def _diff_manifests(recorded: dict[str, str], current: dict[str, str]) -> str:
 # Test 1: manifest currency. Pure file-hash check, no Docker involved -- must run everywhere.
 # ---------------------------------------------------------------------------------------------
 def test_manifest_paths_exist_and_hash_match() -> None:
-    recorded = load_manifest()
+    recorded, build_artifacts = load_manifest()
     removed: list[str] = []
     changed: list[str] = []
+    skipped_build_artifacts: list[str] = []
     for path, sha in sorted(recorded.items()):
         abs_path = REPO_ROOT / path
         if not abs_path.is_file():
+            if path in build_artifacts:
+                # A build artifact is verified only when present (docs/open-questions.md
+                # question 179's unindexed amendment) -- absence here is expected on a clean
+                # checkout that has not run the cross-build step, not a manifest/tree drift.
+                skipped_build_artifacts.append(path)
+                continue
             removed.append(path)
             continue
         actual = sha256_file(abs_path)
@@ -241,6 +271,24 @@ def test_manifest_paths_exist_and_hash_match() -> None:
         lines.append(f"Re-run `{BUILD_SCRIPT}` to regenerate the manifest for the current tree.")
         pytest.fail("\n".join(lines))
 
+    if skipped_build_artifacts:
+        lines = [
+            f"{len(skipped_build_artifacts)} build-artifact manifest "
+            f"{'entry is' if len(skipped_build_artifacts) == 1 else 'entries are'} not present "
+            "on this checkout -- every other (non-build-artifact) manifest entry above was "
+            "verified strictly and matched:",
+        ]
+        for p in skipped_build_artifacts:
+            lines.append(
+                f"  - {p}: absent. This is a compiled, git-ignored build artifact "
+                f"(`git check-ignore {p}` succeeds), not tracked in git -- see "
+                "services/cfs/Dockerfile's own header comment (the paragraph starting "
+                "\"The shim binary itself ... is PREBUILT, not compiled by this Dockerfile\") "
+                "for the exact three-command cross-build recipe that produces it, then re-run "
+                f"`{BUILD_SCRIPT}` to regenerate this manifest with it present."
+            )
+        pytest.skip("\n".join(lines))
+
 
 # ---------------------------------------------------------------------------------------------
 # Test 2: built image digest vs. recorded pin. Docker-gated, visible skip when not applicable.
@@ -252,7 +300,7 @@ def test_image_digest_matches_recorded_value() -> None:
     if actual == expected:
         return
 
-    recorded_manifest = load_manifest()
+    recorded_manifest, _build_artifacts = load_manifest()
     current_manifest = compute_current_copy_manifest()
     diff = _diff_manifests(recorded_manifest, current_manifest)
 

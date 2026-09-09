@@ -45,9 +45,36 @@ running it is a deliberate, by-hand action exactly like running `build-image.sh`
 
 Per question 164's captured-artifact rule, the comparison here is between two artifacts this
 test itself just built, not a guess about what they should contain.
+
+Amended for docs/open-questions.md question 185 (round 5, and its own 2026-09-08 amendment "after
+the manager's review"): three image-content changes landed on top of the question-182 pins --
+cFE's unit-test/coverage build turned off (services/cfs/build/targets.cmake), `-Wl,--build-id=
+none` added to the native_std link flags (services/cfs/build/global_build_options.cmake), and
+both Dockerfile stages pinned to one digest-identified `ubuntu:22.04` base with the final stage's
+`apt-get install libc6` removed entirely. Two assertions now exist, and the manager's amendment
+is explicit that the second does not replace or narrow the first:
+
+  1. The RUNTIME-CONTENT HASH (question 185's own term): SHA-256 over the sorted
+     "<path> <sha256>" lines for every file this image actually ships and runs --
+     `/cfs/av-lockstep-shim`, `/cfs/container-entrypoint.sh`, and every file under `/cfs/cpu1`
+     (after the unit-tests-off fix, that directory should hold nothing else). See
+     services/cfs/IMAGE_DIGEST.md's own "Runtime-content hash" section for the canonical
+     definition this file's `runtime_content_hash()` independently re-implements (question 164's
+     captured-artifact precedent for TWO independent implementations of one defined algorithm --
+     services/cfs/build-image.sh has the other, in bash). This is an ADDITIONAL, ALWAYS-ON
+     assertion: it must hold even when the whole-image digest below does not yet match, and it
+     is not a substitute for that stricter check.
+  2. The WHOLE-IMAGE DIGEST (the original, question-182-era assertion below): stays exactly as
+     strict as before -- a straight `docker image inspect ... .Id` comparison, no narrowing to
+     the runtime set. It is expected to pass now that all three question-185 causes are fixed;
+     if it still fails, the failure message below diffs every file under `/cfs` between the two
+     images and NAMES which ones differ and whether each is inside the runtime-content set or
+     not, rather than repeating R4.3's now-possibly-stale prose about causes that may already be
+     fixed.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -125,6 +152,92 @@ def _docker_rmi(tag: str) -> None:
     subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, text=True, timeout=60)
 
 
+# --- Runtime-content hash (question 185): see this module's own docstring amendment and
+# services/cfs/IMAGE_DIGEST.md's "Runtime-content hash" section for the canonical definition.
+# This is an independent re-implementation of services/cfs/build-image.sh's own (bash) version --
+# question 164's captured-artifact precedent for keeping two implementations of one algorithm
+# separate, so a bug in one is unlikely to be masked by the same bug in the other. -----------------
+RUNTIME_CONTENT_SHELL_CMD = (
+    "find /cfs/cpu1 -type f -exec sha256sum {} + ; "
+    "sha256sum /cfs/av-lockstep-shim /cfs/container-entrypoint.sh"
+)
+
+
+def _docker_run_capture(tag: str, shell_cmd: str, timeout: int = 120) -> str:
+    result = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "sh", tag, "-c", shell_cmd],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    assert result.returncode == 0, (
+        f"`docker run --rm --entrypoint sh {tag} -c {shell_cmd!r}` failed "
+        f"(exit {result.returncode}): {result.stderr}"
+    )
+    return result.stdout
+
+
+def _parse_sha256sum_output(stdout: str) -> dict[str, str]:
+    """coreutils `sha256sum` output ('<sha256>  <path>', two spaces) -> {path: sha256}."""
+    hashes: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        sha, path = line.split(None, 1)
+        hashes[path] = sha
+    return hashes
+
+
+def runtime_content_hash(tag: str) -> str:
+    """SHA-256 over the sorted "<path> <sha256>" lines for every file this image's
+    runtime-content set contains: /cfs/av-lockstep-shim, /cfs/container-entrypoint.sh, and every
+    file under /cfs/cpu1 (after question 185's unit-tests-off fix, that directory should hold
+    nothing but runtime-relevant artifacts). Returns the bare hex digest (no "sha256:" prefix)."""
+    hashes = _parse_sha256sum_output(_docker_run_capture(tag, RUNTIME_CONTENT_SHELL_CMD))
+    lines = sorted(f"{path} {sha}" for path, sha in hashes.items())
+    blob = ("\n".join(lines) + "\n").encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _all_cfs_file_hashes(tag: str) -> dict[str, str]:
+    """path -> sha256 for EVERY file under /cfs (the only directory either Dockerfile stage
+    writes to beyond the pinned, now byte-identical-across-stages base image -- see
+    services/cfs/Dockerfile's own final-stage comment). Used only for mismatch attribution when
+    the whole-image digest differs, so a failure names which files changed."""
+    return _parse_sha256sum_output(_docker_run_capture(tag, "find /cfs -type f -exec sha256sum {} +"))
+
+
+def _is_runtime_content_path(path: str) -> bool:
+    return path in ("/cfs/av-lockstep-shim", "/cfs/container-entrypoint.sh") or path.startswith(
+        "/cfs/cpu1/"
+    )
+
+
+def _describe_cfs_file_diff(hashes_1: dict[str, str], hashes_2: dict[str, str]) -> str:
+    added = sorted(set(hashes_2) - set(hashes_1))
+    removed = sorted(set(hashes_1) - set(hashes_2))
+    changed = sorted(p for p in set(hashes_1) & set(hashes_2) if hashes_1[p] != hashes_2[p])
+    if not added and not removed and not changed:
+        return (
+            "  no file under /cfs differs between the two images at all -- the whole-image "
+            "digest difference is NOT attributable to any shipped file's content; look at image "
+            "metadata or layer history instead (`docker history --no-trunc <tag>`)."
+        )
+    lines = []
+    for p in added:
+        kind = "runtime" if _is_runtime_content_path(p) else "NON-runtime"
+        lines.append(f"  + added:   {p}  [{kind}]  (sha256:{hashes_2[p]})")
+    for p in removed:
+        kind = "runtime" if _is_runtime_content_path(p) else "NON-runtime"
+        lines.append(f"  - removed: {p}  [{kind}]  (was sha256:{hashes_1[p]})")
+    for p in changed:
+        kind = "runtime" if _is_runtime_content_path(p) else "NON-runtime"
+        lines.append(
+            f"  ~ changed: {p}  [{kind}]  (sha256:{hashes_1[p]} -> sha256:{hashes_2[p]})"
+        )
+    return "\n".join(lines)
+
+
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_two_independent_builds_produce_the_same_image_id() -> None:
     run_id = str(int(time.time()))
@@ -133,31 +246,42 @@ def test_two_independent_builds_produce_the_same_image_id() -> None:
     try:
         _docker_build_no_cache(tag_1)
         digest_1 = _image_id(tag_1)
+        rc_hash_1 = runtime_content_hash(tag_1)
         _docker_build_no_cache(tag_2)
         digest_2 = _image_id(tag_2)
+        rc_hash_2 = runtime_content_hash(tag_2)
+
+        print(f"whole-image digest 1: sha256:{digest_1}")
+        print(f"whole-image digest 2: sha256:{digest_2}")
+        print(f"runtime-content hash 1: sha256:{rc_hash_1}")
+        print(f"runtime-content hash 2: sha256:{rc_hash_2}")
+
+        # Assertion 1 (question 185, always-on, never narrowed to replace assertion 2 below):
+        # the runtime-content hash -- every file this image actually ships and runs -- must be
+        # EQUAL across two independent builds.
+        if rc_hash_1 != rc_hash_2:
+            diff = _describe_cfs_file_diff(_all_cfs_file_hashes(tag_1), _all_cfs_file_hashes(tag_2))
+            pytest.fail(
+                "runtime-content hash DIFFERS between two independent `docker build --no-cache` "
+                f"runs (sha256:{rc_hash_1} vs sha256:{rc_hash_2}) -- this hash covers every file "
+                "the image actually ships and runs (/cfs/av-lockstep-shim, "
+                "/cfs/container-entrypoint.sh, and everything under /cfs/cpu1; see "
+                "IMAGE_DIGEST.md's 'Runtime-content hash' section for the exact definition) and "
+                "must be equal; it is never weakened or narrowed to make this pass.\n"
+                f"Files differing under /cfs (runtime-set membership marked):\n{diff}"
+            )
+
+        # Assertion 2 (the original, question-182-era check): the whole-image digest, still just
+        # as strict as before -- no narrowing to the runtime set.
         assert digest_1 == digest_2, (
             f"two independent `docker build --no-cache` runs of {DOCKERFILE} produced DIFFERENT "
-            f"image IDs ({digest_1!r} vs {digest_2!r}) -- the image is not reproducible from an "
-            "identical build context.\n"
-            "\n"
-            "DO NOT read this failure as 'the question-182 BUILDDATE/USER/HOSTNAME pins were "
-            "removed' without checking first. As of R4.3 this assertion is KNOWN to fail even "
-            "with those pins correctly in place, for two further, independent, out-of-scope "
-            "reasons measured and root-caused in services/cfs/R4_3_REPORT.md section 4:\n"
-            "  (a) 86 of the 143 files under /cfs/cpu1 -- every one of them a cFE/OSAL unit-test "
-            "or coverage-harness binary the container never executes -- carry non-deterministic "
-            "GNU-linker build-ids (isolated to 34 bytes inside .note.gnu.build-id);\n"
-            "  (b) the final stage's `apt-get install ... libc6` layer differs between builds "
-            "(unpinned apt package/index state).\n"
-            "\n"
-            "The question-182 pins ARE confirmed effective for every runtime-relevant artifact: "
-            "core-cpu1, every mission .so, the startup script and all 21 utmod modules are "
-            "byte-identical across two independent builds. To tell the two causes apart, compare "
-            "core-cpu1's own sha256 between the two builds: if THAT differs, the BUILDDATE pin is "
-            "genuinely broken (that is the clean signal R4_3_REPORT.md section 5's break test "
-            "used); if it matches, you are looking at (a) and/or (b) above, which need an "
-            "image-content change beyond the three pinned variables. See IMAGE_DIGEST.md's "
-            "'Re-pinned 2026-09-08 (R4.3, question 182)' section."
+            f"whole-image IDs ({digest_1!r} vs {digest_2!r}) even though the runtime-content "
+            "hash MATCHED (sha256:" + rc_hash_1 + ") -- every file the image actually ships and "
+            "runs is byte-identical between the two builds, so this difference is confined to "
+            "something outside the runtime-content set (or to image metadata/layer history, not "
+            "file content at all). Files differing under /cfs (runtime-set membership marked; "
+            "empty if the cause is metadata-only):\n"
+            + _describe_cfs_file_diff(_all_cfs_file_hashes(tag_1), _all_cfs_file_hashes(tag_2))
         )
     finally:
         _docker_rmi(tag_1)

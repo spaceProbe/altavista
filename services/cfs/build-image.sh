@@ -15,6 +15,16 @@
 #      services/cfs/tests/test_image_digest.py diffs against on a future digest mismatch, so
 #      drift is attributable to specific files instead of merely detected.
 #
+#      A COPYed path that `git check-ignore` reports as ignored (docs/open-questions.md
+#      question 179's unindexed amendment, dated 2026-09-08: `services/cfs/bin/av-lockstep-shim`
+#      is "a compiled cross-build artifact deliberately not tracked" -- see this Dockerfile's own
+#      header comment for the exact rebuild recipe) is a BUILD ARTIFACT: its manifest line gets a
+#      third token, `<sha256>  <path>  BUILD_ARTIFACT`, so the manifest self-describes which
+#      entries are expected to be absent on a clean checkout that has not run that cross-build
+#      step, rather than a hardcoded filename list living a second time in the test file. This is
+#      a property of the PATH (is it git-ignored?), not a hardcoded name, so a future build
+#      artifact gets the same treatment automatically.
+#
 # The COPY list is PARSED from services/cfs/Dockerfile itself (not hardcoded here) so the
 # manifest cannot silently drift out of sync with the Dockerfile: add/remove/change a COPY line
 # and this script picks it up on the next run with no second place to edit. `COPY --from=...`
@@ -53,6 +63,7 @@ command -v docker >/dev/null 2>&1 || die "docker binary not found on PATH -- ins
 if ! docker info >/dev/null 2>&1; then
     die "\`docker info\` failed -- Docker is not running (or not accessible). Start Docker Desktop (or the daemon) and re-run."
 fi
+command -v git >/dev/null 2>&1 || die "git binary not found on PATH -- needed to mark build-artifact manifest entries (git check-ignore)."
 [ -f "${DOCKERFILE}" ] || die "Dockerfile not found at ${DOCKERFILE}"
 
 # --- 1. Build the image, once. ----------------------------------------------------------------
@@ -63,6 +74,24 @@ docker build -f "${DOCKERFILE}" -t "${IMAGE_TAG}" "${REPO_ROOT}" 1>&2
 IMAGE_ID="$(docker image inspect "${IMAGE_TAG}" --format '{{.Id}}')"
 [ -n "${IMAGE_ID}" ] || die "docker image inspect returned an empty .Id for ${IMAGE_TAG}"
 log "built image ID: ${IMAGE_ID}"
+
+# --- 2b. Compute the runtime-content hash (docs/open-questions.md question 185): SHA-256 over
+# the sorted "<path> <sha256>" lines for every file this image actually ships and runs --
+# /cfs/av-lockstep-shim, /cfs/container-entrypoint.sh, and every file under /cfs/cpu1 (after
+# services/cfs/build/targets.cmake's own unit-tests-off fix, that directory should hold nothing
+# but runtime-relevant artifacts -- see services/cfs/IMAGE_DIGEST.md's own "Runtime-content hash"
+# section for the canonical definition this mirrors, and services/cfs/tests/
+# test_image_reproducibility.py's `runtime_content_hash()` for the independent Python
+# re-implementation of this exact algorithm -- question 164's captured-artifact precedent for
+# keeping two implementations of one defined algorithm separate).
+log "computing runtime-content hash (question 185)"
+RUNTIME_CONTENT_HASH="$(docker run --rm --entrypoint sh "${IMAGE_TAG}" -c \
+    'find /cfs/cpu1 -type f -exec sha256sum {} + ; sha256sum /cfs/av-lockstep-shim /cfs/container-entrypoint.sh' \
+    | awk '{print $2, $1}' \
+    | LC_ALL=C sort \
+    | shasum -a 256 | awk '{print $1}')"
+[ -n "${RUNTIME_CONTENT_HASH}" ] || die "runtime-content hash computation produced no output"
+log "runtime-content hash: sha256:${RUNTIME_CONTENT_HASH}"
 
 # --- 3. Parse the Dockerfile's COPY list (skip --from=... intra-image copies). -----------------
 # Each surviving COPY line has the form (after collapsing whitespace):
@@ -102,17 +131,30 @@ log "parsed ${#COPY_SRCS[@]} host COPY source path(s) from ${DOCKERFILE}"
 TMP_MANIFEST="$(mktemp "${MANIFEST_PATH}.XXXXXX")"
 trap 'rm -f "${TMP_MANIFEST}"' EXIT
 
+# A manifest entry is a "build artifact" iff git itself reports the path as ignored -- this is
+# the exact property that distinguishes services/cfs/bin/av-lockstep-shim (`.gitignore` line 35)
+# from every other COPYed path, and it generalizes to any future build artifact without a second
+# hardcoded filename list here or in the test.
+manifest_line() {
+    local sha="$1" rel="$2"
+    if git -C "${REPO_ROOT}" check-ignore -q -- "${rel}"; then
+        printf '%s  %s  BUILD_ARTIFACT\n' "${sha}" "${rel}"
+    else
+        printf '%s  %s\n' "${sha}" "${rel}"
+    fi
+}
+
 for src in "${COPY_SRCS[@]}"; do
     abs_path="${REPO_ROOT}/${src}"
     if [ -f "${abs_path}" ]; then
         sha="$(shasum -a 256 "${abs_path}" | awk '{print $1}')"
-        printf '%s  %s\n' "${sha}" "${src}" >> "${TMP_MANIFEST}"
+        manifest_line "${sha}" "${src}" >> "${TMP_MANIFEST}"
     elif [ -d "${abs_path}" ]; then
         # Recursively list every file under the directory, deterministically ordered.
         while IFS= read -r -d '' file; do
             rel="${file#"${REPO_ROOT}"/}"
             sha="$(shasum -a 256 "${file}" | awk '{print $1}')"
-            printf '%s  %s\n' "${sha}" "${rel}" >> "${TMP_MANIFEST}"
+            manifest_line "${sha}" "${rel}" >> "${TMP_MANIFEST}"
         done < <(find "${abs_path}" -type f -print0 | sort -z)
     else
         die "COPY source path does not exist on disk: ${src} (resolved to ${abs_path})"
@@ -124,8 +166,14 @@ sort -k2 -o "${TMP_MANIFEST}" "${TMP_MANIFEST}"
 {
     printf '# services/cfs/IMAGE_CONTEXT_MANIFEST.txt -- generated by services/cfs/build-image.sh\n'
     printf '# One line per host file the Dockerfile'\''s COPY steps read from (directories expanded\n'
-    printf '# recursively), sorted by path: "<sha256>  <path>" (path relative to the repository root).\n'
+    printf '# recursively), sorted by path: "<sha256>  <path>" (path relative to the repository root),\n'
+    printf '# or "<sha256>  <path>  BUILD_ARTIFACT" when git itself reports <path> as ignored (a\n'
+    printf '# compiled, not-tracked build artifact -- e.g. services/cfs/bin/av-lockstep-shim; see this\n'
+    printf '# Dockerfile'\''s own header comment for the rebuild recipe). test_manifest_paths_exist_and_\n'
+    printf '# hash_match verifies a BUILD_ARTIFACT entry only when the file is present on disk and\n'
+    printf '# skips it visibly, by name, when absent; every other entry is verified strictly.\n'
     printf '# Built image ID for this manifest: %s\n' "${IMAGE_ID}"
+    printf '# Runtime-content hash for this build (question 185, see IMAGE_DIGEST.md): sha256:%s\n' "${RUNTIME_CONTENT_HASH}"
     printf '# Regenerate with: services/cfs/build-image.sh -- do not hand-edit.\n'
     cat "${TMP_MANIFEST}"
 } > "${MANIFEST_PATH}.new"
@@ -136,4 +184,6 @@ rm -f "${TMP_MANIFEST}"
 ENTRY_COUNT="$(grep -vc '^#' "${MANIFEST_PATH}")"
 log "wrote ${MANIFEST_PATH} (${ENTRY_COUNT} file entries)"
 log "done. Image ID: ${IMAGE_ID}"
-printf '%s\n' "${IMAGE_ID}"
+log "record both of the following in services/cfs/IMAGE_DIGEST.md's new dated section (by hand, same as always -- this script never edits that file):"
+printf 'image_id=%s\n' "${IMAGE_ID}"
+printf 'runtime_content_hash=sha256:%s\n' "${RUNTIME_CONTENT_HASH}"

@@ -46,8 +46,29 @@
 # libc/libgcc_s/libm (confirmed with `ldd` against this same `ubuntu:22.04` base -- the crate's
 # own doc comment already notes it pulls no TLS stack at all), so the final stage below needs no
 # extra runtime package for it.
+#
+# docs/open-questions.md question 185 (round 5): both stages pin the SAME base image by content
+# digest (`ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc`,
+# resolved 2026-09-08 via `docker pull ubuntu:22.04` -- the one permitted network window,
+# question 154 -- and confirmed identical to the value services/cfs/IMAGE_DIGEST.md's own R4.3
+# section already recorded as "the local ubuntu:22.04" resolution, so pinning it changes nothing
+# about which bytes either stage starts from). Two consequences: (1) `FROM ubuntu:22.04` was a
+# floating tag that could re-resolve to different bytes on a future pull -- pinning it removes
+# that as a reproducibility variable entirely, not just "usually agrees"; (2) the final stage no
+# longer needs its own `apt-get install ... libc6` (removed below) -- it starts from the exact
+# same base rootfs as the builder stage, which already carries a `libc6` your own compiled
+# binaries linked against at build time, so there is no version-skew risk to cover with a
+# redundant reinstall. That `apt-get` layer was independently confirmed non-deterministic across
+# `--no-cache` builds (services/cfs/R4_3_REPORT.md section 4: differing layer diffID on two
+# `--no-cache` runs of an unchanged package list) and was the sole cause of at least one digest
+# move even between two builds that reused 100% of the builder stage's cache
+# (services/cfs/R4_3_REPORT.md section 6's "Mid-task incident"). Verified, not merely assumed
+# safe (services/cfs/R5_3_REPORT.md has the full account): `ldd` against both
+# `/cfs/av-lockstep-shim` and `/cfs/cpu1/core-cpu1` inside the built final-stage image, run
+# without the `apt-get install libc6` line present, resolves every shared library with no
+# "not found" entries.
 
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc AS builder
 
 # Reproducibility (docs/open-questions.md question 182, following on from question 179's own
 # root cause recorded in services/cfs/IMAGE_DIGEST.md's "Re-pinned 2026-09-08" section):
@@ -99,6 +120,12 @@ COPY services/cfs/psp-lockstep third_party/cfs/psp-lockstep
 COPY services/cfs/build/targets.cmake third_party/cfs/sample_defs/targets.cmake
 COPY services/cfs/build/generate_startup.cmake third_party/cfs/sample_defs/generate_startup.cmake
 COPY services/cfs/build/cpu1_install_custom.cmake third_party/cfs/sample_defs/cpu1/install_custom.cmake
+# docs/open-questions.md question 185's `-Wl,--build-id=none` fix lives inside
+# services/cfs/build/targets.cmake above, NOT in a separate services/cfs/build/
+# global_build_options.cmake wired through cFE's own OPTIONAL "global-scope build customization"
+# hook -- that was tried first and it broke the build; see targets.cmake's own comment (right
+# after its ENABLE_UNIT_TESTS line) for the full root-caused account of why, and
+# services/cfs/R5_3_REPORT.md section 4 for the 9-build investigation.
 
 WORKDIR /build/third_party/cfs
 # Target the single `native_std` config explicitly (`native_std.<goal>`) -- a bare `prep`/`all`
@@ -109,8 +136,15 @@ RUN make native_std.prep
 RUN make native_std.compile
 RUN make native_std.install
 
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y --no-install-recommends libc6 && rm -rf /var/lib/apt/lists/*
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+# No `apt-get install libc6` here (question 185; see this file's header comment for the
+# hypothesis and the `ldd`-based verification that removing it is safe): this stage now pins the
+# exact same base image, by digest, as the builder stage above, so it already has the libc6 that
+# shipped in that base rootfs -- the same one the builder stage's own compiled binaries linked
+# against, since both are byte-identical copies of the same pinned image. The
+# `apt-get update && apt-get install libc6` layer this replaces was independently
+# non-deterministic (services/cfs/R4_3_REPORT.md section 4) and contributed nothing this final
+# stage's shipped binaries actually needed beyond what the base image already provides.
 COPY --from=builder /build/third_party/cfs/build-native_std/exe/cpu1 /cfs/cpu1
 COPY services/cfs/bin/av-lockstep-shim /cfs/av-lockstep-shim
 COPY services/cfs/container-entrypoint.sh /cfs/container-entrypoint.sh

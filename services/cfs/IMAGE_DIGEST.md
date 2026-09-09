@@ -17,11 +17,88 @@ docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .
 docker image inspect altavista-cfs-lockstep:local --format '{{.Id}}'
 ```
 
-Recorded digest (re-pinned 2026-09-08 for R4.3 / question 182 -- see "Re-pinned 2026-09-08
-(R4.3, question 182)" below, and its "Mid-task incident" addendum, for what changed and why --
-`third_party/cfs` still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see
-`third_party/fetch-cfs.sh`):
+## Runtime-content hash definition (docs/open-questions.md question 185, round 5)
 
+In addition to the whole-image digest above (`docker image inspect`'s content-addressed `.Id`,
+which depends on Docker/BuildKit internals and image metadata, not only on shipped file
+content), this file also records a **runtime-content hash**: a hash of exactly the files this
+image actually ships and runs, independent of any Docker/BuildKit implementation detail.
+
+**Runtime-content set** -- every file at these image-internal paths (paths as they exist inside
+the built container, not host paths):
+- `/cfs/av-lockstep-shim`
+- `/cfs/container-entrypoint.sh`
+- every regular file under `/cfs/cpu1`, recursively (as of this round, with cFE's unit-test/
+  coverage build turned off -- `services/cfs/build/targets.cmake` -- this directory should
+  contain nothing else: no `coverage-*-testrunner` / `*-test` / `*_UT` harness binaries)
+
+These three roots are exactly what `services/cfs/container-entrypoint.sh` (this image's own
+`ENTRYPOINT`) reads and executes: it runs `/cfs/av-lockstep-shim` and `exec`s
+`/cfs/cpu1/core-cpu1`, which `dlopen()`s the mission app/PSP `.so` modules and reads the table/
+startup files also under `/cfs/cpu1` -- see that script's own top comment.
+
+**Runtime-content hash** -- SHA-256 over the UTF-8 bytes of: for every file in the runtime-content
+set, one line `"<path> <sha256>"` (image-internal path, one space, lowercase hex SHA-256 of that
+file's bytes, no trailing path metadata), sorted lexicographically by the full line, joined by
+`"\n"`, with a trailing `"\n"` after the last line. Reported as `sha256:<hex>`.
+
+Computed by two independent implementations that must agree (docs/open-questions.md question
+164's captured-artifact precedent -- two implementations of one defined algorithm, so a bug in
+one is unlikely to be masked by the same bug in the other):
+- `services/cfs/build-image.sh` (bash: `docker run --rm --entrypoint sh ... find/sha256sum` on
+  the just-built official image), which records the value here, beside the whole-image digest,
+  by hand (this script never edits this file, exactly as it has never auto-edited the whole-image
+  digest above).
+- `services/cfs/tests/test_image_reproducibility.py`'s `runtime_content_hash()` (Python), used to
+  assert the hash is EQUAL between that test's own two independent `--no-cache` builds -- an
+  always-on assertion (whenever that opt-in test actually runs) that is never weakened or used to
+  narrow the whole-image digest assertion, which stays exactly as strict as before.
+
+Recorded digest (re-pinned 2026-09-09 for R5.3 / question 185 -- see "Re-pinned 2026-09-09
+(R5.3, question 185)" below for what changed and why, and the manifest-regeneration note
+immediately after this block -- `third_party/cfs` still pinned at
+`088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
+
+```
+sha256:9bcb253dcce57ba64657954de33d2dc2d1cc51de46d211450ce02ecaf4c3fb42
+```
+
+Recorded runtime-content hash for this pin (question 185, see the definition above):
+```
+sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef
+```
+
+**Manifest regeneration, 2026-09-09 (round-5 manager's acceptance run), and what it measured.**
+R5.3's own last edit to `services/cfs/build/targets.cmake` was a documentation-only comment
+(the root-caused account of the `global_build_options.cmake` build failure) written AFTER its
+final `services/cfs/build-image.sh` run, so the manifest it had already written recorded the
+pre-comment hash and `test_manifest_paths_exist_and_hash_match` failed in the acceptance gate,
+naming that one file -- exactly the attributable-drift behaviour question 179 asked that test
+for. Fixed by re-running `services/cfs/build-image.sh` once (never a hand-rolled `docker
+build`), which regenerated the manifest and re-pinned the digest above.
+
+The measurement this accidentally produced is worth keeping, because it is the first direct
+evidence that the runtime-content hash does the job question 185 defined it for: a
+**documentation-only** change to a COPYed build-input file
+- moved the whole-image digest (`sha256:3477865d...` -> `sha256:9bcb253d...`), because the
+  changed `COPY` invalidated the layer and every layer after it, and
+- left the runtime-content hash **exactly unchanged** (`sha256:5049bf8f...`), because not one
+  byte of what the image actually ships and runs changed.
+
+So the whole-image digest still moves for reasons that have nothing to do with the image's
+runtime content, and the runtime-content hash is the value that answers "did what this image
+runs change?" See the escalation in `services/cfs/R5_3_REPORT.md` section 8 for the remaining
+whole-image reproducibility gap.
+
+Previous digest (R5.3 / question 185, superseded by the manifest regeneration immediately
+above -- same runtime-content hash, digest moved only for the comment-only `targets.cmake`
+edit described there):
+```
+sha256:3477865d381a91a307fdc2e05c62d55efa426dcbfb6aafb7d33ca4a90115ad30
+```
+
+Previous digest (R4.3 / question 182, re-pinned 2026-09-08, superseded by the R5.3 re-pin
+above):
 ```
 sha256:a1303bcef95d870d609c1965d09ec26807030d197ea36d559748e71398081e0a
 ```
@@ -54,6 +131,129 @@ test_image_digest.py` no longer builds anything: it inspects an already-built im
 visibly (naming `build-image.sh`) when Docker is absent or the image is not built, and on a
 mismatch prints which manifest entries changed so drift is attributable rather than merely
 detected. A second, non-Docker-gated test asserts the manifest itself is still accurate.
+
+## Re-pinned 2026-09-09 (R5.3, `docs/open-questions.md` question 185): what changed and why
+
+Question 185 (round 5, and its own 2026-09-08 "after the manager's review" amendment) asked for
+five things: (1) build-artifact manifest entries for question 179's amendment (`services/cfs/bin/
+av-lockstep-shim`, untracked); (2) cFE's unit-test/coverage build off for `native_std`; (3)
+`-Wl,--build-id=none` in the same mission-config layer, belt-and-braces; (4) both Dockerfile
+stages pinned to one digest-identified `ubuntu:22.04` base, with the final stage's `apt-get
+install libc6` dropped entirely; (5) a runtime-content hash (defined above), recorded here and
+asserted equal across two independent builds by `services/cfs/tests/test_image_reproducibility.
+py`, without narrowing or replacing the existing whole-image digest assertion.
+
+**1. Build-artifact manifest entries.** `services/cfs/build-image.sh` now marks a manifest entry
+`BUILD_ARTIFACT` when `git check-ignore` reports its path as ignored (a property of the path, not
+a hardcoded filename list) -- currently only `services/cfs/bin/av-lockstep-shim`. `services/cfs/
+tests/test_image_digest.py`'s `test_manifest_paths_exist_and_hash_match` verifies a
+`BUILD_ARTIFACT` entry's hash only when the file is present, and skips VISIBLY (naming the file
+and the Dockerfile's own rebuild recipe) when it is not; every other entry stays strictly
+verified, and a missing/changed non-build-artifact entry still fails the test outright. Proven
+with a real break-and-restore: the shim was moved aside, the test was re-run (captured in
+`services/cfs/_r5_3_scratch/15_break_item1_shim_absent.txt`) and skipped with the exact expected
+reason, the shim was moved back, and `git status` for `services/cfs/bin/` was confirmed empty
+throughout (the path is `.gitignore`d, so this move never touches tracked state).
+
+**2. cFE unit tests off.** `services/cfs/build/targets.cmake` now does `set(ENABLE_UNIT_TESTS
+FALSE CACHE BOOL "Enable build of unit tests" FORCE)`. `third_party/cfs/target-configs.mk`'s own
+`PREP_OPTS_native_std += -DENABLE_UNIT_TESTS=TRUE` (a fetched file, not edited) pre-populates the
+CMake cache as TRUE before any project code runs; a plain `set(... CACHE BOOL ...)` without FORCE
+(what `third_party/cfs/cfe/cmake/mission_build.cmake`'s own `initialize_globals()` does) cannot
+override an already-cached value, so `services/cfs/build/targets.cmake`'s FORCE -- placed at the
+earliest point this task's own files run (`include(${MISSION_DEFS}/targets.cmake)`, before
+`read_targetconfig()`/`prepare()` and before every module's own `if (ENABLE_UNIT_TESTS)
+add_subdirectory(...)` gate) -- is what actually takes effect, for both the mission-level build
+and every per-architecture sub-build (the sub-build imports a plain-variable TRUE from the
+mission's own `mission_vars.cache`, which this FORCE cache set still overrides -- confirmed
+empirically with a standalone CMake reproduction before relying on it, `services/cfs/
+R5_3_REPORT.md` section 2).
+
+Expected count stated before measuring: R4.3 recorded 143 files under `/cfs/cpu1` (86 UT/coverage
++ 57 "runtime-relevant", by R4.3's own count, which turned out to be wrong -- see the finding
+below). Measured: **10 files** (`core-cpu1`, six mission `.so` app/PSP modules, `container-start`,
+`cf/cfe_test_tbl.tbl`, `cf/cfe_es_startup.scr`). **Finding, not R4.3's fault to have caught but
+worth recording:** R4.3's own "57 runtime-relevant" count included 21 `utmod/MODULE*.so` files,
+which are dummy fixture modules built by OSAL's OWN `osal/src/unit-tests/osloader-test/`
+directory (confirmed by reading that directory, gated by the very same `ENABLE_UNIT_TESTS`
+switch, `osal/CMakeLists.txt` line 437) -- these are unit-test artifacts too, not runtime
+content, and their removal here is correct, not a regression. Break-and-restore: the
+`ENABLE_UNIT_TESTS FALSE` line was commented out, a real `docker build` (disposable tag) showed
+**143 files** (matching the pre-fix baseline exactly, including `coverage-*-testrunner`/`*_UT`
+binaries), the line was restored, and `git diff services/cfs/build/targets.cmake` was confirmed
+back to exactly the intended addition. Full logs: `services/cfs/_r5_3_scratch/13_break_item2.log`.
+
+**3. `-Wl,--build-id=none`.** Also in `services/cfs/build/targets.cmake` (see below for why NOT
+a separate `global_build_options.cmake` file): `CMAKE_EXE_LINKER_FLAGS`, `CMAKE_SHARED_LINKER_
+FLAGS` and `CMAKE_MODULE_LINKER_FLAGS` each get `-Wl,--build-id=none` appended via `CACHE STRING
+... FORCE`. Verified by a raw byte-string search for the ELF section name `.note.gnu.build-id`
+inside `core-cpu1` and `io_lockstep.so` (no `readelf`/`objdump` in the minimal final-stage image,
+so `grep -a -c '\.note\.gnu\.build-id'` was used instead -- the same signal, a different tool):
+**0 matches** (absent) with the fix applied (both the official image and a disposable
+fix-verification build), **1 match** (present) with the fix broken. Break-and-restore: the
+`foreach`/`set(... FORCE)` block was commented out, a real `docker build` (disposable tag) showed
+the section present in both files, the block was restored, and `git diff` confirmed clean. Full
+log: `services/cfs/_r5_3_scratch/14_break_item3.log`.
+
+**A real defect found and fixed while implementing this item:** the first attempt put this in a
+NEW file, `services/cfs/build/global_build_options.cmake`, wired through cFE's own OPTIONAL
+"global-scope build customization" hook (`third_party/cfs/cfe/CMakeLists.txt` line 122) -- the
+more textbook extension point, and the one this task tried first. It broke the build:
+`es/fsw/src/cfe_es_api.c.o` failed with `fatal error: global_core_api_base_msgid_values.h: No
+such file or directory` (a header `third_party/cfs/sample_defs/cpu1/cfe_core_api_base_msgid_
+values.h` itself unconditionally `#include`s). Root-caused with 9 real `docker build` runs, one
+variable isolated at a time (full account in `services/cfs/R5_3_REPORT.md` section 2): NOT the
+digest-pinned base image, NOT `ENABLE_UNIT_TESTS`, NOT the new file's own content (proven by
+neutralizing it and rebuilding) -- purely the presence of one MORE `COPY` instruction in the
+Dockerfile's builder stage, regardless of what it copies. The generator for `global_core_api_
+base_msgid_values.h` was not located after reading every `cfe/cmake/*.cmake` file and every
+`MISSION_CORE_MODULES` module's own `arch_build.cmake`/`mission_build.cmake` in full; the leading
+hypothesis is a latent, filesystem-enumeration-order-dependent defect somewhere in cFE's own
+fetched build system, perturbed by Docker layer/container-filesystem state that shifts merely
+from adding one more `COPY` layer -- not something this task fixes under `third_party/cfs/`.
+**Fix:** move the linker-flags block into `services/cfs/build/targets.cmake` (already `COPY`ed,
+no new `COPY` instruction needed) instead of a new file; `services/cfs/build/global_build_
+options.cmake` was deleted and its `COPY` line removed from the Dockerfile. Verified with a real
+build after the fix (succeeded; see `services/cfs/R5_3_REPORT.md`).
+
+**4. Digest-pinned base, both stages; final-stage `apt-get` dropped.** `services/cfs/Dockerfile`
+now pins `FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc`
+for BOTH stages (resolved via `docker pull ubuntu:22.04` during the one permitted network window,
+question 154 -- confirmed identical to the value this file's own R4.3 section already recorded
+for "the local ubuntu:22.04"). The final stage's `RUN apt-get update && apt-get install ...
+libc6` is removed entirely. **Hypothesis stated before verifying:** the final stage's own
+`libc6` need is already satisfied by the pinned base rootfs itself, which is now byte-identical
+to what the builder stage's binaries linked against, since both stages start from the exact same
+digest. **Verified, not assumed:** `ldd /cfs/cpu1/core-cpu1` and `ldd /cfs/av-lockstep-shim`
+inside the built official image both resolve every shared library (`libc.so.6`, `libgcc_s.so.1`,
+`libm.so.6`, the dynamic linker) with no "not found" entries.
+
+**5. Runtime-content hash.** Defined above ("Runtime-content hash definition"). `services/cfs/
+build-image.sh` computes and prints it (bash); `services/cfs/tests/test_image_reproducibility.py`
+computes it independently (Python) for each of its two `--no-cache` builds and asserts equality,
+as an ADDITIONAL always-on check that never narrows or replaces the whole-image digest assertion.
+**Actually run, opted in** (`AV_CFS_RUN_REPRO_BUILD=1`, two genuine `docker build --no-cache`
+runs, `services/cfs/_r5_3_scratch/17_repro_test_run.txt`): **the runtime-content hash MATCHED
+exactly** (`sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef` both times) --
+every file this image actually ships and runs is byte-identical across two independent builds,
+confirming items 2-4 above are sufficient for everything the container actually runs. **The
+whole-image digest still did NOT match** (`sha256:d568bd98b3f8...` vs `sha256:972df8296c38...`),
+and the test's own dynamic file-diff (not a static, possibly-stale paragraph) reported: no file
+under `/cfs` differs between the two images at all -- the difference is confined to something
+outside the runtime-content set, i.e. image metadata or OCI layer history, not file content.
+**Not root-caused further in this round** (would need at least one more `--no-cache` build pair
+to inspect `docker history --no-trunc` on the specific failing images, which are disposable and
+already removed by the test's own cleanup): the leading hypothesis is non-deterministic tar-entry
+ordering or metadata (e.g. mtimes) within the multi-file `COPY --from=builder .../cpu1 /cfs/cpu1`
+layer, a class of Docker/OCI reproducibility gap that is independent of and beyond any of items
+2-4 -- **escalated to the manager, not guessed at further here** (an image-content change beyond
+the five items, if fixable at all without changing build tooling). Per this task's own rule, the
+whole-image assertion is left strict and failing, honestly, rather than weakened.
+
+**Consequence for this section's own recorded digest and hash above:** the digest and
+runtime-content hash recorded at the top of this file come from the single official
+`services/cfs/build-image.sh` run (not from either disposable `--no-cache` reproducibility-test
+build), exactly as every previous re-pin in this file's history has done.
 
 ## Re-pinned 2026-09-08 (R4.3, `docs/open-questions.md` question 182): what changed and why
 
