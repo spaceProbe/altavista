@@ -593,15 +593,31 @@ fn demo_command_port_corrupt_mutates_the_bytes_flight_receives_and_keeps_the_out
     let port_commands: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32).collect();
     assert!(port_commands.is_empty(), "flight must never have applied accel_scale from an undecodable packet: {port_commands:#?}");
 
-    let fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32).collect();
-    assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
-    assert_eq!(fault_events[0].reference_id, "corrupt_ground_cmd");
-    assert_eq!(fault_events[0].tai_ns, COMMAND_TAI_NS, "the fault's own first (and only) applied frame is the dispatch itself");
-    assert_eq!(fault_events[0].values.get("frames_affected").copied(), Some(1.0), "question 186(c): the one frame this fault affected");
+    // R5.2 (question 188) added a SECOND `EVENT_KIND_FAULT` event to this run: the consuming
+    // model now RECORDS the undecodable frame it rejects instead of silently swallowing it, so
+    // "count every FAULT event" is no longer the same question as "was the port fault applied
+    // once". Both are asserted explicitly by name below rather than the count being relaxed --
+    // the two events say genuinely different things (the router applied a corruption; the
+    // consumer could not decode what arrived) and this test is the one place both are visible on
+    // one frame.
+    let port_fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "corrupt_ground_cmd").collect();
+    assert_eq!(port_fault_events.len(), 1, "{port_fault_events:#?}");
+    assert_eq!(port_fault_events[0].tai_ns, COMMAND_TAI_NS, "the fault's own first (and only) applied frame is the dispatch itself");
+    assert_eq!(port_fault_events[0].values.get("frames_affected").copied(), Some(1.0), "question 186(c): the one frame this fault affected");
+
+    // Question 188: the corrupted frame really is delivered and really is rejected at the
+    // consumer, and that rejection is now on the record rather than invisible. Exactly one, for
+    // the one corrupted frame, on the port that received it.
+    let decode_error_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.name == "decode_error").collect();
+    assert_eq!(decode_error_events.len(), 1, "exactly one rejected frame, the one the corrupt fault mutated: {decode_error_events:#?}");
+    assert_eq!(decode_error_events[0].entity_id, "flight", "recorded against the CONSUMER that could not decode it, not the emitter");
+    assert_eq!(decode_error_events[0].reference_id, "cmd_in", "and against the port it arrived on");
+    let attrs = &decode_error_events[0].provenance.as_ref().expect("provenance set").attributes;
+    assert!(!attrs["codec_error"].is_empty(), "the codec's own error text must be carried, not discarded: {attrs:#?}");
 
     let lifecycle: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Lifecycle as i32).collect();
     assert_eq!(lifecycle.len(), 4, "2 instances x run_start/run_end: {lifecycle:#?}");
-    assert_eq!(products.events.len(), 4 + 4 + 1, "predicted total, stated before running: {:#?}", products.events);
+    assert_eq!(products.events.len(), 4 + 4 + 1 + 1, "4 command transitions + 4 lifecycle + 1 port fault + 1 decode_error (question 188): {:#?}", products.events);
 
     // -- PortTrafficLog sidecar ---------------------------------------------------------------
     let log = read_port_traffic_log(&dir.join("port_traffic.pb"));

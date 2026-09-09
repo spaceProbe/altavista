@@ -60,6 +60,22 @@ pub struct AppliedPortCommand {
     pub sender: Option<String>,
 }
 
+/// One undecodable FRAMED frame a `DynamicsModel::step_with_ports` call received and skipped,
+/// enriched with the receiving instance -- the one field `av_dynamics::DecodeErrorOccurrence`
+/// itself cannot carry, since a model sees only its own `Inbox`, never its own instance name
+/// (`docs/open-questions.md` question 188, R5.2, mirrors [`AppliedPortCommand`]'s own identical
+/// "the caller knows the instance, the model does not" enrichment). [`crate::schedule::
+/// HeteroScheduler::advance_to_with_ports`] is the one place that builds these, right after a
+/// `step_with_ports` call returns, from `model.drain_decode_errors()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodeErrorRecord {
+    pub instance: String,
+    pub port: String,
+    pub tai_ns: i64,
+    pub sequence_count: Option<u16>,
+    pub error: String,
+}
+
 /// Sort `queued` (every message currently waiting for one receiving instance) into question
 /// 108's deterministic delivery order -- `(port name, sender emission epoch, sender instance
 /// id)`, the receiving-instance field of the full four-field rule already fixed by which queue

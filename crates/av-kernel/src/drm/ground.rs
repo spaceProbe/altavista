@@ -106,7 +106,7 @@
 //!   so `executor::run_covariance_instance`'s existing generic `DrmError::ModelNotStmCapable`
 //!   refusal applies with no ground-station-specific code.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -393,6 +393,12 @@ pub struct GroundStationModel {
     in_contact: Cell<bool>,
     last_elevation_rad: Cell<f64>,
     info: ModelInfo,
+    /// Question 188 (R5.2): every undecodable frame this instance's own most recent
+    /// `step_with_ports` call received on `self.tm_port` and skipped, continuing with
+    /// `in_contact`/`last_elevation_rad`'s own last good value rather than aborting the run --
+    /// mirrors `crate::drm::controller::AttitudeControllerModel::decode_errors_this_step`'s own
+    /// doc comment exactly.
+    decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 
 impl GroundStationModel {
@@ -422,7 +428,7 @@ impl GroundStationModel {
         settings.insert("tc_apid".to_string(), tc_codec.apid.to_string());
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.no_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
-        Ok(Self { spec, tm_codec, tm_port, tc_codec, tc_port, seq: Cell::new(0), in_contact: Cell::new(false), last_elevation_rad: Cell::new(f64::NAN), info })
+        Ok(Self { spec, tm_codec, tm_port, tc_codec, tc_port, seq: Cell::new(0), in_contact: Cell::new(false), last_elevation_rad: Cell::new(f64::NAN), info, decode_errors_this_step: RefCell::new(Vec::new()) })
     }
 
     /// This instance's own declared spec -- exposed for tests and for `super::fault::
@@ -464,40 +470,50 @@ impl DynamicsModel for GroundStationModel {
     /// unchanged -- a gap in telemetry is not itself a loss-of-contact event.
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         debug_assert!(state.is_empty());
+        self.decode_errors_this_step.borrow_mut().clear();
         let end = t_tai_ns + dt_ns;
         let mut outbox = Outbox::new();
         let mut outputs = BTreeMap::new();
         let mut applied = Vec::new();
 
         if let Some((msg, _sender)) = inbox.last_on_port(&self.tm_port) {
-            if let Ok(decoded) = codec::decode_packet(&{ let mut m = codec::ApidMap::new(); m.insert(self.tm_codec.apid, self.tm_codec.clone()); m }, &msg.payload) {
-                let get = |name: &str| match decoded.fields.get(name) {
-                    Some(FieldValue::Numeric(v)) => *v,
-                    _ => f64::NAN,
-                };
-                let target_ecef_m = [get("x"), get("y"), get("z")];
-                if target_ecef_m.iter().all(|v| v.is_finite()) {
-                    let elevation = elevation_of(&self.spec, target_ecef_m);
-                    self.last_elevation_rad.set(elevation);
-                    outputs.insert("elevation_rad".to_string(), elevation);
-                    let now_visible = elevation >= self.spec.elevation_mask_rad;
-                    let was_visible = self.in_contact.get();
-                    if now_visible && !was_visible {
-                        self.in_contact.set(true);
-                        applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_START_VALUE, applied_tai_ns: end });
-                        let seq = self.seq.get();
-                        self.seq.set(seq.wrapping_add(1) & 0x3FFF);
-                        let mut values = BTreeMap::new();
-                        values.insert("seq".to_string(), FieldValue::Numeric(seq as f64));
-                        let payload = codec::encode_packet(&self.tc_codec, seq, &[], &values).expect(
-                            "GroundStationModel's declared tc_codec always carries the \"seq\" UINT32 field this call supplies, pre-validated at construction (validate_codec) -- encode_packet can only fail for a missing/mistyped/out-of-range field, none of which can happen here",
-                        );
-                        outbox.push(self.tc_port.clone(), end, payload);
-                    } else if !now_visible && was_visible {
-                        self.in_contact.set(false);
-                        applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_END_VALUE, applied_tai_ns: end });
+            match codec::decode_packet(&{ let mut m = codec::ApidMap::new(); m.insert(self.tm_codec.apid, self.tm_codec.clone()); m }, &msg.payload) {
+                Ok(decoded) => {
+                    let get = |name: &str| match decoded.fields.get(name) {
+                        Some(FieldValue::Numeric(v)) => *v,
+                        _ => f64::NAN,
+                    };
+                    let target_ecef_m = [get("x"), get("y"), get("z")];
+                    if target_ecef_m.iter().all(|v| v.is_finite()) {
+                        let elevation = elevation_of(&self.spec, target_ecef_m);
+                        self.last_elevation_rad.set(elevation);
+                        outputs.insert("elevation_rad".to_string(), elevation);
+                        let now_visible = elevation >= self.spec.elevation_mask_rad;
+                        let was_visible = self.in_contact.get();
+                        if now_visible && !was_visible {
+                            self.in_contact.set(true);
+                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_START_VALUE, applied_tai_ns: end });
+                            let seq = self.seq.get();
+                            self.seq.set(seq.wrapping_add(1) & 0x3FFF);
+                            let mut values = BTreeMap::new();
+                            values.insert("seq".to_string(), FieldValue::Numeric(seq as f64));
+                            let payload = codec::encode_packet(&self.tc_codec, seq, &[], &values).expect(
+                                "GroundStationModel's declared tc_codec always carries the \"seq\" UINT32 field this call supplies, pre-validated at construction (validate_codec) -- encode_packet can only fail for a missing/mistyped/out-of-range field, none of which can happen here",
+                            );
+                            outbox.push(self.tc_port.clone(), end, payload);
+                        } else if !now_visible && was_visible {
+                            self.in_contact.set(false);
+                            applied.push(AppliedCommand { port: CONTACT_TRANSITION_PORT.to_string(), field: String::new(), value: CONTACT_END_VALUE, applied_tai_ns: end });
+                        }
                     }
                 }
+                // Question 188 (R5.2): an undecodable telemetry frame is recorded, never
+                // silently swallowed as it was through R5.1b -- `in_contact`/`last_elevation_rad`
+                // are deliberately left untouched (a gap in telemetry, decoded or not, is not
+                // itself a contact transition -- this method's own doc comment already states
+                // that for "no message at all"; an undecodable message gets the identical
+                // treatment).
+                Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(&self.tm_port, msg, &e)),
             }
         }
         outputs.insert("in_contact".to_string(), if self.in_contact.get() { 1.0 } else { 0.0 });
@@ -514,6 +530,12 @@ impl DynamicsModel for GroundStationModel {
     // No SENSOR fault runtime.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
+    }
+
+    /// Question 188 (R5.2): every occurrence `step_with_ports` recorded this call into
+    /// `decode_errors_this_step` -- see that field's own doc comment.
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.decode_errors_this_step.borrow().clone()
     }
 }
 
@@ -722,6 +744,37 @@ mod tests {
         assert_eq!(applied2.len(), 1);
         assert_eq!(applied2[0].value, CONTACT_END_VALUE);
         assert!(o2.messages().is_empty(), "no ack on a falling edge");
+    }
+
+    /// **Question 188 (R5.2).** An undecodable `tm_in` frame (a `400`-declared APID, this packet
+    /// names `999`) is recorded via `drain_decode_errors`, never propagated -- the run keeps
+    /// going (`step_with_ports` returns `Ok`), `in_contact`/`elevation_rad` are left exactly as a
+    /// gap in telemetry would leave them (this method's own doc comment: "a gap in telemetry is
+    /// not itself a loss-of-contact event"), and a later good frame resumes normal reporting.
+    /// Fails against an implementation that still silently swallows the occurrence (the pre-R5.2
+    /// `if let Ok(...)` shape) -- `drain_decode_errors` would stay empty instead of reporting one.
+    #[test]
+    fn an_undecodable_tm_frame_is_recorded_and_a_later_good_frame_resumes_normal_reporting() {
+        let model = test_model();
+        let bad = av_dynamics::PortMessage { port: "tm_in".to_string(), tai_ns: 3_000_000_000, payload: vec![0x1F, 0x67, 0xC0, 0x2A, 0x00, 0x0B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
+        let inbox = Inbox::new(vec![bad]);
+        let (result, outbox, applied) = model.step_with_ports(&[], 0, &[], 3_000_000_000, &inbox).expect("a decode error must never abort the run");
+        assert!(applied.is_empty(), "no genuine transition without a decoded position");
+        assert!(outbox.messages().is_empty());
+        assert_eq!(result.outputs.get("in_contact"), Some(&0.0));
+
+        let occurrences = model.drain_decode_errors();
+        assert_eq!(occurrences.len(), 1, "{occurrences:?}");
+        assert_eq!(occurrences[0].port, "tm_in");
+        assert_eq!(occurrences[0].tai_ns, 3_000_000_000);
+
+        let site_ecef = geodetic_to_ecef_m(model.spec.latitude_rad, model.spec.longitude_rad, model.spec.height_m);
+        let up_unit = ellipsoidal_up_unit(model.spec.latitude_rad, model.spec.longitude_rad);
+        let overhead = [site_ecef[0] + 500_000.0 * up_unit[0], site_ecef[1] + 500_000.0 * up_unit[1], site_ecef[2] + 500_000.0 * up_unit[2]];
+        let good = Inbox::new(vec![tm_message(&model, overhead, 3_000_000_000)]);
+        let (_r2, _o2, applied2) = model.step_with_ports(&[], 3_000_000_000, &[], 1_000_000_000, &good).unwrap();
+        assert_eq!(applied2.len(), 1, "a good frame after the bad one must resume normal contact reporting");
+        assert!(model.drain_decode_errors().is_empty(), "no new decode error this call");
     }
 
     /// `state_dim() == 0` and `stm_capable() == false` -- the two "decide and state" facts this

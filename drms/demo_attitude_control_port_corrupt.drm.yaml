@@ -1,0 +1,121 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R5.2
+# (docs/open-questions.md question 188: a corrupted packet no longer aborts the run at a native
+# FRAMED consumer; `crate::drm::controller::AttitudeControllerModel::step_with_ports` records a
+# typed decode_error event and continues on its last good input instead of propagating the
+# CCSDS decode error).
+#
+# Identical to drms/demo_attitude_control.drm.yaml (same sos_configuration_id, same four systems,
+# same scenario span/objectives/measures/options -- reused UNCHANGED) with exactly one addition:
+# a FAULT_TARGET_KIND_PORT "corrupt" fault on `startracker`'s own emitting port (`st_meas`), with
+# a DECLARED corrupt_mask (0xFF), over a BOUNDED 30 s window -- [start+5s, start+35s) -- not the
+# whole 300 s run.
+#
+# ## Why "corrupt" is now safe to use on THIS closed-loop fixture (it was not, through R5.1b)
+#
+# `drms/demo_attitude_control_port_duplicate.drm.yaml`'s own header comment records why R4.1b
+# deliberately substituted "duplicate" for "corrupt" on this exact topology: `crate::drm::
+# controller::AttitudeControllerModel::step_with_ports` decoded `startracker_in` with
+# `codec::decode_packet(...).map_err(...)?`, so ANY corrupted frame -- and a byte-mask corruption
+# applied to the WHOLE payload, header included, will eventually corrupt the 6-byte CCSDS primary
+# header over enough candidate frames -- aborted the whole run. Question 188 (this task) removes
+# that `?`: an undecodable frame is now recorded as a typed `EVENT_KIND_FAULT` (`kind ==
+# "decode_error"`) event and the controller continues on its own last good `last_star_q`, exactly
+# the "keep going" behaviour `demo_command_port_corrupt.drm.yaml` already proved for the simpler
+# `ConstantAccelModel` consumer. This fixture is the closed-loop counterpart R4.1b's own
+# escalation 2 asked for.
+#
+# ## Why a DECLARED corrupt_mask (0xFF), not the no-mask random bit-flip
+#
+# A declared mask XORs EVERY byte deterministically, every time -- no RNG draw decides whether a
+# given candidate frame's own header ends up corrupted (it always does, for any mask != 0x00,
+# since the mask flips the APID bits too). This is what makes the REJECTED-FRAME COUNT an exact,
+# hand-computable number rather than a seed-dependent one (see `crates/av-kernel/tests/
+# decode_errors.rs`'s own module doc comment for the exact derivation) -- still requires its own
+# `Scenario.seeds` entry (question 178, rule 6: uniform and honest even at rate 1.0, unchanged by
+# R5.2).
+#
+# ## Why [start+5s, start+35s), not the whole 300 s run
+#
+# `crate::drm::controller::AttitudeControllerModel::step_with_ports` only ever decodes the LAST
+# star tracker message in its own `Inbox` each call (`av_dynamics::Inbox::last_on_port`, question
+# 108's own delivery-order rule) -- the star tracker's declared 20 Hz emission rate against the
+# controller's own declared 10 Hz update rate means exactly TWO star tracker frames land in the
+# controller's `Inbox` every controller step, and only the LATER one (the one whose own emission
+# epoch is an exact multiple of the controller's own 0.1 s period) is ever actually handed to
+# `codec::decode_packet` at all -- the earlier one is silently never even attempted, corrupted or
+# not. A PERSISTENT fault over the whole 300 s run would therefore still draw ~6000 independent
+# corruptions at the router (20 Hz * 300 s) but only ~3000 of them would ever reach a real decode
+# attempt -- an event count this task's own instructions call out as the "unbounded event list"
+# risk to ESCALATE, not build (see this task's own `R5_2_REPORT.md`). This fixture instead reuses
+# `drms/demo_attitude_control_startracker_dropout.drm.yaml`'s own proven window -- [start+5s,
+# start+35s), 30 s, during the closed loop's own decaying transient, chosen there for exactly the
+# same reason R5.1a's own header comment gives (comparable to a Freeze-style sensor fault, since a
+# corrupt-and-therefore-undecoded frame leaves the controller's own belief of the star tracker's
+# quaternion frozen at its last successfully-decoded value, structurally the SAME mechanism
+# R5.1a's `Freeze` sensor fault effect already produces, one layer downstream -- see `tests/
+# decode_errors.rs`'s own module doc comment for the full derivation this reuses).
+#
+# ## Expected result (crates/av-kernel/tests/decode_errors.rs states this before running)
+#
+# - `router.startracker_meas`'s own corrupt fault mutates every one of the 600 candidate frames
+#   (30 s * 20 Hz) the router draws in this window -- `EVENT_KIND_FAULT` for "corrupt_startracker"
+#   carries `values["frames_affected"] == 600.0`.
+# - Exactly 300 of those corrupted frames are the ones the controller's own `Inbox::last_on_port`
+#   ever actually selects (one per 0.1 s controller step over the 30 s window) -- every one fails
+#   `codec::decode_packet`, so `controller`'s own instance produces exactly 300
+#   `EVENT_KIND_FAULT`/`decode_error` events on `RunProducts.events`, one per rejected frame
+#   (question 188's own literal "one event per undecodable frame" wording).
+# - The run completes (`execute()` returns `Ok`, never a propagated `CodecError`) and
+#   `controller_pointing_error_at_end`'s own real, measured value is nonzero and near the
+#   unfaulted baseline's own noise-floor order of magnitude by run end (both re-settle), but
+#   diverges from the SAME baseline, in the same direction R5.1a's own dropout/freeze fixture
+#   found (faulted SMALLER than baseline during the window), at matched in-window epochs -- see
+#   `tests/decode_errors.rs`'s own derivation and measurement.
+id: attitude_control_port_corrupt_drm
+version: "1"
+name: "Closed-loop attitude control (R5.2): a PORT corrupt fault on the star tracker never aborts the run"
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+  seeds:
+    corrupt_startracker: 5252
+  faults:
+    - id: corrupt_startracker
+      tai_ns: 1767225642000000000
+      duration_ns: 30000000000
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: startracker
+      target: st_meas
+      kind: corrupt
+      params:
+        corrupt_mask: 255
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # Scored, not a hard gate (this fixture's own point is the event/continuation behaviour, not
+    # a tight physical bound) -- a generous tolerance around the unfaulted baseline's own target
+    # (drms/demo_attitude_control.drm.yaml), wide enough to absorb the real, measured divergence
+    # this fault leaves by run end (both baseline and faulted re-settle to the same ~1e-4 rad
+    # order of magnitude -- crates/av-kernel/tests/decode_errors.rs's own measurement).
+    target: 0.00012578826462456927
+    tolerance: 0.0005
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R5.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control_port_corrupt.drm.yaml
+hash: "27d265a08bd1f2e7f5ce680f41f981fe21f86d5a361d37f919f82abfb80af99a"

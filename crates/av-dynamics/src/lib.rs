@@ -260,6 +260,36 @@ pub struct SensorFaultEffectDrain {
     pub frames_affected: u64,
 }
 
+/// One undecodable FRAMED frame a [`DynamicsModel::step_with_ports`] call received and skipped,
+/// continuing with its own last good input instead of propagating the decode error
+/// (`docs/open-questions.md` question 188, R5.2). Every field here is exactly what
+/// `av_kernel::drm::events::decode_error_event` needs to build one `EVENT_KIND_FAULT` event
+/// (`kind == "decode_error"`) per occurrence, per question 188's own literal wording -- see
+/// [`DynamicsModel::drain_decode_errors`]'s own doc comment for why this crate cannot name the
+/// codec error's own concrete type here (`av_kernel::codec::CodecError` -- this crate has no
+/// dependency on `av-kernel`, which depends on `av-dynamics`, not the other way around), so
+/// `error` is already rendered to its `Display` text by the model that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodeErrorOccurrence {
+    /// The port the undecodable frame arrived on (this model's own declared FRAMED IN port
+    /// name) -- one of the two required "which port" facts question 188 asks for.
+    pub port: String,
+    /// The frame's own delivery epoch (`PortMessage.tai_ns`, the value the router already
+    /// stamped it with) -- never fabricated, and unaffected by the decode failure itself (a
+    /// `"corrupt"` PORT fault mutates payload bytes only, never timing -- `av_kernel::router`'s
+    /// own module doc comment).
+    pub tai_ns: i64,
+    /// The frame's own CCSDS sequence count, when recoverable from the raw bytes regardless of
+    /// why decoding failed (`av_kernel::codec::peek_sequence_count` reads it straight off the
+    /// primary header, before any codec-specific check runs) -- `None` only for a payload too
+    /// short to even carry a primary header, the one case no sequence count exists to report.
+    pub sequence_count: Option<u16>,
+    /// The codec error's own `Display` text (`av_kernel::codec::CodecError`, rendered by the
+    /// caller -- see this struct's own doc comment for why this crate cannot name that type
+    /// directly).
+    pub error: String,
+}
+
 /// The result of [`DynamicsModel::step`]: the propagated state, the new absolute epoch, and
 /// any named side outputs (ADR-002: `step(state, t, controls, dt) -> (state, t + dt,
 /// outputs)`). `outputs` is a `BTreeMap` for the same reason as [`settings_hash`]'s input --
@@ -469,6 +499,32 @@ pub trait DynamicsModel {
     /// model with a SENSOR fault runtime) ever returns `Some`.
     fn drain_sensor_fault_effect(&self) -> Option<SensorFaultEffectDrain>;
 
+    /// `docs/open-questions.md` question 188 (R5.2): every undecodable FRAMED frame this model's
+    /// own most recent [`step_with_ports`](DynamicsModel::step_with_ports) call received and
+    /// skipped, continuing with its own last good input rather than propagating the decode error
+    /// -- mirrors [`last_measurements`](DynamicsModel::last_measurements)'s exact shape and
+    /// "required, not defaulted" reasoning (question 112), not [`drain_sensor_fault_effect`](
+    /// DynamicsModel::drain_sensor_fault_effect)'s "since the last drain" accumulator: a model
+    /// only ever decodes its *last* message on a given port once per `step_with_ports` call
+    /// (`Inbox::last_on_port`), so "this call's own occurrences" and "since the last drain" are
+    /// the same list here, and there is no re-materialization-survives-the-window complication
+    /// [`SensorFaultEffectDrain`] has to solve. Empty unless this call actually hit a decode
+    /// error -- typically cached in a `RefCell` cleared and repopulated at the top of every
+    /// `step_with_ports` call, exactly like `last_measurements`'s own precedent.
+    ///
+    /// **Required, not defaulted (question 112, the identical "no trait default that returns a
+    /// valid empty result" rule [`last_measurements`](DynamicsModel::last_measurements) and
+    /// [`drain_sensor_fault_effect`](DynamicsModel::drain_sensor_fault_effect) already state in
+    /// full): a model that never overrides this and silently inherited an empty-`Vec` default
+    /// would be indistinguishable from a model with no FRAMED decode path at all.** Every model
+    /// in this workspace implements this explicitly -- almost always a trivial `Vec::new()`; only
+    /// a model that itself calls `av_kernel::codec::decode_packet` against a received frame
+    /// (`av_kernel::drm::controller::AttitudeControllerModel`/`CommandedAttitude`,
+    /// `av_kernel::drm::ground::GroundStationModel`, `av_kernel::drm::gmat_command::
+    /// GmatFramedCommandModel`, `av_kernel::drm::binding::ConstantAccelModel`) ever returns a
+    /// non-empty `Vec`.
+    fn drain_decode_errors(&self) -> Vec<DecodeErrorOccurrence>;
+
     /// Whether this model can also propagate its own state transition matrix (STM)
     /// alongside the state (ADR-002 second amendment, `docs/adr/002-dynamics-contract.md`).
     /// A **declared capability**, checked by the kernel before it ever calls
@@ -592,6 +648,11 @@ mod tests {
         // Test-only closed-form model; no SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<SensorFaultEffectDrain> {
             None
+        }
+
+        // Test-only closed-form model; never decodes a FRAMED frame.
+        fn drain_decode_errors(&self) -> Vec<DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 

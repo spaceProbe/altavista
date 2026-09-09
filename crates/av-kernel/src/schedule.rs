@@ -345,6 +345,18 @@ struct HeteroSystemEntry {
     /// with this scheduler at the end of `run_one_span`. Only ever populated by
     /// [`HeteroScheduler::advance_to_with_ports`], same as `applied_commands`/`measurements`.
     sensor_fault_effect: (Option<i64>, u64),
+    /// Every undecodable FRAMED frame this system's own `step_with_ports` calls have recorded so
+    /// far (`docs/open-questions.md` question 188, R5.2) -- collected from `model.
+    /// drain_decode_errors()` right after each call, the identical "read once, right after the
+    /// step that produced it, ever-growing list" pattern `measurements` above already uses (not
+    /// `sensor_fault_effect`'s own running-total shape: a decode error is not tied to any
+    /// declared `Fault`'s own window/boundary, so there is no cross-span total to fold -- every
+    /// occurrence is already final the moment `step_with_ports` returns it). `instance` is filled
+    /// in here from `id` (this `BTreeMap`'s own key), mirroring `measurements`'s own `sensor_id`
+    /// enrichment for the identical reason: the wrapped model itself never knows its own instance
+    /// name. Only ever populated by [`HeteroScheduler::advance_to_with_ports`], same as
+    /// `applied_commands`/`measurements`.
+    decode_errors: Vec<crate::ports::DecodeErrorRecord>,
 }
 
 /// Error advancing or sampling a [`HeteroScheduler`] -- the non-generic twin of
@@ -424,6 +436,7 @@ impl HeteroScheduler {
                 applied_commands: Vec::new(),
                 measurements: Vec::new(),
                 sensor_fault_effect: (None, 0),
+                decode_errors: Vec::new(),
             },
         );
     }
@@ -600,6 +613,12 @@ impl HeteroScheduler {
                         sys.sensor_fault_effect.0 = Some(sys.sensor_fault_effect.0.map_or(drain.first_effect_tai_ns, |e| e.min(drain.first_effect_tai_ns)));
                     }
                 }
+                // Question 188 (R5.2): enrich and collect this call's own undecodable-frame
+                // occurrences, exactly like `measurements` above (`instance` filled in from `id`,
+                // for the identical reason).
+                for occ in sys.model.drain_decode_errors() {
+                    sys.decode_errors.push(crate::ports::DecodeErrorRecord { instance: id.clone(), port: occ.port, tai_ns: occ.tai_ns, sequence_count: occ.sequence_count, error: occ.error });
+                }
                 sys.history.prev = Some(sys.history.curr.clone());
                 sys.history.curr = (result.t_tai_ns, result.state);
                 router.deliver(id, result.t_tai_ns, outbox);
@@ -667,6 +686,16 @@ impl HeteroScheduler {
         }
         let first_effect_tai_ns = sys.sensor_fault_effect.0.expect("frames_affected > 0 implies the first-effect epoch was recorded alongside it");
         Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
+    }
+
+    /// Every undecodable FRAMED frame [`HeteroScheduler::advance_to_with_ports`] has recorded
+    /// `id` receiving so far (`docs/open-questions.md` question 188, R5.2) -- in the order the
+    /// underlying `step_with_ports` calls returned them (native-step order), mirroring
+    /// [`HeteroScheduler::measurements`]'s own identical contract. Always empty for `id` if it
+    /// was only ever driven through [`HeteroScheduler::advance_to`], or if its own model never
+    /// hit a decode error.
+    pub fn decode_errors(&self, id: &str) -> Option<&[crate::ports::DecodeErrorRecord]> {
+        self.systems.get(id).map(|s| s.decode_errors.as_slice())
     }
 
     /// See [`Scheduler::sample_kind`] -- identical contract, over [`HeteroScheduler`].
@@ -802,6 +831,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -1001,6 +1034,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     fn erased_constant_accel(model_id: &str, a: [f64; 3]) -> BoxedModel {
@@ -1116,6 +1153,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     /// M14.4 (lifting `DrmError::ContainerPeriodExceedsSampleInterval`): [`HeteroScheduler::
@@ -1184,6 +1225,10 @@ mod tests {
             // No SENSOR fault runtime.
             fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
                 None
+            }
+            // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+            fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+                Vec::new()
             }
         }
         let boxed: BoxedModel = av_dynamics::erase_with_id("test.always_fails", AlwaysFails, |model_id, detail| ModelError::Numerical { model_id, detail });

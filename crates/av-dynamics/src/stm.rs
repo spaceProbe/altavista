@@ -150,6 +150,10 @@ impl<M: DynamicsModel> DynamicsModel for StmAugmented<M> {
     fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
         self.0.drain_sensor_fault_effect()
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+        self.0.drain_decode_errors()
+    }
 }
 
 /// `P(t) = Phi P0 Phi^T`, `n x n` row-major throughout. Explicitly symmetrizes the result
@@ -268,6 +272,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -348,6 +356,10 @@ mod tests {
             // Test-only model; no SENSOR fault runtime.
             fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
                 None
+            }
+            // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+            fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+                Vec::new()
             }
         }
         let _ = StmAugmented::new(NotStmCapable);
@@ -470,6 +482,10 @@ mod tests {
         // Test-only model; no SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 

@@ -666,6 +666,13 @@ impl HeteroKernel {
         self.scheduler.sensor_fault_effect(id)
     }
 
+    /// See [`HeteroScheduler::decode_errors`] -- identical contract (`docs/open-questions.md`
+    /// question 188, R5.2). Only ever non-empty for a system driven through [`HeteroKernel::
+    /// run_with_ports`] whose own model actually hit an undecodable frame.
+    pub fn decode_errors(&self, id: &str) -> Option<&[crate::ports::DecodeErrorRecord]> {
+        self.scheduler.decode_errors(id)
+    }
+
     /// Like [`HeteroKernel::run`], but drives [`HeteroScheduler::advance_to_with_ports`]
     /// instead of `advance_to` at every output tick, so any registered system that overrides
     /// `av_dynamics::DynamicsModel::step_with_ports` exchanges port messages with the rest of
@@ -823,6 +830,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     /// An STM-capable, 6-state constant-acceleration model (M13.3): `x' = v`, `v' = a`
@@ -876,6 +887,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -1009,6 +1024,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -1087,6 +1106,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -1359,6 +1382,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -1667,6 +1694,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 

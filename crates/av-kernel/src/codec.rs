@@ -615,6 +615,44 @@ pub fn decode_packet(apid_map: &ApidMap, data: &[u8]) -> Result<DecodedPacket, C
     Ok(DecodedPacket { apid, is_command, sequence_count, fields })
 }
 
+/// Read a CCSDS primary header's own sequence count field (bytes 2-3, the identical bits
+/// [`decode_packet`] itself reads) straight off raw bytes, with no [`ApidMap`] lookup and no
+/// codec cross-check at all -- `None` only when `data` is too short to even carry a primary
+/// header ([`PRIMARY_HEADER_LEN`] bytes). `docs/open-questions.md` question 188 (R5.2): a
+/// FRAMED consumer that fails to [`decode_packet`] a frame still needs the frame's own sequence
+/// count for the `decode_error` event it records -- but [`decode_packet`]'s own `Err` variants
+/// carry no sequence count (the primary header is parsed before the APID is even matched against
+/// `apid_map`, so an `UnknownApid` failure has a real sequence count sitting right there in the
+/// bytes, discarded on the way to the `Err`; other failures, e.g. [`CodecError::
+/// PacketDataLengthMismatch`], happen even later, after the header parsed cleanly). Rather than
+/// widen every [`CodecError`] variant with a sequence count field it would rarely need (most of
+/// them are load-time-only, where no frame and therefore no sequence count exists at all --
+/// `codec_id`-shaped, not `data`-shaped), this is a second, tiny, purely additive read of the
+/// same six bytes: cheap, and it never fails except for the one genuinely-too-short case, which
+/// is exactly why the caller-facing type is `Option<u16>`, not a second `Result`.
+pub fn peek_sequence_count(data: &[u8]) -> Option<u16> {
+    if data.len() < PRIMARY_HEADER_LEN {
+        return None;
+    }
+    Some((((data[2] & 0x3F) as u16) << 8) | (data[3] as u16))
+}
+
+/// Build one [`av_dynamics::DecodeErrorOccurrence`] from a frame that failed [`decode_packet`]
+/// (`docs/open-questions.md` question 188, R5.2) -- the one place every FRAMED-consuming native
+/// model in this crate builds this record, so the `port`/`tai_ns`/`sequence_count`/`error` shape
+/// can never drift between `crate::drm::controller::AttitudeControllerModel`/`CommandedAttitude`,
+/// `crate::drm::ground::GroundStationModel`, `crate::drm::gmat_command::GmatFramedCommandModel`
+/// and `crate::drm::binding::ConstantAccelModel` (question 188's own "every FRAMED consumer"
+/// scope). `msg` is the received [`av_dynamics::PortMessage`] whose `payload` failed to decode --
+/// `tai_ns` is its own delivery epoch (the router's own stamp, unaffected by a decode failure:
+/// see this module's own `sequence_count`, `av_dynamics::DecodeErrorOccurrence`'s own doc
+/// comment), and `peek_sequence_count` reads the frame's own sequence count independently of
+/// *why* `decode_packet` failed (see that function's own doc comment for why a second, tiny read
+/// of the same six bytes is cheaper and more honest than widening every [`CodecError`] variant).
+pub fn decode_error_occurrence(port: &str, msg: &av_dynamics::PortMessage, error: &CodecError) -> av_dynamics::DecodeErrorOccurrence {
+    av_dynamics::DecodeErrorOccurrence { port: port.to_string(), tai_ns: msg.tai_ns, sequence_count: peek_sequence_count(&msg.payload), error: error.to_string() }
+}
+
 // --------------------------------------------------------------------------------------
 // Question 173 (M25.3): FRAMED telemetry -> CDM `Measurement`s, via `PacketField.target`.
 // --------------------------------------------------------------------------------------
@@ -777,6 +815,53 @@ mod tests {
         assert!(!decoded.is_command);
         assert_eq!(decoded.sequence_count, 42);
         assert_eq!(decoded.fields.get("word"), Some(&FieldValue::Numeric(0x01020304u32 as f64)));
+    }
+
+    /// `peek_sequence_count` reads the identical 42 `decode_packet` itself reports above, off
+    /// the SAME hand-written bytes, with no `ApidMap` at all -- and, critically, still reads it
+    /// correctly even when the APID byte is corrupted so `decode_packet` itself would refuse the
+    /// packet (`UnknownApid`): the two header fields (bytes 0-1 for APID, bytes 2-3 for sequence
+    /// count) are independent, so a fault that corrupts one must not be assumed to also corrupt
+    /// the other. Fails against an implementation that reads the wrong byte pair (e.g. bytes 0-1,
+    /// which would see `0x0123 & 0x3FFF = 0x0123 = 291`, not `42`) or that requires a successful
+    /// `decode_packet` first.
+    #[test]
+    fn peek_sequence_count_reads_the_same_value_decode_packet_does_even_when_the_apid_is_corrupted() {
+        assert_eq!(peek_sequence_count(&HAND_COMPUTED_PACKET), Some(42), "must match decode_packet's own reported sequence_count exactly");
+        let mut apid_corrupted = HAND_COMPUTED_PACKET;
+        apid_corrupted[1] = 0xFF; // now names an APID no ApidMap declares
+        assert_eq!(peek_sequence_count(&apid_corrupted), Some(42), "the sequence count lives in different bytes than the APID and must survive an APID-only corruption");
+    }
+
+    /// A payload too short to carry even the 6-byte primary header has no sequence count to
+    /// report -- `None`, never a fabricated value (question 188's own "never a fabricated value"
+    /// convention, mirroring `crate::router`'s corrupt-fault doc comment). Fails against an
+    /// implementation that panics (out-of-bounds indexing) or that returns `Some(0)` for a
+    /// too-short buffer instead of honestly reporting nothing.
+    #[test]
+    fn peek_sequence_count_is_none_for_a_payload_shorter_than_the_primary_header() {
+        assert_eq!(peek_sequence_count(&[]), None);
+        assert_eq!(peek_sequence_count(&[0x01, 0x23, 0xC0]), None, "3 bytes is shorter than the 6-byte primary header");
+    }
+
+    /// `decode_error_occurrence` carries the message's own real delivery epoch (never
+    /// re-derived, never the fault's own declared window start), the sequence count read off the
+    /// SAME payload independently of the decode failure, and the error's own real `Display` text
+    /// -- not a placeholder. Fails against an implementation that fabricates any of the three
+    /// (e.g. `tai_ns: 0` regardless of `msg.tai_ns`, or a hardcoded error string).
+    #[test]
+    fn decode_error_occurrence_carries_the_real_epoch_sequence_and_error_text() {
+        let mut map = ApidMap::new();
+        map.insert(291, hand_computed_codec());
+        let mut corrupted = HAND_COMPUTED_PACKET;
+        corrupted[1] = 0xFF; // now names an APID no ApidMap declares
+        let err = decode_packet(&map, &corrupted).unwrap_err();
+        let msg = av_dynamics::PortMessage { port: "startracker_in".to_string(), tai_ns: 42_000_000_000, payload: corrupted.to_vec() };
+        let occ = decode_error_occurrence("startracker_in", &msg, &err);
+        assert_eq!(occ.port, "startracker_in");
+        assert_eq!(occ.tai_ns, 42_000_000_000, "must be the message's own real delivery epoch");
+        assert_eq!(occ.sequence_count, Some(42), "must match peek_sequence_count on the same bytes");
+        assert_eq!(occ.error, err.to_string(), "must be the real CodecError's own Display text, not a placeholder");
     }
 
     /// Big-endian byte order, asserted against the hand-written expected byte string (not a

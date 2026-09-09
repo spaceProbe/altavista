@@ -379,6 +379,10 @@ impl<M: DynamicsModel> DynamicsModel for TruthBroadcastAttitude<M> {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         self.inner.drain_sensor_fault_effect()
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.inner.drain_decode_errors()
+    }
 }
 
 // ============================================================================================
@@ -857,6 +861,11 @@ impl DynamicsModel for StarTrackerModel {
         self.fault_frames_affected.set(0);
         self.fault_first_effect_tai_ns.set(None);
         Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
+    }
+    // This model never itself decodes a FRAMED frame (question 188, R5.2) -- it only emits;
+    // decode is a receiver-side concern (`crate::drm::controller::AttitudeControllerModel`).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
     }
 }
 
@@ -1371,6 +1380,11 @@ impl DynamicsModel for ImuModel {
         self.fault_frames_affected.set(0);
         self.fault_first_effect_tai_ns.set(None);
         Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
+    }
+    // This model never itself decodes a FRAMED frame (question 188, R5.2) -- it only emits;
+    // decode is a receiver-side concern (`crate::drm::controller::AttitudeControllerModel`).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
     }
 }
 

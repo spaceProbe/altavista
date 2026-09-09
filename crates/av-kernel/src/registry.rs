@@ -189,6 +189,18 @@ impl ModelHandle {
         self.model.drain_sensor_fault_effect()
     }
 
+    /// `docs/open-questions.md` question 188 (R5.2): the wrapped model's own undecodable-frame
+    /// occurrences from its most recent `step_with_ports` call (`av_dynamics::DynamicsModel::
+    /// drain_decode_errors`) -- mirrors [`ModelHandle::drain_sensor_fault_effect`]'s own doc
+    /// comment and API-completeness reasoning exactly. Added for the same symmetry with
+    /// `describe`/`stm_capable`/`drain_sensor_fault_effect` -- the real drain path
+    /// (`crate::schedule::HeteroScheduler::advance_to_with_ports`, via a boxed `BoxedModel`, not
+    /// a live `ModelHandle`) does not use this method, exactly as `drain_sensor_fault_effect`'s
+    /// own doc comment already discloses for the identical reason (R5.1a).
+    pub fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.model.drain_decode_errors()
+    }
+
     /// Erase to a plain [`BoxedModel`] for `crate::kernel::HeteroKernel::register_system` (the
     /// non-covariance path). `erase_id` becomes the id every [`ModelError`] this boxed model
     /// later produces (from a `derivatives`/`step` failure during the run) carries --

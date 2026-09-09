@@ -235,19 +235,25 @@ pub fn parse_attitude_controller_spec(params: &BTreeMap<String, Parameter>) -> R
 // AttitudeControllerModel: the native controller DynamicsModel.
 // ============================================================================================
 
-/// A malformed inbound packet at run time (question 149's "typed, never a silent drop" rule) --
-/// the only way [`AttitudeControllerModel::step_with_ports`] can fail (every physical/structural
-/// check already happened in [`parse_attitude_controller_spec`]/[`AttitudeControllerModel::
-/// new`]).
+/// **Question 188 (R5.2), superseding the pre-R5.2 shape of this type.** Through R5.1b, a
+/// malformed inbound packet at run time was the only way [`AttitudeControllerModel::
+/// step_with_ports`] could fail: `Codec(CodecError)`, propagated with `?` from a `decode_packet`
+/// call, hard-failing the whole run. The lead's decision (question 188): a consumer that
+/// receives an undecodable frame records a typed event and continues with its own last good
+/// input instead -- see [`AttitudeControllerModel::drain_decode_errors`] for where that record
+/// now lives. With decoding the only way this model could ever fail, and decoding no longer a
+/// failure this model propagates at all, `ControllerRuntimeError` is now permanently
+/// uninhabited -- kept as a zero-variant enum (not deleted outright) so [`AttitudeControllerModel`]'s
+/// own `type Error` stays a distinctly-named type rather than silently becoming a bare
+/// `std::convert::Infallible` alias with no crate-local documentation trail explaining why (this
+/// crate's own "delete what becomes unreachable" rule, applied at the narrowest surviving grain:
+/// the *variant* that became dead, `Codec`, is gone; the *type* stays, honestly empty, exactly
+/// the way an uninhabited enum should be represented).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ControllerRuntimeError {
-    Codec(CodecError),
-}
+pub enum ControllerRuntimeError {}
 impl fmt::Display for ControllerRuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ControllerRuntimeError::Codec(e) => write!(f, "{e}"),
-        }
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {}
     }
 }
 impl std::error::Error for ControllerRuntimeError {}
@@ -271,6 +277,14 @@ pub struct AttitudeControllerModel {
     last_star_q: RefCell<Option<[f64; 4]>>,
     last_imu_omega: RefCell<Option<[f64; 3]>>,
     info: ModelInfo,
+    /// Question 188 (R5.2): every undecodable frame this instance's own most recent
+    /// `step_with_ports` call received on [`CONTROLLER_STARTRACKER_IN_PORT`]/
+    /// [`CONTROLLER_IMU_IN_PORT`] and skipped, continuing with `last_star_q`/`last_imu_omega`'s
+    /// own last good value rather than aborting the run -- cleared and repopulated at the top of
+    /// every call, mirrored back out via [`Self::drain_decode_errors`], exactly the `RefCell`
+    /// pattern `super::sensors::StarTrackerModel::measurements`'s own doc comment already
+    /// establishes for question 173.
+    decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 
 impl AttitudeControllerModel {
@@ -321,7 +335,19 @@ impl AttitudeControllerModel {
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.no_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
 
-        Ok(Self { spec, star_apid_map, imu_apid_map, command_codec, period_ns, next_due: Cell::new(epoch_tai_ns + period_ns), seq: Cell::new(0), last_star_q: RefCell::new(None), last_imu_omega: RefCell::new(None), info })
+        Ok(Self {
+            spec,
+            star_apid_map,
+            imu_apid_map,
+            command_codec,
+            period_ns,
+            next_due: Cell::new(epoch_tai_ns + period_ns),
+            seq: Cell::new(0),
+            last_star_q: RefCell::new(None),
+            last_imu_omega: RefCell::new(None),
+            info,
+            decode_errors_this_step: RefCell::new(Vec::new()),
+        })
     }
 
     pub fn period_ns(&self) -> i64 {
@@ -360,21 +386,34 @@ impl DynamicsModel for AttitudeControllerModel {
     /// controller's own current belief, not stale-by-up-to-one-period.
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         debug_assert!(state.is_empty());
+        self.decode_errors_this_step.borrow_mut().clear();
         if let Some((msg, _sender)) = inbox.last_on_port(CONTROLLER_STARTRACKER_IN_PORT) {
-            let decoded = codec::decode_packet(&self.star_apid_map, &msg.payload).map_err(ControllerRuntimeError::Codec)?;
-            let get = |name: &str| match decoded.fields.get(name) {
-                Some(FieldValue::Numeric(v)) => *v,
-                _ => 0.0,
-            };
-            *self.last_star_q.borrow_mut() = Some([get("qx"), get("qy"), get("qz"), get("qw")]);
+            match codec::decode_packet(&self.star_apid_map, &msg.payload) {
+                Ok(decoded) => {
+                    let get = |name: &str| match decoded.fields.get(name) {
+                        Some(FieldValue::Numeric(v)) => *v,
+                        _ => 0.0,
+                    };
+                    *self.last_star_q.borrow_mut() = Some([get("qx"), get("qy"), get("qz"), get("qw")]);
+                }
+                // Question 188 (R5.2): an undecodable frame is recorded, never propagated --
+                // `last_star_q` is deliberately left untouched, so the control law below keeps
+                // acting on its own last good measurement instead of aborting the run.
+                Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(CONTROLLER_STARTRACKER_IN_PORT, msg, &e)),
+            }
         }
         if let Some((msg, _sender)) = inbox.last_on_port(CONTROLLER_IMU_IN_PORT) {
-            let decoded = codec::decode_packet(&self.imu_apid_map, &msg.payload).map_err(ControllerRuntimeError::Codec)?;
-            let get = |name: &str| match decoded.fields.get(name) {
-                Some(FieldValue::Numeric(v)) => *v,
-                _ => 0.0,
-            };
-            *self.last_imu_omega.borrow_mut() = Some([get("wx"), get("wy"), get("wz")]);
+            match codec::decode_packet(&self.imu_apid_map, &msg.payload) {
+                Ok(decoded) => {
+                    let get = |name: &str| match decoded.fields.get(name) {
+                        Some(FieldValue::Numeric(v)) => *v,
+                        _ => 0.0,
+                    };
+                    *self.last_imu_omega.borrow_mut() = Some([get("wx"), get("wy"), get("wz")]);
+                }
+                // Question 188 (R5.2): same treatment as the star tracker port immediately above.
+                Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(CONTROLLER_IMU_IN_PORT, msg, &e)),
+            }
         }
 
         let end = t_tai_ns + dt_ns;
@@ -420,6 +459,12 @@ impl DynamicsModel for AttitudeControllerModel {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
     }
+
+    /// Question 188 (R5.2): every occurrence `step_with_ports` recorded this call into
+    /// `decode_errors_this_step` -- see that field's own doc comment.
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.decode_errors_this_step.borrow().clone()
+    }
 }
 
 /// `q_err = target_q^-1 (x) measured_q`, then sign-flipped for the shortest rotational path
@@ -437,18 +482,26 @@ fn signed_error_vector(target_q: [f64; 4], measured_q: [f64; 4]) -> [f64; 3] {
 // CommandedAttitude: the plant-side decorator that consumes a wheel-torque command packet.
 // ============================================================================================
 
-/// A malformed inbound wheel-torque command packet, or the wrapped model's own error -- see the
-/// module doc comment's "Typed refusals" section.
+/// The wrapped model's own error -- see the module doc comment's "Typed refusals" section.
+///
+/// **Question 188 (R5.2): the `Codec(CodecError)` variant this type carried through R5.1b is
+/// gone.** A malformed inbound wheel-torque command packet used to propagate through it with
+/// `?`, hard-failing the run; the lead's decision (question 188) instead records a typed event
+/// and continues with `last_commanded_torque`'s own last good value -- see
+/// [`CommandedAttitude::drain_decode_errors`] for where that record now lives, and
+/// [`ControllerRuntimeError`]'s own doc comment for the identical "delete the variant, keep the
+/// type" reasoning applied here. `CommandedAttitudeError<E>` is not itself uninhabited (unlike
+/// `ControllerRuntimeError`): `Inner(E)` stays real and reachable whenever the wrapped model `M`
+/// (in practice `super::sensors::TruthBroadcastAttitude<super::attitude::AttitudeWheelsModel>`)
+/// can itself fail.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandedAttitudeError<E> {
     Inner(E),
-    Codec(CodecError),
 }
 impl<E: fmt::Display> fmt::Display for CommandedAttitudeError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CommandedAttitudeError::Inner(e) => write!(f, "{e}"),
-            CommandedAttitudeError::Codec(e) => write!(f, "{e}"),
         }
     }
 }
@@ -481,6 +534,10 @@ pub struct CommandedAttitude<M> {
     pub inner: M,
     command: Option<CommandInput>,
     last_commanded_torque: RefCell<[f64; 3]>,
+    /// Question 188 (R5.2): every undecodable frame this instance's own most recent
+    /// `step_with_ports` call received on [`ATTITUDE_WHEEL_TORQUE_IN_PORT`] and skipped --
+    /// mirrors `AttitudeControllerModel::decode_errors_this_step`'s own doc comment exactly.
+    decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 
 impl<M> CommandedAttitude<M> {
@@ -495,7 +552,7 @@ impl<M> CommandedAttitude<M> {
             apid_map.insert(codec.apid, codec);
             CommandInput { apid_map }
         });
-        Self { inner, command, last_commanded_torque: RefCell::new([0.0; 3]) }
+        Self { inner, command, last_commanded_torque: RefCell::new([0.0; 3]), decode_errors_this_step: RefCell::new(Vec::new()) }
     }
 }
 
@@ -516,18 +573,28 @@ impl<M: DynamicsModel> DynamicsModel for CommandedAttitude<M> {
     }
 
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
+        self.decode_errors_this_step.borrow_mut().clear();
         let mut extra_applied = Vec::new();
         if let Some(cmd) = &self.command {
             if let Some((msg, _sender)) = inbox.last_on_port(ATTITUDE_WHEEL_TORQUE_IN_PORT) {
-                let decoded = codec::decode_packet(&cmd.apid_map, &msg.payload).map_err(CommandedAttitudeError::Codec)?;
-                let mut torque = [0.0; 3];
-                for (i, name) in WHEEL_TORQUE_FIELD_NAMES.iter().enumerate() {
-                    if let Some(FieldValue::Numeric(v)) = decoded.fields.get(*name) {
-                        torque[i] = *v;
+                match codec::decode_packet(&cmd.apid_map, &msg.payload) {
+                    Ok(decoded) => {
+                        let mut torque = [0.0; 3];
+                        for (i, name) in WHEEL_TORQUE_FIELD_NAMES.iter().enumerate() {
+                            if let Some(FieldValue::Numeric(v)) = decoded.fields.get(*name) {
+                                torque[i] = *v;
+                            }
+                        }
+                        *self.last_commanded_torque.borrow_mut() = torque;
+                        extra_applied.push(AppliedCommand { port: ATTITUDE_WHEEL_TORQUE_IN_PORT.to_string(), field: "tau_mag".to_string(), value: (torque[0] * torque[0] + torque[1] * torque[1] + torque[2] * torque[2]).sqrt(), applied_tai_ns: t_tai_ns });
                     }
+                    // Question 188 (R5.2): an undecodable command frame is recorded, never
+                    // propagated -- `last_commanded_torque` is deliberately left untouched (the
+                    // zero-order hold continues on the plant's own last good commanded torque),
+                    // exactly the "continue with last good input" contract `AttitudeControllerModel::
+                    // step_with_ports` already establishes on the sensor side.
+                    Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(ATTITUDE_WHEEL_TORQUE_IN_PORT, msg, &e)),
                 }
-                *self.last_commanded_torque.borrow_mut() = torque;
-                extra_applied.push(AppliedCommand { port: ATTITUDE_WHEEL_TORQUE_IN_PORT.to_string(), field: "tau_mag".to_string(), value: (torque[0] * torque[0] + torque[1] * torque[1] + torque[2] * torque[2]).sqrt(), applied_tai_ns: t_tai_ns });
             }
         }
         let effective_controls: Vec<f64> = if self.command.is_some() { self.last_commanded_torque.borrow().to_vec() } else { controls.to_vec() };
@@ -548,6 +615,17 @@ impl<M: DynamicsModel> DynamicsModel for CommandedAttitude<M> {
     /// -- delegating honestly is still the right shape rather than hardcoding that fact here.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         self.inner.drain_sensor_fault_effect()
+    }
+
+    /// This wrapper's OWN command-decode occurrences (this call's, from
+    /// `decode_errors_this_step`) plus the wrapped model's own (question 188, R5.2) -- "every
+    /// other `DynamicsModel` method delegates to the wrapped model unchanged" (this struct's own
+    /// doc comment) still holds: nothing here is dropped, only combined with what this wrapper
+    /// itself additionally records.
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        let mut v = self.decode_errors_this_step.borrow().clone();
+        v.extend(self.inner.drain_decode_errors());
+        v
     }
 }
 
@@ -627,6 +705,32 @@ mod tests {
         bad_star.fields.retain(|f| f.name != "qw");
         let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), bad_star, imu_codec(), command_codec(), 0, "ctrl_test").unwrap_err();
         assert!(matches!(err, ControllerSpecError::InvalidParameter { ref name, .. } if name == "controller.star_codec"), "{err:?}");
+    }
+
+    /// **Question 188 (R5.2): the two decode-failure cases stay distinct, on purpose.** A
+    /// malformed DECLARED codec (here, a field extent that runs past the codec's own declared
+    /// `user_data_bytes` -- `codec::validate_codec`'s own check) is refused at CONSTRUCTION time,
+    /// a typed `ControllerSpecError::Codec`, exactly as it always has been -- never softened into
+    /// a runtime `decode_error` event. Only a malformed RUNTIME FRAME (a well-formed codec, a
+    /// badly-corrupted wire message) gets the new "record and continue" treatment
+    /// (`a_malformed_star_packet_is_recorded_and_the_run_continues_on_the_last_good_input`,
+    /// above) -- this test is the other half of that same distinction, pinned directly against
+    /// `codec::validate_codec` rather than assumed. Fails against an implementation that
+    /// accidentally started accepting a structurally invalid codec at construction (would return
+    /// `Ok` instead of `Err`), or one that reported the wrong error variant.
+    #[test]
+    fn a_malformed_declared_star_codec_is_still_a_load_time_error_never_a_runtime_decode_event() {
+        let mut bad_star = star_codec();
+        // `qw`'s own declared bit_offset (192) + bit_width (64) = 256 bits, exactly this codec's
+        // own declared `user_data_bytes` (32, i.e. 256 bits) -- moving it to 256 pushes the
+        // field's own extent to 320 bits, past the end: `CodecError::FieldExtentExceedsUserData`,
+        // a load-time-only check (question 149's own documented example, `crate::codec`'s own
+        // module doc comment).
+        if let Some(f) = bad_star.fields.iter_mut().find(|f| f.name == "qw") {
+            f.bit_offset = 256;
+        }
+        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), bad_star, imu_codec(), command_codec(), 0, "ctrl_test").unwrap_err();
+        assert!(matches!(err, ControllerSpecError::Codec(CodecError::FieldExtentExceedsUserData { .. })), "{err:?}");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -726,15 +830,71 @@ mod tests {
         assert!(applied.is_empty());
     }
 
-    /// A malformed inbound star tracker packet (declares an APID this controller's own star
-    /// codec does not carry) is a typed `ControllerRuntimeError`, never a panic or a silent skip.
+    /// **Question 188 (R5.2), superseding the pre-R5.2 version of this test.** A malformed
+    /// inbound star tracker packet (declares an APID this controller's own star codec does not
+    /// carry, `apid=511` against the declared `200`) no longer aborts the run: `step_with_ports`
+    /// returns `Ok` (never a panic, never a propagated `ControllerRuntimeError` -- that type is
+    /// uninhabited as of this task), `drain_decode_errors` reports exactly one occurrence naming
+    /// the right port/epoch/sequence/error text, and `last_star_q` is left untouched (`None`,
+    /// since no good measurement has arrived yet) -- "continues with its last good input," not
+    /// "invents a value." Fails against an implementation that still propagates the decode
+    /// error (would panic on `.unwrap()` below), that silently drops the occurrence (empty
+    /// `drain_decode_errors`), or that fabricates a `last_star_q` default instead of leaving it
+    /// `None`.
     #[test]
-    fn a_malformed_star_packet_is_a_typed_error_not_a_panic() {
+    fn a_malformed_star_packet_is_recorded_and_the_run_continues_on_the_last_good_input() {
         let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
-        let bad = av_dynamics::PortMessage { port: CONTROLLER_STARTRACKER_IN_PORT.to_string(), tai_ns: 0, payload: vec![0xFF, 0xFF, 0xFF, 0xFF] };
+        // 6-byte primary header only: apid 511 (0x1FF), sequence_count 42 -- long enough for
+        // `peek_sequence_count` to read a real value, short enough (and wrong-APID enough) that
+        // `decode_packet` refuses it as `UnknownApid`, never `PacketTooShortForHeader`.
+        let bad = av_dynamics::PortMessage { port: CONTROLLER_STARTRACKER_IN_PORT.to_string(), tai_ns: 5_000_000_000, payload: vec![0x01, 0xFF, 0xC0, 0x2A, 0x00, 0x03] };
         let inbox = Inbox::new(vec![bad]);
-        let err = model.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).unwrap_err();
-        assert!(matches!(err, ControllerRuntimeError::Codec(_)), "{err:?}");
+        let (_result, outbox, applied) = model.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).expect("a decode error must never abort the run");
+        assert!(outbox.messages().is_empty(), "no star measurement has ever arrived, so the controller still commands nothing");
+        assert!(applied.is_empty());
+
+        let occurrences = model.drain_decode_errors();
+        assert_eq!(occurrences.len(), 1, "{occurrences:?}");
+        let occ = &occurrences[0];
+        assert_eq!(occ.port, CONTROLLER_STARTRACKER_IN_PORT);
+        assert_eq!(occ.tai_ns, 5_000_000_000, "must be the frame's own real delivery epoch");
+        assert_eq!(occ.sequence_count, Some(42), "must be recoverable even though the APID itself is what made the frame undecodable");
+        assert!(occ.error.contains("511"), "the codec error text must name the real bad apid: {:?}", occ.error);
+
+        assert!(model.last_star_q.borrow().is_none(), "an undecodable frame must never fabricate a last_star_q value");
+        // `drain_decode_errors` mirrors `last_measurements`'s own "this call's own occurrences"
+        // contract (the doc comment on `av_dynamics::DynamicsModel::drain_decode_errors`), not
+        // `drain_sensor_fault_effect`'s own "since the last drain" accumulator -- calling it
+        // again with no intervening `step_with_ports` call must return the SAME occurrence, not
+        // an empty list.
+        assert_eq!(model.drain_decode_errors().len(), 1, "drain_decode_errors is a per-call snapshot, not a one-shot drain -- a second read with no new step must see the same occurrence");
+        // A later step with nothing on the star tracker port at all clears it back to empty --
+        // the accumulator is cleared and repopulated each `step_with_ports` call.
+        let _ = model.step_with_ports(&[], 1_000_000_000, &[], 1_000_000_000, &Inbox::empty()).unwrap();
+        assert!(model.drain_decode_errors().is_empty(), "a later step with no message at all must clear the previous occurrence");
+    }
+
+    /// A malformed inbound star tracker packet does not merely fail to crash -- once cleared by
+    /// a later good measurement, the control law resumes exactly as if the bad frame had never
+    /// arrived (the "degraded, not aborted" half of question 188's own acceptance bar, at the
+    /// unit level; the closed-loop, multi-corruption version is `tests/decode_errors.rs`'s own
+    /// headline test).
+    #[test]
+    fn after_a_malformed_star_packet_a_later_good_one_resumes_normal_control() {
+        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
+        let star = star_codec();
+        let imu = imu_codec();
+        let bad = av_dynamics::PortMessage { port: CONTROLLER_STARTRACKER_IN_PORT.to_string(), tai_ns: 0, payload: vec![0x01, 0xFF, 0xC0, 0x2A, 0x00, 0x03] };
+        let (_r, outbox1, applied1) = model.step_with_ports(&[], 0, &[], 250_000_000, &Inbox::new(vec![bad, imu_message(&imu, 0, [0.0, 0.0, 0.0], 0)])).unwrap();
+        assert!(outbox1.messages().is_empty(), "still nothing to control on after only a bad frame");
+        assert!(applied1.is_empty());
+        assert_eq!(model.drain_decode_errors().len(), 1);
+
+        let good = star_message(&star, 250_000_000, [0.0, 0.0, 0.1, (1.0f64 - 0.01).sqrt()], 1);
+        let (_r2, outbox2, applied2) = model.step_with_ports(&[], 250_000_000, &[], 250_000_000, &Inbox::new(vec![good, imu_message(&imu, 250_000_000, [0.0, 0.0, 0.0], 1)])).unwrap();
+        assert_eq!(outbox2.messages().len(), 1, "a good measurement after the bad one must resume normal, real commanding");
+        assert_eq!(applied2.len(), 1);
+        assert!(model.drain_decode_errors().is_empty(), "no new decode error this call");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -769,6 +929,10 @@ mod tests {
         // No SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
             None
+        }
+        // Test-only recorder; never decodes a FRAMED frame itself.
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -805,14 +969,25 @@ mod tests {
         assert_eq!(*wrapped.inner.last_controls.borrow(), vec![0.0, 0.0, 0.0], "before the first command, a configured CommandedAttitude must command zero, not the caller's own controls");
     }
 
-    /// A malformed inbound wheel-torque command packet is a typed `CommandedAttitudeError`,
-    /// never a panic.
+    /// **Question 188 (R5.2), superseding the pre-R5.2 version of this test.** A malformed
+    /// inbound wheel-torque command packet no longer aborts the run: `step_with_ports` returns
+    /// `Ok`, `drain_decode_errors` reports exactly one occurrence, and `last_commanded_torque`
+    /// stays at its own last good value (all-zero here, since no good command has arrived yet --
+    /// the same "continue with last good input" contract the star tracker/IMU side already
+    /// gets).
     #[test]
-    fn a_malformed_command_packet_is_a_typed_error_not_a_panic() {
+    fn a_malformed_command_packet_is_recorded_and_the_run_continues_commanding_the_last_good_torque() {
         let wrapped = CommandedAttitude::new(RecordingModel { last_controls: RefCell::new(Vec::new()) }, Some(command_codec()));
-        let bad = av_dynamics::PortMessage { port: ATTITUDE_WHEEL_TORQUE_IN_PORT.to_string(), tai_ns: 0, payload: vec![0xFF, 0xFF] };
+        let bad = av_dynamics::PortMessage { port: ATTITUDE_WHEEL_TORQUE_IN_PORT.to_string(), tai_ns: 7_000_000_000, payload: vec![0x01, 0xFF, 0xC0, 0x2A, 0x00, 0x03] };
         let inbox = Inbox::new(vec![bad]);
-        let err = wrapped.step_with_ports(&[], 0, &[], 1_000_000_000, &inbox).unwrap_err();
-        assert!(matches!(err, CommandedAttitudeError::Codec(_)), "{err:?}");
+        let (_r, _ob, applied) = wrapped.step_with_ports(&[], 0, &[9.0, 9.0, 9.0], 1_000_000_000, &inbox).expect("a decode error must never abort the run");
+        assert_eq!(*wrapped.inner.last_controls.borrow(), vec![0.0, 0.0, 0.0], "an undecodable command must never fabricate a torque -- the last good (here, still the initial all-zero) value is kept");
+        assert!(applied.is_empty(), "an undecodable command was never actually applied");
+
+        let occurrences = wrapped.drain_decode_errors();
+        assert_eq!(occurrences.len(), 1, "{occurrences:?}");
+        assert_eq!(occurrences[0].port, ATTITUDE_WHEEL_TORQUE_IN_PORT);
+        assert_eq!(occurrences[0].tai_ns, 7_000_000_000);
+        assert_eq!(occurrences[0].sequence_count, Some(42));
     }
 }

@@ -102,6 +102,10 @@ impl DynamicsModel for SignalSender {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
+    }
 }
 
 /// Like [`SignalSender`], but a genuinely physical (`state_dim() == 6`, `[pos x3; vel x3]`,
@@ -147,6 +151,10 @@ impl DynamicsModel for PhysicalSignalSender {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
+    }
 }
 
 /// A model with one or more IN ports: logs every delivered `PortMessage` (in the order its own
@@ -178,6 +186,10 @@ impl DynamicsModel for SignalReceiver {
     // No SENSOR fault runtime.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
+    }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
     }
 }
 
@@ -402,6 +414,10 @@ impl DynamicsModel for SignalReceiverStepLog {
     // No SENSOR fault runtime.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
+    }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
     }
 }
 

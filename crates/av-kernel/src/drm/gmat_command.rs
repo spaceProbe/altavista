@@ -61,6 +61,7 @@
 //! `sys`/`instance`/`port_name` -- nothing `ConstantAccelSpec`-specific -- so it is reused
 //! verbatim here rather than duplicated).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use av_cdm::pb::{ModelInfo, PacketCodec};
@@ -105,11 +106,16 @@ pub(crate) struct GmatFramedCommandModel {
     inner: GmatModel,
     command: Option<FramedCommandInput>,
     ack: Option<FramedAck>,
+    /// Question 188 (R5.2): every undecodable frame this instance's own most recent
+    /// `step_with_ports` call received on `cmd.port` and skipped, continuing with no command
+    /// applied this step rather than aborting the run -- mirrors `super::controller::
+    /// CommandedAttitude::decode_errors_this_step`'s own doc comment exactly.
+    decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 
 impl GmatFramedCommandModel {
     pub fn new(inner: GmatModel, command: Option<FramedCommandInput>, ack: Option<FramedAck>) -> Self {
-        Self { inner, command, ack }
+        Self { inner, command, ack, decode_errors_this_step: RefCell::new(Vec::new()) }
     }
 }
 
@@ -160,16 +166,25 @@ impl DynamicsModel for GmatFramedCommandModel {
         let Some(cmd) = &self.command else {
             return self.inner.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox);
         };
+        self.decode_errors_this_step.borrow_mut().clear();
         let mut inner_inbox = Inbox::empty();
         let mut decoded_seq: Option<u16> = None;
         if let Some((msg, _sender)) = inbox.last_on_port(&cmd.port) {
-            if let Ok(decoded) = codec::decode_packet(&cmd.apid_map, &msg.payload) {
-                if let Some(FieldValue::Numeric(value)) = decoded.fields.get(&cmd.packet_field) {
-                    // Hand the decoded value to the SAME apply path a SIGNAL command already
-                    // takes -- see the module doc comment.
-                    inner_inbox = Inbox::new(vec![PortMessage { port: cmd.port.clone(), tai_ns: msg.tai_ns, payload: encode_signal(*value) }]);
-                    decoded_seq = Some(decoded.sequence_count);
+            match codec::decode_packet(&cmd.apid_map, &msg.payload) {
+                Ok(decoded) => {
+                    if let Some(FieldValue::Numeric(value)) = decoded.fields.get(&cmd.packet_field) {
+                        // Hand the decoded value to the SAME apply path a SIGNAL command already
+                        // takes -- see the module doc comment.
+                        inner_inbox = Inbox::new(vec![PortMessage { port: cmd.port.clone(), tai_ns: msg.tai_ns, payload: encode_signal(*value) }]);
+                        decoded_seq = Some(decoded.sequence_count);
+                    }
                 }
+                // Question 188 (R5.2): an undecodable command frame is recorded, never silently
+                // swallowed as it was through R5.1b -- `inner_inbox` stays empty, so the wrapped
+                // `GmatModel` sees no command this step (its own "no message, no effect" contract,
+                // the same "no message at all" treatment `consume_framed`'s own doc comment
+                // already applies).
+                Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(&cmd.port, msg, &e)),
             }
         }
         let (result, mut outbox, applied) = self.inner.step_with_ports(state, t_tai_ns, controls, dt_ns, &inner_inbox)?;
@@ -204,6 +219,16 @@ impl DynamicsModel for GmatFramedCommandModel {
     /// delegating honestly matches every other method on this wrapper.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         self.inner.drain_sensor_fault_effect()
+    }
+
+    /// This wrapper's OWN command-decode occurrences (this call's, from
+    /// `decode_errors_this_step`) plus the wrapped `GmatModel`'s own (always empty in practice --
+    /// `GmatModel` never itself decodes a FRAMED frame) -- question 188 (R5.2), mirrors
+    /// `super::controller::CommandedAttitude::drain_decode_errors`'s own combining shape exactly.
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        let mut v = self.decode_errors_this_step.borrow().clone();
+        v.extend(self.inner.drain_decode_errors());
+        v
     }
 }
 
@@ -380,5 +405,40 @@ mod tests {
         assert!((cd_with_stray - CD_BEFORE).abs() < 1e-12, "Cd must stay at the declared baseline; got {cd_with_stray}");
         assert!(applied.is_empty());
         assert!(outbox.messages().is_empty(), "ack is set but command is None: nothing was ever applied, so nothing is ever acked");
+    }
+
+    /// **Question 188 (R5.2).** An undecodable command frame (a `900`-declared APID, this
+    /// packet names `901`) is recorded via `drain_decode_errors`, never propagated -- the run
+    /// keeps going, `Cd` stays at its own last good (here, the declared baseline) value, no
+    /// `AppliedCommand`/ack is ever produced from it, and a later good command still applies
+    /// normally. Fails against an implementation that still silently swallows the occurrence
+    /// (the pre-R5.2 `if let Ok(...)` shape) -- `drain_decode_errors` would stay empty instead
+    /// of reporting one.
+    #[test]
+    fn gmat_framed_command_records_an_undecodable_frame_and_a_later_good_one_still_applies() {
+        let _engine = gmat_sys::engine_lock();
+        let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        let (model, x0) = wrapped(&gmat, "GfcDecodeError", Some(command_input()), Some(ack_output()));
+
+        let bad = av_dynamics::PortMessage { port: CMD_PORT.to_string(), tai_ns: 20_000_000_000, payload: vec![0x1F, 0x67, 0xC0, 0x2A, 0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0] };
+        let inbox = Inbox::new(vec![bad]);
+        let (result, outbox, applied) = model.step_with_ports(&x0, 0, &[], 60_000_000_000, &inbox).expect("a decode error must never abort the run");
+        let cd_after_step = *result.outputs.get(gmat_sys::model::OUTPUT_CD).expect("GmatModel::step always populates OUTPUT_CD");
+        assert!((cd_after_step - CD_BEFORE).abs() < 1e-12, "Cd must stay at the declared baseline; got {cd_after_step}");
+        assert!(applied.is_empty(), "an undecodable command was never actually applied");
+        assert!(outbox.messages().is_empty(), "nothing was applied, so nothing is acked");
+
+        let occurrences = model.drain_decode_errors();
+        assert_eq!(occurrences.len(), 1, "{occurrences:?}");
+        assert_eq!(occurrences[0].port, CMD_PORT);
+        assert_eq!(occurrences[0].tai_ns, 20_000_000_000);
+
+        let good_inbox = Inbox::new(vec![command_packet(3, CD_AFTER)]);
+        let (result2, outbox2, applied2) = model.step_with_ports(&result.state, result.t_tai_ns, &[], 60_000_000_000, &good_inbox).unwrap();
+        let cd_after_good = *result2.outputs.get(gmat_sys::model::OUTPUT_CD).unwrap();
+        assert!((cd_after_good - CD_AFTER).abs() < 1e-12, "a good command after the bad one must still apply normally");
+        assert_eq!(applied2.len(), 1);
+        assert_eq!(outbox2.messages().len(), 1);
+        assert!(model.drain_decode_errors().is_empty(), "no new decode error this call");
     }
 }

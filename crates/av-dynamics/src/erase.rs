@@ -169,6 +169,10 @@ impl<M: DynamicsModel> DynamicsModel for ErasedModel<M> {
     fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
         self.inner.drain_sensor_fault_effect()
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+        self.inner.drain_decode_errors()
+    }
 }
 
 /// `ErasedModel::new` plus `Box::new`, for the common case of building a [`BoxedModel`]
@@ -218,6 +222,10 @@ mod tests {
         // A synthetic error-path model; no SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -288,6 +296,10 @@ mod tests {
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
         }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
+        }
     }
 
     #[test]
@@ -338,6 +350,10 @@ mod tests {
         // Test-only model; no SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 
@@ -438,6 +454,10 @@ mod tests {
         // Test-only model; no SENSOR fault runtime.
         fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
             None
+        }
+        // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+        fn drain_decode_errors(&self) -> Vec<crate::DecodeErrorOccurrence> {
+            Vec::new()
         }
     }
 

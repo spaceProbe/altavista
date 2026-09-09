@@ -1321,6 +1321,17 @@ struct ModelSpanState {
     /// `(epoch_ns, measurement_id)` there, not here) -- unlike `applied_commands`, a measurement
     /// never becomes an `Event`: question 173's whole point is that it is its own CDM type.
     measurements: Vec<av_cdm::pb::Measurement>,
+    /// Every undecodable FRAMED frame this instance's own `step_with_ports` calls actually
+    /// recorded, across every span of this shared run (`docs/open-questions.md` question 188,
+    /// R5.2) -- drained from `HeteroKernel::decode_errors` at the end of each [`run_one_span`]
+    /// call, the same way `measurements` above is drained from `HeteroKernel::measurements`.
+    /// Turned into one `EVENT_KIND_FAULT` `Event` PER OCCURRENCE once the whole run finishes
+    /// (`run_shared_group`'s own tail, alongside `applied_commands`'s own event conversion) --
+    /// question 188's own literal wording ("a consumer... records a typed... event"), not
+    /// collapsed to one event per (instance, port) the way `crate::router::Router`'s own PORT/
+    /// SENSOR fault events are (see `R5_2_REPORT.md`'s escalations for why that collapse is
+    /// flagged, not built, here).
+    decode_errors: Vec<crate::ports::DecodeErrorRecord>,
     /// Whether this instance's own `x0`/`handle` were produced by a maneuver's dv jump at the
     /// boundary that ends the *previous* span (i.e. whether the sample recorded at this span's
     /// own start is velocity-discontinuous with the previous span's last sample) -- see
@@ -1447,6 +1458,13 @@ fn run_one_span(
         // Question 173: same drain shape as `applied_commands` immediately above.
         if let Some(measured) = kernel.measurements(name) {
             span.measurements.extend_from_slice(measured);
+        }
+        // Question 188 (R5.2): same ever-growing-list drain shape as `measurements` immediately
+        // above -- unlike `sensor_fault_effect` below, a decode error needs no cross-span fold
+        // (it is not tied to any declared `Fault`'s own window/boundary; every occurrence is
+        // already final the moment `step_with_ports` returns it).
+        if let Some(decode_errs) = kernel.decode_errors(name) {
+            span.decode_errors.extend_from_slice(decode_errs);
         }
         // Question 178 (R5.1a): this instance's own SENSOR fault effect over the WHOLE span
         // this call just ran -- read here, while `kernel` (and the boxed model it owns) is
@@ -1682,6 +1700,7 @@ fn run_shared_group(
                 all_outputs: BTreeMap::new(),
                 applied_commands: Vec::new(),
                 measurements: Vec::new(),
+                decode_errors: Vec::new(),
                 seg_start_is_post_maneuver: false,
             },
         );
@@ -1731,6 +1750,7 @@ fn run_shared_group(
                     all_outputs: BTreeMap::new(),
                     applied_commands: Vec::new(),
                     measurements: Vec::new(),
+                    decode_errors: Vec::new(),
                     seg_start_is_post_maneuver: false,
                 },
             );
@@ -2139,6 +2159,15 @@ fn run_shared_group(
                     all_events.push(command::acked_event(parsed, cmd.applied_tai_ns, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
                 }
             }
+        }
+        // Question 188 (R5.2): every undecodable frame this instance recorded, across every span
+        // of this shared run, becomes exactly one EVENT_KIND_FAULT (kind decode_error) event --
+        // never a segment split (a decode error is a run-time frame problem, not a reconfiguration
+        // of the model's own hashed settings). One event PER OCCURRENCE, per question 188's own
+        // literal wording -- see `ModelSpanState::decode_errors`'s own doc comment for why this is
+        // not collapsed the way PORT/SENSOR fault events are.
+        for (i, occ) in span.decode_errors.iter().enumerate() {
+            all_events.push(events::decode_error_event(occ, i, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
         }
         all_events.extend(events::lifecycle_pair(&name, t0, run_end_tai_ns, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
         // Question 173: fold this instance's own measurements straight in -- global sort by

@@ -409,6 +409,12 @@ pub(crate) struct ConstantAccelModel {
     /// M25.2: `(port, codec)` when [`ConstantAccelSpec::ack_framed_port`]/`.ack_framed_codec`
     /// were both resolved -- see [`ConstantAccelSpec::ack_framed_port`]'s own doc comment.
     pub ack_framed: Option<(String, PacketCodec)>,
+    /// Question 188 (R5.2): every undecodable frame this instance's own most recent
+    /// `step_with_ports` call received on `consume_framed`'s own port and skipped, continuing
+    /// with `commanded_accel_scale`'s own last good value rather than aborting the run --
+    /// mirrors `super::controller::AttitudeControllerModel::decode_errors_this_step`'s own doc
+    /// comment exactly.
+    pub decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 impl DynamicsModel for ConstantAccelModel {
     type Error = std::convert::Infallible;
@@ -474,28 +480,37 @@ impl DynamicsModel for ConstantAccelModel {
         // same "no message, no effect" contract `consume_port` below already uses. `applied`
         // (M20.3/question 137's "changed, or first" rule -- see `last_applied_command_value`'s
         // own doc comment) is empty unless a command actually changed something.
+        self.decode_errors_this_step.borrow_mut().clear();
         let mut applied: Vec<AppliedCommand> = Vec::new();
         let mut newly_applied_seq: Option<u16> = None;
         if let Some((port, codec, field)) = &self.consume_framed {
             if let Some((msg, _sender)) = inbox.last_on_port(port) {
                 let mut apid_map = crate::codec::ApidMap::new();
                 apid_map.insert(codec.apid, codec.clone());
-                if let Ok(decoded) = crate::codec::decode_packet(&apid_map, &msg.payload) {
-                    if let Some(crate::codec::FieldValue::Numeric(value)) = decoded.fields.get("value") {
-                        // The write always happens, unconditionally, on every decoded message --
-                        // this is the physics (`derivatives`, below, reads it every RK sub-stage
-                        // of `self.step` further down); only whether it is *reported* (and,
-                        // downstream, acknowledged) depends on `last_applied_command_value` --
-                        // see that field's own doc comment.
-                        debug_assert_eq!(field.as_str(), "accel_scale", "CONSTANT_ACCEL_WRITABLE_PARAMETERS has exactly one entry today; parse_constant_accel_spec already refused anything else");
-                        self.commanded_accel_scale.set(*value);
-                        let changed_or_first = self.last_applied_command_value.get() != Some(*value);
-                        if changed_or_first {
-                            self.last_applied_command_value.set(Some(*value));
-                            applied.push(AppliedCommand { port: port.clone(), field: field.clone(), value: *value, applied_tai_ns: t_tai_ns });
-                            newly_applied_seq = Some(decoded.sequence_count);
+                match crate::codec::decode_packet(&apid_map, &msg.payload) {
+                    Ok(decoded) => {
+                        if let Some(crate::codec::FieldValue::Numeric(value)) = decoded.fields.get("value") {
+                            // The write always happens, unconditionally, on every decoded message
+                            // -- this is the physics (`derivatives`, below, reads it every RK
+                            // sub-stage of `self.step` further down); only whether it is
+                            // *reported* (and, downstream, acknowledged) depends on `last_applied_
+                            // command_value` -- see that field's own doc comment.
+                            debug_assert_eq!(field.as_str(), "accel_scale", "CONSTANT_ACCEL_WRITABLE_PARAMETERS has exactly one entry today; parse_constant_accel_spec already refused anything else");
+                            self.commanded_accel_scale.set(*value);
+                            let changed_or_first = self.last_applied_command_value.get() != Some(*value);
+                            if changed_or_first {
+                                self.last_applied_command_value.set(Some(*value));
+                                applied.push(AppliedCommand { port: port.clone(), field: field.clone(), value: *value, applied_tai_ns: t_tai_ns });
+                                newly_applied_seq = Some(decoded.sequence_count);
+                            }
                         }
                     }
+                    // Question 188 (R5.2): an undecodable command frame is recorded, never
+                    // silently swallowed as it was through R5.1b -- `commanded_accel_scale` is
+                    // deliberately left untouched (the "no message, no effect" contract this
+                    // method's own doc comment already states, applied identically to a message
+                    // that arrived but failed to decode).
+                    Err(e) => self.decode_errors_this_step.borrow_mut().push(crate::codec::decode_error_occurrence(port, msg, &e)),
                 }
             }
         }
@@ -584,6 +599,12 @@ impl DynamicsModel for ConstantAccelModel {
     // No SENSOR fault runtime.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
+    }
+
+    /// Question 188 (R5.2): every occurrence `step_with_ports` recorded this call into
+    /// `decode_errors_this_step` -- see that field's own doc comment.
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.decode_errors_this_step.borrow().clone()
     }
 }
 
@@ -983,6 +1004,23 @@ impl DynamicsModel for AnyModel {
             AnyModel::Replay(m) => m.drain_sensor_fault_effect(),
         }
     }
+
+    /// Delegates to each variant's own `drain_decode_errors` (question 188, R5.2) -- mirrors
+    /// `AnyModel::drain_sensor_fault_effect`'s own identical dispatch and reasoning (a required
+    /// trait method, no catch-all arm here either) and covered by the same executable arm-count
+    /// check (`any_model_arm_count_for_ground_station_matches_star_tracker`).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        match self {
+            AnyModel::Gmat(m) => m.drain_decode_errors(),
+            AnyModel::ConstantAccel(m) => m.drain_decode_errors(),
+            AnyModel::Attitude(m) => m.drain_decode_errors(),
+            AnyModel::Controller(m) => m.drain_decode_errors(),
+            AnyModel::StarTracker(m) => m.drain_decode_errors(),
+            AnyModel::Imu(m) => m.drain_decode_errors(),
+            AnyModel::GroundStation(m) => m.drain_decode_errors(),
+            AnyModel::Replay(m) => m.drain_decode_errors(),
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -1156,6 +1194,11 @@ impl DynamicsModel for ContainerModel {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
     }
+    // `lockstep.proto`'s wire protocol carries no CCSDS/FRAMED concept at all -- a container
+    // instance never itself calls `crate::codec::decode_packet` (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
+    }
 }
 
 impl ContainerModel {
@@ -1260,6 +1303,10 @@ impl DynamicsModel for SharedContainerModel {
     /// Delegates, same as every other method here (question 178, R5.1a).
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         self.0.drain_sensor_fault_effect()
+    }
+    /// Delegates, same as every other method here (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        self.0.drain_decode_errors()
     }
 }
 
@@ -2956,6 +3003,7 @@ pub(crate) fn materialize_constant_accel(spec: &ConstantAccelSpec, epoch_tai_ns:
         commanded_accel_scale: Cell::new(1.0),
         last_applied_command_value: Cell::new(None),
         ack_framed,
+        decode_errors_this_step: RefCell::new(Vec::new()),
     };
     Materialized { model: AnyModel::ConstantAccel(model), t0_tai_ns: epoch_tai_ns, x0_si: spec.x0_si.clone(), settings: BTreeMap::new() }
 }
@@ -4582,6 +4630,7 @@ mod tests {
             commanded_accel_scale: Cell::new(1.0),
             last_applied_command_value: Cell::new(None),
             ack_framed: None,
+            decode_errors_this_step: RefCell::new(Vec::new()),
         };
         let state = [0.0; 6];
         let inbox_with = |v: f64| Inbox::new(vec![av_cdm::pb::PortMessage { port: "range_in".to_string(), tai_ns: 0, payload: av_dynamics::encode_signal(v) }]);
@@ -4617,6 +4666,7 @@ mod tests {
             commanded_accel_scale: Cell::new(1.0),
             last_applied_command_value: Cell::new(None),
             ack_framed: None,
+            decode_errors_this_step: RefCell::new(Vec::new()),
         };
         let state = [0.0; 6];
 
@@ -4660,6 +4710,7 @@ mod tests {
             commanded_accel_scale: Cell::new(1.0),
             last_applied_command_value: Cell::new(None),
             ack_framed: None,
+            decode_errors_this_step: RefCell::new(Vec::new()),
         };
         // x0 = (1000, 2000, 3000) m, v0 = (10, 0, 0) m/s, a = 0 -> after 1s, x = (1010, 2000, 3000).
         let state = [1000.0, 2000.0, 3000.0, 10.0, 0.0, 0.0];
@@ -4706,6 +4757,7 @@ mod tests {
             commanded_accel_scale: Cell::new(1.0),
             last_applied_command_value: Cell::new(None),
             ack_framed: Some(("ack_out".to_string(), ack_out_codec())),
+            decode_errors_this_step: RefCell::new(Vec::new()),
         }
     }
 
@@ -4786,6 +4838,38 @@ mod tests {
         assert_eq!(model.commanded_accel_scale.get(), 1.0);
         assert!(applied.is_empty());
         assert!(outbox.messages().is_empty(), "ack_framed is set but consume_framed is None: nothing was ever applied, so nothing is ever acked");
+    }
+
+    /// **Question 188 (R5.2).** An undecodable `consume_framed` frame (a `900`-declared APID,
+    /// this packet names `901`) is recorded via `drain_decode_errors`, never propagated: the
+    /// step still succeeds, `commanded_accel_scale` stays at its own last good (here, the
+    /// declared no-op `1.0`) value, no `AppliedCommand`/ack is produced from it, and a later good
+    /// command still applies normally. Fails against an implementation that still silently
+    /// swallows the occurrence (the pre-R5.2 `if let Ok(...)` shape) -- `drain_decode_errors`
+    /// would stay empty instead of reporting one.
+    #[test]
+    fn consume_framed_records_an_undecodable_frame_and_a_later_good_one_still_applies() {
+        let model = command_consuming_model([0.0, 0.0, 2.0]);
+        let state = [0.0; 6];
+        let bad = av_dynamics::PortMessage { port: "cmd_in".to_string(), tai_ns: 15_000_000_000, payload: vec![0x1F, 0x67, 0xC0, 0x2A, 0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0] };
+        let (result, outbox, applied) = model.step_with_ports(&state, 0, &[], 1_000_000_000, &Inbox::new(vec![bad])).expect("a decode error must never abort the run");
+        assert_eq!(model.commanded_accel_scale.get(), 1.0, "an undecodable command must never fabricate a scale -- the last good (here, the initial no-op) value is kept");
+        // a = (0,0,2), accel_scale stays at its own no-op 1.0: pos_z after 1s from rest = 0.5*2*1^2 = 1.0.
+        assert!((result.state[2] - 1.0).abs() < 1e-9, "propagation must use the unchanged (no-op) accel_scale, not a fabricated one: got z={}", result.state[2]);
+        assert!(applied.is_empty());
+        assert!(outbox.messages().is_empty());
+
+        let occurrences = model.drain_decode_errors();
+        assert_eq!(occurrences.len(), 1, "{occurrences:?}");
+        assert_eq!(occurrences[0].port, "cmd_in");
+        assert_eq!(occurrences[0].tai_ns, 15_000_000_000);
+
+        let good = Inbox::new(vec![command_packet(&model.consume_framed.as_ref().unwrap().1, 8, 2.0)]);
+        let (_result2, outbox2, applied2) = model.step_with_ports(&state, 1_000_000_000, &[], 1_000_000_000, &good).unwrap();
+        assert_eq!(model.commanded_accel_scale.get(), 2.0, "a good command after the bad one must still apply normally");
+        assert_eq!(applied2.len(), 1);
+        assert_eq!(outbox2.messages().len(), 1);
+        assert!(model.drain_decode_errors().is_empty(), "no new decode error this call");
     }
 
     // =========================================================================================
@@ -5676,14 +5760,17 @@ mod tests {
     /// asserted directly rather than by comparison. **R5.1a (question 178) raised this from
     /// eleven to twelve**: `DynamicsModel` gained a new required method, `drain_sensor_fault_
     /// effect`, delegated here with one more plain arm (no guard split, mirroring `last_
-    /// measurements`). Fails against a future edit that removes an arm (the count drops below
-    /// 12) or duplicates one (the sibling `registry.rs` check below would also need `wrap_
+    /// measurements`). **R5.2 (question 188) raises this from twelve to thirteen**:
+    /// `DynamicsModel` gained a second new required method, `drain_decode_errors`, delegated
+    /// here with one more plain arm, identical shape to `drain_sensor_fault_effect`'s own
+    /// addition. Fails against a future edit that removes an arm (the count drops below 13) or
+    /// duplicates one (the sibling `registry.rs` check below would also need `wrap_
     /// replay`'s own construction site to still exist).
     #[test]
     fn any_model_arm_count_for_replay_covers_every_dynamics_model_match_site() {
         let binding_source = include_str!("binding.rs");
         let indented_arm_count = binding_source.matches("\n            AnyModel::Replay(").count();
-        assert_eq!(indented_arm_count, 12, "AnyModel::Replay( must appear as a real match arm (12-space indent) exactly 12 times: one per DynamicsModel method (R5.1a added drain_sensor_fault_effect), with stm_derivatives/step_with_stm each split into a guard + delegate pair");
+        assert_eq!(indented_arm_count, 13, "AnyModel::Replay( must appear as a real match arm (12-space indent) exactly 13 times: one per DynamicsModel method (R5.1a added drain_sensor_fault_effect, R5.2 added drain_decode_errors), with stm_derivatives/step_with_stm each split into a guard + delegate pair");
 
         // The one construction site this variant has, which -- unlike every other variant's own
         // `materialize_*` function -- lives in `crate::registry::ModelRegistry::wrap_replay`,

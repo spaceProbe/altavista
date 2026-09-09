@@ -586,6 +586,10 @@ impl DynamicsModel for GmatModel {
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         None
     }
+    // See `drain_sensor_fault_effect`'s identical reasoning immediately above (question 188, R5.2).
+    fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
