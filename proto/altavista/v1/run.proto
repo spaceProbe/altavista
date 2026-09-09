@@ -85,17 +85,25 @@ message SweepSample {
   uint32 draw_index = 2;
   // "instance.parameter" -> the value applied at this point.
   map<string, double> axis_values = 3;
-  // The seed this draw ran with (derived from Scenario.seeds, sweep id, point and draw;
-  // recorded so the sample replays alone).
-  uint64 seed = 4;
+  // Field 4 was a single derived seed; Scenario.seeds is a map, so the derived seeds are a
+  // map too (field 10). Reserved so the old shape cannot return.
+  reserved 4;
+  reserved "seed";
   string run_id = 5;
-  // The per-sample DRM hash (the sweep's DRM with this point's overrides applied).
+  // The per-sample configuration hash: SHA-256 over the length-prefixed canonical
+  // serializations of the DRM, the SosConfiguration and every SystemDefinition, with this
+  // point's axis values applied (axis values land on SystemInstance.overrides in the SOS or
+  // on a Scenario event, so the DRM hash alone would not change).
   string config_hash = 6;
   map<string, ScoreResult> scores = 7;
   // Where this sample's RunProducts and sidecars were written, when kept.
   string products_uri = 8;
   // Set when the run failed: the typed error's text; scores are then empty.
   string error = 9;
+  // Every seed this draw ran with, keyed like Scenario.seeds: each derived from the base
+  // seed under that key, the sweep hash, the point and the draw; recorded so the sample
+  // replays alone with exactly the stochastic inputs it had.
+  map<string, uint64> seeds = 10;
 }
 
 // Aggregate of one score across the draws at one grid point.
