@@ -60,7 +60,7 @@ immediately after this block -- `third_party/cfs` still pinned at
 `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:9bcb253dcce57ba64657954de33d2dc2d1cc51de46d211450ce02ecaf4c3fb42
+sha256:b1300c6fd3c0e323feae1be0db3f3c4b740ea84229c510ceaae7ee0ed5f8ad12
 ```
 
 Recorded runtime-content hash for this pin (question 185, see the definition above):
@@ -89,6 +89,32 @@ So the whole-image digest still moves for reasons that have nothing to do with t
 runtime content, and the runtime-content hash is the value that answers "did what this image
 runs change?" See the escalation in `services/cfs/R5_3_REPORT.md` section 8 for the remaining
 whole-image reproducibility gap.
+
+**Rebuild from a cold cache, 2026-09-09 (same acceptance run), and the stronger measurement it
+gave.** Later the same day both `altavista-cfs-lockstep:local` and the `ubuntu:22.04` tag its
+Dockerfile builds from disappeared from this host's image store while 16 unrelated tagged images
+(including `registry:2`, which our own container tests DO use) survived -- the second occurrence
+of the tag-disappearance R4.3 recorded. The suspected actor there, `crates/av-kernel/tests/
+drm_attitude_control_cfs.rs`'s `DockerImageGuard` (`docker rmi -f <its own throwaway tag>`), is
+now **excluded by measurement, not merely doubted**: tagging one present image under two names
+and running `docker rmi -f` on the second untags only that second name and leaves both the first
+name and the original tag intact (probe run and captured this round). No path remains to identify
+the real actor from inside this repository without a Docker daemon event log, so it is recorded
+here rather than guessed at.
+
+Recovering from it required a genuinely cold, from-scratch rebuild (no image, no base image, no
+layer cache -- the network window per question 154), which is the strongest reproducibility
+evidence this pin has: that build's runtime-content hash came out `sha256:5049bf8f...` again,
+identical to the two earlier builds, while the whole-image digest moved a third time. Three
+builds -- one warm-cache, one comment-only-change, one fully cold -- agree exactly on what the
+image runs.
+
+**Operational note for the next person.** The four `drm_attitude_control_cfs.rs` container tests
+short-circuit and report `ok` when this image is absent (measured: 0.17s for all four, against
+200.86s when it is present). A green `cargo test -p av-kernel` therefore does NOT by itself mean
+the cFS container path was exercised -- check the elapsed time of that binary, or run
+`services/cfs/build-image.sh` first. Raised for the lead as a defect in its own right: unlike
+`test_image_digest.py`, which skips visibly with a reason, these skip invisibly as passes.
 
 Previous digest (R5.3 / question 185, superseded by the manifest regeneration immediately
 above -- same runtime-content hash, digest moved only for the comment-only `targets.cmake`
