@@ -189,6 +189,7 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-kernel",
+ "gmat-sys",
  "prost",
  "serde",
  "serde_json",

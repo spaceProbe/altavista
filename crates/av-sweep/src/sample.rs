@@ -140,6 +140,16 @@ pub fn sample_config(
     })
 }
 
+/// A declared bound is `min`/`max` both left at proto3's zero default (`Parameter`'s own field
+/// comment) -- checked only when `max > min` actually declares a real bound (F1a review defect
+/// #2; see [`SweepError::ParameterOutOfBounds`]'s own doc comment).
+fn check_bound(instance: &str, parameter: &str, value: f64, min: f64, max: f64) -> Result<(), SweepError> {
+    if max > min && (value < min || value > max) {
+        return Err(SweepError::ParameterOutOfBounds { instance: instance.to_string(), parameter: parameter.to_string(), value, min, max });
+    }
+    Ok(())
+}
+
 /// Apply one axis value to `sos` (in place) -- see [`sample_config`]'s own doc comment for the
 /// exact rules this enforces.
 fn apply_axis_value(sos: &mut pb::SosConfiguration, systems: &BTreeMap<String, pb::SystemDefinition>, axis: &AxisValue) -> Result<(), SweepError> {
@@ -149,19 +159,25 @@ fn apply_axis_value(sos: &mut pb::SosConfiguration, systems: &BTreeMap<String, p
         if !existing.string_value.is_empty() {
             return Err(SweepError::StringValuedParameter { instance: axis.instance.clone(), parameter: axis.parameter.clone() });
         }
+        check_bound(&axis.instance, &axis.parameter, axis.value, existing.min, existing.max)?;
         existing.value = axis.value;
         return Ok(());
     }
 
+    // F1a review defect #1: the instance's own system_id must resolve in `systems` BEFORE its
+    // parameters are searched -- an unknown system_id is never blamed on the parameter (the
+    // previous behaviour, folding this case into the "not found" arm below, named the wrong
+    // cause; see SweepError::UnknownSystem's own doc comment).
     let system_id = instance.system_id.clone();
-    let base_param = systems.get(&system_id).and_then(|sys| sys.parameters.iter().find(|p| p.name == axis.parameter));
-    let base_param = match base_param {
+    let sys = systems.get(&system_id).ok_or_else(|| SweepError::UnknownSystem { instance: axis.instance.clone(), system_id: system_id.clone() })?;
+    let base_param = match sys.parameters.iter().find(|p| p.name == axis.parameter) {
         Some(p) => p,
         None => return Err(SweepError::UndeclaredParameter { instance: axis.instance.clone(), parameter: axis.parameter.clone() }),
     };
     if !base_param.string_value.is_empty() {
         return Err(SweepError::StringValuedParameter { instance: axis.instance.clone(), parameter: axis.parameter.clone() });
     }
+    check_bound(&axis.instance, &axis.parameter, axis.value, base_param.min, base_param.max)?;
     let unit = base_param.unit;
     instance.parameter_overrides.push(pb::Parameter { name: axis.parameter.clone(), unit, value: axis.value, string_value: String::new(), min: 0.0, max: 0.0, description: String::new() });
     Ok(())
@@ -280,6 +296,97 @@ mod tests {
         let sweep_hash2 = crate::hash::canonical_sweep_hash(&sweep2);
         let err2 = sample_config(&sweep2, &sweep_hash2, &drm, &sos, &systems, 0, 0).unwrap_err();
         assert!(matches!(err2, SweepError::StringValuedParameter { ref instance, ref parameter } if instance == "demo_mvr" && parameter == "force_model.central_body"), "{err2:?}");
+    }
+
+    /// F1a review defect #1: an axis on an instance whose `system_id` is not in the supplied
+    /// `systems` map must be blamed on the missing system, not on the parameter -- fails against
+    /// the pre-fix implementation, which returned `UndeclaredParameter` here (the parameter
+    /// search silently treated "no such system" the same as "system present, parameter absent").
+    #[test]
+    fn refuses_an_axis_whose_instance_names_an_unknown_system_id() {
+        let drm = fixture_drm();
+        let mut sos = fixture_sos();
+        {
+            let inst = sos.instances.iter_mut().find(|i| i.name == "demo_mvr").unwrap();
+            inst.system_id = "no_such_system_id".to_string();
+        }
+        sos.hash = canonical_sos_hash(&sos);
+        let systems = fixture_systems(); // still keyed by "leo_demo_sys" -- "no_such_system_id" is genuinely absent
+        let sweep = build_sweep(vec![axis("demo_mvr", "totally.new.parameter", vec![1.0])], 1);
+        let sweep_hash = crate::hash::canonical_sweep_hash(&sweep);
+        let err = sample_config(&sweep, &sweep_hash, &drm, &sos, &systems, 0, 0).unwrap_err();
+        assert!(
+            matches!(err, SweepError::UnknownSystem { ref instance, ref system_id } if instance == "demo_mvr" && system_id == "no_such_system_id"),
+            "{err:?}"
+        );
+    }
+
+    /// F1a review defect #2: a declared bound (`max > min`, a real bound -- not the 0/0
+    /// "unbounded" default) must refuse an out-of-range axis value rather than silently applying
+    /// it. Both branches [`apply_axis_value`] can take: an existing instance override, and the
+    /// base `SystemDefinition` declaration.
+    #[test]
+    fn refuses_an_axis_value_outside_a_declared_bound() {
+        let drm = fixture_drm();
+
+        // Branch 1: the existing declaration is an instance override.
+        let mut sos = fixture_sos();
+        {
+            let inst = sos.instances.iter_mut().find(|i| i.name == "demo_flt").unwrap();
+            inst.parameter_overrides.push(pb::Parameter { name: "test.bounded".to_string(), value: 5.0, min: 0.0, max: 10.0, ..Default::default() });
+        }
+        sos.hash = canonical_sos_hash(&sos);
+        let systems = fixture_systems();
+        let sweep = build_sweep(vec![axis("demo_flt", "test.bounded", vec![20.0])], 1);
+        let sweep_hash = crate::hash::canonical_sweep_hash(&sweep);
+        let err = sample_config(&sweep, &sweep_hash, &drm, &sos, &systems, 0, 0).unwrap_err();
+        assert!(
+            matches!(err, SweepError::ParameterOutOfBounds { ref instance, ref parameter, value, min, max }
+                if instance == "demo_flt" && parameter == "test.bounded" && value == 20.0 && min == 0.0 && max == 10.0),
+            "{err:?}"
+        );
+        // A value inside the same declared bound is unaffected.
+        let sweep_ok = build_sweep(vec![axis("demo_flt", "test.bounded", vec![7.0])], 1);
+        let sweep_ok_hash = crate::hash::canonical_sweep_hash(&sweep_ok);
+        sample_config(&sweep_ok, &sweep_ok_hash, &drm, &sos, &systems, 0, 0).expect("value inside the declared bound is accepted");
+
+        // Branch 2: the existing declaration is the base SystemDefinition's own parameter
+        // (spacecraft.SMA has no declared bound in the real fixture; give it one here).
+        let mut systems2 = fixture_systems();
+        {
+            let sys = systems2.get_mut("leo_demo_sys").unwrap();
+            let sma = sys.parameters.iter_mut().find(|p| p.name == "spacecraft.SMA").unwrap();
+            sma.min = 6000.0;
+            sma.max = 7000.0;
+            sys.hash = av_kernel::drm::hash::canonical_system_hash(sys);
+        }
+        let sos2 = fixture_sos();
+        let sweep2 = build_sweep(vec![axis("demo_mvr", "spacecraft.SMA", vec![8000.0])], 1);
+        let sweep_hash2 = crate::hash::canonical_sweep_hash(&sweep2);
+        let err2 = sample_config(&sweep2, &sweep_hash2, &drm, &sos2, &systems2, 0, 0).unwrap_err();
+        assert!(
+            matches!(err2, SweepError::ParameterOutOfBounds { ref instance, ref parameter, value, min, max }
+                if instance == "demo_mvr" && parameter == "spacecraft.SMA" && value == 8000.0 && min == 6000.0 && max == 7000.0),
+            "{err2:?}"
+        );
+    }
+
+    /// A `Parameter` whose `min`/`max` are both left at the proto3 zero default (0.0/0.0) is
+    /// "unbounded" by convention (`SweepError::ParameterOutOfBounds`'s own doc comment) -- every
+    /// existing fixture parameter has no declared bound, so any axis value must still be
+    /// accepted; this is the regression test proving the new bound check is conditional on
+    /// `max > min`, not merely on `min`/`max` being present as fields.
+    #[test]
+    fn an_undeclared_zero_zero_bound_is_unbounded() {
+        let drm = fixture_drm();
+        let sos = fixture_sos();
+        let systems = fixture_systems();
+        // spacecraft.SMA has min: 0.0, max: 0.0 (never declared) in the real fixture -- a wildly
+        // out-of-physical-range value must still be accepted by the bound check itself (this
+        // crate does not validate physical plausibility, only declared bounds).
+        let sweep = build_sweep(vec![axis("demo_flt", "spacecraft.SMA", vec![1_000_000.0])], 1);
+        let sweep_hash = crate::hash::canonical_sweep_hash(&sweep);
+        sample_config(&sweep, &sweep_hash, &drm, &sos, &systems, 0, 0).expect("a 0/0 bound is unbounded, not a silent [0,0] range");
     }
 
     #[test]

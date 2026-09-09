@@ -1,7 +1,7 @@
 [package]
 name = "av-sweep"
 publish = false
-description = "F1a (docs/feasibility-plan.md): pure, GMAT-free sweep grid expansion, per-sample seed derivation and per-sample DRM/SOS configuration for the feasibility-mode parameter sweep executor. Library only -- the process-parallel executor and CLI binary are F1b."
+description = "F1 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,10 @@ av-cdm = { path = "../av-cdm" }
 # crate's REPORT.md and each module's own doc comment for exactly what is reused vs.
 # transcribed locally, and why).
 av-kernel = { path = "../av-kernel" }
+# F1b (this crate's own task brief): sample mode is the one place in this binary that
+# constructs a live gmat_sys::Gmat handle (mirroring crates/av-run/src/main.rs's own reason for
+# depending on gmat-sys directly rather than only transitively through av-kernel).
+gmat-sys = { path = "../gmat-sys" }
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true

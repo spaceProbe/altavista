@@ -6,9 +6,12 @@
 //! `av_kernel::drm::{schema, hash}` as a library; never edits, and this crate's own tests never
 //! run, `crates/av-kernel/src/drm/{executor,router,fault,sensors}.rs`.
 //!
-//! The process-parallel executor and the `av-sweep` CLI binary that actually calls
-//! `av_kernel::drm::execute` are F1b, not built here -- see this crate's `REPORT.md` for
-//! exactly what remains.
+//! F1b (the process-parallel executor and the `av-sweep` CLI binary that actually calls
+//! `av_kernel::drm::execute`) is now built on top of this library, at
+//! `src/bin/av-sweep/{main,cli,study,sample_mode,json}.rs` -- see that binary's own module doc
+//! comments (`main.rs` in particular) for the two-mode (study/sample) design and why GMAT is
+//! only ever touched in sample mode. F2 (per-point aggregates across draws, and a study-store
+//! trait) is not built here either.
 //!
 //! ## Module layout
 //!

@@ -72,11 +72,29 @@ pub enum SweepError {
     #[error("axis names instance {instance:?}, which is not in this SosConfiguration")]
     UnknownInstance { instance: String },
 
+    /// F1a review defect #1 (`REPORT.md`/this crate's own task brief): an axis targets an
+    /// instance whose `SystemInstance.system_id` names no `SystemDefinition` in the `systems`
+    /// map supplied to [`crate::sample::sample_config`]. Previously this fell through to
+    /// [`SweepError::UndeclaredParameter`], which blames the *parameter* for what is actually a
+    /// missing *`SystemDefinition`* -- a failure's message must name the real cause (this
+    /// crate's own standing rule), so it is now its own variant.
+    #[error("instance {instance:?} names system_id {system_id:?}, which is not in the supplied systems map")]
+    UnknownSystem { instance: String, system_id: String },
+
     /// A `SweepAxis.parameter` named a parameter declared neither in its instance's own
     /// `parameter_overrides` nor in the bound `SystemDefinition.parameters` -- a typo must not
     /// silently become a meaningless override.
     #[error("axis names {instance}.{parameter}, which is declared neither in that instance's own parameter_overrides nor in its bound SystemDefinition.parameters")]
     UndeclaredParameter { instance: String, parameter: String },
+
+    /// F1a review defect #2: the existing declaration (an instance's own override, or the base
+    /// `SystemDefinition.parameters` entry) an axis targets carries a real declared bound
+    /// (`max > min` -- `Parameter`'s own field comment: `min`/`max` both `0.0` is proto3's zero
+    /// default and means "unbounded", so the check below is conditional on a genuine bound
+    /// having been declared, never on the mere presence of the fields) and the axis's value
+    /// falls outside `[min, max]`. A declared bound is enforced, not silently exceeded.
+    #[error("axis names {instance}.{parameter} = {value}, which is outside its declared bound [{min}, {max}]")]
+    ParameterOutOfBounds { instance: String, parameter: String, value: f64, min: f64, max: f64 },
 
     /// A `SweepAxis` named a parameter whose existing declaration (override or base) carries a
     /// non-empty `string_value` -- a `double`-valued axis cannot sweep a string parameter.
