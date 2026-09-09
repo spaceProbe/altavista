@@ -180,6 +180,15 @@ impl ModelHandle {
         self.model.describe()
     }
 
+    /// `docs/open-questions.md` question 178 (R5.1a): the wrapped model's own accumulated SENSOR
+    /// fault effect since the last drain (`av_dynamics::DynamicsModel::
+    /// drain_sensor_fault_effect`) -- `None` for every binding kind except a `StarTrackerModel`
+    /// with a fault currently installed. `crate::drm::executor::run_shared_group` calls this at
+    /// every boundary this handle is about to be discarded and re-materialized.
+    pub fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.model.drain_sensor_fault_effect()
+    }
+
     /// Erase to a plain [`BoxedModel`] for `crate::kernel::HeteroKernel::register_system` (the
     /// non-covariance path). `erase_id` becomes the id every [`ModelError`] this boxed model
     /// later produces (from a `derivatives`/`step` failure during the run) carries --
@@ -589,7 +598,7 @@ mod tests {
     /// fails against an implementation missing the constructor entirely (a compile error).
     #[test]
     fn construct_star_tracker_builds_a_usable_zero_dimensional_handle() {
-        let spec = crate::drm::sensors::StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0] };
+        let spec = crate::drm::sensors::StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None };
         let codec = crate::drm::sensors::star_tracker_packet_codec("st_test", 100);
         let handle = ModelRegistry::construct_star_tracker(&spec, codec, "st_meas".to_string(), 1_700_000_000_000_000_000, "startracker.test").expect("a valid spec/codec pair must construct");
         assert_eq!(handle.t0_tai_ns, 1_700_000_000_000_000_000);
@@ -604,7 +613,7 @@ mod tests {
     /// space`'s own proof for the attitude side.
     #[test]
     fn construct_star_tracker_returns_a_typed_error_for_a_codec_missing_a_required_field() {
-        let spec = crate::drm::sensors::StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0] };
+        let spec = crate::drm::sensors::StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None };
         let mut codec = crate::drm::sensors::star_tracker_packet_codec("st_test", 100);
         codec.fields.retain(|f| f.name != "qw");
         let err = match ModelRegistry::construct_star_tracker(&spec, codec, "st_meas".to_string(), 0, "startracker.test") {

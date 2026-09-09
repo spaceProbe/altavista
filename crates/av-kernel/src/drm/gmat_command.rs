@@ -198,6 +198,13 @@ impl DynamicsModel for GmatFramedCommandModel {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.inner.last_measurements()
     }
+
+    /// Delegates to `self.inner.drain_sensor_fault_effect` (question 178, R5.1a) -- the wrapped
+    /// `GmatModel` never has a SENSOR fault runtime, so this is always `None` in practice, but
+    /// delegating honestly matches every other method on this wrapper.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.inner.drain_sensor_fault_effect()
+    }
 }
 
 #[cfg(test)]

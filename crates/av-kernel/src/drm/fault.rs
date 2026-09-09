@@ -1,11 +1,15 @@
 //! Injecting `Scenario.faults` (ADR-005 section 5, `docs/adr/005-simulation-kernel.md`) at
 //! their declared epochs, for the kinds this crate can act on: `FAULT_TARGET_KIND_DYNAMICS`
-//! (fully applied), `_PORT` (R4.1a: `"drop"`/`"delay"` are fully applied too, by
-//! `crate::router::Router`, not this module -- `"corrupt"`/`"duplicate"` stay a typed refusal,
-//! R4.1b's own scope), `_SENSOR` (validated, seeded, and explicitly refused -- see "SENSOR --
-//! seeded, validated, and explicitly refused; PORT -- now a real runtime (R4.1a)" below), and
-//! `_HARDWARE` (a container power cycle only -- see "Container power-cycle (HARDWARE)" below; any
-//! other `_HARDWARE` use is a typed refusal, not silently dropped).
+//! (fully applied), `_PORT` (R4.1a/R4.1b: all four documented kinds -- `"drop"`/`"delay"`/
+//! `"corrupt"`/`"duplicate"` -- are now fully applied, by `crate::router::Router`, not this
+//! module), `_SENSOR` (R5.1a, question 178: fully applied for a star-tracker instance --
+//! `"bias"`/`"dropout"`/`"freeze"`/`"scale"`, [`apply_sensor_fault`]/[`clear_sensor_fault`],
+//! `crate::drm::sensors::StarTrackerModel`; still validated, seeded, and explicitly refused for
+//! an IMU instance, R5.1b's own scope -- see "SENSOR -- a real runtime for the star tracker
+//! (R5.1a), still explicitly refused for the IMU; PORT -- a real runtime for all four kinds
+//! (R4.1a/R4.1b)" below), and `_HARDWARE` (a container power cycle only -- see "Container
+//! power-cycle (HARDWARE)" below; any other `_HARDWARE` use is a typed refusal, not silently
+//! dropped).
 //!
 //! ## DYNAMICS (question 87's "What to build" item 5) -- applied
 //!
@@ -86,50 +90,58 @@
 //! board to reset, only its own process to power-cycle. See `executor::execute`'s own load-time
 //! validation pass for both checks.
 //!
-//! ## SENSOR -- seeded, validated, and explicitly refused; PORT -- now a real runtime (R4.1a)
+//! ## SENSOR -- a real runtime for the star tracker (R5.1a), still explicitly refused for the
+//! IMU; PORT -- a real runtime for all four kinds (R4.1a/R4.1b)
 //!
 //! Section 5 also names `FAULT_TARGET_KIND_PORT` ("acts in the router: drop, delay, corrupt,
 //! duplicate") and `FAULT_TARGET_KIND_SENSOR` ("acts in sensor models: bias, noise, dropout,
 //! misalignment"). Through M25.4a, neither had a runtime this crate could act on: there was no
 //! port router with a fault-aware `deliver` and no sensor-model binding kind at all.
 //!
-//! **R4.1a (`docs/open-questions.md` question 178) gives PORT a real runtime for two of its four
-//! kinds.** `crate::router::Router::install_port_faults`/`deliver` now actually applies a
-//! `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"` or `"delay"` -- see that module's own doc
-//! comment's "Port fault runtime" section for the complete contract. `"corrupt"`/`"duplicate"`
-//! remain unimplemented (R4.1b's own scope, on the identical machinery); `executor::execute`'s
-//! own load-time fault-validation loop refuses them with a message naming R4.1b, distinct from a
-//! `kind` outside section 5's vocabulary entirely. **This module's own [`realize_unapplied_fault`]
-//! is unchanged and still validates the full four-kind PORT vocabulary** (it is a generic,
-//! target-kind-agnostic "validate, seed, draw one canonical value, refuse" helper -- see its own
-//! doc comment) **but `executor::execute` never calls it for PORT any more**: `crate::router`'s
-//! own runtime does its own, kind-specific validation and realization instead, so
-//! `realize_unapplied_fault`'s PORT-kind path is exercised only by this module's own tests and by
-//! `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call it directly -- never by a
-//! real `execute()` run any more.
+//! **R4.1a (`docs/open-questions.md` question 178) gave PORT a real runtime for two of its four
+//! kinds; R4.1b completes it.** `crate::router::Router::install_port_faults`/`deliver` now
+//! actually applies a `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`, `"delay"`, `"corrupt"`
+//! or `"duplicate"` -- see that module's own doc comment's "Port fault runtime" section for the
+//! complete contract, including R4.1b's own new "Corrupt"/"Duplicate" subsections and its
+//! "Overlapping windows are refused at load" rule. **This module's own
+//! [`realize_unapplied_fault`] is unchanged and still validates the full four-kind PORT
+//! vocabulary** (it is a generic, target-kind-agnostic "validate, seed, draw one canonical value,
+//! refuse" helper -- see its own doc comment) **but `executor::execute` never calls it for PORT at
+//! all any more**: `crate::router`'s own runtime does its own, kind-specific validation and
+//! realization instead, so `realize_unapplied_fault`'s PORT-kind path is exercised only by this
+//! module's own tests and by `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call
+//! it directly -- never by a real `execute()` run any more, for any PORT kind.
 //!
-//! **SENSOR is unchanged**: `execute()` still refuses any `FAULT_TARGET_KIND_SENSOR` fault at
-//! load ([`DrmError::PortOrSensorFaultNotYetSupported`], now SENSOR-only in practice), before any
-//! binding or GMAT call. [`realize_unapplied_fault`] validates the fault's `kind` against the
-//! names section 5 documents for its `target_kind`, resolves its seed from
-//! `Scenario.seeds[fault.id]` (via [`crate::rng::seed_for`]), draws the first `u64` from that
-//! fault's own [`crate::rng::Pcg64`] stream -- proving the seeded stream is correctly keyed and
-//! reproducible, exactly what section 5 promises -- and then **always** returns
-//! [`DrmError::FaultTargetKindNotSupported`], carrying that draw so it stays visible to the
-//! caller even though nothing consumes it. This is a typed, explicit refusal, not a silent
-//! skip; see this module's own tests, and the crate's `tests/faults_seeded.rs`, for exactly
-//! what each failure mode looks like.
+//! **R5.1a (`docs/open-questions.md` question 178) gives SENSOR a real runtime for the star
+//! tracker, and only the star tracker.** `execute()`'s own load-time fault-validation loop
+//! resolves a `FAULT_TARGET_KIND_SENSOR` fault's own `instance` binding
+//! (`crate::registry::kind_for(&sys.dynamics_model)`) first: naming a `"startracker."`-dispatched
+//! instance now checks `fault.kind` against [`SENSOR_KINDS`] ([`DrmError::UnknownSensorFaultKind`]
+//! for anything else) and, once loaded, [`apply_sensor_fault`]/[`clear_sensor_fault`] apply/clear
+//! the declared effect at a fault-bounded re-materialization boundary -- see `crate::drm::
+//! sensors`'s own module doc comment's "SENSOR fault runtime" section for the complete contract.
+//! Naming an instance that is not a sensor model instance at all is [`DrmError::
+//! SensorFaultTargetNotASensor`]. **Naming a `"imu."`-dispatched instance still refuses**
+//! ([`DrmError::PortOrSensorFaultNotYetSupported`], now narrowed to IMU only -- R5.1b's own
+//! scope, not this task's): the IMU sensor fault runtime does not exist yet, exactly the state
+//! SENSOR was in, wholesale, before this task.
 //!
-//! **What this module does *not* invent (SENSOR, and PORT's own remaining `"corrupt"`/
-//! `"duplicate"` kinds).** Neither the proto nor ADR-005 defines a per-kind parameter schema for
-//! a SENSOR fault's actual effect (e.g. what a `"bias"` fault's magnitude/units would be), or for
-//! PORT's own `"corrupt"`/`"duplicate"` kinds -- that belongs to the sensor-model binding /
-//! R4.1b's own PORT-fault extension respectively, neither of which exists yet. Inventing one
-//! here, ahead of that work, would be scope this task does not have the authority to set (it
-//! would become part of ADR-005's own contract the moment a caller started relying on it).
-//! [`realize_unapplied_fault`] therefore draws one canonical value per fault (proof of a
-//! correctly-keyed, reproducible stream) rather than a kind-specific realization, for every kind
-//! it still covers.
+//! **This module's own [`realize_unapplied_fault`] is unchanged and still validates the full
+//! four-kind ADR-005-generic SENSOR vocabulary** (it is a generic, target-kind-agnostic
+//! "validate, seed, draw one canonical value, refuse" helper -- see its own doc comment, and
+//! [`SENSOR_KINDS_ADR005_GENERIC`]'s own doc comment for why it is a DIFFERENT vocabulary from
+//! [`SENSOR_KINDS`]) **but `execute()` never calls it for a SENSOR fault naming a star-tracker
+//! instance at all**, mirroring PORT's own R4.1a precedent exactly: `execute()`'s own load-time
+//! validation plus `apply_sensor_fault` do their own, star-tracker-specific validation and
+//! realization instead, so `realize_unapplied_fault`'s SENSOR-kind path is exercised only by this
+//! module's own tests and by `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call it
+//! directly against a synthetic target -- never by a real `execute()` run any more, for a
+//! star-tracker instance. `execute()`'s own IMU refusal ([`DrmError::
+//! PortOrSensorFaultNotYetSupported`]) is likewise raised before any seed lookup, unchanged from
+//! before this task, so `realize_unapplied_fault`'s SENSOR path was already dead from
+//! `execute()`'s own perspective for every sensor kind before R5.1a and stays exactly that dead
+//! afterward -- kept, not deleted, because it is still exercised directly by the tests named
+//! above and still proves the seeded-stream property section 5 promises.
 
 use std::collections::BTreeMap;
 
@@ -148,11 +160,39 @@ use crate::rng::{seed_for, Pcg64};
 /// router (drop, delay, corrupt, duplicate)". Matches `proto/altavista/v1/system.proto`'s own
 /// `Fault.kind` doc comment.
 pub(crate) const PORT_KINDS: [&str; 4] = ["drop", "delay", "corrupt", "duplicate"];
-/// `Fault.kind` values ADR-005 section 5 documents for `FAULT_TARGET_KIND_SENSOR`: "acts in
-/// sensor models (bias, noise, dropout, misalignment)". `"misalign"`, not `"misalignment"`,
-/// per `proto/altavista/v1/system.proto`'s `Fault.kind` doc comment, which spells out the
-/// literal string values this field actually takes.
-const SENSOR_KINDS: [&str; 4] = ["bias", "noise", "dropout", "misalign"];
+/// `Fault.kind` values ADR-005 section 5's own GENERIC documentation names for
+/// `FAULT_TARGET_KIND_SENSOR` across every kind of sensor: "acts in sensor models (bias, noise,
+/// dropout, misalignment)". `"misalign"`, not `"misalignment"`, per `proto/altavista/v1/
+/// system.proto`'s `Fault.kind` doc comment, which spells out the literal string values this
+/// field actually takes. **Used only by [`kinds_for`]/[`realize_unapplied_fault`]'s own generic,
+/// target-kind-agnostic "validate, seed, draw one canonical value, refuse" path** (that
+/// function's own doc comment) -- `executor::execute` never calls it for a SENSOR fault naming a
+/// star tracker any more (R5.1a, question 178: [`SENSOR_KINDS`] below is the real, narrower,
+/// star-tracker-specific vocabulary that governs what actually loads and runs), so this constant
+/// is exercised only by this module's own tests and by `tests/faults_seeded.rs`/`tests/
+/// faults_determinism.rs`, which call `realize_unapplied_fault` directly -- the identical "never
+/// reached by a real `execute()` run any more" fate R4.1a's own report already recorded for
+/// `PORT_KINDS`'s pre-R4.1a role in this same function. Named distinctly from [`SENSOR_KINDS`]
+/// below (rather than reusing that name for both) because the two vocabularies are genuinely
+/// different: this one is ADR-005 section 5's UNREALIZED, generic sensor list; `SENSOR_KINDS` is
+/// the star tracker's own REAL, narrower, task-178-decided one (drops `"noise"`/`"misalign"`,
+/// adds `"freeze"`/`"scale"`) -- see that constant's own doc comment.
+const SENSOR_KINDS_ADR005_GENERIC: [&str; 4] = ["bias", "noise", "dropout", "misalign"];
+/// `Fault.kind` values the star tracker's own SENSOR fault runtime (R5.1a, `docs/open-
+/// questions.md` question 178) actually supports -- checked by `executor::execute`'s own
+/// load-time fault-validation loop for a SENSOR fault naming a `"startracker."`-dispatched
+/// instance (a `kind` outside this list is [`DrmError::UnknownSensorFaultKind`]), mirroring
+/// [`PORT_KINDS`]'s identical role for PORT. **Deliberately not [`SENSOR_KINDS_ADR005_GENERIC`]
+/// above**: ADR-005 section 5's own generic sensor vocabulary was written before any sensor fault
+/// runtime existed and does not fit what a star tracker's declared `StarTrackerFaultEffect`
+/// (`crate::drm::sensors`) can actually represent -- `"noise"` is not a distinct fault (the star
+/// tracker already reports noise every emission; there is no separate "add noise" toggle) and
+/// `"misalign"` duplicates what a declared `startracker.mount_q` already is, a static
+/// configuration value, not a timed fault -- while `"freeze"` and `"scale"` are new kinds this
+/// module's own design (this task's own charter) adds because they are what the star tracker's
+/// single `Option<StarTrackerFaultEffect>` slot can actually express. See `crate::drm::sensors`'s
+/// own module doc comment's "SENSOR fault runtime" section for the full contract.
+pub(crate) const SENSOR_KINDS: [&str; 4] = ["bias", "dropout", "freeze", "scale"];
 
 /// Comparison key for ADR-005 section 5's required fault-application order: "injected at their
 /// epochs in sorted `(epoch, id)` order". Exposed so a caller sorting `&[Fault]` (today,
@@ -196,12 +236,12 @@ pub fn is_legacy_dynamics_power_cycle(fault: &Fault) -> bool {
 }
 
 /// The named `target_kind`'s ADR-005 section 5 kind vocabulary (see [`PORT_KINDS`]/
-/// [`SENSOR_KINDS`]), or `None` for any `target_kind` other than PORT/SENSOR (a caller error --
-/// [`realize_unapplied_fault`] is only meant to be called for those two).
+/// [`SENSOR_KINDS_ADR005_GENERIC`]), or `None` for any `target_kind` other than PORT/SENSOR (a
+/// caller error -- [`realize_unapplied_fault`] is only meant to be called for those two).
 fn kinds_for(target_kind: FaultTargetKind) -> Option<&'static [&'static str]> {
     match target_kind {
         FaultTargetKind::Port => Some(&PORT_KINDS),
-        FaultTargetKind::Sensor => Some(&SENSOR_KINDS),
+        FaultTargetKind::Sensor => Some(&SENSOR_KINDS_ADR005_GENERIC),
         _ => None,
     }
 }
@@ -373,6 +413,121 @@ fn apply_star_tracker_target(spec: &mut StarTrackerSpec, target: &str, value: f6
     match target {
         "startracker.noise_sigma_rad" => spec.noise_sigma_rad = value,
         other => return Err(DrmError::UnknownParameter { context: format!("fault {fault_id:?}"), name: other.to_string() }),
+    }
+    Ok(())
+}
+
+/// `docs/open-questions.md` question 178 (R5.1a): apply one `FAULT_TARGET_KIND_SENSOR` fault to
+/// a star-tracker `BindingPlan`, returning the new plan the boundary loop re-materializes from --
+/// the SENSOR counterpart of [`apply_dynamics_fault`], called from the identical `Boundary::
+/// Fault` arm in `executor::run_shared_group`'s own boundary loop (that arm branches on
+/// `fault.target_kind` to decide which of the two to call). `fault.kind` is already validated
+/// against [`SENSOR_KINDS`] by `executor::execute`'s own load-time fault-validation loop, and
+/// `fault.instance` is already validated to name a star-tracker instance -- this function's own
+/// `target` match (below) is the ONLY place a per-kind `target` string is checked, mirroring
+/// [`apply_gmat_target`]/[`apply_star_tracker_target`]'s own identical "kind is checked at load,
+/// target is checked lazily, at apply time" precedent for DYNAMICS.
+///
+/// # Panics
+///
+/// If `plan` is not `BindingPlan::StarTracker` -- a caller bug: `executor::execute`'s own
+/// load-time validation (`DrmError::SensorFaultTargetNotASensor`) guarantees a SENSOR fault
+/// naming a star-tracker instance can only ever reach this function with a `BindingPlan::
+/// StarTracker` plan (mirrors [`materialize_plan_at_boundary`]'s own array-length `.expect()`
+/// preconditions elsewhere in this crate).
+pub fn apply_sensor_fault(plan: &BindingPlan, fault: &Fault) -> Result<BindingPlan, DrmError> {
+    let BindingPlan::StarTracker(spec) = plan else {
+        panic!("apply_sensor_fault called on a non-StarTracker plan ({plan:?}); executor::execute's own load-time validation (DrmError::SensorFaultTargetNotASensor) guarantees this never happens for a real run")
+    };
+    let mut spec: StarTrackerSpec = spec.clone();
+    let effect = match fault.kind.as_str() {
+        "bias" => {
+            let axis = match fault.target.as_str() {
+                "startracker.bias_rad.x" => 0,
+                "startracker.bias_rad.y" => 1,
+                "startracker.bias_rad.z" => 2,
+                other => return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: other.to_string() }),
+            };
+            crate::drm::sensors::StarTrackerFaultEffect::Bias { axis, value_rad: fault_value(fault)? }
+        }
+        "dropout" => {
+            if fault.target != "startracker.output" {
+                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+            }
+            crate::drm::sensors::StarTrackerFaultEffect::Dropout
+        }
+        "freeze" => {
+            if fault.target != "startracker.output" {
+                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+            }
+            crate::drm::sensors::StarTrackerFaultEffect::Freeze
+        }
+        "scale" => {
+            if fault.target != "startracker.scale" {
+                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+            }
+            crate::drm::sensors::StarTrackerFaultEffect::Scale { value: fault_value(fault)? }
+        }
+        other => panic!("apply_sensor_fault called with kind {other:?}; executor::execute's own load-time validation against fault::SENSOR_KINDS guarantees only bias/dropout/freeze/scale ever reach here"),
+    };
+    spec.fault = Some(effect);
+    Ok(BindingPlan::StarTracker(spec))
+}
+
+/// `docs/open-questions.md` question 178 (R5.1a): restore a star-tracker `BindingPlan` to its
+/// exact pre-fault value at a windowed SENSOR fault's own end epoch -- the second re-
+/// materialization boundary `executor::run_shared_group` synthesizes for `duration_ns > 0`
+/// (`Boundary::SensorFaultEnd`). Simply clears `StarTrackerSpec::fault` back to `None`; every
+/// other declared field is untouched, since nothing else about the spec ever changed.
+///
+/// # Panics
+///
+/// Same precondition as [`apply_sensor_fault`] -- see that function's own doc comment.
+pub fn clear_sensor_fault(plan: &BindingPlan) -> BindingPlan {
+    let BindingPlan::StarTracker(spec) = plan else {
+        panic!("clear_sensor_fault called on a non-StarTracker plan ({plan:?}); executor::run_shared_group only ever synthesizes a Boundary::SensorFaultEnd for a star-tracker instance")
+    };
+    let mut spec: StarTrackerSpec = spec.clone();
+    spec.fault = None;
+    BindingPlan::StarTracker(spec)
+}
+
+/// `docs/open-questions.md` questions 178/184/186(b) (R5.1a): refuse two `FAULT_TARGET_KIND_
+/// SENSOR` faults naming the same `instance` whose `[tai_ns, tai_ns + duration_ns)` windows
+/// overlap -- see `super::DrmError::OverlappingSensorFaultWindows`'s own doc comment for the
+/// full reasoning (keyed on `instance` alone, coarser than PORT's own `(instance, port)` key,
+/// because of the single-`Option`-slot `StarTrackerSpec::fault` representation). Mirrors
+/// `crate::router::Router::install_port_faults`'s own overlap check exactly (`duration_ns == 0`
+/// means "persistent to end of run," so it overlaps everything at or after its own start on that
+/// instance; two disjoint windows -- one ending exactly where another begins -- stay legal,
+/// half-open intervals). Called once, by `executor::execute`, after its own per-fault loop has
+/// already validated every SENSOR fault's own `instance`/`kind` -- every fault this function
+/// inspects is assumed already-valid on that basis (a caller bug otherwise, not a data problem,
+/// mirroring [`apply_sensor_fault`]'s own precondition).
+pub fn validate_no_overlapping_sensor_fault_windows(faults: &[Fault]) -> Result<(), DrmError> {
+    let sensor_faults: Vec<&Fault> = faults.iter().filter(|f| f.target_kind == FaultTargetKind::Sensor as i32).collect();
+    for i in 0..sensor_faults.len() {
+        for j in (i + 1)..sensor_faults.len() {
+            let a = sensor_faults[i];
+            let b = sensor_faults[j];
+            if a.instance != b.instance {
+                continue;
+            }
+            let a_end = if a.duration_ns == 0 { i64::MAX } else { a.tai_ns + a.duration_ns };
+            let b_end = if b.duration_ns == 0 { i64::MAX } else { b.tai_ns + b.duration_ns };
+            let overlap_start = a.tai_ns.max(b.tai_ns);
+            let overlap_end = a_end.min(b_end);
+            if overlap_start < overlap_end {
+                let overlap_end_tai_ns = if a.duration_ns == 0 && b.duration_ns == 0 { None } else { Some(overlap_end) };
+                return Err(DrmError::OverlappingSensorFaultWindows {
+                    fault_a: a.id.clone(),
+                    fault_b: b.id.clone(),
+                    instance: a.instance.clone(),
+                    overlap_start_tai_ns: overlap_start,
+                    overlap_end_tai_ns,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -609,7 +764,7 @@ mod tests {
     // target as for an attitude one.
 
     fn star_tracker_spec() -> StarTrackerSpec {
-        StarTrackerSpec { update_rate_hz: 2.0, seed: 7, noise_sigma_rad: 1e-5, mount_q: [0.1, 0.2, 0.3, 0.4] }
+        StarTrackerSpec { update_rate_hz: 2.0, seed: 7, noise_sigma_rad: 1e-5, mount_q: [0.1, 0.2, 0.3, 0.4], fault: None }
     }
 
     fn ground_station_spec() -> GroundStationSpec {
@@ -691,6 +846,112 @@ mod tests {
             let err = apply_dynamics_fault(&plan, &attitude_fault(target, 1.0)).unwrap_err();
             assert!(matches!(err, DrmError::UnknownParameter { ref name, .. } if name == target), "target {target:?}: {err:?}");
         }
+    }
+
+    // -- Question 178 (R5.1a): `apply_sensor_fault`/`clear_sensor_fault`, the SENSOR counterpart
+    // of `apply_dynamics_fault` immediately above, for the star tracker's own four declared
+    // kinds (`fault::SENSOR_KINDS`).
+
+    fn sensor_fault_kind(id: &str, kind: &str, target: &str, value: Option<f64>) -> Fault {
+        let mut params = std::collections::BTreeMap::new();
+        if let Some(v) = value {
+            params.insert("value".to_string(), v);
+        }
+        Fault { id: id.to_string(), target_kind: FaultTargetKind::Sensor as i32, instance: "st1".to_string(), target: target.to_string(), kind: kind.to_string(), params, ..Default::default() }
+    }
+
+    /// `Bias` writes exactly the declared axis/value into `StarTrackerSpec::fault`, leaving
+    /// every other declared field untouched -- fails against an implementation that writes the
+    /// wrong axis, drops the value, or perturbs `noise_sigma_rad`/`mount_q` by mistake.
+    #[test]
+    fn apply_sensor_fault_bias_writes_the_declared_axis_and_value() {
+        let plan = BindingPlan::StarTracker(star_tracker_spec());
+        for (target, axis) in [("startracker.bias_rad.x", 0), ("startracker.bias_rad.y", 1), ("startracker.bias_rad.z", 2)] {
+            let BindingPlan::StarTracker(spec) = apply_sensor_fault(&plan, &sensor_fault_kind("f1", "bias", target, Some(0.002))).unwrap() else { panic!("expected StarTracker") };
+            assert_eq!(spec.fault, Some(crate::drm::sensors::StarTrackerFaultEffect::Bias { axis, value_rad: 0.002 }), "target {target:?}");
+            assert_eq!(spec.noise_sigma_rad, star_tracker_spec().noise_sigma_rad, "bias must not perturb noise_sigma_rad");
+        }
+    }
+
+    #[test]
+    fn apply_sensor_fault_dropout_and_freeze_write_the_declared_effect() {
+        let plan = BindingPlan::StarTracker(star_tracker_spec());
+        let BindingPlan::StarTracker(dropout) = apply_sensor_fault(&plan, &sensor_fault_kind("f1", "dropout", "startracker.output", None)).unwrap() else { panic!("expected StarTracker") };
+        assert_eq!(dropout.fault, Some(crate::drm::sensors::StarTrackerFaultEffect::Dropout));
+        let BindingPlan::StarTracker(freeze) = apply_sensor_fault(&plan, &sensor_fault_kind("f2", "freeze", "startracker.output", None)).unwrap() else { panic!("expected StarTracker") };
+        assert_eq!(freeze.fault, Some(crate::drm::sensors::StarTrackerFaultEffect::Freeze));
+    }
+
+    #[test]
+    fn apply_sensor_fault_scale_writes_the_declared_value() {
+        let plan = BindingPlan::StarTracker(star_tracker_spec());
+        let BindingPlan::StarTracker(spec) = apply_sensor_fault(&plan, &sensor_fault_kind("f1", "scale", "startracker.scale", Some(3.5))).unwrap() else { panic!("expected StarTracker") };
+        assert_eq!(spec.fault, Some(crate::drm::sensors::StarTrackerFaultEffect::Scale { value: 3.5 }));
+    }
+
+    /// A recognized `kind` (already validated against `SENSOR_KINDS` at load, by construction --
+    /// this function's own doc comment) but a `target` string that does not match what that
+    /// kind actually requires (e.g. `"bias"` naming `startracker.scale`) is a typed
+    /// `DrmError::UnknownParameter`, never silently accepted or misapplied -- mirrors
+    /// `apply_gmat_target`'s own lazy, apply-time target validation.
+    #[test]
+    fn apply_sensor_fault_refuses_a_target_that_does_not_match_its_own_kind() {
+        let plan = BindingPlan::StarTracker(star_tracker_spec());
+        for (kind, target, value) in [("bias", "startracker.scale", Some(1.0)), ("dropout", "startracker.bias_rad.x", None), ("freeze", "startracker.scale", None), ("scale", "startracker.output", Some(1.0))] {
+            let err = apply_sensor_fault(&plan, &sensor_fault_kind("f1", kind, target, value)).unwrap_err();
+            assert!(matches!(err, DrmError::UnknownParameter { .. }), "kind {kind:?} target {target:?}: {err:?}");
+        }
+    }
+
+    /// `clear_sensor_fault` restores exactly `fault: None`, leaving every other declared field
+    /// untouched -- fails against an implementation that also resets `noise_sigma_rad`/`mount_q`
+    /// or forgets to clear `fault` at all.
+    #[test]
+    fn clear_sensor_fault_restores_fault_to_none_and_touches_nothing_else() {
+        let plan = BindingPlan::StarTracker(star_tracker_spec());
+        let faulted = apply_sensor_fault(&plan, &sensor_fault_kind("f1", "scale", "startracker.scale", Some(2.0))).unwrap();
+        let BindingPlan::StarTracker(cleared) = clear_sensor_fault(&faulted) else { panic!("expected StarTracker") };
+        assert_eq!(cleared.fault, None);
+        assert_eq!(cleared.noise_sigma_rad, star_tracker_spec().noise_sigma_rad);
+        assert_eq!(cleared.mount_q, star_tracker_spec().mount_q);
+    }
+
+    fn sensor_window_fault(id: &str, instance: &str, target: &str, tai_ns: i64, duration_ns: i64) -> Fault {
+        Fault { id: id.to_string(), target_kind: FaultTargetKind::Sensor as i32, instance: instance.to_string(), target: target.to_string(), kind: "dropout".to_string(), tai_ns, duration_ns, ..Default::default() }
+    }
+
+    /// Two overlapping windows on the SAME instance are refused, even when their own `target`
+    /// strings differ (`"bias_rad.x"` vs `"output"`) -- the deliberate, coarser-than-PORT key
+    /// `DrmError::OverlappingSensorFaultWindows`'s own doc comment explains.
+    #[test]
+    fn overlapping_sensor_fault_windows_on_the_same_instance_are_refused_even_with_different_targets() {
+        let faults = [sensor_window_fault("f1", "st1", "startracker.bias_rad.x", 1_000, 500), sensor_window_fault("f2", "st1", "startracker.output", 1_200, 500)];
+        let err = validate_no_overlapping_sensor_fault_windows(&faults).unwrap_err();
+        assert!(matches!(err, DrmError::OverlappingSensorFaultWindows { ref fault_a, ref fault_b, ref instance, overlap_start_tai_ns: 1_200, overlap_end_tai_ns: Some(1_500), .. } if fault_a == "f1" && fault_b == "f2" && instance == "st1"), "{err:?}");
+    }
+
+    /// Disjoint windows (one ending exactly where the next begins -- half-open, not overlapping)
+    /// on the same instance stay legal, mirroring PORT's identical disjoint-window precedent.
+    #[test]
+    fn disjoint_sensor_fault_windows_on_the_same_instance_are_legal() {
+        let faults = [sensor_window_fault("f1", "st1", "startracker.output", 1_000, 500), sensor_window_fault("f2", "st1", "startracker.output", 1_500, 500)];
+        assert!(validate_no_overlapping_sensor_fault_windows(&faults).is_ok());
+    }
+
+    /// Two windows on DIFFERENT instances never conflict, regardless of overlap.
+    #[test]
+    fn overlapping_windows_on_different_instances_are_legal() {
+        let faults = [sensor_window_fault("f1", "st1", "startracker.output", 1_000, 500), sensor_window_fault("f2", "st2", "startracker.output", 1_000, 500)];
+        assert!(validate_no_overlapping_sensor_fault_windows(&faults).is_ok());
+    }
+
+    /// A persistent fault (`duration_ns == 0`, "to end of run") on one instance conflicts with
+    /// ANY later fault on the same instance -- mirrors PORT's identical rule.
+    #[test]
+    fn a_persistent_sensor_fault_conflicts_with_any_later_fault_on_the_same_instance() {
+        let faults = [sensor_window_fault("f1", "st1", "startracker.output", 1_000, 0), sensor_window_fault("f2", "st1", "startracker.output", 5_000, 500)];
+        let err = validate_no_overlapping_sensor_fault_windows(&faults).unwrap_err();
+        assert!(matches!(err, DrmError::OverlappingSensorFaultWindows { overlap_end_tai_ns: Some(5_500), .. }), "{err:?}");
     }
 
     /// The IMU counterpart of the star tracker test above: all four declared noise/bias-

@@ -502,33 +502,83 @@ pub enum DrmError {
     /// load-time policy refusal, not "I tried and there is nothing to apply this to").
     ///
     /// **R4.1a (`crate::router`'s own module doc comment's "Port fault runtime" section) narrows
-    /// this variant to SENSOR only.** A `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/
-    /// `"delay"` now has a real runtime (`crate::router::Router::install_port_faults`/
-    /// `deliver`) and no longer reaches this variant at all; `kind == "corrupt"`/`"duplicate"`
-    /// (R4.1b's own scope, on the identical machinery) reaches [`DrmError::
-    /// PortFaultKindNotYetSupported`] instead, and any other `kind` reaches
-    /// [`DrmError::UnknownPortFaultKind`] -- see `execute()`'s own load-time fault-validation
-    /// loop for exactly how the three are told apart. `target_kind` is always
+    /// this variant to SENSOR only, and R4.1b makes that narrowing permanent.** A
+    /// `FAULT_TARGET_KIND_PORT` fault now has a real runtime for its whole documented vocabulary
+    /// (`"drop"`/`"delay"`, R4.1a; `"corrupt"`/`"duplicate"`, R4.1b -- `crate::router::Router::
+    /// install_port_faults`/`deliver`) and never reaches this variant at all any more; a `kind`
+    /// outside that vocabulary entirely reaches [`DrmError::UnknownPortFaultKind`] instead -- see
+    /// `execute()`'s own load-time fault-validation loop. `target_kind` is always
     /// `"FAULT_TARGET_KIND_SENSOR"` now; the field is kept (rather than dropped) so this remains
     /// the same wire/`Debug` shape it always was, for any caller already matching on it.
+    ///
+    /// **R5.1a (`docs/open-questions.md` question 178, the star-tracker SENSOR fault runtime)
+    /// narrows this variant a second time, to IMU only.** A `FAULT_TARGET_KIND_SENSOR` fault
+    /// naming a `"startracker."`-dispatched instance now has a real runtime
+    /// (`crate::drm::sensors::StarTrackerModel`'s own `fault: Option<StarTrackerFaultEffect>`,
+    /// applied at fault-bounded re-materialization boundaries exactly like a DYNAMICS fault --
+    /// see `crate::drm::sensors`'s own module doc comment and `crate::drm::fault::
+    /// apply_sensor_fault`) and never reaches this variant either; a SENSOR fault whose `kind` is
+    /// outside the star tracker's own documented vocabulary reaches [`DrmError::
+    /// UnknownSensorFaultKind`] instead, and one naming an instance that is not a sensor model
+    /// instance at all reaches [`DrmError::SensorFaultTargetNotASensor`]. This variant is now
+    /// reached **only** by a SENSOR fault naming a `"imu."`-dispatched instance -- the IMU's own
+    /// SENSOR fault runtime remains out of this task's scope (R5.1b's own charter); do not delete
+    /// this variant until R5.1b gives the IMU a real runtime too, exactly as R4.1b deleted the
+    /// analogous `DrmError::PortFaultKindNotYetSupported` only once every PORT kind had one.
+    /// `target_kind` stays `"FAULT_TARGET_KIND_SENSOR"` (the field is kept, unchanged, for the
+    /// same reason the R4.1a narrowing above kept it).
     PortOrSensorFaultNotYetSupported { fault_id: String, instance: String, target_kind: String },
-    /// R4.1a (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's own
-    /// `kind` was `"corrupt"` or `"duplicate"` -- both are in ADR-005 section 5's own PORT
-    /// vocabulary (`crate::drm::fault::PORT_KINDS`), but this crate's own port fault runtime
-    /// (`crate::router`) implements only `"drop"`/`"delay"` so far; `"corrupt"`/`"duplicate"` are
-    /// R4.1b's own scope, on the identical machinery R4.1a built. Distinct from
-    /// [`DrmError::UnknownPortFaultKind`] (a `kind` outside the documented vocabulary entirely)
-    /// and from [`DrmError::PortOrSensorFaultNotYetSupported`] (now SENSOR-only, which has no
-    /// runtime at all).
-    PortFaultKindNotYetSupported { fault_id: String, instance: String, kind: String },
-    /// R4.1a (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's own
-    /// `kind` was not one of ADR-005 section 5's own four documented PORT kinds
+    /// R4.1a/R4.1b (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's
+    /// own `kind` was not one of ADR-005 section 5's own four documented PORT kinds
     /// (`crate::drm::fault::PORT_KINDS`: `"drop"`, `"delay"`, `"corrupt"`, `"duplicate"`) at all --
     /// refused at load, before any binding or GMAT call, the same "checked up front" pattern
-    /// every other fault-validation refusal in this executor follows. Distinct from
-    /// [`DrmError::PortFaultKindNotYetSupported`] (a real, documented kind this crate simply has
-    /// not implemented yet).
+    /// every other fault-validation refusal in this executor follows. **R4.1b removed the sibling
+    /// `DrmError::PortFaultKindNotYetSupported` variant this crate carried through R4.1a**: it
+    /// existed only to name a real, documented PORT kind this crate had not implemented yet
+    /// (`"corrupt"`/`"duplicate"`); now that all four documented kinds have a real runtime, no
+    /// PORT fault can ever reach that "documented but unimplemented" state again, so the variant
+    /// was dead code the moment R4.1b landed and was deleted rather than left unreachable (see
+    /// `R4_1B_REPORT.md`) -- this variant is the only one left for a PORT fault's own `kind`.
     UnknownPortFaultKind { fault_id: String, instance: String, kind: String },
+    /// `docs/open-questions.md` question 178 (R5.1a): a `FAULT_TARGET_KIND_SENSOR` fault named a
+    /// `"startracker."`-dispatched instance, but its own `kind` was not one of the star tracker's
+    /// own documented vocabulary (`crate::drm::fault::SENSOR_KINDS`: `"bias"`, `"dropout"`,
+    /// `"freeze"`, `"scale"`) -- refused at load, before any binding or GMAT call, mirroring
+    /// [`DrmError::UnknownPortFaultKind`]'s identical role for PORT.
+    UnknownSensorFaultKind { fault_id: String, instance: String, kind: String },
+    /// `docs/open-questions.md` question 178 (R5.1a): a `FAULT_TARGET_KIND_SENSOR` fault named an
+    /// `instance` that is not a sensor model instance at all (neither `"startracker."`- nor
+    /// `"imu."`-dispatched -- `crate::registry::kind_for`) -- refused at load, before any binding
+    /// or GMAT call. `binding` names the instance's own `SystemDefinition.dynamics_model`, so the
+    /// refusal is self-explaining without a second lookup.
+    SensorFaultTargetNotASensor { fault_id: String, instance: String, binding: String },
+    /// `docs/open-questions.md` questions 178/184/186(b) (R5.1a): two `FAULT_TARGET_KIND_SENSOR`
+    /// faults naming the same star-tracker `instance` have overlapping `[tai_ns, tai_ns +
+    /// duration_ns)` windows. Mirrors `crate::router::RouterError::OverlappingPortFaultWindows`'s
+    /// own rule and reasoning **keyed one level coarser** than that PORT precedent: PORT keys on
+    /// `(instance, port)` because two different ports are two genuinely independent channels a
+    /// `Router` can act on simultaneously; a star tracker's own SENSOR fault runtime instead
+    /// carries its currently-installed effect in ONE `Option<crate::drm::sensors::
+    /// StarTrackerFaultEffect>` slot (`StarTrackerSpec::fault`) regardless of which of the four
+    /// kinds it is, so two faults naming *different* targets on the *same instance* (e.g. a
+    /// `"bias"` fault on `startracker.bias_rad.x` and a `"scale"` fault on `startracker.scale`)
+    /// could not both be installed at once either -- keying the refusal on `target` alone, the
+    /// way PORT's `port` does, would let such a pair load and then silently let the later one
+    /// clobber the earlier one's effect for the overlap, which is exactly the ambiguous-join
+    /// failure mode this refusal exists to prevent. Refusing any overlap on the same instance,
+    /// regardless of target, is what keeps the event-to-effect join unambiguous (mirrors question
+    /// 184's own reasoning) and is what makes "at most one SENSOR fault is ever in force on one
+    /// instance at a time" (question 186(c)'s `frames_affected` attribution) actually true.
+    /// **No `target_a`/`target_b` fields** (unlike a first draft of this variant): `clippy::
+    /// result_large_err` flags `DrmError` itself once any one variant exceeds its own size
+    /// threshold, cascading into 81 unrelated "this Result is too large" errors across every
+    /// function in this crate returning `Result<_, DrmError>` -- two more `String` fields pushed
+    /// this variant to 144 bytes; `instance` alone (the actual join key -- see above) is already
+    /// sufficient to look the two faults' own declared targets up in `Scenario.faults` if a
+    /// caller needs them, exactly the same information-is-derivable-not-duplicated convention
+    /// `crate::router`'s own module doc comment already applies to `PortTrafficRecord` not
+    /// carrying a fault-attribution field.
+    OverlappingSensorFaultWindows { fault_a: String, fault_b: String, instance: String, overlap_start_tai_ns: i64, overlap_end_tai_ns: Option<i64> },
     /// M25.4b (question 175's own follow-on): `RunConfig.replay.log_path` could not be read,
     /// or its bytes (once hash-verified -- see [`DrmError::ReplayLogHashMismatch`]) did not
     /// decode as a `PortTrafficLog` -- `crate::drm::replay::verify_and_load`'s own doc comment
@@ -681,16 +731,24 @@ impl std::fmt::Display for DrmError {
             DrmError::GroundPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid ground station port/codec configuration: {reason}"),
             DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } => write!(
                 f,
-                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults are not realized by this kernel yet (docs/open-questions.md question 178) -- the sensor fault runtime is task R4.2's own scope, not merely \"unsupported\" (a PORT fault's own \"drop\"/\"delay\" kinds DO have a runtime now, R4.1a -- see crate::router's own module doc comment)"
-            ),
-            DrmError::PortFaultKindNotYetSupported { fault_id, instance, kind } => write!(
-                f,
-                "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_PORT kind {kind:?} is in ADR-005 section 5's own vocabulary but this crate's port fault runtime (crate::router) implements only \"drop\"/\"delay\" so far -- {kind:?} is task R4.1b's own scope, on the identical machinery"
+                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults on an IMU instance are not realized by this kernel yet (docs/open-questions.md question 178) -- the IMU sensor fault runtime is task R5.1b's own scope; the star tracker's own SENSOR fault runtime DOES exist now, R5.1a -- see crate::drm::sensors's own module doc comment"
             ),
             DrmError::UnknownPortFaultKind { fault_id, instance, kind } => write!(
                 f,
                 "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_PORT kind {kind:?} is not one of ADR-005 section 5's own documented PORT kinds (\"drop\", \"delay\", \"corrupt\", \"duplicate\")"
             ),
+            DrmError::UnknownSensorFaultKind { fault_id, instance, kind } => write!(
+                f,
+                "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_SENSOR kind {kind:?} is not one of the star tracker's own documented kinds (\"bias\", \"dropout\", \"freeze\", \"scale\")"
+            ),
+            DrmError::SensorFaultTargetNotASensor { fault_id, instance, binding } => write!(
+                f,
+                "fault {fault_id:?} names instance {instance:?}, whose own binding {binding:?} is not a sensor model instance (neither \"startracker.\"- nor \"imu.\"-dispatched)"
+            ),
+            DrmError::OverlappingSensorFaultWindows { fault_a, fault_b, instance, overlap_start_tai_ns, overlap_end_tai_ns } => {
+                let end = overlap_end_tai_ns.map(|e| e.to_string()).unwrap_or_else(|| "end of run".to_string());
+                write!(f, "faults {fault_a:?} and {fault_b:?} on instance {instance:?} have overlapping windows: [{overlap_start_tai_ns}, {end})")
+            }
             DrmError::PortTrafficSidecarIo { path, detail } => write!(f, "writing the port traffic sidecar to {}: {detail}", path.display()),
             DrmError::ReplayLogIo { path, detail } => write!(f, "replay log {}: {detail}", path.display()),
             DrmError::ReplayLogHashMismatch { path, expected, computed } => {

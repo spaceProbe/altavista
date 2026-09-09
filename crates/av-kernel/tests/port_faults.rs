@@ -37,6 +37,43 @@
 //! baseline itself, live, in-process (never a hand-copied constant from another test file), and
 //! asserts the faulted run's own real epochs equal `baseline + output_period_ns` exactly.
 //!
+//! **Test 1b (corrupt, R4.1b).** `demo_command_port_corrupt.drm.yaml`'s own fault
+//! (`corrupt_ground_cmd`, window `[50s, 51s)`, `params.corrupt_mask = 255`) targets the identical
+//! emitting port as Test 1. Predicted, before running: `ground.cmd_out`'s own OUT record keeps
+//! the emitter's own ORIGINAL bytes (`crate::router`'s own "Corrupt" doc section: the OUT record
+//! is recorded before any fault is even consulted); `flight.cmd_in`'s own IN record carries every
+//! one of those same bytes XORed with `0xFF` -- computed from the OUT record's own real bytes,
+//! not hand-copied hex, so this stays honest against whatever `crate::codec::encode_packet`
+//! actually produces for this DRM's own CCSDS command packet. Because the mask covers the WHOLE
+//! payload (the CCSDS primary header included, not merely the "value" user-data field), the
+//! packet's own APID is corrupted away from 700 for any non-zero mask, so `flight`'s own
+//! `crate::codec::decode_packet` fails and the command is silently never applied -- the SAME
+//! command-transition shape as Test 1 (drop): 4 COMMAND_TRANSITION events (never ACKED), zero
+//! PORT_COMMAND events, 4 LIFECYCLE events, exactly one FAULT event. **Predicted total: 4 + 4 + 1
+//! = 9 events; 2 PortTrafficLog records (1 OUT + 1 IN), unlike Test 1's own 1 (drop keeps only
+//! the OUT; corrupt keeps both, since the frame really is delivered, just unusably mutated).**
+//!
+//! **Test 2b (duplicate, R4.1b).** `demo_command_port_duplicate.drm.yaml`'s own fault
+//! (`duplicate_ground_cmd`, window `[50s, 51s)`, no declared params -- "duplicate" always means
+//! exactly one `output_period_ns` later) targets the identical emitting port again. Predicted,
+//! before running: `ground.cmd_out`'s own OUT record count stays 1 (never a second one --
+//! `crate::router`'s own "Duplicate" doc section: there is only ever one real emission);
+//! `flight.cmd_in`'s own IN record count is 2, both sharing the ONE real `tai_ns` (the dispatch
+//! epoch, never the fault's own added offset). `flight`'s own `ConstantAccelModel::
+//! step_with_ports` genuinely receives that payload at two different native steps (dispatch + 3s,
+//! the connection's own unfaulted availability; and dispatch + 4s, one whole `output_period_ns`
+//! later) -- but its own "changed, or first" rule (`crate::drm::binding::ConstantAccelModel::
+//! step_with_ports`, `last_applied_command_value`) means only the FIRST of the two decodes as
+//! newly applied (the second carries the identical `value = 3.0`, already applied): so
+//! `RunProducts.events` shows EXACTLY ONE PORT_COMMAND event and the SAME single ACKED
+//! transition, at the SAME epochs as the UNFAULTED baseline -- "duplicate" is invisible to
+//! command-level semantics even though the sidecar proves the frame really was delivered twice.
+//! **Predicted total: identical event shape/count to the unfaulted baseline PLUS one FAULT
+//! event; 4 PortTrafficLog records (1 cmd_out OUT + 2 cmd_in IN + 1 ack_out OUT... plus the ack's
+//! own IN on `ground.ack_in`) -- measured exactly, not merely predicted qualitatively, in the
+//! test body itself, since this is the one count this task's own brief explicitly calls out
+//! ("with the record counts stated before measuring").**
+//!
 //! ## What this file deliberately does NOT duplicate
 //!
 //! "A PORT fault naming a non-FRAMED port" is pinned at the `crate::router::Router` level
@@ -361,10 +398,15 @@ fn a_port_fault_naming_an_unknown_kind_is_a_typed_load_error() {
     assert!(matches!(&err, DrmError::UnknownPortFaultKind { fault_id, instance, kind } if fault_id == "f_bad_kind" && instance == "ground" && kind == "not_a_real_kind"), "{err:?}");
 }
 
-/// A `"corrupt"`/`"duplicate"` PORT fault (R4.1b's own not-yet-implemented scope) is
-/// `DrmError::PortFaultKindNotYetSupported`, distinct from `UnknownPortFaultKind`.
+/// **Converted for R4.1b.** Through R4.1a, `"corrupt"`/`"duplicate"` were `DrmError::
+/// PortFaultKindNotYetSupported` (that variant has since been removed -- see `crate::drm::mod`'s
+/// own doc comment and `R4_1B_REPORT.md`). R4.1b implements both, on the identical machinery this
+/// file's own dedicated `demo_command_port_corrupt`/`demo_command_port_duplicate` tests exercise
+/// in full byte-level detail below -- this smoke test's own, narrower job is only to confirm
+/// neither kind is refused at load through `execute()` any more (a generic `Fault` built directly
+/// in Rust, on the existing `demo_command.drm.yaml` fixture, rather than a dedicated DRM file).
 #[test]
-fn a_port_fault_naming_corrupt_or_duplicate_is_a_distinct_typed_load_error_naming_r4_1b() {
+fn a_port_fault_naming_corrupt_or_duplicate_now_loads_and_applies_r4_1b() {
     let _engine = gmat_sys::engine_lock();
     let sos = load_command_sos();
     let systems = load_command_systems();
@@ -374,9 +416,9 @@ fn a_port_fault_naming_corrupt_or_duplicate_is_a_distinct_typed_load_error_namin
         let mut drm = load_drm("demo_command.drm.yaml");
         {
             let scenario = drm.scenario.as_mut().expect("scenario");
-            scenario.seeds.insert("f_unimplemented".to_string(), 1);
+            scenario.seeds.insert("f_now_real".to_string(), 1);
             scenario.faults.push(Fault {
-                id: "f_unimplemented".to_string(),
+                id: "f_now_real".to_string(),
                 tai_ns: START_TAI_NS,
                 duration_ns: 0,
                 target_kind: FaultTargetKind::Port as i32,
@@ -387,8 +429,9 @@ fn a_port_fault_naming_corrupt_or_duplicate_is_a_distinct_typed_load_error_namin
             });
         }
         let drm = rehash_drm(drm);
-        let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-r4-1b", None)).expect_err(&format!("kind {kind:?} must still be a typed load refusal"));
-        assert!(matches!(&err, DrmError::PortFaultKindNotYetSupported { fault_id, instance, kind: k } if fault_id == "f_unimplemented" && instance == "ground" && k == kind), "kind {kind:?}: {err:?}");
+        let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-r4-1b", None)).unwrap_or_else(|e| panic!("kind {kind:?} must load and run now (R4.1b): {e:?}"));
+        let fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "f_now_real").collect();
+        assert_eq!(fault_events.len(), 1, "kind {kind:?} must genuinely apply (the command dispatch is its one candidate frame): {fault_events:#?}");
     }
 }
 
@@ -519,4 +562,247 @@ fn a_port_fault_off_the_sample_grid_still_loads_and_applies() {
     assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
     assert_eq!(fault_events[0].reference_id, "f_off_grid");
     assert_eq!(fault_events[0].tai_ns, COMMAND_TAI_NS, "applied at the real dispatch epoch, the fault's own window merely needed to cover it");
+}
+
+// =================================================================================================
+// Test 1b: corrupt (R4.1b) -- see the module doc comment's "Test 1b (corrupt)" section.
+// =================================================================================================
+
+/// Fails against an implementation that: never mutates the IN side at all (IN bytes == OUT
+/// bytes); also mutates the OUT record (the module doc comment's "OUT is the emitter's own
+/// original bytes" rule is the whole point); XORs the wrong mask, or the wrong bytes; or never
+/// emits the FAULT event (or emits it without `frames_affected`).
+#[test]
+fn demo_command_port_corrupt_mutates_the_bytes_flight_receives_and_keeps_the_out_record_original() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = load_drm("demo_command_port_corrupt.drm.yaml");
+    let sos = load_command_sos();
+    let systems = load_command_systems();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let dir = scratch_dir("corrupt");
+
+    let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-corrupt", Some(dir.clone()))).expect("demo_command_port_corrupt executes end to end");
+
+    // -- Events -----------------------------------------------------------------------------
+    let transitions: Vec<&str> = products.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "cmd1").map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        transitions,
+        vec!["COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED", "COMMAND_STATE_DISPATCHED"],
+        "no ACKED: a whole-payload XOR by a nonzero mask corrupts the packet's own APID away from 700, so flight's own decode_packet must fail"
+    );
+    let port_commands: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32).collect();
+    assert!(port_commands.is_empty(), "flight must never have applied accel_scale from an undecodable packet: {port_commands:#?}");
+
+    let fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32).collect();
+    assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
+    assert_eq!(fault_events[0].reference_id, "corrupt_ground_cmd");
+    assert_eq!(fault_events[0].tai_ns, COMMAND_TAI_NS, "the fault's own first (and only) applied frame is the dispatch itself");
+    assert_eq!(fault_events[0].values.get("frames_affected").copied(), Some(1.0), "question 186(c): the one frame this fault affected");
+
+    let lifecycle: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Lifecycle as i32).collect();
+    assert_eq!(lifecycle.len(), 4, "2 instances x run_start/run_end: {lifecycle:#?}");
+    assert_eq!(products.events.len(), 4 + 4 + 1, "predicted total, stated before running: {:#?}", products.events);
+
+    // -- PortTrafficLog sidecar ---------------------------------------------------------------
+    let log = read_port_traffic_log(&dir.join("port_traffic.pb"));
+    assert_eq!(log.records.len(), 2, "1 OUT (original) + 1 IN (corrupted) -- the frame really is delivered, unlike drop: {:#?}", log.records);
+    let out_rec = log.records.iter().find(|r| r.direction == PortDirection::Out as i32).expect("an OUT record");
+    let in_rec = log.records.iter().find(|r| r.direction == PortDirection::In as i32).expect("an IN record");
+    assert_eq!(out_rec.instance, "ground");
+    assert_eq!(out_rec.port, "cmd_out");
+    assert_eq!(out_rec.tai_ns, COMMAND_TAI_NS);
+    assert_eq!(in_rec.instance, "flight");
+    assert_eq!(in_rec.port, "cmd_in");
+    assert_eq!(in_rec.tai_ns, COMMAND_TAI_NS, "the IN record's own tai_ns is still the emission epoch -- a corrupt fault never appears there either, only in the payload");
+
+    // Computed from the OUT record's own REAL bytes (never hand-copied hex), per the module doc
+    // comment's own stated method: expected_in = out_bytes XOR 0xFF (the fixture's declared
+    // corrupt_mask), byte for byte.
+    let expected_in: Vec<u8> = out_rec.payload.iter().map(|b| b ^ 0xFFu8).collect();
+    assert_eq!(in_rec.payload, expected_in, "the IN record must be exactly the OUT record's own bytes XORed with the declared corrupt_mask (255 = 0xFF)");
+    assert_ne!(in_rec.payload, out_rec.payload, "sanity: a nonzero mask must actually change every byte");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =================================================================================================
+// Test 2b: duplicate (R4.1b) -- see the module doc comment's "Test 2b (duplicate)" section.
+// =================================================================================================
+
+/// Fails against an implementation that: delivers only once (no second IN record, or the
+/// receiver never actually sees a second copy); delivers a second OUT record too (rule: only the
+/// emitter's own genuine emission gets one); re-applies the command a second time (a second
+/// PORT_COMMAND/ACKED, or at the wrong epoch); or records the second IN record at the offset
+/// epoch instead of sharing the one real emission epoch.
+#[test]
+fn demo_command_port_duplicate_delivers_the_command_twice_but_is_invisible_to_command_semantics() {
+    let _engine = gmat_sys::engine_lock();
+    let systems = load_command_systems();
+    let sos = load_command_sos();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    // The unfaulted baseline, measured live (not copied from another test file's own numbers).
+    let baseline_drm = load_drm("demo_command.drm.yaml");
+    let baseline_dir = scratch_dir("duplicate-baseline");
+    let baseline = execute(run_config(&gmat, &baseline_drm, &sos, &systems, "test-port-fault-duplicate-baseline", Some(baseline_dir.clone()))).expect("baseline demo_command executes");
+    let baseline_log = read_port_traffic_log(&baseline_dir.join("port_traffic.pb"));
+    assert_eq!(
+        baseline_log.records.len(),
+        4,
+        "sanity, stated before measuring the faulted run: 1 cmd_out OUT + 1 cmd_in IN + 1 ack_out OUT + 1 ack_in IN: {:#?}",
+        baseline_log.records
+    );
+
+    let duplicate_drm = load_drm("demo_command_port_duplicate.drm.yaml");
+    let dir = scratch_dir("duplicate");
+    let faulted = execute(run_config(&gmat, &duplicate_drm, &sos, &systems, "test-port-fault-duplicate", Some(dir.clone()))).expect("demo_command_port_duplicate executes end to end");
+
+    // -- Events: identical shape/epochs to the unfaulted baseline, plus one FAULT event ------
+    let baseline_transitions: Vec<(&str, i64)> = baseline.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "cmd1").map(|e| (e.name.as_str(), e.tai_ns)).collect();
+    let faulted_transitions: Vec<(&str, i64)> = faulted.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "cmd1").map(|e| (e.name.as_str(), e.tai_ns)).collect();
+    assert_eq!(faulted_transitions, baseline_transitions, "a duplicate delivery must be invisible to command-level semantics -- same 5 transitions at the same epochs, including ACKED");
+
+    let baseline_port_commands: Vec<_> = baseline.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32).collect();
+    let faulted_port_commands: Vec<_> = faulted.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32).collect();
+    assert_eq!(baseline_port_commands.len(), 1, "sanity on the baseline itself");
+    assert_eq!(faulted_port_commands.len(), 1, "the second (duplicate) delivery must never re-apply the identical value: {faulted_port_commands:#?}");
+    assert_eq!(faulted_port_commands[0].tai_ns, baseline_port_commands[0].tai_ns, "applied at the SAME epoch as the unfaulted baseline -- the first delivery's own timing is unaffected");
+
+    let fault_events: Vec<_> = faulted.events.iter().filter(|e| e.kind == EventKind::Fault as i32).collect();
+    assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
+    assert_eq!(fault_events[0].reference_id, "duplicate_ground_cmd");
+    assert_eq!(fault_events[0].tai_ns, COMMAND_TAI_NS);
+
+    assert_eq!(
+        faulted.events.len(),
+        baseline.events.len() + 1,
+        "the faulted run's only difference from the baseline is the one extra FAULT event: baseline {:#?}, faulted {:#?}",
+        baseline.events,
+        faulted.events
+    );
+
+    // -- PortTrafficLog sidecar: the record counts this task's own brief explicitly asks to
+    // state before measuring. --------------------------------------------------------------
+    let log = read_port_traffic_log(&dir.join("port_traffic.pb"));
+    assert_eq!(log.records.len(), 5, "1 cmd_out OUT + 2 cmd_in IN (the duplicate's own extra IN record) + 1 ack_out OUT + 1 ack_in IN: {:#?}", log.records);
+    let cmd_out_count = log.records.iter().filter(|r| r.port == "cmd_out" && r.direction == PortDirection::Out as i32).count();
+    let cmd_in_recs: Vec<_> = log.records.iter().filter(|r| r.port == "cmd_in" && r.direction == PortDirection::In as i32).collect();
+    assert_eq!(cmd_out_count, 1, "never a second OUT record for a duplicate: {:#?}", log.records);
+    assert_eq!(cmd_in_recs.len(), 2, "the duplicate's own second IN record -- the receiver really is delivered the frame twice: {:#?}", log.records);
+    assert!(cmd_in_recs.iter().all(|r| r.tai_ns == COMMAND_TAI_NS), "both IN records must share the one real emission epoch, never the fault's own added offset: {cmd_in_recs:#?}");
+
+    let _ = std::fs::remove_dir_all(&baseline_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =================================================================================================
+// Test 3b: byte-identical determinism for corrupt/duplicate (question 178's own required test,
+// extended to R4.1b's two new kinds -- mirrors `the_same_faulted_drm_executed_twice_produces_
+// byte_identical_run_products_and_port_traffic`'s own method exactly, including the SAME
+// products_dir requirement).
+// =================================================================================================
+
+#[test]
+fn the_same_corrupt_faulted_drm_executed_twice_produces_byte_identical_run_products_and_port_traffic() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = load_drm("demo_command_port_corrupt.drm.yaml");
+    let sos = load_command_sos();
+    let systems = load_command_systems();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let dir = scratch_dir("det-corrupt");
+    let products_a = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-det-corrupt", Some(dir.clone()))).expect("run A executes");
+    let log_bytes_a = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb A");
+    let products_b = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-det-corrupt", Some(dir.clone()))).expect("run B executes");
+    let log_bytes_b = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb B");
+
+    let bytes_a = products_a.to_proto().encode_to_vec();
+    let bytes_b = products_b.to_proto().encode_to_vec();
+    assert_eq!(bytes_a, bytes_b, "encoded RunProducts must be byte-identical across two runs of the same corrupt-faulted DRM");
+    assert!(!bytes_a.is_empty());
+    assert_eq!(log_bytes_a, log_bytes_b, "encoded port_traffic.pb must be byte-identical across two runs of the same corrupt-faulted DRM");
+    assert!(!log_bytes_a.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_same_duplicate_faulted_drm_executed_twice_produces_byte_identical_run_products_and_port_traffic() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = load_drm("demo_command_port_duplicate.drm.yaml");
+    let sos = load_command_sos();
+    let systems = load_command_systems();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let dir = scratch_dir("det-duplicate");
+    let products_a = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-det-duplicate", Some(dir.clone()))).expect("run A executes");
+    let log_bytes_a = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb A");
+    let products_b = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-det-duplicate", Some(dir.clone()))).expect("run B executes");
+    let log_bytes_b = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb B");
+
+    let bytes_a = products_a.to_proto().encode_to_vec();
+    let bytes_b = products_b.to_proto().encode_to_vec();
+    assert_eq!(bytes_a, bytes_b, "encoded RunProducts must be byte-identical across two runs of the same duplicate-faulted DRM");
+    assert!(!bytes_a.is_empty());
+    assert_eq!(log_bytes_a, log_bytes_b, "encoded port_traffic.pb must be byte-identical across two runs of the same duplicate-faulted DRM");
+    assert!(!log_bytes_a.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// =================================================================================================
+// Overlapping-window refusal (question 184/186(b)), at the execute() level -- named fault ids
+// checked. `crate::router::tests` already pins this rigorously at the Router level (several
+// cases); this is the qualitative execute()-level companion, the same relationship Test 5 above
+// has to `two_port_faults_on_different_ports_draw_from_independent_seeded_substreams`.
+// =================================================================================================
+
+#[test]
+fn two_port_faults_on_the_same_port_with_overlapping_windows_are_a_typed_load_refusal_naming_both_ids() {
+    let _engine = gmat_sys::engine_lock();
+    let sos = load_command_sos();
+    let systems = load_command_systems();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let mut drm = load_drm("demo_command.drm.yaml");
+    {
+        let scenario = drm.scenario.as_mut().expect("scenario");
+        scenario.seeds.insert("f_drop_first".to_string(), 1);
+        scenario.seeds.insert("f_delay_second".to_string(), 2);
+        // [50s, 52s) and [51s, 53s) -- overlap on [51s, 52s), both on ground.cmd_out.
+        scenario.faults.push(Fault {
+            id: "f_drop_first".to_string(),
+            tai_ns: COMMAND_TAI_NS,
+            duration_ns: 2_000_000_000,
+            target_kind: FaultTargetKind::Port as i32,
+            instance: "ground".to_string(),
+            target: "cmd_out".to_string(),
+            kind: "drop".to_string(),
+            ..Default::default()
+        });
+        scenario.faults.push(Fault {
+            id: "f_delay_second".to_string(),
+            tai_ns: COMMAND_TAI_NS + 1_000_000_000,
+            duration_ns: 2_000_000_000,
+            target_kind: FaultTargetKind::Port as i32,
+            instance: "ground".to_string(),
+            target: "cmd_out".to_string(),
+            kind: "delay".to_string(),
+            params: BTreeMap::from([("delay_s".to_string(), 1.0)]),
+            ..Default::default()
+        });
+    }
+    let drm = rehash_drm(drm);
+    let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-port-fault-overlap", None)).expect_err("overlapping windows on the same (instance, port) must be a typed load refusal");
+    match &err {
+        DrmError::Router(RouterError::OverlappingPortFaultWindows { fault_a, fault_b, instance, port, overlap_start_tai_ns, overlap_end_tai_ns }) => {
+            assert_eq!(fault_a, "f_drop_first");
+            assert_eq!(fault_b, "f_delay_second");
+            assert_eq!(instance, "ground");
+            assert_eq!(port, "cmd_out");
+            assert_eq!(*overlap_start_tai_ns, COMMAND_TAI_NS + 1_000_000_000);
+            assert_eq!(*overlap_end_tai_ns, Some(COMMAND_TAI_NS + 2_000_000_000));
+        }
+        other => panic!("expected DrmError::Router(RouterError::OverlappingPortFaultWindows), got {other:?}"),
+    }
 }

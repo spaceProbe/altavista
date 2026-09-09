@@ -1,0 +1,79 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R4.1b
+# (docs/open-questions.md question 178, ADR-005 sec 5: the PORT fault runtime, `crate::router`).
+#
+# Identical to drms/demo_command.drm.yaml (same sos_configuration_id -- drms/demo_command.sos.yaml
+# is reused unchanged, same two systems) with exactly one addition: a FAULT_TARGET_KIND_PORT
+# "corrupt" fault covering the command dispatch's own window, on the EMITTING port
+# (instance="ground", target="cmd_out" -- crate::router's own "Port fault runtime" doc section:
+# a PORT fault matches the emitting pair, not a Connection), with a DECLARED corrupt_mask (0xFF =
+# 255) -- every byte of the payload the router already recorded on cmd_out is XORed by 255 before
+# reaching flight.cmd_in.
+#
+# Window: [1700000050000000000, 1700000051000000000) -- exactly 1s, covering the command's own
+# declared dispatch epoch (t=50s) and nothing else in this 100s/1Hz run. rate is left unset
+# (defaults to 1.0: every candidate frame in the window is corrupted) but still requires its own
+# Scenario.seeds entry (question 178, rule 6: uniform and honest, even at rate 1.0, and R4.1b's
+# own "corrupt" needs a seed even with a declared mask -- the rate draw itself still needs one).
+#
+# Expected result (crates/av-kernel/tests/port_faults.rs states this before running):
+# - ground.cmd_out's own OUT PortTrafficRecord keeps the EMITTER's own original bytes, unmutated
+#   (crate::router's own module doc comment, "Corrupt": the OUT record is recorded before any
+#   fault is even consulted).
+# - flight.cmd_in's own IN PortTrafficRecord carries every one of those same bytes XORed with
+#   0xFF -- genuinely different from the OUT record's own bytes (mask != 0), and this is what
+#   flight itself actually receives and tries to decode (not merely a mutated log entry).
+# - XORing EVERY byte (including the CCSDS primary header, not merely the user-data "value"
+#   field) corrupts the packet's own APID away from 700 (flight's only declared command-in APID)
+#   for any non-zero mask, so flight's own `crate::codec::decode_packet` fails
+#   (`CodecError::UnknownApid` or similar) and the command is silently never applied -- `flight`
+#   never applies accel_scale, never sends an ack, and `RunProducts.events` carries the four
+#   COMMAND_TRANSITION events up through DISPATCHED (never ACKED), no EVENT_KIND_PORT_COMMAND
+#   event, and exactly one EVENT_KIND_FAULT event for "corrupt_ground_cmd" at
+#   tai_ns=1700000050000000000 (the one frame the fault actually corrupted) -- the SAME command-
+#   state shape drms/demo_command_port_drop.drm.yaml already produces, but (unlike drop) WITH a
+#   real IN PortTrafficRecord on flight.cmd_in, proving the frame really did reach the receiver,
+#   just unusably mutated.
+id: command_demo_port_corrupt_drm
+version: "1"
+name: "Port fault runtime demo (R4.1b): a PORT corrupt fault mutates the bytes flight actually receives"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+  seeds:
+    corrupt_ground_cmd: 888
+  events:
+    - id: cmd1
+      tai_ns: 1700000050000000000
+      kind: command
+      instance: flight
+      values:
+        value: 3.0
+      attributes:
+        field: accel_scale
+        from: ground
+        command_class: demo
+  faults:
+    - id: corrupt_ground_cmd
+      tai_ns: 1700000050000000000
+      duration_ns: 1000000000
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: ground
+      target: cmd_out
+      kind: corrupt
+      params:
+        corrupt_mask: 255
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R4.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_command_port_corrupt.drm.yaml
+hash: "10ba92949ad0b466dae211d0ce5f30456f2357b8baac8d774787df68bde3dfd2"

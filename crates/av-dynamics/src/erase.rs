@@ -161,6 +161,14 @@ impl<M: DynamicsModel> DynamicsModel for ErasedModel<M> {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.inner.last_measurements()
     }
+
+    /// Delegates to `self.inner.drain_sensor_fault_effect` (question 178, R5.1a) -- for the same
+    /// reason [`ErasedModel::last_measurements`] does: without this, erasing a SENSOR-fault-
+    /// capable model would silently fall back to a defaulted `None` regardless of what the
+    /// wrapped model actually accumulated.
+    fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+        self.inner.drain_sensor_fault_effect()
+    }
 }
 
 /// `ErasedModel::new` plus `Box::new`, for the common case of building a [`BoxedModel`]
@@ -206,6 +214,10 @@ mod tests {
         // A synthetic error-path model; never emits telemetry mapped to a CDM measurement.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // A synthetic error-path model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -272,6 +284,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // Test-only model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     #[test]
@@ -318,6 +334,10 @@ mod tests {
         // This model's own override is about port traffic, not telemetry -- no CDM measurement.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // Test-only model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -414,6 +434,10 @@ mod tests {
         // override above (question 173, M25.3c: this method is now required, not defaulted).
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             vec![av_cdm::pb::Measurement { measurement_id: "all_overridden_measurement".to_string(), z: vec![123.0], epoch_ns: 0, sensor_id: String::new(), frame_id: String::new(), ..Default::default() }]
+        }
+        // Test-only model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
         }
     }
 

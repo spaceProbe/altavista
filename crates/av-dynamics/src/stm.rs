@@ -144,6 +144,12 @@ impl<M: DynamicsModel> DynamicsModel for StmAugmented<M> {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.0.last_measurements()
     }
+
+    /// Delegates to the wrapped model, for the same reason [`StmAugmented::last_measurements`]
+    /// above does (question 178, R5.1a).
+    fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+        self.0.drain_sensor_fault_effect()
+    }
 }
 
 /// `P(t) = Phi P0 Phi^T`, `n x n` row-major throughout. Explicitly symmetrizes the result
@@ -258,6 +264,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // Test-only model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     #[test]
@@ -334,6 +344,10 @@ mod tests {
             // Test-only stand-in for a non-STM-capable model; never emits telemetry.
             fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
                 Vec::new()
+            }
+            // Test-only model; no SENSOR fault runtime.
+            fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+                None
             }
         }
         let _ = StmAugmented::new(NotStmCapable);
@@ -452,6 +466,10 @@ mod tests {
         // Test-only rotation model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // Test-only model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<crate::SensorFaultEffectDrain> {
+            None
         }
     }
 

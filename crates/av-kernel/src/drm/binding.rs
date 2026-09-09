@@ -581,6 +581,10 @@ impl DynamicsModel for ConstantAccelModel {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -960,6 +964,25 @@ impl DynamicsModel for AnyModel {
             AnyModel::Replay(m) => m.last_measurements(),
         }
     }
+
+    /// Delegates to each variant's own `drain_sensor_fault_effect` (question 178, R5.1a) -- only
+    /// `StarTracker` ever returns anything non-`None` today (the one model with a SENSOR fault
+    /// runtime); every other variant's own `drain_sensor_fault_effect` is that model's own
+    /// explicit `None` override, mirroring `AnyModel::last_measurements`'s own identical
+    /// reasoning (a required trait method, no blanket default here either) and covered by the
+    /// same executable arm-count check.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        match self {
+            AnyModel::Gmat(m) => m.drain_sensor_fault_effect(),
+            AnyModel::ConstantAccel(m) => m.drain_sensor_fault_effect(),
+            AnyModel::Attitude(m) => m.drain_sensor_fault_effect(),
+            AnyModel::Controller(m) => m.drain_sensor_fault_effect(),
+            AnyModel::StarTracker(m) => m.drain_sensor_fault_effect(),
+            AnyModel::Imu(m) => m.drain_sensor_fault_effect(),
+            AnyModel::GroundStation(m) => m.drain_sensor_fault_effect(),
+            AnyModel::Replay(m) => m.drain_sensor_fault_effect(),
+        }
+    }
 }
 
 // --------------------------------------------------------------------------------------
@@ -1129,6 +1152,10 @@ impl DynamicsModel for ContainerModel {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 impl ContainerModel {
@@ -1229,6 +1256,10 @@ impl DynamicsModel for SharedContainerModel {
     /// passthrough wrapper exactly like `ErasedModel`/`AnyModel`").
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.0.last_measurements()
+    }
+    /// Delegates, same as every other method here (question 178, R5.1a).
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.0.drain_sensor_fault_effect()
     }
 }
 
@@ -5141,7 +5172,7 @@ mod tests {
     }
 
     fn simple_star_tracker_spec() -> StarTrackerSpec {
-        StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0] }
+        StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None }
     }
 
     fn test_imu_mat(spec: &ImuSpec) -> Materialized {
@@ -5609,7 +5640,8 @@ mod tests {
     /// never re-run by CI); this test makes the identical check real and executable, by reading
     /// this very source file (`include_str!`) and counting literal `AnyModel::<Variant>(`
     /// occurrences -- `AnyModel::StarTracker(` (an already-landed, reference variant carrying the
-    /// same nine-method, zero-state shape [`AnyModel::GroundStation`] does) against
+    /// same ten-method, zero-state shape [`AnyModel::GroundStation`] does -- R5.1a, question 178,
+    /// raised this from nine to ten by adding `drain_sensor_fault_effect`) against
     /// `AnyModel::GroundStation(` itself. Fails against a future edit that adds a `GroundStation`
     /// call site without its matching `StarTracker` counterpart (or vice versa) drifting the two
     /// out of lockstep -- exactly the class of silent, partial wiring this task's own standing
@@ -5638,17 +5670,20 @@ mod tests {
     /// Instead: a leading-indentation-anchored needle (`"\n            AnyModel::Replay("`, twelve spaces
     /// -- the exact indentation every real `match self { ... }` arm in this file's own `impl
     /// DynamicsModel for AnyModel` block uses) counts ONLY real match arms, never a comment or
-    /// this test's own strings (neither is indented that way), so the expected count -- eleven,
+    /// this test's own strings (neither is indented that way), so the expected count -- twelve,
     /// one per `DynamicsModel` method, `stm_derivatives`/`step_with_stm` each split into a guard
     /// arm plus a dead-but-typechecking delegate arm mirroring `Attitude`/`Controller` -- can be
-    /// asserted directly rather than by comparison. Fails against a future edit that removes an
-    /// arm (the count drops below 11) or duplicates one (the sibling `registry.rs` check below
-    /// would also need `wrap_replay`'s own construction site to still exist).
+    /// asserted directly rather than by comparison. **R5.1a (question 178) raised this from
+    /// eleven to twelve**: `DynamicsModel` gained a new required method, `drain_sensor_fault_
+    /// effect`, delegated here with one more plain arm (no guard split, mirroring `last_
+    /// measurements`). Fails against a future edit that removes an arm (the count drops below
+    /// 12) or duplicates one (the sibling `registry.rs` check below would also need `wrap_
+    /// replay`'s own construction site to still exist).
     #[test]
     fn any_model_arm_count_for_replay_covers_every_dynamics_model_match_site() {
         let binding_source = include_str!("binding.rs");
         let indented_arm_count = binding_source.matches("\n            AnyModel::Replay(").count();
-        assert_eq!(indented_arm_count, 11, "AnyModel::Replay( must appear as a real match arm (12-space indent) exactly 11 times: one per DynamicsModel method, with stm_derivatives/step_with_stm each split into a guard + delegate pair");
+        assert_eq!(indented_arm_count, 12, "AnyModel::Replay( must appear as a real match arm (12-space indent) exactly 12 times: one per DynamicsModel method (R5.1a added drain_sensor_fault_effect), with stm_derivatives/step_with_stm each split into a guard + delegate pair");
 
         // The one construction site this variant has, which -- unlike every other variant's own
         // `materialize_*` function -- lives in `crate::registry::ModelRegistry::wrap_replay`,

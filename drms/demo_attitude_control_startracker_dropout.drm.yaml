@@ -1,0 +1,132 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R5.1a
+# (docs/open-questions.md question 178: the SENSOR fault runtime for the star tracker;
+# `crate::drm::sensors`'s own module doc comment's "SENSOR fault runtime" section).
+#
+# Identical to drms/demo_attitude_control.drm.yaml (same sos_configuration_id, same four
+# systems, same scenario span/options -- reused UNCHANGED) with exactly one addition: a
+# FAULT_TARGET_KIND_SENSOR "dropout" fault on `startracker`'s own declared output
+# (`startracker.output`), windowed over [start + 5s, start + 35s) -- 30 s, one and a half of the
+# closed loop's own 20 s critically-damped time constant (see
+# drms/demo_attitude_control.drm.yaml's own header comment for the full derivation: tau = 2*Jz/kd
+# = 20 s, zeta = 1 exactly).
+#
+# ## Why this window, not later in the run
+#
+# The task's own instruction is explicit: put the fault "where it actually shows something --
+# during the slew, while the error is large and changing, not after the loop has settled."
+# theta(t)/theta(0) = (1 + t/tau)*exp(-t/tau) (the undisturbed closed-form): at t = 5 s,
+# theta/theta(0) = 1.25*exp(-0.25) = 0.9735 (theta = 0.1947 rad, essentially the full initial
+# 0.2 rad error); at t = 35 s, theta/theta(0) = 2.75*exp(-1.75) = 0.4782 (theta = 0.0956 rad) --
+# a substantial, actively-decaying error throughout, nowhere near the ~9.8e-7 rad deterministic
+# residual (or the ~1.26e-4 rad measurement-noise floor) the undisturbed loop reaches by run's
+# end (t = 300 s = 15*tau). Placing the fault any later (e.g. past t ~= 3*tau = 60 s) would let
+# it start from an already-small, noise-dominated error where a stale-quaternion hold has nothing
+# large left to visibly perturb.
+#
+# ## Expected effect DURING the window (stated before running, per this task's own instruction --
+# crates/av-kernel/tests/sensor_faults.rs measures against exactly this reasoning)
+#
+# **R5.1a-fix correction, superseding the original paragraph below (kept, corrected in place, not
+# deleted): the manager's review found the original test's own bounds (`err > 1e-3` during the
+# window) were satisfied by the UNFAULTED baseline too, so "stays large" -- while true in absolute
+# terms against the noise floor -- was never evidence the fault does anything, and the naive
+# reading ("frozen LARGER error overdrives a BIGGER swing than baseline") has the sign backwards.
+# The corrected derivation below compares against the baseline explicitly and gets the direction
+# right: the true error ends up SMALLER than baseline, not larger.**
+#
+# `crate::drm::controller::AttitudeControllerModel::step_with_ports` only ever overwrites its own
+# `last_star_q` when a NEW message actually arrives on `startracker_in` (`Inbox::last_on_port`
+# returns `None` on a step with nothing new -- see that field's own doc comment); a dropout fault
+# means NO packet is ever emitted for the whole window, so `last_star_q` is frozen at whatever it
+# held at the fault epoch (t = 5 s) for the entire 30 s window. The IMU is NOT faulted, so
+# `last_imu_omega` keeps updating with the real, current body rate. The control law is
+# `tau_z = kp*qv_z + kd*omega_z`; with `qv_z` frozen at its own t=5s value (a near-constant, not a
+# shrinking function of the REAL, still-evolving error), the loop degenerates from "critically
+# damped restoring spring" (kp*qv_z, proportional to the TRUE, decaying error) to "a
+# near-constant commanded torque (the frozen kp*qv_z term) plus real rate damping (kd*omega_z)" --
+# a first-order ODE in the RATE, `J*omega_dot_z + kd*omega_z = -kp*qv_z_frozen` (constant RHS),
+# time constant `J/kd = 50/5 = 10 s`, relaxing toward `omega_ss = -kp*qv_z_frozen/kd ~=
+# -(0.25*0.0973)/5.0 ~= -4.87e-3 rad/s` (`qv_z_frozen = sin(theta(5)/2) ~= theta(5)/2 ~= 0.0973`
+# for this small angle, `theta(5) = 0.194701` rad from this file's own closed form above).
+#
+# **Because `omega_ss` is a CONSTANT, never-shrinking rate (unlike the unfaulted loop's own
+# `omega_ss`, which tracks toward zero as `qv_z` itself shrinks), the faulted loop's own `theta(t)`
+# decays FASTER than the baseline's -- it "overdrives" past where the same loop would be with a
+# working sensor, not "overshoots bigger."** Integrating `theta(t) = theta(5) + omega_ss*(t-5) +
+# (theta_dot(5) - omega_ss)*tau2*(1 - exp(-(t-5)/tau2))` (`tau2 = 10` s, `theta_dot(5) =
+# -theta(0)*5/tau^2*exp(-5/tau) = -1.947e-3` rad/s from the undisturbed closed form, true in BOTH
+# runs since nothing has diverged before t=5s) against the baseline's own `theta_base(t) =
+# 0.2*(1+t/20)*exp(-t/20)` predicts, BEFORE measuring: `theta_base(20) - theta(20) ~= 0.0028` rad
+# (~1.9%), growing to `theta_base(35) - theta(35) ~= 0.0191` rad (~20%) by window end -- the TRUE
+# physical pointing error (the "attitude" instance's own propagated attitude vs.
+# `controller.target_q` = identity -- NOT `output.controller.pointing_error_rad`, which is
+# derived from the same frozen `last_star_q` and stays near its own t=5s value, ~0.19 rad, for the
+# whole window, uninformatively) stays LARGE relative to the noise floor throughout (never
+# collapsing to ~1e-4 rad the way an undisturbed loop would on this timescale) but SMALLER than
+# the baseline's own value at every matched epoch inside the window -- measured in
+# `crates/av-kernel/tests/sensor_faults.rs::dropout_fixture_true_pointing_error_diverges_below_the_
+# unfaulted_baseline_during_the_window_and_reconverges_by_run_end`: baseline-minus-faulted =
+# 2.6896e-3 rad at t=20s, 1.8950e-2 rad at t=35s -- within a few percent of the derivation above at
+# both epochs.
+#
+# ## Expected recovery by end of run
+#
+# The window ends at t = 35 s; the star tracker resumes normal (noisy) emission immediately
+# afterward, so the controller sees a real, current measurement again from t = 35 s on. Whatever
+# the true error has drifted to by then, the closed loop is critically damped with the SAME
+# tau = 20 s it always had -- 265 s (>13 time constants) remain before run end at t = 300 s, far
+# more than enough for a critically damped loop to fully re-settle to its own measurement-noise
+# floor. Expected: the TRUE pointing error recovers to the SAME order of magnitude as the
+# unfaulted baseline's own true pointing error at t=300s -- not necessarily the identical value
+# (`apply_sensor_fault`/`clear_sensor_fault` each re-materialize the star tracker, reseeding its
+# `Pcg64` from scratch, so the post-window noise stream is desynced from the baseline's own
+# continuous stream), but the same order of magnitude, evidencing full recovery. **Measured:
+# baseline-minus-faulted = -2.3807e-5 rad at t=300s** (sign flipped from mid-window, both runs
+# settled to the ~1e-4 rad order of magnitude -- exactly "same order of magnitude, not
+# bit-identical").
+id: attitude_control_startracker_dropout_drm
+version: "1"
+name: "Closed-loop attitude control (R5.1a): a SENSOR dropout fault on the star tracker"
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+  seeds:
+    dropout_startracker: 5151
+  faults:
+    - id: dropout_startracker
+      tai_ns: 1767225642000000000
+      duration_ns: 30000000000
+      target_kind: FAULT_TARGET_KIND_SENSOR
+      instance: startracker
+      target: startracker.output
+      kind: dropout
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # Not the unfaulted baseline's own target -- the dropout genuinely changes what the
+    # controller saw during the window (this file's own header comment), so the loop's own
+    # post-recovery stochastic steady state need not match bit-for-bit. This objective is scored,
+    # not a hard gate; crates/av-kernel/tests/sensor_faults.rs is what actually asserts recovery
+    # (same order of magnitude as the unfaulted baseline), against the real measured value.
+    target: 0.00012578826462456927
+    tolerance: 0.001
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R5.1a)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control_startracker_dropout.drm.yaml
+hash: "ee3066aa8f7f436a1d08cfbcb8367d5a68e3450bb6f972ed8547ad6a8a0b6f9e"

@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use av_cdm::pb::{BindingKind, DesignReferenceMission, PortDirection, PortTrafficLog, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{BindingKind, DesignReferenceMission, EventKind, PortDirection, PortTrafficLog, SosConfiguration, SystemDefinition};
 use av_kernel::drm::replay::ReplayConfig;
 use av_kernel::drm::{execute, hash, schema, DrmError, RunConfig};
 use gmat_sys::Gmat;
@@ -428,6 +428,158 @@ fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_inst
         }
         other => panic!("expected DrmError::Schedule (crate::drm::replay::ReplayError::MissingFrame's own stringified surface), got {other:?}"),
     }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ================================================================================================
+// T5 (R4.1b, this task's own headline deliverable): replaying a faulted run reproduces the fault.
+// ================================================================================================
+
+/// **What this test proves, and what it explicitly does NOT (stated before running, per this
+/// task's own standing instruction).**
+///
+/// PROVES: a run faulted with a real `FAULT_TARGET_KIND_PORT` fault (here, `"duplicate"` on
+/// `startracker.st_meas` -- see `drms/demo_attitude_control_port_duplicate.drm.yaml`'s own header
+/// comment for why `"duplicate"`, not `"corrupt"`, was chosen for THIS closed-loop fixture),
+/// recorded with `products_dir: Some(...)`, and then REPLAYED (`RunConfig.replay`, replaying
+/// `startracker` -- a `BINDING_KIND_MODEL` instance, `state_dim() == 0`, no Docker, mirroring
+/// T1/T1b's own instance choice) reproduces the ENTIRE faulted run's own `RunProducts`, byte for
+/// byte, with NOTHING excluded -- the SAME bar `t1_...`/`t1b_...` already meet in this file. This
+/// is possible here for the identical reason T1/T1b's own byte-identity is possible: same
+/// `products_dir`, same `run_id`, and `crate::router::Router::install_port_faults` is called
+/// UNCONDITIONALLY by `execute()` regardless of `RunConfig.replay` (see "the one thing to think
+/// hard about," below).
+///
+/// DOES NOT PROVE: that replaying a `"corrupt"` fault (byte mutation, rather than `"duplicate"`'s
+/// own re-delivery) reproduces correctly through THIS SAME closed-loop fixture -- see
+/// `drms/demo_attitude_control_port_duplicate.drm.yaml`'s own header comment for exactly why that
+/// specific combination was not attempted here (a real, investigated risk in the CURRENT
+/// topology, not a shortcut: `AttitudeControllerModel::step_with_ports` propagates any
+/// `CodecError` as a hard model error via `?`, so a byte-mutating fault persistent over a
+/// thousands-of-frames run risks eventually corrupting the CCSDS primary header and aborting the
+/// whole run). `"Corrupt"` itself IS pinned, byte-for-byte, end to end (both the OUT-keeps-
+/// original and the IN-carries-mutated halves), by `crates/av-kernel/tests/port_faults.rs::
+/// demo_command_port_corrupt_mutates_the_bytes_flight_receives_and_keeps_the_out_record_
+/// original` -- just not through a REPLAY of that specific run: `demo_command`'s own two
+/// instances are unsuited to replay for unrelated reasons (`ground` never itself constructs the
+/// packet it emits -- `drms/demo_command_ground.system.yaml`'s own header comment -- and `flight`
+/// has a real, 6-dimensional propagated trajectory a zero-order-hold replay could never honestly
+/// reproduce, `crate::drm::replay`'s own module doc comment's disclosed limitation).
+///
+/// **The one thing to think hard about, per this task's own explicit instruction, and the
+/// conclusion, stated before running:** the fault runtime IS installed on the Router during a
+/// replay run too (`crate::drm::executor::execute` calls `router.install_port_faults` from its
+/// own load-time validation pass, which runs identically whether or not `RunConfig.replay` is
+/// set -- read directly in `crates/av-kernel/src/drm/executor.rs`, not assumed). So the replayed
+/// run's own Router DOES re-apply `"duplicate_startracker"` to `startracker`'s own replayed
+/// emissions -- this is DELIBERATE, not a bug, and it is what makes replay reproduce the faulted
+/// outcome at all: `crate::drm::replay::ReplayModel` only ever plays back OUT frames, and
+/// `crate::router`'s own "OUT is the emitter's own original bytes" rule (unchanged by R4.1b,
+/// extended to `"corrupt"`/`"duplicate"`) means the REPLAYED emission is bit-for-bit the SAME
+/// pre-fault content, at the SAME epochs, as the original run's own real emitter produced.
+/// Re-applying the identical seeded fault to identical candidate frames draws identical outcomes
+/// -- this is emphatically NOT "the same frame faulted twice within one run": the REAL run
+/// applies the fault to its own frames exactly once; the REPLAY run is a SEPARATE, independent
+/// `execute()` call whose own Router starts a fresh `Pcg64` from the SAME seed and applies the
+/// SAME fault, exactly once, to its own (identical) candidate frames -- the identical "two
+/// independent runs of one faulted DRM are byte-identical" property `tests/port_faults.rs::
+/// the_same_faulted_drm_executed_twice_produces_byte_identical_run_products_and_port_traffic`
+/// already proves, with a replayed instance standing in for one of the two "real" runs.
+/// **The alternative (the Router somehow bypassing fault application for a replayed instance's
+/// own traffic) was considered and rejected**: `Router::deliver` has, and needs, no notion of
+/// "this Outbox came from a replayed instance" at all -- adding one purely to suppress fault
+/// re-application would be new, unrequested machinery this task's own "cheapest honest vehicle"
+/// instruction does not justify, and it would ALSO be WRONG for `"corrupt"` specifically: since
+/// the OUT record (what replay reads) is always PRE-fault, bypassing re-application on replay
+/// would replay the ORIGINAL, uncorrupted bytes and never reproduce the corruption at all -- the
+/// opposite of "reproducing the faulted run." See `crate::router`'s own module doc comment's
+/// "Replay re-applies every installed PORT fault" section for the same conclusion, stated at the
+/// source.
+///
+/// **This test distinguishes "reapplies" from "bypassed" itself** -- it does not merely compare
+/// PortTrafficLog record COUNTS (this task's own explicitly named "a test that reads stronger
+/// than it is" trap): it compares the ENTIRE encoded `RunProducts`, which embeds
+/// `port_traffic_hash` (a SHA-256 of the ENTIRE re-recorded sidecar), so ANY difference in the
+/// replayed run's own re-application of the fault -- fewer/more/differently-timed records, a
+/// missing FAULT event, anything -- changes that hash (or the event list directly) and fails this
+/// one assertion. A bypassed implementation would replay `startracker`'s own single recorded OUT
+/// frame per candidate epoch WITHOUT re-triggering `"duplicate"` at all, so `controller.
+/// startracker_in` would see exactly ONE IN record per epoch in the replayed run's own
+/// re-recorded sidecar instead of the original run's own TWO, and `run_replayed.events` would be
+/// missing the FAULT event entirely -- both real, hash/event-list-visible differences this test's
+/// own byte-for-byte comparison catches. **Confirmed directly, not merely argued**: see
+/// `R4_1B_REPORT.md` section 3 for this exact break (skip `install_port_faults` whenever
+/// `RunConfig.replay` is `Some`), the real panic text it produces against this test, and the
+/// restore.
+#[test]
+fn t5_replaying_the_emitting_instance_of_a_duplicate_port_fault_reproduces_the_faulted_run_byte_identically() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = schema::parse_drm_yaml(&read("demo_attitude_control_port_duplicate.drm.yaml")).expect("DRM parses");
+    let sos = schema::parse_sos_yaml(&read("demo_attitude_control.sos.yaml")).expect("SosConfiguration parses");
+    let mut systems = BTreeMap::new();
+    for stem in ["demo_attitude_control_truth", "demo_attitude_control_startracker", "demo_attitude_control_imu", "demo_attitude_control_controller"] {
+        let s = load_system(stem);
+        systems.insert(s.id.clone(), s);
+    }
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    // Pinned before either run: the replayed instance is genuinely BINDING_KIND_MODEL and really
+    // is wired to a real downstream consumer -- the identical sanity T1b already checks, so this
+    // test is not merely "T1 again" for the fault case.
+    let star = sos.instances.iter().find(|i| i.name == "startracker").expect("startracker instance exists");
+    assert_eq!(star.binding.as_ref().expect("binding set").kind, BindingKind::Model as i32);
+    let feeds_controller = sos.connections.iter().any(|c| c.from_instance == "startracker" && c.to_instance == "controller");
+    assert!(feeds_controller, "the duplicate fault's own effect must reach a real downstream consumer for this to test anything beyond T1's own narrow claim");
+
+    let dir = scratch_dir("t5-duplicate-replay");
+    let run_id = "test-replay-t5-duplicate".to_string();
+
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
+    assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was recorded");
+
+    // Sanity, stated before comparing against replay: the fault genuinely applied (a real FAULT
+    // event), and its own effect on the sidecar is exactly what the fixture's own header comment
+    // predicted -- TWO IN records per candidate frame on controller.startracker_in, never a
+    // second OUT record on startracker.st_meas.
+    let fault_events: Vec<_> = run_real.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "duplicate_startracker").collect();
+    assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
+    let real_log = {
+        let bytes = std::fs::read(dir.join("port_traffic.pb")).expect("sidecar written");
+        PortTrafficLog::decode(bytes.as_slice()).expect("sidecar decodes")
+    };
+    let out_count = real_log.records.iter().filter(|r| r.instance == "startracker" && r.port == "st_meas" && r.direction == PortDirection::Out as i32).count();
+    let in_count = real_log.records.iter().filter(|r| r.instance == "controller" && r.port == "startracker_in" && r.direction == PortDirection::In as i32).count();
+    assert!(out_count > 0, "sanity: startracker must have actually emitted something over this 300s run");
+    assert_eq!(in_count, 2 * out_count, "every OUT emission must have gotten its own extra duplicate IN record: {out_count} OUT, {in_count} IN");
+    // R5.0 (manager's review of R4.1b): question 186(c)'s `frames_affected` asserted END TO END,
+    // through a real `execute()`, over a MULTI-frame window -- R4.1b pinned the multi-frame count
+    // only in `router.rs`'s own unit test (5 synthetic frames) and `events.rs`'s own (1 vs. 42 as
+    // a plain argument), while the one integration assertion (`tests/port_faults.rs::demo_command_
+    // port_corrupt_...`) covers a ONE-frame fault, where "counts every frame" and "records only
+    // the first" are indistinguishable. Here the fault's window is the whole 300 s run and every
+    // candidate frame applies (`rate` defaults to 1.0), so the event's own count must equal the
+    // number of frames `startracker` genuinely emitted on the faulted port -- measured from the
+    // sidecar above, never hardcoded. Stated before running: this is > 1 (the whole point), so an
+    // implementation that recorded only the first frame fails here with 1 != out_count.
+    assert!(out_count > 1, "sanity: this assertion is only meaningful for a multi-frame window: {out_count} OUT");
+    assert_eq!(
+        fault_events[0].values.get("frames_affected").copied(),
+        Some(out_count as f64),
+        "question 186(c): the FAULT event must carry the TOTAL number of frames this fault affected over the whole run ({out_count}), not just its first: {:#?}",
+        fault_events[0]
+    );
+
+    let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
+
+    assert_eq!(
+        run_real.to_proto().encode_to_vec(),
+        run_replayed.to_proto().encode_to_vec(),
+        "replaying the duplicate-faulted instance must reproduce the ENTIRE faulted run byte for byte -- trajectories, events (including the FAULT event), measurements, scores, and the port traffic hash, with nothing excluded"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

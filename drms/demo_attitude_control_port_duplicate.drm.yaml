@@ -1,0 +1,99 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R4.1b
+# (docs/open-questions.md question 178, ADR-005 sec 5: the PORT fault runtime, `crate::router`;
+# this task's own headline deliverable, the REPLAY test for a faulted run).
+#
+# Identical to drms/demo_attitude_control.drm.yaml (same sos_configuration_id, same four
+# systems, same scenario span/objectives/measures/options -- reused UNCHANGED) with exactly one
+# addition: a FAULT_TARGET_KIND_PORT "duplicate" fault on `startracker`'s own emitting port
+# (`st_meas`), persistent (duration_ns=0) for the whole 300 s run.
+#
+# ## Why "duplicate," not "corrupt," for THIS closed-loop fixture
+#
+# The task brief that asked for a replay test of a faulted run left the exact PORT kind open.
+# "Corrupt" was investigated directly against this fixture's own real consuming code, not assumed
+# safe by default: `crate::drm::controller::AttitudeControllerModel::step_with_ports` decodes
+# `startracker_in` with `codec::decode_packet(...).map_err(...)?` -- the `?` propagates ANY
+# `CodecError` (a corrupted CCSDS primary header -- wrong APID, wrong declared length -- included)
+# as a genuine model error, aborting the whole run rather than gracefully skipping the bad packet
+# the way `crate::drm::binding::ConstantAccelModel`'s own `if let Ok(decoded) = ...` does for the
+# `demo_command` family. `crate::router::Router::install_port_faults`'s own declared
+# `corrupt_mask` (or the no-mask random bit-flip) is applied to the WHOLE payload, header
+# included, so a byte-mask corruption on this port would need to land ENTIRELY within the 32-byte
+# user-data region across EVERY one of this fault's own many candidate frames (persistent, ~20 Hz
+# star-tracker rate over 300 s -- thousands of independent draws) to avoid ever corrupting the
+# 6-byte CCSDS primary header and tripping that `?` -- not a realistic guarantee to make for a
+# fault declared persistent over a whole run. "Duplicate" has no such risk: it always redelivers
+# the SAME, un-mutated, already-valid bytes a second time, one step later, so decoding never
+# fails regardless of how many candidate frames the fault ever draws on. `crate::router`'s own
+# `corrupt`/`duplicate` mechanism is otherwise identical machinery (the SAME `install_port_faults`
+# validation, the SAME seeded-stream draw, the SAME "OUT keeps the emitter's own truth" rule) --
+# what this test needs to prove (does a PORT fault reapply during replay, and does that correctly
+# reproduce the faulted run's own outcome) is exercised identically well by either kind; R4.1b's
+# own dedicated `demo_command_port_corrupt.drm.yaml` (crates/av-kernel/tests/port_faults.rs)
+# already pins "corrupt" byte-for-byte, end to end, on a topology whose own consumer degrades
+# gracefully instead of erroring. See `crates/av-kernel/tests/replay.rs`'s own module doc comment
+# for the identical kind of documented fixture substitution, for an analogous reason (T1b's own
+# choice of `startracker`/`demo_attitude_control` over the task brief's original
+# `controller`/`wheel_torque_out`).
+#
+# ## Expected result (crates/av-kernel/tests/replay.rs states this before running)
+#
+# `AttitudeControllerModel::step_with_ports` has NO idempotency guard on its own incoming star-
+# tracker/IMU decode (unlike `ConstantAccelModel`'s "changed, or first" rule for a command) -- it
+# simply overwrites `last_star_q` with whatever it just decoded, unconditionally, every message.
+# Since the duplicate's own second delivery carries the IDENTICAL bytes (never mutated) as the
+# first, overwriting with the same value is physically a no-op: `RunProducts.trajectories`/
+# `.scores`/`.measurements` for the REAL run are therefore expected to be BYTE-IDENTICAL to
+# drms/demo_attitude_control.drm.yaml's own unfaulted baseline -- "duplicate" is invisible to this
+# closed loop's own physics, exactly the same invisibility crates/av-kernel/tests/port_faults.rs's
+# own `demo_command_port_duplicate_delivers_the_command_twice_but_is_invisible_to_command_
+# semantics` test already proved for the command topology. What DOES differ, and is what this
+# replay test actually exercises, is the sidecar: `startracker.st_meas -> controller.
+# startracker_in`'s own PortTrafficLog carries TWO IN records per candidate frame instead of one,
+# and exactly one EVENT_KIND_FAULT event for "duplicate_startracker" now appears in
+# `RunProducts.events` too (the one real difference from the unfaulted baseline's own events).
+id: attitude_control_port_duplicate_drm
+version: "1"
+name: "Closed-loop attitude control (R4.1b): a PORT duplicate fault on the star tracker, replayed"
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+  seeds:
+    duplicate_startracker: 4141
+  faults:
+    - id: duplicate_startracker
+      tai_ns: 1767225637000000000
+      duration_ns: 0
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: startracker
+      target: st_meas
+      kind: duplicate
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # Identical target/tolerance to the unfaulted drms/demo_attitude_control.drm.yaml -- "duplicate"
+    # is predicted (this file's own header comment, above) to be invisible to this closed loop's
+    # own physics, so the SAME target ought to still be met; this objective is scored, not a hard
+    # gate, so even a surprise here would not itself fail this file's own load or run.
+    target: 0.00012578826462456927
+    tolerance: 0.00001
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R4.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control_port_duplicate.drm.yaml
+hash: "e86096202b1d00e46580b8df114c2eb602e1157027eaa31942761c61668129db"

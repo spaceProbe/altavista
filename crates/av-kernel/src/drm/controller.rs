@@ -416,6 +416,10 @@ impl DynamicsModel for AttitudeControllerModel {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 /// `q_err = target_q^-1 (x) measured_q`, then sign-flipped for the shortest rotational path
@@ -536,6 +540,14 @@ impl<M: DynamicsModel> DynamicsModel for CommandedAttitude<M> {
     /// delegates to the wrapped model unchanged" (this struct's own doc comment).
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.inner.last_measurements()
+    }
+
+    /// Delegates to `self.inner.drain_sensor_fault_effect`, for the same reason
+    /// [`CommandedAttitude::last_measurements`] does (question 178, R5.1a). The wrapped model is
+    /// always attitude-shaped, never a star tracker, so this is always `None` in practice today
+    /// -- delegating honestly is still the right shape rather than hardcoding that fact here.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.inner.drain_sensor_fault_effect()
     }
 }
 
@@ -753,6 +765,10 @@ mod tests {
         // Test-only recorder; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 

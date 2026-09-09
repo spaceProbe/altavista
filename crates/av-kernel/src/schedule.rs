@@ -332,6 +332,19 @@ struct HeteroSystemEntry {
     /// enrichment already established for applied commands. Only ever populated by
     /// [`HeteroScheduler::advance_to_with_ports`], same as `applied_commands`.
     measurements: Vec<av_cdm::pb::Measurement>,
+    /// Question 178 (R5.1a): this system's own SENSOR fault effect, accumulated across every
+    /// `step_with_ports` call this ENTIRE `HeteroScheduler` has driven so far -- collected from
+    /// `model.drain_sensor_fault_effect()` right after each call, the identical "read once,
+    /// right after the step that produced it" pattern `measurements`/`applied_commands` above
+    /// already use. **Why accumulation must happen here, per step, rather than reading the
+    /// model once after the whole run:** `crate::drm::executor::run_one_span` erases every
+    /// `ModelHandle` into a `BoxedModel` and hands it to `HeteroKernel::register_system` --
+    /// `ModelSpanState::handle` is `None` for the ENTIRE duration of the run this scheduler
+    /// drives (`run_one_span`'s own `span.handle.take()`), so there is no live handle left to
+    /// drain from once `run_with_ports` returns; the underlying model itself is dropped along
+    /// with this scheduler at the end of `run_one_span`. Only ever populated by
+    /// [`HeteroScheduler::advance_to_with_ports`], same as `applied_commands`/`measurements`.
+    sensor_fault_effect: (Option<i64>, u64),
 }
 
 /// Error advancing or sampling a [`HeteroScheduler`] -- the non-generic twin of
@@ -410,6 +423,7 @@ impl HeteroScheduler {
                 outputs: BTreeMap::new(),
                 applied_commands: Vec::new(),
                 measurements: Vec::new(),
+                sensor_fault_effect: (None, 0),
             },
         );
     }
@@ -577,6 +591,15 @@ impl HeteroScheduler {
                     measurement.meta.insert("decoded_at".to_string(), id.clone());
                     sys.measurements.push(measurement);
                 }
+                // Question 178 (R5.1a): drain and fold this step's own SENSOR fault effect (if
+                // any) into `sys.sensor_fault_effect` -- see that field's own doc comment for
+                // why this must happen here, per step, rather than once after the whole run.
+                if let Some(drain) = sys.model.drain_sensor_fault_effect() {
+                    sys.sensor_fault_effect.1 += drain.frames_affected;
+                    if drain.frames_affected > 0 {
+                        sys.sensor_fault_effect.0 = Some(sys.sensor_fault_effect.0.map_or(drain.first_effect_tai_ns, |e| e.min(drain.first_effect_tai_ns)));
+                    }
+                }
                 sys.history.prev = Some(sys.history.curr.clone());
                 sys.history.curr = (result.t_tai_ns, result.state);
                 router.deliver(id, result.t_tai_ns, outbox);
@@ -627,6 +650,23 @@ impl HeteroScheduler {
     /// `ImuModel` today).
     pub fn measurements(&self, id: &str) -> Option<&[av_cdm::pb::Measurement]> {
         self.systems.get(id).map(|s| s.measurements.as_slice())
+    }
+
+    /// The total SENSOR fault effect [`HeteroScheduler::advance_to_with_ports`] has accumulated
+    /// for `id` over the WHOLE lifetime of this scheduler (question 178, R5.1a) -- `None` if `id`
+    /// is not registered, or if nothing has been affected (no fault installed on `id`'s own
+    /// model, or one installed but not yet reached by a real emission). Unlike `measurements`/
+    /// `applied_commands` (an ever-growing list), this is a single running total, since that is
+    /// exactly what `av_dynamics::SensorFaultEffectDrain` itself already is (see that type's own
+    /// doc comment).
+    pub fn sensor_fault_effect(&self, id: &str) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        let sys = self.systems.get(id)?;
+        let frames_affected = sys.sensor_fault_effect.1;
+        if frames_affected == 0 {
+            return None;
+        }
+        let first_effect_tai_ns = sys.sensor_fault_effect.0.expect("frames_affected > 0 implies the first-effect epoch was recorded alongside it");
+        Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
     }
 
     /// See [`Scheduler::sample_kind`] -- identical contract, over [`HeteroScheduler`].
@@ -758,6 +798,10 @@ mod tests {
         // Test-only closed-form model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -953,6 +997,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     fn erased_constant_accel(model_id: &str, a: [f64; 3]) -> BoxedModel {
@@ -1064,6 +1112,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     /// M14.4 (lifting `DrmError::ContainerPeriodExceedsSampleInterval`): [`HeteroScheduler::
@@ -1128,6 +1180,10 @@ mod tests {
             // Test-only failing model; never emits telemetry.
             fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
                 Vec::new()
+            }
+            // No SENSOR fault runtime.
+            fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+                None
             }
         }
         let boxed: BoxedModel = av_dynamics::erase_with_id("test.always_fails", AlwaysFails, |model_id, detail| ModelError::Numerical { model_id, detail });

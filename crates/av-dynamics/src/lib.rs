@@ -231,6 +231,17 @@ pub struct AppliedCommand {
     pub applied_tai_ns: i64,
 }
 
+/// See [`DynamicsModel::drain_sensor_fault_effect`] (`docs/open-questions.md` question 178,
+/// R5.1a).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SensorFaultEffectDrain {
+    /// TAI nanoseconds of the first sensor emission this fault changed or suppressed, since the
+    /// last drain.
+    pub first_effect_tai_ns: i64,
+    /// The total count of emissions this fault changed or suppressed, since the last drain.
+    pub frames_affected: u64,
+}
+
 /// The result of [`DynamicsModel::step`]: the propagated state, the new absolute epoch, and
 /// any named side outputs (ADR-002: `step(state, t, controls, dt) -> (state, t + dt,
 /// outputs)`). `outputs` is a `BTreeMap` for the same reason as [`settings_hash`]'s input --
@@ -420,6 +431,26 @@ pub trait DynamicsModel {
     /// (much smaller) set of `impl DynamicsModel for ...` blocks.
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement>;
 
+    /// `docs/open-questions.md` question 178 (R5.1a, the SENSOR fault runtime for the star
+    /// tracker): the accumulated effect of this model's own currently-installed SENSOR fault
+    /// (if any) since the last time this was called -- the epoch of the first sensor emission
+    /// it changed or suppressed, and the total count of emissions it changed or suppressed.
+    /// `None` when no SENSOR fault is installed on this model, or one is installed but has not
+    /// yet taken effect (no truth has arrived, or the window has not been reached).
+    ///
+    /// **A required method with no default, mirroring [`last_measurements`](DynamicsModel::
+    /// last_measurements)'s own precedent and reasoning (question 112): a caller drains this at
+    /// every re-materialization boundary a faulted instance survives (`crate::drm::sensors` --
+    /// this crate has no `crate::drm` of its own, so no call site lives here -- but every model
+    /// in this workspace, including this one, must answer this explicitly), so a model with no
+    /// SENSOR fault runtime returning an implicit, defaulted `None` would be indistinguishable
+    /// from a model that legitimately has nothing to report this call -- the same silent-gap
+    /// risk `last_measurements`'s own doc comment already explains for a defaulted empty
+    /// `Vec`.** Every model in this workspace implements this explicitly (almost always a
+    /// trivial `None`) -- only `crate::drm::sensors::StarTrackerModel` (in `av-kernel`, the one
+    /// model with a SENSOR fault runtime) ever returns `Some`.
+    fn drain_sensor_fault_effect(&self) -> Option<SensorFaultEffectDrain>;
+
     /// Whether this model can also propagate its own state transition matrix (STM)
     /// alongside the state (ADR-002 second amendment, `docs/adr/002-dynamics-contract.md`).
     /// A **declared capability**, checked by the kernel before it ever calls
@@ -538,6 +569,11 @@ mod tests {
         // Test-only closed-form model; never emits telemetry, so never produces a CDM measurement.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+
+        // Test-only closed-form model; no SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<SensorFaultEffectDrain> {
+            None
         }
     }
 

@@ -660,6 +660,12 @@ impl HeteroKernel {
         self.scheduler.measurements(id)
     }
 
+    /// See [`HeteroScheduler::sensor_fault_effect`] -- identical contract (`docs/open-
+    /// questions.md` question 178, R5.1a).
+    pub fn sensor_fault_effect(&self, id: &str) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.scheduler.sensor_fault_effect(id)
+    }
+
     /// Like [`HeteroKernel::run`], but drives [`HeteroScheduler::advance_to_with_ports`]
     /// instead of `advance_to` at every output tick, so any registered system that overrides
     /// `av_dynamics::DynamicsModel::step_with_ports` exchanges port messages with the rest of
@@ -813,6 +819,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     /// An STM-capable, 6-state constant-acceleration model (M13.3): `x' = v`, `v' = a`
@@ -862,6 +872,10 @@ mod tests {
         // Test-only closed-form STM model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -991,6 +1005,10 @@ mod tests {
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
         }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
+        }
     }
 
     #[test]
@@ -1065,6 +1083,10 @@ mod tests {
         // Test-only closed-form rotation model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -1333,6 +1355,10 @@ mod tests {
         // Test-only closed-form rotation model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 
@@ -1637,6 +1663,10 @@ mod tests {
         // Test-only zero-dimensional model; never emits telemetry.
         fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
             Vec::new()
+        }
+        // No SENSOR fault runtime.
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
         }
     }
 

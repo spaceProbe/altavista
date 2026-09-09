@@ -98,6 +98,10 @@ impl DynamicsModel for SignalSender {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 /// Like [`SignalSender`], but a genuinely physical (`state_dim() == 6`, `[pos x3; vel x3]`,
@@ -139,6 +143,10 @@ impl DynamicsModel for PhysicalSignalSender {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 /// A model with one or more IN ports: logs every delivered `PortMessage` (in the order its own
@@ -166,6 +174,10 @@ impl DynamicsModel for SignalReceiver {
     // Test-only receiver; only ever logs inbound messages, never emits telemetry.
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
+    }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
     }
 }
 
@@ -386,6 +398,10 @@ impl DynamicsModel for SignalReceiverStepLog {
     // Test-only receiver; only ever logs inbound message counts, never emits telemetry.
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
+    }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
     }
 }
 

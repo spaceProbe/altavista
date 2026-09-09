@@ -1,0 +1,74 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R4.1b
+# (docs/open-questions.md question 178, ADR-005 sec 5: the PORT fault runtime, `crate::router`).
+#
+# Identical to drms/demo_command.drm.yaml (same sos_configuration_id -- drms/demo_command.sos.yaml
+# is reused unchanged, same two systems) with exactly one addition: a FAULT_TARGET_KIND_PORT
+# "duplicate" fault covering the command dispatch's own window, on the EMITTING port
+# (instance="ground", target="cmd_out"). No declared params: "duplicate" always means exactly one
+# native output_period_ns later (crate::router::Router::install_port_faults's own
+# output_period_ns parameter -- 1.0 s in this fixture, options.sample_interval_s).
+#
+# Window: [1700000050000000000, 1700000051000000000) -- exactly 1s, covering the command's own
+# declared dispatch epoch (t=50s) and nothing else in this 100s/1Hz run. rate is left unset
+# (defaults to 1.0) but still requires its own Scenario.seeds entry.
+#
+# Expected result (crates/av-kernel/tests/port_faults.rs states this before running):
+# - ground.cmd_out's own OUT PortTrafficRecord: exactly ONE record (never a second one for the
+#   duplicate -- crate::router's own module doc comment, "Duplicate": there is only ever one real
+#   emission).
+# - flight.cmd_in's own IN PortTrafficRecord: exactly TWO records, both sharing the one real
+#   tai_ns=1700000050000000000 (the module doc comment's own "both IN records share the SAME
+#   tai_ns" rule) -- the receiver really is delivered the frame twice.
+# - flight.ConstantAccelModel::step_with_ports actually receives that cmd_in payload at TWO
+#   different native steps (dispatch + 3s, the connection's own unfaulted availability, and
+#   dispatch + 4s, one whole output_period_ns later) -- but its own "changed, or first" rule
+#   (crates/av-kernel/src/drm/binding.rs::ConstantAccelModel::step_with_ports,
+#   last_applied_command_value) means only the FIRST of the two decodes as newly applied (the
+#   second carries the identical value=3.0, already applied): so `RunProducts.events` shows
+#   EXACTLY ONE EVENT_KIND_PORT_COMMAND event and the SAME single ACKED transition, at the SAME
+#   epochs, as the UNFAULTED drms/demo_command.drm.yaml baseline -- the "duplicate" fault is
+#   invisible to command-level semantics, even though the sidecar proves the frame really was
+#   delivered twice. Plus exactly one EVENT_KIND_FAULT event for "duplicate_ground_cmd" at
+#   tai_ns=1700000050000000000 (the one frame the fault actually duplicated).
+id: command_demo_port_duplicate_drm
+version: "1"
+name: "Port fault runtime demo (R4.1b): a PORT duplicate fault delivers the command twice, one step apart"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+  seeds:
+    duplicate_ground_cmd: 333
+  events:
+    - id: cmd1
+      tai_ns: 1700000050000000000
+      kind: command
+      instance: flight
+      values:
+        value: 3.0
+      attributes:
+        field: accel_scale
+        from: ground
+        command_class: demo
+  faults:
+    - id: duplicate_ground_cmd
+      tai_ns: 1700000050000000000
+      duration_ns: 1000000000
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: ground
+      target: cmd_out
+      kind: duplicate
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R4.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_command_port_duplicate.drm.yaml
+hash: "b76d09906257e798d8f88d9e3672cda9d139a8c20a3b6b97241cc0d0b2cedf41"

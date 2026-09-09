@@ -244,6 +244,10 @@ impl DynamicsModel for ReplayModel {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         Vec::new()
     }
+    // No SENSOR fault runtime.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 #[cfg(test)]

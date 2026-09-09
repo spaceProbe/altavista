@@ -86,6 +86,48 @@
 //!   variance SE = `sigma^2 * sqrt(2/(N-1))` (exact for a Gaussian sample, the same formula that
 //!   test's own doc comment cites) -- both stated, with the expected value, before the test's own
 //!   measurement is taken, per each test's doc comment below.
+//!
+//! ## SENSOR fault runtime for the star tracker (`docs/open-questions.md` question 178, R5.1a)
+//!
+//! [`StarTrackerFaultEffect`] is the declared effect of a `FAULT_TARGET_KIND_SENSOR` fault whose
+//! `kind` is one of [`crate::drm::fault::SENSOR_KINDS`] (`"bias"`, `"dropout"`, `"freeze"`,
+//! `"scale"`), carried in [`StarTrackerSpec::fault`] and applied by
+//! [`StarTrackerModel::step_with_ports`] -- the PORT fault runtime's own analogue
+//! (`crate::router`'s own module doc comment's "Port fault runtime" section) but realized as a
+//! declared PARAMETER CHANGE, applied by the SAME fault-bounded re-materialization boundary a
+//! DYNAMICS fault already uses (`crate::drm::fault::apply_dynamics_fault`/`apply_sensor_fault`,
+//! `crate::drm::executor::run_shared_group`'s own boundary loop), not by a router-mediated
+//! per-frame draw -- there is no router in the loop for a native sensor's own emission.
+//!
+//! **`Freeze`'s own definition, and why "first," not "last before the window."** A
+//! re-materialized model has no history: `crate::drm::executor::materialize_plan_at_boundary`
+//! constructs a genuinely FRESH `StarTrackerModel` at every boundary (a new `Pcg64`, `seq` reset
+//! to 0, `next_due` reset, `last_truth` cleared -- this module's own `StarTrackerModel::new`) --
+//! it has nothing left over from whatever segment ran immediately before the fault epoch to
+//! latch as "the last value." The FIRST measurement it computes after the fault epoch is
+//! therefore the only value available to freeze at all; [`StarTrackerModel::frozen_measurement`]
+//! latches exactly that one, the moment it is first computed, and every later emission in the
+//! window re-emits it unchanged -- still one packet, and one incremented CCSDS sequence count,
+//! per declared period (`docs/open-questions.md` question 178's own design: "it still emits a
+//! packet per period... only the measured values repeat").
+//!
+//! **Window semantics** ([Fault.tai_ns, Fault.tai_ns + duration_ns), half-open, `duration_ns ==
+//! 0` persistent to run end) and **overlap refusal** are `crate::drm::executor`'s own concern,
+//! not this module's -- see `super::DrmError::OverlappingSensorFaultWindows`'s own doc comment
+//! for exactly how SENSOR's own single-`Option`-slot representation makes its overlap key
+//! coarser than PORT's `(instance, port)` one.
+//!
+//! **Counting (question 186(c)).** [`StarTrackerModel::fault_frames_affected`]/`fault_first_
+//! effect_tai_ns` accumulate across every `step_with_ports` call until [`StarTrackerModel::
+//! drain_sensor_fault_effect`] (an `av_dynamics::DynamicsModel` required method, question 112 --
+//! delegated explicitly through `crate::drm::binding::AnyModel`, never a trait default) drains
+//! them -- `crate::drm::executor::run_shared_group` calls this at every boundary this instance's
+//! own handle is about to be discarded and re-materialized, not only the two SENSOR-fault-
+//! specific ones, because a re-materialization discards the counter along with everything else
+//! (the same "known pre-existing behaviour" this module's own R5.1A_REPORT.md measures for
+//! `seq`/the emission grid). Because overlapping windows are refused at load, at most one SENSOR
+//! fault is ever in force on one instance at a time, so attributing a drained count to "the
+//! currently active fault on this instance" is unambiguous.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -316,6 +358,14 @@ impl<M: DynamicsModel> DynamicsModel for TruthBroadcastAttitude<M> {
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         self.inner.last_measurements()
     }
+
+    /// Delegates to `self.inner.drain_sensor_fault_effect` (question 178, R5.1a) -- the wrapped
+    /// model is always attitude-shaped (`AttitudeWheelsModel`), never a star tracker, so this is
+    /// always `None` in practice, but delegating honestly matches every other method on this
+    /// wrapper.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        self.inner.drain_sensor_fault_effect()
+    }
 }
 
 // ============================================================================================
@@ -408,6 +458,33 @@ fn parse_optional_unit_quat(group: [Option<f64>; 4], name: &str) -> Result<[f64;
 // Star tracker.
 // ============================================================================================
 
+/// `docs/open-questions.md` question 178 (R5.1a): the SENSOR fault effect currently installed on
+/// a [`StarTrackerModel`], carried in [`StarTrackerSpec::fault`] and applied inside
+/// [`StarTrackerModel::step_with_ports`] -- see that method's own doc comment for exactly where
+/// each variant is applied, and this module's own doc comment's "SENSOR fault runtime" section
+/// for the vocabulary these mirror ([`crate::drm::fault::SENSOR_KINDS`]). At most one variant is
+/// ever installed at a time -- `crate::drm::executor` refuses two SENSOR faults on the same
+/// instance with overlapping windows at load ([`super::DrmError::OverlappingSensorFaultWindows`]),
+/// which is what makes a single `Option` slot (rather than a set) the correct representation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StarTrackerFaultEffect {
+    /// `Fault.target` is `startracker.bias_rad.{x,y,z}` (`axis` 0/1/2); `Fault.params["value"]`
+    /// is `value_rad`, a fixed small-angle rotation about that body axis, radians.
+    Bias { axis: usize, value_rad: f64 },
+    /// `Fault.target` is `startracker.output`: no packet, no `Measurement`, at any emission
+    /// instant inside the window.
+    Dropout,
+    /// `Fault.target` is `startracker.output`: the FIRST measurement computed after the fault
+    /// epoch is latched and re-emitted, unchanged, at every subsequent emission instant in the
+    /// window -- see [`StarTrackerModel::step_with_ports`]'s own doc comment for why "first," not
+    /// "last before the window."
+    Freeze,
+    /// `Fault.target` is `startracker.scale`; `Fault.params["value"]` is `value`, a dimensionless
+    /// factor multiplying the sensor's reported deviation from truth (noise plus any bias) --
+    /// `value == 1.0` is exactly a no-op.
+    Scale { value: f64 },
+}
+
 /// Parsed, typed parameters for [`StarTrackerModel`] -- built by [`parse_star_tracker_spec`].
 /// Parameter vocabulary (a name matching none of these is [`SensorSpecError::
 /// UnknownParameter`]):
@@ -417,12 +494,18 @@ fn parse_optional_unit_quat(group: [Option<f64>; 4], name: &str) -> Result<[f64;
 ///   error, radians -- see [`StarTrackerModel::step_with_ports`] for how it is applied (trap 1).
 /// - `startracker.mount_q.{x,y,z,w}` (optional, all four together; default identity): fixed
 ///   mounting rotation from the vehicle body frame into the star tracker's own boresight frame.
+///
+/// `fault` (question 178, R5.1a) is never a declared parameter -- it is `None` at parse time,
+/// always, and is set only by `crate::drm::fault::apply_sensor_fault` at a fault-bounded
+/// re-materialization boundary (`crate::drm::executor::run_shared_group`'s own boundary loop),
+/// exactly the way a DYNAMICS fault's own perturbed field is never a declared parameter either.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StarTrackerSpec {
     pub update_rate_hz: f64,
     pub seed: u64,
     pub noise_sigma_rad: f64,
     pub mount_q: [f64; 4],
+    pub fault: Option<StarTrackerFaultEffect>,
 }
 
 pub fn parse_star_tracker_spec(params: &BTreeMap<String, Parameter>) -> Result<StarTrackerSpec, SensorSpecError> {
@@ -455,7 +538,7 @@ pub fn parse_star_tracker_spec(params: &BTreeMap<String, Parameter>) -> Result<S
     let seed = seed.ok_or_else(|| SensorSpecError::MissingParameter { name: "startracker.seed".to_string() })?;
     let noise_sigma_rad = require_positive(noise_sigma_rad, "startracker.noise_sigma_rad")?;
     let mount_q = parse_optional_unit_quat(mount_q, "startracker.mount_q")?;
-    Ok(StarTrackerSpec { update_rate_hz, seed, noise_sigma_rad, mount_q })
+    Ok(StarTrackerSpec { update_rate_hz, seed, noise_sigma_rad, mount_q, fault: None })
 }
 
 /// The fixed field layout every star tracker `PacketCodec` this module builds/expects uses:
@@ -509,6 +592,21 @@ pub struct StarTrackerModel {
     /// `Cell`/`RefCell` for the same `&self`-only-methods reason `next_due`/`rng` already need
     /// interior mutability.
     measurements: RefCell<Vec<pb::Measurement>>,
+    /// Question 178 (R5.1a): the `[qx,qy,qz,qw]` of the FIRST measurement this instance computed
+    /// under `StarTrackerFaultEffect::Freeze` -- `None` until that first computation, then
+    /// re-emitted, unchanged, at every subsequent emission instant. Reset only by constructing a
+    /// fresh model (a fault-bounded re-materialization boundary), never by anything inside
+    /// `step_with_ports` itself, which is exactly why "first value in the window" is a sound
+    /// definition at all: a re-materialized model has no history (this struct's own doc comment,
+    /// and `crate::drm::sensors`'s own module doc comment) beyond what it computes after the
+    /// fault epoch, so "first" is the only value it CAN latch -- "last value before the window"
+    /// would require the model to remember something from a segment it never ran.
+    frozen_measurement: RefCell<Option<[f64; 4]>>,
+    /// Question 178 (R5.1a): the total count of emissions `self.spec.fault` has changed or
+    /// suppressed since the last [`Self::drain_sensor_fault_effect`] call, and the epoch of the
+    /// first one -- see that method's own doc comment for exactly what counts as "affected".
+    fault_frames_affected: Cell<u64>,
+    fault_first_effect_tai_ns: Cell<Option<i64>>,
 }
 
 impl StarTrackerModel {
@@ -553,6 +651,22 @@ impl StarTrackerModel {
         }
         settings.insert("output_port".to_string(), output_port.clone());
         settings.insert("apid".to_string(), codec.apid.to_string());
+        // Question 178 (R5.1a): included in the settings hash -- and therefore in `dynamics_hash`
+        // -- so a fault-bounded re-materialization (installing or clearing `spec.fault`) always
+        // produces a genuinely different configuration hash, keeping `executor::
+        // merge_adjacent_segments` from wrongly merging the pre-fault, faulted, and post-fault
+        // segments together (question 115/116's own "merge only when the configuration is truly
+        // unchanged" rule).
+        settings.insert(
+            "fault".to_string(),
+            match spec.fault {
+                None => "none".to_string(),
+                Some(StarTrackerFaultEffect::Bias { axis, value_rad }) => format!("bias:{axis}:{value_rad:.17e}"),
+                Some(StarTrackerFaultEffect::Dropout) => "dropout".to_string(),
+                Some(StarTrackerFaultEffect::Freeze) => "freeze".to_string(),
+                Some(StarTrackerFaultEffect::Scale { value }) => format!("scale:{value:.17e}"),
+            },
+        );
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.no_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
         let seed = spec.seed;
@@ -567,6 +681,9 @@ impl StarTrackerModel {
             last_truth: RefCell::new(None),
             info,
             measurements: RefCell::new(Vec::new()),
+            frozen_measurement: RefCell::new(None),
+            fault_frames_affected: Cell::new(0),
+            fault_first_effect_tai_ns: Cell::new(None),
         })
     }
 
@@ -626,13 +743,39 @@ impl DynamicsModel for StarTrackerModel {
         while end >= self.next_due.get() {
             let due = self.next_due.get();
             if let Some((truth_q, _omega)) = *self.last_truth.borrow() {
-                let err_vec = {
-                    let mut rng = self.rng.borrow_mut();
-                    gaussian_vec3(&mut rng, self.spec.noise_sigma_rad)
+                // Question 178 (R5.1a): `Dropout` suppresses the WHOLE emission -- no packet,
+                // no `Measurement`, and `seq` is left untouched (there is no packet to number --
+                // see this model's own module doc comment's "SENSOR fault runtime" section).
+                // Every other installed fault (`None`/`Bias`/`Freeze`/`Scale`) still emits a
+                // packet below, exactly as an unfaulted model would.
+                if matches!(self.spec.fault, Some(StarTrackerFaultEffect::Dropout)) {
+                    self.record_fault_effect(due);
+                    self.next_due.set(due + self.period_ns);
+                    continue;
+                }
+                // `already_frozen` is read into a plain, owned `Option<[f64; 4]>` (Copy) BEFORE
+                // the `if`/`else` below, rather than matching directly on `*self.
+                // frozen_measurement.borrow()` -- a `Ref` scrutinee's borrow otherwise stays
+                // alive across the WHOLE `if let`/`else` (both arms), including the `else`
+                // arm's own `self.frozen_measurement.borrow_mut()`, which would panic
+                // ("already borrowed") the very first time this fires. Caught directly, not
+                // assumed: `freeze_latches_the_first_measurement_and_repeats_it_while_truth_
+                // keeps_changing` paniced with exactly that message before this fix.
+                let already_frozen = *self.frozen_measurement.borrow();
+                let measured_q = if matches!(self.spec.fault, Some(StarTrackerFaultEffect::Freeze)) {
+                    if let Some(frozen) = already_frozen {
+                        frozen
+                    } else {
+                        let q = self.compute_measured_quaternion(truth_q);
+                        *self.frozen_measurement.borrow_mut() = Some(q);
+                        q
+                    }
+                } else {
+                    self.compute_measured_quaternion(truth_q)
                 };
-                let delta_q = small_angle_to_quat(err_vec);
-                let mounted = quat_mul(self.spec.mount_q, truth_q);
-                let measured_q = quat_mul(delta_q, mounted);
+                if self.spec.fault.is_some() {
+                    self.record_fault_effect(due);
+                }
                 let mut values = BTreeMap::new();
                 values.insert("qx".to_string(), FieldValue::Numeric(measured_q[0]));
                 values.insert("qy".to_string(), FieldValue::Numeric(measured_q[1]));
@@ -679,6 +822,67 @@ impl DynamicsModel for StarTrackerModel {
     /// that call crossed no emission boundary, or truth had not arrived yet).
     fn last_measurements(&self) -> Vec<pb::Measurement> {
         self.measurements.borrow().clone()
+    }
+
+    /// Question 178 (R5.1a): drains [`Self::fault_frames_affected`]/[`Self::
+    /// fault_first_effect_tai_ns`], resetting both to their empty state -- `None` when nothing
+    /// has been affected since the last drain (no fault installed, or one installed but not yet
+    /// reached by a real emission), never a zero-valued `Some` (mirrors `crate::router::Router::
+    /// take_applied_port_faults`'s own "a fault that never actually applies produces no event at
+    /// all" rule). `crate::drm::executor::run_shared_group` calls this at every boundary this
+    /// instance's own handle is about to be discarded and re-materialized -- see that function's
+    /// own doc comment for why every boundary, not only the two SENSOR-fault-specific ones.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        let frames_affected = self.fault_frames_affected.get();
+        if frames_affected == 0 {
+            return None;
+        }
+        let first_effect_tai_ns = self
+            .fault_first_effect_tai_ns
+            .get()
+            .expect("fault_frames_affected > 0 implies fault_first_effect_tai_ns is Some -- record_fault_effect always sets both together");
+        self.fault_frames_affected.set(0);
+        self.fault_first_effect_tai_ns.set(None);
+        Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
+    }
+}
+
+impl StarTrackerModel {
+    /// Question 178 (R5.1a): the sensor's reported deviation from truth (the composed
+    /// small-angle noise vector, `Bias` added in before conversion, `Scale` multiplying the
+    /// combined vector) -- see [`Self::step_with_ports`]'s own doc comment for `Dropout`/
+    /// `Freeze`, which never reach this function at all (dropout emits nothing; freeze calls
+    /// this only for the one measurement it ever actually computes). Composes noise into the
+    /// reported quaternion via [`quat_mul`], exactly [`Self::step_with_ports`]'s own pre-
+    /// existing convention (trap 1) -- never touched, only the small-angle VECTOR fed into
+    /// [`small_angle_to_quat`] gains a bias term and/or a scale factor first.
+    fn compute_measured_quaternion(&self, truth_q: [f64; 4]) -> [f64; 4] {
+        let mut err_vec = {
+            let mut rng = self.rng.borrow_mut();
+            gaussian_vec3(&mut rng, self.spec.noise_sigma_rad)
+        };
+        if let Some(StarTrackerFaultEffect::Bias { axis, value_rad }) = self.spec.fault {
+            err_vec[axis] += value_rad;
+        }
+        if let Some(StarTrackerFaultEffect::Scale { value }) = self.spec.fault {
+            err_vec = [err_vec[0] * value, err_vec[1] * value, err_vec[2] * value];
+        }
+        let delta_q = small_angle_to_quat(err_vec);
+        let mounted = quat_mul(self.spec.mount_q, truth_q);
+        quat_mul(delta_q, mounted)
+    }
+
+    /// Question 178 (R5.1a): record one more emission `self.spec.fault` changed or suppressed,
+    /// at TAI epoch `due` -- called for every kind (`Dropout` included, question 186(c): "the
+    /// ones dropout suppressed" count too) exactly once per affected emission instant, only when
+    /// truth has already arrived (an emission with no truth yet produces nothing regardless of
+    /// any fault, so it is never "affected" by one -- see [`Self::step_with_ports`]'s own call
+    /// sites, both inside the `if let Some((truth_q, ...)) = ...` guard).
+    fn record_fault_effect(&self, due: i64) {
+        self.fault_frames_affected.set(self.fault_frames_affected.get() + 1);
+        if self.fault_first_effect_tai_ns.get().is_none() {
+            self.fault_first_effect_tai_ns.set(Some(due));
+        }
     }
 }
 
@@ -979,6 +1183,14 @@ impl DynamicsModel for ImuModel {
     fn last_measurements(&self) -> Vec<pb::Measurement> {
         self.measurements.borrow().clone()
     }
+
+    /// The IMU stays refused this round (`DrmError::PortOrSensorFaultNotYetSupported`, narrowed
+    /// to "IMU only, R5.1b" -- `crate::drm::fault`'s own module doc comment): no DRM naming an
+    /// IMU instance's SENSOR fault can ever load, so this model never has one installed to
+    /// report -- always `None`.
+    fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1152,7 +1364,7 @@ mod tests {
 
     #[test]
     fn star_tracker_new_refuses_a_codec_missing_a_required_field() {
-        let spec = StarTrackerSpec { update_rate_hz: 5.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0] };
+        let spec = StarTrackerSpec { update_rate_hz: 5.0, seed: 1, noise_sigma_rad: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None };
         let mut codec = star_tracker_packet_codec("st1", 100);
         codec.fields.retain(|f| f.name != "qw");
         let err = StarTrackerModel::new(spec, codec, "st_out".to_string(), 0, "startracker.test").unwrap_err();
@@ -1178,7 +1390,7 @@ mod tests {
     // unchanged from before the M22.2b fix documented on `StarTrackerModel::new`/`ImuModel::new`
     // added an explicit `epoch_tai_ns` parameter).
     fn star_tracker(update_rate_hz: f64, seed: u64, sigma: f64) -> StarTrackerModel {
-        let spec = StarTrackerSpec { update_rate_hz, seed, noise_sigma_rad: sigma, mount_q: [0.0, 0.0, 0.0, 1.0] };
+        let spec = StarTrackerSpec { update_rate_hz, seed, noise_sigma_rad: sigma, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None };
         let codec = star_tracker_packet_codec("st_test", 100);
         StarTrackerModel::new(spec, codec, "st_out".to_string(), 0, "startracker.test").unwrap()
     }
@@ -1218,7 +1430,7 @@ mod tests {
 
     #[test]
     fn star_tracker_constructed_at_a_realistic_epoch_emits_exactly_once_per_declared_period() {
-        let spec = StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-6, mount_q: [0.0, 0.0, 0.0, 1.0] };
+        let spec = StarTrackerSpec { update_rate_hz: 2.0, seed: 1, noise_sigma_rad: 1e-6, mount_q: [0.0, 0.0, 0.0, 1.0], fault: None };
         let codec = star_tracker_packet_codec("st_test", 100);
         let model = StarTrackerModel::new(spec, codec, "st_out".to_string(), REALISTIC_EPOCH_TAI_NS, "startracker.test").unwrap();
         let inbox = feed_truth(([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0]));
@@ -1639,6 +1851,160 @@ mod tests {
         eprintln!("[star tracker recovered boresight error] N={N} sigma={SIGMA:e}: mean expected=0 measured={mean:.3e} dev={dev_mean:.2} SE; std expected={SIGMA:e} measured={std:.6e} dev={dev_std:.2} SE (bound 5 SE)");
         assert!(dev_mean < 5.0, "mean off by {dev_mean:.2} SE");
         assert!(dev_std < 5.0, "std off by {dev_std:.2} SE");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Question 178 (R5.1a): the SENSOR fault runtime for the star tracker -- one unit test per
+    // declared effect, plus the drain/counting machinery `crate::drm::executor` relies on.
+    // ---------------------------------------------------------------------------------------
+
+    fn star_tracker_with_fault(update_rate_hz: f64, seed: u64, sigma: f64, fault: Option<StarTrackerFaultEffect>) -> StarTrackerModel {
+        let spec = StarTrackerSpec { update_rate_hz, seed, noise_sigma_rad: sigma, mount_q: IDENTITY_Q, fault };
+        let codec = star_tracker_packet_codec("st_test", 100);
+        StarTrackerModel::new(spec, codec, "st_out".to_string(), 0, "startracker.test").unwrap()
+    }
+
+    /// `Bias` composes a fixed small-angle rotation about the declared axis into the reported
+    /// quaternion the same way noise already is (`compute_measured_quaternion`'s own doc
+    /// comment) -- with `noise_sigma_rad == 0.0` (a legitimate, deterministic edge case:
+    /// `gaussian_vec3` at sigma 0 always draws the zero vector), the ENTIRE measured deviation
+    /// from truth must equal the declared bias exactly, to floating-point round-trip precision.
+    /// Fails against an implementation that never adds the bias term at all (recovered angle
+    /// would be exactly zero) or one that writes it into the wrong axis.
+    #[test]
+    fn bias_adds_a_fixed_rotation_about_the_declared_axis_when_noise_is_zero() {
+        let model = star_tracker_with_fault(1.0, 1, 0.0, Some(StarTrackerFaultEffect::Bias { axis: 1, value_rad: 0.001 }));
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let (result, outbox, _) = model.step_with_ports(&[], 0, &[], model.period_ns(), &inbox).unwrap();
+        assert_eq!(outbox.messages().len(), 1);
+        let codec = star_tracker_packet_codec("st_test", 100);
+        let measured = decode_star_tracker(&codec, &outbox.messages()[0].payload);
+        let recovered = quat_to_small_angle(quat_mul(measured, quat_conj(IDENTITY_Q)));
+        assert!((recovered[0]).abs() < 1e-12, "x axis must be untouched: {recovered:?}");
+        assert!((recovered[1] - 0.001).abs() < 1e-12, "y axis must carry exactly the declared bias: {recovered:?}");
+        assert!((recovered[2]).abs() < 1e-12, "z axis must be untouched: {recovered:?}");
+        let _ = result;
+    }
+
+    /// `Dropout`: no packet, no `Measurement`, at any emission instant inside the window --
+    /// every one of `N` declared periods must produce nothing. Fails against an implementation
+    /// that still emits (checking `outbox`) or that emits nothing but still records a
+    /// `Measurement` some other way (checking `last_measurements`).
+    #[test]
+    fn dropout_emits_no_packet_and_no_measurement_at_any_emission_instant() {
+        const N: usize = 20;
+        let model = star_tracker_with_fault(2.0, 1, 1e-5, Some(StarTrackerFaultEffect::Dropout));
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let mut state: Vec<f64> = Vec::new();
+        let mut t = 0i64;
+        for _ in 0..N {
+            let (result, outbox, _) = model.step_with_ports(&state, t, &[], model.period_ns(), &inbox).unwrap();
+            state = result.state;
+            t = result.t_tai_ns;
+            assert!(outbox.messages().is_empty(), "dropout must emit no packet");
+            assert!(model.last_measurements().is_empty(), "dropout must produce no Measurement");
+        }
+        let drain = model.drain_sensor_fault_effect().expect("N affected (suppressed) emissions must be reported");
+        assert_eq!(drain.frames_affected, N as u64, "every suppressed emission counts, question 186(c)");
+        assert_eq!(drain.first_effect_tai_ns, model.period_ns(), "the first suppressed instant is the sensor's own first declared period");
+    }
+
+    /// `Freeze`: the FIRST measurement computed after the fault epoch is latched and re-emitted,
+    /// unchanged, at every later emission instant -- even though the TRUTH keeps changing (this
+    /// test drives a genuinely rotating truth quaternion across the window, the opposite of a
+    /// vacuous "truth never changed so of course the output didn't either" case), and even
+    /// though noise is nonzero (so a non-frozen model would draw a fresh, different value every
+    /// time by construction -- see the seeded-determinism tests elsewhere in this module).
+    /// Sequence count still increments every emission (a packet per period, per the design).
+    /// Fails against an implementation that re-measures every step (payloads would differ) or
+    /// that freezes the sequence count too (would not increment).
+    #[test]
+    fn freeze_latches_the_first_measurement_and_repeats_it_while_truth_keeps_changing() {
+        const N: usize = 10;
+        let model = star_tracker_with_fault(1.0, 42, 1e-4, Some(StarTrackerFaultEffect::Freeze));
+        let codec = star_tracker_packet_codec("st_test", 100);
+        let mut state: Vec<f64> = Vec::new();
+        let mut t = 0i64;
+        let mut payloads: Vec<[f64; 4]> = Vec::new();
+        let mut seqs: Vec<u16> = Vec::new();
+        for k in 0..N {
+            // A genuinely rotating truth: k degrees about z each step -- proves the freeze is
+            // not merely an artifact of unchanging input.
+            let half = (k as f64).to_radians() / 2.0;
+            let truth_q = [0.0, 0.0, half.sin(), half.cos()];
+            let inbox = feed_truth((truth_q, [0.0, 0.0, 0.0]));
+            let (result, outbox, _) = model.step_with_ports(&state, t, &[], model.period_ns(), &inbox).unwrap();
+            state = result.state;
+            t = result.t_tai_ns;
+            assert_eq!(outbox.messages().len(), 1, "a packet must still be emitted every period");
+            payloads.push(decode_star_tracker(&codec, &outbox.messages()[0].payload));
+            let mut apid_map = ApidMap::new();
+            apid_map.insert(codec.apid, codec.clone());
+            seqs.push(codec::decode_packet(&apid_map, &outbox.messages()[0].payload).unwrap().sequence_count);
+        }
+        for (i, p) in payloads.iter().enumerate() {
+            assert_eq!(*p, payloads[0], "emission {i} must repeat the FIRST measurement exactly, byte for byte, not the true (changing) attitude");
+        }
+        assert_eq!(seqs, (0..N as u16).collect::<Vec<_>>(), "the CCSDS sequence count must still increment every emission, only the measured values repeat");
+        let drain = model.drain_sensor_fault_effect().expect("N affected emissions");
+        assert_eq!(drain.frames_affected, N as u64);
+    }
+
+    /// `Scale`: the sensor's reported deviation from truth (noise, here alone since no bias is
+    /// also installed) is multiplied by the declared factor. Checked two ways: (a) `value == 2.0`
+    /// against a same-seed, unfaulted baseline -- the SAME raw noise draw (same seed, same call
+    /// order) must recover to (approximately) double the unfaulted deviation; (b) `value == 1.0`
+    /// must be EXACTLY a no-op -- bit-identical payloads against the unfaulted baseline, not
+    /// merely numerically close (`x * 1.0 == x` exactly, for any finite IEEE-754 `x`).
+    #[test]
+    fn scale_multiplies_the_deviation_from_truth_and_one_is_exactly_a_no_op() {
+        let truth_q = {
+            let axis_norm = (1.0f64 + 4.0 + 9.0).sqrt();
+            let axis = [1.0 / axis_norm, 2.0 / axis_norm, 3.0 / axis_norm];
+            let half = (5.0f64).to_radians() / 2.0;
+            [axis[0] * half.sin(), axis[1] * half.sin(), axis[2] * half.sin(), half.cos()]
+        };
+        let inbox = feed_truth((truth_q, [0.0, 0.0, 0.0]));
+        let codec = star_tracker_packet_codec("st_test", 100);
+
+        let baseline = star_tracker_with_fault(1.0, 99, 1e-4, None);
+        let (_r, ob_base, _) = baseline.step_with_ports(&[], 0, &[], baseline.period_ns(), &inbox).unwrap();
+        let measured_base = decode_star_tracker(&codec, &ob_base.messages()[0].payload);
+        let recovered_base = quat_to_small_angle(quat_mul(measured_base, quat_conj(truth_q)));
+
+        let scaled_2x = star_tracker_with_fault(1.0, 99, 1e-4, Some(StarTrackerFaultEffect::Scale { value: 2.0 }));
+        let (_r, ob_2x, _) = scaled_2x.step_with_ports(&[], 0, &[], scaled_2x.period_ns(), &inbox).unwrap();
+        let measured_2x = decode_star_tracker(&codec, &ob_2x.messages()[0].payload);
+        let recovered_2x = quat_to_small_angle(quat_mul(measured_2x, quat_conj(truth_q)));
+        for axis in 0..3 {
+            let expected = recovered_base[axis] * 2.0;
+            assert!((recovered_2x[axis] - expected).abs() < 1e-12, "axis {axis}: scaled={:.3e} expected 2x baseline={:.3e}", recovered_2x[axis], expected);
+        }
+
+        let scaled_1x = star_tracker_with_fault(1.0, 99, 1e-4, Some(StarTrackerFaultEffect::Scale { value: 1.0 }));
+        let (_r, ob_1x, _) = scaled_1x.step_with_ports(&[], 0, &[], scaled_1x.period_ns(), &inbox).unwrap();
+        assert_eq!(ob_1x.messages()[0].payload, ob_base.messages()[0].payload, "value == 1.0 must be EXACTLY a no-op, bit for bit");
+    }
+
+    /// `drain_sensor_fault_effect` reports `None` when nothing has been affected (no fault
+    /// installed at all), and clears its own accumulator once drained -- a second, immediate
+    /// drain with nothing newly affected must be `None`, not a repeat of the first drain's own
+    /// count. Fails against an implementation that never clears (`.take()` vs `.clone()`, the
+    /// identical bug class `router::tests::a_drop_fault_suppresses_...`'s break-and-restore
+    /// evidence already pins for PORT faults).
+    #[test]
+    fn drain_sensor_fault_effect_is_none_with_no_fault_and_clears_once_drained() {
+        let unfaulted = star_tracker_with_fault(1.0, 1, 1e-5, None);
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let (_r, ob, _) = unfaulted.step_with_ports(&[], 0, &[], unfaulted.period_ns(), &inbox).unwrap();
+        assert_eq!(ob.messages().len(), 1);
+        assert!(unfaulted.drain_sensor_fault_effect().is_none(), "no fault installed -- nothing to report");
+
+        let faulted = star_tracker_with_fault(1.0, 1, 1e-5, Some(StarTrackerFaultEffect::Dropout));
+        let (_r, _ob, _) = faulted.step_with_ports(&[], 0, &[], faulted.period_ns(), &inbox).unwrap();
+        let first = faulted.drain_sensor_fault_effect().expect("one affected (suppressed) emission");
+        assert_eq!(first.frames_affected, 1);
+        assert!(faulted.drain_sensor_fault_effect().is_none(), "a second, immediate drain with nothing newly affected must be empty, not a repeat");
     }
 
     // ---------------------------------------------------------------------------------------

@@ -453,9 +453,17 @@ pub struct RunProducts {
     /// Router::deliver`'s own OUT recording, which happens entirely independently of, and after,
     /// `Measurement` decoding at the emitter's own `step_with_ports` call (this doc comment's own
     /// first sentence, above), so a dropped packet's own `Measurement` still appears here exactly
-    /// like an unconnected port's own packet already did before this task. `kind ==
-    /// "corrupt"`/`"duplicate"` (R4.1b's own scope) and every `FAULT_TARGET_KIND_SENSOR` fault
-    /// are still refused at load, so those two shapes still never reach a real run at all.
+    /// like an unconnected port's own packet already did before this task. **R4.1b: `kind ==
+    /// "corrupt"`/`"duplicate"` are real now too, and neither retroactively changes this field
+    /// either** -- decoding always happens at the emitter, from its own pre-fault bytes, before
+    /// `crate::router::Router::deliver` is ever consulted, so a corrupted or duplicated packet's
+    /// `Measurement` is exactly what an unfaulted run would have produced (`crate::router`'s own
+    /// module doc comment, "Corrupt"/"Duplicate": the mutation/second delivery is something the
+    /// RECEIVER experiences, never something that reaches back and changes what the emitter
+    /// already decoded from its own original values) -- pinned by `tests/demo_measurements.rs`.
+    /// Every `FAULT_TARGET_KIND_SENSOR` fault is still refused at load
+    /// (`DrmError::PortOrSensorFaultNotYetSupported`), so that shape still never reaches a real
+    /// run at all.
     pub measurements: Vec<pb::Measurement>,
     /// `docs/open-questions.md` question 175 (M25.4a): SHA-256 (lowercase hex) of the exact
     /// bytes written to this run's `PortTrafficLog` sidecar -- empty when [`RunConfig::
@@ -1115,26 +1123,34 @@ fn hetero_err_to_drm(e: HeteroKernelError) -> DrmError {
     }
 }
 
-/// One boundary event this loop can split a run at -- either a `FAULT_TARGET_KIND_DYNAMICS`
-/// fault (reconfigures the dynamics, state continuous) or a `"maneuver"` `ScenarioEvent`
-/// (jumps the velocity, dynamics configuration unchanged). See [`run_shared_group`]'s own doc
-/// comment for how the two are merged into one sorted boundary list (M14.1: across every
-/// active `BINDING_KIND_MODEL` instance, not just one).
+/// One boundary event this loop can split a run at -- a `FAULT_TARGET_KIND_DYNAMICS`/`_HARDWARE`/
+/// `_SENSOR` fault (reconfigures the dynamics, state continuous), a `"maneuver"` `ScenarioEvent`
+/// (jumps the velocity, dynamics configuration unchanged), or [`Boundary::SensorFaultEnd`] --
+/// question 178 (R5.1a)'s own SECOND, executor-synthesized boundary at a windowed SENSOR fault's
+/// own end epoch (`Fault.tai_ns + Fault.duration_ns`, only when `duration_ns > 0`), which restores
+/// the star-tracker instance's spec to its exact pre-fault value (`fault::clear_sensor_fault`).
+/// See [`run_shared_group`]'s own doc comment for how all of these are merged into one sorted
+/// boundary list (M14.1: across every active `BINDING_KIND_MODEL` instance, not just one).
 enum Boundary<'a> {
     Fault(&'a Fault),
     Maneuver(&'a ParsedManeuver),
+    SensorFaultEnd(&'a Fault),
 }
 impl Boundary<'_> {
     fn tai_ns(&self) -> i64 {
         match self {
             Boundary::Fault(f) => f.tai_ns,
             Boundary::Maneuver(m) => m.tai_ns,
+            // `Fault.duration_ns > 0` is `run_shared_group`'s own precondition for ever
+            // constructing this variant at all -- see its own boundary-collection pass.
+            Boundary::SensorFaultEnd(f) => f.tai_ns + f.duration_ns,
         }
     }
     fn id(&self) -> &str {
         match self {
             Boundary::Fault(f) => &f.id,
             Boundary::Maneuver(m) => &m.id,
+            Boundary::SensorFaultEnd(f) => &f.id,
         }
     }
     /// M14.1 (question 109): which instance this boundary targets -- the shared multi-instance
@@ -1146,6 +1162,7 @@ impl Boundary<'_> {
         match self {
             Boundary::Fault(f) => &f.instance,
             Boundary::Maneuver(m) => &m.instance,
+            Boundary::SensorFaultEnd(f) => &f.instance,
         }
     }
 }
@@ -1389,7 +1406,16 @@ fn hetero_err_to_drm_shared(e: HeteroKernelError, container_error_slots: &BTreeM
 /// identically to a kernel that was never split at all (see [`run_shared_group`]'s own doc
 /// comment for the "byte-identical, not merely assumed" scope this claim is limited to).
 #[allow(clippy::too_many_arguments)]
-fn run_one_span(seg_start: i64, seg_end: i64, model_spans: &mut BTreeMap<String, ModelSpanState>, container_spans: &mut BTreeMap<String, ContainerSpanState>, router: &mut crate::router::Router, output_period_ns: i64) -> Result<(), DrmError> {
+fn run_one_span(
+    seg_start: i64,
+    seg_end: i64,
+    model_spans: &mut BTreeMap<String, ModelSpanState>,
+    container_spans: &mut BTreeMap<String, ContainerSpanState>,
+    router: &mut crate::router::Router,
+    output_period_ns: i64,
+    sensor_fault_drains: &mut BTreeMap<String, av_dynamics::SensorFaultEffectDrain>,
+) -> Result<(), DrmError> {
+    sensor_fault_drains.clear();
     let mut kernel = HeteroKernel::new(output_period_ns);
     for (name, span) in model_spans.iter_mut() {
         let handle = span.handle.take().expect("materialized before this span (either the initial materialization or the previous boundary's rebuild)");
@@ -1420,6 +1446,16 @@ fn run_one_span(seg_start: i64, seg_end: i64, model_spans: &mut BTreeMap<String,
         // Question 173: same drain shape as `applied_commands` immediately above.
         if let Some(measured) = kernel.measurements(name) {
             span.measurements.extend_from_slice(measured);
+        }
+        // Question 178 (R5.1a): this instance's own SENSOR fault effect over the WHOLE span
+        // this call just ran -- read here, while `kernel` (and the boxed model it owns) is
+        // still alive, and handed back to the caller (`run_shared_group`) via `sensor_fault_
+        // drains`, since `span.handle` itself is `None` for the entire duration of this call
+        // (`span.handle.take()`, above) and stays that way until the caller re-materializes a
+        // fresh handle at the next boundary -- there is no live handle left in `span` to drain
+        // from once this function returns.
+        if let Some(drain) = kernel.sensor_fault_effect(name) {
+            sensor_fault_drains.insert(name.clone(), drain);
         }
         append_span_samples(sub, &mut span.all_samples, &mut span.all_segments, &mut span.segment_preceded_by_own_maneuver, &mut span.shell, !span.seg_start_is_post_maneuver);
     }
@@ -1559,6 +1595,28 @@ fn run_one_span(seg_start: i64, seg_end: i64, model_spans: &mut BTreeMap<String,
 /// epochs, M14.4) -- see this function's own doc comment's "Container period vs. the trajectory's
 /// own output grid" section for why that side channel is gone.
 type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, String>, Vec<av_cdm::pb::Measurement>);
+
+/// Question 178 (R5.1a): drain `handle`'s own accumulated SENSOR fault effect (if any) and fold
+/// it into `sensor_fault_totals`, attributed to whichever fault id `active_sensor_fault` says is
+/// currently installed on `name` -- a no-op when `name` has no active SENSOR fault, `handle` is
+/// `None`, or the drain itself is `None` (nothing affected since the last drain). Called by
+/// [`run_shared_group`] at every point one instance's own handle is about to be discarded and
+/// replaced with a freshly re-materialized one -- see that function's own doc comment for why
+/// this must happen at every boundary, not only the two SENSOR-fault-specific ones.
+/// Fold `name`'s own per-span SENSOR fault drain (if any -- see [`run_one_span`]'s own doc
+/// comment for why this is collected from `kernel.sensor_fault_effect` DURING the span rather
+/// than from `ModelSpanState::handle` afterward, which is always `None` by the time a span
+/// finishes) into `sensor_fault_totals`, attributed to whichever fault id [`active_sensor_fault`]
+/// says is currently installed on `name`.
+fn fold_sensor_fault_span_drain(name: &str, drain: Option<av_dynamics::SensorFaultEffectDrain>, active_sensor_fault: &BTreeMap<String, String>, sensor_fault_totals: &mut BTreeMap<String, (Option<i64>, u64)>) {
+    let Some(fault_id) = active_sensor_fault.get(name) else { return };
+    let Some(drain) = drain else { return };
+    let entry = sensor_fault_totals.entry(fault_id.clone()).or_insert((None, 0));
+    entry.1 += drain.frames_affected;
+    if drain.frames_affected > 0 {
+        entry.0 = Some(entry.0.map_or(drain.first_effect_tai_ns, |e| e.min(drain.first_effect_tai_ns)));
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_shared_group(
@@ -1723,6 +1781,20 @@ fn run_shared_group(
             // is_container_power_cycle` predicate, so the two can never disagree about which
             // faults reach here.
             boundaries.push(Boundary::Fault(f));
+        } else if f.target_kind == FaultTargetKind::Sensor as i32 && plans.contains_key(&f.instance) {
+            // Question 178 (R5.1a): a SENSOR fault naming a star-tracker instance is the third
+            // boundary shape -- `execute()`'s own load-time validation already refused any other
+            // SENSOR shape (an IMU instance, a non-sensor instance, an unknown kind, an
+            // off-grid epoch, an overlapping window) before this function is ever called, so
+            // every SENSOR fault reaching here is known-good. `duration_ns > 0` additionally
+            // gets a SECOND, synthesized boundary at its own window end (`Boundary::
+            // SensorFaultEnd`) -- `duration_ns == 0` (persistent to end of run) gets only the
+            // one, exactly like a persistent PORT fault needs no second Router-side bookkeeping
+            // either.
+            boundaries.push(Boundary::Fault(f));
+            if f.duration_ns > 0 {
+                boundaries.push(Boundary::SensorFaultEnd(f));
+            }
         }
     }
     for m in maneuvers {
@@ -1740,6 +1812,20 @@ fn run_shared_group(
     // across every span -- folded in from each `ModelSpanState::measurements` in the same loop
     // that already walks `model_spans` for events/trajectories, below.
     let mut all_measurements: Vec<av_cdm::pb::Measurement> = Vec::new();
+    // Question 178 (R5.1a): the currently-installed SENSOR fault id on each star-tracker
+    // instance (at most one at a time -- `fault::validate_no_overlapping_sensor_fault_windows`),
+    // and the running (first-effect epoch, frames-affected) total drained from that instance's
+    // own model at every boundary it survives -- summed here, not read once at the end like
+    // PORT's `Router::take_applied_port_faults`, because a fresh `StarTrackerModel` is
+    // constructed at every boundary in this shared run, targeted at this instance or not
+    // (question 115/116's own "re-segmented at every boundary" behaviour discards the model's
+    // own internal counter each time -- see `crate::drm::sensors`'s own module doc comment).
+    let mut active_sensor_fault: BTreeMap<String, String> = BTreeMap::new();
+    let mut sensor_fault_totals: BTreeMap<String, (Option<i64>, u64)> = BTreeMap::new();
+    // Question 178 (R5.1a): scratch space `run_one_span` fills in, per call, with whatever it
+    // drained from `kernel.sensor_fault_effect` for that one span -- see `run_one_span`'s own
+    // doc comment for why this cannot be read from `ModelSpanState::handle` afterward.
+    let mut sensor_fault_span_drains: BTreeMap<String, av_dynamics::SensorFaultEffectDrain> = BTreeMap::new();
 
     // M25.2 (`docs/sil-plan.md`'s M25 milestone: "DRM command events become CDM `Command`s,
     // framed as CCSDS telecommands, delivered through the router with the link model"). See
@@ -1822,7 +1908,13 @@ fn run_shared_group(
             // pre-M14.1 per-instance loop already applied.
             continue;
         }
-        run_one_span(seg_start, boundary, &mut model_spans, &mut container_spans, router, output_period_ns)?;
+        run_one_span(seg_start, boundary, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains)?;
+        // Question 178 (R5.1a): fold whatever this just-finished span contributed, attributed
+        // by `active_sensor_fault` as it stood BEFORE this boundary's own updates below (i.e.
+        // "who was under fault during [seg_start, boundary)", the span that just ran).
+        for (name, drain) in std::mem::take(&mut sensor_fault_span_drains) {
+            fold_sensor_fault_span_drain(&name, Some(drain), &active_sensor_fault, &mut sensor_fault_totals);
+        }
 
         let target = b.instance().to_string();
         for (name, span) in model_spans.iter_mut() {
@@ -1838,12 +1930,42 @@ fn run_shared_group(
 
             if *name == target {
                 match b {
+                    // Question 178 (R5.1a): a SENSOR fault installs its declared effect exactly
+                    // the way a DYNAMICS fault installs a parameter change -- `apply_sensor_
+                    // fault` instead of `apply_dynamics_fault` -- but its own `EVENT_KIND_FAULT`
+                    // event is NOT emitted here, unlike DYNAMICS: "at the epoch of its FIRST
+                    // real effect" (the design's own rule, mirroring PORT's identical rule) is
+                    // data-dependent (truth may not have arrived yet) and is only known once
+                    // this span -- and every later span this fault stays active across -- has
+                    // actually run and been drained. `active_sensor_fault` records which fault
+                    // is now installed on this instance; the event is built once the fault's own
+                    // window ends (`Boundary::SensorFaultEnd`, below) or, for a persistent
+                    // fault, once the whole run ends (this function's own tail).
+                    Boundary::Fault(f) if f.target_kind == FaultTargetKind::Sensor as i32 => {
+                        let new_plan = fault::apply_sensor_fault(&span.cur_plan, f)?;
+                        span.cur_plan = new_plan;
+                        span.x0 = last_state;
+                        span.seg_start_is_post_maneuver = false;
+                        active_sensor_fault.insert(name.clone(), f.id.clone());
+                    }
                     Boundary::Fault(f) => {
                         let new_plan = fault::apply_dynamics_fault(&span.cur_plan, f)?;
                         span.cur_plan = new_plan;
                         span.x0 = last_state;
                         span.seg_start_is_post_maneuver = false;
                         all_events.push(events::fault_event(f, name, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    }
+                    // Question 178 (R5.1a): the second, synthesized boundary at a windowed
+                    // SENSOR fault's own end epoch -- restores the spec to its exact pre-fault
+                    // value. `active_sensor_fault` is cleared, and the fault's own event built
+                    // from the accumulated totals, after this per-instance loop (below), once
+                    // this instance's own about-to-be-discarded handle has also been drained
+                    // (the drain call right before `span.handle` is overwritten, further down,
+                    // is what captures this span's own final contribution).
+                    Boundary::SensorFaultEnd(_f) => {
+                        span.cur_plan = fault::clear_sensor_fault(&span.cur_plan);
+                        span.x0 = last_state;
+                        span.seg_start_is_post_maneuver = false;
                     }
                     Boundary::Maneuver(m) => {
                         // M22.2b: `BindingPlan::Imu`'s own declared state -- [bias_gyro_x,y,z,
@@ -1891,12 +2013,34 @@ fn run_shared_group(
             }
             let name_suffix = format!("{name}_{}", span.all_segments.len());
             let rebound = materialize_plan_at_boundary(gmat, &span.cur_plan, sys, boundary, &span.x0, /* with_stm */ false, options.accept_missing_stm_terms, gmat_ns, &name_suffix)?;
+            // Question 178 (R5.1a): this span's own SENSOR fault contribution (if any) was
+            // already folded into `sensor_fault_totals` right after `run_one_span` returned,
+            // above -- `span.handle` itself was `None` throughout that span (`run_one_span`'s
+            // own `span.handle.take()`), so there is nothing left to drain from it here.
             // M25.4b: every span re-materializes every registered instance's own handle, even one
             // this particular boundary did not target (`span.cur_plan`/`span.x0` are simply
             // unchanged in that case, above) -- so a replayed instance's handle must be
             // re-wrapped here too, on every boundary, the same way its FIRST span's handle was
             // wrapped above this loop.
             span.handle = Some(if replay_targets.contains(name) { ModelRegistry::wrap_replay(rebound, name, replay_log.expect("checked by the debug_assert! above")) } else { rebound });
+        }
+
+        // Question 178 (R5.1a): a windowed SENSOR fault's own end boundary -- the drain above
+        // (inside the per-instance loop that just ran, for `target`'s own about-to-be-discarded
+        // handle) has now captured this span's own final contribution, so the accumulated total
+        // is complete. Clear `active_sensor_fault` and emit exactly one `EVENT_KIND_FAULT` event
+        // -- at the epoch of the fault's own first real effect, carrying the total count -- but
+        // only if it ever actually applied (mirrors PORT's own "a fault that never actually
+        // applies produces no event at all" rule; `sensor_fault_totals` has no entry, or a
+        // `None` first epoch, when nothing was ever drained).
+        if let Boundary::SensorFaultEnd(f) = b {
+            active_sensor_fault.remove(&target);
+            if let Some((Some(first_effect_tai_ns), frames_affected)) = sensor_fault_totals.get(&f.id).copied() {
+                let instance = instances_by_name[&target];
+                let sys = systems.get(&instance.system_id).expect("validated in pass 1");
+                let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
+                all_events.push(events::sensor_fault_event(f, first_effect_tai_ns, frames_affected, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+            }
         }
 
         // M15.3 (question 118), a FAULT_TARGET_KIND_HARDWARE fault as of M16.2 (question 120):
@@ -1923,7 +2067,27 @@ fn run_shared_group(
         }
         seg_start = boundary;
     }
-    run_one_span(seg_start, run_end_tai_ns, &mut model_spans, &mut container_spans, router, output_period_ns)?;
+    run_one_span(seg_start, run_end_tai_ns, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains)?;
+    for (name, drain) in std::mem::take(&mut sensor_fault_span_drains) {
+        fold_sensor_fault_span_drain(&name, Some(drain), &active_sensor_fault, &mut sensor_fault_totals);
+    }
+
+    // Question 178 (R5.1a): a PERSISTENT SENSOR fault (`duration_ns == 0`) has no `Boundary::
+    // SensorFaultEnd` -- it stays active through run end, so its own final span (the
+    // `run_one_span` call immediately above) never reaches the per-boundary handling the
+    // boundary loop above gives every OTHER span (that final span's own contribution was
+    // already folded into `sensor_fault_totals` immediately above). Emit each such fault's own
+    // event here, once, mirroring the `SensorFaultEnd` handling above exactly, just triggered by
+    // "the run ended" rather than "the window ended".
+    for (name, fault_id) in &active_sensor_fault {
+        if let Some((Some(first_effect_tai_ns), frames_affected)) = sensor_fault_totals.get(fault_id).copied() {
+            let fault = scenario.faults.iter().find(|f| &f.id == fault_id).expect("active_sensor_fault only ever names a fault id from scenario.faults");
+            let instance = instances_by_name[name.as_str()];
+            let sys = systems.get(&instance.system_id).expect("validated in pass 1");
+            let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
+            all_events.push(events::sensor_fault_event(fault, first_effect_tai_ns, frames_affected, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+        }
+    }
 
     // Shutdown every container, once, after its own last Step -- mirrors run_container_
     // instance's old identical call, now made once per instance after the shared run finishes
@@ -2797,32 +2961,64 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         if !cfg.sos.instances.iter().any(|i| i.name == f.instance) {
             return Err(DrmError::UnknownFaultInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
         }
-        // `docs/open-questions.md` question 178: a SENSOR fault is still a typed load refusal,
-        // not a silent no-op -- the sensor fault runtime is task R4.2's own scope, not this
-        // crate's today. Checked here, before any binding or GMAT call, the same "checked up
+        // `docs/open-questions.md` question 178 (R5.1a): a SENSOR fault naming a star-tracker
+        // instance now has a real runtime; one naming an IMU instance is still a typed load
+        // refusal (R5.1b's own scope); one naming anything else is refused as not a sensor
+        // instance at all. Checked here, before any binding or GMAT call, the same "checked up
         // front" pattern `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`
         // (immediately above/below) already follow.
         if f.target_kind == FaultTargetKind::Sensor as i32 {
-            return Err(DrmError::PortOrSensorFaultNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), target_kind: FaultTargetKind::Sensor.as_str_name().to_string() });
+            let instance = cfg
+                .sos
+                .instances
+                .iter()
+                .find(|i| i.name == f.instance)
+                .expect("DrmError::UnknownFaultInstance was already checked, and returned, for this same fault immediately above");
+            let sys = cfg.systems.get(&instance.system_id).ok_or_else(|| DrmError::UnknownSystemDefinition { instance: instance.name.clone(), system_id: instance.system_id.clone() })?;
+            match crate::registry::kind_for(&sys.dynamics_model) {
+                crate::registry::ModelKind::Imu => {
+                    return Err(DrmError::PortOrSensorFaultNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), target_kind: FaultTargetKind::Sensor.as_str_name().to_string() });
+                }
+                crate::registry::ModelKind::StarTracker => {
+                    if !fault::SENSOR_KINDS.contains(&f.kind.as_str()) {
+                        return Err(DrmError::UnknownSensorFaultKind { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
+                    }
+                    // Question 178, item 3: both the start AND (when declared, `duration_ns >
+                    // 0`) the end epoch must land on the output sample grid -- the DYNAMICS/
+                    // HARDWARE check below only ever checks the one epoch a DYNAMICS/HARDWARE
+                    // fault has; a windowed SENSOR fault has two, since the executor synthesizes
+                    // a second re-materialization boundary at the window's own end (`Boundary::
+                    // SensorFaultEnd`, `run_shared_group`'s own boundary loop, below).
+                    if (f.tai_ns - scenario.start_tai_ns) % output_period_ns != 0 {
+                        return Err(DrmError::FaultEpochNotOnSampleGrid { fault_id: f.id.clone(), tai_ns: f.tai_ns, sample_interval_s: options.sample_interval_s });
+                    }
+                    if f.duration_ns > 0 {
+                        let end_tai_ns = f.tai_ns + f.duration_ns;
+                        if (end_tai_ns - scenario.start_tai_ns) % output_period_ns != 0 {
+                            return Err(DrmError::FaultEpochNotOnSampleGrid { fault_id: f.id.clone(), tai_ns: end_tai_ns, sample_interval_s: options.sample_interval_s });
+                        }
+                    }
+                }
+                _ => {
+                    return Err(DrmError::SensorFaultTargetNotASensor { fault_id: f.id.clone(), instance: f.instance.clone(), binding: sys.dynamics_model.clone() });
+                }
+            }
+            continue;
         }
-        // R4.1a (question 178): PORT now has a real runtime for two of its four documented
+        // R4.1a/R4.1b (question 178): PORT now has a real runtime for all four of its documented
         // kinds -- `crate::router::Router::install_port_faults` (below, once `router` and
         // `scenario` both exist) does the REST of a PORT fault's own load-time validation
-        // (declared port, FRAMED/BYTE_STREAM, seed, delay_s, rate, clear); this loop's own job is
-        // only to sort a PORT fault's `kind` into one of its three distinct outcomes before that
-        // call ever runs, each a typed refusal named for exactly what is wrong: outside ADR-005
-        // section 5's whole vocabulary ([`DrmError::UnknownPortFaultKind`]), inside it but not
-        // yet implemented by this crate ([`DrmError::PortFaultKindNotYetSupported`], naming
-        // R4.1b), or implemented (`"drop"`/`"delay"`), in which case this loop does nothing
-        // further -- in particular, it does NOT apply the DYNAMICS/HARDWARE sample-grid check
-        // below: a PORT fault splits no segment, so it need not land on that grid
-        // (`crate::router`'s own module doc comment, "Port fault runtime," "Epoch grid").
+        // (declared port, FRAMED/BYTE_STREAM, seed, delay_s/corrupt_mask, rate, clear, and R4.1b's
+        // own overlapping-window refusal); this loop's own job is only to refuse a `kind` outside
+        // ADR-005 section 5's whole vocabulary entirely ([`DrmError::UnknownPortFaultKind`])
+        // before that call ever runs -- every kind still in the vocabulary (`"drop"`, `"delay"`,
+        // `"corrupt"`, `"duplicate"`) falls through to `install_port_faults` for the rest of its
+        // own validation. This loop does NOT apply the DYNAMICS/HARDWARE sample-grid check below
+        // to a PORT fault either way: a PORT fault splits no segment, so it need not land on that
+        // grid (`crate::router`'s own module doc comment, "Port fault runtime," "Epoch grid").
         if f.target_kind == FaultTargetKind::Port as i32 {
             if !fault::PORT_KINDS.contains(&f.kind.as_str()) {
                 return Err(DrmError::UnknownPortFaultKind { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
-            }
-            if f.kind == "corrupt" || f.kind == "duplicate" {
-                return Err(DrmError::PortFaultKindNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
             }
             continue;
         }
@@ -2830,19 +3026,30 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             return Err(DrmError::FaultEpochNotOnSampleGrid { fault_id: f.id.clone(), tai_ns: f.tai_ns, sample_interval_s: options.sample_interval_s });
         }
     }
-    // R4.1a (question 178): resolve and install every FAULT_TARGET_KIND_PORT fault (kind ==
-    // "drop"/"delay" -- the loop just above already refused every other PORT shape) onto
-    // `router` -- see `crate::router`'s own module doc comment's "Port fault runtime" section
-    // for the full validation this performs (declared port, FRAMED/BYTE_STREAM, seed, delay_s,
-    // rate, clear). Before any binding or GMAT call, and before Pass 1's own classification --
-    // `router` (built above, right after the canonical hash checks) already has every declared
-    // port's own PortKind, from every `SosConfiguration.instances` entry's own `SystemDefinition`,
-    // so nothing further needs to happen first. `RouterError::MissingFaultSeed` is mapped to the
-    // crate-wide `DrmError::MissingFaultSeed` (reusing the existing variant, per this crate's own
-    // convention for a seed check -- ADR-004 "seeds are logged inputs"); every other `RouterError`
-    // wraps generically through `DrmError::Router`, the same way `Router::build`'s own connection
+    // Question 178/184/186(b) (R5.1a): refuse two SENSOR faults on the same instance with
+    // overlapping windows -- see `DrmError::OverlappingSensorFaultWindows`'s own doc comment for
+    // why this is keyed on `instance` alone, not `(instance, target)` (PORT's own key, at
+    // `Router::install_port_faults`). Every SENSOR fault in `scenario.faults` reaching this call
+    // has already been validated (instance is a real sensor, kind is real) by the loop just
+    // above, which returns before this point on any earlier failure.
+    fault::validate_no_overlapping_sensor_fault_windows(&scenario.faults)?;
+    // R4.1a/R4.1b (question 178): resolve and install every FAULT_TARGET_KIND_PORT fault (every
+    // kind in `fault::PORT_KINDS` -- the loop just above already refused any other PORT shape)
+    // onto `router` -- see `crate::router`'s own module doc comment's "Port fault runtime"
+    // section for the full validation this performs (declared port, FRAMED/BYTE_STREAM, seed,
+    // delay_s/corrupt_mask, rate, clear, overlapping windows on the same (instance, port)).
+    // Before any binding or GMAT call, and before Pass 1's own classification -- `router` (built
+    // above, right after the canonical hash checks) already has every declared port's own
+    // PortKind, from every `SosConfiguration.instances` entry's own `SystemDefinition`, so
+    // nothing further needs to happen first. `output_period_ns` (computed above, from
+    // `options.sample_interval_s`) is R4.1b's own addition -- `"duplicate"` needs the run's own
+    // output period and the Router has no other way to learn it (`Router::install_port_faults`'s
+    // own doc comment). `RouterError::MissingFaultSeed` is mapped to the crate-wide
+    // `DrmError::MissingFaultSeed` (reusing the existing variant, per this crate's own convention
+    // for a seed check -- ADR-004 "seeds are logged inputs"); every other `RouterError` wraps
+    // generically through `DrmError::Router`, the same way `Router::build`'s own connection
     // validation already does, immediately above.
-    router.install_port_faults(&scenario.faults, &scenario.seeds).map_err(|e| match e {
+    router.install_port_faults(&scenario.faults, &scenario.seeds, output_period_ns).map_err(|e| match e {
         crate::router::RouterError::MissingFaultSeed { fault_id } => DrmError::MissingFaultSeed { fault_id },
         other => DrmError::Router(other),
     })?;
@@ -3247,20 +3454,22 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         all_events.push(events::dropped_messages_event(scenario.end_tai_ns, dropped_in_flight_messages, &computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id));
     }
 
-    // R4.1a (question 178): every PORT fault `router` genuinely applied at least once (a frame
-    // actually dropped or delayed) becomes exactly one EVENT_KIND_FAULT event, at the epoch of
-    // its own first real effect -- see `crate::router::Router::take_applied_port_faults`'s own
-    // doc comment and `events::port_fault_event`'s own doc comment for why PORT gets its own
-    // builder instead of reusing `events::fault_event`. Read once, here, alongside
-    // `pending_count` (both only make sense once every span of the run has finished; the
-    // covariance path never drives `router` at all, so this is always empty there, honestly,
-    // exactly like `dropped_in_flight_messages` above).
+    // R4.1a/R4.1b (question 178): every PORT fault `router` genuinely applied at least once (a
+    // frame actually affected -- dropped, delayed, corrupted, or duplicated) becomes exactly one
+    // EVENT_KIND_FAULT event, at the epoch of its own first real effect, carrying the TOTAL count
+    // of frames it affected over the whole run (`values["frames_affected"]`, question 186(c),
+    // R4.1b) -- see `crate::router::Router::take_applied_port_faults`'s own doc comment and
+    // `events::port_fault_event`'s own doc comment for why PORT gets its own builder instead of
+    // reusing `events::fault_event`. Read once, here, alongside `pending_count` (both only make
+    // sense once every span of the run has finished; the covariance path never drives `router` at
+    // all, so this is always empty there, honestly, exactly like `dropped_in_flight_messages`
+    // above).
     for applied in router.take_applied_port_faults() {
         let fault = scenario.faults.iter().find(|f| f.id == applied.fault_id).expect("Router only ever reports a fault id it was itself installed with, from scenario.faults");
         let instance = cfg.sos.instances.iter().find(|i| i.name == applied.instance).expect("Router only ever reports an instance its own port_kinds table knows, built from cfg.sos.instances");
         let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
         let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
-        all_events.push(events::port_fault_event(fault, applied.applied_tai_ns, events::event_provenance(&computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id, sys_hash, &sys.id)));
+        all_events.push(events::port_fault_event(fault, applied.applied_tai_ns, applied.frames_affected, events::event_provenance(&computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id, sys_hash, &sys.id)));
     }
 
     all_events.sort_by_key(events::epoch_id_order);

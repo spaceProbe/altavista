@@ -283,26 +283,70 @@ pub fn fault_event(fault: &Fault, instance: &str, provenance: Provenance) -> Eve
     }
 }
 
-/// One `EVENT_KIND_FAULT` event for a `FAULT_TARGET_KIND_PORT` fault (`kind == "drop"`/`"delay"`)
-/// `crate::router::Router` genuinely applied at least once (question 178, R4.1a) -- see
-/// `crate::router`'s own module doc comment's "Port fault runtime" section, "Events," for why
-/// this is a separate builder from [`fault_event`] rather than a reuse of it: a PORT fault has no
-/// single discrete "changed a parameter" epoch the way a DYNAMICS fault's own `Fault.tai_ns`
-/// already is (it recurs, gated per candidate frame, over a whole window) -- so the one event
-/// this executor emits per PORT fault records the epoch of its FIRST genuinely applied frame
-/// (`applied_tai_ns`, from `crate::router::AppliedPortFault`), never the window's own declared
-/// start (`fault.tai_ns`) and never one entry per frame (question 137's "record changes only").
-/// `values` is `fault.params` verbatim, same as [`fault_event`] -- so `event.<fault id>.
-/// values.rate`/`.delay_s` are both readable from the real event, not only the declared DRM.
-pub fn port_fault_event(fault: &Fault, applied_tai_ns: i64, provenance: Provenance) -> Event {
+/// One `EVENT_KIND_FAULT` event for a `FAULT_TARGET_KIND_PORT` fault (`kind == "drop"`/`"delay"`/
+/// `"corrupt"`/`"duplicate"`, all real as of R4.1b) `crate::router::Router` genuinely applied at
+/// least once (question 178, R4.1a/R4.1b) -- see `crate::router`'s own module doc comment's "Port
+/// fault runtime" section, "Events," for why this is a separate builder from [`fault_event`]
+/// rather than a reuse of it: a PORT fault has no single discrete "changed a parameter" epoch the
+/// way a DYNAMICS fault's own `Fault.tai_ns` already is (it recurs, gated per candidate frame,
+/// over a whole window) -- so the one event this executor emits per PORT fault records the epoch
+/// of its FIRST genuinely applied frame (`applied_tai_ns`, from `crate::router::
+/// AppliedPortFault::applied_tai_ns`), never the window's own declared start (`fault.tai_ns`) and
+/// never one entry per frame (question 137's "record changes only"). `values` is `fault.params`
+/// verbatim, PLUS one synthetic key R4.1b adds (question 186(c)): `"frames_affected"`, the TOTAL
+/// count of frames this fault affected over the whole run (`crate::router::
+/// AppliedPortFault::frames_affected`, as an `f64` -- `Event.values` is `map<string, double>`, no
+/// integer type of its own) -- so `event.<fault id>.values.rate`/`.delay_s`/`.corrupt_mask`/
+/// `.frames_affected` are all readable from the real event, not only the declared DRM. A DRM
+/// author naming a fault param literally `"frames_affected"` would collide with this synthetic
+/// key; nothing in this crate's schema reserves that name today, so this is a known, narrow
+/// naming hazard, not a silent one (see `R4_1B_REPORT.md`).
+pub fn port_fault_event(fault: &Fault, applied_tai_ns: i64, frames_affected: u64, provenance: Provenance) -> Event {
+    let mut values = fault.params.clone();
+    values.insert("frames_affected".to_string(), frames_affected as f64);
     Event {
         id: format!("fault:{}", fault.id),
         entity_id: fault.instance.clone(),
         tai_ns: applied_tai_ns,
         kind: EventKind::Fault as i32,
         name: fault.id.clone(),
-        detail: format!("FAULT_TARGET_KIND_PORT fault {:?} (kind {:?}) on instance {:?} port {:?} first applied at tai_ns={applied_tai_ns}", fault.id, fault.kind, fault.instance, fault.target),
-        values: fault.params.clone(),
+        detail: format!(
+            "FAULT_TARGET_KIND_PORT fault {:?} (kind {:?}) on instance {:?} port {:?} first applied at tai_ns={applied_tai_ns}, affecting {frames_affected} frame(s) over the whole run",
+            fault.id, fault.kind, fault.instance, fault.target
+        ),
+        values,
+        reference_id: fault.id.clone(),
+        provenance: Some(provenance),
+        ..Default::default()
+    }
+}
+
+/// One `EVENT_KIND_FAULT` event for a `FAULT_TARGET_KIND_SENSOR` fault (`kind == "bias"`/
+/// `"dropout"`/`"freeze"`/`"scale"`) `crate::drm::sensors::StarTrackerModel` genuinely applied at
+/// least once (question 178, R5.1a) -- the SENSOR counterpart of [`port_fault_event`], a separate
+/// builder for the identical reason that one is separate from [`fault_event`]: a SENSOR fault has
+/// no single discrete "changed a parameter" epoch the way a DYNAMICS fault's own `Fault.tai_ns`
+/// already is (it recurs, per emission, over a whole window), so the one event this executor
+/// emits per SENSOR fault records the epoch of its FIRST genuinely applied emission
+/// (`applied_tai_ns`), never the window's own declared start (`fault.tai_ns`), and never one
+/// entry per emission (question 137's "record changes only", the same rule `port_fault_event`
+/// already follows). `values` is `fault.params` verbatim, PLUS `"frames_affected"` (question
+/// 186(c)), the TOTAL count of emissions this fault changed or suppressed over its own whole
+/// window, as an `f64` -- mirrors `port_fault_event`'s own identical `values` shape exactly.
+pub fn sensor_fault_event(fault: &Fault, applied_tai_ns: i64, frames_affected: u64, provenance: Provenance) -> Event {
+    let mut values = fault.params.clone();
+    values.insert("frames_affected".to_string(), frames_affected as f64);
+    Event {
+        id: format!("fault:{}", fault.id),
+        entity_id: fault.instance.clone(),
+        tai_ns: applied_tai_ns,
+        kind: EventKind::Fault as i32,
+        name: fault.id.clone(),
+        detail: format!(
+            "FAULT_TARGET_KIND_SENSOR fault {:?} (kind {:?}) on instance {:?} target {:?} first applied at tai_ns={applied_tai_ns}, affecting {frames_affected} emission(s) over its own whole window",
+            fault.id, fault.kind, fault.instance, fault.target
+        ),
+        values,
         reference_id: fault.id.clone(),
         provenance: Some(provenance),
         ..Default::default()
@@ -440,20 +484,28 @@ pub fn declared_events(scenario: &Scenario, instance_names: &[String], maneuvers
         // expression naming this event by name would fail load-time typecheck even though the
         // real run goes on to produce it.
         //
-        // R4.1a (question 178): a `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/`"delay"`
-        // is included too, for the identical reason -- `crate::router::Router` now genuinely
-        // applies it (see that module's own "Port fault runtime" doc section), so a
-        // `MeasureOfEffectiveness` naming its event must see it at load time too. This is
-        // deliberately narrower than "every PORT fault": `kind == "corrupt"`/`"duplicate"` (or
-        // anything outside ADR-005 section 5's vocabulary) is refused at load by `execute()`
-        // BEFORE this function's own caller ever runs, so a real run never reaches that shape --
+        // R4.1a/R4.1b (question 178): a `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`,
+        // `"delay"`, `"corrupt"` or `"duplicate"` -- ADR-005 section 5's whole documented PORT
+        // vocabulary, all four real as of R4.1b -- is included too, for the identical reason --
+        // `crate::router::Router` now genuinely applies every one of them (see that module's own
+        // "Port fault runtime" doc section), so a `MeasureOfEffectiveness` naming its event must
+        // see it at load time too. Deliberately still narrower than "every PORT fault whatsoever":
+        // any `kind` outside that documented vocabulary is refused at load by `execute()` BEFORE
+        // this function's own caller ever runs, so a real run never reaches that shape --
         // including it here would advertise an event no real run could ever produce. This is the
         // one deliberate case `declared_events_skips_a_fault_outside_the_executed_span`'s own
         // `"not_dynamics"` PORT fixture (`kind` left at its proto zero value, `""`) still,
-        // correctly, stays excluded: `""` is not `"drop"`/`"delay"`, so it is filtered out by
-        // `kind`, not merely by `target_kind` -- see that test's own updated comment.
-        let is_applicable_port_fault = f.target_kind == FaultTargetKind::Port as i32 && matches!(f.kind.as_str(), "drop" | "delay");
-        if f.target_kind != FaultTargetKind::Dynamics as i32 && !fault::is_container_power_cycle(f) && !is_applicable_port_fault {
+        // correctly, stays excluded: `""` is not one of the four documented kinds, so it is
+        // filtered out by `kind`, not merely by `target_kind` -- see that test's own comment.
+        let is_applicable_port_fault = f.target_kind == FaultTargetKind::Port as i32 && matches!(f.kind.as_str(), "drop" | "delay" | "corrupt" | "duplicate");
+        // Question 178 (R5.1a): a `FAULT_TARGET_KIND_SENSOR` fault of `kind` in `fault::
+        // SENSOR_KINDS` (`"bias"`/`"dropout"`/`"freeze"`/`"scale"`) is included too, mirroring
+        // the PORT reasoning immediately above exactly: by the time `declared_events` runs,
+        // `executor::execute`'s own load-time validation has already refused an IMU instance, a
+        // non-sensor instance, and any kind outside this vocabulary, so every SENSOR fault
+        // reaching here genuinely does apply on a real run.
+        let is_applicable_sensor_fault = f.target_kind == FaultTargetKind::Sensor as i32 && fault::SENSOR_KINDS.contains(&f.kind.as_str());
+        if f.target_kind != FaultTargetKind::Dynamics as i32 && !fault::is_container_power_cycle(f) && !is_applicable_port_fault && !is_applicable_sensor_fault {
             continue;
         }
         if f.tai_ns <= scenario.start_tai_ns || f.tai_ns >= scenario.end_tai_ns {
@@ -534,7 +586,7 @@ mod tests {
             params: BTreeMap::from([("rate".to_string(), 0.5)]),
             ..Default::default()
         };
-        let e = port_fault_event(&fault, 12_345, Provenance::default());
+        let e = port_fault_event(&fault, 12_345, 7, Provenance::default());
         assert_eq!(e.id, "fault:f_drop");
         assert_eq!(e.name, "f_drop");
         assert_eq!(e.reference_id, "f_drop");
@@ -542,6 +594,73 @@ mod tests {
         assert_eq!(e.kind, EventKind::Fault as i32);
         assert_eq!(e.tai_ns, 12_345, "must be the applied epoch, not fault.tai_ns (10_000)");
         assert_eq!(e.values.get("rate"), Some(&0.5));
+    }
+
+    /// Question 186(c) (R4.1b): `frames_affected` reaches the real event's own
+    /// `values["frames_affected"]`, verbatim (as an `f64`), alongside `fault.params` -- and a
+    /// one-frame vs. a many-frame application are DISTINGUISHABLE from the event alone, exactly
+    /// this task's own required proof.
+    #[test]
+    fn port_fault_event_carries_frames_affected_in_values_distinguishing_one_frame_from_many() {
+        let fault = Fault { id: "f1".to_string(), target_kind: FaultTargetKind::Port as i32, instance: "ground".to_string(), target: "cmd_out".to_string(), kind: "drop".to_string(), ..Default::default() };
+        let one = port_fault_event(&fault, 1_000, 1, Provenance::default());
+        let many = port_fault_event(&fault, 1_000, 42, Provenance::default());
+        assert_eq!(one.values.get("frames_affected"), Some(&1.0));
+        assert_eq!(many.values.get("frames_affected"), Some(&42.0));
+        assert_ne!(one.values.get("frames_affected"), many.values.get("frames_affected"), "a one-frame and a many-frame application must be distinguishable from the event alone");
+    }
+
+    /// Question 178 (R5.1a): `sensor_fault_event` uses the applied epoch, not the fault's own
+    /// declared window start -- mirrors `port_fault_event_uses_the_applied_epoch_...` exactly.
+    #[test]
+    fn sensor_fault_event_uses_the_applied_epoch_not_the_faults_own_declared_window_start() {
+        let fault = Fault {
+            id: "f_dropout".to_string(),
+            tai_ns: 10_000,
+            target_kind: FaultTargetKind::Sensor as i32,
+            instance: "startracker".to_string(),
+            target: "startracker.output".to_string(),
+            kind: "dropout".to_string(),
+            ..Default::default()
+        };
+        let e = sensor_fault_event(&fault, 12_345, 7, Provenance::default());
+        assert_eq!(e.id, "fault:f_dropout");
+        assert_eq!(e.name, "f_dropout");
+        assert_eq!(e.reference_id, "f_dropout");
+        assert_eq!(e.entity_id, "startracker");
+        assert_eq!(e.kind, EventKind::Fault as i32);
+        assert_eq!(e.tai_ns, 12_345, "must be the applied epoch, not fault.tai_ns (10_000)");
+    }
+
+    /// Question 186(c), applied to SENSOR: `frames_affected` reaches `values["frames_affected"]`
+    /// verbatim, distinguishing a one-emission from a many-emission application.
+    #[test]
+    fn sensor_fault_event_carries_frames_affected_in_values_distinguishing_one_frame_from_many() {
+        let fault = Fault { id: "f1".to_string(), target_kind: FaultTargetKind::Sensor as i32, instance: "startracker".to_string(), target: "startracker.output".to_string(), kind: "dropout".to_string(), ..Default::default() };
+        let one = sensor_fault_event(&fault, 1_000, 1, Provenance::default());
+        let many = sensor_fault_event(&fault, 1_000, 42, Provenance::default());
+        assert_eq!(one.values.get("frames_affected"), Some(&1.0));
+        assert_eq!(many.values.get("frames_affected"), Some(&42.0));
+    }
+
+    /// `declared_events` includes an in-range SENSOR fault of a kind in `fault::SENSOR_KINDS`,
+    /// but not one outside it -- mirrors the PORT counterpart exactly (`declared_events`'s own
+    /// filter is deliberately narrower than "every SENSOR fault whatsoever": a real run can
+    /// never reach an unrecognized kind, since `execute()` refuses it at load first).
+    #[test]
+    fn an_in_range_sensor_fault_of_a_documented_kind_is_included_but_an_unrecognized_kind_is_not() {
+        let scenario = Scenario {
+            start_tai_ns: 0,
+            end_tai_ns: 100_000,
+            faults: vec![
+                Fault { id: "f_bias".to_string(), tai_ns: 10_000, target_kind: FaultTargetKind::Sensor as i32, instance: "st".to_string(), target: "startracker.bias_rad.x".to_string(), kind: "bias".to_string(), ..Default::default() },
+                Fault { id: "f_bad".to_string(), tai_ns: 20_000, target_kind: FaultTargetKind::Sensor as i32, instance: "st".to_string(), target: "startracker.nonsense".to_string(), kind: "not_a_real_kind".to_string(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let events = declared_events(&scenario, &["st".to_string()], &[], ExecutionErrorMode::Nominal);
+        assert!(events.iter().any(|e| e.id == "fault:f_bias"), "the declared bias fault must be included");
+        assert!(!events.iter().any(|e| e.id == "fault:f_bad"), "an unrecognized kind must never be advertised");
     }
 
     /// [`port_command_event`]'s own unit test (question 130): every one of the five required
@@ -616,13 +735,14 @@ mod tests {
                 Fault { id: "in_range".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "before_start".to_string(), tai_ns: -1, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "at_or_after_end".to_string(), tai_ns: 10_000_000_000, target_kind: FaultTargetKind::Dynamics as i32, instance: "veh".to_string(), ..Default::default() },
-                // R4.1a (question 178): this fixture's own `kind` is left at its proto zero
-                // value (`""`), never set to `"drop"`/`"delay"` -- so, deliberately revisited
-                // (not merely left as-is), this stays excluded because its `kind` does not match
-                // either applicable PORT kind, NOT merely because `target_kind != Dynamics` --
-                // see `an_in_range_applicable_port_fault_is_included_but_an_unimplemented_kind_
-                // is_not`, immediately below, for the case where `target_kind == Port` really
-                // IS included.
+                // R4.1a/R4.1b (question 178): this fixture's own `kind` is left at its proto
+                // zero value (`""`), never set to any of the four documented PORT kinds -- so,
+                // deliberately revisited (not merely left as-is), this stays excluded because its
+                // `kind` does not match any applicable PORT kind, NOT merely because
+                // `target_kind != Dynamics` -- see
+                // `an_in_range_applicable_port_fault_is_included_for_all_four_kinds_but_an_
+                // unknown_kind_is_not`, immediately below, for the case where `target_kind ==
+                // Port` really IS included.
                 Fault { id: "not_dynamics".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, instance: "veh".to_string(), ..Default::default() },
             ],
             ..Default::default()
@@ -634,18 +754,23 @@ mod tests {
         assert!(!events.iter().any(|e| e.name == "before_start" || e.name == "at_or_after_end" || e.name == "not_dynamics"));
     }
 
-    /// R4.1a (question 178): an in-range `FAULT_TARGET_KIND_PORT` fault of `kind == "drop"`/
-    /// `"delay"` IS included in `declared_events` now (unlike the `""`-kind PORT fixture in the
-    /// test just above, which stays excluded on `kind` alone) -- `crate::router::Router` really
-    /// does apply these now, so a `MeasureOfEffectiveness` naming the event must see it at load
-    /// time. A `"corrupt"` PORT fault (R4.1b's own, not-yet-implemented scope) stays excluded:
-    /// `execute()`'s own load-time loop refuses that shape before a real run could ever reach it,
-    /// so declaring the event here would advertise something no real run could produce. Fails
-    /// against an implementation that still filters PORT out unconditionally (the pre-R4.1a
-    /// behaviour) or one that includes every PORT kind indiscriminately (the `"corrupt"` fixture
-    /// would then wrongly appear too).
+    /// R4.1a/R4.1b (question 178): an in-range `FAULT_TARGET_KIND_PORT` fault of ANY of the four
+    /// documented kinds (`"drop"`/`"delay"`/`"corrupt"`/`"duplicate"`) IS included in
+    /// `declared_events` now (unlike the `""`-kind PORT fixture in the test just above, which
+    /// stays excluded on `kind` alone) -- `crate::router::Router` really does apply every one of
+    /// them now, so a `MeasureOfEffectiveness` naming the event must see it at load time.
+    /// **Converted from R4.1a's own version of this test**, which pinned `"corrupt"` as the
+    /// still-excluded, not-yet-implemented kind -- R4.1b implements it, so it moved from the
+    /// "excluded" list into the "included" one below (see `R4_1B_REPORT.md`); `"not_a_real_kind"`
+    /// (entirely outside ADR-005 section 5's vocabulary) takes over as the "stays excluded"
+    /// fixture instead, since a real run could never reach it either (refused at load,
+    /// `DrmError::UnknownPortFaultKind`). Fails against an implementation that still filters PORT
+    /// out unconditionally (the pre-R4.1a behaviour), one that only recognizes `"drop"`/`"delay"`
+    /// (the pre-R4.1b behaviour, would miss `port_corrupt`/`port_duplicate`), or one that includes
+    /// every PORT kind indiscriminately (the `"not_a_real_kind"` fixture would then wrongly appear
+    /// too).
     #[test]
-    fn an_in_range_applicable_port_fault_is_included_but_an_unimplemented_kind_is_not() {
+    fn an_in_range_applicable_port_fault_is_included_for_all_four_kinds_but_an_unknown_kind_is_not() {
         let scenario = Scenario {
             start_tai_ns: 0,
             end_tai_ns: 10_000_000_000,
@@ -653,13 +778,17 @@ mod tests {
                 Fault { id: "port_drop".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "drop".to_string(), instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "port_delay".to_string(), tai_ns: 6_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "delay".to_string(), instance: "veh".to_string(), ..Default::default() },
                 Fault { id: "port_corrupt".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "corrupt".to_string(), instance: "veh".to_string(), ..Default::default() },
+                Fault { id: "port_duplicate".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "duplicate".to_string(), instance: "veh".to_string(), ..Default::default() },
+                Fault { id: "port_unknown".to_string(), tai_ns: 5_000_000_000, target_kind: FaultTargetKind::Port as i32, kind: "not_a_real_kind".to_string(), instance: "veh".to_string(), ..Default::default() },
             ],
             ..Default::default()
         };
         let events = declared_events(&scenario, &["veh".to_string()], &[], ExecutionErrorMode::Nominal);
         assert!(events.iter().any(|e| e.name == "port_drop" && e.kind == EventKind::Fault as i32), "{events:?}");
         assert!(events.iter().any(|e| e.name == "port_delay" && e.kind == EventKind::Fault as i32), "{events:?}");
-        assert!(!events.iter().any(|e| e.name == "port_corrupt"), "{events:?}");
+        assert!(events.iter().any(|e| e.name == "port_corrupt" && e.kind == EventKind::Fault as i32), "{events:?}");
+        assert!(events.iter().any(|e| e.name == "port_duplicate" && e.kind == EventKind::Fault as i32), "{events:?}");
+        assert!(!events.iter().any(|e| e.name == "port_unknown"), "{events:?}");
     }
 
     /// M16.2 (question 120): a container power cycle is `FAULT_TARGET_KIND_HARDWARE` now, and a
