@@ -42,3 +42,8 @@ goldens/_gen_*
 .claude/settings.local.json
 # Claude Code session scheduler lock
 .claude/scheduled_tasks.lock
+# Symlinks a worktree points at the main checkout's untracked trees (no trailing slash: symlinks are not directories)
+/GMAT R2026a
+/third_party/gmat-src
+/third_party/cspice
+/third_party/cfs
