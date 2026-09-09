@@ -24,11 +24,13 @@
 //!   `av_kernel::drm::execute` exactly as `av-run` does and writes the resulting `RunProducts`
 //!   protobuf to `--out`.
 //!
-//! See `study.rs`, `sample_mode.rs`, `cli.rs` and `json.rs` for the rest -- each carries its own
-//! module doc comment for the part of this task's brief it implements.
+//! See `study.rs`, `sample_mode.rs` and `cli.rs` for the rest -- each carries its own module doc
+//! comment for the part of this task's brief it implements. The proto3 canonical JSON encoder
+//! (`json.rs`) moved to the library as of F2 (`av_sweep::json`) so `av-sweep`'s own study-store
+//! writer (`av_sweep::store`) can reuse it; this binary now calls it there instead of as a local
+//! module.
 
 mod cli;
-mod json;
 mod sample_mode;
 mod study;
 

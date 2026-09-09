@@ -3,17 +3,20 @@
 //! §4): a small, entirely SYNTHETIC (no GMAT, no real study run) `altavista.v1.SweepResults`,
 //! written once as real protobuf bytes (`prost::Message::encode_to_vec`, ground truth, never
 //! hand-edited) and once through this crate's own hand-written JSON encoder
-//! (`crates/av-sweep/src/bin/av-sweep/json.rs`'s `sweep_results_to_json`, reused here rather
-//! than reimplemented a third time). The pytest then parses the `.json` with Python's REAL
+//! (`crates/av-sweep/src/json.rs`'s `sweep_results_to_json` -- moved here from
+//! `src/bin/av-sweep/json.rs` as part of F2, see that module's own doc comment -- reused here
+//! rather than reimplemented a third time). The pytest then parses the `.json` with Python's REAL
 //! `google.protobuf.json_format.Parse` and the `.pb` with `ParseFromString`, and asserts they
 //! decode to the identical message -- that is the oracle: Python's protobuf library, not this
 //! crate's own code, is what actually checks the JSON encoder's correctness.
 //!
-//! Deliberately exercises more of the message tree than any single real F1b study output would
-//! (F1b itself never emits `aggregates` -- that is F2's job): both an errored and a successful
-//! `SweepSample`, a `ScoreResult` with `passed` both `Some` and unset, and a `ScoreAggregate`
-//! with `pass_fraction` set -- so the oracle test's coverage is not accidentally narrower than
-//! the encoder's own declared behaviour.
+//! Deliberately exercises more of the message tree than any single real study output typically
+//! would in one go: both an errored and a successful `SweepSample`, a `ScoreResult` with `passed`
+//! both `Some` and unset, and a `ScoreAggregate` with `pass_fraction` set -- so the oracle test's
+//! coverage is not accidentally narrower than the encoder's own declared behaviour. (Originally
+//! written under F1b, before `aggregate.rs` existed to compute a real `ScoreAggregate` -- this
+//! synthetic one was hand-authored then and still is now; nothing about the golden needed to
+//! change for F2, since it already covered aggregates.)
 //!
 //! Mirrors `goldens/gen_*.py`'s own `--reason` convention (standing rule 10: "Goldens are
 //! regenerated only through a generator that takes an explicit `--reason`"), refusing to run at
@@ -33,10 +36,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use av_cdm::pb;
+use av_sweep::json;
 use prost::Message;
-
-#[path = "../src/bin/av-sweep/json.rs"]
-mod json;
 
 fn synthetic_sweep_results() -> pb::SweepResults {
     let mut scores_p0d0 = BTreeMap::new();

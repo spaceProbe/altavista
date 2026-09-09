@@ -104,7 +104,6 @@ fn the_two_point_two_draw_study_runs_every_sample_and_records_seeds_and_hashes()
     assert_eq!(r.drm_hash, declared_drm_hash, "SweepResults.drm_hash must be the base DRM's own verified hash");
 
     assert_eq!(r.samples.len(), 4, "2 points x 2 draws = 4 samples");
-    assert!(r.aggregates.is_empty(), "F1b leaves aggregates empty (F2's job)");
     let prov = r.provenance.as_ref().expect("SweepResults.provenance is always Some");
     assert_eq!(prov.author_kind, pb::AuthorKind::Agent as i32);
     assert_eq!(prov.tool, "av-sweep");
@@ -120,6 +119,58 @@ fn the_two_point_two_draw_study_runs_every_sample_and_records_seeds_and_hashes()
         assert!(!s.products_uri.is_empty(), "a successful sample records where its products live");
         assert!(PathBuf::from(&s.products_uri).is_absolute(), "products_uri must be an absolute path: {}", s.products_uri);
         assert_eq!(s.run_id, format!("demo_two_instance_sweep_p{}_d{}", s.point_index, s.draw_index));
+    }
+}
+
+/// F2: the fixture declares 2 grid points x 2 draws x 3 measures (`demo_flt_rmag_at_end`,
+/// `demo_flt_cd_at_end`, `demo_mvr_rmag_at_end` -- `drms/demo_two_instance_sweep.drm.yaml`'s own
+/// `measures:` block, "No objectives declared ... All three measures report a raw run-time value
+/// with no pass/fail concept"), and the study fixture above asserts all four samples succeeded --
+/// so the PREDICTION, made before looking at `r.aggregates` below, is: exactly 2 points x 3
+/// measures = 6 aggregate rows, every row's `draws == 2` (both draws at that point succeeded),
+/// every row's `pass_fraction` unset (`None`, since every score here is a MeasureOfEffectiveness,
+/// never an Objective -- no `passed` was ever set on any `ScoreResult` for these three measure
+/// names), sorted `(point_index, name)`. Each row's `mean`/`min`/`max` must also agree with a
+/// hand recomputation from that point's own two recorded samples (not merely "some plausible
+/// number") -- checked directly below rather than trusted.
+#[test]
+fn the_study_writes_six_aggregate_rows_two_points_times_three_measures_each_with_two_contributing_draws_and_no_pass_fraction() {
+    let f = study_fixture();
+    let r = &f.results;
+
+    let expected_names = ["demo_flt_cd_at_end", "demo_flt_rmag_at_end", "demo_mvr_rmag_at_end"]; // alphabetical, matching (point, name) sort order
+    assert_eq!(r.aggregates.len(), 6, "2 points x 3 measures = 6 rows; got {:#?}", r.aggregates);
+
+    let keys: Vec<(u32, &str)> = r.aggregates.iter().map(|a| (a.point_index, a.name.as_str())).collect();
+    let expected_keys: Vec<(u32, &str)> = [0u32, 1u32].iter().flat_map(|&p| expected_names.iter().map(move |&n| (p, n))).collect();
+    assert_eq!(keys, expected_keys, "sorted (point_index, name), 3 measures per point in alphabetical order");
+
+    for a in &r.aggregates {
+        assert_eq!(a.draws, 2, "point {} score {:?}: both draws at this point succeeded, so both must contribute", a.point_index, a.name);
+        assert_eq!(a.pass_fraction, None, "point {} score {:?}: a MeasureOfEffectiveness has no pass criterion, unlike an Objective", a.point_index, a.name);
+
+        // Recompute mean/min/max directly from this point's own two recorded samples (not just
+        // re-trusting the aggregate row) -- the independent half of this test.
+        let d0 = score(sample(r, a.point_index, 0), &a.name);
+        let d1 = score(sample(r, a.point_index, 1), &a.name);
+        let expected_mean = (d0 + d1) / 2.0;
+        let expected_min = d0.min(d1);
+        let expected_max = d0.max(d1);
+        assert!((a.mean - expected_mean).abs() < 1e-9, "point {} score {:?}: mean={} recomputed={}", a.point_index, a.name, a.mean, expected_mean);
+        assert_eq!(a.min, expected_min, "point {} score {:?}", a.point_index, a.name);
+        assert_eq!(a.max, expected_max, "point {} score {:?}", a.point_index, a.name);
+        assert!(a.std_dev >= 0.0, "a standard deviation is never negative");
+        // Population std_dev of exactly two values d0,d1 has the closed form |d0-d1|/2 -- an
+        // independent recomputation distinct from aggregate.rs's own formula, not the same code
+        // path re-run.
+        let expected_std = (d0 - d1).abs() / 2.0;
+        // Tolerance 1e-9, not the 1e-4 this assertion was first written with (manager review):
+        // the measured residual against the closed form is ~2e-11 -- the two formulas differ only
+        // in floating-point association -- so 1e-4 carried a factor of five million and could not
+        // have caught a real regression. That is the same objection the M19.4 review raised
+        // against a 93x margin on demo_two_instance's own rmag tolerance. 1e-9 leaves ~50x over
+        // the measured residual.
+        assert!((a.std_dev - expected_std).abs() < 1e-9, "point {} score {:?}: std_dev={} expected~={} (closed-form population std_dev of exactly two values d0,d1 is |d0-d1|/2)", a.point_index, a.name, a.std_dev, expected_std);
     }
 }
 

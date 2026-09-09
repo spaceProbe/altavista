@@ -125,4 +125,11 @@ pub enum SweepError {
     /// module's doc comment's "the one variant that wraps `DrmError`" section.
     #[error(transparent)]
     Drm(#[from] DrmError),
+
+    /// F2 (`crate::aggregate::aggregate`): the same score `name` at the same `point_index`
+    /// carried `ScoreResult.passed` set (an Objective) on at least one contributing draw and
+    /// unset (a MeasureOfEffectiveness) on at least one other -- one score cannot be both within
+    /// a single study; that would mean the DRM's own scoring declaration changed mid-study.
+    #[error("point {point_index}, score {name:?}: passed is set on some draws and unset on others; a score cannot be an Objective in one draw and a MeasureOfEffectiveness in another within one study")]
+    MixedPassCriterion { name: String, point_index: u32 },
 }

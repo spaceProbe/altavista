@@ -1,7 +1,7 @@
 [package]
 name = "av-sweep"
 publish = false
-description = "F1 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it."
+description = "F1-F2 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it. F2 (also src/lib.rs: aggregate.rs, store.rs, json.rs) adds per-point score aggregates and the study store (file-backed now, ClickHouse deferred behind the same trait)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -18,6 +18,25 @@
 //! point and out of bounds at another), so those are recorded as a failed [`pb::SweepSample`]
 //! and the study continues; no child is ever spawned for a sample that never got a valid
 //! configuration to write.
+//!
+//! ## F2 additions: aggregates and the optional study store
+//!
+//! Once every sample has been recorded, [`run_study`] computes per-`(point, score)` aggregates
+//! (`av_sweep::aggregate::aggregate`, `docs/feasibility-plan.md`'s F2 milestone) and fills
+//! `SweepResults.aggregates` -- F1b always left this empty. A `SweepError::MixedPassCriterion`
+//! from that call is treated as fatal to the study (like every other structural, sweep-wide
+//! refusal in [`preflight`]): it means the same score name was declared an Objective in one draw
+//! and a MeasureOfEffectiveness in another, which cannot happen from a single, unchanging DRM.
+//!
+//! `--store-dir <dir>` is a new, additional, OPTIONAL destination (F2's own brief: "Do NOT change
+//! the existing `--out-dir` layout"). When given, the finished `SweepResults` is also written
+//! through `av_sweep::store::FileStudyStore` rooted at that directory
+//! (`<store-dir>/<sweep_id>/{sweep_results.pb,sweep_results.json,samples.jsonl}`) -- this is the
+//! platform's own read path for a study (`docs/feasibility-plan.md`: "nothing reads the store
+//! except through that trait"), distinct from `--out-dir`, which remains the per-sample
+//! reproduction workspace (`drm.pb`/`sos.pb`/`sys_*.pb`/`stderr.txt`/`run_products.pb` per
+//! sample) that F1b's own tests and this task's per-sample replay both depend on unchanged. When
+//! `--store-dir` is omitted, no store directory is created or written at all.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -27,11 +46,11 @@ use std::time::Duration;
 
 use av_cdm::pb;
 use av_kernel::drm::ExecutionErrorMode;
-use av_sweep::SampleConfig;
+use av_sweep::store::{FileStudyStore, StudyStore};
+use av_sweep::{json, SampleConfig};
 use prost::Message;
 
 use crate::cli::StudyArgs;
-use crate::json;
 
 /// The maximum number of stderr bytes a failed sample's own [`pb::SweepSample::error`] message
 /// quotes -- this task's own brief: "cap the stderr at 4096 bytes and say explicitly in the
@@ -342,14 +361,19 @@ pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
 
     results.sort_by_key(|s| (s.point_index, s.draw_index));
 
+    // F2: per-(point, score) aggregates across draws -- see this module's own doc comment's "F2
+    // additions" section. A MixedPassCriterion refusal here is fatal to the whole study, the same
+    // way every other structural, sweep-wide refusal in `preflight` is: it names a real data
+    // inconsistency (the same score declared an Objective in one draw and a
+    // MeasureOfEffectiveness in another), not a per-sample condition to record and move past.
+    let aggregates = av_sweep::aggregate(&results).map_err(|e| format!("computing per-point aggregates: {e}"))?;
+
     let sweep_results = pb::SweepResults {
         sweep_id: loaded.sweep.id.clone(),
         sweep_hash: loaded.sweep_hash.clone(),
         drm_hash: loaded.drm.hash.clone(), // verified equal to its own canonical hash in preflight()
         samples: results,
-        // F2 fills this in (per-point aggregates across draws); left empty here, never a
-        // placeholder value.
-        aggregates: Vec::new(),
+        aggregates,
         provenance: Some(pb::Provenance {
             author_kind: pb::AuthorKind::Agent as i32,
             tool: "av-sweep".to_string(),
@@ -367,6 +391,15 @@ pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
     std::fs::write(&pb_path, sweep_results.encode_to_vec()).map_err(|e| format!("writing {}: {e}", pb_path.display()))?;
     let json_path = args.out_dir.join("sweep_results.json");
     std::fs::write(&json_path, json::sweep_results_to_json(&sweep_results)).map_err(|e| format!("writing {}: {e}", json_path.display()))?;
+
+    // F2: the study store is an ADDITIONAL, OPTIONAL destination -- see this module's own doc
+    // comment's "F2 additions" section for why --out-dir itself is untouched. Nothing is written
+    // under any store directory unless --store-dir was actually given.
+    if let Some(store_dir) = &args.store_dir {
+        let mut store = FileStudyStore::new(store_dir);
+        let location = store.put_study(&sweep_results).map_err(|e| format!("writing the study store at {}: {e}", store_dir.display()))?;
+        eprintln!("av-sweep: study store written to {location}");
+    }
 
     eprintln!("av-sweep: study {:?}: {} sample(s), {failed_count} failed", loaded.sweep.id, sweep_results.samples.len());
     Ok(())
@@ -538,6 +571,7 @@ mod tests {
             out_dir: out_dir.to_path_buf(),
             workers: 2,
             gmat_startup: None,
+            store_dir: None,
         }
     }
 
@@ -682,6 +716,42 @@ exit 0"#;
         let empty_path = dir.join("empty.txt");
         std::fs::write(&empty_path, b"").unwrap();
         assert_eq!(read_capped_stderr(&empty_path), "<empty>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F2: `--store-dir` is additional and optional -- given, the study store's own files
+    /// (`sweep_results.pb`/`.json`/`samples.jsonl` under `<store-dir>/<sweep_id>/`) must exist
+    /// after the study runs; omitted, no store directory is created at all, and `--out-dir`'s own
+    /// layout is unaffected either way. Uses the same fake-child machinery as the tests above (no
+    /// GMAT needed): the study store only cares about the FINISHED `SweepResults`, not about how
+    /// each sample's child behaved.
+    #[test]
+    fn study_mode_writes_the_store_when_store_dir_is_given_and_not_otherwise() {
+        let dir = temp_dir("store-dir-wiring");
+        let exe = write_fake_exe(&dir, "fake_exe.sh", "exit 7"); // every sample fails; irrelevant to this test
+
+        // Without --store-dir: no store directory appears anywhere near out_dir.
+        let out_dir_no_store = dir.join("out-no-store");
+        let result = run_study(study_args_for_fake_child(&out_dir_no_store), &exe);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(out_dir_no_store.join("sweep_results.pb").exists(), "--out-dir's own layout is unaffected either way");
+        let would_be_store_dir = dir.join("store-not-requested");
+        assert!(!would_be_store_dir.exists(), "no store directory must be created when --store-dir was never given");
+
+        // With --store-dir: the store's own three files exist under <store-dir>/<sweep_id>/.
+        let out_dir_with_store = dir.join("out-with-store");
+        let store_dir = dir.join("store");
+        let mut args = study_args_for_fake_child(&out_dir_with_store);
+        args.store_dir = Some(store_dir.clone());
+        let result = run_study(args, &exe);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(out_dir_with_store.join("sweep_results.pb").exists(), "--out-dir's own layout is unaffected either way");
+
+        let study_dir = store_dir.join("demo_two_instance_sweep");
+        assert!(study_dir.join("sweep_results.pb").exists());
+        assert!(study_dir.join("sweep_results.json").exists());
+        assert!(study_dir.join("samples.jsonl").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

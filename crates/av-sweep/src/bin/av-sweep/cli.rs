@@ -26,6 +26,11 @@ pub struct StudyArgs {
     /// a typed refusal ([`parse_study`]), not treated as "run nothing" or "unbounded".
     pub workers: u32,
     pub gmat_startup: Option<String>,
+    /// F2 (`docs/feasibility-plan.md`'s F2 milestone): an ADDITIONAL, OPTIONAL destination --
+    /// when set, the finished `SweepResults` is also written through
+    /// `av_sweep::store::FileStudyStore` rooted here. Never changes `out_dir`'s own layout;
+    /// `None` (the default, `--store-dir` simply omitted) writes no store directory at all.
+    pub store_dir: Option<PathBuf>,
 }
 
 /// Sample mode: one child, one sample, the only place GMAT is touched.
@@ -44,12 +49,15 @@ fn usage_study(prog: &str) -> String {
     format!(
         "usage: {prog} --sweep <sweep.yaml> --drm <drm.yaml> --sos <sos.yaml> \
          --system <path> [--system <path> ...] --out-dir <dir> --workers <N> \
-         [--gmat-startup <path>]\n\n\
+         [--gmat-startup <path>] [--store-dir <dir>]\n\n\
          Study mode (the parent): loads and hash-verifies the sweep, expands its grid, builds \
          every sample's per-sample DRM/SOS configuration, writes each sample's inputs, spawns \
          up to --workers children (one per sample, each this same binary invoked with \
-         --run-sample) at a time, collects their results, and writes sweep_results.pb/.json \
-         under --out-dir. --workers is required; 0 is refused."
+         --run-sample) at a time, collects their results, computes per-point aggregates, and \
+         writes sweep_results.pb/.json under --out-dir. --workers is required; 0 is refused. \
+         --store-dir is an additional, optional destination: when given, the finished \
+         SweepResults is also written through the study store (FileStudyStore) rooted there, \
+         without changing --out-dir's own layout."
     )
 }
 
@@ -90,6 +98,7 @@ fn parse_study(args: &[String], prog: &str) -> Result<StudyArgs, String> {
     let mut out_dir = None;
     let mut workers = None;
     let mut gmat_startup = None;
+    let mut store_dir = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -105,6 +114,7 @@ fn parse_study(args: &[String], prog: &str) -> Result<StudyArgs, String> {
                 workers = Some(n);
             }
             "--gmat-startup" => gmat_startup = Some(take_next(args, &mut i, "--gmat-startup", &usage)?),
+            "--store-dir" => store_dir = Some(PathBuf::from(take_next(args, &mut i, "--store-dir", &usage)?)),
             "-h" | "--help" => return Err(usage),
             other => return Err(format!("unrecognized argument {other:?}\n\n{usage}")),
         }
@@ -122,7 +132,7 @@ fn parse_study(args: &[String], prog: &str) -> Result<StudyArgs, String> {
     if workers == 0 {
         return Err(format!("--workers must be at least 1, got 0\n\n{usage}"));
     }
-    Ok(StudyArgs { sweep, drm, sos, systems, out_dir, workers, gmat_startup })
+    Ok(StudyArgs { sweep, drm, sos, systems, out_dir, workers, gmat_startup, store_dir })
 }
 
 fn parse_sample(args: &[String], prog: &str) -> Result<SampleArgs, String> {
@@ -192,6 +202,29 @@ mod tests {
                 out_dir: PathBuf::from("out"),
                 workers: 4,
                 gmat_startup: None,
+                store_dir: None,
+            })
+        );
+    }
+
+    /// `--store-dir` is optional and additional -- given, it is parsed into `StudyArgs.store_dir`
+    /// without disturbing anything else (this task's own brief: an ADDITIONAL, OPTIONAL
+    /// destination, never a replacement for `--out-dir`).
+    #[test]
+    fn parses_an_optional_store_dir_flag() {
+        let args = v(&["av-sweep", "--sweep", "s.yaml", "--drm", "d.yaml", "--sos", "o.yaml", "--system", "sys.yaml", "--out-dir", "out", "--workers", "4", "--store-dir", "store"]);
+        let cli = parse_cli(&args).unwrap();
+        assert_eq!(
+            cli,
+            Cli::Study(StudyArgs {
+                sweep: PathBuf::from("s.yaml"),
+                drm: PathBuf::from("d.yaml"),
+                sos: PathBuf::from("o.yaml"),
+                systems: vec![PathBuf::from("sys.yaml")],
+                out_dir: PathBuf::from("out"),
+                workers: 4,
+                gmat_startup: None,
+                store_dir: Some(PathBuf::from("store")),
             })
         );
     }

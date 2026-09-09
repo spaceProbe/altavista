@@ -7,6 +7,17 @@
 //! (https://protobuf.dev/programming-guides/json/) so that `google.protobuf.json_format.Parse`
 //! (the independent oracle `tests/test_sweep_results_json.py` uses) accepts the output.
 //!
+//! **F2 move, disclosed.** This module lived at `src/bin/av-sweep/json.rs` (F1b) and moved here
+//! unchanged (module doc comment aside) so `src/store.rs`'s `FileStudyStore` (F2,
+//! `docs/feasibility-plan.md`'s F2 milestone: "reuse the existing JSON encoder rather than
+//! writing a second one") can call [`sweep_results_to_json`]/[`sweep_sample_json`] as a library
+//! function instead of this crate duplicating the encoder a second time for `samples.jsonl`. The
+//! binary (`src/bin/av-sweep/study.rs`) now calls `av_sweep::json::sweep_results_to_json` the
+//! same way; `crates/av-sweep/examples/gen_sweep_results_json_golden.rs` likewise now does
+//! `use av_sweep::json;` instead of `#[path = "../src/bin/av-sweep/json.rs"] mod json;`. Every
+//! test below moved with the module, unchanged, and still passes (including the byte-for-byte
+//! golden pin) -- proof this is a pure relocation, not a rewrite.
+//!
 //! Rules this module applies, all load-bearing (each has a named test in this file's own
 //! `#[cfg(test)]` module):
 //!
@@ -140,7 +151,10 @@ fn provenance_json(p: &pb::Provenance) -> String {
     obj(f)
 }
 
-fn sweep_sample_json(s: &pb::SweepSample) -> String {
+/// One `SweepSample` as proto3 canonical JSON text -- `pub` (not just used internally by
+/// [`sweep_results_to_json`]) so `src/store.rs`'s `FileStudyStore` can reuse this exact encoder
+/// for `samples.jsonl` (one such object per line) rather than writing a second one.
+pub fn sweep_sample_json(s: &pb::SweepSample) -> String {
     let mut f = Vec::new();
     if s.point_index != 0 {
         f.push(kv("pointIndex", s.point_index.to_string()));
@@ -204,9 +218,10 @@ fn score_aggregate_json(a: &pb::ScoreAggregate) -> String {
 }
 
 /// The whole `SweepResults` message as proto3 canonical JSON text -- see the module doc comment
-/// for the exact rules. `aggregates` is left empty by F1b (this crate's own task brief: "left
-/// empty in F1b; F2 fills them") -- an empty `repeated` field is omitted here exactly like every
-/// other default-valued field, so an F1b `sweep_results.json` never carries a stray `"aggregates":[]`.
+/// for the exact rules. F2 (this crate's own `src/aggregate.rs`) now fills `aggregates`; an empty
+/// `repeated` field is still omitted here exactly like every other default-valued field, so a
+/// study with no aggregate rows (e.g. every sample failed) never carries a stray
+/// `"aggregates":[]`.
 pub fn sweep_results_to_json(r: &pb::SweepResults) -> String {
     let mut f = Vec::new();
     if !r.sweep_id.is_empty() {
