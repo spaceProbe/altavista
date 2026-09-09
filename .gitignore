@@ -40,3 +40,5 @@ target-docker-linux/
 goldens/_gen_*
 # Per-user Claude Code settings; launch.json stays tracked.
 .claude/settings.local.json
+# Claude Code session scheduler lock
+.claude/scheduled_tasks.lock
