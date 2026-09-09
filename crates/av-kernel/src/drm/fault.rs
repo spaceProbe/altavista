@@ -2,14 +2,12 @@
 //! their declared epochs, for the kinds this crate can act on: `FAULT_TARGET_KIND_DYNAMICS`
 //! (fully applied), `_PORT` (R4.1a/R4.1b: all four documented kinds -- `"drop"`/`"delay"`/
 //! `"corrupt"`/`"duplicate"` -- are now fully applied, by `crate::router::Router`, not this
-//! module), `_SENSOR` (R5.1a, question 178: fully applied for a star-tracker instance --
+//! module), `_SENSOR` (R5.1a/R5.1b, question 178: fully applied for BOTH sensor model kinds --
 //! `"bias"`/`"dropout"`/`"freeze"`/`"scale"`, [`apply_sensor_fault`]/[`clear_sensor_fault`],
-//! `crate::drm::sensors::StarTrackerModel`; still validated, seeded, and explicitly refused for
-//! an IMU instance, R5.1b's own scope -- see "SENSOR -- a real runtime for the star tracker
-//! (R5.1a), still explicitly refused for the IMU; PORT -- a real runtime for all four kinds
-//! (R4.1a/R4.1b)" below), and `_HARDWARE` (a container power cycle only -- see "Container
-//! power-cycle (HARDWARE)" below; any other `_HARDWARE` use is a typed refusal, not silently
-//! dropped).
+//! `crate::drm::sensors::StarTrackerModel`/`ImuModel` -- see "SENSOR -- a real runtime for both
+//! sensor models (R5.1a/R5.1b); PORT -- a real runtime for all four kinds (R4.1a/R4.1b)" below),
+//! and `_HARDWARE` (a container power cycle only -- see "Container power-cycle (HARDWARE)" below;
+//! any other `_HARDWARE` use is a typed refusal, not silently dropped).
 //!
 //! ## DYNAMICS (question 87's "What to build" item 5) -- applied
 //!
@@ -90,8 +88,8 @@
 //! board to reset, only its own process to power-cycle. See `executor::execute`'s own load-time
 //! validation pass for both checks.
 //!
-//! ## SENSOR -- a real runtime for the star tracker (R5.1a), still explicitly refused for the
-//! IMU; PORT -- a real runtime for all four kinds (R4.1a/R4.1b)
+//! ## SENSOR -- a real runtime for both sensor models (R5.1a/R5.1b); PORT -- a real runtime for
+//! all four kinds (R4.1a/R4.1b)
 //!
 //! Section 5 also names `FAULT_TARGET_KIND_PORT` ("acts in the router: drop, delay, corrupt,
 //! duplicate") and `FAULT_TARGET_KIND_SENSOR` ("acts in sensor models: bias, noise, dropout,
@@ -112,36 +110,35 @@
 //! module's own tests and by `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call
 //! it directly -- never by a real `execute()` run any more, for any PORT kind.
 //!
-//! **R5.1a (`docs/open-questions.md` question 178) gives SENSOR a real runtime for the star
-//! tracker, and only the star tracker.** `execute()`'s own load-time fault-validation loop
-//! resolves a `FAULT_TARGET_KIND_SENSOR` fault's own `instance` binding
-//! (`crate::registry::kind_for(&sys.dynamics_model)`) first: naming a `"startracker."`-dispatched
-//! instance now checks `fault.kind` against [`SENSOR_KINDS`] ([`DrmError::UnknownSensorFaultKind`]
-//! for anything else) and, once loaded, [`apply_sensor_fault`]/[`clear_sensor_fault`] apply/clear
-//! the declared effect at a fault-bounded re-materialization boundary -- see `crate::drm::
-//! sensors`'s own module doc comment's "SENSOR fault runtime" section for the complete contract.
+//! **R5.1a (`docs/open-questions.md` question 178) gave SENSOR a real runtime for the star
+//! tracker; R5.1b completes it for the IMU too.** `execute()`'s own load-time fault-validation
+//! loop resolves a `FAULT_TARGET_KIND_SENSOR` fault's own `instance` binding
+//! (`crate::registry::kind_for(&sys.dynamics_model)`) first: naming a `"startracker."`- or
+//! `"imu."`-dispatched instance now checks `fault.kind` against [`SENSOR_KINDS`]
+//! ([`DrmError::UnknownSensorFaultKind`] for anything else) and, once loaded, [`apply_sensor_
+//! fault`]/[`clear_sensor_fault`] apply/clear the declared effect at a fault-bounded
+//! re-materialization boundary -- see `crate::drm::sensors`'s own module doc comment's "SENSOR
+//! fault runtime" section for the complete contract, shared by both models on the identical
+//! machinery (a single `Option<...FaultEffect>` slot each, applied/cleared by the identical two
+//! functions here, dispatched by matching on `BindingPlan::StarTracker`/`BindingPlan::Imu`).
 //! Naming an instance that is not a sensor model instance at all is [`DrmError::
-//! SensorFaultTargetNotASensor`]. **Naming a `"imu."`-dispatched instance still refuses**
-//! ([`DrmError::PortOrSensorFaultNotYetSupported`], now narrowed to IMU only -- R5.1b's own
-//! scope, not this task's): the IMU sensor fault runtime does not exist yet, exactly the state
-//! SENSOR was in, wholesale, before this task.
+//! SensorFaultTargetNotASensor`]. **`DrmError::PortOrSensorFaultNotYetSupported`, the typed
+//! refusal that covered the IMU through R5.1a, is deleted (R5.1b)** -- once every SENSOR shape
+//! had a real runtime (both models, all four kinds), that variant became unreachable dead code,
+//! exactly as R4.1b deleted the analogous `DrmError::PortFaultKindNotYetSupported` once every
+//! PORT kind had a real runtime.
 //!
 //! **This module's own [`realize_unapplied_fault`] is unchanged and still validates the full
 //! four-kind ADR-005-generic SENSOR vocabulary** (it is a generic, target-kind-agnostic
 //! "validate, seed, draw one canonical value, refuse" helper -- see its own doc comment, and
 //! [`SENSOR_KINDS_ADR005_GENERIC`]'s own doc comment for why it is a DIFFERENT vocabulary from
-//! [`SENSOR_KINDS`]) **but `execute()` never calls it for a SENSOR fault naming a star-tracker
-//! instance at all**, mirroring PORT's own R4.1a precedent exactly: `execute()`'s own load-time
-//! validation plus `apply_sensor_fault` do their own, star-tracker-specific validation and
+//! [`SENSOR_KINDS`]) **but `execute()` never calls it for a SENSOR fault naming a star-tracker or
+//! IMU instance at all**, mirroring PORT's own R4.1a precedent exactly: `execute()`'s own
+//! load-time validation plus `apply_sensor_fault` do their own, model-specific validation and
 //! realization instead, so `realize_unapplied_fault`'s SENSOR-kind path is exercised only by this
 //! module's own tests and by `tests/faults_seeded.rs`/`tests/faults_determinism.rs`, which call it
-//! directly against a synthetic target -- never by a real `execute()` run any more, for a
-//! star-tracker instance. `execute()`'s own IMU refusal ([`DrmError::
-//! PortOrSensorFaultNotYetSupported`]) is likewise raised before any seed lookup, unchanged from
-//! before this task, so `realize_unapplied_fault`'s SENSOR path was already dead from
-//! `execute()`'s own perspective for every sensor kind before R5.1a and stays exactly that dead
-//! afterward -- kept, not deleted, because it is still exercised directly by the tests named
-//! above and still proves the seeded-stream property section 5 promises.
+//! directly against a synthetic target -- never by a real `execute()` run any more, for either
+//! sensor model.
 
 use std::collections::BTreeMap;
 
@@ -178,20 +175,22 @@ pub(crate) const PORT_KINDS: [&str; 4] = ["drop", "delay", "corrupt", "duplicate
 /// the star tracker's own REAL, narrower, task-178-decided one (drops `"noise"`/`"misalign"`,
 /// adds `"freeze"`/`"scale"`) -- see that constant's own doc comment.
 const SENSOR_KINDS_ADR005_GENERIC: [&str; 4] = ["bias", "noise", "dropout", "misalign"];
-/// `Fault.kind` values the star tracker's own SENSOR fault runtime (R5.1a, `docs/open-
-/// questions.md` question 178) actually supports -- checked by `executor::execute`'s own
-/// load-time fault-validation loop for a SENSOR fault naming a `"startracker."`-dispatched
-/// instance (a `kind` outside this list is [`DrmError::UnknownSensorFaultKind`]), mirroring
-/// [`PORT_KINDS`]'s identical role for PORT. **Deliberately not [`SENSOR_KINDS_ADR005_GENERIC`]
-/// above**: ADR-005 section 5's own generic sensor vocabulary was written before any sensor fault
-/// runtime existed and does not fit what a star tracker's declared `StarTrackerFaultEffect`
-/// (`crate::drm::sensors`) can actually represent -- `"noise"` is not a distinct fault (the star
-/// tracker already reports noise every emission; there is no separate "add noise" toggle) and
-/// `"misalign"` duplicates what a declared `startracker.mount_q` already is, a static
-/// configuration value, not a timed fault -- while `"freeze"` and `"scale"` are new kinds this
-/// module's own design (this task's own charter) adds because they are what the star tracker's
-/// single `Option<StarTrackerFaultEffect>` slot can actually express. See `crate::drm::sensors`'s
-/// own module doc comment's "SENSOR fault runtime" section for the full contract.
+/// `Fault.kind` values BOTH sensor models' own SENSOR fault runtimes (star tracker, R5.1a; IMU,
+/// R5.1b -- `docs/open-questions.md` question 178) actually support, on the identical vocabulary
+/// -- checked by `executor::execute`'s own load-time fault-validation loop for a SENSOR fault
+/// naming a `"startracker."`- or `"imu."`-dispatched instance (a `kind` outside this list is
+/// [`DrmError::UnknownSensorFaultKind`]), mirroring [`PORT_KINDS`]'s identical role for PORT.
+/// **Deliberately not [`SENSOR_KINDS_ADR005_GENERIC`] above**: ADR-005 section 5's own generic
+/// sensor vocabulary was written before any sensor fault runtime existed and does not fit what
+/// either model's declared `...FaultEffect` (`crate::drm::sensors::StarTrackerFaultEffect`/
+/// `ImuFaultEffect`) can actually represent -- `"noise"` is not a distinct fault (both models
+/// already report noise every emission; there is no separate "add noise" toggle) and
+/// `"misalign"` duplicates what a declared `*.mount_q` already is, a static configuration value,
+/// not a timed fault -- while `"freeze"` and `"scale"` are new kinds this module's own design
+/// (R5.1a's own charter, extended to the IMU by R5.1b on the identical reasoning) adds because
+/// they are what each model's single `Option<...FaultEffect>` slot can actually express. See
+/// `crate::drm::sensors`'s own module doc comment's "SENSOR fault runtime" section for the full
+/// contract.
 pub(crate) const SENSOR_KINDS: [&str; 4] = ["bias", "dropout", "freeze", "scale"];
 
 /// Comparison key for ADR-005 section 5's required fault-application order: "injected at their
@@ -417,79 +416,126 @@ fn apply_star_tracker_target(spec: &mut StarTrackerSpec, target: &str, value: f6
     Ok(())
 }
 
-/// `docs/open-questions.md` question 178 (R5.1a): apply one `FAULT_TARGET_KIND_SENSOR` fault to
-/// a star-tracker `BindingPlan`, returning the new plan the boundary loop re-materializes from --
-/// the SENSOR counterpart of [`apply_dynamics_fault`], called from the identical `Boundary::
-/// Fault` arm in `executor::run_shared_group`'s own boundary loop (that arm branches on
-/// `fault.target_kind` to decide which of the two to call). `fault.kind` is already validated
-/// against [`SENSOR_KINDS`] by `executor::execute`'s own load-time fault-validation loop, and
-/// `fault.instance` is already validated to name a star-tracker instance -- this function's own
-/// `target` match (below) is the ONLY place a per-kind `target` string is checked, mirroring
-/// [`apply_gmat_target`]/[`apply_star_tracker_target`]'s own identical "kind is checked at load,
-/// target is checked lazily, at apply time" precedent for DYNAMICS.
+/// `docs/open-questions.md` question 178 (R5.1a/R5.1b): apply one `FAULT_TARGET_KIND_SENSOR`
+/// fault to a star-tracker or IMU `BindingPlan`, returning the new plan the boundary loop
+/// re-materializes from -- the SENSOR counterpart of [`apply_dynamics_fault`], called from the
+/// identical `Boundary::Fault` arm in `executor::run_shared_group`'s own boundary loop (that arm
+/// branches on `fault.target_kind` to decide which of the two to call). `fault.kind` is already
+/// validated against [`SENSOR_KINDS`] by `executor::execute`'s own load-time fault-validation
+/// loop, and `fault.instance` is already validated to name a star-tracker or IMU instance --
+/// this function's own `target` match (below) is the ONLY place a per-kind `target` string is
+/// checked, mirroring [`apply_gmat_target`]/[`apply_star_tracker_target`]'s own identical "kind
+/// is checked at load, target is checked lazily, at apply time" precedent for DYNAMICS.
 ///
 /// # Panics
 ///
-/// If `plan` is not `BindingPlan::StarTracker` -- a caller bug: `executor::execute`'s own
-/// load-time validation (`DrmError::SensorFaultTargetNotASensor`) guarantees a SENSOR fault
-/// naming a star-tracker instance can only ever reach this function with a `BindingPlan::
-/// StarTracker` plan (mirrors [`materialize_plan_at_boundary`]'s own array-length `.expect()`
+/// If `plan` is neither `BindingPlan::StarTracker` nor `BindingPlan::Imu` -- a caller bug:
+/// `executor::execute`'s own load-time validation (`DrmError::SensorFaultTargetNotASensor`)
+/// guarantees a SENSOR fault naming a sensor instance can only ever reach this function with one
+/// of those two plans (mirrors [`materialize_plan_at_boundary`]'s own array-length `.expect()`
 /// preconditions elsewhere in this crate).
 pub fn apply_sensor_fault(plan: &BindingPlan, fault: &Fault) -> Result<BindingPlan, DrmError> {
-    let BindingPlan::StarTracker(spec) = plan else {
-        panic!("apply_sensor_fault called on a non-StarTracker plan ({plan:?}); executor::execute's own load-time validation (DrmError::SensorFaultTargetNotASensor) guarantees this never happens for a real run")
-    };
-    let mut spec: StarTrackerSpec = spec.clone();
-    let effect = match fault.kind.as_str() {
-        "bias" => {
-            let axis = match fault.target.as_str() {
-                "startracker.bias_rad.x" => 0,
-                "startracker.bias_rad.y" => 1,
-                "startracker.bias_rad.z" => 2,
-                other => return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: other.to_string() }),
+    match plan {
+        BindingPlan::StarTracker(spec) => {
+            let mut spec: StarTrackerSpec = spec.clone();
+            let effect = match fault.kind.as_str() {
+                "bias" => {
+                    let axis = match fault.target.as_str() {
+                        "startracker.bias_rad.x" => 0,
+                        "startracker.bias_rad.y" => 1,
+                        "startracker.bias_rad.z" => 2,
+                        other => return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: other.to_string() }),
+                    };
+                    crate::drm::sensors::StarTrackerFaultEffect::Bias { axis, value_rad: fault_value(fault)? }
+                }
+                "dropout" => {
+                    if fault.target != "startracker.output" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::StarTrackerFaultEffect::Dropout
+                }
+                "freeze" => {
+                    if fault.target != "startracker.output" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::StarTrackerFaultEffect::Freeze
+                }
+                "scale" => {
+                    if fault.target != "startracker.scale" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::StarTrackerFaultEffect::Scale { value: fault_value(fault)? }
+                }
+                other => panic!("apply_sensor_fault called with kind {other:?}; executor::execute's own load-time validation against fault::SENSOR_KINDS guarantees only bias/dropout/freeze/scale ever reach here"),
             };
-            crate::drm::sensors::StarTrackerFaultEffect::Bias { axis, value_rad: fault_value(fault)? }
+            spec.fault = Some(effect);
+            Ok(BindingPlan::StarTracker(spec))
         }
-        "dropout" => {
-            if fault.target != "startracker.output" {
-                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
-            }
-            crate::drm::sensors::StarTrackerFaultEffect::Dropout
+        BindingPlan::Imu(spec) => {
+            let mut spec: ImuSpec = spec.clone();
+            let effect = match fault.kind.as_str() {
+                "bias" => {
+                    let (channel, axis) = match fault.target.as_str() {
+                        "imu.gyro_bias.x" => (crate::drm::sensors::ImuBiasChannel::Gyro, 0),
+                        "imu.gyro_bias.y" => (crate::drm::sensors::ImuBiasChannel::Gyro, 1),
+                        "imu.gyro_bias.z" => (crate::drm::sensors::ImuBiasChannel::Gyro, 2),
+                        "imu.accel_bias.x" => (crate::drm::sensors::ImuBiasChannel::Accel, 0),
+                        "imu.accel_bias.y" => (crate::drm::sensors::ImuBiasChannel::Accel, 1),
+                        "imu.accel_bias.z" => (crate::drm::sensors::ImuBiasChannel::Accel, 2),
+                        other => return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: other.to_string() }),
+                    };
+                    crate::drm::sensors::ImuFaultEffect::Bias { channel, axis, value: fault_value(fault)? }
+                }
+                "dropout" => {
+                    if fault.target != "imu.output" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::ImuFaultEffect::Dropout
+                }
+                "freeze" => {
+                    if fault.target != "imu.output" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::ImuFaultEffect::Freeze
+                }
+                "scale" => {
+                    if fault.target != "imu.scale" {
+                        return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
+                    }
+                    crate::drm::sensors::ImuFaultEffect::Scale { value: fault_value(fault)? }
+                }
+                other => panic!("apply_sensor_fault called with kind {other:?}; executor::execute's own load-time validation against fault::SENSOR_KINDS guarantees only bias/dropout/freeze/scale ever reach here"),
+            };
+            spec.fault = Some(effect);
+            Ok(BindingPlan::Imu(spec))
         }
-        "freeze" => {
-            if fault.target != "startracker.output" {
-                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
-            }
-            crate::drm::sensors::StarTrackerFaultEffect::Freeze
-        }
-        "scale" => {
-            if fault.target != "startracker.scale" {
-                return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: fault.target.clone() });
-            }
-            crate::drm::sensors::StarTrackerFaultEffect::Scale { value: fault_value(fault)? }
-        }
-        other => panic!("apply_sensor_fault called with kind {other:?}; executor::execute's own load-time validation against fault::SENSOR_KINDS guarantees only bias/dropout/freeze/scale ever reach here"),
-    };
-    spec.fault = Some(effect);
-    Ok(BindingPlan::StarTracker(spec))
+        other => panic!("apply_sensor_fault called on a non-sensor plan ({other:?}); executor::execute's own load-time validation (DrmError::SensorFaultTargetNotASensor) guarantees this never happens for a real run"),
+    }
 }
 
-/// `docs/open-questions.md` question 178 (R5.1a): restore a star-tracker `BindingPlan` to its
-/// exact pre-fault value at a windowed SENSOR fault's own end epoch -- the second re-
-/// materialization boundary `executor::run_shared_group` synthesizes for `duration_ns > 0`
-/// (`Boundary::SensorFaultEnd`). Simply clears `StarTrackerSpec::fault` back to `None`; every
-/// other declared field is untouched, since nothing else about the spec ever changed.
+/// `docs/open-questions.md` question 178 (R5.1a/R5.1b): restore a star-tracker or IMU
+/// `BindingPlan` to its exact pre-fault value at a windowed SENSOR fault's own end epoch -- the
+/// second re-materialization boundary `executor::run_shared_group` synthesizes for `duration_ns >
+/// 0` (`Boundary::SensorFaultEnd`). Simply clears the spec's own `fault` field back to `None`;
+/// every other declared field is untouched, since nothing else about the spec ever changed.
 ///
 /// # Panics
 ///
 /// Same precondition as [`apply_sensor_fault`] -- see that function's own doc comment.
 pub fn clear_sensor_fault(plan: &BindingPlan) -> BindingPlan {
-    let BindingPlan::StarTracker(spec) = plan else {
-        panic!("clear_sensor_fault called on a non-StarTracker plan ({plan:?}); executor::run_shared_group only ever synthesizes a Boundary::SensorFaultEnd for a star-tracker instance")
-    };
-    let mut spec: StarTrackerSpec = spec.clone();
-    spec.fault = None;
-    BindingPlan::StarTracker(spec)
+    match plan {
+        BindingPlan::StarTracker(spec) => {
+            let mut spec: StarTrackerSpec = spec.clone();
+            spec.fault = None;
+            BindingPlan::StarTracker(spec)
+        }
+        BindingPlan::Imu(spec) => {
+            let mut spec: ImuSpec = spec.clone();
+            spec.fault = None;
+            BindingPlan::Imu(spec)
+        }
+        other => panic!("clear_sensor_fault called on a non-sensor plan ({other:?}); executor::run_shared_group only ever synthesizes a Boundary::SensorFaultEnd for a star-tracker or IMU instance"),
+    }
 }
 
 /// `docs/open-questions.md` questions 178/184/186(b) (R5.1a): refuse two `FAULT_TARGET_KIND_
@@ -812,6 +858,7 @@ mod tests {
             accel_bias_rw_sigma: 1e-5,
             mount_q: [0.1, 0.2, 0.3, 0.4],
             true_specific_force: [0.0, 0.0, 9.81],
+            fault: None,
         }
     }
 
@@ -914,6 +961,87 @@ mod tests {
         assert_eq!(cleared.fault, None);
         assert_eq!(cleared.noise_sigma_rad, star_tracker_spec().noise_sigma_rad);
         assert_eq!(cleared.mount_q, star_tracker_spec().mount_q);
+    }
+
+    // -- Question 178 (R5.1b): `apply_sensor_fault`/`clear_sensor_fault`'s new `BindingPlan::Imu`
+    // arm -- the identical four kinds, mirroring the star-tracker tests immediately above,
+    // proving the IMU gets a genuinely independent (not merely delegated/shared) `target`
+    // vocabulary (`imu.gyro_bias.*`/`imu.accel_bias.*`/`imu.output`/`imu.scale`, never the star
+    // tracker's `startracker.*` strings).
+
+    fn imu_sensor_fault(id: &str, kind: &str, target: &str, value: Option<f64>) -> Fault {
+        let mut params = std::collections::BTreeMap::new();
+        if let Some(v) = value {
+            params.insert("value".to_string(), v);
+        }
+        Fault { id: id.to_string(), target_kind: FaultTargetKind::Sensor as i32, instance: "imu1".to_string(), target: target.to_string(), kind: kind.to_string(), params, ..Default::default() }
+    }
+
+    /// `Bias` writes exactly the declared channel/axis/value into `ImuSpec::fault`, leaving
+    /// every other declared field untouched -- fails against an implementation that writes the
+    /// wrong channel/axis, drops the value, or perturbs `gyro_noise_sigma`/`accel_noise_sigma`/
+    /// `mount_q` by mistake.
+    #[test]
+    fn apply_sensor_fault_bias_writes_the_declared_channel_axis_and_value_for_imu() {
+        use crate::drm::sensors::ImuBiasChannel;
+        let plan = BindingPlan::Imu(imu_spec());
+        let cases = [
+            ("imu.gyro_bias.x", ImuBiasChannel::Gyro, 0),
+            ("imu.gyro_bias.y", ImuBiasChannel::Gyro, 1),
+            ("imu.gyro_bias.z", ImuBiasChannel::Gyro, 2),
+            ("imu.accel_bias.x", ImuBiasChannel::Accel, 0),
+            ("imu.accel_bias.y", ImuBiasChannel::Accel, 1),
+            ("imu.accel_bias.z", ImuBiasChannel::Accel, 2),
+        ];
+        for (target, channel, axis) in cases {
+            let BindingPlan::Imu(spec) = apply_sensor_fault(&plan, &imu_sensor_fault("f1", "bias", target, Some(0.003))).unwrap() else { panic!("expected Imu") };
+            assert_eq!(spec.fault, Some(crate::drm::sensors::ImuFaultEffect::Bias { channel, axis, value: 0.003 }), "target {target:?}");
+            assert_eq!(spec.gyro_noise_sigma, imu_spec().gyro_noise_sigma, "bias must not perturb gyro_noise_sigma");
+            assert_eq!(spec.accel_noise_sigma, imu_spec().accel_noise_sigma, "bias must not perturb accel_noise_sigma");
+        }
+    }
+
+    #[test]
+    fn apply_sensor_fault_dropout_and_freeze_write_the_declared_effect_for_imu() {
+        let plan = BindingPlan::Imu(imu_spec());
+        let BindingPlan::Imu(dropout) = apply_sensor_fault(&plan, &imu_sensor_fault("f1", "dropout", "imu.output", None)).unwrap() else { panic!("expected Imu") };
+        assert_eq!(dropout.fault, Some(crate::drm::sensors::ImuFaultEffect::Dropout));
+        let BindingPlan::Imu(freeze) = apply_sensor_fault(&plan, &imu_sensor_fault("f2", "freeze", "imu.output", None)).unwrap() else { panic!("expected Imu") };
+        assert_eq!(freeze.fault, Some(crate::drm::sensors::ImuFaultEffect::Freeze));
+    }
+
+    #[test]
+    fn apply_sensor_fault_scale_writes_the_declared_value_for_imu() {
+        let plan = BindingPlan::Imu(imu_spec());
+        let BindingPlan::Imu(spec) = apply_sensor_fault(&plan, &imu_sensor_fault("f1", "scale", "imu.scale", Some(4.5))).unwrap() else { panic!("expected Imu") };
+        assert_eq!(spec.fault, Some(crate::drm::sensors::ImuFaultEffect::Scale { value: 4.5 }));
+    }
+
+    /// Mirrors `apply_sensor_fault_refuses_a_target_that_does_not_match_its_own_kind`'s identical
+    /// proof for the star tracker: a recognized `kind` (already validated against `SENSOR_KINDS`
+    /// at load) naming a `target` that does not match what that kind actually requires is a typed
+    /// `DrmError::UnknownParameter`, never silently accepted or misapplied.
+    #[test]
+    fn apply_sensor_fault_refuses_a_target_that_does_not_match_its_own_kind_for_imu() {
+        let plan = BindingPlan::Imu(imu_spec());
+        for (kind, target, value) in [("bias", "imu.scale", Some(1.0)), ("dropout", "imu.gyro_bias.x", None), ("freeze", "imu.scale", None), ("scale", "imu.output", Some(1.0))] {
+            let err = apply_sensor_fault(&plan, &imu_sensor_fault("f1", kind, target, value)).unwrap_err();
+            assert!(matches!(err, DrmError::UnknownParameter { .. }), "kind {kind:?} target {target:?}: {err:?}");
+        }
+    }
+
+    /// `clear_sensor_fault` restores exactly `fault: None` on an IMU plan too, leaving every
+    /// other declared field untouched -- fails against an implementation that only ever added the
+    /// `BindingPlan::Imu` arm to `apply_sensor_fault` and forgot the matching arm here (a compile
+    /// error, since this match is exhaustive, but pinned directly rather than relied on).
+    #[test]
+    fn clear_sensor_fault_restores_fault_to_none_and_touches_nothing_else_for_imu() {
+        let plan = BindingPlan::Imu(imu_spec());
+        let faulted = apply_sensor_fault(&plan, &imu_sensor_fault("f1", "scale", "imu.scale", Some(2.0))).unwrap();
+        let BindingPlan::Imu(cleared) = clear_sensor_fault(&faulted) else { panic!("expected Imu") };
+        assert_eq!(cleared.fault, None);
+        assert_eq!(cleared.gyro_noise_sigma, imu_spec().gyro_noise_sigma);
+        assert_eq!(cleared.mount_q, imu_spec().mount_q);
     }
 
     fn sensor_window_fault(id: &str, instance: &str, target: &str, tai_ns: i64, duration_ns: i64) -> Fault {

@@ -728,3 +728,58 @@ edge -- disclosed, not claimed away, in the module's own doc comment.
 Reading the sidecar directly (e.g. to build a `ReplayConfig` or to inspect what a run actually
 carried): `av_cdm::pb::PortTrafficLog::decode(&bytes)` (`prost::Message`), the same wire type
 `execute()` itself writes.
+
+**Replaying a SENSOR-faulted instance does not reproduce that fault's own event (R5.1b,
+measured).** A PORT fault's effect is applied by `crate::router::Router` at DELIVERY time, to
+already-recorded (pre-fault) OUT frames a replay plays back verbatim -- so replaying the emitting
+instance genuinely re-triggers the fault (`crates/av-kernel/tests/replay.rs::t5_...`). A SENSOR
+fault's effect, in contrast, is computed INSIDE the sensor model's own `step_with_ports`, before
+the (already-faulted) packet is ever pushed to its `Outbox` -- so a replayed instance's own frames
+already carry the fault's effect, but `crate::drm::replay::ReplayModel::drain_sensor_fault_effect`
+always returns `None` (a replay binding has no sensor-specific fault-effect counter to report),
+so `crate::drm::executor::run_shared_group`'s own `sensor_fault_totals` accumulator -- which
+gates whether that fault's own `EVENT_KIND_FAULT` event is ever emitted at all -- never receives
+a contribution from a replayed instance, for ANY SENSOR fault kind. Measured directly:
+`crates/av-kernel/tests/replay.rs::t6b_replaying_the_same_instance_a_sensor_fault_targets_
+measurably_drops_that_faults_own_event` replays the SAME instance a `"bias"` fault targets and
+confirms the fault's own event is genuinely, measurably absent from the replayed run's own
+`RunProducts.events` -- one of at least two reasons `imu` cannot honestly replay itself here: it
+also has a real, nonzero propagated state (`state_dim() == 6`, the bias random walk, unlike the
+star tracker's `0`), so replaying it also replaces that real propagation with `ReplayModel`'s own
+zero-order hold and drops its own `Measurement`s, independent of the fault-event gap. `t6_`'s own
+fixture (`drms/demo_attitude_control_imu_bias.drm.yaml`) sidesteps this by
+faulting one sensor (`imu`) while replaying a DIFFERENT one (`startracker`) that the fault never
+touches -- a genuinely different, still-real claim ("a sensor-faulted run's OTHER instances
+replay byte for byte") rather than the (currently architecturally impossible) claim that a
+SENSOR-faulted instance can replay its own fault event. Not fixed here -- escalated in
+`crates/av-kernel/R5_1B_REPORT.md` for the manager/lead to decide whether and how to close.
+
+## Command bookkeeping: the two-epoch trap (`docs/open-questions.md` question 187)
+
+`av_dynamics::AppliedCommand.applied_tai_ns` is the consuming step's own START epoch (the
+`step_with_ports` call's own `t_tai_ns` argument, the instant from which the commanded value is
+actually in effect) -- **not** the epoch the ack telemetry packet is actually emitted at, which is
+that SAME step's own RESULT (end) epoch, `applied_tai_ns + period` (`period` being the applying
+model's own native step/period, `dt_ns`). Two rounds running, a test was first written against the
+wrong one of these two epochs and had to be root-caused
+(`crates/av-kernel/tests/port_traffic_sidecar.rs`'s own module doc comment has the full account).
+
+- The `ACKED` `CommandTransition` lands at `applied_tai_ns` itself, unchanged --
+  `crate::drm::command::acked_event`'s own call site (`crate::drm::executor::run_shared_group`)
+  passes `cmd.applied_tai_ns` directly, never `+ period`. Proven directly by
+  `crates/av-kernel/tests/drm_command.rs::the_ground_issued_command_drm_runs_through_execute_and_
+  reaches_acked`'s own `assert_eq!(transitions[4].tai_ns, applied_tai_ns, ...)`.
+- The ack packet's own REAL wire emission epoch -- the epoch `crate::router::Router::deliver`
+  records the ack's own OUT/IN `PortTrafficRecord`s at -- is `applied_tai_ns + period`: the model
+  pushes the ack onto its own `Outbox` at `result.t_tai_ns` (the step's own result epoch), after it
+  finishes the step it just applied the command within
+  (`crate::drm::binding::ConstantAccelModel::step_with_ports`'s own `outbox.push(port, result.
+  t_tai_ns, payload)`; `crate::drm::gmat_command::GmatFramedCommandModel::step_with_ports`'s
+  identical shape for a GMAT-bound command target).
+
+`crate::drm::command::ack_emission_epoch(applied: i64, period: i64) -> i64` (`applied + period`)
+is the one place this relation is written -- used at `crates/av-kernel/tests/port_traffic_
+sidecar.rs`'s own call site (previously the literal `applied_tai_ns + OUTPUT_PERIOD_NS`
+arithmetic that test's own EARLIER draft got wrong) and documented, identically, on
+`av_dynamics::AppliedCommand.applied_tai_ns`'s own doc comment -- so a future caller reads the
+relation once, in one of those two places, rather than re-deriving it (wrongly, a third time).

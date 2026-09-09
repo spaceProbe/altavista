@@ -223,6 +223,24 @@ pub fn decode_signal(payload: &[u8]) -> Option<f64> {
 /// only its own [`Inbox`], which may or may not know one (see `Inbox`'s own doc comment) --
 /// the caller that has [`Inbox::last_on_port`] in scope (`av_kernel::schedule::HeteroScheduler`)
 /// is what attaches the sender, once, right after this call returns.
+///
+/// **The two-epoch trap (`docs/open-questions.md` question 187, ratified by the lead after two
+/// rounds of the identical mistake).** `applied_tai_ns` is this step's own START epoch, above --
+/// and that is ALSO the epoch the `ACKED` `CommandTransition` lands at (`av_kernel::drm::command::
+/// acked_event`'s own call site passes `cmd.applied_tai_ns` directly, unchanged, never `+
+/// period`). The ack TELEMETRY PACKET itself, in contrast, is pushed onto the model's own
+/// `Outbox` at this SAME step's own RESULT (end) epoch -- `applied_tai_ns + period` (`period`
+/// being this step's own elapsed duration/native step, `dt_ns`) -- because the model computes and
+/// sends the ack only after finishing the step it just applied the command within (mirrors
+/// `av_kernel::drm::binding::ConstantAccelModel::step_with_ports`'s own `outbox.push(port, result.
+/// t_tai_ns, payload)`, and `av_kernel::drm::gmat_command::GmatFramedCommandModel::step_with_
+/// ports`'s identical shape). These are two genuinely different, both meaningful epochs -- a
+/// caller that conflates them (uses `applied_tai_ns` alone where the ack's own real wire emission
+/// epoch is meant, or vice versa) gets a plausible-looking but wrong answer, which is exactly what
+/// happened twice (`crates/av-kernel/tests/port_traffic_sidecar.rs`'s own module doc comment has
+/// the first, root-caused occurrence). `av_kernel::drm::command::ack_emission_epoch(applied,
+/// period) -> applied + period` is the one place this relation is written, used at every call
+/// site that needs the ack's own real emission epoch rather than repeating the addition inline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppliedCommand {
     pub port: String,

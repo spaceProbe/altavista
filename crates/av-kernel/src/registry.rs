@@ -639,6 +639,7 @@ mod tests {
             accel_bias_rw_sigma: 1e-5,
             mount_q: [0.0, 0.0, 0.0, 1.0],
             true_specific_force: [0.0, 0.0, 0.0],
+            fault: None,
         };
         let codec = crate::drm::sensors::imu_packet_codec("imu_test", 101);
         let handle = ModelRegistry::construct_imu(&spec, codec, "imu_meas".to_string(), 1_700_000_000_000_000_000, "imu.test").expect("a valid spec/codec pair must construct");

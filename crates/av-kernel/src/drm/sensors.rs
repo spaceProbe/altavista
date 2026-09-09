@@ -87,38 +87,51 @@
 //!   test's own doc comment cites) -- both stated, with the expected value, before the test's own
 //!   measurement is taken, per each test's doc comment below.
 //!
-//! ## SENSOR fault runtime for the star tracker (`docs/open-questions.md` question 178, R5.1a)
+//! ## SENSOR fault runtime for the star tracker and the IMU (`docs/open-questions.md` question
+//! 178, R5.1a/R5.1b)
 //!
-//! [`StarTrackerFaultEffect`] is the declared effect of a `FAULT_TARGET_KIND_SENSOR` fault whose
-//! `kind` is one of [`crate::drm::fault::SENSOR_KINDS`] (`"bias"`, `"dropout"`, `"freeze"`,
-//! `"scale"`), carried in [`StarTrackerSpec::fault`] and applied by
-//! [`StarTrackerModel::step_with_ports`] -- the PORT fault runtime's own analogue
-//! (`crate::router`'s own module doc comment's "Port fault runtime" section) but realized as a
-//! declared PARAMETER CHANGE, applied by the SAME fault-bounded re-materialization boundary a
-//! DYNAMICS fault already uses (`crate::drm::fault::apply_dynamics_fault`/`apply_sensor_fault`,
-//! `crate::drm::executor::run_shared_group`'s own boundary loop), not by a router-mediated
-//! per-frame draw -- there is no router in the loop for a native sensor's own emission.
+//! [`StarTrackerFaultEffect`]/[`ImuFaultEffect`] is the declared effect of a
+//! `FAULT_TARGET_KIND_SENSOR` fault whose `kind` is one of [`crate::drm::fault::SENSOR_KINDS`]
+//! (`"bias"`, `"dropout"`, `"freeze"`, `"scale"`), carried in [`StarTrackerSpec::fault`]/
+//! [`ImuSpec::fault`] and applied by [`StarTrackerModel::step_with_ports`]/[`ImuModel::
+//! step_with_ports`] -- the PORT fault runtime's own analogue (`crate::router`'s own module doc
+//! comment's "Port fault runtime" section) but realized as a declared PARAMETER CHANGE, applied
+//! by the SAME fault-bounded re-materialization boundary a DYNAMICS fault already uses
+//! (`crate::drm::fault::apply_dynamics_fault`/`apply_sensor_fault`, `crate::drm::executor::
+//! run_shared_group`'s own boundary loop), not by a router-mediated per-frame draw -- there is no
+//! router in the loop for a native sensor's own emission. R5.1a built this for the star tracker
+//! only (the IMU stayed a typed refusal, `DrmError::PortOrSensorFaultNotYetSupported`); R5.1b
+//! gives the IMU the identical runtime, on the identical machinery, and deletes that now-dead
+//! refusal variant (mirroring R4.1b's deletion of `DrmError::PortFaultKindNotYetSupported` once
+//! every PORT kind had a real runtime).
 //!
 //! **`Freeze`'s own definition, and why "first," not "last before the window."** A
 //! re-materialized model has no history: `crate::drm::executor::materialize_plan_at_boundary`
-//! constructs a genuinely FRESH `StarTrackerModel` at every boundary (a new `Pcg64`, `seq` reset
-//! to 0, `next_due` reset, `last_truth` cleared -- this module's own `StarTrackerModel::new`) --
-//! it has nothing left over from whatever segment ran immediately before the fault epoch to
-//! latch as "the last value." The FIRST measurement it computes after the fault epoch is
-//! therefore the only value available to freeze at all; [`StarTrackerModel::frozen_measurement`]
-//! latches exactly that one, the moment it is first computed, and every later emission in the
-//! window re-emits it unchanged -- still one packet, and one incremented CCSDS sequence count,
-//! per declared period (`docs/open-questions.md` question 178's own design: "it still emits a
-//! packet per period... only the measured values repeat").
+//! constructs a genuinely FRESH `StarTrackerModel`/`ImuModel` at every boundary (a new `Pcg64`,
+//! `seq` reset to 0, `next_due` reset, `last_truth` cleared -- this module's own `StarTrackerModel
+//! ::new`/`ImuModel::new`) -- it has nothing left over from whatever segment ran immediately
+//! before the fault epoch to latch as "the last value." The FIRST measurement it computes after
+//! the fault epoch is therefore the only value available to freeze at all; [`StarTrackerModel::
+//! frozen_measurement`]/[`ImuModel::frozen_measurement`] latches exactly that one, the moment it
+//! is first computed, and every later emission in the window re-emits it unchanged -- still one
+//! packet, and one incremented CCSDS sequence count, per declared period (`docs/open-questions.md`
+//! question 178's own design: "it still emits a packet per period... only the measured values
+//! repeat"). For the IMU specifically, the propagated bias random walk (`state[0..6]`) keeps
+//! advancing underneath the frozen output, exactly as normal -- only the REPORTED values freeze;
+//! see [`ImuFaultEffect::Bias`]'s own doc comment for the analogous "the physics keeps running,
+//! only the report is perturbed" contract for `Bias`.
 //!
 //! **Window semantics** ([Fault.tai_ns, Fault.tai_ns + duration_ns), half-open, `duration_ns ==
 //! 0` persistent to run end) and **overlap refusal** are `crate::drm::executor`'s own concern,
 //! not this module's -- see `super::DrmError::OverlappingSensorFaultWindows`'s own doc comment
 //! for exactly how SENSOR's own single-`Option`-slot representation makes its overlap key
-//! coarser than PORT's `(instance, port)` one.
+//! coarser than PORT's `(instance, port)` one (keyed on `instance` alone, so a star-tracker and
+//! an IMU instance's own windows never interact -- each model's `fault` slot is entirely its
+//! own).
 //!
 //! **Counting (question 186(c)).** [`StarTrackerModel::fault_frames_affected`]/`fault_first_
-//! effect_tai_ns` accumulate across every `step_with_ports` call until [`StarTrackerModel::
+//! effect_tai_ns` (and the identical pair on [`ImuModel`]) accumulate across every
+//! `step_with_ports` call until [`StarTrackerModel::drain_sensor_fault_effect`]/[`ImuModel::
 //! drain_sensor_fault_effect`] (an `av_dynamics::DynamicsModel` required method, question 112 --
 //! delegated explicitly through `crate::drm::binding::AnyModel`, never a trait default) drains
 //! them -- `crate::drm::executor::run_shared_group` calls this at every boundary this instance's
@@ -890,6 +903,69 @@ impl StarTrackerModel {
 // IMU.
 // ============================================================================================
 
+/// `docs/open-questions.md` question 178 (R5.1b): which propagated bias channel a `Bias`
+/// [`ImuFaultEffect`] targets -- `Fault.target` is `imu.gyro_bias.{x,y,z}` (rad/s, [`Self::
+/// Gyro`]) or `imu.accel_bias.{x,y,z}` (m/s^2, [`Self::Accel`]), never a mixed pair (the IMU's
+/// two triads have different units and different declared noise/random-walk sigmas, so one
+/// `axis` index alone -- unlike the star tracker's single 3-vector -- cannot say which triad it
+/// names).
+///
+/// (R5.1b review: this enum was inserted between [`ImuSpec`]'s own doc comment and the struct
+/// itself, which silently reattached that whole parameter-vocabulary block here and left a
+/// duplicate of it above `ImuSpec`. The stale copy is deleted; `ImuSpec` keeps the one below.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImuBiasChannel {
+    Gyro,
+    Accel,
+}
+
+/// `docs/open-questions.md` question 178 (R5.1b): the SENSOR fault effect currently installed on
+/// an [`ImuModel`], carried in [`ImuSpec::fault`] and applied inside [`ImuModel::step_with_ports`]
+/// -- the IMU's own counterpart of [`StarTrackerFaultEffect`], on the identical machinery (single
+/// `Option` slot, applied/cleared by [`crate::drm::fault::apply_sensor_fault`]/[`clear_sensor_
+/// fault`] at a fault-bounded re-materialization boundary). See [`ImuModel::step_with_ports`]'s
+/// own doc comment for exactly where each variant is applied, and this module's own doc comment's
+/// "SENSOR fault runtime" section for the shared vocabulary ([`crate::drm::fault::SENSOR_KINDS`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ImuFaultEffect {
+    /// `Fault.target` is `imu.gyro_bias.{x,y,z}` (rad/s) or `imu.accel_bias.{x,y,z}` (m/s^2, see
+    /// [`ImuBiasChannel`]); `Fault.params["value"]` is `value`, a fixed additive term.
+    ///
+    /// **Composes with the propagated bias random walk -- never replaces it.** `ImuModel`
+    /// already propagates a genuine, continuously-evolving bias random walk in its own state
+    /// (`state[0..6]`, [`random_walk_step3`], trap 2 in this module's own doc comment) -- a
+    /// physically distinct effect from a step-function fault bias (e.g. a stuck bias trim, or a
+    /// thermal step). `Bias`'s declared `value` is summed in as an ADDITIONAL constant term,
+    /// exactly at the point the reported measurement is computed
+    /// ([`ImuModel::compute_measured_values`]), never written into `state[0..6]` itself and
+    /// never used to reset, scale, or otherwise perturb the random walk's own accumulated value
+    /// -- the random walk keeps evolving normally, fault installed or not (`step_with_ports`'s
+    /// own per-period [`random_walk_step3`] calls are unconditional, unchanged by whether a fault
+    /// is installed). This is the same "compose, don't replace" contract [`StarTrackerFaultEffect
+    /// ::Bias`] already uses for the noise vector it adds atop -- clearing the fault
+    /// ([`crate::drm::fault::clear_sensor_fault`]) removes exactly the declared additive term and
+    /// nothing else; the random walk's own accumulated value, whatever it happens to be at that
+    /// instant, is untouched.
+    Bias { channel: ImuBiasChannel, axis: usize, value: f64 },
+    /// `Fault.target` is `imu.output`: no packet, no `Measurement`, at any emission instant
+    /// inside the window -- the whole 6-component packet (gyro triad + accel triad share one
+    /// physical packet, [`imu_packet_codec`]), mirrors [`StarTrackerFaultEffect::Dropout`]
+    /// exactly.
+    Dropout,
+    /// `Fault.target` is `imu.output`: the FIRST full `[wx,wy,wz,ax,ay,az]` measurement computed
+    /// after the fault epoch is latched and re-emitted, unchanged, at every subsequent emission
+    /// instant in the window -- see [`ImuModel::step_with_ports`]'s own doc comment for why
+    /// "first," not "last before the window" (identical reasoning to [`StarTrackerFaultEffect::
+    /// Freeze`], a re-materialized model has no history). The propagated bias random walk keeps
+    /// advancing underneath the frozen output, unaffected -- only the REPORTED values are frozen.
+    Freeze,
+    /// `Fault.target` is `imu.scale`; `Fault.params["value"]` is `value`, a dimensionless factor
+    /// multiplying the reported deviation from truth (bias plus noise) on BOTH triads uniformly
+    /// -- `value == 1.0` is exactly a no-op. Mirrors [`StarTrackerFaultEffect::Scale`]'s identical
+    /// definition, generalized to two channels sharing one declared scale.
+    Scale { value: f64 },
+}
+
 /// Parsed, typed parameters for [`ImuModel`] -- built by [`parse_imu_spec`]. Parameter
 /// vocabulary (a name matching none of these is [`SensorSpecError::UnknownParameter`]):
 /// - `imu.update_rate_hz` (required, `> 0`): declared measurement rate, Hz.
@@ -908,6 +984,10 @@ impl StarTrackerModel {
 ///   bakes in a physical quantity this milestone has no runtime source for yet. A future
 ///   translational-dynamics milestone is the natural place to replace this with a real truth
 ///   port.
+///
+/// `fault` (question 178, R5.1b) is never a declared parameter -- it is `None` at parse time,
+/// always, and is set only by `crate::drm::fault::apply_sensor_fault` at a fault-bounded
+/// re-materialization boundary, exactly mirroring [`StarTrackerSpec::fault`]'s own doc comment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImuSpec {
     pub update_rate_hz: f64,
@@ -918,6 +998,7 @@ pub struct ImuSpec {
     pub accel_bias_rw_sigma: f64,
     pub mount_q: [f64; 4],
     pub true_specific_force: [f64; 3],
+    pub fault: Option<ImuFaultEffect>,
 }
 
 pub fn parse_imu_spec(params: &BTreeMap<String, Parameter>) -> Result<ImuSpec, SensorSpecError> {
@@ -973,7 +1054,7 @@ pub fn parse_imu_spec(params: &BTreeMap<String, Parameter>) -> Result<ImuSpec, S
         [Some(x), Some(y), Some(z)] => [x, y, z],
         _ => return Err(SensorSpecError::MissingParameter { name: "imu.true_specific_force.{x,y,z} (all three required together, or none at all for zero)".to_string() }),
     };
-    Ok(ImuSpec { update_rate_hz, seed, gyro_noise_sigma, gyro_bias_rw_sigma, accel_noise_sigma, accel_bias_rw_sigma, mount_q, true_specific_force })
+    Ok(ImuSpec { update_rate_hz, seed, gyro_noise_sigma, gyro_bias_rw_sigma, accel_noise_sigma, accel_bias_rw_sigma, mount_q, true_specific_force, fault: None })
 }
 
 /// The fixed field layout every IMU `PacketCodec` this module builds/expects uses: six
@@ -1034,6 +1115,15 @@ pub struct ImuModel {
     info: ModelInfo,
     /// Question 173 (M25.3): see `StarTrackerModel::measurements`'s identical doc comment.
     measurements: RefCell<Vec<pb::Measurement>>,
+    /// Question 178 (R5.1b): the `[wx,wy,wz,ax,ay,az]` of the FIRST measurement this instance
+    /// computed under `ImuFaultEffect::Freeze` -- see `StarTrackerModel::frozen_measurement`'s
+    /// identical doc comment for the full "first, not last" reasoning (a re-materialized model
+    /// has no history).
+    frozen_measurement: RefCell<Option<[f64; 6]>>,
+    /// Question 178 (R5.1b): see `StarTrackerModel::fault_frames_affected`/`.fault_first_effect_
+    /// tai_ns`'s identical doc comment.
+    fault_frames_affected: Cell<u64>,
+    fault_first_effect_tai_ns: Cell<Option<i64>>,
 }
 
 impl ImuModel {
@@ -1064,6 +1154,21 @@ impl ImuModel {
         }
         settings.insert("output_port".to_string(), output_port.clone());
         settings.insert("apid".to_string(), codec.apid.to_string());
+        // Question 178 (R5.1b): included in the settings hash -- and therefore in `dynamics_
+        // hash` -- for the identical reason `StarTrackerModel::new`'s own `settings.insert
+        // ("fault", ...)` is: a fault-bounded re-materialization must always produce a genuinely
+        // different configuration hash, keeping `executor::merge_adjacent_segments` from wrongly
+        // merging the pre-fault, faulted, and post-fault segments together.
+        settings.insert(
+            "fault".to_string(),
+            match spec.fault {
+                None => "none".to_string(),
+                Some(ImuFaultEffect::Bias { channel, axis, value }) => format!("bias:{channel:?}:{axis}:{value:.17e}"),
+                Some(ImuFaultEffect::Dropout) => "dropout".to_string(),
+                Some(ImuFaultEffect::Freeze) => "freeze".to_string(),
+                Some(ImuFaultEffect::Scale { value }) => format!("scale:{value:.17e}"),
+            },
+        );
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.bias_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
         let seed = spec.seed;
@@ -1078,11 +1183,52 @@ impl ImuModel {
             last_truth: RefCell::new(None),
             info,
             measurements: RefCell::new(Vec::new()),
+            frozen_measurement: RefCell::new(None),
+            fault_frames_affected: Cell::new(0),
+            fault_first_effect_tai_ns: Cell::new(None),
         })
     }
 
     pub fn period_ns(&self) -> i64 {
         self.period_ns
+    }
+
+    /// Question 178 (R5.1b): the sensor's reported deviation from truth on both triads (the
+    /// composed random-walk-bias + white-noise vector, `Bias` added in atop the specific channel/
+    /// axis it names, `Scale` multiplying both triads' combined deviation uniformly) -- see
+    /// [`ImuFaultEffect::Bias`]'s own doc comment for how a declared fault bias composes with
+    /// the propagated random walk (`bias`, this instance's own current state) rather than
+    /// replacing it. Draws `gyro_noise`/`accel_noise` from the CALLER's already-mutably-borrowed
+    /// `rng` (`step_with_ports` already holds `self.rng.borrow_mut()` for this same while-loop
+    /// iteration's own bias-random-walk draws) -- a second, nested `self.rng.borrow_mut()` here
+    /// would panic exactly the way `StarTrackerModel::step_with_ports`'s own `Freeze` bug once
+    /// did (see that model's own doc comment).
+    fn compute_measured_values(&self, omega_truth: [f64; 3], bias: [f64; 6], rng: &mut Pcg64) -> [f64; 6] {
+        let omega_m = rotate_vector_by_quat(self.spec.mount_q, omega_truth);
+        let accel_m = rotate_vector_by_quat(self.spec.mount_q, self.spec.true_specific_force);
+        let gyro_noise = gaussian_vec3(rng, self.spec.gyro_noise_sigma);
+        let accel_noise = gaussian_vec3(rng, self.spec.accel_noise_sigma);
+        let mut gyro_dev = [bias[0] + gyro_noise[0], bias[1] + gyro_noise[1], bias[2] + gyro_noise[2]];
+        let mut accel_dev = [bias[3] + accel_noise[0], bias[4] + accel_noise[1], bias[5] + accel_noise[2]];
+        if let Some(ImuFaultEffect::Bias { channel, axis, value }) = self.spec.fault {
+            match channel {
+                ImuBiasChannel::Gyro => gyro_dev[axis] += value,
+                ImuBiasChannel::Accel => accel_dev[axis] += value,
+            }
+        }
+        if let Some(ImuFaultEffect::Scale { value }) = self.spec.fault {
+            gyro_dev = [gyro_dev[0] * value, gyro_dev[1] * value, gyro_dev[2] * value];
+            accel_dev = [accel_dev[0] * value, accel_dev[1] * value, accel_dev[2] * value];
+        }
+        [omega_m[0] + gyro_dev[0], omega_m[1] + gyro_dev[1], omega_m[2] + gyro_dev[2], accel_m[0] + accel_dev[0], accel_m[1] + accel_dev[1], accel_m[2] + accel_dev[2]]
+    }
+
+    /// Question 178 (R5.1b): see `StarTrackerModel::record_fault_effect`'s identical doc comment.
+    fn record_fault_effect(&self, due: i64) {
+        self.fault_frames_affected.set(self.fault_frames_affected.get() + 1);
+        if self.fault_first_effect_tai_ns.get().is_none() {
+            self.fault_first_effect_tai_ns.set(Some(due));
+        }
     }
 }
 
@@ -1140,17 +1286,44 @@ impl DynamicsModel for ImuModel {
             bias[4] = a[1];
             bias[5] = a[2];
             if let Some((_, omega_truth)) = *self.last_truth.borrow() {
-                let omega_m = rotate_vector_by_quat(self.spec.mount_q, omega_truth);
-                let accel_m = rotate_vector_by_quat(self.spec.mount_q, self.spec.true_specific_force);
-                let gyro_noise = gaussian_vec3(&mut rng, self.spec.gyro_noise_sigma);
-                let accel_noise = gaussian_vec3(&mut rng, self.spec.accel_noise_sigma);
+                // Question 178 (R5.1b): `Dropout` suppresses the WHOLE emission (both triads
+                // share one physical packet) -- see `StarTrackerModel::step_with_ports`'s
+                // identical rule. `rng` is already mutably borrowed above (this iteration's own
+                // bias-random-walk draws) and is simply dropped, unused further, when this
+                // iteration ends via `continue`.
+                if matches!(self.spec.fault, Some(ImuFaultEffect::Dropout)) {
+                    self.record_fault_effect(due);
+                    self.next_due.set(due + self.period_ns);
+                    continue;
+                }
+                // See `StarTrackerModel::step_with_ports`'s identical `already_frozen` comment:
+                // read into a plain, owned `Option<[f64; 6]>` (Copy) BEFORE the `if`/`else`
+                // below, never matched directly on `*self.frozen_measurement.borrow()` (a `Ref`
+                // scrutinee's borrow would otherwise stay alive across the whole `if`/`else`,
+                // including the `else` arm's own `borrow_mut()`).
+                let already_frozen = *self.frozen_measurement.borrow();
+                let raw = if matches!(self.spec.fault, Some(ImuFaultEffect::Freeze)) {
+                    if let Some(frozen) = already_frozen {
+                        frozen
+                    } else {
+                        let computed = self.compute_measured_values(omega_truth, bias, &mut rng);
+                        *self.frozen_measurement.borrow_mut() = Some(computed);
+                        computed
+                    }
+                } else {
+                    self.compute_measured_values(omega_truth, bias, &mut rng)
+                };
+                if self.spec.fault.is_some() {
+                    self.record_fault_effect(due);
+                }
+                let [wx, wy, wz, ax, ay, az] = raw;
                 let mut values = BTreeMap::new();
-                values.insert("wx".to_string(), FieldValue::Numeric(omega_m[0] + bias[0] + gyro_noise[0]));
-                values.insert("wy".to_string(), FieldValue::Numeric(omega_m[1] + bias[1] + gyro_noise[1]));
-                values.insert("wz".to_string(), FieldValue::Numeric(omega_m[2] + bias[2] + gyro_noise[2]));
-                values.insert("ax".to_string(), FieldValue::Numeric(accel_m[0] + bias[3] + accel_noise[0]));
-                values.insert("ay".to_string(), FieldValue::Numeric(accel_m[1] + bias[4] + accel_noise[1]));
-                values.insert("az".to_string(), FieldValue::Numeric(accel_m[2] + bias[5] + accel_noise[2]));
+                values.insert("wx".to_string(), FieldValue::Numeric(wx));
+                values.insert("wy".to_string(), FieldValue::Numeric(wy));
+                values.insert("wz".to_string(), FieldValue::Numeric(wz));
+                values.insert("ax".to_string(), FieldValue::Numeric(ax));
+                values.insert("ay".to_string(), FieldValue::Numeric(ay));
+                values.insert("az".to_string(), FieldValue::Numeric(az));
                 let seq = self.seq.get();
                 self.seq.set(seq.wrapping_add(1) & 0x3FFF);
                 let payload = codec::encode_packet(&self.codec, seq, &[], &values).expect(
@@ -1184,12 +1357,20 @@ impl DynamicsModel for ImuModel {
         self.measurements.borrow().clone()
     }
 
-    /// The IMU stays refused this round (`DrmError::PortOrSensorFaultNotYetSupported`, narrowed
-    /// to "IMU only, R5.1b" -- `crate::drm::fault`'s own module doc comment): no DRM naming an
-    /// IMU instance's SENSOR fault can ever load, so this model never has one installed to
-    /// report -- always `None`.
+    /// Question 178 (R5.1b): see `StarTrackerModel::drain_sensor_fault_effect`'s identical doc
+    /// comment.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
-        None
+        let frames_affected = self.fault_frames_affected.get();
+        if frames_affected == 0 {
+            return None;
+        }
+        let first_effect_tai_ns = self
+            .fault_first_effect_tai_ns
+            .get()
+            .expect("fault_frames_affected > 0 implies fault_first_effect_tai_ns is Some -- record_fault_effect always sets both together");
+        self.fault_frames_affected.set(0);
+        self.fault_first_effect_tai_ns.set(None);
+        Some(av_dynamics::SensorFaultEffectDrain { first_effect_tai_ns, frames_affected })
     }
 }
 
@@ -1373,7 +1554,7 @@ mod tests {
 
     #[test]
     fn imu_new_refuses_a_malformed_codec_via_validate_codec() {
-        let spec = ImuSpec { update_rate_hz: 10.0, seed: 1, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0] };
+        let spec = ImuSpec { update_rate_hz: 10.0, seed: 1, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0], fault: None };
         let mut codec = imu_packet_codec("imu1", 101);
         codec.user_data_bytes = 0; // invalid per validate_codec
         let err = ImuModel::new(spec, codec, "imu_out".to_string(), 0, "imu.test").unwrap_err();
@@ -1396,7 +1577,7 @@ mod tests {
     }
 
     fn imu(update_rate_hz: f64, seed: u64, gyro_rw: f64, accel_rw: f64) -> ImuModel {
-        let spec = ImuSpec { update_rate_hz, seed, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: gyro_rw, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: accel_rw, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0] };
+        let spec = ImuSpec { update_rate_hz, seed, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: gyro_rw, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: accel_rw, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0], fault: None };
         let codec = imu_packet_codec("imu_test", 101);
         ImuModel::new(spec, codec, "imu_out".to_string(), 0, "imu.test").unwrap()
     }
@@ -1442,7 +1623,7 @@ mod tests {
 
     #[test]
     fn imu_constructed_at_a_realistic_epoch_emits_exactly_once_per_declared_period() {
-        let spec = ImuSpec { update_rate_hz: 2.0, seed: 1, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0] };
+        let spec = ImuSpec { update_rate_hz: 2.0, seed: 1, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0], fault: None };
         let codec = imu_packet_codec("imu_test", 101);
         let model = ImuModel::new(spec, codec, "imu_out".to_string(), REALISTIC_EPOCH_TAI_NS, "imu.test").unwrap();
         let inbox = feed_truth(([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0]));
@@ -2002,6 +2183,172 @@ mod tests {
 
         let faulted = star_tracker_with_fault(1.0, 1, 1e-5, Some(StarTrackerFaultEffect::Dropout));
         let (_r, _ob, _) = faulted.step_with_ports(&[], 0, &[], faulted.period_ns(), &inbox).unwrap();
+        let first = faulted.drain_sensor_fault_effect().expect("one affected (suppressed) emission");
+        assert_eq!(first.frames_affected, 1);
+        assert!(faulted.drain_sensor_fault_effect().is_none(), "a second, immediate drain with nothing newly affected must be empty, not a repeat");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Question 178 (R5.1b): the SENSOR fault runtime for the IMU -- the identical shape of
+    // coverage as the star tracker's own tests immediately above, one per declared effect plus
+    // the drain/counting machinery.
+    // ---------------------------------------------------------------------------------------
+
+    fn imu_with_fault(update_rate_hz: f64, seed: u64, gyro_noise_sigma: f64, accel_noise_sigma: f64, gyro_rw: f64, accel_rw: f64, fault: Option<ImuFaultEffect>) -> ImuModel {
+        let spec = ImuSpec { update_rate_hz, seed, gyro_noise_sigma, gyro_bias_rw_sigma: gyro_rw, accel_noise_sigma, accel_bias_rw_sigma: accel_rw, mount_q: IDENTITY_Q, true_specific_force: [0.0, 0.0, 0.0], fault };
+        let codec = imu_packet_codec("imu_test", 101);
+        ImuModel::new(spec, codec, "imu_out".to_string(), 0, "imu.test").unwrap()
+    }
+
+    fn decode_imu(codec: &pb::PacketCodec, payload: &[u8]) -> [f64; 6] {
+        let mut map = ApidMap::new();
+        map.insert(codec.apid, codec.clone());
+        let decoded = codec::decode_packet(&map, payload).expect("decodes");
+        let get = |name: &str| match decoded.fields.get(name) {
+            Some(FieldValue::Numeric(v)) => *v,
+            other => panic!("field {name}: {other:?}"),
+        };
+        [get("wx"), get("wy"), get("wz"), get("ax"), get("ay"), get("az")]
+    }
+
+    /// `Bias` adds the declared additive value to the declared channel/axis, leaving every other
+    /// reported component close to zero -- with every random-walk sigma at 0.0 (a legitimate,
+    /// deterministic edge case: `random_walk_step3` at `sigma_rw == 0.0` always draws an exact
+    /// zero increment) and zero truth rate/specific force, the only nonzero contribution to each
+    /// non-target component is white measurement noise. **Unlike the star tracker's own identical
+    /// `noise_sigma_rad == 0.0` technique, a `gyro_noise_sigma`/`accel_noise_sigma` of EXACTLY
+    /// 0.0 cannot be used here**: `ImuModel::step_with_ports` builds a genuine SPD noise diagonal
+    /// for `codec::measurements_from_field_values` (unlike the star tracker, which leaves `r`
+    /// empty -- see `MEASUREMENT_ID_IMU_GYRO3`'s own doc comment), and an exactly-zero diagonal
+    /// is positive SEMI-definite, not positive DEFINITE, so the Cholesky check inside that call
+    /// panics (measured directly: `MeasurementNoiseNotSpd` before this fix) -- a genuinely
+    /// different, pre-existing IMU-only constraint discovered while writing this test, not a
+    /// defect this task introduces or fixes. A tiny (`1e-9`) but nonzero sigma sidesteps it while
+    /// keeping the noise floor 8-9 orders of magnitude below the declared 0.5 bias, so `1e-6`
+    /// tolerance still separates "the bias landed" from "no bias/wrong axis" cleanly. Fails
+    /// against an implementation that never adds the bias term at all (the target component
+    /// would stay within the tiny noise floor of zero) or one that writes it into the wrong
+    /// channel/axis.
+    #[test]
+    fn imu_bias_adds_a_fixed_offset_to_the_declared_channel_and_axis_when_noise_is_close_to_zero() {
+        let model = imu_with_fault(1.0, 1, 1e-9, 1e-9, 0.0, 0.0, Some(ImuFaultEffect::Bias { channel: ImuBiasChannel::Accel, axis: 2, value: 0.5 }));
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let (result, outbox, _) = model.step_with_ports(&[0.0; 6], 0, &[], model.period_ns(), &inbox).unwrap();
+        assert_eq!(outbox.messages().len(), 1);
+        let codec = imu_packet_codec("imu_test", 101);
+        let raw = decode_imu(&codec, &outbox.messages()[0].payload);
+        let expected = [0.0, 0.0, 0.0, 0.0, 0.0, 0.5];
+        for i in 0..6 {
+            assert!((raw[i] - expected[i]).abs() < 1e-6, "component {i}: got {:.3e}, expected {:.3e} (within the {:.0e} noise floor) -- {raw:?}", raw[i], expected[i], 1e-6);
+        }
+        let _ = result;
+    }
+
+    /// `Dropout`: no packet, no `Measurement`, at any emission instant inside the window --
+    /// mirrors `dropout_emits_no_packet_and_no_measurement_at_any_emission_instant`'s identical
+    /// star-tracker proof.
+    #[test]
+    fn imu_dropout_emits_no_packet_and_no_measurement_at_any_emission_instant() {
+        const N: usize = 20;
+        let model = imu_with_fault(2.0, 1, 1e-4, 1e-3, 1e-6, 1e-5, Some(ImuFaultEffect::Dropout));
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let mut state: Vec<f64> = vec![0.0; 6];
+        let mut t = 0i64;
+        for _ in 0..N {
+            let (result, outbox, _) = model.step_with_ports(&state, t, &[], model.period_ns(), &inbox).unwrap();
+            state = result.state;
+            t = result.t_tai_ns;
+            assert!(outbox.messages().is_empty(), "dropout must emit no packet");
+            assert!(model.last_measurements().is_empty(), "dropout must produce no Measurement");
+        }
+        let drain = model.drain_sensor_fault_effect().expect("N affected (suppressed) emissions must be reported");
+        assert_eq!(drain.frames_affected, N as u64, "every suppressed emission counts, question 186(c)");
+        assert_eq!(drain.first_effect_tai_ns, model.period_ns(), "the first suppressed instant is the sensor's own first declared period");
+    }
+
+    /// `Freeze`: the FIRST full `[wx,wy,wz,ax,ay,az]` measurement computed after the fault epoch
+    /// is latched and re-emitted, unchanged, at every later emission instant -- even though the
+    /// TRUTH keeps changing (a genuinely rotating truth quaternion, driving `omega_m` different
+    /// every step). Sequence count still increments every emission. Mirrors `freeze_latches_the_
+    /// first_measurement_and_repeats_it_while_truth_keeps_changing`'s identical star-tracker
+    /// proof.
+    #[test]
+    fn imu_freeze_latches_the_first_measurement_and_repeats_it_while_truth_keeps_changing() {
+        const N: usize = 10;
+        let model = imu_with_fault(1.0, 42, 1e-4, 1e-3, 1e-6, 1e-5, Some(ImuFaultEffect::Freeze));
+        let codec = imu_packet_codec("imu_test", 101);
+        let mut state: Vec<f64> = vec![0.0; 6];
+        let mut t = 0i64;
+        let mut payloads: Vec<[f64; 6]> = Vec::new();
+        let mut seqs: Vec<u16> = Vec::new();
+        for k in 0..N {
+            // A genuinely changing truth rate: k*0.01 rad/s about z each step -- proves the
+            // freeze is not merely an artifact of unchanging input.
+            let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, k as f64 * 0.01]));
+            let (result, outbox, _) = model.step_with_ports(&state, t, &[], model.period_ns(), &inbox).unwrap();
+            state = result.state;
+            t = result.t_tai_ns;
+            assert_eq!(outbox.messages().len(), 1, "a packet must still be emitted every period");
+            payloads.push(decode_imu(&codec, &outbox.messages()[0].payload));
+            let mut apid_map = ApidMap::new();
+            apid_map.insert(codec.apid, codec.clone());
+            seqs.push(codec::decode_packet(&apid_map, &outbox.messages()[0].payload).unwrap().sequence_count);
+        }
+        for (i, p) in payloads.iter().enumerate() {
+            assert_eq!(*p, payloads[0], "emission {i} must repeat the FIRST measurement exactly, byte for byte, not the true (changing) rate");
+        }
+        assert_eq!(seqs, (0..N as u16).collect::<Vec<_>>(), "the CCSDS sequence count must still increment every emission, only the measured values repeat");
+        let drain = model.drain_sensor_fault_effect().expect("N affected emissions");
+        assert_eq!(drain.frames_affected, N as u64);
+    }
+
+    /// `Scale`: the sensor's reported deviation from truth (random-walk bias + white noise, on
+    /// BOTH triads) is multiplied by the declared factor. Checked two ways, mirroring `scale_
+    /// multiplies_the_deviation_from_truth_and_one_is_exactly_a_no_op`'s identical star-tracker
+    /// proof: (a) `value == 2.0` against a same-seed, unfaulted baseline -- the SAME raw noise/
+    /// random-walk draws (same seed, same call order) must recover to exactly double the
+    /// unfaulted deviation on every one of the 6 reported components; (b) `value == 1.0` must be
+    /// EXACTLY a no-op -- bit-identical payloads against the unfaulted baseline.
+    #[test]
+    fn imu_scale_multiplies_the_deviation_from_truth_on_both_triads_and_one_is_exactly_a_no_op() {
+        let inbox = feed_truth((IDENTITY_Q, [0.01, -0.02, 0.03]));
+        let codec = imu_packet_codec("imu_test", 101);
+
+        let baseline = imu_with_fault(1.0, 99, 1e-4, 1e-3, 1e-6, 1e-5, None);
+        let (_r, ob_base, _) = baseline.step_with_ports(&[0.0; 6], 0, &[], baseline.period_ns(), &inbox).unwrap();
+        let raw_base = decode_imu(&codec, &ob_base.messages()[0].payload);
+
+        let scaled_2x = imu_with_fault(1.0, 99, 1e-4, 1e-3, 1e-6, 1e-5, Some(ImuFaultEffect::Scale { value: 2.0 }));
+        let (_r, ob_2x, _) = scaled_2x.step_with_ports(&[0.0; 6], 0, &[], scaled_2x.period_ns(), &inbox).unwrap();
+        let raw_2x = decode_imu(&codec, &ob_2x.messages()[0].payload);
+        // omega_m/accel_m (the rotated truth) is the same in both runs and is NOT scaled -- only
+        // the deviation (bias + noise, both exactly zero-mean bias here since state starts at
+        // zero) is. `raw - omega_truth_component` must double.
+        let truth = [0.01, -0.02, 0.03, 0.0, 0.0, 0.0]; // omega_m == truth (identity mount_q), accel_m == 0 (zero true_specific_force)
+        for i in 0..6 {
+            let dev_base = raw_base[i] - truth[i];
+            let dev_2x = raw_2x[i] - truth[i];
+            assert!((dev_2x - 2.0 * dev_base).abs() < 1e-12, "component {i}: scaled deviation={dev_2x:.3e} expected 2x baseline deviation={:.3e}", 2.0 * dev_base);
+        }
+
+        let scaled_1x = imu_with_fault(1.0, 99, 1e-4, 1e-3, 1e-6, 1e-5, Some(ImuFaultEffect::Scale { value: 1.0 }));
+        let (_r, ob_1x, _) = scaled_1x.step_with_ports(&[0.0; 6], 0, &[], scaled_1x.period_ns(), &inbox).unwrap();
+        assert_eq!(ob_1x.messages()[0].payload, ob_base.messages()[0].payload, "value == 1.0 must be EXACTLY a no-op, bit for bit");
+    }
+
+    /// `drain_sensor_fault_effect` reports `None` when nothing has been affected, and clears its
+    /// own accumulator once drained -- mirrors `drain_sensor_fault_effect_is_none_with_no_fault_
+    /// and_clears_once_drained`'s identical star-tracker proof.
+    #[test]
+    fn imu_drain_sensor_fault_effect_is_none_with_no_fault_and_clears_once_drained() {
+        let unfaulted = imu_with_fault(1.0, 1, 1e-4, 1e-3, 1e-6, 1e-5, None);
+        let inbox = feed_truth((IDENTITY_Q, [0.0, 0.0, 0.0]));
+        let (_r, ob, _) = unfaulted.step_with_ports(&[0.0; 6], 0, &[], unfaulted.period_ns(), &inbox).unwrap();
+        assert_eq!(ob.messages().len(), 1);
+        assert!(unfaulted.drain_sensor_fault_effect().is_none(), "no fault installed -- nothing to report");
+
+        let faulted = imu_with_fault(1.0, 1, 1e-4, 1e-3, 1e-6, 1e-5, Some(ImuFaultEffect::Dropout));
+        let (_r, _ob, _) = faulted.step_with_ports(&[0.0; 6], 0, &[], faulted.period_ns(), &inbox).unwrap();
         let first = faulted.drain_sensor_fault_effect().expect("one affected (suppressed) emission");
         assert_eq!(first.frames_affected, 1);
         assert!(faulted.drain_sensor_fault_effect().is_none(), "a second, immediate drain with nothing newly affected must be empty, not a repeat");

@@ -444,26 +444,27 @@ pub struct RunProducts {
     /// telemetry packet the router later never delivers (no declared `Connection` for
     /// its port, or a `"latency"` connection whose delivery never lands before the run ends) still
     /// contributes its `Measurement` here. **A declared SENSOR-targeted fault
-    /// (`av_cdm::pb::FaultTargetKind::Sensor`) can still never reach this field at all** --
-    /// `execute()` refuses such a DRM at load (`DrmError::PortOrSensorFaultNotYetSupported`,
-    /// raised in the same up-front fault-validation loop as `DrmError::UnknownFaultInstance`),
-    /// before any binding or GMAT call, unchanged since M25.4a (`docs/open-questions.md` question
-    /// 178). **A PORT-targeted fault is different as of R4.1a**: `kind == "drop"` now genuinely
-    /// CAN reach this field, honestly -- a dropped FRAMED packet never leaves `crate::router::
-    /// Router::deliver`'s own OUT recording, which happens entirely independently of, and after,
-    /// `Measurement` decoding at the emitter's own `step_with_ports` call (this doc comment's own
-    /// first sentence, above), so a dropped packet's own `Measurement` still appears here exactly
-    /// like an unconnected port's own packet already did before this task. **R4.1b: `kind ==
-    /// "corrupt"`/`"duplicate"` are real now too, and neither retroactively changes this field
-    /// either** -- decoding always happens at the emitter, from its own pre-fault bytes, before
-    /// `crate::router::Router::deliver` is ever consulted, so a corrupted or duplicated packet's
-    /// `Measurement` is exactly what an unfaulted run would have produced (`crate::router`'s own
-    /// module doc comment, "Corrupt"/"Duplicate": the mutation/second delivery is something the
-    /// RECEIVER experiences, never something that reaches back and changes what the emitter
-    /// already decoded from its own original values) -- pinned by `tests/demo_measurements.rs`.
-    /// Every `FAULT_TARGET_KIND_SENSOR` fault is still refused at load
-    /// (`DrmError::PortOrSensorFaultNotYetSupported`), so that shape still never reaches a real
-    /// run at all.
+    /// (`av_cdm::pb::FaultTargetKind::Sensor`) genuinely reaches this field, honestly, as of
+    /// R5.1a/R5.1b** (`docs/open-questions.md` question 178: a real runtime for both the star
+    /// tracker and the IMU, `crate::drm::sensors`'s own module doc comment) -- a `bias`/`freeze`/
+    /// `scale` fault still computes and decodes a genuine `Measurement` every emission (from the
+    /// possibly-perturbed reported values, exactly the value the FRAMED packet itself carries),
+    /// while a `dropout` fault suppresses the WHOLE emission at an affected instant -- no packet,
+    /// so no `Measurement` either, the identical "nothing was ever emitted" absence an unconnected
+    /// port's own packet already has, not a special case. **A PORT-targeted fault is different as
+    /// of R4.1a**: `kind == "drop"` now genuinely CAN reach this field, honestly -- a dropped
+    /// FRAMED packet never leaves `crate::router::Router::deliver`'s own OUT recording, which
+    /// happens entirely independently of, and after, `Measurement` decoding at the emitter's own
+    /// `step_with_ports` call (this doc comment's own first sentence, above), so a dropped
+    /// packet's own `Measurement` still appears here exactly like an unconnected port's own
+    /// packet already did before this task. **R4.1b: `kind == "corrupt"`/`"duplicate"` are real
+    /// now too, and neither retroactively changes this field either** -- decoding always happens
+    /// at the emitter, from its own pre-fault bytes, before `crate::router::Router::deliver` is
+    /// ever consulted, so a corrupted or duplicated packet's `Measurement` is exactly what an
+    /// unfaulted run would have produced (`crate::router`'s own module doc comment, "Corrupt"/
+    /// "Duplicate": the mutation/second delivery is something the RECEIVER experiences, never
+    /// something that reaches back and changes what the emitter already decoded from its own
+    /// original values) -- pinned by `tests/demo_measurements.rs`.
     pub measurements: Vec<pb::Measurement>,
     /// `docs/open-questions.md` question 175 (M25.4a): SHA-256 (lowercase hex) of the exact
     /// bytes written to this run's `PortTrafficLog` sidecar -- empty when [`RunConfig::
@@ -2961,11 +2962,12 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         if !cfg.sos.instances.iter().any(|i| i.name == f.instance) {
             return Err(DrmError::UnknownFaultInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
         }
-        // `docs/open-questions.md` question 178 (R5.1a): a SENSOR fault naming a star-tracker
-        // instance now has a real runtime; one naming an IMU instance is still a typed load
-        // refusal (R5.1b's own scope); one naming anything else is refused as not a sensor
-        // instance at all. Checked here, before any binding or GMAT call, the same "checked up
-        // front" pattern `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`
+        // `docs/open-questions.md` question 178 (R5.1a/R5.1b): a SENSOR fault naming a
+        // star-tracker OR an IMU instance now has a real runtime (R5.1b closed the IMU's own
+        // gap -- `DrmError::PortOrSensorFaultNotYetSupported` is deleted, see this loop's own
+        // git history/`R5_1B_REPORT.md` for exactly why); one naming anything else is refused as
+        // not a sensor instance at all. Checked here, before any binding or GMAT call, the same
+        // "checked up front" pattern `DrmError::UnknownFaultInstance`/`FaultEpochNotOnSampleGrid`
         // (immediately above/below) already follow.
         if f.target_kind == FaultTargetKind::Sensor as i32 {
             let instance = cfg
@@ -2976,10 +2978,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
                 .expect("DrmError::UnknownFaultInstance was already checked, and returned, for this same fault immediately above");
             let sys = cfg.systems.get(&instance.system_id).ok_or_else(|| DrmError::UnknownSystemDefinition { instance: instance.name.clone(), system_id: instance.system_id.clone() })?;
             match crate::registry::kind_for(&sys.dynamics_model) {
-                crate::registry::ModelKind::Imu => {
-                    return Err(DrmError::PortOrSensorFaultNotYetSupported { fault_id: f.id.clone(), instance: f.instance.clone(), target_kind: FaultTargetKind::Sensor.as_str_name().to_string() });
-                }
-                crate::registry::ModelKind::StarTracker => {
+                crate::registry::ModelKind::StarTracker | crate::registry::ModelKind::Imu => {
                     if !fault::SENSOR_KINDS.contains(&f.kind.as_str()) {
                         return Err(DrmError::UnknownSensorFaultKind { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
                     }
@@ -3172,6 +3171,30 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             rc.instances.iter().cloned().collect()
         }
     };
+
+    // R5.1b review (question 178's own "never a silent no-op" rule, applied to replay): replaying
+    // an instance that a `FAULT_TARGET_KIND_SENSOR` fault targets is refused here, typed, rather
+    // than allowed to diverge silently. `crate::drm::replay::ReplayModel` is a generic,
+    // content-agnostic frame player with no sensor knowledge at all -- its own
+    // `drain_sensor_fault_effect` always returns `None` -- and `run_shared_group`'s
+    // `sensor_fault_totals` accumulator, which is what gates a SENSOR fault's own
+    // `EVENT_KIND_FAULT`, is fed from exactly that drain. So a replayed run of a SENSOR-faulted
+    // instance silently drops that fault's own event from `RunProducts.events` and is NOT
+    // byte-identical to the run it replays -- measured directly, see `tests/replay.rs`'s own
+    // `t6b_...`, which pins this refusal and records the measurement that motivated it. This is
+    // architecturally unlike a PORT fault, which `crate::router::Router` re-applies at delivery to
+    // the replayed instance's own played-back (always pre-fault, by the OUT-record rule) frames and
+    // therefore reproduces naturally -- `tests/replay.rs`'s own `t5_...`. Refusing is the same call
+    // question 178 already made for a fault kind with no runtime: a typed refusal naming what is
+    // missing, never a run that quietly produces the wrong products. Replaying a DIFFERENT instance
+    // in a SENSOR-faulted run stays fully supported and byte-identical (`t6_...`).
+    if !replay_targets.is_empty() {
+        for f in &scenario.faults {
+            if f.target_kind == FaultTargetKind::Sensor as i32 && replay_targets.contains(&f.instance) {
+                return Err(DrmError::ReplayInstanceHasSensorFault { instance: f.instance.clone(), fault_id: f.id.clone() });
+            }
+        }
+    }
 
     // Question 107: a BINDING_KIND_CONTAINER instance does not yet support DYNAMICS faults or
     // maneuvers (a container instance is never itself a fault/maneuver boundary's own target --

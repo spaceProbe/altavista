@@ -485,49 +485,6 @@ pub enum DrmError {
     /// `DrmError::SensorPortConfiguration`'s own reasoning, applied to the ground station's own
     /// two-port (not one-port) convention.
     GroundPortConfiguration { instance: String, reason: String },
-    /// `docs/open-questions.md` question 178: a `Fault` with `target_kind ==
-    /// FAULT_TARGET_KIND_SENSOR` was declared. Through M25.3, `execute()` never called
-    /// `fault::realize_unapplied_fault` at all, so a SENSOR fault was a silent no-op -- seeded
-    /// and validated by nothing, applied by nothing, and never mentioned in `RunProducts`.
-    /// Question 178 decided: until the sensor fault runtime exists (`fault`'s own module doc
-    /// comment's "Integration note"; that runtime is task R4.2's own scope, not this crate's
-    /// today), such a DRM is a typed LOAD REFUSAL instead, checked up front in `execute()`'s own
-    /// fault-validation loop (alongside `DrmError::UnknownFaultInstance`/
-    /// `FaultEpochNotOnSampleGrid`), before any binding or GMAT call. Distinct from
-    /// [`DrmError::FaultTargetKindNotSupported`]: that variant is `fault::
-    /// realize_unapplied_fault`'s own *realization-time* result (seeded, validated, and a
-    /// deterministic draw computed, but nothing to apply it to) for a caller that actually
-    /// invokes it -- `execute()` has no such caller today, so this variant exists instead, raised
-    /// earlier (at load, before any seed is even looked up) and for a different reason (a
-    /// load-time policy refusal, not "I tried and there is nothing to apply this to").
-    ///
-    /// **R4.1a (`crate::router`'s own module doc comment's "Port fault runtime" section) narrows
-    /// this variant to SENSOR only, and R4.1b makes that narrowing permanent.** A
-    /// `FAULT_TARGET_KIND_PORT` fault now has a real runtime for its whole documented vocabulary
-    /// (`"drop"`/`"delay"`, R4.1a; `"corrupt"`/`"duplicate"`, R4.1b -- `crate::router::Router::
-    /// install_port_faults`/`deliver`) and never reaches this variant at all any more; a `kind`
-    /// outside that vocabulary entirely reaches [`DrmError::UnknownPortFaultKind`] instead -- see
-    /// `execute()`'s own load-time fault-validation loop. `target_kind` is always
-    /// `"FAULT_TARGET_KIND_SENSOR"` now; the field is kept (rather than dropped) so this remains
-    /// the same wire/`Debug` shape it always was, for any caller already matching on it.
-    ///
-    /// **R5.1a (`docs/open-questions.md` question 178, the star-tracker SENSOR fault runtime)
-    /// narrows this variant a second time, to IMU only.** A `FAULT_TARGET_KIND_SENSOR` fault
-    /// naming a `"startracker."`-dispatched instance now has a real runtime
-    /// (`crate::drm::sensors::StarTrackerModel`'s own `fault: Option<StarTrackerFaultEffect>`,
-    /// applied at fault-bounded re-materialization boundaries exactly like a DYNAMICS fault --
-    /// see `crate::drm::sensors`'s own module doc comment and `crate::drm::fault::
-    /// apply_sensor_fault`) and never reaches this variant either; a SENSOR fault whose `kind` is
-    /// outside the star tracker's own documented vocabulary reaches [`DrmError::
-    /// UnknownSensorFaultKind`] instead, and one naming an instance that is not a sensor model
-    /// instance at all reaches [`DrmError::SensorFaultTargetNotASensor`]. This variant is now
-    /// reached **only** by a SENSOR fault naming a `"imu."`-dispatched instance -- the IMU's own
-    /// SENSOR fault runtime remains out of this task's scope (R5.1b's own charter); do not delete
-    /// this variant until R5.1b gives the IMU a real runtime too, exactly as R4.1b deleted the
-    /// analogous `DrmError::PortFaultKindNotYetSupported` only once every PORT kind had one.
-    /// `target_kind` stays `"FAULT_TARGET_KIND_SENSOR"` (the field is kept, unchanged, for the
-    /// same reason the R4.1a narrowing above kept it).
-    PortOrSensorFaultNotYetSupported { fault_id: String, instance: String, target_kind: String },
     /// R4.1a/R4.1b (`docs/open-questions.md` question 178): a `FAULT_TARGET_KIND_PORT` fault's
     /// own `kind` was not one of ADR-005 section 5's own four documented PORT kinds
     /// (`crate::drm::fault::PORT_KINDS`: `"drop"`, `"delay"`, `"corrupt"`, `"duplicate"`) at all --
@@ -540,11 +497,12 @@ pub enum DrmError {
     /// was dead code the moment R4.1b landed and was deleted rather than left unreachable (see
     /// `R4_1B_REPORT.md`) -- this variant is the only one left for a PORT fault's own `kind`.
     UnknownPortFaultKind { fault_id: String, instance: String, kind: String },
-    /// `docs/open-questions.md` question 178 (R5.1a): a `FAULT_TARGET_KIND_SENSOR` fault named a
-    /// `"startracker."`-dispatched instance, but its own `kind` was not one of the star tracker's
-    /// own documented vocabulary (`crate::drm::fault::SENSOR_KINDS`: `"bias"`, `"dropout"`,
-    /// `"freeze"`, `"scale"`) -- refused at load, before any binding or GMAT call, mirroring
-    /// [`DrmError::UnknownPortFaultKind`]'s identical role for PORT.
+    /// `docs/open-questions.md` question 178 (R5.1a/R5.1b): a `FAULT_TARGET_KIND_SENSOR` fault
+    /// named a `"startracker."`- or `"imu."`-dispatched instance, but its own `kind` was not one
+    /// of the shared documented vocabulary both sensor models support (`crate::drm::fault::
+    /// SENSOR_KINDS`: `"bias"`, `"dropout"`, `"freeze"`, `"scale"`) -- refused at load, before any
+    /// binding or GMAT call, mirroring [`DrmError::UnknownPortFaultKind`]'s identical role for
+    /// PORT.
     UnknownSensorFaultKind { fault_id: String, instance: String, kind: String },
     /// `docs/open-questions.md` question 178 (R5.1a): a `FAULT_TARGET_KIND_SENSOR` fault named an
     /// `instance` that is not a sensor model instance at all (neither `"startracker."`- nor
@@ -596,6 +554,19 @@ pub enum DrmError {
     /// "named instance does not exist" refusal in this executor (`DrmError::
     /// UnknownFaultInstance`, `DrmError::UnknownManeuverInstance`, ...).
     UnknownReplayInstance { instance: String },
+    /// R5.1b review (`docs/open-questions.md` question 178): `RunConfig.replay.instances` named an
+    /// instance that a `FAULT_TARGET_KIND_SENSOR` fault targets. Refused at load, because the
+    /// replayed run would otherwise silently produce the WRONG products rather than fail:
+    /// `crate::drm::replay::ReplayModel` is deliberately content-agnostic and its
+    /// `drain_sensor_fault_effect` always returns `None`, so the fault's own `EVENT_KIND_FAULT`
+    /// (which `executor::run_shared_group` emits only from that drain's accumulated totals) never
+    /// appears at all and the replayed `RunProducts` is not byte-identical to the run it claims to
+    /// replay. Question 178's own standing rule -- a missing runtime is a typed refusal naming what
+    /// is absent, never a silent no-op -- applied to replay. **A PORT fault is unaffected**:
+    /// `crate::router::Router` re-applies it at delivery, to the pre-fault bytes replay plays back,
+    /// and reproduces byte-identically (`tests/replay.rs`'s own `t5_...`). Replaying a DIFFERENT
+    /// instance in a SENSOR-faulted run is likewise unaffected and fully supported (`t6_...`).
+    ReplayInstanceHasSensorFault { instance: String, fault_id: String },
     /// M25.4b: `RunConfig.replay` and `DrmOptions.covariance` were both requested. Not
     /// supported together -- the covariance path (`executor::run_covariance_instance`) is
     /// unchanged by this task (see `executor`'s own module doc comment's "One shared kernel
@@ -729,10 +700,6 @@ impl std::fmt::Display for DrmError {
             DrmError::SensorPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid sensor port/codec configuration: {reason}"),
             DrmError::InvalidGroundStationSpec { instance, reason } => write!(f, "instance {instance:?}: invalid ground station spec: {reason}"),
             DrmError::GroundPortConfiguration { instance, reason } => write!(f, "instance {instance:?}: invalid ground station port/codec configuration: {reason}"),
-            DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } => write!(
-                f,
-                "fault {fault_id:?} on instance {instance:?}: {target_kind} faults on an IMU instance are not realized by this kernel yet (docs/open-questions.md question 178) -- the IMU sensor fault runtime is task R5.1b's own scope; the star tracker's own SENSOR fault runtime DOES exist now, R5.1a -- see crate::drm::sensors's own module doc comment"
-            ),
             DrmError::UnknownPortFaultKind { fault_id, instance, kind } => write!(
                 f,
                 "fault {fault_id:?} on instance {instance:?}: FAULT_TARGET_KIND_PORT kind {kind:?} is not one of ADR-005 section 5's own documented PORT kinds (\"drop\", \"delay\", \"corrupt\", \"duplicate\")"
@@ -755,6 +722,10 @@ impl std::fmt::Display for DrmError {
                 write!(f, "replay log {}: declared hash {expected:?} does not match its own computed hash {computed:?}; refusing to replay from a log that cannot be verified", path.display())
             }
             DrmError::UnknownReplayInstance { instance } => write!(f, "RunConfig.replay.instances names instance {instance:?}, which is not in this SosConfiguration"),
+            DrmError::ReplayInstanceHasSensorFault { instance, fault_id } => write!(
+                f,
+                "RunConfig.replay.instances names instance {instance:?}, which FAULT_TARGET_KIND_SENSOR fault {fault_id:?} targets: crate::drm::replay::ReplayModel has no sensor fault runtime (its drain_sensor_fault_effect always returns None), so replaying it would drop that fault's own EVENT_KIND_FAULT and produce products that are not byte-identical to the run being replayed -- replay a different instance, or drop the SENSOR fault (docs/open-questions.md question 178)"
+            ),
             DrmError::ReplayWithCovarianceNotSupported => write!(f, "RunConfig.replay and DrmOptions.covariance were both requested; not yet supported together"),
         }
     }
