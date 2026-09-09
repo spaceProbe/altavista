@@ -1,0 +1,112 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R5.1b
+# (docs/open-questions.md question 178: the SENSOR fault runtime for the IMU; job 2, replaying a
+# SENSOR-faulted run byte for byte).
+#
+# Identical to drms/demo_attitude_control.drm.yaml (same sos_configuration_id, same four
+# systems, same scenario span/objectives/measures/options -- reused UNCHANGED) with exactly one
+# addition: a FAULT_TARGET_KIND_SENSOR "bias" fault on `imu`'s own declared gyro-z bias channel
+# (`imu.gyro_bias.z`), windowed over [start + 5s, start + 35s) -- the identical window
+# drms/demo_attitude_control_startracker_dropout.drm.yaml already uses and justifies (30 s, one
+# and a half of the closed loop's own 20 s critically-damped time constant, during the slew while
+# the error is large and actively decaying -- see that file's own header comment for the full
+# "why this window" derivation, reused verbatim here).
+#
+# ## Why the IMU, not the star tracker (job 1/job 2 synergy, and the real reason: replay)
+#
+# R5.1b's own job 1 gives the IMU a real SENSOR fault runtime for the first time; this fixture is
+# its first exercise through a real closed loop (drms/demo_attitude_control_startracker_dropout.
+# drm.yaml already covers the star tracker's own closed-loop behaviour end to end -- R5_1A_REPORT
+# .md's own "what remains" item 3 named exactly this gap: "a second closed-loop SENSOR fault
+# fixture for a kind other than dropout... through the full attitude-control loop"). But the real,
+# load-bearing reason is job 2's own replay requirement -- see crates/av-kernel/tests/replay.rs's
+# own T6 doc comment for the full account: this fixture's own SENSOR fault is deliberately
+# installed on `imu`, while the REPLAYED instance is `startracker` -- a DIFFERENT sensor, chosen
+# because replaying the SAME instance a SENSOR fault is installed on cannot reproduce that fault's
+# own EVENT_KIND_FAULT event during replay (`crate::drm::replay::ReplayModel::drain_sensor_fault_
+# effect` always returns `None` -- a replayed instance's own fault-effect counter, which lives
+# inside the REAL model this binding replaces, is never consulted at all), a real, measured
+# architectural gap T6's own doc comment proves directly, not merely reasons about. Faulting `imu`
+# while replaying `startracker` sidesteps that gap: `imu` is never replaced by a `ReplayModel` in
+# either run, so it genuinely, deterministically re-executes (same seed) in both, and its own
+# FAULT event reproduces correctly; `startracker`'s own frames are unaffected by this fault at
+# all (a different instance's declared effect), so replaying them is the SAME already-proven T1b
+# shape.
+#
+# ## Why "bias," not "dropout" (job 2's own explicit instruction)
+#
+# `crate::drm::replay::ReplayModel` plays back recorded OUT frames; a "dropout" fault suppresses
+# the whole emission at every affected instant, so replaying THAT instance across the fault's own
+# window would have nothing to play back there -- a real, but narrower, proof (mirrors why
+# drms/demo_attitude_control_port_duplicate.drm.yaml's own header comment picked "duplicate," not
+# "corrupt," for its own closed-loop fixture: the OTHER kinds are proven end to end elsewhere, not
+# because dropout is broken). Not the deciding factor here (this fixture does not even replay the
+# faulted instance -- see above), but "bias" is also the more informative choice for job 1's own
+# debut through a closed loop: it still emits every packet, with a real, physically continuous
+# rate offset baked into every one of them, rather than large stretches of silence.
+#
+# ## Expected effect (stated before running, per this task's own instruction)
+#
+# `imu.gyro_bias.z = 0.001` rad/s (100x the declared `imu.gyro_noise_sigma = 0.00001` rad/s,
+# drms/demo_attitude_control_imu.system.yaml -- a real, physically dominant rate offset, not a
+# noise-floor-scale perturbation) is added atop the IMU's own propagated bias random walk for the
+# whole window (`crate::drm::sensors::ImuFaultEffect::Bias`'s own doc comment: composes with,
+# never replaces, the random walk). `AttitudeControllerModel::step_with_ports` feeds `omega_z`
+# straight from the IMU's own reported `wz` (`crate::drm::controller`'s own module doc comment),
+# so the control law `tau_z = kp*qv_z + kd*omega_z` (kd = 5.0) sees a genuine, roughly constant
+# `+0.001` rad/s rate offset for the whole window -- a real, nonzero, physically meaningful
+# perturbation to the commanded torque (`kd * 0.001 = 0.005` N*m, the same order of magnitude as
+# the peak commanded torque the base fixture's own header comment computes, `~0.025` N*m), not
+# expected to be invisible the way drms/demo_attitude_control_port_duplicate.drm.yaml's own PORT
+# duplicate fault deliberately is. The exact magnitude of the resulting pointing-error divergence
+# is not separately re-derived here (job 2's own headline claim is REPLAY reproducibility, not a
+# second physics-accuracy proof -- drms/demo_attitude_control_startracker_dropout.drm.yaml already
+# carries that derivation for a SENSOR fault on this same closed loop); the objective below is
+# scored, not a hard gate, exactly like both existing fault fixtures' own identical disclosure.
+id: attitude_control_imu_bias_drm
+version: "1"
+name: "Closed-loop attitude control (R5.1b): a SENSOR bias fault on the IMU, replayed via startracker"
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+  seeds:
+    bias_imu: 6161
+  faults:
+    - id: bias_imu
+      tai_ns: 1767225642000000000
+      duration_ns: 30000000000
+      target_kind: FAULT_TARGET_KIND_SENSOR
+      instance: imu
+      target: imu.gyro_bias.z
+      kind: bias
+      params:
+        value: 0.001
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # Not the unfaulted baseline's own target -- the bias genuinely changes what the controller
+    # saw during the window (this file's own header comment), so the loop's own post-recovery
+    # stochastic steady state need not match bit-for-bit. This objective is scored, not a hard
+    # gate -- job 2's own headline claim is byte-identical REPLAY reproducibility, checked in
+    # crates/av-kernel/tests/replay.rs, not a second independently-derived physics bound.
+    target: 0.00012578826462456927
+    tolerance: 0.001
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R5.1b)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control_imu_bias.drm.yaml
+hash: "a96829945c13f84ed18bd74a677a8484824eff819868c0583cca37c4bab8f764"

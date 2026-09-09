@@ -348,8 +348,15 @@ message ParameterSweep {
   uint32 monte_carlo_draws = 4;
   Provenance provenance = 5;
   string hash = 6;
+  // Question 192: run every sample in ExecutionErrorMode::Sampled even when
+  // monte_carlo_draws is 1 (a single dispersed draw per point); false means Nominal when
+  // draws is 1 and Sampled when it is greater, the sweep executor's default rule.
+  bool dispersed = 7;
 }
 
+// One axis of a ParameterSweep. Exactly one target: an instance parameter (instance +
+// parameter) or a scenario event value (event_id + value_key, e.g. a maneuver's "dv_x"),
+// question 192.
 message SweepAxis {
   string instance = 1;
   string parameter = 2;
@@ -357,4 +364,7 @@ message SweepAxis {
   double min = 4;
   double max = 5;
   uint32 steps = 6;
+  // Scenario.events[].id whose values[value_key] this axis sets; empty for a parameter axis.
+  string event_id = 7;
+  string value_key = 8;
 }

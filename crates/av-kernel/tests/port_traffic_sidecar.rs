@@ -189,7 +189,13 @@ fn demo_command_sidecar_records_match_an_independent_reconstruction_from_fixture
     let applied = products.events.iter().find(|e| e.kind == EventKind::PortCommand as i32 && e.entity_id == "flight" && e.name == "accel_scale").expect("the one applied accel_scale command on flight");
     let applied_tai_ns = applied.tai_ns;
     assert_eq!(applied_tai_ns, COMMAND_TAI_NS + 2_000_000_000, "measured: AppliedCommand.applied_tai_ns is the consuming step's own START epoch (t_ns), one period before the step's result epoch the ack is actually emitted at -- see the comment just above");
-    let ack_tai_ns = applied_tai_ns + OUTPUT_PERIOD_NS;
+    // Question 187's own helper (`crate::drm::command::ack_emission_epoch`) -- this call site is
+    // exactly the one its own doc comment names as the reason it exists: before this helper, this
+    // line was `applied_tai_ns + OUTPUT_PERIOD_NS` written inline, and an EARLIER draft of this
+    // very test asserted this relation against the WRONG epoch entirely (see this file's own
+    // module doc comment's "This prediction's `<applied_tai_ns>` was WRONG" paragraph) -- the
+    // second occurrence of the identical mistake question 187 itself names.
+    let ack_tai_ns = av_kernel::drm::command::ack_emission_epoch(applied_tai_ns, OUTPUT_PERIOD_NS);
     assert_eq!(ack_tai_ns, COMMAND_TAI_NS + 3_000_000_000, "the ack's own real emission epoch (the step's RESULT epoch) is exactly 3 s of real router latency after dispatch, matching the fixture's own header-comment arithmetic -- applied_tai_ns alone (the event field) does not equal this");
 
     let ack_sequence = tick_sequence(ack_tai_ns);

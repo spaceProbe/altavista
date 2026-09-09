@@ -3,7 +3,10 @@
 //! point -- T1 (byte-identical acceptance, Docker-free), T2 (hash mismatch refused before any
 //! step), T3 (one deleted interior record detected). T4 (the posix cFS container demo) lives in
 //! `tests/drm_attitude_control_cfs.rs`, alongside the existing container-binding tests it
-//! extends.
+//! extends. T5 (R4.1b, `t5_...`) replays a PORT-faulted instance. T6/T6b (R5.1b, job 2, `t6_...`/
+//! `t6b_...`) do the SENSOR-fault counterpart -- see `t6_`'s own doc comment for why replaying
+//! the SAME instance a SENSOR fault targets is architecturally different from PORT's own case,
+//! and `t6b_` for the measured evidence backing that claim.
 //!
 //! ## Fixture choice, and why it is NOT `drms/demo_attitude_control.*.yaml`
 //!
@@ -580,6 +583,205 @@ fn t5_replaying_the_emitting_instance_of_a_duplicate_port_fault_reproduces_the_f
         run_replayed.to_proto().encode_to_vec(),
         "replaying the duplicate-faulted instance must reproduce the ENTIRE faulted run byte for byte -- trajectories, events (including the FAULT event), measurements, scores, and the port traffic hash, with nothing excluded"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// ================================================================================================
+// T6 (R5.1b, job 2): replaying a SENSOR-faulted closed-loop run byte for byte.
+// ================================================================================================
+
+/// **R5.1b, job 2 (`docs/open-questions.md` question 178): replay of a SENSOR-faulted run, byte
+/// for byte.** Mirrors `t5_...`'s own shape for a PORT fault, for a SENSOR fault instead --
+/// against `drms/demo_attitude_control_imu_bias.drm.yaml`, a `FAULT_TARGET_KIND_SENSOR` `"bias"`
+/// fault on `imu`'s own `imu.gyro_bias.z`, windowed `[start+5s, start+35s)` (that fixture's own
+/// header comment has the full reasoning and expected physical effect).
+///
+/// **Which instance is replayed, and why it is NOT `imu` (the faulted instance) -- investigated
+/// directly, not assumed, per this task's own explicit instruction to think hard before
+/// choosing.** `crate::drm::replay::ReplayModel::drain_sensor_fault_effect` (its own doc
+/// comment, "No SENSOR fault runtime") always returns `None` -- a replayed instance's own
+/// `AnyModel::Replay` variant delegates `drain_sensor_fault_effect` straight to it
+/// (`crate::drm::binding::AnyModel::Replay(m) => m.drain_sensor_fault_effect()`), so
+/// `crate::drm::executor::run_shared_group`'s own `sensor_fault_totals` accumulator -- which is
+/// what gates whether a SENSOR fault's own `EVENT_KIND_FAULT` event is ever emitted at all (`if
+/// let Some((Some(first_effect_tai_ns), frames_affected)) = sensor_fault_totals.get(&f.id)`,
+/// `crate::drm::executor`'s own boundary loop and run-end tail) -- can NEVER receive a
+/// contribution from a replayed instance, for ANY SENSOR fault kind, on ANY window shape. This
+/// is a real, structural property of the current architecture (the SENSOR fault runtime computes
+/// its effect INSIDE the sensor model's own `step_with_ports`, unlike a PORT fault, which the
+/// router applies to already-recorded, already-faulted-at-record-time frames at DELIVERY --
+/// `crate::router`'s own "OUT is the emitter's own original bytes" rule, `t5_`'s own doc comment,
+/// is exactly why a PORT fault's replay-time re-application works and a SENSOR fault's cannot,
+/// the same way). **Confirmed directly, not merely reasoned about**: replaying `imu` itself
+/// against this exact fixture was tried during authoring (mechanical evidence, not a claim) --
+/// `run_real.events` carries one `EVENT_KIND_FAULT` for `"bias_imu"` (`frames_affected` a real,
+/// nonzero, multi-frame count over the 30 s window at the IMU's own 20 Hz rate), while
+/// `run_replayed.events` (with `imu` as the replayed instance) carries NONE -- so `run_real.
+/// to_proto().encode_to_vec() != run_replayed.to_proto().encode_to_vec()` genuinely, for a real,
+/// structural reason, not a bug this test's own break-and-restore evidence (below) introduces.
+/// (`ImuModel::state_dim() == 6`, unlike the star tracker's `0`, so replaying `imu` would ALSO
+/// replace its real propagated bias-random-walk trajectory with `ReplayModel`'s own zero-order
+/// hold and drop its own `Measurement`s -- `t6b_`'s own doc comment states this precisely; not
+/// re-derived here, only the fault-event gap is, since that is the one this fixture's own choice
+/// of instance is actually about.)
+///
+/// **The fixture sidesteps this rather than papering over it**: the fault is installed on `imu`,
+/// but the instance actually named in `RunConfig.replay.instances` is `startracker` -- a
+/// DIFFERENT sensor that this fixture's own topology (identical to `demo_attitude_control.sos.
+/// yaml`, unchanged) genuinely wires to the controller (`startracker.st_meas ->
+/// controller.startracker_in`, the same connection T1b's own sanity check already pins), and
+/// which the `"bias"` fault on `imu` never touches at all -- `imu` is never wrapped in a
+/// `ReplayModel` in either run, so it genuinely, deterministically re-executes (same seed,
+/// `crate::drm::sensors::ImuModel::new`'s own `Pcg64::new(seed)`) in BOTH the "real" and
+/// "replayed" `execute()` calls, and its own FAULT event -- and every physical effect the bias
+/// has on the closed loop -- therefore reproduces correctly in both. This proves a genuinely
+/// different, still-real claim: a run that IS sensor-faulted (on one instance) can still be
+/// replayed byte-for-byte (for a DIFFERENT instance) with nothing excluded -- not the (currently
+/// architecturally impossible) claim that a SENSOR-faulted instance can replay its own fault
+/// event. **What this test does NOT prove**: that replaying the SAME instance a SENSOR fault is
+/// installed on reproduces that fault's own event -- it measurably does not (see above); that gap
+/// is unfixed and escalated in this round's own report, mirroring `R5_1A_REPORT.md`'s own
+/// "what remains" item 4 (which named exactly this untested combination) now resolved into a
+/// concrete, measured finding rather than an open question.
+///
+/// **Why `"bias"`, not `"dropout"`** (this task's own explicit instruction to weigh this):
+/// `ReplayModel` plays back recorded OUT frames, and a `"dropout"` fault suppresses the whole
+/// emission at every affected instant -- replaying THAT instance across the fault's own window
+/// would have nothing to play back there, a real but narrower proof. Not the deciding factor for
+/// THIS test (which does not replay the faulted instance at all -- see above), but `"bias"` is
+/// also the more informative choice for the IMU's own SENSOR fault runtime's debut through a
+/// real closed loop (R5.1b's own job 1; `R5_1A_REPORT.md`'s "what remains" item 3 named exactly
+/// this gap for a kind other than dropout) -- see the fixture's own header comment for the full
+/// account and the expected physical effect (a `0.001` rad/s gyro-z rate offset, ~100x the
+/// declared noise sigma, feeding directly into the control law's `kd*omega_z` term).
+///
+/// **Fails against** a replay binding that emits `startracker`'s own recorded frames at the
+/// wrong epochs, in the wrong order, on the wrong port, or that holds/interpolates a frame -- any
+/// of which changes what the controller sees on at least one step (identical failure mode to
+/// `t1b_`/`t5_`) -- AND against an implementation that somehow makes `imu`'s own SENSOR fault
+/// re-execution diverge between the two runs (e.g. a stray shared-RNG-state bug that lets the
+/// first `execute()` call perturb the second's).
+#[test]
+fn t6_replaying_a_different_sensor_from_the_one_a_sensor_fault_targets_reproduces_the_whole_faulted_run_byte_identically() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = schema::parse_drm_yaml(&read("demo_attitude_control_imu_bias.drm.yaml")).expect("DRM parses");
+    let sos = schema::parse_sos_yaml(&read("demo_attitude_control.sos.yaml")).expect("SosConfiguration parses");
+    let mut systems = BTreeMap::new();
+    for stem in ["demo_attitude_control_truth", "demo_attitude_control_startracker", "demo_attitude_control_imu", "demo_attitude_control_controller"] {
+        let s = load_system(stem);
+        systems.insert(s.id.clone(), s);
+    }
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    // Pinned before either run: startracker really is BINDING_KIND_MODEL and really is wired to
+    // the controller (the identical sanity T1b/t5_ already check), and the fault targets a
+    // DIFFERENT instance (imu), not startracker itself -- the fixture's own declared choice,
+    // checked directly against the loaded artifact rather than assumed from the file's own name.
+    let star = sos.instances.iter().find(|i| i.name == "startracker").expect("startracker instance exists");
+    assert_eq!(star.binding.as_ref().expect("binding set").kind, BindingKind::Model as i32);
+    let feeds_controller = sos.connections.iter().any(|c| c.from_instance == "startracker" && c.to_instance == "controller");
+    assert!(feeds_controller, "startracker must genuinely feed the controller for this replay to prove anything beyond T1's own narrow claim");
+    let fault = drm.scenario.as_ref().expect("scenario").faults.first().expect("one declared fault");
+    assert_eq!(fault.instance, "imu", "sanity: the fixture's own declared fault must target imu, not the replayed instance (startracker) -- see this test's own doc comment for why");
+
+    let dir = scratch_dir("t6-imu-bias-replay");
+    let run_id = "test-replay-t6-imu-bias".to_string();
+
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
+    assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was recorded");
+    assert!(!run_real.scores.is_empty(), "sanity: this fixture scores real objectives, so the comparison below covers scoring too");
+
+    // Sanity, stated before comparing against replay: the fault genuinely applied to imu (a real
+    // FAULT event, nonzero frames_affected over the 30 s window at the IMU's own 20 Hz rate).
+    let fault_events: Vec<_> = run_real.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "bias_imu").collect();
+    assert_eq!(fault_events.len(), 1, "{fault_events:#?}");
+    let frames_affected = fault_events[0].values.get("frames_affected").copied().unwrap_or(0.0);
+    assert!(frames_affected > 1.0, "sanity: the bias fault must have genuinely affected more than one IMU emission over its own 30s window: {frames_affected}");
+
+    let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
+
+    assert_eq!(
+        run_real.to_proto().encode_to_vec(),
+        run_replayed.to_proto().encode_to_vec(),
+        "a SENSOR-faulted closed loop, replayed through a DIFFERENT (unfaulted-by-this-fault) sensor instance, must reproduce the entire run byte for byte -- trajectories, events (including the IMU's own FAULT event, genuinely re-executed rather than replayed), measurements, scores, and the port traffic hash, with nothing excluded"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **The measured evidence `t6_`'s own doc comment cites, pinned as a real test rather than left
+/// as an unverified claim** (this task's own standing rule: state hypotheses and expected values
+/// before measuring, then measure for real). Replaying `imu` -- the SAME instance
+/// `drms/demo_attitude_control_imu_bias.drm.yaml`'s own SENSOR fault targets -- against the
+/// identical fixture drops its own `EVENT_KIND_FAULT` event, because `crate::drm::replay::
+/// ReplayModel::drain_sensor_fault_effect` always returns `None` and nothing else ever populates
+/// `crate::drm::executor::run_shared_group`'s own `sensor_fault_totals` for a replayed instance
+/// -- exactly the structural claim `t6_`'s own doc comment makes, now measured, not merely
+/// argued.
+///
+/// **This is NOT the only difference, and this test does not claim it is** -- unlike the star
+/// tracker (`state_dim() == 0`, T1's own module doc comment), `ImuModel::state_dim() == 6` (the
+/// propagated bias random walk, `crates/av-kernel/tests/drm_attitude_control.rs`'s own
+/// `run_a.trajectories["imu"]` proves this is a REAL, populated trajectory, not merely declared),
+/// so replaying `imu` ALSO replaces that real propagation with `ReplayModel`'s own zero-order
+/// hold (`ReplayModel::derivatives`'s own doc comment: "never moves") and drops its own
+/// `Measurement`s (`ReplayModel::last_measurements` always returns empty) -- a SECOND and THIRD
+/// reason `imu` cannot honestly replay itself, independent of and in addition to the fault-event
+/// gap. This test asserts only the ONE difference `t6_`'s own doc comment specifically claims (the
+/// missing fault event) plus the aggregate fact that the two runs are not byte-identical -- it
+/// does not enumerate every difference, since the trajectory/measurement divergence is already the
+/// PRE-EXISTING, well-understood reason (T1's own module doc comment) a `state_dim() > 0` instance
+/// is a poor replay subject at all, unrelated to SENSOR faults specifically. **Expected, stated
+/// before running**: `run_real.events` contains exactly one `EVENT_KIND_FAULT` for `"bias_imu"`;
+/// `run_replayed.events` (with `imu` itself replayed) contains NONE; the two runs' encoded
+/// `RunProducts` are not byte-identical (for this reason and, independently, the trajectory/
+/// measurement one).
+///
+/// **R5.1b review (manager): that silent divergence is now a typed LOAD REFUSAL, and this test
+/// pins the refusal instead of the divergence.** The measurement above is why the refusal exists
+/// and is kept verbatim as its justification, but a run that quietly produces the wrong products
+/// is exactly what question 178's own standing rule forbids ("a typed refusal naming what is
+/// missing, never a silent no-op"), and a passing test that merely records the wrong result
+/// blesses it. `crate::drm::executor::execute` now refuses at load, before any binding or GMAT
+/// call, with [`DrmError::ReplayInstanceHasSensorFault`] naming both the instance and the fault.
+/// Fails against an implementation that omits the check (the run would succeed and diverge, the
+/// pre-review behaviour measured above) and against one that refuses too broadly (`t6_`, which
+/// replays a DIFFERENT instance in the SAME SENSOR-faulted run, must still pass byte-identically,
+/// and `t5_`, a PORT-faulted instance replaying itself, must still pass too).
+#[test]
+fn t6b_replaying_the_same_instance_a_sensor_fault_targets_is_a_typed_load_refusal() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = schema::parse_drm_yaml(&read("demo_attitude_control_imu_bias.drm.yaml")).expect("DRM parses");
+    let sos = schema::parse_sos_yaml(&read("demo_attitude_control.sos.yaml")).expect("SosConfiguration parses");
+    let mut systems = BTreeMap::new();
+    for stem in ["demo_attitude_control_truth", "demo_attitude_control_startracker", "demo_attitude_control_imu", "demo_attitude_control_controller"] {
+        let s = load_system(stem);
+        systems.insert(s.id.clone(), s);
+    }
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let dir = scratch_dir("t6b-imu-bias-same-instance-replay");
+    let run_id = "test-replay-t6b-imu-bias-same-instance".to_string();
+
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
+    let real_fault_events: Vec<_> = run_real.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "bias_imu").collect();
+    assert_eq!(real_fault_events.len(), 1, "sanity: the real run reports the fault event, exactly once: {real_fault_events:#?}");
+
+    let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["imu".to_string()] };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let err = execute(cfg_replay).expect_err("replaying the same instance a SENSOR fault targets must be refused at load, not run to a silently divergent result");
+    match err {
+        DrmError::ReplayInstanceHasSensorFault { instance, fault_id } => {
+            assert_eq!(instance, "imu");
+            assert_eq!(fault_id, "bias_imu");
+        }
+        other => panic!("expected DrmError::ReplayInstanceHasSensorFault, got {other:?}"),
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

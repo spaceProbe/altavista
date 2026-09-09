@@ -5181,7 +5181,7 @@ mod tests {
     }
 
     fn simple_imu_spec() -> ImuSpec {
-        ImuSpec { update_rate_hz: 2.0, seed: 2, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0] }
+        ImuSpec { update_rate_hz: 2.0, seed: 2, gyro_noise_sigma: 1e-4, gyro_bias_rw_sigma: 1e-6, accel_noise_sigma: 1e-3, accel_bias_rw_sigma: 1e-5, mount_q: [0.0, 0.0, 0.0, 1.0], true_specific_force: [0.0, 0.0, 0.0], fault: None }
     }
 
     // -- Full per-method AnyModel::StarTracker delegation coverage (M14.3's own rule: "every

@@ -1,5 +1,9 @@
-//! `docs/open-questions.md` question 178 (R5.1a): the SENSOR fault runtime for the star tracker,
-//! exercised end to end through [`av_kernel::drm::execute`].
+//! `docs/open-questions.md` question 178 (R5.1a/R5.1b): the SENSOR fault runtime for the star
+//! tracker (R5.1a) and, as of R5.1b, the IMU too, exercised end to end through
+//! [`av_kernel::drm::execute`]. The IMU's own load-time refusal coverage (unrecognized `kind`,
+//! off-grid epoch) lives alongside the star tracker's identical tests below; the IMU's own unit-
+//! level fault-effect coverage (one test per declared kind) lives in `crate::drm::sensors`'s own
+//! `#[cfg(test)]` module, mirroring the star tracker's identical split.
 //!
 //! ## Load-time refusals
 //!
@@ -133,21 +137,42 @@ fn a_sensor_fault_naming_a_non_sensor_instance_is_a_typed_load_error() {
     assert!(matches!(&err, DrmError::SensorFaultTargetNotASensor { fault_id, instance, .. } if fault_id == "f_not_sensor" && instance == "attitude"), "{err:?}");
 }
 
-/// The IMU stays refused this round -- R5.1b's own scope, not this task's (the design's own
-/// explicit instruction: reuse the existing `PortOrSensorFaultNotYetSupported` shape, narrowed).
+/// Question 178 (R5.1b): the IMU now has a real SENSOR fault runtime too -- an unrecognized
+/// `kind` naming an IMU instance is a typed load refusal, on the identical `DrmError::
+/// UnknownSensorFaultKind` shape the star tracker's own identical test above proves (mirrors
+/// `a_sensor_fault_naming_an_unrecognized_kind_on_a_star_tracker_is_a_typed_load_error`).
 #[test]
-fn a_sensor_fault_naming_the_imu_instance_is_still_refused_naming_r5_1b() {
+fn a_sensor_fault_naming_an_unrecognized_kind_on_the_imu_is_a_typed_load_error() {
     let _engine = gmat_sys::engine_lock();
     let (mut drm, sos, systems) = load_sensors_bundle();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
     {
         let scenario = drm.scenario.as_mut().expect("scenario");
-        scenario.seeds.insert("f_imu".to_string(), 1);
-        scenario.faults.push(sensor_fault("f_imu", "imu", "imu.output", "dropout", SENSORS_START_TAI_NS + SENSORS_OUTPUT_PERIOD_NS, 0));
+        scenario.seeds.insert("f_imu_bad_kind".to_string(), 1);
+        scenario.faults.push(sensor_fault("f_imu_bad_kind", "imu", "imu.output", "not_a_real_kind", SENSORS_START_TAI_NS + SENSORS_OUTPUT_PERIOD_NS, 0));
     }
     let drm = rehash_drm(drm);
-    let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-sensor-fault-imu", None)).expect_err("a SENSOR fault naming the IMU must still be refused (R5.1b's own scope)");
-    assert!(matches!(&err, DrmError::PortOrSensorFaultNotYetSupported { fault_id, instance, target_kind } if fault_id == "f_imu" && instance == "imu" && target_kind == "FAULT_TARGET_KIND_SENSOR"), "{err:?}");
+    let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-sensor-fault-imu-unknown-kind", None)).expect_err("an unrecognized SENSOR kind on the IMU must be a typed load refusal");
+    assert!(matches!(&err, DrmError::UnknownSensorFaultKind { fault_id, instance, kind } if fault_id == "f_imu_bad_kind" && instance == "imu" && kind == "not_a_real_kind"), "{err:?}");
+}
+
+/// Question 178 (R5.1b): the IMU's own SENSOR fault epoch must land on the output sample grid
+/// too, on the identical `DrmError::FaultEpochNotOnSampleGrid` shape the star tracker's own
+/// identical test above proves (mirrors `a_sensor_fault_start_epoch_off_the_sample_grid_is_a_
+/// typed_load_error`).
+#[test]
+fn a_sensor_fault_start_epoch_off_the_sample_grid_on_the_imu_is_a_typed_load_error() {
+    let _engine = gmat_sys::engine_lock();
+    let (mut drm, sos, systems) = load_sensors_bundle();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    {
+        let scenario = drm.scenario.as_mut().expect("scenario");
+        scenario.seeds.insert("f_imu_off_grid".to_string(), 1);
+        scenario.faults.push(sensor_fault("f_imu_off_grid", "imu", "imu.output", "dropout", SENSORS_START_TAI_NS + SENSORS_OUTPUT_PERIOD_NS + 500_000_000, 0));
+    }
+    let drm = rehash_drm(drm);
+    let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-sensor-fault-imu-off-grid-start", None)).expect_err("an off-grid start epoch on the IMU must be a typed load refusal");
+    assert!(matches!(&err, DrmError::FaultEpochNotOnSampleGrid { fault_id, .. } if fault_id == "f_imu_off_grid"), "{err:?}");
 }
 
 #[test]

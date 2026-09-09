@@ -117,6 +117,38 @@ fn context(id: &str) -> String {
     format!("scenario event {id:?}")
 }
 
+/// `docs/open-questions.md` question 187 (the two-epoch trap, team 2's second occurrence): the
+/// real-wire epoch a command's own ack telemetry packet is actually emitted at, given the applying
+/// step's own two epochs. **Two epochs, not one, and they are NOT interchangeable:**
+/// - `applied` (`av_dynamics::AppliedCommand.applied_tai_ns`, that field's own doc comment) is
+///   the consuming step's own START epoch (`step_with_ports`'s own `t_tai_ns` argument) -- the
+///   instant from which the commanded value is in effect. The `ACKED` `CommandTransition` lands
+///   HERE (`crate::drm::command::acked_event`'s own call site, `crate::drm::executor::
+///   run_shared_group`: `command::acked_event(parsed, cmd.applied_tai_ns, ...)`) -- proven
+///   directly by `crates/av-kernel/tests/drm_command.rs::the_ground_issued_command_drm_runs_
+///   through_execute_and_reaches_acked`'s own `assert_eq!(transitions[4].tai_ns, applied_tai_ns,
+///   ...)`.
+/// - `period` is that SAME step's own elapsed duration (`dt_ns`, the applying model's own native
+///   step/period) -- so `applied + period` is that step's own RESULT (end) epoch
+///   (`StepResult.t_tai_ns`). The ack packet itself is pushed onto the model's own `Outbox` at
+///   THIS epoch, not `applied` (`crate::drm::binding::ConstantAccelModel::step_with_ports`'s own
+///   `outbox.push(port.clone(), result.t_tai_ns, payload)`, mirrored by `crate::drm::
+///   gmat_command::GmatFramedCommandModel::step_with_ports`'s identical `result.t_tai_ns` push) --
+///   this is the epoch `crate::router::Router::deliver` records the ack's own OUT/IN
+///   `PortTrafficRecord`s at, and the epoch `crates/av-kernel/tests/port_traffic_sidecar.rs`'s own
+///   module doc comment measured, not assumed, after a first draft of that same test was written
+///   against `applied` alone and had to be root-caused (the SAME mistake this helper exists to
+///   retire, having now occurred twice -- question 187's own "two rounds running" wording).
+///
+/// A caller wanting "when does the ACKED transition land" wants `applied` alone, unchanged --
+/// this helper is for the OTHER question, "when does the ack packet's own real wire emission
+/// land," which needs the addition spelled out in exactly one place rather than written inline at
+/// every call site (`crates/av-kernel/tests/port_traffic_sidecar.rs`'s own `applied_tai_ns +
+/// OUTPUT_PERIOD_NS` line, before this helper existed, is the call site this retires).
+pub fn ack_emission_epoch(applied: i64, period: i64) -> i64 {
+    applied + period
+}
+
 /// A `command` `ScenarioEvent`, typed (see the module doc comment's "Schema" section).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedCommand {
@@ -324,6 +356,16 @@ mod tests {
     }
     fn valid_values() -> BTreeMap<String, f64> {
         BTreeMap::from([("value".to_string(), 2.0)])
+    }
+
+    /// Question 187: `ack_emission_epoch` is exactly `applied + period` -- pure addition, no
+    /// hidden rounding or sign flip. Fails against an implementation that subtracts instead of
+    /// adds, or that returns `applied` alone (the mistake this helper exists to retire).
+    #[test]
+    fn ack_emission_epoch_is_applied_plus_period() {
+        assert_eq!(ack_emission_epoch(1_700_000_052_000_000_000, 1_000_000_000), 1_700_000_053_000_000_000);
+        assert_eq!(ack_emission_epoch(0, 0), 0);
+        assert_eq!(ack_emission_epoch(-5, 3), -2, "must not special-case a negative applied epoch");
     }
 
     /// A well-formed `command` event parses into every field `parse` promises -- fails against
