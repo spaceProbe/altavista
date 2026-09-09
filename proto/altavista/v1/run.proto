@@ -76,3 +76,48 @@ message PortTrafficLog {
   repeated PortTrafficRecord records = 2;
   Provenance provenance = 3;
 }
+
+// One sample of a feasibility study (question 191): one point of the ParameterSweep's grid
+// and one Monte Carlo draw at that point, run through the executor as its own run.
+message SweepSample {
+  // Row-major index into the sweep grid, then the draw index.
+  uint32 point_index = 1;
+  uint32 draw_index = 2;
+  // "instance.parameter" -> the value applied at this point.
+  map<string, double> axis_values = 3;
+  // The seed this draw ran with (derived from Scenario.seeds, sweep id, point and draw;
+  // recorded so the sample replays alone).
+  uint64 seed = 4;
+  string run_id = 5;
+  // The per-sample DRM hash (the sweep's DRM with this point's overrides applied).
+  string config_hash = 6;
+  map<string, ScoreResult> scores = 7;
+  // Where this sample's RunProducts and sidecars were written, when kept.
+  string products_uri = 8;
+  // Set when the run failed: the typed error's text; scores are then empty.
+  string error = 9;
+}
+
+// Aggregate of one score across the draws at one grid point.
+message ScoreAggregate {
+  string name = 1;
+  uint32 point_index = 2;
+  uint32 draws = 3;
+  double mean = 4;
+  double std_dev = 5;
+  double min = 6;
+  double max = 7;
+  // Fraction of draws whose Objective passed; unset for a measure of effectiveness.
+  optional double pass_fraction = 8;
+}
+
+// The products of a feasibility study (question 191): every sample, the aggregates, and the
+// provenance that makes the whole study reproducible from the sweep hash and the seeds.
+message SweepResults {
+  string sweep_id = 1;
+  string sweep_hash = 2;
+  string drm_hash = 3;
+  repeated SweepSample samples = 4;
+  repeated ScoreAggregate aggregates = 5;
+  Provenance provenance = 6;
+}
