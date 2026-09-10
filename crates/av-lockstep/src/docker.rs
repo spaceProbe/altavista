@@ -190,8 +190,14 @@ pub fn image_gate_status(default_image_ref: &str, build_hint: &str) -> Result<()
 /// shape of on the Rust side.
 pub const REQUIRE_DOCKER_TESTS_ENV: &str = "AV_REQUIRE_DOCKER_TESTS";
 
+/// The one parser of a truthy flag value: `1`/`true`/`yes`, trimmed, case-insensitive. Pure,
+/// so it is testable without touching the process environment (question 199).
+fn truthy(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+}
+
 fn truthy_env(name: &str) -> bool {
-    std::env::var(name).map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")).unwrap_or(false)
+    std::env::var(name).map(|v| truthy(&v)).unwrap_or(false)
 }
 
 /// `true` iff [`REQUIRE_DOCKER_TESTS_ENV`] is set to `1`/`true`/`yes` (case-insensitive).
@@ -210,7 +216,16 @@ pub fn require_docker_tests() -> bool {
 /// into a hard failure (question 194 item 4).
 #[track_caller]
 pub fn announce_gate_skip(test_name: &str, reason: &DockerGateReason) -> String {
-    if require_docker_tests() {
+    announce_gate_skip_with(require_docker_tests(), test_name, reason)
+}
+
+/// [`announce_gate_skip`] with the require flag passed in rather than read from the process
+/// environment (question 199): the public entry point reads the environment exactly once;
+/// tests of the panic path call this directly and never mutate `std::env`, because a test
+/// that sets a process-wide variable races every parallel test that reads it.
+#[track_caller]
+pub(crate) fn announce_gate_skip_with(require: bool, test_name: &str, reason: &DockerGateReason) -> String {
+    if require {
         panic!("{REQUIRE_DOCKER_TESTS_ENV}=1 is set and {test_name} cannot run against the real thing: {reason}");
     }
     let line = format!("SKIPPED {test_name}: {reason}\n");
@@ -225,8 +240,14 @@ pub fn announce_gate_skip(test_name: &str, reason: &DockerGateReason) -> String 
 /// exactly like the single-reason form.
 #[track_caller]
 pub fn announce_gate_skip_multi(test_name: &str, reasons: &[DockerGateReason]) -> String {
+    announce_gate_skip_multi_with(require_docker_tests(), test_name, reasons)
+}
+
+/// See [`announce_gate_skip_with`].
+#[track_caller]
+pub(crate) fn announce_gate_skip_multi_with(require: bool, test_name: &str, reasons: &[DockerGateReason]) -> String {
     let joined = reasons.iter().map(DockerGateReason::message).collect::<Vec<_>>().join("; ");
-    if require_docker_tests() {
+    if require {
         panic!("{REQUIRE_DOCKER_TESTS_ENV}=1 is set and {test_name} cannot run against the real thing: {joined}");
     }
     let line = format!("SKIPPED {test_name}: {joined}\n");
@@ -674,21 +695,31 @@ mod tests {
     /// (question 194 item 4). **What this fails against:** an implementation that ignores the
     /// env var (the pre-item-4 shape) would return the announced-text `String` here instead of
     /// unwinding, and `catch_unwind` would observe `Ok(_)`, not `Err(_)`.
+    ///
+    /// Question 199: this test used to `set_var(AV_REQUIRE_DOCKER_TESTS, "1")` on the process
+    /// and restore it afterwards. The two announce tests above read that variable and do not
+    /// hold `ENV_TEST_LOCK`, so under `cargo test`'s parallel runner they intermittently ran
+    /// inside that window and panicked with "AV_REQUIRE_DOCKER_TESTS=1 is set" (reproduced in
+    /// the lead's clone gate, 2026-09-10). The require flag is now injected instead.
     #[test]
     fn require_docker_tests_turns_a_skip_into_a_panic() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var(REQUIRE_DOCKER_TESTS_ENV).ok();
-        std::env::set_var(REQUIRE_DOCKER_TESTS_ENV, "1");
-        assert!(require_docker_tests());
-
         let reason = DockerGateReason::DockerNotInstalled;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| announce_gate_skip("some_required_test", &reason)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| announce_gate_skip_with(true, "some_required_test", &reason)));
+        assert!(result.is_err(), "the require flag must turn announce_gate_skip into a panic, not a returned skip line");
+        let multi = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| announce_gate_skip_multi_with(true, "some_required_multi_test", &[reason])));
+        assert!(multi.is_err(), "the require flag must turn announce_gate_skip_multi into a panic too");
+    }
 
-        match saved {
-            Some(v) => std::env::set_var(REQUIRE_DOCKER_TESTS_ENV, v),
-            None => std::env::remove_var(REQUIRE_DOCKER_TESTS_ENV),
+    /// The flag parser itself, without the environment: exactly `1`/`true`/`yes` (trimmed,
+    /// case-insensitive) are truthy.
+    #[test]
+    fn truthy_flag_parsing() {
+        for v in ["1", "true", "yes", " TRUE ", "Yes"] {
+            assert!(truthy(v), "{v:?} must be truthy");
         }
-        assert!(result.is_err(), "AV_REQUIRE_DOCKER_TESTS=1 must turn announce_gate_skip into a panic, not a returned skip line");
+        for v in ["", "0", "false", "no", "on", "2"] {
+            assert!(!truthy(v), "{v:?} must not be truthy");
+        }
     }
 
     /// Serializes the small handful of tests above that mutate process-wide env vars
