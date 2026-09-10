@@ -160,6 +160,21 @@ export function defaultLayoutForScenario(sc) {
 export const RUN_PRODUCTS_PANEL_ID = 'run-products';
 export const MAP_PANEL_ID = 'map-2d';
 export const CONSOLE_PANEL_ID = 'console-log';
+// F3b (docs/feasibility-plan.md's F3 milestone): the feasibility-study panel
+// (web/js/panels/feasibility_panel.js) -- registered below in REGISTERED_PANEL_TYPES
+// (reachable through the M26.5 pane chooser/header-menu, question 167) but DELIBERATELY
+// NOT added to attachM264Panels()'s own default tree. Two reasons: (1) attachM264Panels'
+// exact output shape ("exactly 5 leaves" / "exactly 7 leaves") is asserted by name in
+// web/js/panels_check.mjs's own "attachM264Panels:" checks and this task's brief says
+// those must stay green UNTOUCHED -- adding a 4th default panel there would change that
+// shape; (2) unlike run-products/map/console, which are meaningful (if possibly empty)
+// for every scenario a server publishes, a feasibility study is the EXCEPTION, not the
+// rule -- most scenarios have no `sweep` key at all (this panel's own render() shows an
+// honest "no study in this scenario" notice for exactly that case), so showing it by
+// default in every layout would mean most users see a permanently-empty pane most of
+// the time. The chooser already exists precisely for "a panel a user wants sometimes,
+// not always" (question 167's own stated purpose) -- this is that case.
+export const FEASIBILITY_PANEL_ID = 'feasibility';
 
 /**
  * Wrap an already-built layout tree with the three M26.4 panels stacked in a column to
@@ -193,6 +208,9 @@ export const REGISTERED_PANEL_TYPES = [
   { panelId: RUN_PRODUCTS_PANEL_ID, label: 'Run Products & Scores' },
   { panelId: CONSOLE_PANEL_ID, label: 'Console / Log' },
   { panelId: 'sidebar', label: 'Sidebar' },
+  // F3b: singleton, like every other non-viewport entry above -- offered whenever no
+  // OTHER leaf in the tree currently holds it (availablePanelChoices' own existing rule).
+  { panelId: FEASIBILITY_PANEL_ID, label: 'Feasibility Study' },
 ];
 
 /**

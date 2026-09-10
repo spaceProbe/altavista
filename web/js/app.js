@@ -26,6 +26,12 @@ import { hasRicFrame, ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID } from './layo
 import { render as renderRunProducts, timelineMeasurementTicks } from './panels/run_products_panel.js';
 import { render as renderMap } from './panels/map_panel.js';
 import { render as renderConsole } from './panels/console_panel.js';
+// F3b (docs/feasibility-plan.md's F3 milestone): the feasibility-study panel. `sc.sweep`
+// is real, wire-published data only for a scenario worker A's `POST /api/cdm/sweep`
+// route published (`meta.sweepSource === 'SweepResults'`) -- `undefined` for every other
+// scenario, which feasibility_panel.js's own render() turns into an honest "no study in
+// this scenario" notice, never invented data (see that module's own top comment).
+import { render as renderFeasibility } from './panels/feasibility_panel.js';
 
 const SEC_PER_DAY = 86400;
 const SPEEDS = [
@@ -45,6 +51,8 @@ const els = {
   globe: $('opt-globe'), loadTiles: $('btn-load-3dtiles'), globeInfo: $('globe-info'),
   // M26.4: the three panels' pane content (index.html's #panel-run-products/-map/-console).
   runProductsPanel: $('panel-run-products'), mapPanel: $('panel-map'), consolePanel: $('panel-console'),
+  // F3b: the feasibility-study panel's pane content (index.html's #panel-feasibility).
+  feasibilityPanel: $('panel-feasibility'),
 };
 
 // M26.4: the console/log panel accumulates a message log across the whole page lifetime
@@ -111,6 +119,87 @@ if (window.altavistaLayoutManager) window.altavistaLayoutManager.panelFactories.
 const viewer = new Viewer(els.canvas, els.labels);
 const clock = { t: 0, t0: 0, t1: 1, playing: false, speed: 60, t0Iso: null };
 let scenario = null;
+
+// F3b: the feasibility panel's own selection state -- owned by app.js (the caller), not
+// feasibility_panel.js itself, exactly the same split run_products_panel.js's
+// `onJumpToEvent` pattern already uses (that module holds no mutable state of its own
+// either). Reset per scenario load (renderFeasibilityPanel() below is called with a
+// fresh `sc` every time loadScenario() runs) so a stale selectedPoint from a PREVIOUS
+// study is never carried into a different one.
+const feasibilityState = { selectedScore: null, selectedPoint: null };
+
+function renderFeasibilityPanel(sc) {
+  renderFeasibility(els.feasibilityPanel, {
+    sweep: sc.sweep,
+    selectedScore: feasibilityState.selectedScore,
+    selectedPoint: feasibilityState.selectedPoint,
+    onSelectScore: (name) => { feasibilityState.selectedScore = name; renderFeasibilityPanel(sc); },
+    onSelectPoint: (pointIndex) => { feasibilityState.selectedPoint = pointIndex; renderFeasibilityPanel(sc); },
+    onOpenSample: (drawRow) => openFeasibilitySample(sc, drawRow),
+  });
+}
+
+// F3b/F3c: "opens any sample's run in the existing viewer through its products_uri"
+// (docs/feasibility-plan.md's F3 milestone, verbatim) -- the client-side half. F3b's
+// first attempt at this tried to `fetch(drawRow.productsUri)` straight from the browser
+// then POST the bytes to `POST /api/cdm/run`; that could never work, for two independent
+// reasons verified against the source (F3c, this task's own defect fix): (1)
+// `SweepSample.products_uri` is the sample's DIRECTORY, not a file
+// (crates/av-sweep/src/bin/av-sweep/study.rs's `finalize()` sets it to
+// `std::fs::canonicalize(&r.sample_dir)`) -- the real `RunProducts` bytes are at
+// `<products_uri>/run_products.pb`; (2) it is an absolute LOCAL FILESYSTEM PATH on
+// whichever machine ran the study, e.g. `/private/var/folders/.../sample_p0_d0` -- a
+// browser `fetch()` of that string resolves it against the page's own origin and asks
+// *this* HTTP server for that path, which serves nothing.
+//
+// The fix: the server now does the reading. `POST /api/cdm/sweep/sample`
+// (altavista/server.py) takes only an identity -- `{sweepId, pointIndex, drawIndex}`,
+// never a path -- resolves it against its own already-published sweep scenario (the one
+// `POST /api/cdm/sweep` put in the hub), reads the `productsUri` IT ITSELF RECORDED for
+// that sample, decodes `<productsUri>/run_products.pb` and publishes the resulting run
+// scenario exactly like `POST /api/cdm/run` does (see that route's own docstring for the
+// full "why an identity, never a path" reasoning). This function supplies `sweepId` from
+// `sc.sweep.sweepId` and `pointIndex` from `feasibilityState.selectedPoint` (both already
+// known to app.js, the caller -- `feasibility_panel.js`'s own `onOpenSample(drawRow)`
+// callback shape is unchanged, so `drawRow` only needs to carry its own `drawIndex`,
+// which `drawRows()` already returns); `sc` is threaded in from `renderFeasibilityPanel`
+// above rather than read off module-level state, so this never accidentally opens a
+// sample against a STALE previously-loaded scenario's sweep.
+//
+// Selects the resulting published scenario by name exactly like choosing it from the
+// scenario dropdown does (`els.scenarioSelect`'s own 'change' handler below, same
+// `net.send` call). Never silently swallows a failure -- a fetch/publish error surfaces
+// visibly (mirrors LayoutManager._showError's "never silently lost" posture elsewhere in
+// this codebase), since this is a rare, user-initiated action, not a hot path worth a
+// quieter failure mode. Keeps the existing rule that a failed sample is not openable:
+// `drawRow.openable` is `feasibility_panel.js`'s own `isSampleOpenable()` result (the one
+// place that rule is decided -- see that module's own doc comment), so this never
+// re-derives "openable" from `productsUri`/`error` a second time.
+async function openFeasibilitySample(sc, drawRow) {
+  if (!drawRow || !drawRow.openable) return; // render() already hides this control when non-openable; defensive no-op otherwise.
+  const sweepId = sc && sc.sweep && sc.sweep.sweepId;
+  const pointIndex = feasibilityState.selectedPoint;
+  // Defensive: onOpenSample is only reachable from a rendered draw row, which only ever
+  // exists once a study is loaded (sc.sweep) and a grid point is selected -- but this
+  // never assumes that silently.
+  if (!sweepId || pointIndex === null || pointIndex === undefined) return;
+  try {
+    const publishResp = await fetch('/api/cdm/sweep/sample', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sweepId, pointIndex, drawIndex: drawRow.drawIndex }),
+    });
+    if (!publishResp.ok) {
+      const detail = await publishResp.json().catch(() => null);
+      const reason = detail && typeof detail.detail === 'string' ? detail.detail : `HTTP ${publishResp.status}`;
+      throw new Error(`POST /api/cdm/sweep/sample: ${reason}`);
+    }
+    const { name } = await publishResp.json();
+    net.send({ type: 'select', name });
+  } catch (e) {
+    window.alert(`Could not open this sample's run (${drawRow.runId}): ${e.message}`);
+  }
+}
 let lastFrame = performance.now();
 let lastClockSend = 0;
 let suppressSync = false;
@@ -196,6 +285,14 @@ function loadScenario(sc) {
   renderMap(els.mapPanel, { sc, level: 1, t: clock.t });
   lastMapRenderWall = performance.now();
   consolePanelHandles.setProvenance(sc);
+  // F3b: a fresh scenario load resets the feasibility panel's own selection state (never
+  // carries a selectedPoint from a DIFFERENT study's grid into this one -- see
+  // feasibilityState's own comment above) and re-renders against this scenario's own
+  // `sc.sweep` (absent/undefined for every non-sweep scenario -- renderFeasibilityPanel
+  // -> feasibility_panel.js's render() turns that into an honest notice, not a throw).
+  feasibilityState.selectedScore = null;
+  feasibilityState.selectedPoint = null;
+  renderFeasibilityPanel(sc);
 }
 
 function pickDefaultSpeed() {

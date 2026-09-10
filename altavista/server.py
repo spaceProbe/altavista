@@ -18,6 +18,16 @@ POST /api/cdm/trajectory    publish an altavista.v1.Trajectory (binary protobuf 
 POST /api/cdm/run           publish an altavista.v1.RunProducts (binary protobuf or JSON
                             transcoding) from crates/av-run; converted and pushed like
                             POST /api/cdm/trajectory (M17.2, question 121)
+POST /api/cdm/sweep         publish an altavista.v1.SweepResults (binary protobuf or JSON
+                            transcoding) from crates/av-sweep; converted and pushed like
+                            POST /api/cdm/run (F3, docs/feasibility-plan.md, question 191)
+POST /api/cdm/sweep/sample  open one already-run sample of a published sweep by identity
+                            ({"sweepId", "pointIndex", "drawIndex"}, never a path) -- reads
+                            <productsUri>/run_products.pb on this host (the productsUri
+                            this server itself recorded, never one the caller supplies) and
+                            publishes/broadcasts it like POST /api/cdm/run (F3c, this
+                            task's own defect fix for F3's "opens any sample ... through
+                            its products_uri")
 POST /api/clock             broadcast a playback clock to all browsers
 GET  /textures/{file}       planet textures from the GMAT install
 WS   /ws                    push channel (scenario, list, clock messages)
@@ -368,104 +378,16 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
                 400, f"malformed altavista.v1.RunProducts body (Content-Type "
                      f"{content_type or '<none>'!r}): {exc}")
 
-        # RunProducts.trajectories is a proto map (no wire order of its own) -- iterate sorted
-        # by key (SystemInstance.id) for determinism, matching this task's own "sort explicitly"
-        # rule (crates/av-kernel's BTreeMap convention, mirrored here since this module has no
-        # BTreeMap of its own).
-        instance_ids = sorted(run_products.trajectories)
-        try:
-            # M20.1 (question 133, decided by the lead): "the viewer renders only instances
-            # whose state space has [a position class]" -- cdm_trajectory_to_viewer_json
-            # returns None for an instance with no position trajectory to render (e.g. a
-            # native controller's own non-physical state space), filtered out here rather
-            # than published as an empty/zero-filled spacecraft entry. Events are untouched:
-            # viewer_events below is built straight from run_products.events, entity-tagged
-            # independently of instance_ids/viewer_trajs, so a filtered-out instance's own
-            # lifecycle/port_command events still reach the timeline.
-            viewer_trajs = [v for k in instance_ids if (v := cdm_adapter.cdm_trajectory_to_viewer_json(run_products.trajectories[k])) is not None]
-        except cdm_adapter.CdmAdapterError as exc:
-            raise HTTPException(400, f"cannot convert RunProducts trajectory to viewer JSON: {exc}")
-        viewer_events = [cdm_adapter.cdm_event_to_viewer_event(e) for e in run_products.events]
-        # M26.4b (question 165): RunProducts.scores is a proto map (no wire order of its
-        # own) -- sorted by name for the same determinism reason instance_ids is sorted
-        # above. See _score_result_to_dict's own docstring for why this hand-builds the
-        # three keys instead of delegating to json_format.MessageToDict.
-        viewer_scores = {name: _score_result_to_dict(run_products.scores[name])
-                         for name in sorted(run_products.scores)}
-        # M25.3e (question 174): RunProducts.measurements is a repeated field the
-        # executor already sorts by (epoch, id) (question 173) -- no re-sort here, same
-        # posture as `viewer_events` above.
-        viewer_measurements = [_measurement_to_dict(m) for m in run_products.measurements]
-
-        # The entities frame (ScenarioData.frame, web/js/scene.js's _originFrameId): the
-        # first trajectory (in sorted-key order, for determinism) declaring a frame_id wins
-        # (every fixture this endpoint is exercised against today declares exactly one
-        # instance, hence one frame). Its real origin/axes come from the matching declared
-        # FrameDefinition (cdm_adapter.viewer_frame_for) when the bundle actually declares
-        # one for that id and it is a body-axes kind altavista.model.Frame can represent;
-        # otherwise this falls back to carrying frame_id through as a display name only
-        # (altavista's own Earth/MJ2000Eq Frame default), the same documented caveat
-        # POST /api/cdm/trajectory below still has for a bundle with no matching frame.
-        # Computed from the raw RunProducts.frames (not the FrameRegistry-validated
-        # scenario_data.frames set further below), so it is available before -- and
-        # independent of -- frame-registry validation.
-        frame_id = next((run_products.trajectories[k].frame_id for k in instance_ids if run_products.trajectories[k].frame_id), "")
-        frame_def = next((fd for fd in run_products.frames if fd.id == frame_id), None) if frame_id else None
-        entities_frame = (cdm_adapter.viewer_frame_for(frame_def) if frame_def is not None else None) \
-            or Frame(name=frame_id or Frame().name)
-        run_id = run_products.run_id or run_products.provenance.run_id or "run"
-        scenario_data = ScenarioData(
-            name=f"run:{run_id}",
-            frame=entities_frame,
-            spacecraft=viewer_trajs,
-            events=viewer_events,
-            scores=viewer_scores,
-            measurements=viewer_measurements,
-            meta={"configHash": run_products.provenance.config_hash, "runId": run_id,
-                  # M26.4b (question 165): additive, present even when RunProducts declared
-                  # no scores at all (viewer_scores == {}) -- same honest-provenance posture
-                  # as bodiesSource below ("a reader of meta must be able to tell where the
-                  # (possibly empty) value came from").
-                  "scoresSource": "RunProducts.scores",
-                  # M25.3e (question 174): same posture -- present even when
-                  # viewer_measurements == [] (a run that declared no measurements).
-                  "measurementsSource": "RunProducts.measurements"},
-        )
-
-        # M18.2 (question 125): the globe needs an `Earth` body entry, and the CDM
-        # ingest path had no bodies handling at all -- derive the scene's body list
-        # from the origin bodies RunProducts.frames actually names (never invented; see
-        # altavista.cdm.bodies_from_frames's own docstring for the full contract), sampled
-        # over this run's own epoch span with the existing altavista.bodies.BodySampler.
-        # Raises (400, never silently drops a body or a 500) if a frame names a body
-        # this process's GMAT solar system has no data for. Deliberately run *before*
-        # the FrameRegistry validation below: bodies_from_frames only ever needs GMAT's
-        # solar system (SolarSystem.GetBody), a much narrower check than a full
-        # CoordinateSystem construction, so an unknown-body frame is refused with this
-        # precise, typed error before frame registration ever has a chance to run.
-        try:
-            scenario_data.bodies = cdm_adapter.bodies_from_frames(
-                run_products.frames, frame=entities_frame, span=scenario_data.span())
-        except cdm_adapter.UnknownBodyError as exc:
-            raise HTTPException(400, f"cannot derive bodies from RunProducts.frames: {exc}")
-        # Additive, honest provenance note (this task's own requirement): a reader of
-        # meta must be able to tell this scenario's bodies came from the run bundle's
-        # own frames, not from a Python scenario file's Scenario.default_bodies()
-        # convenience list (which this path never calls) -- present even when the
-        # derived list is empty (RunProducts.frames named no body), since that is
-        # still an honest fact about where the (empty) list came from.
-        scenario_data.meta["bodiesSource"] = "RunProducts.frames"
-
-        # M17.1 (question 122): every FrameDefinition RunProducts.frames declares, run
-        # through the real altavista.frames.FrameRegistry (GMAT validation + question 76's
-        # parent_frame_id fill) -- the same wire shape ScenarioData.to_dict()["frames"]
-        # already carries for a Python scenario. Raises (400, never silently drops a frame
-        # or substitutes a validated one) if GMAT rejects a declared definition.
-        try:
-            scenario_data.frames = cdm_adapter.frames_to_viewer_json(run_products.frames)
-        except cdm_adapter.CdmAdapterError as exc:
-            raise HTTPException(400, f"cannot build frame list from RunProducts.frames: {exc}")
-
+        # F3c (this task's own defect fix, docs/feasibility-plan.md's F3 milestone): the
+        # actual "RunProducts -> viewer scenario" conversion is factored out into
+        # _run_products_to_scenario_data below -- decode + call + publish is all that is
+        # left here -- so POST /api/cdm/sweep/sample further down (which also needs to turn
+        # a decoded RunProducts, this time read off local disk rather than the request
+        # body, into a scenario) uses the exact same conversion rather than a second,
+        # potentially-divergent copy of it. See that function's own docstring for the full,
+        # unchanged conversion contract (M17.2, M17.1, M26.4b, M25.3e, M18.2) this route
+        # always implemented inline before this refactor.
+        scenario_data = _run_products_to_scenario_data(run_products)
         scenario = scenario_data.to_dict()
         name = hub.put(scenario)
         if hub.clock and hub.clock.get("scenario") != name:
@@ -473,8 +395,255 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
         await hub.broadcast({"type": "list", "names": hub.names()})
         await hub.broadcast({"type": "scenario", "scenario": scenario})
         log.info("published RunProducts %r (%d trajectories, %d events, %d measurements, %d bodies, config_hash %s) to %d client(s)",
-                 run_id, len(run_products.trajectories), len(run_products.events), len(viewer_measurements),
-                 len(scenario_data.bodies), run_products.provenance.config_hash, len(hub.clients))
+                 scenario_data.meta["runId"], len(run_products.trajectories), len(run_products.events),
+                 len(scenario_data.measurements), len(scenario_data.bodies), run_products.provenance.config_hash,
+                 len(hub.clients))
+        return {"ok": True, "name": name, "clients": len(hub.clients)}
+
+    @app.post("/api/cdm/sweep")
+    async def publish_cdm_sweep(request: Request):
+        """Accept an ``altavista.v1.SweepResults`` (F3, ``docs/feasibility-plan.md``,
+        question 191 -- the feasibility-study products ``crates/av-sweep`` writes): every
+        ``SweepSample`` (one grid point, one Monte Carlo draw) and ``ScoreAggregate`` (one
+        score, one grid point, aggregated across its draws) one ``av-sweep`` study produced.
+
+        Accepts binary protobuf (``Content-Type: application/x-protobuf``) or JSON
+        transcoding (any other content type, via ``google.protobuf.json_format``) --
+        *exactly* the same content-type dispatch ``POST /api/cdm/run`` above already uses
+        (this task's own instruction: mirror that route's pattern).
+
+        **The wire contract below is fixed by this task's own manager and is the single
+        source of truth** (the viewer's feasibility panel, built concurrently by another
+        worker, is written against exactly this shape) -- this handler does not improvise
+        on it:
+
+        ::
+
+            scenario name:  "sweep:{sweep_id}"
+            meta.sweepSource = "SweepResults"
+            meta.sweepId, meta.sweepHash, meta.drmHash    (always present, even when empty)
+            scenario["sweep"] = <the dict _sweep_results_to_dict below returns>
+
+        ``sweep_id``/``sweep_hash``/``drm_hash`` are carried through verbatim (``""`` if the
+        producer left them empty) -- unlike ``POST /api/cdm/run``'s ``run_id`` fallback
+        chain (``run_products.run_id or run_products.provenance.run_id or "run"``), this
+        contract names no fallback for an empty ``sweep_id``, so none is invented here: a
+        study published with an empty ``sweep_id`` becomes a scenario literally named
+        ``"sweep:"``, an honest (if unusual) reflection of what the producer actually sent,
+        not a silently substituted default that would misrepresent that the producer left it
+        blank.
+
+        The whole ``scenario["sweep"]`` projection is built by the single, module-level,
+        directly-testable :func:`_sweep_results_to_dict` function below (this task's own
+        instruction: "so a test -- and worker B's join test later -- can call it directly
+        rather than through HTTP") -- see that function's own docstring for the per-field
+        contract, the ``scores``/``passFraction`` ``HasField`` handling (mirroring
+        ``_score_result_to_dict`` above for exactly the same "an unset optional field must
+        stay an explicit ``null``, never silently omitted or coerced" reason, question 165),
+        the ``seeds`` uint64-as-decimal-string encoding (proto3 canonical JSON convention --
+        a bare JSON number cannot hold the full uint64 range without precision loss), and
+        every explicit sort (a proto ``map`` has no wire order of its own).
+
+        **No trajectory, no events, no bodies.** A ``SweepResults`` carries none of the
+        three (``proto/altavista/v1/run.proto``'s message has no ``Trajectory``/``Event``
+        fields at all -- it is samples and aggregates, nothing else). Investigated against
+        ``altavista.model.ScenarioData``: :meth:`ScenarioData.span` computes ``min(ts),
+        max(ts)`` over every spacecraft's first/last sample epoch and returns ``None`` when
+        that list is empty (``spacecraft=[]``) rather than raising or dividing by zero, and
+        :meth:`ScenarioData.to_dict` already handles a ``None`` span by publishing
+        ``t0``/``t1`` as JSON ``null`` -- so ``spacecraft=[]``, ``events=[]`` (the dataclass
+        default) is a genuinely representable, self-consistent scenario, not a workaround
+        that silently breaks something else. Chosen over any alternative that would invent a
+        trajectory, a body, or a time span this message does not carry -- "nothing is ever
+        synthesized" applies here exactly as it does to ``bodiesSource``/``scoresSource``
+        above. ``frame``/``bodies`` are therefore left at :class:`ScenarioData`'s own
+        defaults (the Earth/MJ2000Eq ``Frame()``, an empty body list) rather than derived
+        from anything -- there is nothing in a ``SweepResults`` to derive them from.
+        """
+        content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        body = await request.body()
+        sweep_results = run_pb2.SweepResults()
+        try:
+            if content_type == "application/x-protobuf":
+                sweep_results.ParseFromString(body)
+            else:
+                sweep_results = json_format.Parse(body.decode("utf-8"), sweep_results)
+        except (DecodeError, json_format.ParseError, UnicodeDecodeError, ValueError) as exc:
+            raise HTTPException(
+                400, f"malformed altavista.v1.SweepResults body (Content-Type "
+                     f"{content_type or '<none>'!r}): {exc}")
+
+        scenario_data = ScenarioData(
+            name=f"sweep:{sweep_results.sweep_id}",
+            # See this handler's own docstring, "No trajectory, no events, no bodies": a
+            # SweepResults carries none of the three, so the minimal honest representation
+            # is the dataclass's own empty defaults, never a fabricated one.
+            spacecraft=[],
+            events=[],
+            meta={
+                "sweepSource": "SweepResults",
+                "sweepId": sweep_results.sweep_id,
+                "sweepHash": sweep_results.sweep_hash,
+                "drmHash": sweep_results.drm_hash,
+            },
+        )
+        scenario = scenario_data.to_dict()
+        scenario["sweep"] = _sweep_results_to_dict(sweep_results)
+
+        name = hub.put(scenario)
+        if hub.clock and hub.clock.get("scenario") != name:
+            hub.clock = None
+        await hub.broadcast({"type": "list", "names": hub.names()})
+        await hub.broadcast({"type": "scenario", "scenario": scenario})
+        log.info("published SweepResults %r (%d samples, %d aggregates, sweep_hash %s) to %d client(s)",
+                 sweep_results.sweep_id, len(sweep_results.samples), len(sweep_results.aggregates),
+                 sweep_results.sweep_hash, len(hub.clients))
+        return {"ok": True, "name": name, "clients": len(hub.clients)}
+
+    @app.post("/api/cdm/sweep/sample")
+    async def open_cdm_sweep_sample(request: Request):
+        """Open one already-run sample of a published feasibility study in the viewer --
+        the server-side fix for F3's "opens any sample's run in the existing viewer through
+        its products_uri" requirement (docs/feasibility-plan.md's F3 milestone, F3c: this
+        task's own defect fix).
+
+        **Why this route exists at all.** The panel worker's first attempt
+        (``web/js/app.js``'s ``openFeasibilitySample()``) tried to do this from the
+        *browser*: ``fetch(drawRow.productsUri)`` followed by POSTing the bytes to
+        ``POST /api/cdm/run``. That cannot work, for two independent reasons, both verified
+        against the source before this route was written: (1) ``SweepSample.products_uri``
+        is the sample's *directory*, not a file -- ``crates/av-sweep/src/bin/av-sweep/
+        study.rs``'s ``finalize()`` sets it to ``std::fs::canonicalize(&r.sample_dir)``; the
+        actual ``RunProducts`` bytes are at ``<products_uri>/run_products.pb``. (2) it is an
+        absolute *local filesystem path* on whichever machine ran the study -- a browser's
+        own ``fetch()`` of that string resolves it against the page's own origin and asks
+        *this* HTTP server for a path shaped like ``/private/var/folders/.../sample_p0_d0``,
+        which serves nothing. Reading the sample therefore has to happen server-side, where
+        the path is meaningful.
+
+        **The caller sends an identity, never a path.** The request body is exactly
+        ``{"sweepId": str, "pointIndex": int, "drawIndex": int}`` -- three plain
+        identifiers, nothing resembling a filesystem path. This handler resolves that
+        identity against the server's OWN state: it looks up the already-published sweep
+        scenario for ``sweepId`` (the one ``POST /api/cdm/sweep`` put in the hub, named
+        ``f"sweep:{sweepId}"``), finds that point/draw in ITS OWN recorded
+        ``sweep["points"]``, and reads the ``productsUri`` THE SERVER ITSELF RECORDED when
+        it published that study -- never a string the HTTP caller supplied (a caller that
+        additionally sends a ``productsUri`` field in the body gets it silently ignored;
+        see ``tests/test_feasibility_join.py``'s own
+        ``test_caller_supplied_products_uri_is_never_trusted`` for the proof). A route that
+        instead read a caller-supplied path directly would be an arbitrary-local-file-read
+        primitive -- any path on the server's filesystem, readable by anyone who can reach
+        this endpoint. This route cannot be that, because the only paths it will ever open
+        are ones that were already inside a scenario THIS SAME SERVER published, at its own
+        earlier ``POST /api/cdm/sweep`` call -- the same trust boundary
+        ``GET /textures/{file}`` already draws for local file reads on this server, just
+        keyed by a study's own identity instead of a filename. No path-sanitisation is
+        layered on top of that on purpose: there is no untrusted path here to sanitise.
+        Adding one would only decorate a boundary that is not "a string pattern this
+        handler happens to accept," it is "identity resolved against this server's own
+        prior state."
+
+        **This route reads local files, so it is only meaningful for a viewer server
+        co-located with (on the same machine or shared filesystem as) the study that
+        produced the sweep it is opening a sample of.** A ``SweepResults`` bundle published
+        here after being produced elsewhere -- or a study whose sample directories were
+        since deleted -- legitimately fails the "does not exist on this host" refusal
+        below. That is not a bug to route around; it is an honest report of "this server
+        cannot see that file," the same posture ``GET /textures/{file}`` already takes
+        (404, never a fabricated texture) for a texture directory this process cannot see.
+
+        Refusals (each its own typed ``HTTPException``, each with its own test in
+        ``tests/test_feasibility_join.py``): the request body is malformed (400); no sweep
+        named ``sweepId`` has been published to this server (404); that sweep has no such
+        ``pointIndex`` (404); that point has no such ``drawIndex`` (404); the sample at that
+        point/draw failed (``error`` non-empty, so it has no run to open -- 409); the
+        directory or ``run_products.pb`` inside it does not exist on this host (404); the
+        file that does exist does not decode as an ``altavista.v1.RunProducts`` (400).
+
+        On success: converts ``<productsUri>/run_products.pb`` with the exact same
+        ``_run_products_to_scenario_data`` ``POST /api/cdm/run`` uses (one implementation
+        of "a RunProducts becomes a viewer scenario", this task's own instruction),
+        publishes and broadcasts it exactly like that route, and returns the published
+        scenario's name so the caller can ``{"type": "select", "name": ...}`` it over the
+        websocket -- the same selection path the scenario dropdown already uses.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, f"malformed JSON body: {exc}")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "expected a JSON object with sweepId/pointIndex/drawIndex")
+        sweep_id = body.get("sweepId")
+        point_index = body.get("pointIndex")
+        draw_index = body.get("drawIndex")
+        if not isinstance(sweep_id, str) or not sweep_id:
+            raise HTTPException(400, "'sweepId' must be a non-empty string")
+        # bool is a subclass of int in Python -- excluded explicitly so {"pointIndex": true}
+        # is refused as malformed rather than silently treated as point 1.
+        if not isinstance(point_index, int) or isinstance(point_index, bool):
+            raise HTTPException(400, "'pointIndex' must be an integer")
+        if not isinstance(draw_index, int) or isinstance(draw_index, bool):
+            raise HTTPException(400, "'drawIndex' must be an integer")
+
+        scenario_name = f"sweep:{sweep_id}"
+        sweep_scenario = hub.scenarios.get(scenario_name)
+        if sweep_scenario is None or (sweep_scenario.get("meta") or {}).get("sweepSource") != "SweepResults":
+            raise HTTPException(404, f"no published sweep named {sweep_id!r} (looked for scenario "
+                                      f"{scenario_name!r} in the hub -- publish it with POST /api/cdm/sweep first)")
+        sweep = sweep_scenario.get("sweep") or {}
+
+        point = next((p for p in sweep.get("points", []) if p.get("pointIndex") == point_index), None)
+        if point is None:
+            raise HTTPException(404, f"sweep {sweep_id!r} has no point {point_index}")
+        sample = next((s for s in point.get("samples", []) if s.get("drawIndex") == draw_index), None)
+        if sample is None:
+            raise HTTPException(404, f"sweep {sweep_id!r} point {point_index} has no draw {draw_index}")
+
+        # A failed sample never ran to completion, so there is nothing at a products_uri to
+        # open (crates/av-sweep/src/aggregate.rs's own "a failed sample's scores map is
+        # always empty" rule, and study.rs's finalize() never sets products_uri for one --
+        # see feasibility_panel.js's own isSampleOpenable, which this refusal mirrors on the
+        # server side). Checked BEFORE looking at productsUri (never after) so the error
+        # text always names the real cause -- "this sample failed" -- rather than a
+        # confusing "no productsUri" for a case that has a perfectly good explanation.
+        if sample.get("error"):
+            raise HTTPException(409, f"sweep {sweep_id!r} point {point_index} draw {draw_index} failed and has "
+                                      f"no run to open: {sample['error']}")
+        products_uri = sample.get("productsUri") or ""
+        if not products_uri:
+            raise HTTPException(409, f"sweep {sweep_id!r} point {point_index} draw {draw_index} recorded no "
+                                      f"productsUri (every succeeded sample has one; this looks like a "
+                                      f"malformed publish)")
+
+        # SweepSample.products_uri is the sample's DIRECTORY (verified against
+        # crates/av-sweep/src/bin/av-sweep/study.rs's finalize(), which canonicalize()s
+        # r.sample_dir -- never a file), so the real RunProducts bytes are one path segment
+        # further in. `products_uri` here came from THIS SERVER'S OWN hub state, never the
+        # request body (see this route's own docstring, "identity, never a path").
+        run_products_path = Path(products_uri) / "run_products.pb"
+        if not run_products_path.is_file():
+            raise HTTPException(
+                404, f"{run_products_path} does not exist on this host -- this route reads local files, so "
+                     f"it only works against a viewer server co-located with the study that produced "
+                     f"{sweep_id!r} (see this route's own docstring); a sweep published here after being "
+                     f"produced elsewhere legitimately fails this way")
+
+        run_products = run_pb2.RunProducts()
+        try:
+            run_products.ParseFromString(run_products_path.read_bytes())
+        except DecodeError as exc:
+            raise HTTPException(400, f"{run_products_path} does not decode as an altavista.v1.RunProducts: {exc}")
+
+        scenario_data = _run_products_to_scenario_data(run_products)
+        scenario = scenario_data.to_dict()
+        name = hub.put(scenario)
+        if hub.clock and hub.clock.get("scenario") != name:
+            hub.clock = None
+        await hub.broadcast({"type": "list", "names": hub.names()})
+        await hub.broadcast({"type": "scenario", "scenario": scenario})
+        log.info("opened feasibility sample sweep=%r point=%d draw=%d -> run %r (%d client(s))",
+                 sweep_id, point_index, draw_index, name, len(hub.clients))
         return {"ok": True, "name": name, "clients": len(hub.clients)}
 
     @app.delete("/api/scenario/{name}")
@@ -555,6 +724,248 @@ def _score_result_to_dict(sr: run_pb2.ScoreResult) -> dict:
         "value": sr.value,
         "unit": core_pb2.Unit.Name(sr.unit),
         "passed": sr.passed if sr.HasField("passed") else None,
+    }
+
+
+def _run_products_to_scenario_data(run_products: run_pb2.RunProducts) -> ScenarioData:
+    """Convert a decoded ``altavista.v1.RunProducts`` into the viewer's
+    :class:`~altavista.model.ScenarioData` -- the single, shared implementation of "a
+    RunProducts becomes a viewer scenario" (F3c, this task's own instruction: extracted out
+    of ``POST /api/cdm/run`` so ``POST /api/cdm/sweep/sample`` -- opening one sample of a
+    published feasibility study, F3's requirement -- uses the exact same conversion rather
+    than a second, potentially-divergent copy of it. ``tests/test_cdm_run.py``, unedited,
+    is this refactor's own proof: every one of its assertions about ``POST /api/cdm/run``'s
+    published scenario must still pass unchanged, since this function's body is byte-for-
+    byte what that route used to run inline.
+
+    Every effect is unchanged from before this extraction (see git history / the docstring
+    this replaced on ``POST /api/cdm/run`` for the full per-milestone rationale, still
+    accurate): ``instance_ids`` sorted for determinism (a proto map has no wire order of its
+    own); trajectories with no position class (M20.1, question 133) filtered out via
+    ``cdm_adapter.cdm_trajectory_to_viewer_json`` returning ``None``; events converted
+    unsorted (the executor already sorts them); scores (M26.4b, question 165) and
+    measurements (M25.3e, question 174) hand-built via ``_score_result_to_dict``/
+    ``_measurement_to_dict`` so an unset optional stays an explicit JSON ``null``, never
+    silently omitted; the entities frame (M17.1, question 122) derived from the first
+    trajectory (in sorted-key order) that declares a ``frame_id``, given its real
+    origin/axes from the matching declared ``FrameDefinition`` when the bundle names one;
+    bodies (M18.2, question 125) derived strictly from the origin bodies
+    ``RunProducts.frames`` actually names, via ``cdm_adapter.bodies_from_frames``, run
+    *before* frame-registry validation (a narrower check, so an unknown-body frame is
+    refused with this precise error before frame registration ever runs); every declared
+    frame (M17.1) run through the real ``altavista.frames.FrameRegistry`` via
+    ``cdm_adapter.frames_to_viewer_json``.
+
+    Raises ``fastapi.HTTPException`` (400) with the exact typed messages
+    ``POST /api/cdm/run`` always raised inline, now raised from this one place so every
+    caller gets identical refusals for identical malformed input -- ``CdmAdapterError``/
+    ``UnknownBodyError`` never leak past this function uncaught. Does NOT decode wire bytes,
+    does NOT call ``hub.put``/broadcast, and does NOT call ``.to_dict()`` -- purely the
+    ``RunProducts -> ScenarioData`` projection; each caller owns content-type dispatch (or,
+    for ``POST /api/cdm/sweep/sample``, reading the bytes off local disk), publish/
+    broadcast, and its own route-specific logging, exactly as it always did.
+    """
+    # RunProducts.trajectories is a proto map (no wire order of its own) -- iterate sorted
+    # by key (SystemInstance.id) for determinism, matching this task's own "sort explicitly"
+    # rule (crates/av-kernel's BTreeMap convention, mirrored here since this module has no
+    # BTreeMap of its own).
+    instance_ids = sorted(run_products.trajectories)
+    try:
+        # M20.1 (question 133, decided by the lead): "the viewer renders only instances
+        # whose state space has [a position class]" -- cdm_trajectory_to_viewer_json
+        # returns None for an instance with no position trajectory to render (e.g. a
+        # native controller's own non-physical state space), filtered out here rather
+        # than published as an empty/zero-filled spacecraft entry. Events are untouched:
+        # viewer_events below is built straight from run_products.events, entity-tagged
+        # independently of instance_ids/viewer_trajs, so a filtered-out instance's own
+        # lifecycle/port_command events still reach the timeline.
+        viewer_trajs = [v for k in instance_ids if (v := cdm_adapter.cdm_trajectory_to_viewer_json(run_products.trajectories[k])) is not None]
+    except cdm_adapter.CdmAdapterError as exc:
+        raise HTTPException(400, f"cannot convert RunProducts trajectory to viewer JSON: {exc}")
+    viewer_events = [cdm_adapter.cdm_event_to_viewer_event(e) for e in run_products.events]
+    # M26.4b (question 165): RunProducts.scores is a proto map (no wire order of its
+    # own) -- sorted by name for the same determinism reason instance_ids is sorted
+    # above. See _score_result_to_dict's own docstring for why this hand-builds the
+    # three keys instead of delegating to json_format.MessageToDict.
+    viewer_scores = {name: _score_result_to_dict(run_products.scores[name])
+                     for name in sorted(run_products.scores)}
+    # M25.3e (question 174): RunProducts.measurements is a repeated field the
+    # executor already sorts by (epoch, id) (question 173) -- no re-sort here, same
+    # posture as `viewer_events` above.
+    viewer_measurements = [_measurement_to_dict(m) for m in run_products.measurements]
+
+    # The entities frame (ScenarioData.frame, web/js/scene.js's _originFrameId): the
+    # first trajectory (in sorted-key order, for determinism) declaring a frame_id wins
+    # (every fixture this endpoint is exercised against today declares exactly one
+    # instance, hence one frame). Its real origin/axes come from the matching declared
+    # FrameDefinition (cdm_adapter.viewer_frame_for) when the bundle actually declares
+    # one for that id and it is a body-axes kind altavista.model.Frame can represent;
+    # otherwise this falls back to carrying frame_id through as a display name only
+    # (altavista's own Earth/MJ2000Eq Frame default), the same documented caveat
+    # POST /api/cdm/trajectory below still has for a bundle with no matching frame.
+    # Computed from the raw RunProducts.frames (not the FrameRegistry-validated
+    # scenario_data.frames set further below), so it is available before -- and
+    # independent of -- frame-registry validation.
+    frame_id = next((run_products.trajectories[k].frame_id for k in instance_ids if run_products.trajectories[k].frame_id), "")
+    frame_def = next((fd for fd in run_products.frames if fd.id == frame_id), None) if frame_id else None
+    entities_frame = (cdm_adapter.viewer_frame_for(frame_def) if frame_def is not None else None) \
+        or Frame(name=frame_id or Frame().name)
+    run_id = run_products.run_id or run_products.provenance.run_id or "run"
+    scenario_data = ScenarioData(
+        name=f"run:{run_id}",
+        frame=entities_frame,
+        spacecraft=viewer_trajs,
+        events=viewer_events,
+        scores=viewer_scores,
+        measurements=viewer_measurements,
+        meta={"configHash": run_products.provenance.config_hash, "runId": run_id,
+              # M26.4b (question 165): additive, present even when RunProducts declared
+              # no scores at all (viewer_scores == {}) -- same honest-provenance posture
+              # as bodiesSource below ("a reader of meta must be able to tell where the
+              # (possibly empty) value came from").
+              "scoresSource": "RunProducts.scores",
+              # M25.3e (question 174): same posture -- present even when
+              # viewer_measurements == [] (a run that declared no measurements).
+              "measurementsSource": "RunProducts.measurements"},
+    )
+
+    # M18.2 (question 125): the globe needs an `Earth` body entry, and the CDM
+    # ingest path had no bodies handling at all -- derive the scene's body list
+    # from the origin bodies RunProducts.frames actually names (never invented; see
+    # altavista.cdm.bodies_from_frames's own docstring for the full contract), sampled
+    # over this run's own epoch span with the existing altavista.bodies.BodySampler.
+    # Raises (400, never silently drops a body or a 500) if a frame names a body
+    # this process's GMAT solar system has no data for. Deliberately run *before*
+    # the FrameRegistry validation below: bodies_from_frames only ever needs GMAT's
+    # solar system (SolarSystem.GetBody), a much narrower check than a full
+    # CoordinateSystem construction, so an unknown-body frame is refused with this
+    # precise, typed error before frame registration ever has a chance to run.
+    try:
+        scenario_data.bodies = cdm_adapter.bodies_from_frames(
+            run_products.frames, frame=entities_frame, span=scenario_data.span())
+    except cdm_adapter.UnknownBodyError as exc:
+        raise HTTPException(400, f"cannot derive bodies from RunProducts.frames: {exc}")
+    # Additive, honest provenance note (this task's own requirement): a reader of
+    # meta must be able to tell this scenario's bodies came from the run bundle's
+    # own frames, not from a Python scenario file's Scenario.default_bodies()
+    # convenience list (which this path never calls) -- present even when the
+    # derived list is empty (RunProducts.frames named no body), since that is
+    # still an honest fact about where the (empty) list came from.
+    scenario_data.meta["bodiesSource"] = "RunProducts.frames"
+
+    # M17.1 (question 122): every FrameDefinition RunProducts.frames declares, run
+    # through the real altavista.frames.FrameRegistry (GMAT validation + question 76's
+    # parent_frame_id fill) -- the same wire shape ScenarioData.to_dict()["frames"]
+    # already carries for a Python scenario. Raises (400, never silently drops a frame
+    # or substitutes a validated one) if GMAT rejects a declared definition.
+    try:
+        scenario_data.frames = cdm_adapter.frames_to_viewer_json(run_products.frames)
+    except cdm_adapter.CdmAdapterError as exc:
+        raise HTTPException(400, f"cannot build frame list from RunProducts.frames: {exc}")
+
+    return scenario_data
+
+
+def _sweep_results_to_dict(sr: run_pb2.SweepResults) -> dict:
+    """``altavista.v1.SweepResults`` -> the ``scenario["sweep"]`` wire dict this task's
+    manager fixed (see ``POST /api/cdm/sweep``'s own docstring above for the full contract
+    text). Module-level and independently callable (not nested in the route handler) so a
+    test -- or another consumer -- can exercise this projection directly, without an HTTP
+    round trip.
+
+    ``points``: grouped by ``SweepSample.point_index`` (a distinct point exists here iff at
+    least one sample names it -- ``SweepResults`` carries no separate "the grid has N points"
+    field to iterate against, only the samples themselves), sorted ascending by point index;
+    each point's own ``samples`` sorted ascending by ``draw_index``. ``axisValues`` for a
+    point is taken from its first sample (in draw-index order) -- every draw at one grid
+    point shares the same axis values by construction (``crates/av-sweep``'s own
+    ``expand_grid``/``sample_config`` apply one point's axis values identically to every
+    draw at that point), so this is not a lossy choice among disagreeing candidates; a key
+    absent from that sample's own ``axis_values`` map is simply absent from the result --
+    never zero-filled (a proto3 ``double`` map has no way to distinguish "0.0" from
+    "unset" for a key that IS present, but a key that is simply not in the map is
+    unambiguous, and this function never invents one).
+
+    ``scores``: reuses ``_score_result_to_dict`` verbatim (this task's own instruction: "do
+    not write a second one") -- the exact same reasoning that function's own docstring gives
+    for ``ScoreResult.passed`` applies unchanged to ``ScoreAggregate.pass_fraction`` below:
+    ``google.protobuf.json_format.MessageToDict``'s default settings omit an unset
+    ``optional`` field entirely rather than emitting an explicit JSON ``null``, so
+    ``pass_fraction`` is read through ``HasField`` here, not through a bare ``a.pass_fraction
+    or None`` (which would wrongly turn a real, measured ``0.0`` pass fraction into
+    ``null``).
+
+    ``seeds``: ``SweepSample.seeds`` is ``map<string, uint64>``; Python's protobuf runtime
+    exposes each value as a plain ``int``, so it is stringified here (``str(v)``) to match
+    proto3 canonical JSON's own uint64-as-decimal-string convention (a bare JSON number
+    cannot represent the full uint64 range without precision loss in every mainstream JSON
+    parser, JavaScript's included) -- the same convention
+    ``tests/test_sweep_results_json.py`` independently verifies for the Rust-side JSON
+    encoder's own ``seeds`` output.
+
+    Every map-derived list is sorted explicitly (``axisKeys``, ``scoreNames``, each sample's
+    own ``scores``/``seeds`` keys, ``aggregates`` by ``(name, pointIndex)``) -- a proto
+    ``map`` has no wire order of its own, matching this module's existing convention
+    (``POST /api/cdm/run``'s own ``instance_ids = sorted(...)`` above).
+
+    Nothing is ever synthesized: a study with no aggregates returns ``"aggregates": []``; a
+    failed sample's ``scores``/``seeds`` are published exactly as recorded (empty, per
+    ``crates/av-sweep``'s own "a failed sample never got far enough to derive any seeds"
+    rule) rather than backfilled with a placeholder.
+    """
+    axis_keys = sorted({k for s in sr.samples for k in s.axis_values.keys()})
+    score_names = sorted({a.name for a in sr.aggregates})
+
+    samples_by_point: Dict[int, List] = {}
+    for s in sr.samples:
+        samples_by_point.setdefault(s.point_index, []).append(s)
+
+    points = []
+    for point_index in sorted(samples_by_point):
+        samples = sorted(samples_by_point[point_index], key=lambda s: s.draw_index)
+        points.append({
+            "pointIndex": point_index,
+            # See this function's own docstring: every draw at one point shares the same
+            # axis values by construction, so the first (in draw-index order) is authoritative.
+            "axisValues": dict(samples[0].axis_values),
+            "samples": [
+                {
+                    "drawIndex": s.draw_index,
+                    "runId": s.run_id,
+                    "configHash": s.config_hash,
+                    "seeds": {k: str(s.seeds[k]) for k in sorted(s.seeds)},
+                    "scores": {name: _score_result_to_dict(s.scores[name]) for name in sorted(s.scores)},
+                    "productsUri": s.products_uri,
+                    "error": s.error,
+                }
+                for s in samples
+            ],
+        })
+
+    aggregates = [
+        {
+            "name": a.name,
+            "pointIndex": a.point_index,
+            "draws": a.draws,
+            "mean": a.mean,
+            "stdDev": a.std_dev,
+            "min": a.min,
+            "max": a.max,
+            # Question 165's same rule, restated for ScoreAggregate: HasField, never `or
+            # None` (a real, measured pass_fraction of 0.0 must stay 0.0, not become null).
+            "passFraction": a.pass_fraction if a.HasField("pass_fraction") else None,
+        }
+        for a in sorted(sr.aggregates, key=lambda a: (a.name, a.point_index))
+    ]
+
+    return {
+        "sweepId": sr.sweep_id,
+        "sweepHash": sr.sweep_hash,
+        "drmHash": sr.drm_hash,
+        "axisKeys": axis_keys,
+        "scoreNames": score_names,
+        "points": points,
+        "aggregates": aggregates,
     }
 
 

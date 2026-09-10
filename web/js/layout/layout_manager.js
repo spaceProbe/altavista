@@ -21,7 +21,7 @@ import { loadLayout, saveLayout, exportLayoutJson, importLayoutJson, DEFAULT_STO
 import {
   defaultLayoutForImagery, defaultLayoutForScenario, attachM264Panels,
   ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID,
-  RUN_PRODUCTS_PANEL_ID, MAP_PANEL_ID, CONSOLE_PANEL_ID,
+  RUN_PRODUCTS_PANEL_ID, MAP_PANEL_ID, CONSOLE_PANEL_ID, FEASIBILITY_PANEL_ID,
   REGISTERED_PANEL_TYPES, availablePanelChoices,
 } from './default_layouts.js';
 
@@ -47,6 +47,11 @@ const PANEL_TITLES = {
   [RUN_PRODUCTS_PANEL_ID]: 'Run Products & Scores',
   [MAP_PANEL_ID]: '2D Map',
   [CONSOLE_PANEL_ID]: 'Console / Log',
+  // F3b (docs/feasibility-plan.md's F3 milestone): pane-chooser-only (see
+  // default_layouts.js's own comment on FEASIBILITY_PANEL_ID for why it is not in
+  // attachM264Panels' default tree) -- still needs a title here so a pane the user
+  // assigns it to shows a real label, not the raw panelId string.
+  [FEASIBILITY_PANEL_ID]: 'Feasibility Study',
 };
 
 // M26.5 (question 167): REGISTERED_PANEL_TYPES/availablePanelChoices now live in

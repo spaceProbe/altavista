@@ -234,3 +234,55 @@ button:hover { border-color: var(--accent); }
 .av-console-provenance dt { color: var(--muted); float: left; clear: left; width: 90px; }
 .av-console-provenance dd { margin-left: 96px; word-break: break-all; }
 .av-console-log { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow: auto; font-family: monospace; font-size: 11px; display: flex; flex-direction: column; gap: 1px; }
+
+/* F3b feasibility panel (docs/feasibility-plan.md's F3 milestone,
+   web/js/panels/feasibility_panel.js). Colour lives here, not as computed inline style
+   strings in JS -- feasibility_panel.js's own `render()` doc comment explains why this
+   follows the rest of this file's existing convention (.av-pass/.av-fail/.av-measure,
+   .av-timeline-event-fault/-port_command are all discrete classes, not computed inline
+   styles): `heatBucket()` maps a continuous [0,1] colour position to one of 7 discrete
+   `av-heat-<n>` classes (0 = lowest mean across points, 6 = highest), plus the `none`
+   sentinel below for "no aggregate at all" (never folded into bucket 0). A diverging
+   blue (low) -> neutral grey (mid) -> orange (high) ramp -- deliberately varying
+   LIGHTNESS and SATURATION together with hue (darker+more saturated at both extremes,
+   lighter+greyer at the midpoint), not a pure hue sweep at constant lightness: the
+   brief's own requirement ("does not encode magnitude as hue alone"). Every cell also
+   prints its exact mean as text (feasibility_panel.js's `buildGridSection`), so colour
+   is never the ONLY channel carrying the value either -- a colourblind viewer, or
+   anyone on a display that renders these hues close together, still reads the real
+   number. */
+.av-feasibility-header { display: flex; flex-direction: column; gap: 4px; }
+.av-feasibility-score-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.av-feasibility-score-select { font-size: 11px; }
+.av-feasibility-grid { border-collapse: collapse; font-size: 11px; }
+.av-feasibility-grid th { font-weight: 400; color: var(--muted); padding: 3px 6px; text-align: left; white-space: nowrap; }
+.av-feasibility-grid td { border: 1px solid var(--border); }
+.av-heat-cell { padding: 6px 10px; text-align: center; cursor: pointer; color: #f4f7fb; white-space: nowrap; min-width: 64px; }
+.av-heat-cell:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+.av-heat-selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Bucket 0 (lowest measured mean) -> bucket 6 (highest): dark saturated blue through
+   light neutral grey to dark saturated orange -- see this section's own top comment for
+   the "not hue alone" rationale. */
+.av-heat-0 { background: hsl(210, 70%, 28%); }
+.av-heat-1 { background: hsl(213, 55%, 34%); }
+.av-heat-2 { background: hsl(216, 35%, 40%); }
+.av-heat-3 { background: hsl(210, 8%, 46%); }
+.av-heat-4 { background: hsl(30, 35%, 40%); }
+.av-heat-5 { background: hsl(26, 55%, 34%); }
+.av-heat-6 { background: hsl(22, 70%, 28%); }
+/* Sentinel: no aggregate for this (point, score) at all -- e.g. every draw at that point
+   failed. Deliberately NOT any of the 7 colour buckets above (never mistaken for a real,
+   measured low value): a hatched pattern plus muted colour plus its own text ("no
+   data"), three independent signals none of which is colour-alone. */
+.av-heat-none {
+  background: repeating-linear-gradient(45deg, var(--panel-2), var(--panel-2) 4px, var(--border) 4px, var(--border) 8px);
+  color: var(--muted); font-style: italic; cursor: default;
+}
+.av-heat-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.av-feasibility-flat-grid { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.av-feasibility-flat-grid li { padding: 3px 4px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.av-feasibility-flat-grid li:hover { background: var(--panel-2); }
+.av-feasibility-flat-grid li.av-heat-selected { outline: 1px solid var(--accent); }
+.av-feasibility-draws td { vertical-align: middle; }
+.av-feasibility-open { font-size: 11px; }
+.av-feasibility-unopenable { display: inline-block; }
