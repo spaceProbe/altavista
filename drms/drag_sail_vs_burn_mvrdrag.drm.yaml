@@ -1,0 +1,92 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- round 3, F5.3
+# (question 195's second follow-up). A NEW file: a byte-for-byte copy of
+# `drms/drag_sail_vs_burn.drm.yaml` (F4, PINNED, untouched by this task) except for a new
+# `id`/`name` and `sos_configuration_id` pointed at the new
+# `drms/demo_two_instance_drag.sos.yaml` (this task's own new `SosConfiguration`, which adds
+# `force_model.drag_model`/its three weather-source companions to `demo_mvr` -- see that file's
+# own header comment). Every other field -- `scenario.start_tai_ns`/`end_tai_ns`, `frames`,
+# `fault1`, `burn1` (including its `execution_error` Gates sigmas and `seed: burn_seed`),
+# `scenario.seeds`, `measures`, and `options` -- is unchanged, character for character, from
+# `drms/drag_sail_vs_burn.drm.yaml`, so this grid is directly comparable to both round-2 grids
+# (`drag_sail_vs_burn`/"mvr" and `drag_sail_vs_burn_flt`/"flt"): same epochs, same fault, same
+# commanded burn, same Gates sigmas, same seed key.
+#
+# **Why a new DRM at all, rather than pointing the existing `drag_sail_vs_burn.drm.yaml` at the
+# new SOS.** `drms/drag_sail_vs_burn.drm.yaml` is a pinned, hash-committed file this task's own
+# hard boundary forbids editing, and its own `hash:` covers the full canonical message
+# including `sos_configuration_id` -- repointing it in place would both violate the pinned-file
+# boundary and silently invalidate round 2's own committed hash/reproduction commands. A new
+# `id` here is required for the identical reason the F4 DRM's own header states for itself: "a
+# new `id`/`hash` because this is this study's own top-level artifact, not an edit to the
+# pinned F1b/F2b fixture" -- applied one level further down this task's own chain.
+#
+# Gates execution_error sigmas (question 100's model; ManeuverExecutionError, core.proto):
+# sigma_magnitude_fixed_mps=0.01, sigma_magnitude_proportional=0.02,
+# sigma_pointing_fixed_mps=0.01, sigma_pointing_proportional_rad=0.002 -- unchanged from
+# `drag_sail_vs_burn.drm.yaml`, so draw-to-draw dispersion stays directly comparable across all
+# three grids sharing this scenario shape.
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -q -p av-kernel --example drm_hash -- drm drms/drag_sail_vs_burn_mvrdrag.drm.yaml
+id: drag_sail_vs_burn_mvrdrag_drm
+version: "1"
+name: Drag-sail area vs burn magnitude (round 3, F5.3) -- drag now on BOTH instances, both axes on demo_mvr
+sos_configuration_id: demo_two_instance_drag_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  frames:
+    - id: EarthICRF
+      body: Earth
+      axes: AXES_KIND_ICRF
+      description: "International Celestial Reference Frame (ICRF): an inertial frame whose axes are fixed to distant quasar positions, origin at Earth's centre of mass."
+  faults:
+    - id: fault1
+      tai_ns: 1767227437000000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: demo_flt
+      target: force_model.gravity_order
+      kind: parameter
+      params:
+        value: 0.0
+  events:
+    - id: burn1
+      tai_ns: 1767231037000000000
+      kind: maneuver
+      instance: demo_mvr
+      values:
+        dv_x: 20.0
+        dv_y: 0.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_VNB
+      execution_error:
+        sigma_magnitude_fixed_mps: 0.01
+        sigma_magnitude_proportional: 0.02
+        sigma_pointing_fixed_mps: 0.01
+        sigma_pointing_proportional_rad: 0.002
+        seed: burn_seed
+  seeds:
+    burn_seed: 1
+measures:
+  - name: demo_flt_rmag_at_end
+    expression: "output.demo_flt.rmag@end"
+    unit: UNIT_METER
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+  - name: demo_mvr_rmag_at_end
+    expression: "output.demo_mvr.rmag@end"
+    unit: UNIT_METER
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "round 3 F5.3 drag-sail-vs-burn (mvrdrag) study authoring"
+hash: "96ffcc267f811079406f3a8c8beb9ed9fda4941fe1f75a76e7373a0d947e4e80"
