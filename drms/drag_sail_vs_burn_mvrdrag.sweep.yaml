@@ -1,0 +1,70 @@
+# ParameterSweep (proto/altavista/v1/system.proto), YAML transcoding -- round 3, F5.3
+# (question 195's second follow-up, third grid over this study's own scenario shape). Emitted
+# by altavista.feasibility (NOT hand-written -- altavista/feasibility/study_drag_sail_vs_burn.py's
+# own build_grid_mvrdrag()/emit_sweep_yaml() call wrote this file and computed `hash:` below
+# through the package, which shells out to the same `cargo run -p av-sweep --example
+# sweep_hash` the first two grids' own sweep.yaml headers name). This header comment is a pure
+# text prepend added AFTER emission (altavista/feasibility/yaml_io.to_yaml has no
+# header-comment field to author through -- the same disclosed gap the first two grids' own
+# headers already name, still not silently patched around here). A YAML comment is never part
+# of the parsed message, so prepending it does not change `hash:` below -- reverified with the
+# same `cargo run -q -p av-sweep --example sweep_hash` command after this edit (see
+# docs/studies/drag-sail-vs-burn.md's own "Hashes and reproduction" section for both the
+# before- and after-prepend digests).
+#
+# The study (third grid, round 3 F5.3): 2 (demo_mvr.spacecraft.DragArea: 5.0, 25.0 m^2) x 3
+# (event burn1's dv_x: 10.0, 20.0, 30.0 m/s) = 6 points x 3 monte_carlo_draws = 18 samples --
+# the IDENTICAL axis shape and values as grid "mvr" (F4, `drms/drag_sail_vs_burn.sweep.yaml`),
+# but run against a NEW DRM (`drms/drag_sail_vs_burn_mvrdrag.drm.yaml`) whose
+# `sos_configuration_id` points at a NEW SOS (`drms/demo_two_instance_drag.sos.yaml`) that
+# gives `demo_mvr` a real `DragForce` too -- closing the gap
+# `docs/feasibility-plan.md`'s own "Open for the lead" paragraph named after round 2 ("a study
+# that genuinely varies drag on the manoeuvring vehicle needs a new SosConfiguration enabling
+# drag on demo_mvr").
+#
+# DragArea axis values (5.0, 25.0) and dv_x axis values (10.0, 20.0, 30.0) are IDENTICAL to
+# both round-2 grids' own values, chosen for direct apples-to-apples comparability against
+# grid "mvr"'s own null DragArea result and grid "flt"'s own real DragArea-on-demo_flt result,
+# not to make a figure look better. `dispersed: true` and `monte_carlo_draws: 3` match both
+# round-2 grids exactly.
+#
+# HYPOTHESIS (written before running; docs/studies/drag-sail-vs-burn.md records the measured
+# values against this, and altavista/feasibility/study_drag_sail_vs_burn.py's own module
+# docstring, "Grid \"mvrdrag\"" section, has the full writeup with arithmetic for all four
+# axis-to-score pairs this grid measures):
+# - demo_mvr_rmag_at_end vs. DragArea (direct, now a real DragForce on demo_mvr): a
+#   time-integrated-Cd*A scaling argument against grid "flt"'s own measured -97.980581 m
+#   direct DragArea effect on demo_flt predicted roughly -6.7 m (order 0.5-20 m, the manager's
+#   own bracket). NOT exactly zero -- the qualitative point of this whole task.
+# - demo_flt_rmag_at_end vs. DragArea-on-demo_mvr (indirect, via the controller's range-latch
+#   timing): predicted either exactly zero (bit-for-bit identical, if the latch crossing lands
+#   on the identical 0.1 s tick at both DragArea values) or a shift of the same small order
+#   round 2's own F4b document already measured for this same crossing under a different
+#   perturbation (draw-to-draw burn dispersion): 0.04-2.07 m.
+# - demo_mvr_rmag_at_end vs. dv_x (direct): predicted to closely reproduce grid "mvr"'s own
+#   ~2.6 km/(m/s) slope, but with every value shifted systematically LOWER than grid "mvr"'s
+#   own (no-drag) values at the same dv_x, since demo_mvr now decays under real drag for the
+#   entire run.
+# - Wall time: primary estimate ~100 s (18 samples at a conservative 1.3x over grid "mvr"'s
+#   own measured 4.25 s/sample), conservative upper bound ~271 s -- both comfortably inside
+#   the 900 s (15 min) budget.
+id: drag_sail_vs_burn_mvrdrag
+drm_id: drag_sail_vs_burn_mvrdrag_drm
+axes:
+- instance: demo_mvr
+  parameter: spacecraft.DragArea
+  values:
+  - 5.0
+  - 25.0
+- values:
+  - 10.0
+  - 20.0
+  - 30.0
+  event_id: burn1
+  value_key: dv_x
+monte_carlo_draws: 3
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: round 3 F5.3 drag-sail-vs-burn (mvrdrag) study authoring
+hash: b73925d87aba86d002bbbb449182c0bf46a90cc4bb3fbefcaa68ec20eeecb939
+dispersed: true

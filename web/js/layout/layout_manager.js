@@ -19,7 +19,7 @@ import {
 } from './split_tree.js';
 import { loadLayout, saveLayout, exportLayoutJson, importLayoutJson, DEFAULT_STORAGE_KEY } from './persistence.js';
 import {
-  defaultLayoutForImagery, defaultLayoutForScenario, attachM264Panels,
+  defaultLayoutTreeForScenario,
   ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID,
   RUN_PRODUCTS_PANEL_ID, MAP_PANEL_ID, CONSOLE_PANEL_ID, FEASIBILITY_PANEL_ID,
   REGISTERED_PANEL_TYPES, availablePanelChoices,
@@ -99,11 +99,16 @@ export class LayoutManager {
     const { tree, error, source } = loadLayout({
       storage: this.storage,
       key: this.storageKey,
-      // M26.4: attachM264Panels() adds the run-products/map/console panes to whatever
-      // defaultLayoutForImagery() returns -- see default_layouts.js's own module
-      // comment on why this wrapping happens here (LayoutManager) rather than inside
-      // default_layouts.js's own default-selection functions.
-      defaultFactory: () => attachM264Panels(defaultLayoutForImagery(imagery)),
+      // M26.4/F5.1: defaultLayoutTreeForScenario() is the one shared default-layout
+      // entry point (default_layouts.js's own module comment on why). The constructor
+      // has no real scenario yet, only whatever `imagery` opts handed it (today,
+      // always null -- see web/js/layout_bootstrap.js), so this degrades to exactly
+      // what attachM264Panels(defaultLayoutForImagery(imagery)) computed before this
+      // task: a synthetic `{ imagery }` object has no `sweep`/`frames` key, so
+      // hasSweep()/hasRicFrame() are both false and defaultLayoutTreeForScenario falls
+      // straight through to attachM264Panels(defaultLayoutForScenario({ imagery })),
+      // which itself reduces to attachM264Panels(defaultLayoutForImagery(imagery)).
+      defaultFactory: () => defaultLayoutTreeForScenario({ imagery }),
     });
     this.tree = tree;
     // Question 161's "default layout per profile": at construction time (page load,
@@ -130,7 +135,7 @@ export class LayoutManager {
   // site was updated to pass the whole scenario object instead of just `sc.imagery`.
   applyDefaultForScenario(sc) {
     if (this._userHasCustomized) return;
-    this.tree = attachM264Panels(defaultLayoutForScenario(sc));
+    this.tree = defaultLayoutTreeForScenario(sc);
     this.render();
   }
 
@@ -170,7 +175,7 @@ export class LayoutManager {
   // layout" button was updated to pass `window.altavistaCurrentScenario` directly.
   resetToDefault(sc) {
     this._userHasCustomized = false;
-    this._apply(attachM264Panels(defaultLayoutForScenario(sc)));
+    this._apply(defaultLayoutTreeForScenario(sc));
     this._userHasCustomized = false; // resetting to default is not "customizing" it
   }
 

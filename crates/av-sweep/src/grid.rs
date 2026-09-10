@@ -209,14 +209,19 @@ pub fn expand_grid(sweep: &pb::ParameterSweep) -> Result<Vec<GridPoint>, SweepEr
     // One Vec<f64> of concrete values per declared axis, in declaration order.
     let mut axis_value_lists: Vec<(&pb::SweepAxis, Vec<f64>)> = Vec::with_capacity(sweep.axes.len());
     for axis in &sweep.axes {
+        // `validate_axis_target(axis)` already ran, above, for every axis in `sweep.axes`
+        // (including this one) before this loop starts -- so by this point `axis` is known to
+        // have exactly one well-formed target, and `axis_target(axis)` below is safe to call
+        // unconditionally: it just picks the one branch `validate_axis_target` already proved
+        // consistent, per its own doc comment.
         let values = if !axis.values.is_empty() {
             if axis.min != 0.0 || axis.max != 0.0 || axis.steps != 0 {
-                return Err(SweepError::AmbiguousAxisDeclaration { instance: axis.instance.clone(), parameter: axis.parameter.clone() });
+                return Err(SweepError::AmbiguousAxisDeclaration { target: axis_target(axis).key() });
             }
             axis.values.clone()
         } else {
             if axis.steps < 2 {
-                return Err(SweepError::AxisStepsBelowMinimum { instance: axis.instance.clone(), parameter: axis.parameter.clone(), steps: axis.steps });
+                return Err(SweepError::AxisStepsBelowMinimum { target: axis_target(axis).key(), steps: axis.steps });
             }
             // `!(axis.max > axis.min)` is refused by clippy's `neg_cmp_op_on_partial_ord`
             // (`f64` is only `PartialOrd`, not `Ord` -- NaN makes it incomparable, and the lint
@@ -224,7 +229,7 @@ pub fn expand_grid(sweep: &pb::ParameterSweep) -> Result<Vec<GridPoint>, SweepEr
             // `partial_cmp` instead, which also correctly refuses a NaN `min`/`max` (its
             // `partial_cmp` is `None`, so this is never `Some(Greater)` either).
             if axis.max.partial_cmp(&axis.min) != Some(std::cmp::Ordering::Greater) {
-                return Err(SweepError::AxisRangeNotIncreasing { instance: axis.instance.clone(), parameter: axis.parameter.clone(), min: axis.min, max: axis.max });
+                return Err(SweepError::AxisRangeNotIncreasing { target: axis_target(axis).key(), min: axis.min, max: axis.max });
             }
             let steps = axis.steps;
             let span = axis.max - axis.min;
@@ -335,14 +340,16 @@ mod tests {
     fn refuses_values_and_a_range_declared_together() {
         let sweep = pb::ParameterSweep { axes: vec![pb::SweepAxis { values: vec![1.0], min: 0.0, max: 5.0, steps: 3, ..axis("leo", "cd") }], ..Default::default() };
         let err = expand_grid(&sweep).unwrap_err();
-        assert!(matches!(err, SweepError::AmbiguousAxisDeclaration { ref instance, ref parameter } if instance == "leo" && parameter == "cd"), "{err:?}");
+        assert!(matches!(err, SweepError::AmbiguousAxisDeclaration { ref target } if target == "leo.cd"), "{err:?}");
+        assert!(err.to_string().contains("axis on leo.cd:"), "{err}");
     }
 
     #[test]
     fn refuses_steps_below_two() {
         let sweep = pb::ParameterSweep { axes: vec![pb::SweepAxis { min: 0.0, max: 5.0, steps: 1, ..axis("leo", "cd") }], ..Default::default() };
         let err = expand_grid(&sweep).unwrap_err();
-        assert!(matches!(err, SweepError::AxisStepsBelowMinimum { steps: 1, .. }), "{err:?}");
+        assert!(matches!(err, SweepError::AxisStepsBelowMinimum { ref target, steps: 1 } if target == "leo.cd"), "{err:?}");
+        assert!(err.to_string().contains("axis on leo.cd:"), "{err}");
 
         // An axis declaring neither `values` nor a usable range (everything left at its proto3
         // zero default) is the same refusal: steps defaults to 0, which is < 2.
@@ -355,7 +362,8 @@ mod tests {
     fn refuses_a_max_not_greater_than_min() {
         let sweep = pb::ParameterSweep { axes: vec![pb::SweepAxis { min: 5.0, max: 5.0, steps: 3, ..axis("leo", "cd") }], ..Default::default() };
         let err = expand_grid(&sweep).unwrap_err();
-        assert!(matches!(err, SweepError::AxisRangeNotIncreasing { min, max, .. } if min == 5.0 && max == 5.0), "{err:?}");
+        assert!(matches!(err, SweepError::AxisRangeNotIncreasing { ref target, min, max } if target == "leo.cd" && min == 5.0 && max == 5.0), "{err:?}");
+        assert!(err.to_string().contains("axis on leo.cd:"), "{err}");
 
         let inverted = pb::ParameterSweep { axes: vec![pb::SweepAxis { min: 5.0, max: 1.0, steps: 3, ..axis("leo", "cd") }], ..Default::default() };
         assert!(matches!(expand_grid(&inverted).unwrap_err(), SweepError::AxisRangeNotIncreasing { .. }));
@@ -446,6 +454,51 @@ mod tests {
                 if instance == "leo" && parameter.is_empty() && event_id == "burn1" && value_key == "dv_x"),
             "{err2:?}"
         );
+    }
+
+    /// Question 195 follow-up: `AmbiguousAxisDeclaration`'s message must name an EVENT axis'
+    /// real target too, not the empty `instance`/`parameter` it doesn't have. A test that only
+    /// `matches!`-checked the variant shape would still pass against the unfixed implementation
+    /// (which always raised with `axis.instance.clone()`/`axis.parameter.clone()`, both empty
+    /// strings for an event axis) -- asserting on the rendered `Display` string is the only way
+    /// to actually pin "the message names the real cause".
+    #[test]
+    fn ambiguous_axis_declaration_names_an_event_target() {
+        let sweep = pb::ParameterSweep {
+            axes: vec![pb::SweepAxis { values: vec![1.0], min: 0.0, max: 5.0, steps: 3, ..event_axis("burn1", "dv_x") }],
+            ..Default::default()
+        };
+        let err = expand_grid(&sweep).unwrap_err();
+        assert!(matches!(err, SweepError::AmbiguousAxisDeclaration { ref target } if target == "event:burn1.dv_x"), "{err:?}");
+        let rendered = err.to_string();
+        assert!(rendered.contains("event:burn1.dv_x"), "message must name the event target: {rendered}");
+        assert!(!rendered.contains("axis on ."), "message must not fall back to the empty-target artefact: {rendered}");
+    }
+
+    /// Question 195 follow-up: `AxisStepsBelowMinimum` on an event axis -- see
+    /// `ambiguous_axis_declaration_names_an_event_target`'s doc comment for why the assertion
+    /// must be on the rendered message, not only the variant shape.
+    #[test]
+    fn axis_steps_below_minimum_names_an_event_target() {
+        let sweep = pb::ParameterSweep { axes: vec![pb::SweepAxis { min: 0.0, max: 5.0, steps: 1, ..event_axis("burn1", "dv_x") }], ..Default::default() };
+        let err = expand_grid(&sweep).unwrap_err();
+        assert!(matches!(err, SweepError::AxisStepsBelowMinimum { ref target, steps: 1 } if target == "event:burn1.dv_x"), "{err:?}");
+        let rendered = err.to_string();
+        assert!(rendered.contains("event:burn1.dv_x"), "message must name the event target: {rendered}");
+        assert!(!rendered.contains("axis on ."), "message must not fall back to the empty-target artefact: {rendered}");
+    }
+
+    /// Question 195 follow-up: `AxisRangeNotIncreasing` on an event axis -- see
+    /// `ambiguous_axis_declaration_names_an_event_target`'s doc comment for why the assertion
+    /// must be on the rendered message, not only the variant shape.
+    #[test]
+    fn axis_range_not_increasing_names_an_event_target() {
+        let sweep = pb::ParameterSweep { axes: vec![pb::SweepAxis { min: 5.0, max: 5.0, steps: 3, ..event_axis("burn1", "dv_x") }], ..Default::default() };
+        let err = expand_grid(&sweep).unwrap_err();
+        assert!(matches!(err, SweepError::AxisRangeNotIncreasing { ref target, min, max } if target == "event:burn1.dv_x" && min == 5.0 && max == 5.0), "{err:?}");
+        let rendered = err.to_string();
+        assert!(rendered.contains("event:burn1.dv_x"), "message must name the event target: {rendered}");
+        assert!(!rendered.contains("axis on ."), "message must not fall back to the empty-target artefact: {rendered}");
     }
 
     /// An event axis (`event_id` + `value_key`) expands exactly like a parameter axis over its

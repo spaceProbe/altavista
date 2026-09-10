@@ -162,18 +162,26 @@ export const MAP_PANEL_ID = 'map-2d';
 export const CONSOLE_PANEL_ID = 'console-log';
 // F3b (docs/feasibility-plan.md's F3 milestone): the feasibility-study panel
 // (web/js/panels/feasibility_panel.js) -- registered below in REGISTERED_PANEL_TYPES
-// (reachable through the M26.5 pane chooser/header-menu, question 167) but DELIBERATELY
-// NOT added to attachM264Panels()'s own default tree. Two reasons: (1) attachM264Panels'
-// exact output shape ("exactly 5 leaves" / "exactly 7 leaves") is asserted by name in
-// web/js/panels_check.mjs's own "attachM264Panels:" checks and this task's brief says
-// those must stay green UNTOUCHED -- adding a 4th default panel there would change that
-// shape; (2) unlike run-products/map/console, which are meaningful (if possibly empty)
-// for every scenario a server publishes, a feasibility study is the EXCEPTION, not the
-// rule -- most scenarios have no `sweep` key at all (this panel's own render() shows an
-// honest "no study in this scenario" notice for exactly that case), so showing it by
-// default in every layout would mean most users see a permanently-empty pane most of
-// the time. The chooser already exists precisely for "a panel a user wants sometimes,
-// not always" (question 167's own stated purpose) -- this is that case.
+// (reachable through the M26.5 pane chooser/header-menu, question 167). NOT added to
+// attachM264Panels()'s own default tree: attachM264Panels' exact output shape ("exactly
+// 5 leaves" / "exactly 7 leaves") is asserted by name in web/js/panels_check.mjs's own
+// "attachM264Panels:" checks, and those must stay green UNTOUCHED -- adding a 4th
+// default panel there would change that shape. Most scenarios have no `sweep` key at
+// all (this panel's own render() shows an honest "no study in this scenario" notice for
+// exactly that case), so it is still not part of the ORDINARY default
+// (`defaultLayoutForScenario`/`attachM264Panels`, unchanged by F5.1 below) -- showing it
+// by default in EVERY layout would mean most users see a permanently-empty pane most of
+// the time, and the chooser already exists precisely for "a panel a user wants
+// sometimes, not always" (question 167's own stated purpose).
+//
+// F5.1 (question 197) supersedes the other half of this reasoning for the one case
+// where a feasibility study genuinely IS the point of the scenario: see
+// `hasSweep`/`buildSweepStudyLayout`/`defaultLayoutTreeForScenario` below, the sweep-
+// specific sibling of `hasRicFrame`/`buildRpoTripleViewportLayout`/
+// `defaultLayoutForScenario` above. A sweep-carrying, still-unmodified layout now
+// defaults to a tree that DOES include this panel, at its wide/primary share -- the
+// "permanently-empty pane" argument does not apply there, since a sweep-carrying
+// scenario's whole reason for existing is the study this panel shows.
 export const FEASIBILITY_PANEL_ID = 'feasibility';
 
 /**
@@ -258,4 +266,78 @@ export function attachM264Panels(tree) {
     ],
     { id: 'split-m264-outer' },
   );
+}
+
+// ------------------------------------------------------- F5.1: sweep default layout
+// "When the selected scenario carries a `sweep` key ... and the layout is unmodified,
+// the default layout is a sweep-shaped one: sidebar, the feasibility panel given the
+// wide/primary share, run products, and console" (question 197's own required text).
+// `hasSweep` mirrors `hasRicFrame` above exactly: real data the server already sends
+// (`scenario.sweep`, published by `POST /api/cdm/sweep` -- see web/js/panels/
+// feasibility_panel.js's own top comment for the wire shape), not a new field and not
+// a guess. A scenario published by any OTHER route has no `sweep` key at all (that
+// panel's own module comment, same posture `gridRows`/`scoreNames` there already take
+// on a malformed/absent sweep) -- `hasSweep` only checks for the key's presence, it
+// does not validate the sweep's own internal shape (that is `feasibility_panel.js`'s
+// job, at render time, not this module's).
+export function hasSweep(sc) {
+  return !!(sc && sc.sweep && typeof sc.sweep === 'object');
+}
+
+// Deliberately NOT wrapped by `attachM264Panels` (unlike the ordinary/RPO cases,
+// which both feed into it via `defaultLayoutTreeForScenario` below) -- a sweep-shaped
+// default replaces the map panel with the feasibility panel entirely rather than
+// adding a 5th/7th leaf on top of the M26.4 three-panel set: the brief's own required
+// shape is exactly "sidebar, the feasibility panel ..., run products, and console" --
+// four leaves, no 2D map. (A user who wants the map back for a sweep scenario can
+// still reach it through the M26.5 pane chooser/header-menu, same as any other
+// registered panel type -- see `REGISTERED_PANEL_TYPES` above.)
+export function buildSweepStudyLayout() {
+  return createSplit(
+    'row',
+    0.22,
+    [
+      createLeaf('sidebar', { id: 'pane-sidebar' }),
+      createSplit(
+        'row',
+        0.7, // feasibility gets the wide/primary share, matching attachM264Panels' own 0.7 for its own "main content" side
+        [
+          createLeaf(FEASIBILITY_PANEL_ID, { id: 'pane-feasibility' }),
+          createSplit(
+            'column',
+            0.5,
+            [
+              createLeaf(RUN_PRODUCTS_PANEL_ID, { id: 'pane-run-products' }),
+              createLeaf(CONSOLE_PANEL_ID, { id: 'pane-console-log' }),
+            ],
+            { id: 'split-sweep-run-products-console' },
+          ),
+        ],
+        { id: 'split-sweep-feasibility-rest' },
+      ),
+    ],
+    { id: 'split-sweep-sidebar-rest' },
+  );
+}
+
+/**
+ * The one real default-layout entry point `web/js/layout/layout_manager.js` calls (its
+ * `applyDefaultForScenario`/`resetToDefault`/constructor's `defaultFactory`, all three --
+ * see that module's own comment on why a single shared function rather than three
+ * separate call sites each re-deciding the same branch). Selects `buildSweepStudyLayout()`
+ * first when the scenario carries a `sweep` key (`hasSweep`, above) -- deliberately
+ * BEFORE the RIC-frame/imagery dispatch `defaultLayoutForScenario` already does, so a
+ * sweep-carrying scenario always gets the sweep layout even in the (today, never
+ * actually occurring on any real publish route) case where it also happened to declare
+ * a RIC frame; falls back to exactly `attachM264Panels(defaultLayoutForScenario(sc))`
+ * for every other scenario -- BYTE-IDENTICAL to what `layout_manager.js` computed
+ * before this task, so `defaultLayoutForScenario`'s and `attachM264Panels`' own asserted
+ * output shapes (web/js/viewport_check.mjs, web/js/panels_check.mjs) are untouched.
+ * `sc` may be `null` (no scenario loaded yet); `hasSweep(null)` is `false`, so this
+ * degrades to the same pre-F5.1 default in that case too.
+ * @param {object|null} sc a wire scenario object (or null)
+ */
+export function defaultLayoutTreeForScenario(sc) {
+  if (hasSweep(sc)) return buildSweepStudyLayout();
+  return attachM264Panels(defaultLayoutForScenario(sc));
 }

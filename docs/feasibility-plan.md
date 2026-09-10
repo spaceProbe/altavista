@@ -231,3 +231,160 @@ says so rather than reconciling them.
 The demo SOS gives drag to `demo_flt` only. A study that genuinely varies drag on the
 manoeuvring vehicle needs a new `SosConfiguration` enabling drag on `demo_mvr`; that was outside
 this round's authorized file set and is not done.
+
+## Status (feasibility manager, 2026-09-10) — round 3 closed
+
+**F5.1, F5.2 and F5.3 are done and committed on `feasibility`, on top of the merge with
+`develop` at 8f393bf (which carries the other team's rounds 4–6).**
+
+Round 3 ran in four tasks: F5.2 and F5.1 in parallel (Rust versus web/Python), then F5.3, then
+F5.3b — a root-cause pass the manager opened on F5.3's own wrong prediction rather than leaving
+it as an open question.
+
+**Gates re-baselined on the merged tree first**, then run again at the accepted tree, both in
+isolation by the manager (full output under this session's scratchpad, `mgr_*.txt`):
+
+| Gate | Merged-tree baseline | Accepted tree |
+|---|---|---|
+| `cargo test -p av-sweep` | 89 | **92** (+3, F5.2's event-axis message tests) |
+| `cargo test --workspace --exclude av-kernel` | 282 | **285** (+3, the same three) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean | clean, no new `#[allow]` |
+| `cargo deny check` | ok | ok |
+| `.venv/bin/python -m pytest -q` | **493 passed / 3 skipped** | **497 passed / 3 skipped** (+4, F5.1's four viewer tests) |
+
+The Python baseline is **493, not the 492 this plan recorded before the merge** — the merge from
+`develop` brought round 6's "every Docker-gated test's skip is visible" change, which adds one
+test. The three skips are the same pre-existing opt-in and build-artifact skips under
+`services/`. `cargo test -p av-kernel` was never run: nothing this track touches compiles into
+it.
+
+### F5.2 — an axis-range refusal now names the axis, whichever kind it is
+
+`AmbiguousAxisDeclaration`, `AxisStepsBelowMinimum` and `AxisRangeNotIncreasing` were written
+when an axis could only target an instance parameter. Question 192(c) added event-value axes,
+whose `instance`/`parameter` are both empty — so all three rendered as `axis on .`, naming
+nothing. The three variants now carry one `target` field holding `AxisTarget::key()`, the same
+key the axis already gets in `SweepSample.axis_values`, so the message reads
+`axis on demo_flt.spacecraft.DragArea` or `axis on event:burn1.dv_x`. One test per variant on an
+event axis, each asserting the rendered `Display` string — a variant-shape assertion alone
+passes against the unfixed code for two of the three, so it would not have been a test.
+
+### F5.1 (question 197) — a sweep scenario defaults to a study layout
+
+`defaultLayoutTreeForScenario` is now the single default-layout entry point `LayoutManager` calls
+from its constructor, `applyDefaultForScenario` and `resetToDefault`. `hasSweep(sc)` selects a
+sidebar / feasibility-wide / run-products / console tree, mirroring exactly how `hasRicFrame`
+selects the RPO triple-viewport default; every other scenario resolves byte-identically to what
+those three call sites already built, so `defaultLayoutForScenario`'s and `attachM264Panels`' own
+asserted leaf counts are untouched. The pre-existing `_userHasCustomized` guard is unchanged and
+is now asserted directly: a persisted layout is not replaced when a sweep scenario arrives.
+
+The panel also opened on the first score *alphabetically*. A score that is constant across the
+grid puts every cell in `gridRows`' zero-width-range branch, so the grid opens looking as though
+it carries no signal even when another score shows a real gradient. `defaultScoreName` picks the
+first sorted score whose aggregate means actually differ across points, by **exact** equality —
+this study has measured genuinely bit-identical scores, so a tolerance here would report a real
+difference as flat. It falls back to the first sorted name when nothing varies and never returns
+null for a sweep that declares scores.
+
+**A correction to the round's own brief, recorded rather than quietly worked around.** The brief
+stated that the fixture study's first score is constant across the grid. It is not:
+`web/js/fixtures/feasibility_sweep_fixture.json`'s two scores both vary
+(`demo_flt_rmag_at_end` 6870530.237 → 6870369.12; `demo_mvr_rmag_at_end` 6895844.818 →
+6946252.7335), so the old rule and the new rule return the same name against it and a test using
+only that fixture cannot distinguish them. The discriminating check is a hand-built sweep whose
+first sorted score is constant and whose second varies; the real fixture keeps a check that pins
+what it actually returns.
+
+### F5.3 — drag on the manoeuvring vehicle, and a genuinely coupled grid
+
+Round 2's "Open for the lead" paragraph is closed. `drms/demo_two_instance_drag.sos.yaml` is the
+pinned SOS with the same four `force_model.drag_*` overrides added to `demo_mvr`, using the
+space-weather file packaged with this repository's GMAT install (no network, at run time or any
+other time); `drms/drag_sail_vs_burn_mvrdrag.drm.yaml` points at it with the scenario, the Gates
+sigmas and the seeds otherwise byte-identical to the DRM grids 1 and 2 share, so grid 3 is
+directly comparable to both. All three new artifacts are additive; **no pinned file changed and
+no golden moved**, so nothing was regenerated and `--reason` never came up. All three hashes were
+recomputed independently by the manager, and both pinned hashes re-verified unchanged:
+
+| Artifact | Hash |
+|---|---|
+| `drms/demo_two_instance_drag.sos.yaml` | `aca54cc247c22c3d1973a19af5190053d2fcc7931794840fd319c7a518767bc2` |
+| `drms/drag_sail_vs_burn_mvrdrag.drm.yaml` | `96ffcc267f811079406f3a8c8beb9ed9fda4941fe1f75a76e7373a0d947e4e80` |
+| `drms/drag_sail_vs_burn_mvrdrag.sweep.yaml` | `b73925d87aba86d002bbbb449182c0bf46a90cc4bb3fbefcaa68ec20eeecb939` |
+
+Grid 3 is a new section in `docs/studies/drag-sail-vs-burn.md`: 18 samples (2 DragArea × 3 dv_x ×
+3 draws, `dispersed: true`) in **85.4 s** at `--workers 2`, against a fifteen-minute budget and a
+pre-run estimate of ~100 s. 18/18 succeeded. The coupling was stated before measuring: DragArea
+on `demo_mvr` now acts both directly, on `demo_mvr`'s own decay, and indirectly on `demo_flt`,
+because `demo_mvr`'s altered arc changes when its `rmag` crosses `demo_ctrl`'s threshold and
+therefore how long `demo_flt` spends at the latched `Cd = 220`.
+
+Measured, in clean Nominal-mode isolation checks:
+
+- **The DragArea axis is a real axis now.** `demo_mvr_rmag_at_end` moves **−35.43 m** for
+  DragArea 5 → 25 m². Grid 1 measured this same pair as **exactly 0 ULP**, bit-identical. That
+  contrast is the whole point of the task.
+- **The indirect coupling is nonzero, not the exact zero also predicted.**
+  `demo_flt_rmag_at_end` moves **+0.047 m** — at the bottom of the predicted 0.04–2.07 m
+  latch-jitter band.
+- **The burn axis is essentially unchanged by adding drag**: slope 2545.95 m/(m/s), against grid
+  1's ~2.6 km/(m/s), with every value **8.85 m lower** than grid 1's no-drag baseline at
+  dv_x = 20 — the predicted direction, since any drag at all only reduces final radius.
+
+### F5.3b — the wrong prediction, root-caused instead of left open
+
+The pre-run estimate for the first of those was **−6.7 m**; it missed by 5.3× and stays in the
+document exactly as it was written. F5.3's first draft attributed the miss to
+"altitude-dependent atmospheric density feedback", explicitly plausible-but-not-isolated. This
+track's rule is a definitive root cause or a statement that no path remains, and neither applied,
+so the manager opened a fourth task.
+
+The estimate scaled grid 2's `demo_flt` figure by the **unweighted** `∫Cd dt` ratio, which counts
+every second of `Cd` equally. But a drag perturbation only moves the *final* radius in proportion
+to the arc remaining after it acts, and `demo_flt`'s dominant `Cd = 220` phase occupies only the
+**last 992.6 s** of the 7200 s run (latch at t = 6207.4 s). Weighting by remaining time,
+`W = ∫Cd(t)(T−t)dt`, gives a ratio of 0.3471 rather than 0.0683 and predicts **−34.00 m** against
+−35.43 m measured — a 4% error against the unweighted model's 446%.
+
+**A ratio fitted to the one point it explains proves nothing, so it was tested out of sample, on
+a quantity it was never fitted to.** Calibrating the single constant on grid 2's Nominal point and
+inverting the model for the controller's latch epoch at the other two burn magnitudes predicts
+`t_L` = 6765.4 s at dv_x = 10 and 5919.5 s at dv_x = 30. The `EVENT_KIND_PORT_COMMAND` events
+already recorded in round 2's own scratch runs measure **6614.7 s** and **6045.9 s** — within
+**2.28%** and **2.09%**, and monotonically earlier as the burn grows, the physically required
+direction. The extraction was validated first by reproducing the independently published 6207.4 s
+at dv_x = 20 exactly. The manager re-ran the extraction himself and reproduced all three epochs.
+
+The density-feedback story is superseded, not merely doubted. What remains open is only the ~4%
+residual, consistent with the first-order character of a `Δ = k·W` model.
+
+### Defects found in review this round
+
+- **F5.3's own root-cause paragraph named an unproven mechanism** and stopped there. Caught in
+  the manager's review and closed by F5.3b, with an out-of-sample test rather than a better
+  argument.
+- **The round brief's factual claim about the fixture's first score was wrong** (see F5.1 above).
+  Both the manager and the worker checked it independently against the committed fixture before
+  building a test around it; had it been taken on trust, F5.1 would have shipped a test that
+  passes against the implementation it was meant to replace.
+- **The manager's own bracket for the DragArea effect (0.5–20 m) was too narrow** — the measured
+  −35.43 m falls outside it. The bracket came from the same unweighted scaling argument F5.3b
+  later refuted, so the manager's prediction and the worker's failed for the identical reason.
+- A stray triple blank line in `tests/test_viewer_layout.py`, fixed before the commit.
+
+### Open for the lead
+
+- **Question 197 was not in `docs/open-questions.md`.** The round brief names it as this round's
+  main item, but no entry 197 existed in the file (the last entry was 196). It is recorded now
+  from the brief's own text, attributed to the manager and marked as such — if the lead's own
+  wording differs, replace it.
+- **Nothing in this round was driven in a browser.** F5.1's sweep default layout and the panel's
+  new default score are proven headlessly and under `node`, including a `LayoutManager`
+  integration check against a hand-rolled fake `document`. `layout_manager.js`'s DOM rendering
+  itself remains browser-check-only, exactly as its own module docstring says. A browser drive of
+  the sweep default is the one piece of F5.1 that no automated gate covers.
+- **Grid 3 varies DragArea on one vehicle at a time.** A design that sweeps DragArea
+  independently on `demo_flt` and `demo_mvr` at once — now that both carry a real `DragForce` —
+  would answer a joint-response question none of the three grids can. That is a larger design,
+  not a follow-up edit.

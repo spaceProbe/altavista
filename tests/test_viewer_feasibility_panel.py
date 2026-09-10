@@ -275,6 +275,25 @@ def test_draw_rows_failed_sample_is_never_dropped(panels_data):
     assert not failed, f"failed-sample-not-dropped checks failed: {failed}"
 
 
+# ==================================================== defaultScoreName (F5.1, question 197)
+def test_default_score_name_prefers_a_varying_score_over_alphabetical_first(panels_data):
+    """The round's own brief claimed the real fixture's first score is constant -- it is
+    NOT (both `demo_flt_rmag_at_end` and `demo_mvr_rmag_at_end` vary across the grid,
+    verified directly against the fixture); the real-fixture check here only PINS that
+    fact, it cannot by itself distinguish the new "first varying score" rule from the
+    old `names[0]` rule. The actual discriminating check is VARYING-OVER-ALPHABETICAL: a
+    hand-built sweep where the first sorted score is constant and a later one varies --
+    fails against the old `names.includes(selectedScore) ? selectedScore : (names[0] ||
+    null)` rule, which would return the constant score. The remaining checks cover this
+    task's own required edge cases: every score constant (or a single-point grid) falls
+    back to the first sorted name rather than null; a score with fewer than two
+    aggregate points cannot be shown to vary and is skipped; a null/malformed sweep
+    returns null, never throws.
+    """
+    failed = _failed(panels_data, "feasibility defaultScoreName")
+    assert not failed, f"defaultScoreName checks failed: {failed}"
+
+
 # ------------------------------------------------------------------------------ overall
 def test_feasibility_checks_report(panels_data, capsys):
     """Prints every check this file's fixture drove (not only the `feasibility `-prefixed

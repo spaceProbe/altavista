@@ -177,6 +177,63 @@ export function gridRows(sweep, scoreName) {
   });
 }
 
+// -------------------------------------------------------------------- default score
+/**
+ * The score `render()` colours the grid by when the caller has not chosen one (or
+ * chose a name this sweep no longer has) -- the FIRST score, in `scoreNames`' own
+ * sorted order, whose aggregate `mean` actually VARIES across the grid's points,
+ * rather than simply the first name alphabetically. A score that is constant across
+ * every point makes every cell fall into `gridRows`' own zero-width-range branch
+ * (`t = 0.5` for all of them, `heatBucket` bucket 3 of 7) -- the grid then opens
+ * looking like it carries no signal at all, even when a different score would show a
+ * real gradient. Picking alphabetically first is an arbitrary tie-break that happens
+ * to collide with exactly this failure mode; picking the first VARYING score does not.
+ *
+ * Documented, decided edge cases (this function's own required decisions):
+ * - **Every score is constant across the grid (including a single-point grid, which
+ *   is trivially "constant" -- there is nothing to vary against)**: falls back to the
+ *   first sorted name (`scoreNames(sweep)[0]`), never `null` -- this function never
+ *   leaves a caller with no score selected when the sweep declares at least one.
+ * - **A score with fewer than two points carrying an aggregate for it** (every other
+ *   point's samples all failed for that score, or never declared it): a single
+ *   remaining value cannot be shown to vary against anything, so this function treats
+ *   it exactly like a constant score for SELECTION purposes -- it is skipped in favor
+ *   of a later score that does demonstrably vary, and only chosen itself if nothing
+ *   else does (via the same first-sorted-name fallback as the constant case).
+ * - **Exact float equality, never a tolerance**: two means are "the same" here iff
+ *   they are the identical IEEE-754 double (`===`/`Set` identity, no
+ *   `Math.abs(a - b) <= tol`). This mirrors round 2's own measured proof that two
+ *   axis-to-score pairs in this project's data can be bit-identical (0 ULP) rather than
+ *   merely close -- introducing a tolerance here would risk calling a score "constant"
+ *   when its points are actually different by a real, if small, measured amount, which
+ *   is exactly the kind of invented-looking-flat data this codebase's brief forbids
+ *   (see `gridRows`' own doc comment on why its zero-width-range case is real, not
+ *   assumed). A tolerance is not introduced; if the real data ever needs one, that is a
+ *   decision for a human, not a silent loosening here.
+ * - **Null/absent/malformed sweep**: `null`, never a throw -- same defensive posture as
+ *   `scoreNames`/`gridAxes` above (this function is built directly on top of
+ *   `scoreNames`/`gridRows`, so it inherits their same degrade-to-empty behavior for a
+ *   sweep that is not well-formed).
+ * - **The caller's explicit `selectedScore`**: NOT decided by this function at all --
+ *   `render()` only calls this as its own fallback, exactly where it already fell back
+ *   to `names[0]` before; a `selectedScore` naming a real score in this sweep still
+ *   wins outright, unchanged.
+ * @param {object|null|undefined} sweep
+ * @returns {string|null}
+ */
+export function defaultScoreName(sweep) {
+  const names = scoreNames(sweep);
+  if (names.length === 0) return null;
+  for (const name of names) {
+    const means = gridRows(sweep, name)
+      .map((r) => (r.aggregate ? r.aggregate.mean : null))
+      .filter((m) => typeof m === 'number');
+    if (means.length < 2) continue; // fewer than 2 aggregate points -- cannot be shown to vary
+    if (new Set(means).size > 1) return name; // exact equality, no tolerance -- see doc comment above
+  }
+  return names[0]; // every score constant (or single-point grid) -- first sorted name, never null
+}
+
 // ------------------------------------------------------------------------- draw rows
 
 /**
@@ -498,10 +555,13 @@ export function render(container, data) {
   }
 
   const names = scoreNames(sweep);
-  // The score to colour/select by, defaulting to the first sorted name when the caller
-  // has not chosen one yet (or chose a name this sweep no longer has) -- never silently
-  // renders with no score selected when at least one is available.
-  const effectiveScore = names.includes(selectedScore) ? selectedScore : (names[0] || null);
+  // The score to colour/select by: the caller's explicit selectedScore when it names a
+  // real score in this sweep, otherwise defaultScoreName()'s own choice -- the first
+  // score (in sorted order) that actually VARIES across the grid, not simply the first
+  // alphabetically (see that function's own doc comment for why, and its documented
+  // edge cases). Never silently renders with no score selected when at least one is
+  // available.
+  const effectiveScore = names.includes(selectedScore) ? selectedScore : defaultScoreName(sweep);
 
   const header = document.createElement('div');
   header.className = 'av-panel-section av-feasibility-header';

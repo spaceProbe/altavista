@@ -1,0 +1,118 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- round 3, F5.3
+# (question 195's second follow-up). A NEW `SosConfiguration`: a byte-for-byte copy of the
+# PINNED `drms/demo_two_instance.sos.yaml` (M17.3/M19.4), except for a new `id`/`name` and one
+# additive change to `demo_mvr`'s own `parameter_overrides` -- see below. This file exists
+# because `docs/feasibility-plan.md`'s own "Open for the lead" paragraph, closing round 2's
+# worked study (`docs/studies/drag-sail-vs-burn.md`), states in as many words: "The demo SOS
+# gives drag to `demo_flt` only. A study that genuinely varies drag on the manoeuvring vehicle
+# needs a new `SosConfiguration` enabling drag on `demo_mvr`; that was outside this round's
+# authorized file set and is not done." That new `SosConfiguration` is this file. The pinned
+# `demo_two_instance.sos.yaml` is NOT edited (this task's own hard boundary) -- this is an
+# additive sibling, not a replacement.
+#
+# **The one change, relative to the pinned file:** `demo_mvr`'s own `parameter_overrides` gains
+# the identical four drag declarations `demo_flt` already carries in the pinned file --
+# `force_model.drag_model: JacchiaRoberts`, `force_model.drag_historic_weather_source:
+# CSSISpaceWeatherFile`, `force_model.drag_predicted_weather_source: CSSISpaceWeatherFile`,
+# `force_model.drag_cssi_space_weather_file: SpaceWeather-All-v1.2.txt` -- appended after
+# `demo_mvr`'s own existing `port.emit`/`port.emit_output` overrides, in the same order
+# `demo_flt`'s own block declares them. Nothing else differs: both instances' `step_rate_hz`,
+# `demo_mvr`'s own `initial_covariance`, `demo_ctrl`, and both `connections` entries are
+# unchanged from the pinned file, character for character.
+#
+# **Why this closes the gap, checked against the source, not assumed.**
+# `crate::drm::binding::materialize_gmat` (`crates/av-kernel/src/drm/binding.rs`) only
+# constructs a `DragForce` object for an instance `if let Some(drag_model) = &spec.drag_model`
+# -- the pinned file's own header comment says `demo_mvr` "shares the same base `leo_demo_sys`
+# SystemDefinition but does NOT declare drag, so its own dynamics are unaffected", and round 2's
+# own worked study (`docs/studies/drag-sail-vs-burn.md`, "The modelling finding" section)
+# measured that directly: `demo_mvr_rmag_at_end` came back bit-for-bit identical
+# (6921427.813187283 m) across a DragArea=5.0/25.0 Nominal-mode pre-check, because the override
+# lands on a spacecraft field nothing reads. With `force_model.drag_model` now declared on
+# `demo_mvr` too (this file), a real `DragForce` is constructed for it exactly the way one
+# already is for `demo_flt`, so a `spacecraft.DragArea` sweep axis on `demo_mvr` now reaches a
+# force object that actually integrates it.
+#
+# **The space-weather file is the one packaged with this repository's own GMAT install, never
+# downloaded** -- verified present on disk before this file was authored, at
+# `GMAT R2026a/data/atmosphere/earth/SpaceWeather-All-v1.2.txt` (resolved through this worktree's
+# own `GMAT R2026a` symlink; `GMAT R2026a/bin/api_startup_file.txt`'s own `ATMOSPHERE_PATH`/
+# `CSSI_FLUX_FILE` entries name this exact relative path). No network access happens at run
+# time, on either instance, identically to the pinned file's own posture.
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -q -p av-kernel --example drm_hash -- sos drms/demo_two_instance_drag.sos.yaml
+id: demo_two_instance_drag_sos
+version: "1"
+name: Two-instance demo, drag on BOTH instances (round 3 F5.3 -- demo_mvr also carries a DragForce)
+instances:
+  - name: demo_flt
+    system_id: leo_demo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_demo_sys
+    step_rate_hz: 10.0
+    parameter_overrides:
+      - name: port.consume
+        string_value: cd_cmd_in
+      - name: port.consume_parameter
+        string_value: Cd
+      - name: force_model.drag_model
+        string_value: JacchiaRoberts
+      - name: force_model.drag_historic_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_predicted_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_cssi_space_weather_file
+        string_value: SpaceWeather-All-v1.2.txt
+  - name: demo_mvr
+    system_id: leo_demo_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_demo_sys
+    step_rate_hz: 10.0
+    parameter_overrides:
+      - name: port.emit
+        string_value: cd_cmd_out
+      - name: port.emit_output
+        string_value: rmag
+      - name: force_model.drag_model
+        string_value: JacchiaRoberts
+      - name: force_model.drag_historic_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_predicted_weather_source
+        string_value: CSSISpaceWeatherFile
+      - name: force_model.drag_cssi_space_weather_file
+        string_value: SpaceWeather-All-v1.2.txt
+    initial_covariance:
+      [10000.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 10000.0, 0.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 10000.0, 0.0, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.01, 0.0, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.01, 0.0,
+       0.0, 0.0, 0.0, 0.0, 0.0, 0.01]
+  - name: demo_ctrl
+    system_id: demo_ctrl_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: demo_ctrl_sys
+    step_rate_hz: 10.0
+connections:
+  - from_instance: demo_mvr
+    from_port: cd_cmd_out
+    to_instance: demo_ctrl
+    to_port: range_in
+    link_model: ""
+  - from_instance: demo_ctrl
+    from_port: cd_sail_cmd_out
+    to_instance: demo_flt
+    to_port: cd_cmd_in
+    link_model: ""
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (round 3, F5.3 -- drag enabled on demo_mvr too)"
+hash: "aca54cc247c22c3d1973a19af5190053d2fcc7931794840fd319c7a518767bc2"

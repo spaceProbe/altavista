@@ -37,9 +37,12 @@ in size to a burn-magnitude axis?
 | `drms/drag_sail_vs_burn.drm.yaml` (DRM, shared by both grids, unmodified since F4) | `ef8ea78c599e5f529316458e0d1413fcbc925b384da3f8f138edd2fc66be3b93` |
 | `drms/drag_sail_vs_burn.sweep.yaml` (ParameterSweep, grid 1 "mvr") | `a67a6bf1be781bda13b9d0c204582cc849ef58d6abeb4b6e3ce26b6bd7689fee` |
 | `drms/drag_sail_vs_burn_flt.sweep.yaml` (ParameterSweep, grid 2 "flt") | `2f156ae1063e57f90cd92edd77c60cf509b0a574347cf526474959a8ffcb5b2d` |
+| `drms/demo_two_instance_drag.sos.yaml` (SosConfiguration, round 3 F5.3 — drag added to `demo_mvr`) | `aca54cc247c22c3d1973a19af5190053d2fcc7931794840fd319c7a518767bc2` |
+| `drms/drag_sail_vs_burn_mvrdrag.drm.yaml` (DRM, round 3 F5.3, points at the SOS above) | `96ffcc267f811079406f3a8c8beb9ed9fda4941fe1f75a76e7373a0d947e4e80` |
+| `drms/drag_sail_vs_burn_mvrdrag.sweep.yaml` (ParameterSweep, grid 3 "mvrdrag") | `b73925d87aba86d002bbbb449182c0bf46a90cc4bb3fbefcaa68ec20eeecb939` |
 
-All three hashes are read directly off the committed YAML files' own `hash:` fields, and all
-three were independently re-verified after this document was written:
+All three round-1/round-2 hashes are read directly off the committed YAML files' own `hash:`
+fields, and all three were independently re-verified after this document was written:
 
 ```
 cargo run -q -p av-kernel --example drm_hash -- drm drms/drag_sail_vs_burn.drm.yaml
@@ -50,6 +53,19 @@ cargo run -q -p av-sweep --example sweep_hash -- drms/drag_sail_vs_burn_flt.swee
   -> 2f156ae1063e57f90cd92edd77c60cf509b0a574347cf526474959a8ffcb5b2d
 ```
 (full output at `scratchpad/f4b/` — see the file list at the end of this section).
+
+**Round 3 (F5.3) hashes, computed and independently re-verified the same way** (full output at
+`scratchpad/f5c/sos_hash_drag.log`, `scratchpad/f5c/drm_hash_mvrdrag.log`,
+`scratchpad/f5c/sweep_hash_mvrdrag_after_prepend.log`):
+
+```
+cargo run -q -p av-kernel --example drm_hash -- sos drms/demo_two_instance_drag.sos.yaml
+  -> aca54cc247c22c3d1973a19af5190053d2fcc7931794840fd319c7a518767bc2
+cargo run -q -p av-kernel --example drm_hash -- drm drms/drag_sail_vs_burn_mvrdrag.drm.yaml
+  -> 96ffcc267f811079406f3a8c8beb9ed9fda4941fe1f75a76e7373a0d947e4e80
+cargo run -q -p av-sweep --example sweep_hash -- drms/drag_sail_vs_burn_mvrdrag.sweep.yaml
+  -> b73925d87aba86d002bbbb449182c0bf46a90cc4bb3fbefcaa68ec20eeecb939
+```
 
 **Exact commands that reproduce each grid** (authored and launched through
 `altavista.feasibility`, not hand-written YAML — `altavista/feasibility/study_drag_sail_vs_burn.py`,
@@ -67,6 +83,9 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 # Both grids in one invocation
 .venv/bin/python altavista/feasibility/study_drag_sail_vs_burn.py --grid both --out-dir /path/to/out
+
+# Grid 3 ("mvrdrag", round 3 F5.3) -- re-authors and re-runs the new grid; safe to re-run any time
+.venv/bin/python altavista/feasibility/study_drag_sail_vs_burn.py --grid mvrdrag --out-dir /path/to/out
 ```
 
 **Why this document's own reproduction run used `--grid flt` only, not `--grid both`.**
@@ -667,3 +686,326 @@ value the viewer panel itself displayed for this exact sample.
   both `demo_flt` and `demo_mvr` simultaneously — that would need a new `SosConfiguration`, out
   of this task's authorized scope. So no measurement above speaks to how two independently
   drag-affected vehicles' final ranges would jointly respond to a shared or differing DragArea.
+
+## Grid 3 ("mvrdrag", round 3 F5.3): closing the "drag on exactly one vehicle" gap
+
+Round 2's own bullet above, and `docs/feasibility-plan.md`'s own "Open for the lead" paragraph,
+both name the same gap: "the demo SOS gives drag to `demo_flt` only. A study that genuinely
+varies drag on the manoeuvring vehicle needs a new `SosConfiguration` enabling drag on
+`demo_mvr`; that was outside this round's authorized file set and is not done." This grid closes
+that gap: a new `SosConfiguration` (`drms/demo_two_instance_drag.sos.yaml`) gives `demo_mvr` the
+identical four `force_model.drag_*` overrides `demo_flt` already carries, a new DRM
+(`drms/drag_sail_vs_burn_mvrdrag.drm.yaml`) points at it while keeping the scenario byte-identical
+to grid 1/grid 2's own shared DRM, and grid 3 (`id: drag_sail_vs_burn_mvrdrag`) puts both axes —
+DragArea and dv_x — back on `demo_mvr`, the identical axis shape as grid 1 ("mvr"), but now with
+DragArea reaching a real `DragForce`. The three files are additive, new artifacts; none of the
+pinned round-1/round-2 files were edited.
+
+### Hypotheses (written and committed to disk before running)
+
+Recorded verbatim from `altavista/feasibility/study_drag_sail_vs_burn.py`'s own module
+docstring ("Grid \"mvrdrag\"" section) and `drms/drag_sail_vs_burn_mvrdrag.sweep.yaml`'s own
+header comment, both written and committed before this grid was ever run:
+
+1. **`demo_mvr_rmag_at_end` vs. DragArea-on-`demo_mvr` (direct).** The manager's own bracket:
+   small but definitively nonzero, order 0.5–20 m. Sharpened with a time-integrated-Cd·A scaling
+   argument: `demo_mvr` holds Cd=2.2 for the full 7200 s run (no command ever flows back to it),
+   while `demo_flt` spends 6207.4 s at Cd=2.2 and 992.6 s at the post-latch Cd=220.0. Scaling
+   grid 2's own measured direct DragArea effect on `demo_flt` (−97.980581 m at dv_x=20.0) by the
+   ratio of the two instances' own ∫Cd dt integrals (15840 / 232028.28 = 0.0683) predicted
+   **≈ −6.7 m**.
+2. **`demo_flt_rmag_at_end` vs. DragArea-on-`demo_mvr` (indirect, via the controller's
+   range-latch timing).** Predicted either exactly zero (if the latch crossing lands on the
+   identical 0.1 s tick at both DragArea values) or a shift of the same small order round 2's own
+   F4b document already measured for this identical crossing under a different perturbation
+   (draw-to-draw Gates burn dispersion): 0.04–2.07 m.
+3. **`demo_mvr_rmag_at_end` vs. dv_x-on-`demo_mvr` (direct).** Predicted to closely reproduce
+   grid 1's own ~2.6 km/(m/s) slope, but with every value shifted systematically **lower** than
+   grid 1's own (no-drag) values at the same dv_x, since `demo_mvr` now decays under real drag
+   for the entire run.
+4. **Wall time.** Grid 1 (76.5 s/18 = 4.25 s/sample) and grid 2 (70.4 s/18 = 3.91 s/sample) both
+   already ran with one GMAT instance carrying a JacchiaRoberts atmosphere; this grid's new SOS
+   gives a second GMAT instance (`demo_mvr`) one too. Primary estimate: grid 1's own rate scaled
+   by a conservative 1.3×, 18 × 5.5 s ≈ 100 s (~1.7 min). Conservative upper bound: the F1b/F2b
+   fixture's own cold-cache rate scaled the same 1.3×, 18 × 15.05 s ≈ 271 s (~4.5 min). Both
+   comfortably inside the 900 s budget — the run proceeded.
+
+### Grid, draws, and the wall-time budget: measured
+
+Grid: 2 (DragArea: 5.0, 25.0 m²) × 3 (dv_x: 10.0, 20.0, 30.0 m/s) = 6 points × 3 draws = **18
+samples**, `--workers 2`, identical size to grids 1 and 2. **Measured: 85.4 s wall time**
+(`scratchpad/f5c/study_run_mvrdrag.log`) — close to the 100 s primary estimate, well under the
+271 s conservative upper bound and the 900 s budget (contention checked immediately before the
+run via `ps -Ao pid,etime,command | grep -E "cargo test|pytest|docker build"`, no matches).
+
+### The 18 samples — `config_hash` and `seeds`
+
+Read directly from `scratchpad/f5c/study_run_mvrdrag.log` (`scratchpad/f5c/samples_dump_mvrdrag.txt`).
+
+| Point | DragArea (m²) | dv_x (m/s) | Draw | `run_id` | `config_hash` | `seeds.burn_seed` |
+|---|---|---|---|---|---|---|
+| 0 | 5.0 | 10.0 | 0 | `drag_sail_vs_burn_mvrdrag_p0_d0` | `7bfe454dedf36c9130a21917cb26110c36e2c5728302c5b2dc1524f636846157` | 4982858567909372189 |
+| 0 | 5.0 | 10.0 | 1 | `drag_sail_vs_burn_mvrdrag_p0_d1` | `90bab40fce7f863fea5801fe2c6e8d0298c46a90c4a2ef862e88e5aa6aa49214` | 7867630412978124312 |
+| 0 | 5.0 | 10.0 | 2 | `drag_sail_vs_burn_mvrdrag_p0_d2` | `10332bd50be197dbad62db2fa3ea4052a690395cd6a2b987151adc5b16085273` | 4462316483024094196 |
+| 1 | 5.0 | 20.0 | 0 | `drag_sail_vs_burn_mvrdrag_p1_d0` | `652a9dd3f0c76de6901b65c9b4b9686a48f5e7d08712db6e952701b56cc12a4e` | 17214948362569220595 |
+| 1 | 5.0 | 20.0 | 1 | `drag_sail_vs_burn_mvrdrag_p1_d1` | `c94661f9d0a1abed70ed5a50ad6a298ce7d7f66a46b6014b4ce12bcbae97dba5` | 6654885034188990689 |
+| 1 | 5.0 | 20.0 | 2 | `drag_sail_vs_burn_mvrdrag_p1_d2` | `b94f37230752101e6c54a5a26b32db3ed32ba4ca709ae84a1aa3b8759f6e6f94` | 4409437824090150860 |
+| 2 | 5.0 | 30.0 | 0 | `drag_sail_vs_burn_mvrdrag_p2_d0` | `0c006f5e67c38ae8da64b334e9afefd431152e7db17b21ded40c06114753b7a1` | 824369102997278841 |
+| 2 | 5.0 | 30.0 | 1 | `drag_sail_vs_burn_mvrdrag_p2_d1` | `cdc4a6eabccff46ae42e257e6aeb0088a3499ecab74baaaad2d88cf93a363391` | 2474470881841661740 |
+| 2 | 5.0 | 30.0 | 2 | `drag_sail_vs_burn_mvrdrag_p2_d2` | `953aefb9a7588000cd8eb2b5b51c5b891af882c096d3957f78aa399c759759db` | 2992190708350535366 |
+| 3 | 25.0 | 10.0 | 0 | `drag_sail_vs_burn_mvrdrag_p3_d0` | `f689407498d14253bd5da3a416b13dfc4abe18506be721f2f394def164a972dd` | 4975612333432949261 |
+| 3 | 25.0 | 10.0 | 1 | `drag_sail_vs_burn_mvrdrag_p3_d1` | `e00f509a66cb39d726925214ceeea4e53d4541614d9f77ca3472818d57f8507f` | 15501270821904133136 |
+| 3 | 25.0 | 10.0 | 2 | `drag_sail_vs_burn_mvrdrag_p3_d2` | `ae8e66a2708e6c46af109f0f6c66fd564fa630b8c13c895af96c517f1399906d` | 14480134305369912950 |
+| 4 | 25.0 | 20.0 | 0 | `drag_sail_vs_burn_mvrdrag_p4_d0` | `24ce215a506b05530449e729c89e8db859184f9ec310be3e1e2064b267bd419d` | 13545124008429710696 |
+| 4 | 25.0 | 20.0 | 1 | `drag_sail_vs_burn_mvrdrag_p4_d1` | `649db3bbe2830489720f383bfcc3beee1574eefc2197f7848504f4ef74dde3eb` | 15064857042929592026 |
+| 4 | 25.0 | 20.0 | 2 | `drag_sail_vs_burn_mvrdrag_p4_d2` | `0e85f9c0414e4e546e813aedf0cfba767f5535aedba3d5d3cfbaa612e54cc157` | 4756446896992701638 |
+| 5 | 25.0 | 30.0 | 0 | `drag_sail_vs_burn_mvrdrag_p5_d0` | `afdd5568c806bace489bcda41bc397ca5a5c20e20a2c4e79c36792637fefe965` | 1319114391143698012 |
+| 5 | 25.0 | 30.0 | 1 | `drag_sail_vs_burn_mvrdrag_p5_d1` | `d03c751c368ee029883d5384d056329a05718e38639f50c1cdcf08a643acc0e5` | 15343976555580108633 |
+| 5 | 25.0 | 30.0 | 2 | `drag_sail_vs_burn_mvrdrag_p5_d2` | `8335f0c0e6905fe46c82e2cdbc66251fb985e364fceffd315fe400b0b1114fad` | 13513745173861025453 |
+
+All 18 samples succeeded (`error: ""` on every one; verified by `grep -c "status=OK"` over the
+run log, 18/18).
+
+### Aggregate table
+
+| Point | DragArea | dv_x | Score | Mean | Std dev | Min | Max | Draws |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 5.0 | 10.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 0 | 5.0 | 10.0 | demo_flt_rmag_at_end (m) | 6870529.842325 | 0.183773 | 6870529.589816 | 6870530.021851 | 3 |
+| 0 | 5.0 | 10.0 | demo_mvr_rmag_at_end (m) | 6896705.582391 | 405.817390 | 6896308.733978 | 6897263.054135 | 3 |
+| 1 | 5.0 | 20.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 1 | 5.0 | 20.0 | demo_flt_rmag_at_end (m) | 6870517.744227 | 0.320829 | 6870517.509580 | 6870518.197857 | 3 |
+| 1 | 5.0 | 20.0 | demo_mvr_rmag_at_end (m) | 6920979.059841 | 653.978787 | 6920054.527973 | 6921462.843213 | 3 |
+| 2 | 5.0 | 30.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 2 | 5.0 | 30.0 | demo_flt_rmag_at_end (m) | 6870507.356757 | 0.441241 | 6870506.734577 | 6870507.709194 | 3 |
+| 2 | 5.0 | 30.0 | demo_mvr_rmag_at_end (m) | 6946356.721505 | 1193.813178 | 6945439.311735 | 6948042.844143 | 3 |
+| 3 | 25.0 | 10.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 3 | 25.0 | 10.0 | demo_flt_rmag_at_end (m) | 6870530.173020 | 0.086967 | 6870530.054700 | 6870530.261254 | 3 |
+| 3 | 25.0 | 10.0 | demo_mvr_rmag_at_end (m) | 6896002.585030 | 182.033473 | 6895834.632712 | 6896255.523588 | 3 |
+| 4 | 25.0 | 20.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 4 | 25.0 | 20.0 | demo_flt_rmag_at_end (m) | 6870517.644784 | 0.081825 | 6870517.530463 | 6870517.717470 | 3 |
+| 4 | 25.0 | 20.0 | demo_mvr_rmag_at_end (m) | 6921256.926221 | 189.780166 | 6921116.429514 | 6921525.215666 | 3 |
+| 5 | 25.0 | 30.0 | demo_flt_cd_at_end | 220.0 | 0.0 | 220.0 | 220.0 | 3 |
+| 5 | 25.0 | 30.0 | demo_flt_rmag_at_end (m) | 6870507.450613 | 0.713366 | 6870506.695954 | 6870508.407774 | 3 |
+| 5 | 25.0 | 30.0 | demo_mvr_rmag_at_end (m) | 6946250.019282 | 1979.932984 | 6943570.471349 | 6948293.511292 | 3 |
+
+(read from `scratchpad/f5c/study_out/mvrdrag/sweep_results.json`'s own `aggregates`; full
+recomputation script and output at `scratchpad/f5c/compute_sensitivities.py`/`.log`).
+`demo_flt_cd_at_end` is exactly 220.0 with zero spread everywhere, the identical deterministic
+cross-check grid 1/grid 2 both already carry.
+
+### Nominal-mode isolation checks
+
+As in round 2, the dispersed 18-sample grid confounds each axis's own effect with per-point
+Gates dispersion noise. Two single-axis, single-draw, **Nominal**-error-mode scratch checks
+(mirroring round 2's own Check A/Check B methodology, `dispersed: false`,
+`monte_carlo_draws: 1`, over this grid's own DRM/SOS) isolate each axis cleanly:
+
+**Check A — DragArea axis only** (`demo_mvr.spacecraft.DragArea` ∈ {5.0, 25.0}, dv_x left at the
+DRM's own commanded default, 20.0 m/s):
+
+| DragArea | `demo_mvr_rmag_at_end` | `demo_flt_rmag_at_end` |
+|---|---|---|
+| 5.0 m² | 6921418.958839823 m | 6870517.504355608 m |
+| 25.0 m² | 6921383.531209720 m | 6870517.551324701 m |
+
+`demo_mvr_rmag_at_end` moves **−35.427630 m** (DragArea 5→25) — real, resolved, and in the
+predicted direction (larger DragArea, faster decay, smaller final rmag), but **roughly 5.3×
+larger than the −6.7 m arithmetic prediction, and outside even the manager's own 0.5–20 m
+bracket.** This is a genuine, disclosed miss (see "Hypothesis vs. measured" below for the root
+cause discussion). `demo_flt_rmag_at_end` moves **+0.046969 m** — small, resolved above the
+~1.5 nm double-precision noise floor at this magnitude, and squarely inside the predicted
+0.04–2.07 m latch-jitter bracket (at its very low end): **not exactly zero.**
+
+**Check B — dv_x axis only** (event `burn1`'s `dv_x` ∈ {10.0, 20.0, 30.0}, DragArea left at
+`demo_mvr`'s own base `leo_demo_sys` default, 5.0 m², unoverridden):
+
+| dv_x | `demo_mvr_rmag_at_end` | `demo_flt_rmag_at_end` |
+|---|---|---|
+| 10.0 m/s | 6895953.049253739 m | 6870530.192578523 m |
+| 20.0 m/s | 6921418.958839823 m | 6870517.504355608 m |
+| 30.0 m/s | 6946872.144539691 m | 6870507.202426218 m |
+
+`demo_mvr_rmag_at_end` moves **50919.095287 m (~50.9 km)** across the full bracket, slope
+**2545.95 m/(m/s)** — matching grid 1's own no-drag ~2.6 km/(m/s) closely, confirming the
+predicted slope is essentially unchanged by adding drag. Compared against grid 1's own Nominal
+no-drag baseline at dv_x=20.0 (`demo_mvr_rmag_at_end` = 6921427.813187283 m,
+`drms/drag_sail_vs_burn.drm.yaml`'s own header comment): this grid's own dv_x=20.0,
+DragArea=5.0 value (6921418.958839823 m) is **−8.854347 m lower** — confirming the predicted
+direction (adding any drag at all only ever reduces final rmag) with a real, measured number.
+Both checks' raw output is at `scratchpad/f5c/scratch_isolation_checks.log`; the authoring
+script is `scratchpad/f5c/scratch_isolation_checks.py` (a scratch check, not a study
+deliverable, exactly as both round-2 grids' own methodology).
+
+### Hypothesis vs. measured
+
+**1. `demo_mvr_rmag_at_end` vs. DragArea-on-`demo_mvr` (direct) — predicted ≈ −6.7 m (order
+0.5–20 m bracket).** **Measured −35.427630 m (Check A, Nominal) — real, resolved, correct
+direction, but a genuine miss on magnitude: ~5.3× the point estimate and outside the manager's
+own upper bound (20 m).** Left as measured, not adjusted to fit.
+
+**Root cause, isolated and confirmed out of sample (not left as "plausible but not isolated").**
+The −6.7 m prediction scaled grid 2's own `demo_flt` DragArea effect by the *unweighted*
+time-integrated ballistic term ∫Cd dt (15840 / 232028.28 = 0.0683). That ratio is wrong for a
+structural reason that has nothing to do with atmospheric density: a drag perturbation's effect
+on *final* radius depends on how much of the 7200 s arc remains after it acts, and it weights
+every second of `Cd` identically regardless of when in the run that second falls. `demo_flt`'s
+dominant `Cd=220` phase occupies only the *last* 992.6 s of the run (controller latch at
+`t_L=6207.4` s, `drms/demo_two_instance_ctrl.system.yaml`'s own header comment), while
+`demo_mvr` carries `Cd=2.2` for the entire 7200 s arc — so the unweighted integral systematically
+undercounts `demo_mvr`'s own effect relative to `demo_flt`'s. Weighting each contribution by the
+remaining time `(T−t)`, `W(t_L) = ∫₀ᵀ Cd(t)·(T−t) dt = 2.2·[T·t_L − t_L²/2] + 220·(T−t_L)²/2`,
+gives (arithmetic reproduced at `scratchpad/f5d/model_arithmetic.py`, run as `cd
+/Users/probe/code/AltaVista-feasibility && .venv/bin/python3 scratchpad/f5d/model_arithmetic.py`):
+`W_flt(6207.4 s) = 164,318,243.36`, `W_mvr = 2.2·T²/2 = 57,024,000.00`, ratio
+`W_mvr/W_flt = 0.347034` (vs. 0.0683 unweighted) — scaling grid 2's own −97.980581 m by
+0.347034 predicts **−34.003 m**, a **4.02% miss** against the measured −35.427630 m, down from
+the unweighted model's 5.3× (446%) miss.
+
+**Out-of-sample test (decisive: a ratio tuned on the one point it explains proves nothing by
+itself).** The model makes an independent, falsifiable prediction. Grid 2's own committed
+aggregate table already shows `demo_flt`'s own DragArea sensitivity depends on `dv_x`
+(`demo_flt_rmag_at_end`, DragArea 5→25, dispersed-grid means: −46.267 m at dv_x=10, −100.205 m
+at dv_x=20, −140.470 m at dv_x=30), because a larger burn raises `demo_mvr`'s rmag sooner, so
+`demo_ctrl`'s threshold is crossed earlier and `demo_flt` spends *longer* at `Cd=220`.
+Calibrating `k = Δ/W` on the single Nominal Check A point (`Δ=−97.980581` m at `t_L=6207.4` s,
+giving `k=−5.962855×10⁻⁷`) and inverting `Δ = k·W(t_L)` for `t_L` at `dv_x=10` and `dv_x=30`
+from those two committed dispersed-grid `Δ` values (each inversion is a quadratic in `t_L`; the
+root exceeding the 7200 s run length is unphysical and discarded) predicts:
+
+| `dv_x` (m/s) | predicted `t_L` (inverted model) | measured `t_L` (event) | measured − predicted | relative error |
+|---|---|---|---|---|
+| 10 | 6765.40 s | 6614.70 s | −150.70 s | 2.28% |
+| 20 | 6207.40 s (calibration point) | 6207.40 s (`drms/demo_two_instance_ctrl.system.yaml`'s own stated epoch) | 0 s | 0% (exact) |
+| 30 | 5919.53 s | 6045.90 s | +126.37 s | 2.09% |
+
+Measured epochs were read directly off the `EVENT_KIND_PORT_COMMAND` event on `demo_flt`
+(`altavista/cdm.py`'s own `"port_command"` mapping) already present in each of grid 2's own Check
+B Nominal scratch samples — on disk, not re-run:
+`scratchpad/f4b/study_out/scratch_b/sample_p0_d0/run_products.pb` (dv_x=10), `sample_p1_d0`
+(dv_x=20), `sample_p2_d0` (dv_x=30), each carrying exactly one such event on `demo_flt`
+(`name="Cd"`, `detail='port "cd_cmd_in": Cd = 220 (sender "demo_ctrl")'`). Elapsed time is
+`(event.tai_ns − start_tai_ns)/1e9` against `drms/drag_sail_vs_burn.drm.yaml`'s own
+header-documented `start_tai_ns = 1767225637000000000`. Script:
+`scratchpad/f5d/measure_latch_epochs.py`, run as `cd /Users/probe/code/AltaVista-feasibility &&
+.venv/bin/python scratchpad/f5d/measure_latch_epochs.py` — the dv_x=20 extraction reproduces the
+DRM's own already-published 6207.4 s exactly, validating the extraction method before trusting
+the two new numbers.
+
+**Confirmed.** Both predictions land within 2.3% of the measured epoch, and both the predicted
+and measured epochs move monotonically earlier as `dv_x` grows (6765.4/6614.7 s → 6207.4/6207.4 s
+→ 5919.5/6045.9 s) — the physically required direction. This is an independent, out-of-sample
+confirmation of the remaining-time-weighting model, on a structurally different quantity (a
+controller event epoch, not a final-radius score) the model was never fit to. The qualitative
+point of this whole task — that the effect is **no longer bit-identical** the way grid 1
+measured it (exactly 0 ULP) — is fully confirmed; the quantitative −6.7 m point estimate was
+wrong, and the reason it was wrong is now established: the error was in the unweighted ∫Cd dt
+scaling, not in an unproven atmospheric mechanism. The remaining ~4% residual (−34.003 m vs.
+−35.427630 m above, and the 2.09–2.28% epoch-inversion residual) is consistent with ordinary
+linearization error in a `Δ=k·W` model that is itself only a first-order approximation (real
+atmospheric density is exponential in altitude, and both instances' own altitudes do drift over
+the run) — it does **not** independently require, and gives no positive evidence for, the
+previously-named "altitude-dependent atmospheric density feedback" as a distinct mechanism: that
+story is superseded as the explanation for the 5.3× miss, not merely narrowed. The full-scale
+dispersed grid's own per-dv_x differences (−702.997 m at dv_x=10, 2.74σ; +277.866 m at dv_x=20,
+0.71σ, wrong sign; −106.702 m at dv_x=30, 0.08σ) are dominated by draw-to-draw noise at this
+draw count and are only weakly, inconsistently suggestive of the clean Check A result — exactly
+the same pattern round 2's own document reports for `demo_mvr_rmag_at_end`'s high draw-to-draw
+spread (`scratchpad/f5c/compute_sensitivities.log`).
+
+**2. `demo_flt_rmag_at_end` vs. DragArea-on-`demo_mvr` (indirect, latch timing) — predicted
+exactly zero or a shift of 0.04–2.07 m.** **Confirmed: measured +0.046969 m (Check A), at the
+very bottom of the predicted nonzero bracket — not exactly zero, but small, matching round 2's
+own latch-jitter order of magnitude for this identical crossing.** The dispersed grid's own
+per-dv_x differences (+0.331 m at dv_x=10, 2.82σ; −0.099 m at dv_x=20, 0.52σ; +0.094 m at
+dv_x=30, 0.19σ) are all consistent in order of magnitude with the clean check, though not all
+individually significant at this draw count — the same "consistent with, not independently
+proving" relationship round 2's own document describes for its own small effects.
+
+**3. `demo_mvr_rmag_at_end` vs. dv_x-on-`demo_mvr` (direct) — predicted to reproduce grid 1's
+own ~2.6 km/(m/s) slope with every value shifted systematically lower.** **Confirmed on both
+counts.** Check B measures slope 2545.95 m/(m/s) (dispersed grid: 2482.56 m/(m/s) at
+DragArea=5.0, 2512.37 m/(m/s) at DragArea=25.0) — matching grid 1's own ~2.6 km/(m/s) closely.
+Against grid 1's own Nominal no-drag baseline at dv_x=20.0, this grid's own value is **−8.854
+m** lower at DragArea=5.0 (and −44.282 m lower at DragArea=25.0, i.e. pair 1's own −35.4 m
+DragArea effect stacked on top of the −8.854 m base drag cost) — the predicted direction,
+confirmed with a real number.
+
+**4. Wall time — predicted ~100 s primary, ~271 s conservative upper bound.** **Measured 85.4 s**
+(`scratchpad/f5c/study_run_mvrdrag.log`) — close to, and even slightly under, the primary
+estimate; well inside the 900 s budget. 18/18 samples succeeded, no failures to report.
+
+**Comparison against the direct DragArea effect on `demo_flt` (grid 2).** Grid 2's own Check A
+measured `demo_flt_rmag_at_end` move −97.980581 m for the identical DragArea 5→25 step at
+dv_x=20.0 (`docs/studies/drag-sail-vs-burn.md`, grid 2's own Check A above). This grid's own
+direct effect on `demo_mvr` (−35.427630 m) is **36.16% of that**, not the 6.83% the *unweighted*
+∫Cd·A dt ratio predicted. **This is now explained, not merely observed.** The remaining-time-weighted
+ratio computed above, `W_mvr/W_flt(6207.4 s) = 0.347034` (item 1's "Hypothesis vs. measured"
+paragraph, `scratchpad/f5d/model_arithmetic.py`), predicts **34.70%** — within 4% relative of the
+measured 36.16%, the same order of residual as the −34.003 m vs. −35.427630 m absolute
+comparison. The same time-remaining weighting that fixes the absolute point estimate also fixes
+this percentage comparison, and was independently confirmed out of sample by the latch-epoch
+inversion test above (predicted vs. measured `t_L` at `dv_x=10` and `dv_x=30`, both within 2.3%).
+`demo_mvr`'s own direct drag sensitivity is real, resolved, and proportionally larger relative to
+`demo_flt`'s than the *unweighted* linear time-integral scaling predicts, for the specific,
+now-isolated structural reason (how much of the arc remains after each `Cd` regime acts) — not
+an unproven atmospheric-density mechanism.
+
+### Byte-for-byte reproduction of one sample
+
+Point 5, draw 0 (`drag_sail_vs_burn_mvrdrag_p5_d0`, `config_hash`
+`afdd5568c806bace489bcda41bc397ca5a5c20e20a2c4e79c36792637fefe965` — the strongest-effect grid
+point, DragArea=25.0/dv_x=30.0) was re-run alone from its own recorded `.pb` input files
+(`sample_p5_d0/drm.pb`, `sos.pb`, `sys_leo_demo_sys.pb`, `sys_demo_ctrl_sys.pb`) via `av-sweep`'s
+own sample mode:
+
+```bash
+./target/debug/av-sweep --run-sample \
+  --drm-pb sample_p5_d0/drm.pb --sos-pb sample_p5_d0/sos.pb \
+  --system-pb sample_p5_d0/sys_leo_demo_sys.pb --system-pb sample_p5_d0/sys_demo_ctrl_sys.pb \
+  --run-id drag_sail_vs_burn_mvrdrag_p5_d0 --error-mode sampled --out rerun_p5_d0.pb
+```
+
+The re-run's `RunProducts` is **byte-for-byte identical** to the study's own recorded
+`sample_p5_d0/run_products.pb`: `cmp` reports no difference, and both files' SHA-256 is
+`d82ee5cf248f68c41683fbdd9828b6483103d49338bde84cc8f4cf0285d6f2a0`
+(`scratchpad/f5c/rerun_p5_d0.log`). `av-sweep --run-sample`'s own stderr printed
+`config_hash=7c297dd533806fe0a0dd5727aeb68004ad578afbdcd0d8db7da36e1f023eb0af`
+(`RunProducts.provenance.config_hash`) — this is neither this grid's own committed SOS-file
+hash (`aca54cc2...`) nor `SweepSample.config_hash`
+(`afdd5568...`, `av_sweep::sample_config_hash` over DRM+SOS+every `SystemDefinition` together):
+it is the hash of the *materialized* per-sample `SosConfiguration`, after this sample's own
+DragArea=25.0 axis override has been substituted in, which necessarily differs from both the
+pinned base file's own hash and the whole-sample hash — the identical three-different-hashes
+relationship grid 2's own "distinct hash note" already discloses, not a reproduction failure.
+
+### What grid 3 does not establish
+
+- **This closes the specific gap round 2's own document named** ("a study that genuinely varies
+  drag on the manoeuvring vehicle needs a new SosConfiguration enabling drag on demo_mvr") —
+  `demo_mvr_rmag_at_end` is no longer bit-identical across the DragArea axis, confirmed both in
+  a clean Nominal check and (consistent with, though noisier than) the full dispersed grid.
+- **It does not establish drag on *both* vehicles simultaneously answering a joint-response
+  question.** This grid still varies DragArea on only one instance (`demo_mvr`) at a time, with
+  `demo_flt`'s own DragArea left at its `leo_demo_sys` default (5.0 m², unoverridden) throughout.
+  A study that swept DragArea independently on both instances at once (a 3-axis or paired-axis
+  design) is a further, larger extension this task did not attempt.
+- **The quantitative point estimate for pair 1 was wrong, and is left wrong in this document.**
+  The unweighted ∫Cd·A dt linear-scaling argument predicted ≈−6.7 m; the measured value is
+  −35.4 m — neither number is revised here. **The root cause is now isolated and confirmed, not
+  left as a plausible-but-unproven mechanism**: the unweighted integral ignores how much of the
+  7200 s arc remains after each `Cd` regime acts, and weighting by the remaining time `(T−t)`
+  predicts −34.003 m (a 4.02% miss, "Hypothesis vs. measured" item 1 above) and, independently,
+  inverts `demo_flt`'s own DragArea-sensitivity-vs-`dv_x` table (grid 2) to predict the
+  controller's latch epoch at `dv_x=10` and `dv_x=30` to within 2.3% of the epoch actually
+  measured from each sample's own `EVENT_KIND_PORT_COMMAND` event — an independent, out-of-sample
+  confirmation, not a fit to the one number it was built to explain. **What remains open is
+  narrower and smaller than before**: an ~4% residual (both in the absolute point estimate and
+  in the epoch-inversion test), consistent with ordinary linearization error in the `Δ=k·W`
+  model rather than with a separate, unexplained mechanism. The previously-named
+  altitude-dependent atmospheric density feedback story is superseded as the explanation for the
+  order-of-magnitude (5.3×) miss, and is not needed to account for what is left.
+- **A 7200 s arc, once, for this grid too** — the identical caveat round 2's own document
+  states for grids 1 and 2 applies here: these numbers are specific to this burn's own true
+  anomaly and this controller's own threshold-crossing epoch, not general constants.
+- **A two-instance demo fixture, not a real mission** — unchanged from round 2's own caveat.

@@ -28,7 +28,7 @@ import { listLeaves } from './layout/split_tree.js';
 // plain `node` (no `document`), so every DOM-touching function in this codebase is
 // proven only by the manual browser check (see web/js/REPORT_F3b.md), never here.
 import {
-  scoreNames, gridAxes, axisLevels, gridRows, heatBucket, drawRows, isSampleOpenable,
+  scoreNames, gridAxes, axisLevels, gridRows, heatBucket, drawRows, isSampleOpenable, defaultScoreName,
 } from './panels/feasibility_panel.js';
 import { readFileSync } from 'fs';
 
@@ -532,6 +532,95 @@ if (input.feasibilitySweep) {
     check('feasibility drawRows FAILED-SAMPLE-NOT-DROPPED: the succeeded draw in the SAME point is unaffected (value/openable correct)',
       !!okRow && okRow.failed === false && okRow.value === 7 && okRow.openable === true);
   }
+
+  // ---- defaultScoreName (F5.1, question 197) ----------------------------------------
+  // The real fixture's own two scores (demo_flt_rmag_at_end, demo_mvr_rmag_at_end) BOTH
+  // vary across the grid (means 6870530.237/6870507.9725/6870483.4115/6870369.12 and
+  // 6895844.818/6944507.056/6895782.132/6946252.7335 respectively -- verified directly
+  // against the fixture, not assumed) -- the round's own brief claimed the fixture's
+  // first score is constant, which is NOT true of the committed fixture; the check right
+  // below only PINS what the real fixture actually does (both the old names[0] rule and
+  // the new "first varying" rule agree here, so this one check alone cannot distinguish
+  // them -- see the VARYING-OVER-ALPHABETICAL check further down for the check that can).
+  check('feasibility defaultScoreName: real fixture (both scores vary) returns the first sorted, first varying name (demo_flt_rmag_at_end) -- pinned, not assumed',
+    defaultScoreName(sweep) === 'demo_flt_rmag_at_end');
+
+  // The actual discriminating case: a hand-built sweep where the FIRST sorted score is
+  // constant across the grid and a LATER one varies. Fails against the old
+  // `names.includes(selectedScore) ? selectedScore : (names[0] || null)` rule (would
+  // return 'a_constant'), passes only for an implementation that actually inspects each
+  // score's own values.
+  {
+    const constantThenVaryingSweep = {
+      axisKeys: ['a.x'], scoreNames: ['a_constant', 'b_varies'],
+      points: [
+        { pointIndex: 0, axisValues: { 'a.x': 1 }, samples: [] },
+        { pointIndex: 1, axisValues: { 'a.x': 2 }, samples: [] },
+      ],
+      aggregates: [
+        { name: 'a_constant', pointIndex: 0, draws: 1, mean: 10, stdDev: 0, min: 10, max: 10, passFraction: null },
+        { name: 'a_constant', pointIndex: 1, draws: 1, mean: 10, stdDev: 0, min: 10, max: 10, passFraction: null },
+        { name: 'b_varies', pointIndex: 0, draws: 1, mean: 5, stdDev: 0, min: 5, max: 5, passFraction: null },
+        { name: 'b_varies', pointIndex: 1, draws: 1, mean: 7, stdDev: 0, min: 7, max: 7, passFraction: null },
+      ],
+    };
+    check('feasibility defaultScoreName VARYING-OVER-ALPHABETICAL: first sorted score (a_constant) is constant across the grid, second (b_varies) varies -- returns the varying one, not names[0]',
+      defaultScoreName(constantThenVaryingSweep) === 'b_varies');
+  }
+
+  // Every score constant (including the degenerate single-point-grid case, which is
+  // trivially "constant") -- must fall back to the first sorted name, never null.
+  {
+    const allConstantSweep = {
+      axisKeys: ['a.x'], scoreNames: ['a_constant', 'b_constant'],
+      points: [
+        { pointIndex: 0, axisValues: { 'a.x': 1 }, samples: [] },
+        { pointIndex: 1, axisValues: { 'a.x': 2 }, samples: [] },
+      ],
+      aggregates: [
+        { name: 'a_constant', pointIndex: 0, draws: 1, mean: 10, stdDev: 0, min: 10, max: 10, passFraction: null },
+        { name: 'a_constant', pointIndex: 1, draws: 1, mean: 10, stdDev: 0, min: 10, max: 10, passFraction: null },
+        { name: 'b_constant', pointIndex: 0, draws: 1, mean: 20, stdDev: 0, min: 20, max: 20, passFraction: null },
+        { name: 'b_constant', pointIndex: 1, draws: 1, mean: 20, stdDev: 0, min: 20, max: 20, passFraction: null },
+      ],
+    };
+    check('feasibility defaultScoreName ALL-CONSTANT: every score constant across the grid falls back to the first sorted name, never null',
+      defaultScoreName(allConstantSweep) === 'a_constant');
+
+    const singlePointSweep = {
+      axisKeys: ['a.x'], scoreNames: ['s'],
+      points: [{ pointIndex: 0, axisValues: { 'a.x': 1 }, samples: [] }],
+      aggregates: [{ name: 's', pointIndex: 0, draws: 1, mean: 3, stdDev: 0, min: 3, max: 3, passFraction: null }],
+    };
+    check('feasibility defaultScoreName SINGLE-POINT GRID: only one point overall -- cannot show variation, falls back to the first sorted name',
+      defaultScoreName(singlePointSweep) === 's');
+  }
+
+  // A score with fewer than two points carrying an aggregate cannot be shown to vary --
+  // treated like a constant score for selection purposes and skipped in favor of a
+  // later score that does demonstrably vary.
+  {
+    const sparseThenVaryingSweep = {
+      axisKeys: ['a.x'], scoreNames: ['a_sparse', 'b_varies'],
+      points: [
+        { pointIndex: 0, axisValues: { 'a.x': 1 }, samples: [] },
+        { pointIndex: 1, axisValues: { 'a.x': 2 }, samples: [] },
+      ],
+      aggregates: [
+        // a_sparse has an aggregate at only ONE of the two points (e.g. every draw at
+        // the other point failed for this score) -- a single value cannot vary against
+        // anything.
+        { name: 'a_sparse', pointIndex: 0, draws: 1, mean: 99, stdDev: 0, min: 99, max: 99, passFraction: null },
+        { name: 'b_varies', pointIndex: 0, draws: 1, mean: 1, stdDev: 0, min: 1, max: 1, passFraction: null },
+        { name: 'b_varies', pointIndex: 1, draws: 1, mean: 2, stdDev: 0, min: 2, max: 2, passFraction: null },
+      ],
+    };
+    check('feasibility defaultScoreName FEWER-THAN-TWO-AGGREGATE-POINTS: a_sparse has an aggregate at only one point (cannot be shown to vary) -- skipped in favor of b_varies',
+      defaultScoreName(sparseThenVaryingSweep) === 'b_varies');
+  }
+
+  check('feasibility defaultScoreName: null/undefined/malformed sweep returns null, never throws',
+    defaultScoreName(null) === null && defaultScoreName(undefined) === null && defaultScoreName({}) === null);
 }
 
 // =============================== 11. feasibility panel against the SERVER'S OWN output (F3c join)
