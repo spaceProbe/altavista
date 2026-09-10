@@ -71,6 +71,9 @@
 //   the lookup is a real dispatch, not a function that always returns one constant
 //   regardless of what is registered).
 
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import {
   createLeaf, createSplit, splitLeaf, closePane, resizeSplit,
   collapseToRail, restoreFromRail, serializeLayout, deserializeLayout,
@@ -81,7 +84,10 @@ import { loadLayout, saveLayout, DEFAULT_STORAGE_KEY } from './persistence.js';
 import {
   buildBaseSidebarViewportLayout, defaultLayoutForImagery, registerDefaultLayoutForImagery,
   REGISTERED_PANEL_TYPES, availablePanelChoices,
+  hasSweep, buildSweepStudyLayout, defaultLayoutTreeForScenario, defaultLayoutForScenario,
+  attachM264Panels, FEASIBILITY_PANEL_ID, RUN_PRODUCTS_PANEL_ID, CONSOLE_PANEL_ID,
 } from './default_layouts.js';
+import { LayoutManager } from './layout_manager.js';
 
 const checks = [];
 function check(name, pass, detail) { checks.push({ name, pass: !!pass, detail: detail ?? null }); }
@@ -297,6 +303,152 @@ resetIdCounterForTests();
     availablePanelChoices(base, 'pane-sidebar').some(c => c.panelId === 'sidebar'));
   check('availablePanelChoices.everyRegisteredTypeAccountedFor',
     REGISTERED_PANEL_TYPES.every(t => availablePanelChoices(createLeaf('empty-solo', { id: 'solo' }), 'solo').some(c => c.panelId === t.panelId)));
+}
+
+// -------------------------------------------------------- F5.1 (question 197): sweep default layout
+// "When the selected scenario carries a `sweep` key ... and the layout is unmodified,
+// the default layout is a sweep-shaped one: sidebar, the feasibility panel given the
+// wide/primary share, run products, and console." `hasSweep`/`buildSweepStudyLayout`/
+// `defaultLayoutTreeForScenario` mirror the pre-existing `hasRicFrame`/
+// `buildRpoTripleViewportLayout`/`defaultLayoutForScenario` pattern in default_layouts.js
+// exactly. `input.feasibilitySweep`-shaped real data: the committed
+// web/js/fixtures/feasibility_sweep_fixture.json study (the same fixture
+// tests/test_viewer_feasibility_panel.py/panels_check.mjs section 10 drive), read
+// directly here rather than passed as a CLI arg -- this harness has never taken one
+// (unlike panels_check.mjs) and there is no reason to add that surface just for this.
+{
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const fixturePath = path.join(__dirname, '..', 'fixtures', 'feasibility_sweep_fixture.json');
+  const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
+  const fixtureSweep = fixture.scenario.sweep;
+
+  // ---- hasSweep -----------------------------------------------------------------
+  check('hasSweep.trueForAScenarioCarryingTheRealFixtureStudysSweepKey', hasSweep({ sweep: fixtureSweep }) === true);
+  check('hasSweep.falseForAnOrdinaryScenarioWithNoSweepKey', hasSweep({ imagery: null }) === false);
+  check('hasSweep.falseForNullScenario', hasSweep(null) === false);
+  check('hasSweep.falseForAMalformedNonObjectSweepValue', hasSweep({ sweep: 'not-an-object' }) === false);
+
+  // ---- buildSweepStudyLayout ------------------------------------------------------
+  const sweepTree = buildSweepStudyLayout();
+  const sweepLeaves = listLeaves(sweepTree).map((l) => l.panelId);
+  check('buildSweepStudyLayout.exactlyFourLeavesSidebarFeasibilityRunProductsConsole',
+    sweepLeaves.length === 4 &&
+    ['sidebar', FEASIBILITY_PANEL_ID, RUN_PRODUCTS_PANEL_ID, CONSOLE_PANEL_ID].every((id) => sweepLeaves.includes(id)),
+    { sweepLeaves });
+  check('buildSweepStudyLayout.hasNoMapLeaf(thisIsNotAttachM264PanelsPlusFeasibility)',
+    !sweepLeaves.includes('map-2d'));
+  check('buildSweepStudyLayout.isAValidTree', (() => { try { validateTree(sweepTree); return true; } catch { return false; } })());
+
+  // ---- defaultLayoutTreeForScenario: the shared entry point ------------------------
+  const sweepScenario = { sweep: fixtureSweep };
+  const resolvedForSweep = defaultLayoutTreeForScenario(sweepScenario);
+  const resolvedForSweepLeaves = listLeaves(resolvedForSweep).map((l) => l.panelId);
+  check('defaultLayoutTreeForScenario.selectingTheFixtureStudyYieldsALeafForTheFeasibilityPanel',
+    resolvedForSweepLeaves.includes(FEASIBILITY_PANEL_ID), { resolvedForSweepLeaves });
+  check('defaultLayoutTreeForScenario.sweepScenarioResolvesToExactlyBuildSweepStudyLayout',
+    serializeLayout(resolvedForSweep) === serializeLayout(buildSweepStudyLayout()));
+
+  const ordinaryScenario = { imagery: null };
+  const resolvedForOrdinary = defaultLayoutTreeForScenario(ordinaryScenario);
+  const resolvedForOrdinaryLeaves = listLeaves(resolvedForOrdinary).map((l) => l.panelId);
+  check('defaultLayoutTreeForScenario.ordinaryNoSweepScenarioNeverGetsTheFeasibilityLeaf',
+    !resolvedForOrdinaryLeaves.includes(FEASIBILITY_PANEL_ID), { resolvedForOrdinaryLeaves });
+  check('defaultLayoutTreeForScenario.ordinaryScenarioIsByteIdenticalToAttachM264PanelsOfDefaultLayoutForScenario(noRegression)',
+    serializeLayout(resolvedForOrdinary) === serializeLayout(attachM264Panels(defaultLayoutForScenario(ordinaryScenario))));
+
+  check('defaultLayoutTreeForScenario.nullScenarioDegradesToTheOrdinaryDefaultRatherThanThrowing',
+    (() => { try { return listLeaves(defaultLayoutTreeForScenario(null)).length === 5; } catch { return false; } })());
+
+  // Precedence when a scenario is (today, never actually) both sweep- and RIC-shaped:
+  // this is not a real product requirement (no real publish route produces both -- see
+  // default_layouts.js's own comment on defaultLayoutTreeForScenario), just a pinned,
+  // deliberate dispatch order so it is decided rather than accidental.
+  const bothScenario = { sweep: fixtureSweep, frames: [{ axes: 'AXES_KIND_RIC' }] };
+  check('defaultLayoutTreeForScenario.sweepTakesPrecedenceOverAnRicFrameWhenBothAreSomehowPresent(pinnedDispatchOrder)',
+    listLeaves(defaultLayoutTreeForScenario(bothScenario)).some((l) => l.panelId === FEASIBILITY_PANEL_ID));
+
+  // -------------------------------------------------- LayoutManager wiring (integration)
+  // The pure-function checks above prove default_layouts.js's own selection logic; this
+  // block proves web/js/layout/layout_manager.js actually CALLS defaultLayoutTreeForScenario
+  // from applyDefaultForScenario -- and, critically, that the pre-existing
+  // "_userHasCustomized" guard still blocks the sweep default from ever replacing a
+  // layout the user already arranged or persisted (this task's brief: "a user who has
+  // arranged or persisted their own layout must NOT get their layout replaced when they
+  // select a sweep scenario"). layout_manager.js needs a real `document` (its own module
+  // docstring: normally verified only by an interactive browser check) -- this is a
+  // minimal, hand-rolled stub with just enough surface for render() to run without
+  // throwing under plain `node` (mirrors this file's own makeMemoryStorage() convention
+  // above for a Storage stand-in), not a real/third-party DOM implementation -- this
+  // repo's own stated "no dependency, no build step" posture for the windowing core
+  // (question 161) is preserved.
+  function makeFakeElement(tag) {
+    let text = '';
+    const el = {
+      tagName: tag,
+      className: '',
+      dataset: {},
+      style: {},
+      attributes: {},
+      children: [],
+      tabIndex: -1,
+      title: '',
+      hidden: false,
+      classList: {
+        _set: new Set(),
+        add(c) { this._set.add(c); },
+        remove(c) { this._set.delete(c); },
+        contains(c) { return this._set.has(c); },
+      },
+      get textContent() { return text; },
+      set textContent(v) { text = v; },
+      set innerHTML(_v) { el.children = []; },
+      appendChild(child) { el.children.push(child); return child; },
+      append(...items) { for (const it of items) el.appendChild(it); },
+      addEventListener() {},
+      removeEventListener() {},
+      setAttribute(k, v) { el.attributes[k] = v; },
+      getAttribute(k) { return el.attributes[k]; },
+      contains() { return false; },
+      querySelector() { return null; },
+    };
+    return el;
+  }
+  function withFakeDocument(fn) {
+    const previous = globalThis.document;
+    globalThis.document = { activeElement: null, createElement: (tag) => makeFakeElement(tag) };
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete globalThis.document; else globalThis.document = previous;
+    }
+  }
+
+  withFakeDocument(() => {
+    // Fresh instance, nothing persisted -- not customized -- selecting the fixture
+    // study must apply the sweep default.
+    const freshManager = new LayoutManager({
+      root: makeFakeElement('div'), contentProviders: {}, storage: makeMemoryStorage(),
+    });
+    check('layoutManager.freshInstanceIsNotCustomized', freshManager._userHasCustomized === false);
+    freshManager.applyDefaultForScenario(sweepScenario);
+    const freshLeaves = listLeaves(freshManager.tree).map((l) => l.panelId);
+    check('layoutManager.applyDefaultForScenarioAppliesTheSweepLayoutForAnUnmodifiedLayout',
+      freshLeaves.includes(FEASIBILITY_PANEL_ID), { freshLeaves });
+
+    // A SECOND fresh instance, this time with a real PERSISTED (customized) layout
+    // already in storage -- applyDefaultForScenario must be a no-op for it, even when
+    // the incoming scenario carries a sweep.
+    const persistedTree = buildBaseSidebarViewportLayout();
+    const persistedStorage = makeMemoryStorage({ [DEFAULT_STORAGE_KEY]: serializeLayout(persistedTree) });
+    const customizedManager = new LayoutManager({
+      root: makeFakeElement('div'), contentProviders: {}, storage: persistedStorage,
+    });
+    check('layoutManager.constructorLoadingAPersistedLayoutMarksItCustomized', customizedManager._userHasCustomized === true);
+    customizedManager.applyDefaultForScenario(sweepScenario);
+    check('layoutManager.customizedGuardBlocksTheSweepDefaultFromReplacingAPersistedLayout',
+      serializeLayout(customizedManager.tree) === serializeLayout(persistedTree) &&
+      !listLeaves(customizedManager.tree).some((l) => l.panelId === FEASIBILITY_PANEL_ID));
+  });
 }
 
 const allPass = checks.every(c => c.pass);

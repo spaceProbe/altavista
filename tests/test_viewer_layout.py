@@ -309,6 +309,64 @@ def test_available_panel_choices_is_a_real_registry_not_a_fixed_list(layout_data
         assert names[name] is True, f"{name} failed"
 
 
+# ---------------------------------------------------------------- F5.1 (question 197)
+def test_sweep_carrying_scenario_gets_a_sweep_shaped_default_layout(layout_data):
+    """Question 197's own required text: "when the selected scenario carries a `sweep`
+    key ... and the layout is unmodified, the default layout is a sweep-shaped one:
+    sidebar, the feasibility panel given the wide/primary share, run products, and
+    console." Fails against a `hasSweep` that never detects the real fixture study's
+    `sweep` key, a `buildSweepStudyLayout` missing the feasibility leaf (or carrying an
+    extra map leaf that does not belong in this shape), or a `defaultLayoutTreeForScenario`
+    that does not actually dispatch to it for a sweep-carrying scenario -- see
+    layout_tree_check.mjs's own F5.1 section for the exact fixture-driven assertions.
+    """
+    names = _names(layout_data)
+    for name in (
+        "hasSweep.trueForAScenarioCarryingTheRealFixtureStudysSweepKey",
+        "hasSweep.falseForAnOrdinaryScenarioWithNoSweepKey",
+        "hasSweep.falseForNullScenario",
+        "hasSweep.falseForAMalformedNonObjectSweepValue",
+        "buildSweepStudyLayout.exactlyFourLeavesSidebarFeasibilityRunProductsConsole",
+        "buildSweepStudyLayout.hasNoMapLeaf(thisIsNotAttachM264PanelsPlusFeasibility)",
+        "buildSweepStudyLayout.isAValidTree",
+        "defaultLayoutTreeForScenario.selectingTheFixtureStudyYieldsALeafForTheFeasibilityPanel",
+        "defaultLayoutTreeForScenario.sweepScenarioResolvesToExactlyBuildSweepStudyLayout",
+        "defaultLayoutTreeForScenario.nullScenarioDegradesToTheOrdinaryDefaultRatherThanThrowing",
+        "defaultLayoutTreeForScenario.sweepTakesPrecedenceOverAnRicFrameWhenBothAreSomehowPresent(pinnedDispatchOrder)",
+    ):
+        assert names[name] is True, f"{name} failed"
+
+
+def test_ordinary_scenario_default_layout_is_unregressed_by_the_sweep_default(layout_data):
+    """The other half of question 197's requirement: a scenario with no `sweep` key
+    must still resolve to EXACTLY what `attachM264Panels(defaultLayoutForScenario(sc))`
+    computed before this task -- no feasibility leaf, byte-identical tree. Fails against
+    an implementation that widens the sweep dispatch to also catch ordinary scenarios,
+    or that changes `attachM264Panels`/`defaultLayoutForScenario` themselves (which
+    web/js/panels_check.mjs's own "attachM264Panels:" checks separately guard).
+    """
+    names = _names(layout_data)
+    assert names["defaultLayoutTreeForScenario.ordinaryNoSweepScenarioNeverGetsTheFeasibilityLeaf"] is True
+    assert names["defaultLayoutTreeForScenario.ordinaryScenarioIsByteIdenticalToAttachM264PanelsOfDefaultLayoutForScenario(noRegression)"] is True
+
+
+def test_customized_or_persisted_layout_is_never_replaced_by_the_sweep_default(layout_data):
+    """"A user who has arranged or persisted their own layout must NOT get their layout
+    replaced when they select a sweep scenario" (this task's own brief, restating the
+    pre-existing `_userHasCustomized` guard's own purpose, unweakened by this task).
+    Fails against an `applyDefaultForScenario` that drops or bypasses that guard --
+    verified here by actually constructing a `LayoutManager` (a minimal hand-rolled
+    fake `document`, layout_tree_check.mjs's own convention -- no jsdom dependency)
+    with a real PERSISTED layout already in storage, then handing it a sweep-carrying
+    scenario and asserting its tree is completely unchanged.
+    """
+    names = _names(layout_data)
+    assert names["layoutManager.freshInstanceIsNotCustomized"] is True
+    assert names["layoutManager.applyDefaultForScenarioAppliesTheSweepLayoutForAnUnmodifiedLayout"] is True
+    assert names["layoutManager.constructorLoadingAPersistedLayoutMarksItCustomized"] is True
+    assert names["layoutManager.customizedGuardBlocksTheSweepDefaultFromReplacingAPersistedLayout"] is True
+
+
 def test_layout_report(layout_data, capsys):
     """Not a correctness assertion -- prints the full checks list so `pytest -q -s`
     (or any CI log) carries every individual check's pass/fail, per this task's
