@@ -451,7 +451,8 @@ fn the_same_dropout_faulted_drm_executed_twice_produces_byte_identical_run_produ
 // -- a new `Pcg64::new(seed)`, `seq` reset to 0, `next_due` reset to `boundary + period_ns`,
 // `last_truth` cleared -- and a windowed SENSOR fault means this happens TWICE (fault start, fault
 // end). Measured here, not redesigned: does the CCSDS sequence count restart at 0 at each
-// boundary, and does the emission grid shift?
+// boundary, and does the emission grid shift? (R6.1, question 189: the second question now has a
+// real, sidecar-answerable "yes" -- see the test's own doc comment for the inversion.)
 // =================================================================================================
 
 /// Decodes every `st_meas` OUT record's own CCSDS `sequence_count` field from a run's own
@@ -481,34 +482,28 @@ fn decode_star_tracker_sequence_counts(log: &PortTrafficLog) -> Vec<(i64, u16)> 
 /// this test's own failure is the signal to update this disclosure, not silently absorb the
 /// change.
 ///
-/// **A second, unrelated, PRE-EXISTING finding surfaced while investigating "does the emission
-/// grid shift" (root-caused, not merely observed):** the original hypothesis here was that the
-/// re-materialized model's own `next_due = boundary + period_ns` lands on the exact epoch the
-/// undisturbed schedule would have used anyway (`sample_interval_s = 1.0`, an exact multiple of
-/// the star tracker's declared 0.05 s/20 Hz period, so any on-grid fault epoch is also on-grid
-/// for the sensor). Measuring it directly falsified the naive read of the `PortTrafficLog`
-/// sidecar: the first two OUT records after the fault-end boundary share the IDENTICAL `tai_ns`
-/// (both stamped at the boundary's own `t + one KERNEL step`, not their own individual due
-/// epochs `t + 0.05s`/`t + 0.10s`), with `sequence_count` 0 and 1 distinguishing them. Read
-/// directly from the source: `crate::router::Router::deliver(&mut self, from_instance, emission_
-/// tai_ns, outbox)` stamps EVERY message in one `Outbox` with the SAME caller-supplied `emission_
-/// tai_ns` (the kernel step's own END epoch, from `HeteroScheduler::advance_to_with_ports`'s own
-/// `result.t_tai_ns`) -- `PortMessage.tai_ns` (each message's own individually-`push`ed due
-/// epoch, set correctly inside `StarTrackerModel::step_with_ports`) is never read for the
-/// record's own timestamp. This is a genuine, PRE-EXISTING property of `Router::deliver` --
-/// unrelated to and unintroduced by this task -- that applies to ANY native model emitting more
-/// than once per kernel step (the star tracker's own 20 Hz rate under this fixture's 10 Hz
-/// kernel step, fault or no fault): the sidecar's own recorded epoch is coarsened to the kernel
-/// step grid whenever multiple emissions land inside one step, so it cannot answer "does the
-/// TRUE, sub-kernel-step due-epoch grid shift" for this instance at all -- only the model's own
-/// internal `next_due` arithmetic (exact, and already covered by this crate's own unit tests,
-/// e.g. `sensors::tests::star_tracker_constructed_at_a_realistic_epoch_emits_exactly_once_per_
-/// declared_period`) can. Not fixed here (out of this task's own charter; flagged as an
-/// escalation in `R5_1A_REPORT.md`). This test asserts only what the sidecar CAN honestly answer:
-/// the sequence-count reset, and the record-count/pairing pattern the coalescing itself produces
-/// (a regression guard on the confound's own current shape, not a claim about the true grid).
+/// **R6.1 (`docs/open-questions.md` question 189) inverts this test's own second half, and this
+/// is exactly the inversion the task brief asked for -- documented here, not silently dropped.**
+/// R5.1a's own investigation of "does the emission grid shift" surfaced a PRE-EXISTING confound
+/// (root-caused, not merely observed, and disclosed in `R5_1A_REPORT.md` as an escalation): the
+/// first two OUT records after the fault-end boundary shared the IDENTICAL `tai_ns` (both
+/// stamped at the boundary's own `t + one KERNEL step`, not their own individual due epochs
+/// `t + 0.05s`/`t + 0.10s`), with `sequence_count` 0 and 1 distinguishing them -- `crate::router::
+/// Router::deliver` stamped EVERY message in one `Outbox` with the SAME caller-supplied step-end
+/// epoch, never each message's own individually-`push`ed due epoch, so the sidecar could not
+/// answer "does the true, sub-kernel-step due-epoch grid shift" for this instance at all. R6.1
+/// fixed exactly that: `Router::deliver` now records/delivers each message at its OWN due epoch
+/// (`crate::router`'s own module doc comment, "Per-message emission epochs"), falling back to the
+/// caller's coarser epoch only for a message that carries none (never the case here). **Measured
+/// again, after the fix, not merely asserted from the fix's own description:** the first two OUT
+/// records after the fault-end boundary now carry two DIFFERENT `tai_ns` values, 0.05 s (one
+/// star-tracker period) apart -- `FAULT_END_TAI_NS + 50_000_000` (`sequence_count = 0`) then
+/// `FAULT_END_TAI_NS + 100_000_000` (`sequence_count = 1`), matching `StarTrackerModel::new`'s own
+/// documented `next_due = boundary + period_ns` seeding exactly. The sidecar can now answer "does
+/// the true, sub-kernel-step due-epoch grid shift" directly from `PortTrafficRecord.tai_ns`
+/// itself, with no need to fall back to the model's own internal `next_due` arithmetic.
 #[test]
-fn measured_ccsds_sequence_restarts_at_zero_at_each_rematerialization_boundary_and_the_sidecars_own_epoch_coalesces_multiple_emissions_per_kernel_step() {
+fn measured_ccsds_sequence_restarts_at_zero_at_each_rematerialization_boundary_and_the_sidecars_own_epoch_now_resolves_each_sub_step_emission_distinctly() {
     let _engine = gmat_sys::engine_lock();
     let (drm, sos, systems) = load_control_bundle("demo_attitude_control_startracker_dropout.drm.yaml");
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
@@ -536,11 +531,23 @@ fn measured_ccsds_sequence_restarts_at_zero_at_each_rematerialization_boundary_a
     eprintln!("[seq measurement] first emission at/after fault end: tai_ns={} seq={}", first_after.0, first_after.1);
     assert_eq!(first_after.1, 0, "MEASURED: the CCSDS sequence count restarts at 0 at the fault-end re-materialization boundary, not continuing the pre-fault count");
 
-    // MEASURED (the epoch-coalescing finding, above): the first TWO records after the boundary
-    // share one tai_ns (one kernel step's worth of two 20 Hz emissions coalesced by `Router::
-    // deliver`), distinguished only by sequence_count 0 and 1 -- a regression guard on the
-    // confound's own current shape.
-    assert!(after_end.len() >= 2, "expected at least two records at/after the fault end to check the coalescing pattern");
-    assert_eq!(after_end[0].0, after_end[1].0, "MEASURED: the first two post-fault emissions share the identical sidecar tai_ns (Router::deliver's own per-step epoch stamping, not each message's own due epoch)");
-    assert_eq!((after_end[0].1, after_end[1].1), (0, 1), "the two coalesced records are distinguished by sequence_count, 0 then 1");
+    // R6.1 (question 189), the inversion: the first TWO records after the boundary now carry
+    // their own DISTINCT due epochs, 0.05 s (one star-tracker period) apart -- `StarTrackerModel::
+    // new`'s own documented `next_due = boundary + period_ns` seeding, directly readable from the
+    // sidecar now instead of only from the model's own internal arithmetic -- still distinguished
+    // by sequence_count 0 then 1.
+    const STAR_TRACKER_PERIOD_NS: i64 = 50_000_000; // 20 Hz (drms/demo_attitude_control_startracker.system.yaml)
+    assert!(after_end.len() >= 2, "expected at least two records at/after the fault end to check the sub-step epoch pattern");
+    assert_eq!(
+        after_end[0].0,
+        FAULT_END_TAI_NS + STAR_TRACKER_PERIOD_NS,
+        "MEASURED: the first post-fault emission's own recorded epoch is the re-materialization boundary's own next_due (boundary + one period), not the coarser kernel step end"
+    );
+    assert_eq!(
+        after_end[1].0,
+        FAULT_END_TAI_NS + 2 * STAR_TRACKER_PERIOD_NS,
+        "MEASURED: the second post-fault emission's own recorded epoch is one further star-tracker period along, not coalesced onto the first"
+    );
+    assert_ne!(after_end[0].0, after_end[1].0, "the two post-fault emissions must no longer share one coalesced sidecar tai_ns");
+    assert_eq!((after_end[0].1, after_end[1].1), (0, 1), "the two distinctly-timestamped records are still distinguished by sequence_count, 0 then 1");
 }

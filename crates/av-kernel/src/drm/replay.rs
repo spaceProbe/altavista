@@ -27,29 +27,55 @@
 //!
 //! ## The missing-frame rule
 //!
-//! [`ReplayModel::step_with_ports`] emits exactly the frames recorded at that step's own
-//! emission epoch (`t_tai_ns + dt_ns`, matching `crate::schedule::HeteroScheduler::
-//! advance_to_with_ports`'s own `Router::deliver` call -- see that function's own doc comment).
-//! When nothing was recorded at that exact epoch, the rule is:
+//! **R6.1 (`docs/open-questions.md` question 189): [`ReplayModel::step_with_ports`] plays back a
+//! WINDOW of recorded epochs, not a single exact match.** Through R5.x, `crate::router::Router::
+//! deliver` stamped every message from one `Outbox` with the emitting step's own coarse END
+//! epoch, so exactly one recorded epoch (`t_tai_ns + dt_ns`) ever needed checking per call. Now
+//! that each message carries its own, possibly finer, due epoch (`crate::router`'s own module doc
+//! comment, "Per-message emission epochs"), one ORIGINAL `step_with_ports` call can have produced
+//! several messages at several DIFFERENT due epochs (a sensor whose declared rate exceeds the
+//! kernel's own step rate, e.g. `crate::drm::sensors::StarTrackerModel`/`ImuModel`'s own `while
+//! end >= self.next_due.get()` catch-up loop) -- all of them still landing inside that ONE call's
+//! own span, never outside it. [`ReplayModel::step_with_ports`] therefore gathers every recorded
+//! epoch in `(t_tai_ns, t_tai_ns + dt_ns]` (exclusive lower, inclusive upper) and replays each one
+//! at its own real due epoch, in ascending order -- not one coalesced onto `t_tai_ns + dt_ns`.
+//!
+//! **Why `t_tai_ns` alone is the correct lower bound, with no separate watermark to track:**
+//! `crate::schedule::HeteroScheduler::advance_to_with_ports` steps one system CONTIGUOUSLY at its
+//! own registered `period_ns` (`t_ns == sys.next_due_ns` is checked before every step,
+//! `sys.next_due_ns += sys.period_ns` after it -- read directly, not assumed), so this call's own
+//! `t_tai_ns` IS the previous call's own `t_tai_ns + dt_ns` for the SAME system. A replayed
+//! instance is driven by the identical registered `period_ns` the original model was (replay
+//! swaps the `DynamicsModel`, never the `SystemInstance` schedule), so [`ReplayModel::
+//! step_with_ports`]'s own calls are exactly as contiguous -- there is no gap between one call's
+//! window and the next for a real due epoch to fall through.
+//!
+//! When the window is EMPTY (no recorded epoch in `(t_tai_ns, end]`), the rule is:
 //!
 //! - **Before this instance's first recorded epoch, or after its last:** legitimate silence --
 //!   emits nothing, no error. An instance genuinely has nothing to say before it starts, or
 //!   after it stops.
-//! - **Strictly between this instance's own first and last recorded epoch, on this instance's
-//!   own step grid, with nothing recorded:** [`ReplayError::MissingFrame`] -- a typed error,
-//!   never interpolated, held, or silently skipped. Every recorded epoch for one instance is by
-//!   construction present as a key in [`ReplayModel::frames_by_epoch`], so "first" and "last"
-//!   are themselves always hits, never candidates for this rule; only a genuinely *interior*
-//!   epoch with no entry at all can trip it.
+//! - **The window overlaps `(first recorded epoch, last recorded epoch)`, i.e. `t_tai_ns < last
+//!   && end > first`, yet found NOTHING:** [`ReplayError::MissingFrame`] -- a typed error, never
+//!   interpolated, held, or silently skipped.
 //!
-//! **Honest limit of this rule (state plainly, per this task's own standing instruction): it
-//! detects a deleted or corrupted INTERIOR record, and cannot detect one deleted from the
-//! leading or trailing edge.** An instance that genuinely emitted nothing on its own first or
-//! last step is, from the log alone, indistinguishable from one whose very first or very last
-//! record was quietly removed -- both leave the same "no entry outside [first, last]" shape.
-//! Closing that gap would need an independent signal this log does not carry (e.g. the run's
-//! own declared step count for that instance, cross-checked against how many *are* recorded) --
-//! out of this module's scope; not claimed here.
+//! **Honest limits of this rule (state plainly, per this task's own standing instruction).**
+//! 1. It detects a deleted or corrupted INTERIOR record, and cannot detect one deleted from the
+//!    leading or trailing edge. An instance that genuinely emitted nothing on its own first or
+//!    last step is, from the log alone, indistinguishable from one whose very first or very last
+//!    record was quietly removed -- both leave the same "no entry outside [first, last]" shape.
+//!    Closing that gap would need an independent signal this log does not carry (e.g. the run's
+//!    own declared step count for that instance, cross-checked against how many *are* recorded)
+//!    -- out of this module's scope; not claimed here.
+//! 2. **New in R6.1, disclosed rather than silently accepted:** when one call's own window
+//!    legitimately contains MORE THAN ONE recorded due epoch (the sub-step case above), deleting
+//!    only SOME of them -- not all -- leaves the window non-empty, so this rule does not fire; it
+//!    only detects a call's window turning up EMPTY, never a call that recorded fewer due epochs
+//!    than the original run really produced. This is the identical granularity the pre-R6.1 rule
+//!    already had (it could only ever detect "this whole call recorded nothing" -- a call's
+//!    frames were atomic, one coalesced epoch, so "partially missing" was not even an expressible
+//!    state then); R6.1 does not narrow it, but it does make a new, undetected partial-loss shape
+//!    possible where none existed before, because a call's own frames are no longer atomic.
 //!
 //! ## Reconstructing the ORIGINAL model's own `ModelInfo` (`describe()`/`state_dim()`)
 //!
@@ -70,6 +96,7 @@
 //! segment.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::path::PathBuf;
 
 use av_cdm::pb::{ModelInfo, PortDirection, PortTrafficLog};
@@ -153,7 +180,12 @@ pub(crate) struct ReplayModel {
     /// sort_port_traffic`'s own doc comment -- restricted to this one instance's own records,
     /// whose own `sequence` is monotonic with its own `tai_ns`, so this map's own ascending key
     /// order recovers this instance's true chronological emission order regardless of the log's
-    /// own top-level sort key).
+    /// own top-level sort key). **R6.1 (question 189):** a `tai_ns` key is now each message's own
+    /// due epoch, which can differ between two records from the SAME `deliver` call/`sequence`
+    /// (`crate::router`'s own module doc comment, "Per-message emission epochs") -- so ONE
+    /// [`ReplayModel::step_with_ports`] call's own window can, and for a sub-step-emitting
+    /// instance routinely does, cover more than one key here. See [`ReplayModel::step_with_ports`]
+    /// and the module doc comment's "The missing-frame rule" section.
     frames_by_epoch: BTreeMap<i64, Vec<(String, Vec<u8>)>>,
     /// The earliest/latest emission epoch this instance has ANY recorded OUT frame at -- `None`
     /// for an instance that never emitted a FRAMED/BYTE_STREAM frame the whole run. Cached once
@@ -206,33 +238,37 @@ impl DynamicsModel for ReplayModel {
         Ok(self.step_with_ports(state, t_tai_ns, controls, dt_ns, &Inbox::empty())?.0)
     }
 
-    /// The playback itself -- see the module doc comment's "The missing-frame rule" section.
+    /// The playback itself -- see the module doc comment's "The missing-frame rule" section for
+    /// the full window contract (R6.1, question 189) and why `(t_tai_ns, end]` -- not a single
+    /// exact match at `end` -- is the correct set of recorded epochs to replay from THIS call.
     /// `state` passes through unchanged (zero-order hold, [`ReplayModel::derivatives`]'s own
     /// doc comment); `inbox` is read by nothing here -- a replay binding never computes an
     /// `AppliedCommand` (there is no real controller logic left behind it to have applied one).
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, _inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
-        let emission_tai_ns = t_tai_ns + dt_ns;
+        let end = t_tai_ns + dt_ns;
         let mut outbox = Outbox::new();
-        match self.frames_by_epoch.get(&emission_tai_ns) {
-            Some(frames) => {
-                for (port, payload) in frames {
-                    outbox.push(port.clone(), emission_tai_ns, payload.clone());
-                }
+        // Every recorded epoch this call's own window covers, ascending -- `BTreeMap::range`
+        // already returns them in key order, so no separate sort is needed.
+        let due_epochs: Vec<i64> = self.frames_by_epoch.range((Bound::Excluded(t_tai_ns), Bound::Included(end))).map(|(epoch, _)| *epoch).collect();
+        if due_epochs.is_empty() {
+            let interior_gap = match (self.first_epoch, self.last_epoch) {
+                (Some(first), Some(last)) => t_tai_ns < last && end > first,
+                _ => false,
+            };
+            if interior_gap {
+                return Err(ReplayError::MissingFrame { instance: self.instance.clone(), tai_ns: end });
             }
-            None => {
-                let interior_gap = match (self.first_epoch, self.last_epoch) {
-                    (Some(first), Some(last)) => emission_tai_ns > first && emission_tai_ns < last,
-                    _ => false,
-                };
-                if interior_gap {
-                    return Err(ReplayError::MissingFrame { instance: self.instance.clone(), tai_ns: emission_tai_ns });
+            // Legitimately before this instance's first recorded emission, or after its
+            // last: emits nothing, no error -- see the module doc comment's own disclosed
+            // limitation (indistinguishable from a deleted leading/trailing record).
+        } else {
+            for due in due_epochs {
+                for (port, payload) in &self.frames_by_epoch[&due] {
+                    outbox.push(port.clone(), due, payload.clone());
                 }
-                // Legitimately before this instance's first recorded emission, or after its
-                // last: emits nothing, no error -- see the module doc comment's own disclosed
-                // limitation (indistinguishable from a deleted leading/trailing record).
             }
         }
-        Ok((StepResult { state: state.to_vec(), t_tai_ns: emission_tai_ns, outputs: BTreeMap::new() }, outbox, Vec::new()))
+        Ok((StepResult { state: state.to_vec(), t_tai_ns: end, outputs: BTreeMap::new() }, outbox, Vec::new()))
     }
 
     /// A replay binding produces no fresh CDM measurement of its own -- see the module doc
@@ -301,6 +337,49 @@ mod tests {
         let sent = outbox.messages();
         assert_eq!(sent.len(), 1, "the IN record must not also be replayed as an emission: {sent:?}");
         assert_eq!(sent[0].port, "wheel_torque_out");
+    }
+
+    /// R6.1 (question 189): a call whose window `(t_tai_ns, end]` covers MORE THAN ONE recorded
+    /// epoch -- mirrors a sensor whose declared rate exceeds its own kernel step rate emitting
+    /// twice from one `step_with_ports` call -- replays EVERY one of them, each at its own real
+    /// due epoch, not merely the one recorded exactly at `end`. **Fails against** the pre-R6.1
+    /// exact-match implementation: it would replay only the `2_000` frame (the exact `end`
+    /// match) and silently drop the `1_950` one entirely -- exactly the risk `tests/replay.rs`'s
+    /// T1/T1b guard against end to end.
+    #[test]
+    fn a_calls_window_covering_two_recorded_epochs_replays_both_at_their_own_due_epochs() {
+        let log = PortTrafficLog {
+            run_id: "r".to_string(),
+            records: vec![out_rec("star", "st_meas", 1_950, b"sub-step-a"), out_rec("star", "st_meas", 2_000, b"sub-step-b")],
+            provenance: None,
+        };
+        let model = ReplayModel::new("star", info(), 0, &log);
+        let (result, outbox, _applied) = model.step_with_ports(&[], 1_000, &[], 1_000, &Inbox::empty()).unwrap();
+        assert_eq!(result.t_tai_ns, 2_000, "StepResult.t_tai_ns is still the call's own end epoch, regardless of how many sub-step frames it carries");
+        let sent = outbox.messages();
+        assert_eq!(sent.len(), 2, "both recorded sub-step epochs must be replayed, not just the one at the call's own end: {sent:?}");
+        assert_eq!((sent[0].tai_ns, sent[0].payload.as_slice()), (1_950, b"sub-step-a".as_slice()));
+        assert_eq!((sent[1].tai_ns, sent[1].payload.as_slice()), (2_000, b"sub-step-b".as_slice()));
+    }
+
+    /// The disclosed limitation (module doc comment, "The missing-frame rule," item 2): deleting
+    /// only ONE of two recorded epochs inside one call's own window leaves that window non-empty,
+    /// so no error fires -- this rule detects a call's window turning up EMPTY, never a partial
+    /// loss within a still-non-empty window. Measured and pinned here, not merely asserted in
+    /// prose.
+    #[test]
+    fn deleting_only_one_of_two_recorded_sub_step_epochs_in_one_calls_window_is_not_detected() {
+        let log = PortTrafficLog {
+            run_id: "r".to_string(),
+            // Only the LATER sub-step epoch survives; 1_950 was "deleted".
+            records: vec![out_rec("star", "st_meas", 2_000, b"sub-step-b"), out_rec("star", "st_meas", 3_000, b"next-tick")],
+            provenance: None,
+        };
+        let model = ReplayModel::new("star", info(), 0, &log);
+        let (_result, outbox, _applied) = model
+            .step_with_ports(&[], 1_000, &[], 1_000, &Inbox::empty())
+            .expect("a non-empty window must not error, even though it is missing a sub-step frame the original run really had");
+        assert_eq!(outbox.messages().len(), 1, "plays back whatever survived, silently short by the deleted frame -- the disclosed limitation");
     }
 
     /// A step whose own emission epoch has no recorded frame at all, but is BEFORE this

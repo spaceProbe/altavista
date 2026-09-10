@@ -62,6 +62,67 @@
 //! - anything else -- [`RouterError::UnsupportedLinkModel`], a typed refusal (question 108: "a
 //!   link_model naming anything else is a typed refusal, not a silent ignore").
 //!
+//! ## Per-message emission epochs (`docs/open-questions.md` question 189, R6.1)
+//!
+//! **Through R5.1a, [`Router::deliver`] stamped EVERY message in one `Outbox` with the single
+//! caller-supplied step epoch, never each message's own individually-`push`ed due epoch.** A
+//! model that emits more than once per kernel step -- a sensor whose declared update rate
+//! exceeds the kernel's own step rate, e.g. a 20 Hz star tracker/IMU under a 10 Hz kernel step
+//! (`crate::drm::sensors::StarTrackerModel`/`ImuModel`'s own `while end >= self.next_due.get()`
+//! catch-up loop) -- therefore had every one of that step's real, sub-step-apart emissions
+//! coalesced onto one coarse epoch in the sidecar, distinguishable only by `sequence` (measured
+//! directly, R5.1a: `crates/av-kernel/R5_1A_REPORT.md`'s own "Measurements" section, and
+//! `tests/sensor_faults.rs`'s now-inverted `measured_ccsds_sequence_restarts_...` test). The true
+//! sub-step due epoch was unrecoverable from the sidecar at all.
+//!
+//! **Decided (the lead, question 189): a [`av_dynamics::PortMessage`] carries its own emission
+//! epoch, set by the emitting model, in its own `tai_ns` field -- already true of every message
+//! in this workspace (`lockstep.proto`'s own `PortMessage.tai_ns` doc comment: "Inputs carry the
+//! sender's emission epoch"; every `Outbox::push`/`push_signal` call site already computes a
+//! real one -- `crate::drm::sensors::StarTrackerModel::step_with_ports`'s own `due`, `crate::drm::
+//! controller::AttitudeControllerModel::step_with_ports`'s own `due`, `crate::drm::binding`'s own
+//! `result.t_tai_ns`, `crate::drm::executor`'s own `cmd.tai_ns`, and so on) -- and [`Router::
+//! deliver`] now records and uses THAT epoch, per message, not the one epoch its caller passed
+//! for the whole `Outbox`.** Concretely, every one of the six places this method used to read its
+//! single `emission_tai_ns` parameter now reads `msg_epoch` instead, resolved once per message
+//! (`deliver`'s own code, below): the OUT [`PortTrafficRecord::tai_ns`], the PORT-fault window
+//! comparison, [`InstalledPortFault::first_applied_tai_ns`], the IN [`PortTrafficRecord::tai_ns`]
+//! (both the ordinary and the `"duplicate"`-fault copy), the delivered [`av_cdm::pb::PortMessage::
+//! tai_ns`] (`msg_epoch + edge.latency_ns + extra_delay_ns`, this connection's own availability
+//! rule, unchanged in shape), and [`crate::ports::QueuedMessage::sender_emission_tai_ns`] (the raw
+//! epoch [`crate::ports::sorted_inbox`]'s own question-108 tie-break sorts by) -- every one of
+//! these is now finer, and can now be earlier within one kernel step, than before.
+//!
+//! **The sentinel, and why it is safe.** Proto3 `int64` has no field presence, so "this message
+//! carries no epoch of its own" needs a real sentinel value, not a `None`. [`NO_MESSAGE_EPOCH`]
+//! (`0`, TAI ns 0, 1958-01-01) is that sentinel -- chosen and checked, not merely "the type's own
+//! default": every `drms/*.drm.yaml`'s own `Scenario.start_tai_ns` is a large positive number
+//! (`demo_command`'s `1_700_000_000_000_000_000`, `demo_attitude_control`'s
+//! `1_767_225_637_000_000_000`, and so on -- checked directly, every `start_tai_ns:` line in
+//! `drms/*.drm.yaml`), decades after epoch 0, so no real due epoch a model computes from a real
+//! run's own start can ever collide with it; and every `Outbox::push`/`push_signal` call site in
+//! this workspace (`crate::drm::{controller,sensors,ground,gmat_command,binding,replay}`,
+//! `crate::drm::executor`'s own command dispatch) was read directly and confirmed to compute a
+//! real, non-zero epoch for every message it pushes, never a bare `0` literal. A message carrying
+//! `NO_MESSAGE_EPOCH` is therefore, today, something only a test deliberately constructs
+//! (`Router::deliver`'s own unit tests, `mod tests` below) -- the fallback path exists for a
+//! future producer that has not yet been updated to set one, not for anything a real DRM run
+//! produces right now.
+//!
+//! **Question 181's sidecar order is unaffected in SHAPE, only in the values it now sorts.**
+//! `PortTrafficLog.records`' required `(tai_ns, sequence, instance, port)` order
+//! (`crate::drm::executor::sort_port_traffic`) still sorts epoch first; what changes is that two
+//! records from the SAME `deliver` call (same `sequence`) can now carry two DIFFERENT `tai_ns`
+//! values instead of one, so they may no longer sort adjacently within their shared `sequence`
+//! group -- a real, expected consequence of recording the true epoch, not a loosening of the
+//! order's own contract.
+//!
+//! **Replay (`crate::drm::replay`).** A replayed instance's recorded OUT frames are now keyed by
+//! their own finer due epochs instead of one coarse per-step epoch, so [`crate::drm::replay::
+//! ReplayModel::step_with_ports`] gathers every recorded epoch in ITS OWN call's `(previous end,
+//! this end]` window, not a single exact match -- see that module's own doc comment for the full
+//! account of why this is still byte-for-byte reproduction, never an approximation.
+//!
 //! ## Port traffic recording (`docs/open-questions.md` question 175, M25.4a)
 //!
 //! [`Router`] is also the sole recorder of `altavista.v1.PortTrafficLog`, the sidecar
@@ -181,15 +242,15 @@
 //! - **The OUT side does NOT get a second record** -- there is only ever one real emission; the
 //!   router is what fabricates the extra delivery, not the sender emitting twice. Duplicating the
 //!   OUT record too would falsely claim the emitter itself sent the frame twice.
-//! - **Both IN records share the SAME `tai_ns` (the one real `emission_tai_ns`), never the
-//!   offset epoch** -- the identical "`PortTrafficRecord.tai_ns` is always the emission epoch,
+//! - **Both IN records share the SAME `tai_ns` (the one real `msg_epoch`, question 189), never
+//!   the offset epoch** -- the identical "`PortTrafficRecord.tai_ns` is always the emission epoch,
 //!   never the arrival epoch, never a fault's own added offset" rule `"delay"` already
 //!   establishes (a delay's own added ns famously never appears on the record either -- see
 //!   above). The two IN records are therefore content-identical in the log (same instance, port,
 //!   tai_ns, sequence, payload) -- an intentional, honest way of saying "this one emission was
 //!   delivered twice," not a distinguishable pair. What differs, and is real, is the *delivered*
-//!   `PortMessage`'s own availability: the second copy is queued at `emission_tai_ns + connection
-//!   latency + output_period_ns`, one whole native step after the first (`emission_tai_ns +
+//!   `PortMessage`'s own availability: the second copy is queued at `msg_epoch + connection
+//!   latency + output_period_ns`, one whole native step after the first (`msg_epoch +
 //!   connection latency`) -- so a receiver's `take_inbox` genuinely returns the frame at two
 //!   different steps, never both at once. Delivered PAYLOAD is the emitter's own original bytes,
 //!   unmutated (a duplicate does not also corrupt; combining the two would need overlapping
@@ -281,6 +342,15 @@ use crate::rng::{seed_for, Pcg64};
 /// The one named link model phase one implements (see the module doc comment's "Link model"
 /// section). Any other non-empty `Connection.link_model` is [`RouterError::UnsupportedLinkModel`].
 pub const LATENCY_LINK_MODEL: &str = "latency";
+
+/// The sentinel [`av_dynamics::PortMessage::tai_ns`] value [`Router::deliver`] treats as "this
+/// message carries no emission epoch of its own" -- question 189, see the module doc comment's
+/// "Per-message emission epochs" section for the full contract and why `0` is safe (empirically
+/// checked against every real `drms/*.drm.yaml`'s own `start_tai_ns` and every real `Outbox::
+/// push`/`push_signal` call site in this workspace, not merely assumed from proto3's own lack of
+/// `int64` field presence). Pinned by `mod tests`'
+/// `a_message_carrying_the_sentinel_falls_back_to_the_callers_own_epoch`.
+pub const NO_MESSAGE_EPOCH: i64 = 0;
 
 /// Everything [`Router::build`] can refuse a `SosConfiguration` for. `connection_index` is the
 /// zero-based position in `SosConfiguration.connections`, since a `Connection` carries no id of
@@ -427,8 +497,9 @@ enum PortFaultKind {
 /// resolved once per [`Router::deliver`] call by the fault-matching loop -- see that method's own
 /// body. Overlap-refusal at install time ("Overlapping windows are refused at load," the module
 /// doc comment) guarantees at most one installed fault ever matches (window-contains) the same
-/// `(instance, port, emission_tai_ns)` triple, so `deliver` only ever resolves at most one of
-/// these per message, never several to combine.
+/// `(instance, port, msg_epoch)` triple (question 189: each message's own epoch, not a
+/// per-`deliver`-call coarse one), so `deliver` only ever resolves at most one of these per
+/// message, never several to combine.
 enum PortFaultEffect {
     Drop,
     /// Extra delay (ns) ADDED to the connection's own already-declared latency.
@@ -811,24 +882,34 @@ impl Router {
         Router::default()
     }
 
-    /// Queue every message in `outbox` (emitted by `from_instance` at `emission_tai_ns`) onto
-    /// every connected receiver's pending queue, applying that connection's own latency -- see
-    /// the module doc comment's "Delivery model"/"Link model" sections. A message on a port
-    /// with no matching connection is dropped, not an error (see the module doc comment).
+    /// Queue every message in `outbox` (emitted by `from_instance`) onto every connected
+    /// receiver's pending queue, applying that connection's own latency -- see the module doc
+    /// comment's "Delivery model"/"Link model" sections. A message on a port with no matching
+    /// connection is dropped, not an error (see the module doc comment).
+    ///
+    /// **Per-message emission epochs (question 189, R6.1).** Each message's own epoch --
+    /// `msg_epoch`, resolved once per message, below -- is `message.tai_ns` when it is not
+    /// [`NO_MESSAGE_EPOCH`], and `fallback_emission_tai_ns` (the caller's own, coarser, step-end
+    /// epoch) only when it is. See the module doc comment's "Per-message emission epochs" section
+    /// for the full contract, why this replaced the pre-R6.1 "one epoch for the whole `Outbox`"
+    /// stamping, and why `NO_MESSAGE_EPOCH` is safe as a sentinel. Every use of an emission epoch
+    /// below is now `msg_epoch`, not `fallback_emission_tai_ns` directly.
     ///
     /// **Port traffic recording (question 175, M25.4a).** For every message whose emitting
     /// port's own declared `PortKind` is FRAMED or BYTE_STREAM, this records exactly one OUT
     /// `PortTrafficRecord` (`instance = from_instance`, `port = message.port`, `tai_ns =
-    /// emission_tai_ns`) plus, for every connected receiver edge, exactly one IN record
+    /// msg_epoch`) plus, for every connected receiver edge, exactly one IN record
     /// (`instance = edge.to_instance`, `port = edge.to_port`). **The IN record's own `tai_ns`
-    /// is `emission_tai_ns` too, not the receiver's later arrival epoch** -- `PortTrafficRecord
+    /// is `msg_epoch` too, not the receiver's later arrival epoch** -- `PortTrafficRecord
     /// .tai_ns`'s own proto doc comment ("the emission epoch") makes this the field's
-    /// contract, not an oversight: the arrival epoch is always `emission_tai_ns + that
+    /// contract, not an oversight: the arrival epoch is always `msg_epoch + that
     /// connection's own declared latency`, entirely derivable from the `SosConfiguration` a
     /// replay already has, so storing it twice would only be a second, redundant place for the
     /// two numbers to silently disagree. Both records share one `sequence` (`self.step`,
     /// [`Router::begin_step`]'s own doc comment), since both come from the one `deliver` call
-    /// that this step's own emission produced.
+    /// that this step's own emission produced -- **even when two messages from that one call
+    /// carry two different `msg_epoch` values** (R6.1's own sub-step case): `sequence` identifies
+    /// the `deliver` call, not the epoch, and was never meant to.
     ///
     /// A message on a FRAMED/BYTE_STREAM port with **no** connection still gets its own OUT
     /// record and no IN record at all -- deliberate, the identical "a port with no connection
@@ -871,8 +952,13 @@ impl Router {
     /// `(from_instance, message.port)` -- see the module doc comment's "Port fault runtime"
     /// section for the complete contract (matching, window, rate/seed, what a "drop" vs. "delay"
     /// fault changes about the OUT/IN records and delivery below).
-    pub fn deliver(&mut self, from_instance: &str, emission_tai_ns: i64, outbox: Outbox) {
+    pub fn deliver(&mut self, from_instance: &str, fallback_emission_tai_ns: i64, outbox: Outbox) {
         for message in outbox.into_messages() {
+            // Question 189: this message's own due epoch when it carries one, falling back to
+            // the caller's coarser step-end epoch only when it does not -- see this method's own
+            // doc comment and the module doc comment's "Per-message emission epochs" section.
+            let msg_epoch = if message.tai_ns == NO_MESSAGE_EPOCH { fallback_emission_tai_ns } else { message.tai_ns };
+
             let kind = self.port_kinds.get(&(from_instance.to_string(), message.port.clone())).copied();
             if kind.is_none() {
                 self.undeclared_port_emissions += 1;
@@ -883,7 +969,7 @@ impl Router {
                     instance: from_instance.to_string(),
                     port: message.port.clone(),
                     direction: PortDirection::Out as i32,
-                    tai_ns: emission_tai_ns,
+                    tai_ns: msg_epoch,
                     payload: message.payload.clone(),
                     sequence: self.step,
                 });
@@ -892,17 +978,18 @@ impl Router {
             // Question 178 (R4.1a/R4.1b): the port fault runtime -- see the module doc comment's
             // "Port fault runtime" section for the full contract. Every installed PORT fault
             // whose `(instance, port)` matches this emission and whose window contains
-            // `emission_tai_ns` draws exactly one `bernoulli(rate)` from its own seeded
-            // substream, UNCONDITIONALLY (even at `rate == 1.0`, even though only one fault can
-            // ever end up applying -- overlap-refusal at install time, "Overlapping windows are
-            // refused at load") -- so a run's own stream position never depends on any fault's
-            // realized outcome.
+            // `msg_epoch` (question 189: this message's OWN epoch, not the caller's coarser
+            // per-call one) draws exactly one `bernoulli(rate)` from its own seeded substream,
+            // UNCONDITIONALLY (even at `rate == 1.0`, even though only one fault can ever end up
+            // applying -- overlap-refusal at install time, "Overlapping windows are refused at
+            // load") -- so a run's own stream position never depends on any fault's realized
+            // outcome.
             let mut effect: Option<PortFaultEffect> = None;
             for pf in &mut self.port_faults {
                 if pf.instance != from_instance || pf.port != message.port {
                     continue;
                 }
-                if emission_tai_ns < pf.start_tai_ns || pf.end_tai_ns.is_some_and(|end| emission_tai_ns >= end) {
+                if msg_epoch < pf.start_tai_ns || pf.end_tai_ns.is_some_and(|end| msg_epoch >= end) {
                     continue;
                 }
                 let applies = pf.rng.bernoulli(pf.rate);
@@ -910,7 +997,7 @@ impl Router {
                     continue;
                 }
                 if pf.first_applied_tai_ns.is_none() {
-                    pf.first_applied_tai_ns = Some(emission_tai_ns);
+                    pf.first_applied_tai_ns = Some(msg_epoch);
                 }
                 pf.frames_affected += 1;
                 let this_effect = match pf.kind {
@@ -956,7 +1043,7 @@ impl Router {
                         instance: edge.to_instance.clone(),
                         port: edge.to_port.clone(),
                         direction: PortDirection::In as i32,
-                        tai_ns: emission_tai_ns,
+                        tai_ns: msg_epoch,
                         payload: delivery_payload.clone(),
                         sequence: self.step,
                     });
@@ -964,11 +1051,12 @@ impl Router {
                 // A "delay" fault's own extra_delay_ns is ADDED to this connection's own already-
                 // declared latency, for every edge alike (a port-level fault, not a per-
                 // connection one) -- question 110's existing delivery rule applies unchanged from
-                // there (module doc comment, "What the log records").
-                let delivered = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: emission_tai_ns + edge.latency_ns + extra_delay_ns, payload: delivery_payload.clone() };
+                // there (module doc comment, "What the log records"). `msg_epoch` (question 189)
+                // is this message's OWN emission epoch, not the caller's coarser per-call one.
+                let delivered = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: msg_epoch + edge.latency_ns + extra_delay_ns, payload: delivery_payload.clone() };
                 self.pending.entry(edge.to_instance.clone()).or_default().push(QueuedMessage {
                     message: delivered,
-                    sender_emission_tai_ns: emission_tai_ns,
+                    sender_emission_tai_ns: msg_epoch,
                     sender_instance: from_instance.to_string(),
                 });
 
@@ -981,15 +1069,15 @@ impl Router {
                             instance: edge.to_instance.clone(),
                             port: edge.to_port.clone(),
                             direction: PortDirection::In as i32,
-                            tai_ns: emission_tai_ns,
+                            tai_ns: msg_epoch,
                             payload: delivery_payload.clone(),
                             sequence: self.step,
                         });
                     }
-                    let delivered_again = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: emission_tai_ns + edge.latency_ns + offset_ns, payload: delivery_payload.clone() };
+                    let delivered_again = av_cdm::pb::PortMessage { port: edge.to_port.clone(), tai_ns: msg_epoch + edge.latency_ns + offset_ns, payload: delivery_payload.clone() };
                     self.pending.entry(edge.to_instance.clone()).or_default().push(QueuedMessage {
                         message: delivered_again,
-                        sender_emission_tai_ns: emission_tai_ns,
+                        sender_emission_tai_ns: msg_epoch,
                         sender_instance: from_instance.to_string(),
                     });
                 }
@@ -2007,5 +2095,157 @@ mod tests {
                 if fault_a == "f_drop" && fault_b == "f_corrupt"),
             "{err:?}"
         );
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Per-message emission epochs (question 189, R6.1) -- see the module doc comment's own
+    // "Per-message emission epochs" section. `crates/av-kernel/tests/sensor_faults.rs`'s own
+    // (inverted) `measured_ccsds_sequence_restarts_...` test and `tests/replay.rs`'s T1/T1b cover
+    // the DRM-level, real-sensor-catch-up-loop case end to end; these are the Router-level unit
+    // tests for the mechanism itself, each built to fail against the pre-R6.1 implementation that
+    // stamped every message in one `Outbox` with the caller's single, coarse
+    // `fallback_emission_tai_ns` argument regardless of `message.tai_ns`.
+    // ------------------------------------------------------------------------------------
+
+    /// A message carrying [`NO_MESSAGE_EPOCH`] (the sentinel for "no epoch of its own") falls
+    /// back to the caller's own `fallback_emission_tai_ns` -- the ONE case `deliver` still uses
+    /// that parameter for. Every real producer in this workspace always sets a real epoch (module
+    /// doc comment, "Per-message emission epochs"; `NO_MESSAGE_EPOCH`'s own doc comment), so this
+    /// scenario is exercised only by a test deliberately constructing one, as here (`Outbox::
+    /// push` takes a bare `tai_ns`, so `0` is directly reachable). **Fails against** an
+    /// implementation that always uses `message.tai_ns` verbatim, with no fallback at all: the
+    /// recorded/delivered epoch would be `0` (`NO_MESSAGE_EPOCH`), not the fallback asserted
+    /// below.
+    #[test]
+    fn a_message_carrying_the_sentinel_falls_back_to_the_callers_own_epoch() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let mut outbox = Outbox::new();
+        outbox.push("out", NO_MESSAGE_EPOCH, vec![9]);
+        router.deliver("sender", 5_000, outbox);
+
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert!(recorded.iter().all(|r| r.tai_ns == 5_000), "a message carrying the sentinel must fall back to the caller's own epoch, not 0: {recorded:?}");
+
+        let inbox = router.take_inbox("receiver", 5_000);
+        assert_eq!(inbox.messages().len(), 1);
+        assert_eq!(inbox.messages()[0].tai_ns, 5_000, "delivered availability must also use the fallback epoch");
+    }
+
+    /// A message carrying its OWN real epoch uses it, even when it differs from the caller's own
+    /// `fallback_emission_tai_ns` argument -- question 189's own headline change. **Fails
+    /// against** the pre-R6.1 implementation, which stamped every message with the caller's
+    /// single argument regardless of `message.tai_ns`: that implementation would record/deliver
+    /// at `9_000` (the fallback) everywhere below, not `1_234` (the message's own epoch).
+    #[test]
+    fn a_message_carrying_its_own_epoch_uses_it_not_the_callers_fallback_epoch() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_234, vec![9]);
+        // The caller's own fallback argument is deliberately a DIFFERENT value than the
+        // message's own tai_ns, so this cannot pass by coincidence the way it would if both
+        // happened to be equal (as in every OTHER pre-existing test in this module).
+        router.deliver("sender", 9_000, outbox);
+
+        let recorded = router.take_port_traffic();
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert!(recorded.iter().all(|r| r.tai_ns == 1_234), "must use the message's own epoch, not the caller's fallback 9_000: {recorded:?}");
+
+        assert!(router.take_inbox("receiver", 1_233).is_empty(), "not yet available at 1_233");
+        let inbox = router.take_inbox("receiver", 1_234);
+        assert_eq!(inbox.messages().len(), 1, "must become available at the message's OWN epoch (1_234), not the caller's fallback (9_000)");
+    }
+
+    /// Question 189's own headline scenario: TWO messages emitted in ONE `deliver` call (mirrors
+    /// `crate::drm::sensors::StarTrackerModel::step_with_ports`'s own `while end >=
+    /// self.next_due.get()` catch-up loop, which can push more than one message to the same port
+    /// from ONE call, at DIFFERENT due epochs) must be recorded and made available at their own
+    /// DISTINCT epochs, never coalesced onto the call's one `fallback_emission_tai_ns`. **Fails
+    /// against** the pre-R6.1 implementation: both OUT records would share the identical
+    /// `tai_ns` (the fallback), and both deliveries would become available at the same epoch --
+    /// exactly what R5.1a measured (`R5_1A_REPORT.md`'s own "Measurements" section, `tests/
+    /// sensor_faults.rs`'s now-inverted test).
+    #[test]
+    fn two_messages_in_one_deliver_call_carry_distinct_sub_step_epochs_not_coalesced() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let mut outbox = Outbox::new();
+        // Mirrors the star tracker: two sub-step due epochs 50 ms apart, both <= the kernel
+        // step's own end (the fallback argument below), from ONE outbox/deliver call.
+        outbox.push("out", 1_950, vec![1]);
+        outbox.push("out", 2_000, vec![2]);
+        router.deliver("sender", 2_000, outbox); // 2_000 == the LATER due epoch, i.e. the step end
+
+        let recorded = router.take_port_traffic();
+        let out_epochs: Vec<i64> = recorded.iter().filter(|r| r.direction == PortDirection::Out as i32).map(|r| r.tai_ns).collect();
+        assert_eq!(out_epochs, vec![1_950, 2_000], "the two OUT records must carry their own distinct due epochs, not both coalesced to 2_000: {recorded:?}");
+
+        // Availability: the earlier sub-step message becomes visible to a receiver step at (or
+        // after) 1_950, strictly before the later one's own 2_000 availability -- unrecoverable
+        // under the pre-R6.1 coalesced stamping, where both were only ever available at 2_000.
+        assert!(router.take_inbox("receiver", 1_949).is_empty(), "neither message is available yet at 1_949");
+        let first = router.take_inbox("receiver", 1_950);
+        assert_eq!(first.messages().len(), 1, "only the earlier sub-step message is available at 1_950, not both: {:?}", first.messages());
+        assert_eq!(first.messages()[0].payload, vec![1]);
+        assert!(router.take_inbox("receiver", 1_999).is_empty(), "the later message is still not available at 1_999");
+        let second = router.take_inbox("receiver", 2_000);
+        assert_eq!(second.messages().len(), 1);
+        assert_eq!(second.messages()[0].payload, vec![2]);
+    }
+
+    /// The PORT-fault window comparison (question 178) and `InstalledPortFault::
+    /// first_applied_tai_ns` (question 186(c)) now use EACH message's own epoch, not the
+    /// caller's one coarse `fallback_emission_tai_ns` -- mirrors the previous test's two-
+    /// sub-step-messages shape, but with a fault window that contains only the EARLIER due
+    /// epoch. **Fails against** the pre-R6.1 implementation: using the coarse fallback (2_000)
+    /// for both messages, NEITHER would fall inside `[100, 1_960)` (2_000 is outside it), so
+    /// `frames_affected` would be 0, not 1, and no `AppliedPortFault` would ever drain.
+    #[test]
+    fn a_port_faults_window_matches_by_each_messages_own_epoch_not_the_callers_coarse_one() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let f = port_fault("f_drop_early", "sender", "out", "drop", 100, 1_860); // [100, 1_960)
+        router.install_port_faults(&[f], &seeds_with("f_drop_early", 11), TEST_OUTPUT_PERIOD_NS).expect("valid fault");
+
+        let mut outbox = Outbox::new();
+        outbox.push("out", 1_950, vec![1]); // inside [100, 1_960)
+        outbox.push("out", 2_000, vec![2]); // outside
+        router.deliver("sender", 2_000, outbox);
+
+        let applied = router.take_applied_port_faults();
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert_eq!(applied[0].applied_tai_ns, 1_950, "first_applied_tai_ns must be the message's own epoch (1_950), not the caller's fallback (2_000): {applied:?}");
+        assert_eq!(applied[0].frames_affected, 1, "only the earlier sub-step message falls inside the fault's window: {applied:?}");
+
+        // The earlier message was dropped (no IN record, no delivery); the later one, outside
+        // the fault's window, was delivered normally.
+        let recorded = router.take_port_traffic();
+        let in_epochs: Vec<i64> = recorded.iter().filter(|r| r.direction == PortDirection::In as i32).map(|r| r.tai_ns).collect();
+        assert_eq!(in_epochs, vec![2_000], "only the un-faulted later message gets an IN record: {recorded:?}");
+    }
+
+    /// [`crate::ports::QueuedMessage::sender_emission_tai_ns`] -- the field [`crate::ports::
+    /// sorted_inbox`] sorts by (question 108) -- also carries each message's own resolved epoch,
+    /// not the caller's coarse one: pushed in REVERSE chronological order (the later due epoch
+    /// first) so a stable sort tie-broken on a coalesced, shared value would preserve that wrong
+    /// push order. **Fails against** an implementation that resolves `msg_epoch` for the
+    /// recorded/delivered `tai_ns` fields above but leaves `sender_emission_tai_ns` at the
+    /// caller's coarse fallback: both messages would tie there, and the stable sort would return
+    /// them in push order (the later-due-epoch payload first), not true chronological order.
+    #[test]
+    fn queued_message_sender_emission_epoch_reflects_each_messages_own_due_epoch_for_sort_order() {
+        let (sos, systems) = two_framed_instances();
+        let mut router = Router::build(&sos, &systems).expect("valid connection");
+        let mut outbox = Outbox::new();
+        // Reverse chronological push order, deliberately.
+        outbox.push("out", 2_000, vec![0xB2]);
+        outbox.push("out", 1_000, vec![0xA1]);
+        router.deliver("sender", 2_000, outbox);
+
+        let inbox = router.take_inbox("receiver", 2_000);
+        let payloads: Vec<Vec<u8>> = inbox.messages().iter().map(|m| m.payload.clone()).collect();
+        assert_eq!(payloads, vec![vec![0xA1], vec![0xB2]], "sorted_inbox must order by each message's own true due epoch (1_000 before 2_000), not by push order: {payloads:?}");
     }
 }

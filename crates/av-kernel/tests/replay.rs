@@ -333,27 +333,37 @@ fn t2_a_corrupted_replay_log_file_is_refused_even_with_the_original_hash_as_expe
 // T3: one deleted interior record is detected.
 // ================================================================================================
 
-/// **Hypothesis:** deleting every `startracker` OUT record recorded at one INTERIOR emission
-/// epoch (neither its own first nor its own last recorded epoch), re-serializing the log, and
-/// re-computing `expected_hash` from the MODIFIED bytes (so T2's own hash check passes and this
-/// test proves the gap detection itself, not merely that the hash check works again) produces
-/// [`DrmError::Schedule`] naming the instance and the missing epoch --
-/// [`crate::drm::replay::ReplayError::MissingFrame`]'s own `Display`, reached through
-/// `ModelHandle::into_boxed`'s `ReplayError -> ModelError::InvalidSpec -> HeteroScheduleError::
-/// Model -> DrmError::Schedule` chain (`crate::registry::ModelRegistry::into_boxed`'s own
-/// `AnyModel::Replay` arm doc comment explains why this is the same "stringify the
-/// model-specific error" convention every other post-load runtime model failure in this crate
-/// already surfaces through, e.g. a malformed inbound controller packet).
+/// **Hypothesis:** deleting every `startracker` OUT record belonging to one INTERIOR kernel
+/// tick's own `(previous tick end, this tick end]` window (neither this instance's own overall
+/// first nor last recorded epoch), re-serializing the log, and re-computing `expected_hash` from
+/// the MODIFIED bytes (so T2's own hash check passes and this test proves the gap detection
+/// itself, not merely that the hash check works again) produces [`DrmError::Schedule`] naming the
+/// instance and the missing window's own end epoch -- [`crate::drm::replay::ReplayError::
+/// MissingFrame`]'s own `Display`, reached through `ModelHandle::into_boxed`'s `ReplayError ->
+/// ModelError::InvalidSpec -> HeteroScheduleError::Model -> DrmError::Schedule` chain
+/// (`crate::registry::ModelRegistry::into_boxed`'s own `AnyModel::Replay` arm doc comment
+/// explains why this is the same "stringify the model-specific error" convention every other
+/// post-load runtime model failure in this crate already surfaces through, e.g. a malformed
+/// inbound controller packet).
 ///
-/// **"Every record at one epoch," not literally "exactly one record," and why:** measured
-/// directly (see the test body's own comment at the point it measures this), this fixture's own
-/// 2 Hz sensor rate against the DRM's 1 Hz kernel step means EVERY emission epoch this instance
-/// ever records carries exactly two OUT records, never one -- `ReplayModel`'s own missing-frame
-/// rule fires on an epoch with NO recorded entry at all, so deleting only one of an epoch's two
-/// records would silently drop just that message (a real, but different, gap this rule does not
-/// claim to detect -- its own doc comment's disclosed limitation is about a missing EPOCH, not a
-/// thinned one) and this test would pass having exercised nothing. Deleting both is what
-/// actually opens the interior gap this test needs to prove.
+/// **R6.1 (question 189) changed what has to be deleted, and why -- re-derived here, not
+/// loosened.** Before R6.1, `Router::deliver` stamped every message in one `Outbox` with the
+/// CALL's own single, coarse epoch, so `startracker`'s own 2 Hz-under-1-Hz-kernel catch-up loop
+/// (two real emissions per kernel tick) produced exactly TWO records sharing ONE `tai_ns` per
+/// tick -- `ReplayModel`'s own missing-frame rule fired on an EMPTY epoch bucket, so this test
+/// used to delete both of that ONE shared epoch's records. After R6.1, each of those two
+/// emissions carries its OWN due epoch (0.5 s apart) and therefore its own, separate record --
+/// **measured directly below, not assumed:** every `startracker` OUT epoch in this fixture now
+/// carries exactly ONE record, never two. `ReplayModel::step_with_ports`'s own window is now
+/// `(previous call's end, this call's end]` (`crate::drm::replay`'s own module doc comment), so a
+/// genuine interior gap needs BOTH of one kernel tick's own due epochs deleted, not one --
+/// deleting only one leaves the OTHER inside that same tick's own window, which is exactly
+/// `crate::drm::replay`'s own now-disclosed limitation (pinned directly by
+/// `crates/av-kernel/src/drm/replay.rs`'s own unit test
+/// `deleting_only_one_of_two_recorded_sub_step_epochs_in_one_calls_window_is_not_detected`) -- a
+/// single-record deletion here would silently drop just that message and this test would pass
+/// having exercised nothing, the identical trap the pre-R6.1 version of this test's own doc
+/// comment already warned about for its own (then two-per-epoch) shape.
 #[test]
 fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_instance_and_epoch() {
     let _engine = gmat_sys::engine_lock();
@@ -369,48 +379,57 @@ fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_inst
     let original_bytes = std::fs::read(&log_path).expect("sidecar was written");
     let mut log = PortTrafficLog::decode(original_bytes.as_slice()).expect("sidecar decodes");
 
-    // Every distinct emission epoch startracker's own OUT records carry, ascending, with how
-    // many records land at each one -- the same (instance, direction) filter `crate::drm::
-    // replay::ReplayModel::new` itself applies. `startracker`'s own declared 2 Hz update rate
-    // against this DRM's 1 Hz kernel step means its own `step_with_ports`'s internal catch-up
-    // loop can push MORE than one frame per kernel-tick epoch (`Router::deliver`'s own
-    // `emission_tai_ns` is the STEP's epoch, shared by every message in that one call's
-    // `Outbox`) -- measured directly below, not assumed, since `ReplayModel`'s own missing-frame
-    // rule fires on an EMPTY epoch bucket, not a smaller one: deleting one of two records at the
-    // same epoch would silently drop only that message, never open a detectable gap. An epoch
-    // with exactly one recorded frame is required so this test's own deletion actually empties
-    // the bucket.
+    // Every distinct emission epoch startracker's own OUT records carry, ascending and deduped --
+    // the same (instance, direction) filter `crate::drm::replay::ReplayModel::new` itself
+    // applies.
     let mut star_out_epochs: Vec<i64> = log.records.iter().filter(|r| r.instance == "startracker" && r.direction == PortDirection::Out as i32).map(|r| r.tai_ns).collect();
     star_out_epochs.sort_unstable();
-    let first_epoch = *star_out_epochs.first().expect("at least one startracker OUT record");
-    let last_epoch = *star_out_epochs.last().expect("at least one startracker OUT record");
+    star_out_epochs.dedup();
+    let overall_first = *star_out_epochs.first().expect("at least one startracker OUT record");
+    let overall_last = *star_out_epochs.last().expect("at least one startracker OUT record");
+
+    // **Measured, not assumed (R6.1's own re-derivation of this test's old sanity check):** every
+    // due epoch now carries exactly ONE record, never two -- the direct consequence of `Router::
+    // deliver` no longer coalescing startracker's own two-per-tick emissions onto one shared
+    // epoch.
     let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
-    for &e in &star_out_epochs {
-        *counts.entry(e).or_default() += 1;
+    for r in log.records.iter().filter(|r| r.instance == "startracker" && r.direction == PortDirection::Out as i32) {
+        *counts.entry(r.tai_ns).or_default() += 1;
     }
-    let interior_epoch = *counts.keys().find(|&&epoch| epoch != first_epoch && epoch != last_epoch).expect("at least one interior epoch (first/interior/last are all distinct for a multi-tick run)");
-    let frames_at_interior_epoch = counts[&interior_epoch];
-    // **Measured, not assumed:** with startracker's own declared 2 Hz update rate against this
-    // DRM's 1 Hz kernel step, EVERY kernel-tick epoch carries exactly two records (its own
-    // internal catch-up loop fires twice per tick, and `Router::deliver`'s own `emission_tai_ns`
-    // -- the STEP's epoch -- is shared by every message one `deliver` call carries, not each
-    // message's own `due` sub-epoch) -- there is no naturally single-record epoch in this
-    // fixture to pick instead. `ReplayModel`'s own missing-frame rule fires on an EMPTY epoch
-    // bucket (this module's own doc comment), not a merely-smaller one, so opening a genuine
-    // interior gap here means deleting EVERY record this fixture recorded at the chosen epoch,
-    // not just one -- disclosed here rather than silently deleting only one and reporting a
-    // pass that never actually exercised the rule (the FIRST run of this test, before this
-    // comment existed, measured exactly that: deleting one of two left the epoch's own bucket
-    // non-empty, and the replay run below completed with `Ok`, not the expected error).
-    assert_eq!(frames_at_interior_epoch, 2, "sanity: this fixture's own known catch-up shape; if this ever changes, this test's own deletion strategy below needs revisiting");
+    assert!(counts.values().all(|&c| c == 1), "sanity: R6.1 must give every due epoch its own single record, not a shared one: {counts:?}");
+
+    // `startracker`'s own declared 2 Hz update rate against this DRM's 1 Hz kernel step means
+    // consecutive due epochs are ALWAYS exactly 0.5 s apart -- both WITHIN one kernel tick
+    // (`tick_start + 0.5s`, `tick_start + 1.0s`) and ACROSS the boundary between two ticks
+    // (`tick_N_end`, `tick_N_end + 0.5s`) alike, so a bare "0.5s apart" test cannot tell the two
+    // shapes apart (measured directly: the first version of this test picked a cross-tick pair by
+    // that test alone and the replay run below completed with `Ok`, not the expected error, since
+    // each of the two due epochs it deleted still had its own sibling surviving in a DIFFERENT
+    // kernel tick's own window). Disambiguated using the DRM's own declared `start_tai_ns` and
+    // 1 Hz kernel period directly: a WITHIN-tick pair's LATER member always lands exactly on the
+    // kernel's own 1 s grid (`(epoch - start_tai_ns) % KERNEL_PERIOD_NS == 0`), a cross-tick
+    // pair's does not.
+    const SUB_STEP_PERIOD_NS: i64 = 500_000_000; // 2 Hz
+    const KERNEL_PERIOD_NS: i64 = 1_000_000_000; // demo_attitude_sensors.drm.yaml: default_step_rate_hz = 1.0
+    let start_tai_ns = drm.scenario.as_ref().expect("scenario set").start_tai_ns;
+    let interior_pair: (i64, i64) = star_out_epochs
+        .windows(2)
+        .find(|w| w[1] - w[0] == SUB_STEP_PERIOD_NS && (w[1] - start_tai_ns) % KERNEL_PERIOD_NS == 0 && w[0] != overall_first && w[1] != overall_last)
+        .map(|w| (w[0], w[1]))
+        .expect("at least one interior WITHIN-tick pair of due epochs, neither the overall first nor last");
+    // The LATER of the pair is the containing kernel tick's own `t_tai_ns + dt_ns` (1 Hz grid) --
+    // the epoch `ReplayModel::step_with_ports`'s own error names once this pair's window is
+    // empty.
+    let tick_end = interior_pair.1;
+
     let victim_indices: Vec<usize> = log
         .records
         .iter()
         .enumerate()
-        .filter(|(_, r)| r.instance == "startracker" && r.direction == PortDirection::Out as i32 && r.tai_ns == interior_epoch)
+        .filter(|(_, r)| r.instance == "startracker" && r.direction == PortDirection::Out as i32 && (r.tai_ns == interior_pair.0 || r.tai_ns == interior_pair.1))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(victim_indices.len(), frames_at_interior_epoch);
+    assert_eq!(victim_indices.len(), 2, "deleting both members of the interior pair must remove exactly two records: {victim_indices:?}");
     for &i in victim_indices.iter().rev() {
         log.records.remove(i);
     }
@@ -422,11 +441,11 @@ fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_inst
 
     let replay_cfg = ReplayConfig { log_path: log_path.clone(), expected_hash: recomputed_hash, instances: vec!["startracker".to_string()] };
     let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
-    let err = execute(cfg_replay).expect_err("a deleted interior record must be refused, not silently held or interpolated");
+    let err = execute(cfg_replay).expect_err("deleting both due epochs of one interior kernel tick must be refused, not silently held or interpolated");
     match &err {
         DrmError::Schedule(detail) => {
             assert!(detail.contains("startracker"), "error must name the instance: {detail:?}");
-            assert!(detail.contains(&interior_epoch.to_string()), "error must name the missing epoch ({interior_epoch}): {detail:?}");
+            assert!(detail.contains(&tick_end.to_string()), "error must name the missing window's own end epoch ({tick_end}): {detail:?}");
             assert!(detail.contains("interior"), "error must say this is an interior gap, not merely a generic failure: {detail:?}");
         }
         other => panic!("expected DrmError::Schedule (crate::drm::replay::ReplayError::MissingFrame's own stringified surface), got {other:?}"),
