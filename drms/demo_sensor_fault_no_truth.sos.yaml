@@ -1,0 +1,52 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- R6.2 (question 189's
+# own record from R5.1: "the unreachable frames_affected == 0 end-event guard is recorded as
+# exercised only indirectly, because every existing fixture's SENSOR fault genuinely applies").
+#
+# Reuses drms/demo_attitude_sensors_truth.system.yaml and
+# drms/demo_attitude_sensors_startracker.system.yaml UNCHANGED -- the identical two of the three
+# systems drms/demo_attitude_sensors.sos.yaml already wires (the third, the IMU, is intentionally
+# left out: it plays no part in this fixture's own point). The ONLY difference from that SOS is
+# structural: **zero connections are declared at all** -- none of `crate::drm::sensors::
+# TRUTH_PORT_NAMES`' seven SIGNAL connections from "attitude" to "startracker" exist here.
+#
+# `crate::drm::sensors::read_truth` (crates/av-kernel/src/drm/sensors.rs) returns `None` until
+# EVERY one of the seven truth ports has delivered at least one message (that function's own doc
+# comment: `get(TRUTH_PORT_QX)?` and so on, short-circuiting on the first missing one) -- with
+# zero connections, none of the seven ever deliver, so `StarTrackerModel::last_truth`
+# (`RefCell<Option<...>>`) stays `None` for the star tracker's entire life. `StarTrackerModel::
+# step_with_ports`'s own `while end >= self.next_due.get() { ... if let Some((truth_q, _omega)) =
+# *self.last_truth.borrow() { ... } ... }` therefore NEVER enters that inner `if let` block, on
+# ANY call, for the whole run -- and that inner block is the ONLY place `record_fault_effect` (the
+# function that increments `fault_frames_affected`) is ever called. A SENSOR fault declared on
+# `startracker` in this topology therefore genuinely, structurally NEVER applies -- not "applies
+# with a zero count", but never even reaches the code path that would count it -- which is exactly
+# `crates/av-kernel/src/drm/executor.rs`'s `Boundary::SensorFaultEnd` arm's own guard
+# (`sensor_fault_totals.get(&f.id)` has no entry at all, so no event is emitted).
+#
+# `attitude` is kept as a real instance (rather than omitting it and leaving "startracker" the
+# sole instance) so the fixture states its own hypothesis concretely: truth genuinely exists and
+# propagates in this run, it is simply never routed anywhere.
+id: sensor_fault_unreachable_sos
+version: "1"
+name: "Star tracker with NO truth connection at all (R6.2, question 189's unreachable frames_affected == 0 guard)"
+instances:
+  - name: attitude
+    system_id: attitude_sensors_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_sensors_truth_sys
+  - name: startracker
+    system_id: attitude_sensors_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_sensors_startracker_sys
+connections: []
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R6.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_sensor_fault_no_truth.sos.yaml
+hash: "de7654052799bcbac1837c11628f79b437569dbd7ac96f8b3669f885b6900b65"

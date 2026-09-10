@@ -103,31 +103,33 @@ export function parseCommandId(detail) {
 }
 
 /**
- * Pairs `contact_start`/`contact_end` events into spanned windows -- a start and its
- * matching end for the SAME (station, counterpart) pair, never a different pair's
- * event (the whole point of keying on `spacecraft` (the ground/receiving instance,
- * already a real field) PLUS the counterpart parsed out of `detail` -- two concurrent
- * passes at two different stations, or two different spacecraft passing the same
- * station back-to-back, never cross-pair). Every other event kind is ignored (passed
- * through untouched by whichever caller also wants it).
+ * Generic start/end pairing into spanned windows -- the engine [`pairContactWindows`]
+ * and [`pairDecodeErrorWindows`] both build on, so the matching rules below are
+ * written and tested exactly once rather than twice. `isStart`/`isEnd` select which
+ * events belong to this pairing at all (every other event is ignored, passed through
+ * untouched by whichever caller also wants it); `keyFor` computes the pairing key a
+ * start and its matching end must share (e.g. station+counterpart for a contact
+ * window, spacecraft+port for a decode-error window) -- two different keys never
+ * cross-pair, even when they share a `type`/`name`.
  *
- * Matching is strictly chronological per pairing key: a `contact_start` for a key that
- * already has a pending (unclosed) start makes that EARLIER start unmatched (never
- * silently overwritten, never silently paired with the wrong end) before the new one
- * becomes pending; a `contact_end` for a key with no pending start is unmatched too;
- * any start still pending once every event has been consumed is unmatched. Nothing is
- * ever dropped -- every `contact_start`/`contact_end` in `events` ends up in exactly
- * one of `windows` (as a `start` or `end`) or `unmatched`.
+ * Matching is strictly chronological per pairing key: a start for a key that already
+ * has a pending (unclosed) start makes that EARLIER start unmatched (never silently
+ * overwritten, never silently paired with the wrong end) before the new one becomes
+ * pending; an end for a key with no pending start is unmatched too; any start still
+ * pending once every event has been consumed is unmatched. Nothing is ever dropped --
+ * every matched `isStart`/`isEnd` event in `events` ends up in exactly one of
+ * `windows` (as `start` or `end`) or `unmatched`.
  *
- * @param {Array<{name:string,t:number,type:string,spacecraft?:string,detail?:string}>|null|undefined} events
+ * @param {Array<object>|null|undefined} events
+ * @param {{isStart: (ev:object)=>boolean, isEnd: (ev:object)=>boolean, keyFor: (ev:object)=>string}} opts
  * @returns {{
- *   windows: Array<{spacecraft:string|null, counterpart:string|null, start:object, end:object, startT:number, endT:number, durationT:number}>,
+ *   windows: Array<{start:object, end:object, startT:number, endT:number, durationT:number}>,
  *   unmatched: Array<{event:object, reason:string}>,
  * }}
  */
-export function pairContactWindows(events) {
-  const contacts = (events || [])
-    .filter((e) => e && (e.type === 'contact_start' || e.type === 'contact_end'))
+export function pairEventWindows(events, { isStart, isEnd, keyFor }) {
+  const relevant = (events || [])
+    .filter((e) => e && (isStart(e) || isEnd(e)))
     .slice()
     .sort((a, b) => a.t - b.t);
 
@@ -135,39 +137,118 @@ export function pairContactWindows(events) {
   const windows = [];
   const unmatched = [];
 
-  const keyFor = (ev, counterpart) => `${ev.spacecraft || ''} ${counterpart || ''}`;
-
-  for (const ev of contacts) {
-    const counterpart = parseContactCounterpart(ev.detail);
-    const key = keyFor(ev, counterpart);
-    if (ev.type === 'contact_start') {
+  for (const ev of relevant) {
+    const key = keyFor(ev);
+    if (isStart(ev)) {
       const prior = pending.get(key);
       if (prior) {
-        unmatched.push({ event: prior, reason: 'no matching contact_end before the next contact_start for this station/counterpart pair' });
+        unmatched.push({ event: prior, reason: 'no matching end before the next start for this pairing key' });
       }
       pending.set(key, ev);
     } else {
       const start = pending.get(key);
       if (start) {
         pending.delete(key);
-        windows.push({
-          spacecraft: ev.spacecraft || null,
-          counterpart,
-          start, end: ev,
-          startT: start.t, endT: ev.t, durationT: ev.t - start.t,
-        });
+        windows.push({ start, end: ev, startT: start.t, endT: ev.t, durationT: ev.t - start.t });
       } else {
-        unmatched.push({ event: ev, reason: 'no matching contact_start for this station/counterpart pair' });
+        unmatched.push({ event: ev, reason: 'no matching start for this pairing key' });
       }
     }
   }
   for (const start of pending.values()) {
-    unmatched.push({ event: start, reason: 'no matching contact_end for this station/counterpart pair' });
+    unmatched.push({ event: start, reason: 'no matching end for this pairing key' });
   }
   // Chronological output (Map iteration order for leftover `pending` entries is
   // insertion order, not necessarily time order once multiple keys are involved).
   unmatched.sort((a, b) => a.event.t - b.event.t);
   return { windows, unmatched };
+}
+
+/**
+ * Pairs `contact_start`/`contact_end` events into spanned windows -- a start and its
+ * matching end for the SAME (station, counterpart) pair, never a different pair's
+ * event (the whole point of keying on `spacecraft` (the ground/receiving instance,
+ * already a real field) PLUS the counterpart parsed out of `detail` -- two concurrent
+ * passes at two different stations, or two different spacecraft passing the same
+ * station back-to-back, never cross-pair). Built on [`pairEventWindows`] -- see that
+ * function's own doc comment for the shared matching rules (chronological, per key,
+ * nothing ever dropped).
+ *
+ * @param {Array<{name:string,t:number,type:string,spacecraft?:string,detail?:string}>|null|undefined} events
+ * @returns {{
+ *   windows: Array<{kind:'contact', spacecraft:string|null, counterpart:string|null, start:object, end:object, startT:number, endT:number, durationT:number}>,
+ *   unmatched: Array<{event:object, reason:string}>,
+ * }}
+ */
+export function pairContactWindows(events) {
+  const { windows, unmatched } = pairEventWindows(events, {
+    isStart: (e) => e.type === 'contact_start',
+    isEnd: (e) => e.type === 'contact_end',
+    keyFor: (ev) => `${ev.spacecraft || ''} ${parseContactCounterpart(ev.detail) || ''}`,
+  });
+  return {
+    windows: windows.map((w) => ({
+      kind: 'contact',
+      spacecraft: w.start.spacecraft || null,
+      counterpart: parseContactCounterpart(w.start.detail),
+      start: w.start, end: w.end, startT: w.startT, endT: w.endT, durationT: w.durationT,
+    })),
+    // Restores this function's own pre-generalisation reason wording (`pairEventWindows`'s own
+    // reason text is deliberately generic, shared with `pairDecodeErrorWindows`) -- kept
+    // specific here since callers (and this repo's own existing tests) already match on the
+    // literal "contact_start"/"contact_end" substrings.
+    unmatched: unmatched.map((u) => ({
+      event: u.event,
+      reason: u.event.type === 'contact_start'
+        ? 'no matching contact_end before the next contact_start for this station/counterpart pair'
+        : 'no matching contact_start for this station/counterpart pair',
+    })),
+  };
+}
+
+/**
+ * Pairs `decode_error_start`/`decode_error_end` events (`docs/open-questions.md`
+ * question 193, R6.2 -- `crates/av-kernel/src/drm/events.rs::decode_error_start_event`/
+ * `decode_error_end_event`) into spanned windows -- one decode-error EPISODE per
+ * (instance, port), never a different instance's or port's episode. Unlike
+ * [`pairContactWindows`], both pairing-key fields already reach the viewer as real
+ * fields (`spacecraft` off `entity_id`, `referenceId` off `reference_id` -- the
+ * receiving port), so no `detail`-parsing fallback is needed here at all.
+ *
+ * **Matched on `ev.name`, not `ev.type`.** Every fault-shaped event this crate emits
+ * (`fault_event`/`port_fault_event`/`sensor_fault_event`/`decode_error_start_event`/
+ * `decode_error_end_event`) carries `Event.kind == EVENT_KIND_FAULT`, which
+ * `altavista/cdm.py`'s own `cdm_event_to_viewer_event` maps to the SAME `type ==
+ * "fault"` for every one of them -- `type` cannot tell a decode-error event apart
+ * from a plain DYNAMICS/PORT/SENSOR fault event at all. `Event.name` is what
+ * distinguishes them (`"decode_error_start"`/`"decode_error_end"`, set verbatim by
+ * the Rust builders above), so this function keys off `ev.name`, mirroring
+ * [`groupCommandTransitions`]'s own "prefer the real field" discipline rather than
+ * [`pairContactWindows`]'s `ev.type` (contact events get their OWN distinct
+ * `EventKind`, so `type` already discriminates them -- a decode-error event does not
+ * have that luxury, sharing `EVENT_KIND_FAULT` with every other fault event).
+ *
+ * @param {Array<{name:string,t:number,type:string,spacecraft?:string,referenceId?:string|null,detail?:string}>|null|undefined} events
+ * @returns {{
+ *   windows: Array<{kind:'decode_error', spacecraft:string|null, port:string|null, start:object, end:object, startT:number, endT:number, durationT:number}>,
+ *   unmatched: Array<{event:object, reason:string}>,
+ * }}
+ */
+export function pairDecodeErrorWindows(events) {
+  const { windows, unmatched } = pairEventWindows(events, {
+    isStart: (e) => e.name === 'decode_error_start',
+    isEnd: (e) => e.name === 'decode_error_end',
+    keyFor: (ev) => `${ev.spacecraft || ''} ${ev.referenceId || ''}`,
+  });
+  return {
+    windows: windows.map((w) => ({
+      kind: 'decode_error',
+      spacecraft: w.start.spacecraft || null,
+      port: w.start.referenceId || null,
+      start: w.start, end: w.end, startT: w.startT, endT: w.endT, durationT: w.durationT,
+    })),
+    unmatched,
+  };
 }
 
 /**
@@ -231,36 +312,42 @@ export function groupCommandTransitions(events) {
  * `web/js/panels/run_products_panel.js`'s own "pure data-binding, one DOM function at
  * the bottom" split.
  *
- * - `windows`: spanned contact intervals ([`pairContactWindows`]'s own `windows`) --
- *   rendered as a bar from `startT` to `endT`, never a single point tick.
- * - `unmatched`: contact events with no partner ([`pairContactWindows`]'s own
- *   `unmatched`) -- rendered distinctly from a matched window (never silently dropped,
- *   never merged into a fabricated window).
+ * - `windows`: spanned contact intervals ([`pairContactWindows`]'s own `windows`) PLUS
+ *   spanned decode-error episodes ([`pairDecodeErrorWindows`]'s own `windows`, R6.2,
+ *   question 193) -- both rendered as a bar from `startT` to `endT`, never a single
+ *   point tick; each entry's own `kind` (`'contact'`/`'decode_error'`) says which.
+ * - `unmatched`: contact events OR decode-error events with no partner (both
+ *   functions' own `unmatched`) -- rendered distinctly from a matched window (never
+ *   silently dropped, never merged into a fabricated window).
  * - `points`: every OTHER event (maneuver, fault, lifecycle, command_transition,
  *   marker, ...) as a single point tick, UNCHANGED from the pre-M25.3d rendering
  *   except that a `command_transition` carries its own `className`/`label` so it reads
  *   as visually and textually distinct from every other kind -- `label` is the real
  *   `CommandState` name already on `ev.name` (`COMMAND_STATE_PROPOSED`, ...,
  *   `COMMAND_STATE_ACKED`/`_REJECTED`/`_EXPIRED`/`_FAILED`), plus `ev.spacecraft` for
- *   context, never a paraphrase. `contact_start`/`contact_end` events never appear
- *   here -- they are exhaustively accounted for in `windows`/`unmatched` above, so a
- *   contact event is never ALSO rendered as a generic point tick.
+ *   context, never a paraphrase. `contact_start`/`contact_end`/`decode_error_start`/
+ *   `decode_error_end` events never appear here -- they are exhaustively accounted for
+ *   in `windows`/`unmatched` above, so neither is ALSO rendered as a generic point tick.
  *
- * @param {Array<{name:string,t:number,type:string,spacecraft?:string,detail?:string}>|null|undefined} events
+ * @param {Array<{name:string,t:number,type:string,spacecraft?:string,detail?:string,referenceId?:string|null}>|null|undefined} events
  * @returns {{
- *   windows: ReturnType<typeof pairContactWindows>['windows'],
- *   unmatched: ReturnType<typeof pairContactWindows>['unmatched'],
+ *   windows: Array<ReturnType<typeof pairContactWindows>['windows'][number] | ReturnType<typeof pairDecodeErrorWindows>['windows'][number]>,
+ *   unmatched: Array<ReturnType<typeof pairContactWindows>['unmatched'][number]>,
  *   points: Array<{event:object, className:string|null, label:string}>,
  * }}
  */
 export function timelineTickPlan(events) {
-  const { windows, unmatched } = pairContactWindows(events);
-  const contactEvents = new Set();
-  for (const w of windows) { contactEvents.add(w.start); contactEvents.add(w.end); }
-  for (const u of unmatched) contactEvents.add(u.event);
+  const contact = pairContactWindows(events);
+  const decodeError = pairDecodeErrorWindows(events);
+  const windows = [...contact.windows, ...decodeError.windows];
+  const unmatched = [...contact.unmatched, ...decodeError.unmatched];
+
+  const pairedEvents = new Set();
+  for (const w of windows) { pairedEvents.add(w.start); pairedEvents.add(w.end); }
+  for (const u of unmatched) pairedEvents.add(u.event);
 
   const points = (events || [])
-    .filter((e) => e && !contactEvents.has(e))
+    .filter((e) => e && !pairedEvents.has(e))
     .map((e) => {
       if (e.type === 'command_transition') {
         return { event: e, className: 'tick-command-transition', label: `${e.name}${e.spacecraft ? ' · ' + e.spacecraft : ''}` };

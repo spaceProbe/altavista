@@ -112,6 +112,32 @@
 //! suppressed -- every element of `ModelSpanState::applied_commands` this module ever sees is
 //! already exactly the "record" bar, both before and after M20.3.
 //!
+//! ## Emitted: `EVENT_KIND_FAULT` (`decode_error_start`/`decode_error_end`, question 193, R6.2)
+//!
+//! [`decode_error_start_event`]/[`decode_error_end_event`]: **replaces** the R5.2 `decode_error_
+//! event` (one event per undecodable frame -- question 188's own literal wording, but unbounded:
+//! ~3000 events for a persistent fault on a 20 Hz port over a 300 s run, `R5_2_REPORT.md`'s own
+//! escalation). The lead's decision (question 193): decode errors follow the fault-event shape
+//! questions 137 and 186(c) already established for PORT/SENSOR faults -- one event at the FIRST
+//! undecodable frame per (instance, port) (`decode_error_start`, carrying the codec error text
+//! and the first sequence), a matching event when decoding resumes (`decode_error_end`, carrying
+//! `values["frames_affected"]`), never one per occurrence. `executor::run_shared_group`'s own
+//! "decode-error episodes" doc section folds `ModelSpanState::decode_errors`/`decode_successes`
+//! (chronologically, per port) into [`DecodeErrorEpisode`]s before either builder is ever called;
+//! an episode still open when the run ends gets its `decode_error_end` at the run's own end
+//! epoch, `detail` stating decoding never resumed (the manager's own decision, question 193 does
+//! not itself settle the run-end case -- mirrors `run_shared_group`'s existing precedent for a
+//! persistent SENSOR fault with no `Boundary::SensorFaultEnd`).
+//!
+//! **Naming**: `Event.name` is `"decode_error_start"`/`"decode_error_end"`, the convention
+//! [`contact_event`] already established for its own pair (`"contact_start"`/`"contact_end"`) --
+//! `Event.kind` stays `EVENT_KIND_FAULT` for every fault-shaped event this module emits
+//! (`fault_event`/`port_fault_event`/`sensor_fault_event` included), so a decode-error event is
+//! distinguished from every other `EVENT_KIND_FAULT` event by `name`, not by `kind` (`altavista/
+//! cdm.py`'s own `cdm_event_to_viewer_event` maps the viewer's `type` field from `EventKind`
+//! alone, so `web/js/timeline_events.js` must key its own decode-error pairing off `ev.name`, the
+//! same way it already keys command-transition grouping off `referenceId` rather than `type`).
+//!
 //! ## Emitted: `EVENT_KIND_CONTACT_START`/`_END` (M25.1, question 149's ground segment)
 //!
 //! [`contact_event`]: a ground-station visibility transition, reported through the identical
@@ -353,57 +379,107 @@ pub fn sensor_fault_event(fault: &Fault, applied_tai_ns: i64, frames_affected: u
     }
 }
 
-/// One `EVENT_KIND_FAULT` event, `name == "decode_error"`, for one undecodable FRAMED frame a
-/// consumer received and skipped, continuing with its own last good input rather than aborting
-/// the run (`docs/open-questions.md` question 188, R5.2) -- see `crate::codec::CodecError`'s own
-/// module doc comment for the ways a frame's own bytes and the receiver's own declared codec can
-/// disagree at run time, and `crate::router`'s own "Events" doc section for why [`port_fault_
-/// event`]/[`sensor_fault_event`] are separate builders from [`fault_event`]: this is a THIRD,
-/// separate builder for the identical reason those two are -- a decode error has no single
-/// declared `Fault` behind it at all (it can happen with no PORT/SENSOR fault installed
-/// whatsoever; a `"corrupt"` PORT fault is only the one concrete way this crate's own fixtures
-/// exercise it), so there is no `Fault.id` to key `reference_id`/`name` off the way every other
-/// `EVENT_KIND_FAULT` builder in this module does. `reference_id` is the receiving port name
-/// instead (the one stable identifier every occurrence carries, mirroring [`port_command_event`]'s
-/// own `reference_id = cmd.port`); `name` is the literal `"decode_error"` (this event kind's own
-/// human-facing identifier, since there is no `Fault.id` to use for it).
+/// One decode-error EPISODE on one `(instance, port)`: everything known about the run of
+/// consecutive undecodable frames from the first one (`docs/open-questions.md` question 193,
+/// R6.2) until either a later successful decode on that same port closes it, or the run ends
+/// with it still open. Built by `executor::run_shared_group`'s own episode-folding pass (see
+/// that function's "decode-error episodes" doc section) from the chronologically-merged
+/// `ModelSpanState::decode_errors`/`decode_successes` for one instance, grouped by port -- never
+/// constructed directly from a single [`crate::ports::DecodeErrorRecord`] the way the pre-R6.2
+/// `decode_error_event` was, since an episode's own `frames_affected`/`first_*` fields are only
+/// known once every occurrence up to the close (or the run's end) has been folded in.
+pub struct DecodeErrorEpisode {
+    pub port: String,
+    /// The epoch of the FIRST undecodable frame this episode opened on.
+    pub first_tai_ns: i64,
+    /// [`crate::codec::peek_sequence_count`]'s own recovered value for that first frame, when
+    /// recoverable (never a fabricated sentinel -- mirrors the pre-R6.2 `decode_error_event`'s
+    /// identical rule).
+    pub first_sequence_count: Option<u16>,
+    /// The codec error's own `Display` text for that first frame.
+    pub first_error: String,
+    /// The total count of undecodable frames this episode covers, first frame included.
+    pub frames_affected: u64,
+}
+
+/// One `EVENT_KIND_FAULT` event, `name == "decode_error_start"`, at the epoch of a decode-error
+/// EPISODE's own first undecodable frame (`docs/open-questions.md` question 193, R6.2 --
+/// question 193 decided decode errors follow the fault-event shape questions 137 and 186(c)
+/// already established for PORT/SENSOR faults: one event at the first undecodable frame per
+/// (instance, port), never one per occurrence the way the pre-R6.2 `decode_error_event` was,
+/// which produced ~3000 events for a persistent fault on a 20 Hz port over a 300 s run -- see
+/// `crate::codec::CodecError`'s own module doc comment for the ways a frame's own bytes and the
+/// receiver's own declared codec can disagree at run time). Paired with [`decode_error_end_event`]
+/// -- see this module's own doc comment's "Emitted: EVENT_KIND_FAULT (decode_error_start/_end)"
+/// section for the full account, including why this is two small builders (mirroring
+/// [`fault_event`]/[`port_fault_event`]'s own factored style) rather than one function that
+/// branches on which half it is building the way [`contact_event`] does.
 ///
-/// **One event PER OCCURRENCE, not collapsed to one-per-(instance,port) with a `frames_affected`
-/// count the way [`port_fault_event`]/[`sensor_fault_event`] are.** Question 188 reads literally
-/// as "a consumer... records a typed... event" for every undecodable frame -- this builder
-/// implements exactly that; `executor::run_shared_group`'s own call site (one call per element of
-/// `ModelSpanState::decode_errors`) is where that literal reading is applied. Over a long,
-/// persistently-faulted window this is an unbounded event list -- flagged as an escalation in
-/// `R5_2_REPORT.md`, not decided here (question 178/186(c)'s own PORT/SENSOR collapse is the
-/// precedent a future collapse would follow, but this task's own instructions are explicit: build
-/// what the question says, escalate the risk, do not invent the collapse).
-///
-/// `occurrence_index` disambiguates `id` when more than one occurrence shares an
-/// `(instance, port, tai_ns)` (possible if two frames happen to land on the identical epoch --
-/// e.g. `crate::router::Router`'s own per-Outbox epoch-stamping, question 189's own open item) --
-/// `id` would otherwise collide and silently overwrite one occurrence's own entry in any
-/// `id`-keyed index a caller builds. `values["sequence_count"]` is populated only when
-/// [`crate::codec::peek_sequence_count`] recovered one (never a fabricated `-1`/`0` sentinel);
-/// the codec error's own `Display` text and the receiving instance/port both land on
-/// `provenance.attributes`, mirroring [`port_command_event`]'s own "written there, as strings,
-/// exactly as named" convention for information `Event`'s own typed fields have no slot for.
-pub fn decode_error_event(occ: &crate::ports::DecodeErrorRecord, occurrence_index: usize, mut provenance: Provenance) -> Event {
-    provenance.attributes.insert("instance".to_string(), occ.instance.clone());
-    provenance.attributes.insert("port".to_string(), occ.port.clone());
-    provenance.attributes.insert("codec_error".to_string(), occ.error.clone());
+/// `reference_id`/`entity_id` are unchanged from the pre-R6.2 shape: the receiving port and the
+/// receiving instance -- a decode error still has no single declared `Fault` behind it at all (it
+/// can happen with no PORT/SENSOR fault installed whatsoever), so there is no `Fault.id` to key
+/// off the way every OTHER `EVENT_KIND_FAULT` builder in this module does. `values["sequence_
+/// count"]` is populated only when the first frame's own sequence count was recoverable (never a
+/// fabricated sentinel); the codec error's own `Display` text and the receiving instance/port
+/// land on `provenance.attributes`, mirroring [`port_command_event`]'s own convention.
+pub fn decode_error_start_event(episode: &DecodeErrorEpisode, instance: &str, mut provenance: Provenance) -> Event {
+    provenance.attributes.insert("instance".to_string(), instance.to_string());
+    provenance.attributes.insert("port".to_string(), episode.port.clone());
+    provenance.attributes.insert("codec_error".to_string(), episode.first_error.clone());
     let mut values = BTreeMap::new();
-    if let Some(seq) = occ.sequence_count {
+    if let Some(seq) = episode.first_sequence_count {
         values.insert("sequence_count".to_string(), seq as f64);
     }
     Event {
-        id: format!("decode_error:{}:{}:{}:{}", occ.instance, occ.port, occ.tai_ns, occurrence_index),
-        entity_id: occ.instance.clone(),
-        tai_ns: occ.tai_ns,
+        id: format!("decode_error_start:{instance}:{}:{}", episode.port, episode.first_tai_ns),
+        entity_id: instance.to_string(),
+        tai_ns: episode.first_tai_ns,
         kind: EventKind::Fault as i32,
-        name: "decode_error".to_string(),
-        detail: format!("instance {:?} port {:?}: undecodable frame skipped, continuing with the last good input: {}", occ.instance, occ.port, occ.error),
+        name: "decode_error_start".to_string(),
+        detail: format!("instance {instance:?} port {:?}: undecodable frame -- {}", episode.port, episode.first_error),
         values,
-        reference_id: occ.port.clone(),
+        reference_id: episode.port.clone(),
+        provenance: Some(provenance),
+        ..Default::default()
+    }
+}
+
+/// The matching close for [`decode_error_start_event`], `name == "decode_error_end"` --
+/// `values["frames_affected"]` carries the episode's own total count (question 193's own literal
+/// requirement: "consumers read the count"), the same synthetic key [`port_fault_event`]/
+/// [`sensor_fault_event`] already use for their own identical "count over the whole episode"
+/// field, so `event.<...>.values.frames_affected` is a consistent, greppable convention across
+/// every fault-shaped event this crate emits.
+///
+/// **`resumed` distinguishes the two ways an episode ends (`executor::run_shared_group`'s own
+/// manager-ratified rule, question 193 does not itself settle this).** `true`: a later frame on
+/// this same port genuinely decoded -- `end_tai_ns` is that success's own real epoch. `false`:
+/// the run ended while this episode was still open (`crate::router::Router`'s own persistent-
+/// SENSOR-fault precedent, mirrored here: a fault with no natural end boundary still gets exactly
+/// one closing event, at the run's own end epoch, so a consumer can always read the count) --
+/// `end_tai_ns` is the run's own `end_tai_ns` in that case, and no extra `values` key is invented
+/// for the distinction (question 193's own instruction: `detail` carries it, not a new key) --
+/// `detail` says plainly that decoding never resumed.
+pub fn decode_error_end_event(episode: &DecodeErrorEpisode, end_tai_ns: i64, resumed: bool, instance: &str, mut provenance: Provenance) -> Event {
+    provenance.attributes.insert("instance".to_string(), instance.to_string());
+    provenance.attributes.insert("port".to_string(), episode.port.clone());
+    let detail = if resumed {
+        format!("instance {instance:?} port {:?}: decoding resumed after {} undecodable frame(s)", episode.port, episode.frames_affected)
+    } else {
+        format!(
+            "instance {instance:?} port {:?}: the run ended with {} undecodable frame(s) since tai_ns={} still unresolved -- decoding never resumed",
+            episode.port, episode.frames_affected, episode.first_tai_ns
+        )
+    };
+    Event {
+        id: format!("decode_error_end:{instance}:{}:{}", episode.port, episode.first_tai_ns),
+        entity_id: instance.to_string(),
+        tai_ns: end_tai_ns,
+        kind: EventKind::Fault as i32,
+        name: "decode_error_end".to_string(),
+        detail,
+        values: BTreeMap::from([("frames_affected".to_string(), episode.frames_affected as f64)]),
+        reference_id: episode.port.clone(),
         provenance: Some(provenance),
         ..Default::default()
     }
@@ -719,46 +795,92 @@ mod tests {
         assert!(!events.iter().any(|e| e.id == "fault:f_bad"), "an unrecognized kind must never be advertised");
     }
 
-    /// [`decode_error_event`]'s own unit test (question 188, R5.2): `tai_ns`/`entity_id`/
-    /// `reference_id` come from the record's own `tai_ns`/`instance`/`port`, `kind == Fault`,
-    /// `name == "decode_error"`, the sequence count lands in `values`, and the codec error text
-    /// plus instance/port land in `provenance.attributes`. Fails against an implementation that
-    /// fabricates any of these, mislabels `kind`, or drops the sequence count.
+    fn episode(port: &str, first_tai_ns: i64, first_sequence_count: Option<u16>, first_error: &str, frames_affected: u64) -> DecodeErrorEpisode {
+        DecodeErrorEpisode { port: port.to_string(), first_tai_ns, first_sequence_count, first_error: first_error.to_string(), frames_affected }
+    }
+
+    /// [`decode_error_start_event`]'s own unit test (question 193, R6.2): `tai_ns`/`entity_id`/
+    /// `reference_id` come from the episode's own `first_tai_ns`/the `instance` parameter/`port`,
+    /// `kind == Fault`, `name == "decode_error_start"`, the FIRST sequence count lands in
+    /// `values`, and the codec error text plus instance/port land in `provenance.attributes`.
+    /// Fails against an implementation that fabricates any of these, mislabels `kind`/`name`, or
+    /// drops the sequence count.
     #[test]
-    fn decode_error_event_carries_the_real_epoch_port_sequence_and_error_text() {
-        let occ = crate::ports::DecodeErrorRecord { instance: "controller".to_string(), port: "startracker_in".to_string(), tai_ns: 12_345, sequence_count: Some(42), error: "apid 511 names no declared PacketCodec".to_string() };
-        let e = decode_error_event(&occ, 0, Provenance::default());
-        assert_eq!(e.id, "decode_error:controller:startracker_in:12345:0");
+    fn decode_error_start_event_carries_the_first_epoch_port_sequence_and_error_text() {
+        let ep = episode("startracker_in", 12_345, Some(42), "apid 511 names no declared PacketCodec", 7);
+        let e = decode_error_start_event(&ep, "controller", Provenance::default());
+        assert_eq!(e.id, "decode_error_start:controller:startracker_in:12345");
         assert_eq!(e.entity_id, "controller");
         assert_eq!(e.tai_ns, 12_345);
         assert_eq!(e.kind, EventKind::Fault as i32);
-        assert_eq!(e.name, "decode_error");
+        assert_eq!(e.name, "decode_error_start");
         assert_eq!(e.reference_id, "startracker_in");
         assert_eq!(e.values.get("sequence_count"), Some(&42.0));
-        let attrs = &e.provenance.expect("decode_error_event always sets provenance").attributes;
+        assert!(!e.values.contains_key("frames_affected"), "frames_affected belongs on the END event only");
+        let attrs = &e.provenance.expect("decode_error_start_event always sets provenance").attributes;
         assert_eq!(attrs.get("instance"), Some(&"controller".to_string()));
         assert_eq!(attrs.get("port"), Some(&"startracker_in".to_string()));
         assert_eq!(attrs.get("codec_error"), Some(&"apid 511 names no declared PacketCodec".to_string()));
     }
 
-    /// A `None` sequence count (a payload too short to even carry a primary header) is never
-    /// fabricated as `0.0` -- `values` simply has no `sequence_count` key at all. Fails against
-    /// an implementation that inserts a placeholder value regardless of `Option`.
+    /// A `None` first sequence count (a payload too short to even carry a primary header) is
+    /// never fabricated as `0.0` -- `values` simply has no `sequence_count` key at all. Fails
+    /// against an implementation that inserts a placeholder value regardless of `Option`.
     #[test]
-    fn decode_error_event_omits_sequence_count_when_it_could_not_be_recovered() {
-        let occ = crate::ports::DecodeErrorRecord { instance: "flight".to_string(), port: "cmd_in".to_string(), tai_ns: 0, sequence_count: None, error: "packet is 3 byte(s), shorter than the 6-byte primary header".to_string() };
-        let e = decode_error_event(&occ, 0, Provenance::default());
+    fn decode_error_start_event_omits_sequence_count_when_it_could_not_be_recovered() {
+        let ep = episode("cmd_in", 0, None, "packet is 3 byte(s), shorter than the 6-byte primary header", 1);
+        let e = decode_error_start_event(&ep, "flight", Provenance::default());
         assert_eq!(e.values.get("sequence_count"), None, "no fabricated sequence count");
     }
 
-    /// `occurrence_index` disambiguates `id` when two occurrences share `(instance, port,
-    /// tai_ns)` -- fails against an implementation that omits it from `id`, which would collide.
+    /// [`decode_error_end_event`]'s own unit test, the `resumed == true` half (question 193):
+    /// `tai_ns` is the resumption epoch (NOT the episode's own `first_tai_ns`), `name ==
+    /// "decode_error_end"`, `values["frames_affected"]` carries the real total, and `detail` says
+    /// decoding resumed (never "never resumed", the other half's own wording).
     #[test]
-    fn decode_error_event_occurrence_index_disambiguates_same_epoch_ids() {
-        let occ = crate::ports::DecodeErrorRecord { instance: "controller".to_string(), port: "startracker_in".to_string(), tai_ns: 1_000, sequence_count: Some(1), error: "e".to_string() };
-        let first = decode_error_event(&occ, 0, Provenance::default());
-        let second = decode_error_event(&occ, 1, Provenance::default());
-        assert_ne!(first.id, second.id, "two occurrences at the identical (instance, port, tai_ns) must still get distinct ids");
+    fn decode_error_end_event_resumed_carries_the_resumption_epoch_and_frames_affected() {
+        let ep = episode("startracker_in", 12_345, Some(42), "apid 511 names no declared PacketCodec", 300);
+        let e = decode_error_end_event(&ep, 45_678, true, "controller", Provenance::default());
+        assert_eq!(e.id, "decode_error_end:controller:startracker_in:12345", "keyed off the episode's own first_tai_ns, so start/end pair deterministically");
+        assert_eq!(e.entity_id, "controller");
+        assert_eq!(e.tai_ns, 45_678, "must be the resumption epoch, not first_tai_ns (12345)");
+        assert_eq!(e.kind, EventKind::Fault as i32);
+        assert_eq!(e.name, "decode_error_end");
+        assert_eq!(e.reference_id, "startracker_in");
+        assert_eq!(e.values.get("frames_affected"), Some(&300.0));
+        assert!(e.detail.contains("resumed") && !e.detail.contains("never resumed"), "{:?}", e.detail);
+    }
+
+    /// The `resumed == false` half (question 193's own run-end rule, the manager's decision):
+    /// `tai_ns` is whatever `end_tai_ns` the caller passes (the run's own end epoch in the real
+    /// call site), `detail` states plainly that decoding never resumed, and -- per this task's
+    /// own explicit instruction -- no extra `values` key is invented for the distinction:
+    /// `values` is identical in shape to the `resumed == true` case, `frames_affected` only.
+    #[test]
+    fn decode_error_end_event_not_resumed_states_in_detail_that_decoding_never_resumed_and_invents_no_extra_values_key() {
+        let ep = episode("startracker_in", 12_345, Some(42), "apid 511 names no declared PacketCodec", 150);
+        let e = decode_error_end_event(&ep, 999_999, false, "controller", Provenance::default());
+        assert_eq!(e.tai_ns, 999_999, "must be the caller's own end_tai_ns (the run's end epoch), not first_tai_ns or a fabricated value");
+        assert_eq!(e.name, "decode_error_end");
+        assert_eq!(e.values.get("frames_affected"), Some(&150.0));
+        assert_eq!(e.values.len(), 1, "no extra values key invented for the never-resumed case -- question 193's own instruction, detail carries the distinction");
+        assert!(e.detail.contains("never resumed"), "{:?}", e.detail);
+    }
+
+    /// Two episodes on the SAME (instance, port) but DIFFERENT `first_tai_ns` (two separate,
+    /// sequential decode-error episodes over one run) must never collide on `id` -- fails against
+    /// an implementation that keys `id` off `port`/`instance` alone, dropping `first_tai_ns`.
+    #[test]
+    fn decode_error_start_and_end_ids_disambiguate_two_episodes_on_the_same_port() {
+        let first = episode("startracker_in", 1_000, Some(1), "e1", 3);
+        let second = episode("startracker_in", 50_000, Some(2), "e2", 5);
+        let s1 = decode_error_start_event(&first, "controller", Provenance::default());
+        let s2 = decode_error_start_event(&second, "controller", Provenance::default());
+        assert_ne!(s1.id, s2.id, "two distinct episodes on the same (instance, port) must still get distinct start ids");
+        let e1 = decode_error_end_event(&first, 2_000, true, "controller", Provenance::default());
+        let e2 = decode_error_end_event(&second, 60_000, true, "controller", Provenance::default());
+        assert_ne!(e1.id, e2.id, "and distinct end ids");
+        assert_ne!(s1.id, e1.id, "a start and its own end share the same episode key but never the same id (different prefixes)");
     }
 
     /// [`port_command_event`]'s own unit test (question 130): every one of the five required

@@ -673,6 +673,12 @@ impl HeteroKernel {
         self.scheduler.decode_errors(id)
     }
 
+    /// See [`HeteroScheduler::decode_successes`] -- identical contract (`docs/open-questions.md`
+    /// question 193, R6.2).
+    pub fn decode_successes(&self, id: &str) -> Option<&[crate::ports::DecodeSuccessRecord]> {
+        self.scheduler.decode_successes(id)
+    }
+
     /// Like [`HeteroKernel::run`], but drives [`HeteroScheduler::advance_to_with_ports`]
     /// instead of `advance_to` at every output tick, so any registered system that overrides
     /// `av_dynamics::DynamicsModel::step_with_ports` exchanges port messages with the rest of

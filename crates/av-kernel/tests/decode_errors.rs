@@ -3,6 +3,35 @@
 //! it receives an undecodable frame -- exercised end to end through [`av_kernel::drm::execute`]
 //! against `drms/demo_attitude_control_port_corrupt.drm.yaml`.
 //!
+//! ## R6.2 (question 193): re-derived for the start/end episode shape, not loosened
+//!
+//! R5.2's own shape emitted one `decode_error` event PER undecodable frame -- 300 of them for
+//! this exact fixture (see "Why this exact window..." below), which question 193 (team 2, R5.2's
+//! own escalation) flagged as unbounded over a longer or persistent fault. The lead's decision:
+//! decode errors follow the fault-event shape questions 137/186(c) already established for
+//! PORT/SENSOR faults -- one `decode_error_start` event at the first undecodable frame per
+//! (instance, port), one matching `decode_error_end` when decoding resumes, carrying
+//! `values["frames_affected"]`.
+//!
+//! **Stated before measuring (per this task's own standing rule):** against this identical
+//! fixture, the new shape must produce EXACTLY **2** `decode_error_*` events on `controller`
+//! (one `decode_error_start`, one `decode_error_end` -- a single episode, since the corrupt fault
+//! is a single contiguous `[5s, 35s)` window with no gap in the controller's own failed decode
+//! attempts inside it), with `decode_error_end.values["frames_affected"] == 300.0` -- the
+//! IDENTICAL 300 the R5.2 shape counted one event per, now folded into one episode's own total,
+//! per the SAME derivation "Why this exact window..." below already gives (30 s / 0.1 s
+//! controller decode attempts, all rejected). `decode_error_start.tai_ns` is predicted to be
+//! EXACTLY `FAULT_START_TAI_NS` (t=5s, the fault window's own declared start, which already lands
+//! exactly on the controller's 0.1 s decode grid, so the very first candidate attempt inside the
+//! window is also the first REAL attempt) and `decode_error_end.tai_ns` EXACTLY `FAULT_END_TAI_NS`
+//! (t=35s, the window's own declared, half-open end -- the router's own `corrupt` fault no longer
+//! applies there, per `[start, end)` semantics, so the controller's first post-window decode
+//! attempt, which also lands exactly on the 0.1 s grid, succeeds immediately, closing the episode
+//! at that exact epoch with `resumed == true`). This is the router-level 600/controller-level 300
+//! derivation immediately below, read through the episode lens, not re-derived from scratch.
+//! **Measured**: matches exactly -- see [`corrupt_startracker_run_completes_with_exactly_the_
+//! predicted_decode_error_event_count`]'s own assertions.
+//!
 //! ## Why this exact window and corruption shape (stated before running, per this task's own
 //! instruction)
 //!
@@ -110,11 +139,18 @@ fn read_port_traffic_log(path: &std::path::Path) -> PortTrafficLog {
 const CONTROL_START_TAI_NS: i64 = 1_767_225_637_000_000_000;
 const FAULT_START_TAI_NS: i64 = CONTROL_START_TAI_NS + 5_000_000_000;
 const FAULT_END_TAI_NS: i64 = CONTROL_START_TAI_NS + 35_000_000_000;
-/// Predicted, before running (see this file's own module doc comment): 30 s / 0.1 s controller
-/// step.
-const EXPECTED_DECODE_ERROR_EVENTS: usize = 300;
+/// Predicted, before running (see this file's own module doc comment's "R6.2" section): ONE
+/// decode-error episode on this fixture (a single contiguous corrupt window, no gap in the
+/// controller's own failed decode attempts inside it) -- `decode_error_start` + `decode_error_end`.
+const EXPECTED_DECODE_ERROR_EPISODE_EVENTS: usize = 2;
+/// Predicted, before running: the SAME 300 the pre-R6.2 per-occurrence shape counted one event
+/// per (30 s / 0.1 s controller step, this file's own "Why this exact window..." section), now
+/// folded into the one episode's own `decode_error_end.values["frames_affected"]`.
+const EXPECTED_DECODE_ERROR_FRAMES_AFFECTED: f64 = 300.0;
 /// Predicted, before running: 30 s * 20 Hz star tracker rate -- every candidate frame the router
-/// draws, corrupted (a declared `corrupt_mask` always applies at `rate == 1.0`).
+/// draws, corrupted (a declared `corrupt_mask` always applies at `rate == 1.0`). Unchanged by
+/// R6.2 -- this is the router's OWN, unrelated PORT-fault `frames_affected`, question 186(c)'s
+/// existing accounting, not the controller-level decode-error count above.
 const EXPECTED_FRAMES_AFFECTED: f64 = 600.0;
 
 fn load_control_bundle(drm_name: &str) -> (DesignReferenceMission, SosConfiguration, BTreeMap<String, SystemDefinition>) {
@@ -151,15 +187,16 @@ fn true_pointing_error_at(products: &av_kernel::drm::RunProducts, tai_ns: i64) -
 // 188's own literal "one event per undecodable frame" wording), instead of aborting.
 // =================================================================================================
 
-/// **The core of question 188's own acceptance bar.** `execute()` returns `Ok` (never a
+/// **The core of question 188/193's own acceptance bar.** `execute()` returns `Ok` (never a
 /// propagated `CodecError`, never a panic) against a DRM whose star tracker port is persistently
 /// corrupted for 30 s -- through R5.1b this exact shape (a `"corrupt"` PORT fault on `startracker.
 /// st_meas` in this closed loop) would have hard-failed the whole run
 /// (`AttitudeControllerModel::step_with_ports`'s own pre-R5.2 `?` propagation, `drms/
 /// demo_attitude_control_port_duplicate.drm.yaml`'s own header comment records exactly why R4.1b
 /// had to substitute `"duplicate"` for `"corrupt"` on this topology). Event count asserted
-/// EXACTLY (this file's own module doc comment states the derivation and the number, 300, before
-/// this test runs) -- never "at least one," per this task's own explicit instruction.
+/// EXACTLY (this file's own module doc comment states the derivation and the numbers -- 2 events,
+/// `frames_affected == 300` -- before this test runs) -- never "at least one," per this task's
+/// own explicit instruction.
 #[test]
 fn corrupt_startracker_run_completes_with_exactly_the_predicted_decode_error_event_count() {
     let _engine = gmat_sys::engine_lock();
@@ -168,24 +205,29 @@ fn corrupt_startracker_run_completes_with_exactly_the_predicted_decode_error_eve
 
     let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-decode-errors-corrupt-startracker", None)).expect("a corrupted star-tracker frame must never abort the run (question 188)");
 
-    let decode_error_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.name == "decode_error").collect();
-    assert_eq!(decode_error_events.len(), EXPECTED_DECODE_ERROR_EVENTS, "expected exactly {EXPECTED_DECODE_ERROR_EVENTS} decode_error events (this file's own module doc comment states the derivation), got {}: {:#?}", decode_error_events.len(), decode_error_events.iter().map(|e| e.tai_ns).collect::<Vec<_>>());
-    assert!(decode_error_events.iter().all(|e| e.entity_id == "controller"), "every decode_error event must be attributed to the receiving instance, controller");
-    assert!(decode_error_events.iter().all(|e| e.reference_id == "startracker_in"), "every decode_error event must name the receiving port");
-    assert!(decode_error_events.iter().all(|e| e.provenance.as_ref().unwrap().attributes.get("codec_error").is_some_and(|s| !s.is_empty())), "every decode_error event must carry a real, non-empty codec error text");
-    // Every event's own tai_ns must be the frame's real delivery epoch, on the controller's own
-    // 0.1 s decode grid, strictly inside the declared [5s, 35s) window.
-    for e in &decode_error_events {
-        assert!(e.tai_ns >= FAULT_START_TAI_NS && e.tai_ns < FAULT_END_TAI_NS, "decode_error event at tai_ns={} falls outside the declared fault window [{FAULT_START_TAI_NS}, {FAULT_END_TAI_NS})", e.tai_ns);
-        assert_eq!((e.tai_ns - CONTROL_START_TAI_NS) % 100_000_000, 0, "every decode_error event must land on the controller's own 0.1s decode grid: tai_ns={}", e.tai_ns);
-    }
-    // Every event id is unique (occurrence_index disambiguation, `events::decode_error_event`'s
-    // own doc comment) -- would fail against an implementation that collided ids and silently
-    // dropped duplicates before they ever reached `RunProducts.events`.
-    let mut ids: Vec<&str> = decode_error_events.iter().map(|e| e.id.as_str()).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), decode_error_events.len(), "every decode_error event must have a unique id");
+    let decode_error_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && (e.name == "decode_error_start" || e.name == "decode_error_end")).collect();
+    assert_eq!(
+        decode_error_events.len(),
+        EXPECTED_DECODE_ERROR_EPISODE_EVENTS,
+        "expected exactly {EXPECTED_DECODE_ERROR_EPISODE_EVENTS} decode_error_start/_end events (one episode -- this file's own module doc comment states the derivation), got {}: {:#?}",
+        decode_error_events.len(),
+        decode_error_events.iter().map(|e| (e.name.as_str(), e.tai_ns)).collect::<Vec<_>>()
+    );
+    assert!(decode_error_events.iter().all(|e| e.entity_id == "controller"), "every decode_error_start/_end event must be attributed to the receiving instance, controller");
+    assert!(decode_error_events.iter().all(|e| e.reference_id == "startracker_in"), "every decode_error_start/_end event must name the receiving port");
+
+    let start = decode_error_events.iter().find(|e| e.name == "decode_error_start").expect("exactly one decode_error_start, asserted above");
+    let end = decode_error_events.iter().find(|e| e.name == "decode_error_end").expect("exactly one decode_error_end, asserted above");
+    assert!(start.provenance.as_ref().unwrap().attributes.get("codec_error").is_some_and(|s| !s.is_empty()), "decode_error_start must carry a real, non-empty codec error text");
+    // Predicted exactly, before measuring (this file's own module doc comment's "R6.2" section):
+    // the fault window's own declared start/end epochs both already land on the controller's 0.1s
+    // decode grid, so the episode's own first-failure and first-resumed epochs coincide with them
+    // exactly.
+    assert_eq!(start.tai_ns, FAULT_START_TAI_NS, "decode_error_start must land at the fault window's own declared start, t=5s");
+    assert_eq!(end.tai_ns, FAULT_END_TAI_NS, "decode_error_end must land at the fault window's own declared (half-open) end, t=35s -- the first post-window decode attempt, which succeeds immediately");
+    assert_eq!(end.values.get("frames_affected"), Some(&EXPECTED_DECODE_ERROR_FRAMES_AFFECTED), "decode_error_end.values[\"frames_affected\"] must be exactly 300 -- the SAME count the pre-R6.2 per-occurrence shape produced one event each for");
+    assert!(end.detail.contains("resumed") && !end.detail.contains("never resumed"), "the episode genuinely closed on a real resumption, not a run-end timeout: {:?}", end.detail);
+    assert_ne!(start.id, end.id, "start and end must never collide on id");
 
     // The run genuinely completed to the end, not merely "did not panic" -- a real trajectory
     // exists through the declared end epoch (mirrors `true_pointing_error_at`'s own "attitude"
@@ -212,6 +254,45 @@ fn corrupt_startracker_router_level_fault_event_frames_affected_is_600() {
     assert_eq!(fault_events.len(), 1, "exactly one EVENT_KIND_FAULT event for the PORT fault itself (question 186(c): one per fault, at first real effect): {fault_events:#?}");
     let got = fault_events[0].values.get("frames_affected").copied().unwrap_or_else(|| panic!("no frames_affected in {:?}", fault_events[0].values));
     assert_eq!(got, EXPECTED_FRAMES_AFFECTED, "the router corrupts every one of the 600 candidate frames in the window (30s * 20Hz), regardless of how many the controller ever actually attempts to decode (300)");
+}
+
+// =================================================================================================
+// R6.2 (question 193's own run-end rule, the manager's decision): a decode-error episode still
+// open when the run ends.
+// =================================================================================================
+
+/// **Stated before running (see `drms/demo_attitude_control_port_corrupt_persistent.drm.yaml`'s
+/// own header comment for the full derivation):** exactly ONE `decode_error_start`/`decode_error_
+/// end` pair, `decode_error_start.tai_ns == FAULT_START_TAI_NS` (t=5s, identical to the bounded
+/// fixture's own first attempt), `decode_error_end.tai_ns == CONTROL_START_TAI_NS + 300s` (the
+/// run's own declared `end_tai_ns` -- nothing ever closes the episode naturally), `resumed ==
+/// false`, `values["frames_affected"] == 2950.0` ((300 - 5) / 0.1), and `detail` states plainly
+/// that decoding never resumed.
+#[test]
+fn corrupt_startracker_persistent_fault_leaves_the_episode_open_at_run_end_with_the_real_count() {
+    let _engine = gmat_sys::engine_lock();
+    let (drm, sos, systems) = load_control_bundle("demo_attitude_control_port_corrupt_persistent.drm.yaml");
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-decode-errors-corrupt-persistent", None)).expect("a persistently corrupted star-tracker port must never abort the run (question 188), even with no natural resumption (question 193)");
+
+    let decode_error_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && (e.name == "decode_error_start" || e.name == "decode_error_end")).collect();
+    assert_eq!(decode_error_events.len(), 2, "exactly one episode (start + end), even though it never closed naturally: {:#?}", decode_error_events.iter().map(|e| (e.name.as_str(), e.tai_ns)).collect::<Vec<_>>());
+
+    let start = decode_error_events.iter().find(|e| e.name == "decode_error_start").expect("exactly one decode_error_start, asserted above");
+    let end = decode_error_events.iter().find(|e| e.name == "decode_error_end").expect("exactly one decode_error_end, asserted above");
+    let run_end_tai_ns = CONTROL_START_TAI_NS + 300_000_000_000;
+    assert_eq!(start.tai_ns, FAULT_START_TAI_NS, "decode_error_start must still land at the first real decode attempt inside the window, t=5s");
+    assert_eq!(end.tai_ns, run_end_tai_ns, "decode_error_end must land at the run's own declared end_tai_ns -- nothing else ever closes this episode");
+    assert_eq!(end.values.get("frames_affected"), Some(&2950.0), "(300 - 5) / 0.1 = 2950 controller decode attempts, every one of them corrupted from t=5s to run end");
+    assert!(end.detail.contains("never resumed"), "detail must say plainly that decoding never resumed (question 193's own instruction: no extra values key for this distinction): {:?}", end.detail);
+    assert!(!end.detail.contains("decoding resumed"), "must not ALSO claim decoding resumed: {:?}", end.detail);
+
+    // The run genuinely completed to the end regardless -- an unbounded internal accumulator
+    // (~2950 decode-error records, folded into one episode) must never itself abort or hang the
+    // run.
+    let traj = &products.trajectories["attitude"];
+    assert!(traj.samples.iter().any(|s| s.tai_ns == run_end_tai_ns), "the attitude plant's own trajectory must reach the run's declared end epoch");
 }
 
 // =================================================================================================

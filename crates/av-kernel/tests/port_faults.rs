@@ -605,19 +605,54 @@ fn demo_command_port_corrupt_mutates_the_bytes_flight_receives_and_keeps_the_out
     assert_eq!(port_fault_events[0].tai_ns, COMMAND_TAI_NS, "the fault's own first (and only) applied frame is the dispatch itself");
     assert_eq!(port_fault_events[0].values.get("frames_affected").copied(), Some(1.0), "question 186(c): the one frame this fault affected");
 
-    // Question 188: the corrupted frame really is delivered and really is rejected at the
-    // consumer, and that rejection is now on the record rather than invisible. Exactly one, for
-    // the one corrupted frame, on the port that received it.
-    let decode_error_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.name == "decode_error").collect();
-    assert_eq!(decode_error_events.len(), 1, "exactly one rejected frame, the one the corrupt fault mutated: {decode_error_events:#?}");
-    assert_eq!(decode_error_events[0].entity_id, "flight", "recorded against the CONSUMER that could not decode it, not the emitter");
-    assert_eq!(decode_error_events[0].reference_id, "cmd_in", "and against the port it arrived on");
-    let attrs = &decode_error_events[0].provenance.as_ref().expect("provenance set").attributes;
+    // Question 188, re-derived for question 193's episode shape (R6.2): the corrupted frame
+    // really is delivered and really is rejected at the consumer, and that rejection is on the
+    // record rather than invisible. R5.2 recorded ONE event per undecodable frame, which is
+    // unbounded for a persistent fault, so question 193 replaced it with a start/end pair per
+    // `(instance, port)` episode carrying `frames_affected` on the end -- the same collapse
+    // questions 137 and 186(c) already use for PORT and SENSOR faults.
+    //
+    // **Re-derived, not relaxed.** This run dispatches exactly ONE command, and the corrupt
+    // fault mutates exactly that one frame (asserted as `frames_affected == 1` on the port-fault
+    // event above), so the episode opens at `COMMAND_TAI_NS` and there is never a later good
+    // frame on `cmd_in` for decoding to resume from. It therefore stays open to the end of the
+    // run and is closed by `run_shared_group`'s own run-end rule -- the same shape a persistent
+    // SENSOR fault's own single event already takes -- with `frames_affected == 1`, the one
+    // frame the consumer rejected. So: one start, one end, and the event total goes from 10 to
+    // 11 because the pair replaces the single per-frame event, not because anything new failed.
+    let decode_starts: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.name == "decode_error_start").collect();
+    assert_eq!(decode_starts.len(), 1, "exactly one episode, opened by the one frame the corrupt fault mutated: {decode_starts:#?}");
+    assert_eq!(decode_starts[0].entity_id, "flight", "recorded against the CONSUMER that could not decode it, not the emitter");
+    assert_eq!(decode_starts[0].reference_id, "cmd_in", "and against the port it arrived on");
+    // **Measured, and it corrected the derivation this assertion was first written with.** The
+    // obvious guess is `COMMAND_TAI_NS` -- the epoch the port-fault event above carries. It is
+    // wrong, and the difference is the point: a PORT fault is recorded at the EMITTING epoch
+    // (`Router::deliver` stamps `first_applied_tai_ns` when it corrupts the frame), while a
+    // decode error is recorded at the CONSUMING epoch, because the consumer cannot fail to
+    // decode a frame until the frame reaches it. Those differ by exactly this connection's own
+    // declared link latency -- `drms/demo_command.sos.yaml`'s 1.5 s on each of the two ports,
+    // summed by `Router::effective_latency_ns` into the 3 s this file's own module doc comment
+    // already documents. So the two events describe the SAME frame at two different, individually
+    // correct epochs, and asserting the exact arithmetic pins that relation rather than merely
+    // observing it.
+    const COMMAND_LINK_LATENCY_NS: i64 = 3_000_000_000;
+    assert_eq!(
+        decode_starts[0].tai_ns,
+        COMMAND_TAI_NS + COMMAND_LINK_LATENCY_NS,
+        "the episode opens when the corrupted frame ARRIVES at flight -- the dispatch epoch plus ground.cmd_out -> flight.cmd_in's own declared 3 s latency -- not at the emission epoch the port-fault event carries"
+    );
+    let attrs = &decode_starts[0].provenance.as_ref().expect("provenance set").attributes;
     assert!(!attrs["codec_error"].is_empty(), "the codec's own error text must be carried, not discarded: {attrs:#?}");
+
+    let decode_ends: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.name == "decode_error_end").collect();
+    assert_eq!(decode_ends.len(), 1, "the episode is closed exactly once, at run end since decoding never resumes: {decode_ends:#?}");
+    assert_eq!(decode_ends[0].entity_id, "flight");
+    assert_eq!(decode_ends[0].reference_id, "cmd_in");
+    assert_eq!(decode_ends[0].values.get("frames_affected").copied(), Some(1.0), "question 193: the count a consumer reads, one rejected frame");
 
     let lifecycle: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Lifecycle as i32).collect();
     assert_eq!(lifecycle.len(), 4, "2 instances x run_start/run_end: {lifecycle:#?}");
-    assert_eq!(products.events.len(), 4 + 4 + 1 + 1, "4 command transitions + 4 lifecycle + 1 port fault + 1 decode_error (question 188): {:#?}", products.events);
+    assert_eq!(products.events.len(), 4 + 4 + 1 + 2, "4 command transitions + 4 lifecycle + 1 port fault + a decode_error_start/_end pair (question 193): {:#?}", products.events);
 
     // -- PortTrafficLog sidecar ---------------------------------------------------------------
     let log = read_port_traffic_log(&dir.join("port_traffic.pb"));

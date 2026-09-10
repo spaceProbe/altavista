@@ -231,6 +231,48 @@ fn two_sensor_faults_on_the_same_instance_with_overlapping_windows_are_a_typed_l
 }
 
 // =================================================================================================
+// Question 189 (R6.2): the unreachable `frames_affected == 0` end-event guard, exercised for
+// real, not merely reasoned about (R5.1's own record).
+// =================================================================================================
+
+/// `executor::run_shared_group`'s own `Boundary::SensorFaultEnd` arm only emits a SENSOR
+/// `EVENT_KIND_FAULT` event when `sensor_fault_totals.get(&f.id)` actually has a `Some((Some(_),
+/// _))` entry -- a fault that never truly applied produces no event at all. R5.1 recorded this
+/// `None` half of the guard as exercised only indirectly, because every existing SENSOR-fault
+/// fixture's own fault genuinely applies at least once. `drms/demo_sensor_fault_no_truth.*.yaml`
+/// (see that DRM's own header comment for the full derivation) declares a star tracker with NO
+/// truth connection at all, so `StarTrackerModel::step_with_ports` never even reaches the code
+/// path that would record a fault effect, regardless of the declared fault's own window.
+///
+/// **Asserted, before running: this is the SAME hypothesis question 189 itself names ("a sensor
+/// produces no measurement when its truth input never arrives") -- measured, not assumed.**
+/// (a) the run completes normally (`execute()` returns `Ok`): an unreachable sensor is a
+/// legitimate, if useless, configuration, never a load-time refusal (nothing about the
+/// DECLARATION is malformed, only its real-world effect is nil). (b) NOT ONE `EVENT_KIND_FAULT`
+/// event appears anywhere in `RunProducts.events` -- this fixture declares no OTHER fault, so
+/// this is a direct, unambiguous proof the guard's `None` branch ran.
+#[test]
+fn a_sensor_fault_whose_star_tracker_has_no_truth_connection_never_emits_an_event() {
+    let _engine = gmat_sys::engine_lock();
+    let drm = load_drm("demo_sensor_fault_no_truth.drm.yaml");
+    let sos = schema::parse_sos_yaml(&read("demo_sensor_fault_no_truth.sos.yaml")).expect("SosConfiguration parses");
+    let truth = load_system("demo_attitude_sensors_truth");
+    let star = load_system("demo_attitude_sensors_startracker");
+    let mut systems = BTreeMap::new();
+    systems.insert(truth.id.clone(), truth);
+    systems.insert(star.id.clone(), star);
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+
+    let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-sensor-fault-unreachable-guard", None))
+        .expect("an unreachable star tracker (no truth connection at all) is a legitimate, if useless, configuration -- never a load-time refusal");
+
+    let fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32).collect();
+    assert!(fault_events.is_empty(), "a SENSOR fault that never actually applies (no truth ever arrives) must emit no EVENT_KIND_FAULT event at all -- question 189's own guard's None branch: {fault_events:#?}");
+    // Belt and suspenders: specifically no event references this fault's own id either.
+    assert!(!products.events.iter().any(|e| e.reference_id == "never_applies" || e.name == "never_applies"), "no event of any kind may reference the never-applied fault's own id: {:#?}", products.events);
+}
+
+// =================================================================================================
 // The headline acceptance test: a star-tracker dropout in the closed attitude control loop.
 // =================================================================================================
 

@@ -12,7 +12,7 @@
 // docs/open-questions.md questions 174/177 and drms/M25_3E_REPORT.md for the full
 // account (there is no earlier REPORT_M25_3d.md -- M25.3d's own worker was cut off
 // before writing one; this task's report is the record of both).
-import { pairContactWindows, groupCommandTransitions, timelineTickPlan, parseContactCounterpart, parseCommandId } from './timeline_events.js';
+import { pairContactWindows, pairDecodeErrorWindows, groupCommandTransitions, timelineTickPlan, parseContactCounterpart, parseCommandId } from './timeline_events.js';
 import { readFileSync } from 'fs';
 
 const inputPath = process.argv[2];
@@ -36,6 +36,15 @@ function approxEqual(a, b, tol) { return Math.abs(a - b) <= tol; }
   check('real published scenario: contact_end reaches the viewer', types.has('contact_end'));
   check('real published scenario: command_transition reaches the viewer', types.has('command_transition'));
   check('real published scenario: an unrelated kind (fault) is still present, unaffected', types.has('fault'));
+
+  // Question 193 (R6.2): decode_error_start/_end share EVENT_KIND_FAULT with every other
+  // fault-shaped event (events.rs's own "Naming" doc section), so `type` is "fault" for these
+  // too -- checked by `name`, not `type`, here and everywhere else in this file.
+  const names = new Set((scenario.events || []).map((e) => e.name));
+  check('real published scenario: decode_error_start reaches the viewer (type=fault, name=decode_error_start)',
+    names.has('decode_error_start'));
+  check('real published scenario: decode_error_end reaches the viewer (type=fault, name=decode_error_end)',
+    names.has('decode_error_end'));
 }
 
 // ==================================================================== 2. pairContactWindows
@@ -83,6 +92,55 @@ function approxEqual(a, b, tol) { return Math.abs(a - b) <= tol; }
   const unmatchedEnd = unmatched.find((u) => u.event.type === 'contact_end');
   check('pairContactWindows: the orphan ground_alpha/demo_other end is reported unmatched, not dropped, and not paired',
     !!unmatchedEnd && unmatchedEnd.event.spacecraft === 'ground_alpha' && /contact_start/.test(unmatchedEnd.reason));
+}
+
+// ================================================================ 2b. pairDecodeErrorWindows
+// Fixture (tests/test_viewer_timeline.py): THREE decode-error events forming one matched
+// window (controller/startracker_in) plus two deliberately unmatched ones -- an unclosed start
+// on a DIFFERENT PORT of the SAME instance (controller/imu_in) and an end with no start on a
+// THIRD port of the SAME instance (controller/cmd_in), landing chronologically BETWEEN the real
+// window's own start and end. This is the load-bearing trap for "never silently paired with the
+// wrong partner": an implementation that pairs by spacecraft (entity_id) alone, ignoring the
+// port (referenceId), would wrongly close the real controller/startracker_in start with the
+// controller/cmd_in end instead of its own real, later end -- checks 2b-f/2b-g below fail
+// against exactly that bug (mirrors section 2's own identical contact-pairing trap).
+{
+  const { windows, unmatched } = pairDecodeErrorWindows(scenario.events);
+  check('pairDecodeErrorWindows: exactly one matched window', windows.length === 1);
+  check('pairDecodeErrorWindows: exactly two unmatched decode-error events', unmatched.length === 2);
+
+  const w = windows[0];
+  if (w) {
+    check('pairDecodeErrorWindows: matched window kind is decode_error', w.kind === 'decode_error');
+    check('pairDecodeErrorWindows: matched window spacecraft is controller (entity_id, a real field)', w.spacecraft === 'controller');
+    check('pairDecodeErrorWindows: matched window port is startracker_in (referenceId, a real field -- no detail parsing needed)', w.port === 'startracker_in');
+    check('pairDecodeErrorWindows: matched window startT matches the real episode-open epoch (hand-computed in Python)',
+      approxEqual(w.startT, input.expectedDecodeErrorWindowStartT, 1e-9));
+    check('pairDecodeErrorWindows: matched window endT matches the real episode-close epoch (hand-computed in Python)',
+      approxEqual(w.endT, input.expectedDecodeErrorWindowEndT, 1e-9));
+    check('pairDecodeErrorWindows: durationT is endT - startT exactly',
+      approxEqual(w.durationT, w.endT - w.startT, 1e-12));
+    // The trap: the window's own END event must be the real startracker_in one, NOT the
+    // concurrent controller/cmd_in orphan end (referenceId would say cmd_in).
+    check('pairDecodeErrorWindows: TRAP -- window end is the startracker_in end, not cross-paired with the cmd_in end on the same instance',
+      w.end.referenceId === 'startracker_in');
+  } else {
+    check('pairDecodeErrorWindows: matched window kind is decode_error', false);
+    check('pairDecodeErrorWindows: matched window spacecraft is controller (entity_id, a real field)', false);
+    check('pairDecodeErrorWindows: matched window port is startracker_in (referenceId, a real field -- no detail parsing needed)', false);
+    check('pairDecodeErrorWindows: matched window startT matches the real episode-open epoch (hand-computed in Python)', false);
+    check('pairDecodeErrorWindows: matched window endT matches the real episode-close epoch (hand-computed in Python)', false);
+    check('pairDecodeErrorWindows: durationT is endT - startT exactly', false);
+    check('pairDecodeErrorWindows: TRAP -- window end is the startracker_in end, not cross-paired with the cmd_in end on the same instance', false);
+  }
+
+  const unmatchedStart = unmatched.find((u) => u.event.referenceId === 'imu_in');
+  check('pairDecodeErrorWindows: the never-closed controller/imu_in start is reported unmatched, not dropped',
+    !!unmatchedStart && unmatchedStart.event.name === 'decode_error_start' && /no matching end/.test(unmatchedStart.reason));
+
+  const unmatchedEnd2 = unmatched.find((u) => u.event.name === 'decode_error_end');
+  check('pairDecodeErrorWindows: the orphan controller/cmd_in end is reported unmatched, not dropped, and not paired',
+    !!unmatchedEnd2 && unmatchedEnd2.event.referenceId === 'cmd_in' && /no matching start/.test(unmatchedEnd2.reason));
 }
 
 // ============================================================== 3. groupCommandTransitions
@@ -182,6 +240,8 @@ function approxEqual(a, b, tol) { return Math.abs(a - b) <= tol; }
   const plan = timelineTickPlan(scenario.events);
   check('timelineTickPlan: no contact_start/contact_end event leaks into points (would double-render a windowed contact)',
     !plan.points.some((p) => p.event.type === 'contact_start' || p.event.type === 'contact_end'));
+  check('timelineTickPlan: no decode_error_start/_end event leaks into points (question 193, R6.2 -- would double-render a windowed decode-error episode)',
+    !plan.points.some((p) => p.event.name === 'decode_error_start' || p.event.name === 'decode_error_end'));
 
   const ctPoints = plan.points.filter((p) => p.event.type === 'command_transition');
   check('timelineTickPlan: every command_transition point gets the distinct tick-command-transition class',
@@ -192,6 +252,17 @@ function approxEqual(a, b, tol) { return Math.abs(a - b) <= tol; }
   const faultPoints = plan.points.filter((p) => p.event.type === 'fault');
   check('timelineTickPlan: an unrelated kind (fault) is unaffected -- null className, label is exactly ev.name (pre-M25.3d rendering)',
     faultPoints.length === 1 && faultPoints[0].className === null && faultPoints[0].label === faultPoints[0].event.name);
+
+  // Question 193 (R6.2): the decode-error window is present in plan.windows alongside the
+  // contact window, distinguished by its own `kind` field, and the unmatched decode-error
+  // events are present in plan.unmatched too -- both merged from pairDecodeErrorWindows, not
+  // dropped by timelineTickPlan's own generalisation.
+  const decodeErrorWindows = plan.windows.filter((w) => w.kind === 'decode_error');
+  check('timelineTickPlan: plan.windows carries the decode-error window alongside the contact window',
+    decodeErrorWindows.length === 1 && plan.windows.some((w) => w.kind === 'contact'));
+  const decodeErrorUnmatched = plan.unmatched.filter((u) => u.event.name === 'decode_error_start' || u.event.name === 'decode_error_end');
+  check('timelineTickPlan: plan.unmatched carries both decode-error unmatched events alongside the contact ones',
+    decodeErrorUnmatched.length === 2 && plan.unmatched.length === 4);
 }
 
 // ============================================================ 5. detail parsing edge cases

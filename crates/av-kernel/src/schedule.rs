@@ -357,6 +357,12 @@ struct HeteroSystemEntry {
     /// name. Only ever populated by [`HeteroScheduler::advance_to_with_ports`], same as
     /// `applied_commands`/`measurements`.
     decode_errors: Vec<crate::ports::DecodeErrorRecord>,
+    /// Question 193 (R6.2): every successful decode this system's own `step_with_ports` calls
+    /// have recorded so far, derived (not reported by the model) right next to `decode_errors`
+    /// above -- see [`crate::ports::DecodeSuccessRecord`]'s own doc comment for exactly how and
+    /// why. Only ever populated by [`HeteroScheduler::advance_to_with_ports`], same as
+    /// `decode_errors`.
+    decode_successes: Vec<crate::ports::DecodeSuccessRecord>,
 }
 
 /// Error advancing or sampling a [`HeteroScheduler`] -- the non-generic twin of
@@ -437,6 +443,7 @@ impl HeteroScheduler {
                 measurements: Vec::new(),
                 sensor_fault_effect: (None, 0),
                 decode_errors: Vec::new(),
+                decode_successes: Vec::new(),
             },
         );
     }
@@ -616,8 +623,32 @@ impl HeteroScheduler {
                 // Question 188 (R5.2): enrich and collect this call's own undecodable-frame
                 // occurrences, exactly like `measurements` above (`instance` filled in from `id`,
                 // for the identical reason).
+                let mut failed_ports_this_call: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 for occ in sys.model.drain_decode_errors() {
+                    failed_ports_this_call.insert(occ.port.clone());
                     sys.decode_errors.push(crate::ports::DecodeErrorRecord { instance: id.clone(), port: occ.port, tai_ns: occ.tai_ns, sequence_count: occ.sequence_count, error: occ.error });
+                }
+                // Question 193 (R6.2): derive this call's own successful decodes -- see
+                // `crate::ports::DecodeSuccessRecord`'s own doc comment for the full "why derived
+                // here, not reported by the model" account. A port counts as successfully decoded
+                // this call when `inbox` carried a message on it (`Inbox::last_on_port`, the same
+                // selection every real FRAMED consumer uses) and that same port did NOT just
+                // appear in `failed_ports_this_call` above (built from the identical `drain_
+                // decode_errors()` call this loop already made this step). Every distinct port
+                // name in `inbox` is checked once, regardless of how many messages that port
+                // carries this step (only the LAST one, `last_on_port`, is ever actually
+                // attempted).
+                let mut checked_ports_this_call: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+                for msg in inbox.messages() {
+                    if !checked_ports_this_call.insert(msg.port.as_str()) {
+                        continue;
+                    }
+                    if failed_ports_this_call.contains(&msg.port) {
+                        continue;
+                    }
+                    if let Some((last_msg, _sender)) = inbox.last_on_port(&msg.port) {
+                        sys.decode_successes.push(crate::ports::DecodeSuccessRecord { instance: id.clone(), port: msg.port.clone(), tai_ns: last_msg.tai_ns });
+                    }
                 }
                 sys.history.prev = Some(sys.history.curr.clone());
                 sys.history.curr = (result.t_tai_ns, result.state);
@@ -696,6 +727,15 @@ impl HeteroScheduler {
     /// hit a decode error.
     pub fn decode_errors(&self, id: &str) -> Option<&[crate::ports::DecodeErrorRecord]> {
         self.systems.get(id).map(|s| s.decode_errors.as_slice())
+    }
+
+    /// Every successful decode [`HeteroScheduler::advance_to_with_ports`] has recorded `id`
+    /// making so far (`docs/open-questions.md` question 193, R6.2) -- mirrors
+    /// [`HeteroScheduler::decode_errors`]'s own identical contract exactly, one entry per
+    /// (port, step) this instance decoded without failure. See [`crate::ports::
+    /// DecodeSuccessRecord`]'s own doc comment for how this is derived.
+    pub fn decode_successes(&self, id: &str) -> Option<&[crate::ports::DecodeSuccessRecord]> {
+        self.systems.get(id).map(|s| s.decode_successes.as_slice())
     }
 
     /// See [`Scheduler::sample_kind`] -- identical contract, over [`HeteroScheduler`].

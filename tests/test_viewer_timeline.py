@@ -128,6 +128,38 @@ def _contact_event(*, station: str, counterpart: str, is_start: bool, offset_s: 
     )
 
 
+def _decode_error_event(*, instance: str, port: str, is_start: bool, offset_s: float,
+                        first_offset_s: float | None = None, first_error: str = "",
+                        frames_affected: int = 0, resumed: bool = True) -> trajectory_pb2.Event:
+    """Mirrors crates/av-kernel/src/drm/events.rs::decode_error_start_event/
+    decode_error_end_event's own `format!` calls verbatim (question 193, R6.2). `id`/
+    `reference_id`/`name`/`kind` follow those builders exactly: `kind` is
+    EVENT_KIND_FAULT for BOTH (a decode-error event is distinguished from every other
+    fault-shaped event by `name`, never `kind` -- see events.rs's own module doc
+    comment's "Naming" section), `reference_id` is the receiving port,
+    `id = f"{name}:{instance}:{port}:{first_tai_ns}"` (keyed by the EPISODE's own
+    first_tai_ns on both the start and its own end, so start/end share the pairing
+    key but never the same id -- the `name` prefix differs)."""
+    name = "decode_error_start" if is_start else "decode_error_end"
+    tai_ns = START_TAI_NS + int(offset_s * NS_PER_S)
+    first_tai_ns = START_TAI_NS + int((first_offset_s if first_offset_s is not None else offset_s) * NS_PER_S)
+    if is_start:
+        detail = f'instance "{instance}" port "{port}": undecodable frame -- {first_error}'
+        attrs = {"instance": instance, "port": port, "codec_error": first_error}
+    elif resumed:
+        detail = f'instance "{instance}" port "{port}": decoding resumed after {frames_affected} undecodable frame(s)'
+        attrs = {"instance": instance, "port": port}
+    else:
+        detail = (f'instance "{instance}" port "{port}": the run ended with {frames_affected} '
+                  f'undecodable frame(s) since tai_ns={first_tai_ns} still unresolved -- decoding never resumed')
+        attrs = {"instance": instance, "port": port}
+    return trajectory_pb2.Event(
+        id=f"{name}:{instance}:{port}:{first_tai_ns}", entity_id=instance, tai_ns=tai_ns,
+        kind=trajectory_pb2.EVENT_KIND_FAULT, name=name, detail=detail,
+        reference_id=port, provenance=_provenance(**attrs),
+    )
+
+
 def _command_transition(*, command_id: str, instance: str, command_class: str, state_name: str,
                         principal: str, reason: str, offset_s: float, ack_level: str = "") -> trajectory_pb2.Event:
     """Mirrors crates/av-kernel/src/drm/command.rs::transition_event's own `format!`
@@ -155,6 +187,26 @@ def fixture_events() -> list[trajectory_pb2.Event]:
     events.append(_contact_event(station="ground_beta", counterpart="demo_flt", is_start=True, offset_s=100))  # never closed
     events.append(_contact_event(station="ground_alpha", counterpart="demo_other", is_start=False, offset_s=200))  # no start
     events.append(_contact_event(station="ground_alpha", counterpart="demo_flt", is_start=False, offset_s=795))
+
+    # ---- decode-error episode windows (question 193, R6.2): one matched
+    # (controller/startracker_in), two deliberately not -- the SAME shape as the
+    # contact-window trap above, applied to the decode-error pairing key
+    # (spacecraft/entity_id + referenceId/port, both real fields -- no detail parsing
+    # needed here, unlike contact's counterpart). An unclosed start on a DIFFERENT
+    # PORT of the SAME instance (controller/imu_in) proves pairing keys on port, not
+    # spacecraft alone; an orphan end on a THIRD port of the SAME instance
+    # (controller/cmd_in), landing chronologically BETWEEN the real window's own start
+    # and end, is the load-bearing trap: an implementation that paired by spacecraft
+    # alone would wrongly close the real startracker_in episode with THIS end instead
+    # of its own real, later one.
+    events.append(_decode_error_event(instance="controller", port="startracker_in", is_start=True, offset_s=50,
+                                      first_error="apid 511 names no declared PacketCodec"))
+    events.append(_decode_error_event(instance="controller", port="imu_in", is_start=True, offset_s=100,
+                                      first_error="packet is 3 byte(s), shorter than the 6-byte primary header"))  # never closed
+    events.append(_decode_error_event(instance="controller", port="cmd_in", is_start=False, offset_s=200,
+                                      first_offset_s=190, frames_affected=4))  # no start
+    events.append(_decode_error_event(instance="controller", port="startracker_in", is_start=False, offset_s=795,
+                                      first_offset_s=50, frames_affected=300, resumed=True))
 
     # ---- cmd1: full real state machine on demo_flt (drms/demo_ground_command.drm.yaml's
     # own vocabulary: field Cd, class drag_sail, dispatcher demo_ground).
@@ -289,12 +341,19 @@ def test_every_command_transition_carries_its_real_reference_id(published_scenar
     a fault event's own referenceId (a different real field, `reference_id="fault1"` in
     this fixture) is unaffected -- referenceId is a generic Event field, not something
     special-cased per event type.
+
+    Question 193 (R6.2): `type == "fault"` is no longer unique to `fault1` alone --
+    decode_error_start/_end events (added by this same round's fixture) also carry
+    `type == "fault"` (EVENT_KIND_FAULT, `events.rs`'s own "Naming" doc section: a
+    decode-error event is distinguished from a plain fault by `name`, never `kind`),
+    so this test now selects `fault1` by `name` too, rather than assuming it is the
+    only `type == "fault"` event in the scenario.
     """
     events = published_scenario["events"]
     for ev in events:
         if ev["type"] == "command_transition":
             assert ev["referenceId"] in ("cmd1", "cmd2", "cmd3"), ev
-    fault = next(e for e in events if e["type"] == "fault")
+    fault = next(e for e in events if e["type"] == "fault" and e["name"] == "fault1")
     assert fault["referenceId"] == "fault1"
 
 
@@ -312,6 +371,14 @@ def timeline_check_input_path(tmp_path_factory, published_scenario, fixture_even
         "scenario": published_scenario,
         "expectedWindowStartT": cdm_adapter.tai_ns_to_a1mjd(START_TAI_NS + 50 * NS_PER_S),
         "expectedWindowEndT": cdm_adapter.tai_ns_to_a1mjd(START_TAI_NS + 795 * NS_PER_S),
+        # Question 193 (R6.2): the decode-error episode's own matched window -- SAME
+        # offset_s=50/795 as the contact window above (deliberately reused, not a
+        # coincidence: both fixtures' matched windows share the same start/end so this
+        # file states one pair of epochs, not two, while still proving the two pairing
+        # functions never cross-pair each other's events -- section 2/2b of
+        # timeline_check.mjs each run against the full, combined scenario.events).
+        "expectedDecodeErrorWindowStartT": cdm_adapter.tai_ns_to_a1mjd(START_TAI_NS + 50 * NS_PER_S),
+        "expectedDecodeErrorWindowEndT": cdm_adapter.tai_ns_to_a1mjd(START_TAI_NS + 795 * NS_PER_S),
     }
     d = tmp_path_factory.mktemp("timeline_check")
     path = d / "timeline_input.json"
@@ -369,6 +436,19 @@ def test_contact_windows_paired_correctly_never_cross_paired(timeline_data):
     """
     failed = _failed(timeline_data, 'pairContactWindows:')
     assert not failed, f"contact-window pairing checks failed: {failed}"
+
+
+def test_decode_error_windows_paired_correctly_never_cross_paired(timeline_data):
+    """Question 193's (R6.2) own required test, mirroring `test_contact_windows_paired_
+    correctly_never_cross_paired` exactly: a decode_error_start/decode_error_end pair
+    for the SAME (instance, port) renders as one spanned window with its duration; an
+    unmatched start or end is reported unmatched, never dropped, never paired with the
+    wrong partner. Fails against an implementation that pairs by instance/spacecraft
+    alone, ignoring the port (the TRAP check), or that drops/silently-merges an
+    unmatched event.
+    """
+    failed = _failed(timeline_data, 'pairDecodeErrorWindows:')
+    assert not failed, f"decode-error-window pairing checks failed: {failed}"
 
 
 def test_command_transitions_grouped_by_command_with_real_state_names(timeline_data):

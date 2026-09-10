@@ -1332,6 +1332,13 @@ struct ModelSpanState {
     /// SENSOR fault events are (see `R5_2_REPORT.md`'s escalations for why that collapse is
     /// flagged, not built, here).
     decode_errors: Vec<crate::ports::DecodeErrorRecord>,
+    /// Question 193 (R6.2): every successful decode this instance's own `step_with_ports` calls
+    /// have recorded, across every span of this shared run -- drained from `HeteroKernel::
+    /// decode_successes(name)` at the end of every [`run_one_span`] call, exactly like
+    /// `decode_errors` above. Folded together with `decode_errors` (never turned into an `Event`
+    /// on its own) once the whole run finishes, into decode-error EPISODES per (instance, port)
+    /// -- see [`run_shared_group`]'s own "decode-error episodes" doc section.
+    decode_successes: Vec<crate::ports::DecodeSuccessRecord>,
     /// Whether this instance's own `x0`/`handle` were produced by a maneuver's dv jump at the
     /// boundary that ends the *previous* span (i.e. whether the sample recorded at this span's
     /// own start is velocity-discontinuous with the previous span's last sample) -- see
@@ -1465,6 +1472,11 @@ fn run_one_span(
         // already final the moment `step_with_ports` returns it).
         if let Some(decode_errs) = kernel.decode_errors(name) {
             span.decode_errors.extend_from_slice(decode_errs);
+        }
+        // Question 193 (R6.2): same ever-growing-list drain shape as `decode_errors` immediately
+        // above -- see `ModelSpanState::decode_successes`'s own doc comment.
+        if let Some(decode_ok) = kernel.decode_successes(name) {
+            span.decode_successes.extend_from_slice(decode_ok);
         }
         // Question 178 (R5.1a): this instance's own SENSOR fault effect over the WHOLE span
         // this call just ran -- read here, while `kernel` (and the boxed model it owns) is
@@ -1637,6 +1649,90 @@ fn fold_sensor_fault_span_drain(name: &str, drain: Option<av_dynamics::SensorFau
     }
 }
 
+/// One chronological "did this port's decode attempt this call succeed or fail" entry, folded
+/// by [`decode_error_episode_events`] -- never constructed elsewhere.
+enum DecodeAttempt<'a> {
+    Failed(&'a crate::ports::DecodeErrorRecord),
+    Succeeded(&'a crate::ports::DecodeSuccessRecord),
+}
+impl DecodeAttempt<'_> {
+    fn tai_ns(&self) -> i64 {
+        match self {
+            DecodeAttempt::Failed(r) => r.tai_ns,
+            DecodeAttempt::Succeeded(r) => r.tai_ns,
+        }
+    }
+}
+
+/// Question 193 (R6.2): fold one instance's own `decode_errors`/`decode_successes` (every span
+/// of a shared run already flattened onto `ModelSpanState`'s own two ever-growing lists, in
+/// call order -- see that struct's own doc comments) into decode-error EPISODES, one per `(port,
+/// occurrence-of-being-open)`, and build the `decode_error_start`/`decode_error_end` event PAIR
+/// for each. This is where question 193's own "an episode opens at the first undecodable frame
+/// on an (instance, port) and closes when that consumer next decodes a frame on that port
+/// successfully" rule is actually implemented:
+///
+/// - Both lists are grouped by `port`, then merged into ONE chronologically-sorted sequence of
+///   [`DecodeAttempt`]s per port (a stable sort on `tai_ns` -- ties are not expected in practice,
+///   since a real FRAMED consumer attempts at most one decode per port per `step_with_ports`
+///   call, so a failure and a success for the SAME port can never share an epoch; a stable sort
+///   is the honest, non-arbitrary tie-break if that assumption is ever wrong).
+/// - Walking each port's own sequence in order: a `Failed` attempt with no episode currently open
+///   OPENS one (`first_tai_ns`/`first_sequence_count`/`first_error` = that attempt's own fields,
+///   `frames_affected = 1`); a `Failed` attempt with an episode already open just increments its
+///   `frames_affected`; a `Succeeded` attempt with an episode open CLOSES it (the pair is built
+///   right there, `resumed = true`, `end_tai_ns` = the success's own `tai_ns`); a `Succeeded`
+///   attempt with nothing open is a no-op (nothing to close -- a healthy port's own ordinary
+///   successful decodes never produce a stray `decode_error_end`).
+/// - Any port left with an episode still open once its own sequence is exhausted (the run ended
+///   before decoding ever resumed) gets its own closing pair too, `resumed = false`, `end_tai_ns
+///   = run_end_tai_ns` -- the manager's own decision (question 193 does not itself settle the
+///   run-end case): mirrors `run_shared_group`'s own existing precedent for a persistent SENSOR
+///   fault with no `Boundary::SensorFaultEnd` (this function's own caller's "active_sensor_fault"
+///   tail loop, immediately above this one in the source) -- a fault with no natural end boundary
+///   still gets exactly one closing event, so a consumer can always read `values["frames_
+///   affected"]` regardless of whether the fault happened to still be open at run end.
+///
+/// Ports are iterated in `BTreeMap` order (deterministic, ADR-004) and every episode within one
+/// port in the chronological order it opened, so two runs given the same occurrences always
+/// produce their `decode_error_start`/`_end` pairs in the same relative order.
+fn decode_error_episode_events(errors: &[crate::ports::DecodeErrorRecord], successes: &[crate::ports::DecodeSuccessRecord], instance: &str, run_end_tai_ns: i64, provenance: Provenance) -> Vec<Event> {
+    let mut by_port: BTreeMap<&str, Vec<DecodeAttempt>> = BTreeMap::new();
+    for e in errors {
+        by_port.entry(e.port.as_str()).or_default().push(DecodeAttempt::Failed(e));
+    }
+    for s in successes {
+        by_port.entry(s.port.as_str()).or_default().push(DecodeAttempt::Succeeded(s));
+    }
+
+    let mut out = Vec::new();
+    for (_port, mut attempts) in by_port {
+        attempts.sort_by_key(DecodeAttempt::tai_ns);
+        let mut open: Option<events::DecodeErrorEpisode> = None;
+        for attempt in &attempts {
+            match attempt {
+                DecodeAttempt::Failed(rec) => match &mut open {
+                    None => {
+                        open = Some(events::DecodeErrorEpisode { port: rec.port.clone(), first_tai_ns: rec.tai_ns, first_sequence_count: rec.sequence_count, first_error: rec.error.clone(), frames_affected: 1 });
+                    }
+                    Some(ep) => ep.frames_affected += 1,
+                },
+                DecodeAttempt::Succeeded(rec) => {
+                    if let Some(ep) = open.take() {
+                        out.push(events::decode_error_start_event(&ep, instance, provenance.clone()));
+                        out.push(events::decode_error_end_event(&ep, rec.tai_ns, true, instance, provenance.clone()));
+                    }
+                }
+            }
+        }
+        if let Some(ep) = open {
+            out.push(events::decode_error_start_event(&ep, instance, provenance.clone()));
+            out.push(events::decode_error_end_event(&ep, run_end_tai_ns, false, instance, provenance.clone()));
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_shared_group(
     gmat: &Gmat,
@@ -1701,6 +1797,7 @@ fn run_shared_group(
                 applied_commands: Vec::new(),
                 measurements: Vec::new(),
                 decode_errors: Vec::new(),
+                decode_successes: Vec::new(),
                 seg_start_is_post_maneuver: false,
             },
         );
@@ -1751,6 +1848,7 @@ fn run_shared_group(
                     applied_commands: Vec::new(),
                     measurements: Vec::new(),
                     decode_errors: Vec::new(),
+                    decode_successes: Vec::new(),
                     seg_start_is_post_maneuver: false,
                 },
             );
@@ -2160,15 +2258,13 @@ fn run_shared_group(
                 }
             }
         }
-        // Question 188 (R5.2): every undecodable frame this instance recorded, across every span
-        // of this shared run, becomes exactly one EVENT_KIND_FAULT (kind decode_error) event --
-        // never a segment split (a decode error is a run-time frame problem, not a reconfiguration
-        // of the model's own hashed settings). One event PER OCCURRENCE, per question 188's own
-        // literal wording -- see `ModelSpanState::decode_errors`'s own doc comment for why this is
-        // not collapsed the way PORT/SENSOR fault events are.
-        for (i, occ) in span.decode_errors.iter().enumerate() {
-            all_events.push(events::decode_error_event(occ, i, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
-        }
+        // Question 193 (R6.2): fold this instance's own decode failures/successes, across every
+        // span of this shared run, into decode-error EPISODES per port -- one `decode_error_
+        // start`/`decode_error_end` event PAIR per episode, never one event per occurrence (the
+        // pre-R6.2 shape, unbounded -- see `events::decode_error_start_event`'s own doc comment).
+        // Never a segment split (a decode error is a run-time frame problem, not a reconfiguration
+        // of the model's own hashed settings).
+        all_events.extend(decode_error_episode_events(&span.decode_errors, &span.decode_successes, &name, run_end_tai_ns, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
         all_events.extend(events::lifecycle_pair(&name, t0, run_end_tai_ns, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
         // Question 173: fold this instance's own measurements straight in -- global sort by
         // (epoch_ns, measurement_id) happens once, in `execute()`, after every instance (and

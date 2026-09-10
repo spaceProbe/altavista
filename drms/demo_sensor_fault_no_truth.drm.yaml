@@ -1,0 +1,51 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R6.2 (question
+# 189's own record: "the unreachable frames_affected == 0 end-event guard is recorded as
+# exercised only indirectly"). See drms/demo_sensor_fault_no_truth.sos.yaml's own header comment
+# for the full derivation of WHY this topology's star tracker never applies any SENSOR fault at
+# all: its seven truth ports are never connected, so `crate::drm::sensors::read_truth` never
+# returns `Some`, so `StarTrackerModel::step_with_ports` never even reaches the code path that
+# would apply -- let alone count -- a fault.
+#
+# The declared SENSOR "dropout" fault below on `startracker` (window [start+5s, start+15s), a
+# 10 s bounded window well inside this 20 s run, so `Boundary::SensorFaultEnd` -- the exact arm
+# question 189 names -- is the boundary this run actually exercises, not the run-end persistent
+# path R6.2's own question 193 work exercises for decode errors) therefore has ZERO real effect.
+#
+# `crates/av-kernel/tests/sensor_faults.rs::
+# a_sensor_fault_whose_star_tracker_has_no_truth_connection_never_emits_an_event` asserts
+# directly, against a real `RunProducts.events`, that: (a) the run completes normally (an
+# unreachable sensor is a legitimate, if useless, configuration -- never a load-time refusal,
+# since nothing about the DECLARATION itself is malformed); (b) not one `EVENT_KIND_FAULT` event
+# appears anywhere in the run (there is no OTHER fault declared here to produce one, so this is
+# the guard's own `None` branch actually running, not merely reasoned about).
+id: sensor_fault_unreachable_drm
+version: "1"
+name: "Star tracker SENSOR fault that never applies (R6.2, question 189)"
+sos_configuration_id: sensor_fault_unreachable_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225657000000000
+  seeds:
+    never_applies: 1
+  faults:
+    - id: never_applies
+      tai_ns: 1767225642000000000
+      duration_ns: 10000000000
+      target_kind: FAULT_TARGET_KIND_SENSOR
+      instance: startracker
+      target: startracker.output
+      kind: dropout
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R6.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_sensor_fault_no_truth.drm.yaml
+hash: "dccbb69a01837099e430cb9c8f237f88928e1d1aa4f83ae295c4d170d7665c51"

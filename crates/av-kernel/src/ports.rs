@@ -76,6 +76,43 @@ pub struct DecodeErrorRecord {
     pub error: String,
 }
 
+/// One successful decode on `(instance, port)` -- the signal `docs/open-questions.md` question
+/// 193 (R6.2) needs to close a decode-error episode ("closes when that consumer next decodes a
+/// frame on that port successfully"), enriched with the receiving instance the same way
+/// [`DecodeErrorRecord`] enriches `av_dynamics::DecodeErrorOccurrence`.
+///
+/// **Why this is derived in `crate::schedule::HeteroScheduler::advance_to_with_ports` rather than
+/// reported by the model itself (no new `av_dynamics::DynamicsModel` trait method).** A model's
+/// real decode-success signal would need to cross the `av_dynamics::erase::ErasedModel` type-
+/// erasure boundary (every model this crate constructs is wrapped there before it ever reaches a
+/// `BoxedModel`, `crate::registry::ModelHandle::into_boxed`'s own doc comment) exactly the way
+/// [`DecodeErrorRecord`]'s own `av_dynamics::DecodeErrorOccurrence` already does -- but
+/// `av-dynamics/src/erase.rs` is outside this round's file allowlist (`crates/av-dynamics/src/
+/// lib.rs` only), so a new *required* trait method cannot be wired through it without touching a
+/// file this round does not own, and a new *defaulted* method would still need an explicit
+/// override in `ErasedModel`'s own `impl DynamicsModel` block to ever see past the default (an
+/// `impl` that does not mention a defaulted method inherits the trait's own default, never the
+/// wrapped inner model's override -- Rust has no automatic forwarding). See `R6_2_REPORT.md`
+/// ("What was considered") for the alternatives weighed and why this one was chosen instead:
+/// [`crate::schedule::HeteroScheduler::advance_to_with_ports`] already has, at the exact point it
+/// drains `model.drain_decode_errors()`, both the `Inbox` that call was handed AND that call's own
+/// freshly-drained failure occurrences -- a port present in the `Inbox` (the same `Inbox::
+/// last_on_port` selection every real FRAMED consumer in this workspace uses to pick which
+/// message to attempt) whose port name does NOT appear among this call's own failure occurrences
+/// is, by construction, a successful decode (every real consumer either updates its cache or
+/// records exactly one failure per port per call -- the two are mutually exclusive and
+/// exhaustive), so its absence from the failures is a sound, derived success signal, never a
+/// guess. A port this instance never actually decodes (a SIGNAL port, or a declared FRAMED port no
+/// model logic reads) also passes this test, but harmlessly: such a port can never have
+/// accumulated a [`DecodeErrorRecord`] either, so it can never have an open episode for this
+/// signal to close.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodeSuccessRecord {
+    pub instance: String,
+    pub port: String,
+    pub tai_ns: i64,
+}
+
 /// Sort `queued` (every message currently waiting for one receiving instance) into question
 /// 108's deterministic delivery order -- `(port name, sender emission epoch, sender instance
 /// id)`, the receiving-instance field of the full four-field rule already fixed by which queue

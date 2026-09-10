@@ -1,0 +1,81 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R6.2 (question
+# 193's own run-end rule, the manager's decision, not question 193's own literal wording):
+# "if a run ends while a decode-error episode is still open, emit the end event at the run's end
+# epoch with the real frames_affected, and say in the event's detail that decoding never
+# resumed."
+#
+# Identical to drms/demo_attitude_control_port_corrupt.drm.yaml (same sos_configuration_id, same
+# four systems, same scenario span/objectives/measures/options, same corrupt_mask -- reused
+# UNCHANGED) with exactly one change: `duration_ns: 0` instead of `30000000000` -- a PERSISTENT
+# PORT fault (`proto/altavista/v1/system.proto`'s own `Fault.duration_ns` doc comment: "0 means
+# persistent, to the end of the run"), starting at the SAME `[start+5s, ...)` epoch but never
+# closing before the run's own declared end at t=300s.
+#
+# ## Why this fixture exists (not merely reasoned about)
+#
+# `demo_attitude_control_port_corrupt.drm.yaml`'s own bounded [5s, 35s) window always lets the
+# controller successfully decode a star tracker frame again once the window closes (t=35s),
+# closing the decode-error episode with `resumed == true` -- `crates/av-kernel/tests/
+# decode_errors.rs`'s own headline test proves exactly that path. It never exercises the OTHER
+# half of `executor::run_shared_group`'s own `decode_error_episode_events` -- the case where the
+# run's own last span ends while an episode is still open, which needs its OWN closing event
+# (`resumed == false`) since nothing else will ever emit one. This fixture is that case: the
+# corrupt fault never clears, so the star tracker's every 20 Hz emission from t=5s onward is
+# corrupted for the rest of the 300 s run, and the controller's own last successful decode stays
+# whatever it captured just before t=5s, all the way to run end.
+#
+# ## Expected result (crates/av-kernel/tests/decode_errors.rs states this before running)
+#
+# One decode-error episode on `controller`/`startracker_in`, opening at t=5s (the identical first
+# decode attempt inside the window the bounded fixture's own derivation already gives) and NEVER
+# closing naturally -- `decode_error_end.tai_ns == end_tai_ns` (t=300s, the run's own declared
+# end), `resumed == false`, `detail` stating decoding never resumed.
+# `frames_affected = (300 - 5) / 0.1 = 2950` -- every 0.1 s controller decode attempt from t=5s
+# up to (but not including) t=300s, all of them corrupted (the deterministic corrupt_mask, as in
+# the bounded fixture).
+id: attitude_control_port_corrupt_persistent_drm
+version: "1"
+name: "Closed-loop attitude control (R6.2): a PERSISTENT PORT corrupt fault leaves a decode-error episode open at run end"
+sos_configuration_id: attitude_control_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225937000000000
+  seeds:
+    corrupt_startracker_persistent: 5253
+  faults:
+    - id: corrupt_startracker_persistent
+      tai_ns: 1767225642000000000
+      duration_ns: 0
+      target_kind: FAULT_TARGET_KIND_PORT
+      instance: startracker
+      target: st_meas
+      kind: corrupt
+      params:
+        corrupt_mask: 255
+objectives:
+  - name: controller_pointing_error_at_end
+    expression: "output.controller.pointing_error_rad@end"
+    # Scored, not a hard gate -- this fixture's own point is the run-end episode-closing
+    # behaviour, not a tight physical bound (mirrors demo_attitude_control_port_corrupt.drm.yaml's
+    # own identical disclosure).
+    target: 0.00012578826462456927
+    tolerance: 0.001
+    unit: UNIT_RADIAN
+measures:
+  - name: controller_seq_at_end
+    expression: "output.controller.seq@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R6.2)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_control_port_corrupt_persistent.drm.yaml
+hash: "4ed0acba09225a1fafc64d5b0860bc9ebed9c80ed0603485c679daf1400b54e8"
