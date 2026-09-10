@@ -184,6 +184,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-sweep"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-kernel",
+ "gmat-sys",
+ "prost",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "axum"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

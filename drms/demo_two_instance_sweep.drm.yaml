@@ -1,0 +1,115 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- F1b
+# (crates/av-sweep's own task brief, milestone F1's second half): the fixture study behind
+# crates/av-sweep/tests/*.rs's GMAT-needing tests. A NEW file, not an edit to
+# drms/demo_two_instance.drm.yaml (an existing, pinned golden this task may never modify): that
+# file declares no Scenario.seeds and no execution_error at all, so a Monte Carlo sweep over it
+# would derive identical seeds for every draw and run the identical sample twice. This file adds
+# exactly those two things on top of the otherwise-identical scenario, and reuses
+# demo_two_instance.sos.yaml/demo_two_instance.system.yaml/demo_two_instance_ctrl.system.yaml
+# completely unmodified (sos_configuration_id below is the same "demo_two_instance_sos").
+#
+# Timing is byte-identical to demo_two_instance.drm.yaml (see that file's own header comment):
+#   start_tai_ns: 1767225637000000000 (01 Jan 2026 00:00:00Z)
+#   fault (demo_flt):     start + 1800 s  (00:30:00) -- force_model.gravity_order 8 -> 0
+#   maneuver (demo_mvr):  start + 5400 s  (01:30:00) -- 20 m/s prograde VNB burn, now carrying a
+#                         declared Gates execution_error block (see below)
+#   end_tai_ns:            start + 7200 s  (02:00:00)
+# Both boundary epochs land exactly on the sample_interval_s = 60 s output grid, unchanged.
+# Measured wall time (crates/av-sweep's own task brief requires disclosing this before deciding
+# whether to shorten the scenario): one sample of the byte-identical-length demo_two_instance
+# scenario took 8.18s (debug build, `time ./target/debug/av-run ...`, measured 2026-09-09).
+# F2b (question 192(c)) added a second axis (drms/demo_two_instance_sweep.sweep.yaml's own header
+# comment: event burn1's dv_x), widening the grid from 2 to 4 points; the full 4-point x 2-draw
+# study is therefore 8 such samples, ~65s sequential (~35s measured at --workers 2, F2b's own
+# measurement) -- comfortably inside the "keep cargo test -p av-sweep under about five minutes"
+# budget even with several more individual sample runs for the crate's other GMAT-needing tests.
+# The scenario is therefore kept at its full 7200 s length -- not shortened.
+#
+# Gates execution_error sigmas (question 100's model; ManeuverExecutionError, core.proto):
+# sigma_magnitude_fixed_mps=0.01, sigma_magnitude_proportional=0.02,
+# sigma_pointing_fixed_mps=0.01, sigma_pointing_proportional_rad=0.002 -- exactly the brief's own
+# suggested starting values, kept as-is (no reason found during the fixture study's own
+# measurement to adjust them: draw-to-draw dispersion on demo_mvr_rmag_at_end was clearly
+# resolved above numerical noise at these sigmas -- see crates/av-sweep's own final report for
+# the measured values).
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_two_instance_sweep.drm.yaml
+id: demo_two_instance_sweep_drm
+version: "1"
+name: Two-instance demo sweep fixture (F1b) -- Gates-dispersed maneuver, seeded Monte Carlo draws
+sos_configuration_id: demo_two_instance_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  frames:
+    - id: EarthICRF
+      body: Earth
+      axes: AXES_KIND_ICRF
+      description: "International Celestial Reference Frame (ICRF): an inertial frame whose axes are fixed to distant quasar positions, origin at Earth's centre of mass."
+  faults:
+    - id: fault1
+      tai_ns: 1767227437000000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: demo_flt
+      target: force_model.gravity_order
+      kind: parameter
+      params:
+        value: 0.0
+  events:
+    - id: burn1
+      tai_ns: 1767231037000000000
+      kind: maneuver
+      instance: demo_mvr
+      values:
+        dv_x: 20.0
+        dv_y: 0.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_VNB
+      # Question 100's Gates model: a dispersed burn under ExecutionErrorMode::Sampled (which
+      # crates/av-sweep's own binary selects whenever a sweep declares monte_carlo_draws > 1 OR
+      # sets dispersed: true -- question 192(d); see that crate's own study.rs module doc
+      # comment), a perfect burn under ExecutionErrorMode::Nominal regardless of this block being
+      # present (M12.1, question 103). dv_x here (20.0) is also this DRM's own baseline for
+      # drms/demo_two_instance_sweep.sweep.yaml's event axis on event_id burn1, value_key dv_x
+      # (question 192(c)) -- see that file's own header comment for the axis and its hypothesis.
+      execution_error:
+        sigma_magnitude_fixed_mps: 0.01
+        sigma_magnitude_proportional: 0.02
+        sigma_pointing_fixed_mps: 0.01
+        sigma_pointing_proportional_rad: 0.002
+        seed: burn_seed
+  # A seed for every derived per-sample stream this DRM's own execution_error block references.
+  # crates/av-sweep::sample::sample_config replaces this base value with a derived one per
+  # (point, draw) before every sample run -- the value here is never itself run against; only its
+  # presence (a real key named "burn_seed") matters, since av_sweep::SweepError::
+  # DrawsAboveOneWithoutSeeds refuses monte_carlo_draws > 1 when Scenario.seeds is empty.
+  seeds:
+    burn_seed: 1
+# No objectives declared (crates/av-sweep's own task brief, F1b: "declare measures only -- a pass
+# criterion needs a measured target, which is F2's job; inventing one now would be a target
+# fitted to whatever came out"). All three measures report a raw run-time value with no pass/fail
+# concept (ADR-005 sec 6) -- exactly what a feasibility sweep needs before any objective exists.
+measures:
+  - name: demo_flt_rmag_at_end
+    expression: "output.demo_flt.rmag@end"
+    unit: UNIT_METER
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+  - name: demo_mvr_rmag_at_end
+    expression: "output.demo_mvr.rmag@end"
+    unit: UNIT_METER
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-sweep F1b fixture authoring"
+hash: "499d426e18272fbb361ede2c6edd906fd9f828ac99da154722d56d4e2914433d"

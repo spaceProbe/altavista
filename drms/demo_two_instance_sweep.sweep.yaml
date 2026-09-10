@@ -1,0 +1,78 @@
+# ParameterSweep (proto/altavista/v1/system.proto), YAML transcoding -- F1b (crates/av-sweep's
+# own task brief). The fixture study: a 2-point x 2-draw grid over
+# drms/demo_two_instance_sweep.drm.yaml (which reuses demo_two_instance.sos.yaml/
+# demo_two_instance.system.yaml/demo_two_instance_ctrl.system.yaml completely unmodified).
+#
+# Axis 1: demo_flt.spacecraft.DragArea, [5.0, 25.0] m^2. 5.0 is leo_demo_sys's own declared
+# baseline (drms/demo_two_instance.system.yaml's spacecraft.DragArea: 5.0, not overridden by
+# demo_flt's own parameter_overrides in demo_two_instance.sos.yaml); 25.0 is a deployed drag
+# sail, a 5x increase.
+#
+# Chosen over spacecraft.Cd deliberately (crates/av-sweep's own task brief's own suggestion,
+# verified against the source rather than taken on faith): demo_two_instance.sos.yaml's own
+# header comment and demo_two_instance.system.yaml's own header comment both confirm demo_flt
+# consumes a SIGNAL-commanded Cd from demo_ctrl (drms/demo_two_instance_ctrl.system.yaml, a
+# native range-condition controller) that LATCHES demo_flt's own Cd to 220.0 once demo_mvr's own
+# range crosses a declared threshold near apoapsis -- see demo_two_instance.sos.yaml's own
+# `parameter_overrides: [{name: port.consume, string_value: cd_cmd_in}, {name:
+# port.consume_parameter, string_value: Cd}, ...]` on demo_flt and demo_two_instance_ctrl.
+# system.yaml's own controller logic. A Cd axis on demo_flt would therefore be partly (from the
+# first controller command onward, for however much of the run remains) overwritten by that
+# latch regardless of the axis's own declared value -- an axis whose effect a downstream command
+# silently erases for most of the run is not an honest sweep axis. DragArea has no such command
+# path anywhere in this SOS (grep of demo_two_instance.sos.yaml/demo_two_instance_ctrl.system.yaml
+# confirms no port targets DragArea), so its declared value is what genuinely propagates for the
+# whole 7200 s run.
+#
+# Axis 2 (question 192(c), F2b): an EVENT axis, event_id: burn1, value_key: dv_x, values [10.0,
+# 30.0] m/s -- burn1 (drms/demo_two_instance_sweep.drm.yaml's own scenario.events[0]) is
+# demo_mvr's prograde (VNB, dv_x only -- dv_y/dv_z stay 0.0) maneuver, commanded at 20.0 m/s. Two
+# explicit values bracketing that commanded 20.0 m/s: 10.0 (half) and 30.0 (one and a half times),
+# a +-10 m/s bracket -- large against the Gates dispersion sigmas on this same burn
+# (sigma_magnitude_fixed_mps 0.01, sigma_magnitude_proportional 0.02 -> ~0.4 m/s 1-sigma at 20
+# m/s) so the axis's own effect is never confused with per-draw dispersion noise, and small
+# against LEO orbital velocity (~7.5 km/s) so the burn stays a genuine small impulsive maneuver,
+# not a trajectory-reshaping one.
+#
+# HYPOTHESIS (crates/av-sweep/REPORT.md records the measured values against this, written before
+# running): a prograde burn adds orbital energy, raising the post-burn trajectory: dv_x=30.0
+# (more energy added) should give demo_mvr_rmag_at_end LARGER than dv_x=10.0 (less energy added),
+# both measured at run end, 1763 s after the burn. Scaling this task's own already-measured
+# burn-dispersion sensitivity (~1.09-1.18 km of demo_mvr_rmag_at_end spread from a ~0.4-0.8 m/s
+# draw-to-draw magnitude difference on this same 20 m/s burn, drms/demo_two_instance_sweep.drm.
+# yaml's own header comment) linearly to this axis's own +-10 m/s (25x-ish larger than that
+# stochastic difference) gives an order-of-magnitude ESTIMATE of order 10 km separating the two
+# axis points -- a rough Keplerian-sensitivity scaling, not a vis-viva calculation from the
+# burn's own true anomaly/eccentricity (not available without running GMAT), disclosed as an
+# order-of-magnitude estimate rather than a precise prediction.
+#
+# monte_carlo_draws: 2, and drms/demo_two_instance_sweep.drm.yaml declares exactly one
+# Scenario.seeds key ("burn_seed"), on the maneuver's own Gates execution_error block -- so
+# av_sweep::SweepError::DrawsAboveOneWithoutSeeds does not fire, and crates/av-sweep's own
+# study.rs selects ExecutionErrorMode::Sampled for every sample in this study (its own module doc
+# comment, question 192(d): "Sampled when sweep.dispersed || sweep.monte_carlo_draws > 1, else
+# Nominal" -- this sweep leaves dispersed at its false default; draws=2 alone already selects
+# Sampled here, the same as before question 192).
+#
+# Grid: 2 (DragArea) x 2 (dv_x) = 4 points, row-major with the LAST declared axis (dv_x) varying
+# fastest (crates/av-sweep/src/grid.rs::expand_grid's own documented ordering): point 0 =
+# (DragArea=5.0, dv_x=10.0), point 1 = (5.0, 30.0), point 2 = (25.0, 10.0), point 3 = (25.0,
+# 30.0). x2 draws = 8 samples total.
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-sweep/src/hash.rs::canonical_sweep_hash). Computed with:
+#   cargo run -p av-sweep --example sweep_hash -- drms/demo_two_instance_sweep.sweep.yaml
+id: demo_two_instance_sweep
+drm_id: demo_two_instance_sweep_drm
+axes:
+  - instance: demo_flt
+    parameter: spacecraft.DragArea
+    values: [5.0, 25.0]
+  - event_id: burn1
+    value_key: dv_x
+    values: [10.0, 30.0]
+monte_carlo_draws: 2
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-sweep F1b fixture authoring"
+hash: "e03787532ba919ceb42300fede6a8371c08bcfa81ddb00fe9ffd65f0ba5e0236"

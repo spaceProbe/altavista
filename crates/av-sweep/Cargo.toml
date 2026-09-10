@@ -1,0 +1,31 @@
+[package]
+name = "av-sweep"
+publish = false
+description = "F1-F2 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it. F2 (also src/lib.rs: aggregate.rs, store.rs, json.rs) adds per-point score aggregates and the study store (file-backed now, ClickHouse deferred behind the same trait)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+# Reused for its DRM/SOS/SystemDefinition YAML loader (av_kernel::drm::schema) and canonical
+# hashing (av_kernel::drm::hash) -- this crate's own schema.rs/hash.rs build directly on top
+# of those rather than reimplementing DRM/SOS parsing or hashing a second time (see this
+# crate's REPORT.md and each module's own doc comment for exactly what is reused vs.
+# transcribed locally, and why).
+av-kernel = { path = "../av-kernel" }
+# F1b (this crate's own task brief): sample mode is the one place in this binary that
+# constructs a live gmat_sys::Gmat handle (mirroring crates/av-run/src/main.rs's own reason for
+# depending on gmat-sys directly rather than only transitively through av-kernel).
+gmat-sys = { path = "../gmat-sys" }
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# DRM/sweep authoring format, matching crates/av-kernel/Cargo.toml's own pin exactly (question
+# 87's convention, mirrored here for ParameterSweep/SweepAxis YAML) -- not a workspace
+# dependency, so pinned here with the same explicit version av-kernel already uses.
+serde_yaml = "0.9"
+sha2.workspace = true
+thiserror.workspace = true

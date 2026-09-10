@@ -45,3 +45,8 @@ goldens/_gen_*
 # Per-run docker events capture written by services/cfs/build-image.sh (question 194):
 # a record of ONE local build window on ONE host, overwritten every run, never a source.
 services/cfs/build/last-build-events.jsonl
+# Symlinks a worktree points at the main checkout's untracked trees (no trailing slash: symlinks are not directories)
+/GMAT R2026a
+/third_party/gmat-src
+/third_party/cspice
+/third_party/cfs
