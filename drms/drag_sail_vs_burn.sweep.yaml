@@ -1,0 +1,98 @@
+# ParameterSweep (proto/altavista/v1/system.proto), YAML transcoding -- F4
+# (docs/feasibility-plan.md's F4 milestone). Emitted by altavista.feasibility (NOT
+# hand-written -- altavista/feasibility/study_drag_sail_vs_burn.py's own
+# emit_sweep_yaml() call wrote this file and computed `hash:` below through the package,
+# which shells out to the same `cargo run -p av-sweep --example sweep_hash` the demo
+# fixture study's own sweep.yaml header names). This header comment is a pure text
+# prepend added after emission (yaml_io.to_yaml has no header-comment field to author
+# through -- a real, disclosed gap in the authoring package, not silently patched: no
+# altavista/feasibility/** file was edited to add one). A YAML comment is never part of
+# the parsed message, so prepending it does not change `hash:` below -- reverified with
+# the same `cargo run -p av-sweep --example sweep_hash` command after this edit.
+#
+# The study: 2 (demo_mvr.spacecraft.DragArea: 5.0, 25.0 m^2) x 3 (event burn1's dv_x:
+# 10.0, 20.0, 30.0 m/s) = 6 points x 3 monte_carlo_draws = 18 samples, against
+# drms/drag_sail_vs_burn.drm.yaml (F4's own new DRM -- see that file's own header
+# comment for the scenario, the Gates sigmas, and the measured finding that the
+# DragArea axis is physically inert on demo_mvr as currently wired).
+#
+# Both axes deliberately target demo_mvr (not two different instances, unlike
+# drms/demo_two_instance_sweep.sweep.yaml's own DragArea-on-demo_flt/dv_x-on-demo_mvr
+# split) -- the manager's own F4 design intent: make demo_mvr_rmag_at_end a score that
+# genuinely responds to both axes. See drms/drag_sail_vs_burn.drm.yaml's own header
+# comment for why that intent does not fully hold as built (the DragArea axis) and
+# docs/studies/drag-sail-vs-burn.md for the full measured account of both axes.
+#
+# DragArea axis values: 5.0 is leo_demo_sys's own declared baseline
+# (drms/demo_two_instance.system.yaml's spacecraft.DragArea), 25.0 a deployed drag
+# sail (5x increase) -- the same two values and the same physical justification
+# demo_two_instance_sweep.sweep.yaml already uses (there on demo_flt).
+#
+# dv_x axis values: three points (10.0, 20.0, 30.0 m/s), not two, bracketing the
+# commanded 20.0 m/s value symmetrically at +-10 m/s -- large against this burn's own
+# Gates dispersion sigmas (~0.4 m/s 1-sigma at 20 m/s) so the axis's own effect is
+# never confused with per-draw dispersion noise, small against LEO orbital velocity
+# (~7.5 km/s) so the burn stays a genuine small impulsive maneuver.
+#
+# `dispersed: true` is declared explicitly (question 192(d)) even though
+# monte_carlo_draws=3 already selects ExecutionErrorMode::Sampled under the default
+# rule (`sweep.dispersed || sweep.monte_carlo_draws > 1`) -- not load-bearing at this
+# draw count, declared anyway to demonstrate the flag exists and parses correctly; see
+# docs/studies/drag-sail-vs-burn.md for the honest disclosure of what it does and does
+# not do here.
+#
+# HYPOTHESIS (written before running; docs/studies/drag-sail-vs-burn.md records the
+# measured values against this):
+# - DragArea axis: exactly 0 m of demo_mvr_rmag_at_end movement at every grid point and
+#   draw -- not "small", exactly zero -- because a scratch, single-draw, Nominal-mode
+#   pre-check (drms/drag_sail_vs_burn.drm.yaml's own header comment) found
+#   demo_mvr_rmag_at_end bit-for-bit IDENTICAL (6921427.813187283 m) between
+#   DragArea=5.0 and DragArea=25.0, root-caused to demo_mvr's own SOS declaration never
+#   setting force_model.drag_model.
+# - dv_x axis: demo_mvr_rmag_at_end increases monotonically with dv_x (a prograde burn
+#   adds orbital energy), by very roughly ~2.4-2.5 km per m/s of dv_x (scaled forward
+#   from demo_two_instance_sweep.sweep.yaml's own F2b measurement of ~48-50 km across
+#   this identical +-10 m/s bracket on the same burn) -- an order-of-magnitude
+#   estimate, not a precise prediction.
+# - Gates dispersion (draw-to-draw spread at fixed axis values): a spread comparable to
+#   demo_two_instance_sweep.drm.yaml's own measured ~1.09-1.18 km (same sigmas, same 20
+#   m/s burn) is expected at the dv_x=20.0 grid points; the sigma model's own
+#   proportional terms scale with commanded magnitude, so the dv_x=10.0 points are
+#   hypothesized to disperse less and the dv_x=30.0 points more.
+id: drag_sail_vs_burn
+drm_id: drag_sail_vs_burn_drm
+axes:
+- instance: demo_mvr
+  parameter: spacecraft.DragArea
+  values:
+  - 5.0
+  - 25.0
+  min: 0.0
+  max: 0.0
+  steps: 0
+  event_id: ''
+  value_key: ''
+- instance: ''
+  parameter: ''
+  values:
+  - 10.0
+  - 20.0
+  - 30.0
+  min: 0.0
+  max: 0.0
+  steps: 0
+  event_id: burn1
+  value_key: dv_x
+monte_carlo_draws: 3
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  principal: ''
+  tool: F4 drag-sail-vs-burn study authoring
+  config_hash: ''
+  data_pack_hash: ''
+  dataset_hash: ''
+  created_tai_ns: 0
+  run_id: ''
+  attributes: {}
+hash: a67a6bf1be781bda13b9d0c204582cc849ef58d6abeb4b6e3ce26b6bd7689fee
+dispersed: true

@@ -160,10 +160,74 @@ the order-of-magnitude estimate made before running (~10 km) though larger than 
 linear-scaling estimate predicted — both the hypothesis and the measured value are recorded in
 `REPORT.md`.
 
-Gates at F2b: `cargo build --workspace --all-targets` clean; `cargo test -p av-sweep` **88
-passed** (60 library, 18 binary, 10 GMAT integration — up from round 1's 70); `cargo clippy -p
-av-sweep --all-targets -- -D warnings` clean, no new `#[allow]`; the golden
-(`goldens/sweep_results_json/`) regenerated for the `seeds` map and its Python oracle test
-(`tests/test_sweep_results_json.py`) passes. `cargo deny check` and the full `pytest -q` suite
-were not re-run this round (not in F2b's own gate list; no dependency changed). F3/F4 remain not
-started.
+Gates at F2b, as accepted (one further defect was found in the manager's own review and fixed
+before the commit — `validate_axis_target` tested "both targets" on two *complete* targets, so a
+complete parameter target beside a half-declared event target was silently reclassified as an
+event axis with an empty `value_key`; the count below includes its regression test): `cargo build
+--workspace --all-targets` clean; `cargo test -p av-sweep` **89 passed** (61 library, 18 binary,
+10 GMAT integration — up from round 1's 70); `cargo clippy --workspace --all-targets -- -D
+warnings` clean, no new `#[allow]`; the golden (`goldens/sweep_results_json/`) regenerated for
+the `seeds` map, and its Python oracle test (`tests/test_sweep_results_json.py`) passes.
+
+## Status (feasibility manager, 2026-09-10) — round 2 closed
+
+**F2b, F3 and F4 are done and committed on `feasibility`. Every milestone in this plan has
+landed; the Exit criterion above is met.**
+
+Round 2 ran in six tasks: F2b (adopt question 192 in `av-sweep`), F3a and F3b in parallel
+(Python authoring plus the server route; the viewer panel), F3c (a defect found in review), and
+F4 then F4b (the worked study, and its correction). Gates at the accepted tree, run in isolation
+by the manager: `cargo test -p av-sweep` **89 passed**, `cargo test --workspace --exclude
+av-kernel` **271 passed / 0 failed** (252 baseline plus this crate's 19 new), `cargo clippy
+--workspace --all-targets -- -D warnings` clean with no new `#[allow]`, `cargo deny check` ok,
+`pytest -q` **492 passed / 3 skipped** (436 baseline plus this round's 56; the three skips are
+the same pre-existing opt-in and build-artifact skips under `services/`). `cargo test -p
+av-kernel` was never run: nothing this track touches compiles into it.
+
+### What round 2 changed, beyond the milestones as written
+
+- **Question 192 landed in full.** `SweepSample.seeds` records every derived seed rather than one
+  projected value; a `SweepAxis` may target a scenario event value; `ParameterSweep.dispersed`
+  makes a single dispersed draw expressible. The two round-1 decisions those supersede are struck
+  through in the F2b update above.
+- **Two axis-key namespaces, made disjoint rather than assumed disjoint.** Both axis kinds share
+  one `SweepSample.axis_values` map, and nothing in `av-kernel` restricts the characters in an
+  instance or parameter name — so a parameter axis whose key would begin with the reserved
+  `"event:"` prefix is refused, and the disjointness is a proof rather than a convention.
+- **Opening a sample is a server route, not a browser fetch.** `products_uri` is a directory on
+  the host that ran the study; the panel's first implementation fetched that string from the
+  browser and could never have worked. `POST /api/cdm/sweep/sample` takes an identity
+  (`sweepId`, `pointIndex`, `drawIndex`) and resolves it against the study the server itself
+  published, so no caller-supplied path is ever opened. The `RunProducts`-to-scenario conversion
+  is now one shared function, which the unedited run-publish tests prove.
+- **The worked study found a modelling assumption before it found a trend.** The manager's own
+  design put both of `docs/studies/drag-sail-vs-burn.md`'s axes on `demo_mvr`, which carries no
+  drag force at all — `drms/demo_two_instance.sos.yaml`'s own header comment says so. The sweep
+  surfaced it as a bit-identical score across the whole axis. The null is kept in the study
+  document as its most useful paragraph, and a second grid with the sail on `demo_flt` supplies
+  the real numbers.
+
+### The worked study, measured
+
+`docs/studies/drag-sail-vs-burn.md`, two grids of 18 samples each (3 `dv_x` × 2 `DragArea` × 3
+draws, `dispersed: true`), 76.5 s and 70.4 s at `--workers 2` — together about a sixth of the
+plan's fifteen-minute budget. Burn magnitude moves `demo_mvr`'s final radius by **~2.6 km per
+m/s**; drag-sail area moves `demo_flt`'s by **46–140 m** over the 7200 s arc, depending on the
+commanded burn. Two of the six axis-to-score pairs are **exactly** zero — bit-identical under a
+Nominal check, 0 ULP, not "below a tolerance" — because no coupling path exists at all.
+
+The result that was not predicted: `demo_flt`'s final radius responds to the **burn** axis too,
+by up to 117 m, through the controller's range-latched drag-sail command — the burn changes when
+`demo_mvr` crosses the latch threshold, which changes how much of the run `demo_flt` spends at
+`Cd = 220`. That indirect effect scales with `Cd × DragArea` (a 5.10× ratio measured against a 5×
+DragArea ratio), so it is comparable in size to the direct drag effect rather than negligible.
+The manager's brief had predicted 0.001–4.2 m for this pair, quoting a round-1 number that
+measured a different quantity — draw-to-draw latch jitter at a fixed commanded burn, which this
+study also measures separately at 0.04–2.07 m. The two are not the same question, and the study
+says so rather than reconciling them.
+
+### Open for the lead
+
+The demo SOS gives drag to `demo_flt` only. A study that genuinely varies drag on the
+manoeuvring vehicle needs a new `SosConfiguration` enabling drag on `demo_mvr`; that was outside
+this round's authorized file set and is not done.

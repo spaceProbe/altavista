@@ -1,0 +1,144 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- F4
+# (docs/feasibility-plan.md's F4 milestone: "A worked study... drag-sail area versus initial
+# altitude for the two-instance demo, scored on final radius with the Gates burn dispersion
+# drawn"). A NEW file, modelled on drms/demo_two_instance_sweep.drm.yaml (F1b's own fixture) --
+# same scenario shape (identical fault, identical maneuver epoch and VNB burn, identical Gates
+# execution_error block and seed key, identical measures), reusing
+# demo_two_instance.sos.yaml/demo_two_instance.system.yaml/demo_two_instance_ctrl.system.yaml
+# completely unmodified, exactly as that file does. A new `id`/`hash` because this is this
+# study's own top-level artifact, not an edit to the pinned F1b/F2b fixture.
+#
+# Timing is byte-identical to demo_two_instance.drm.yaml and demo_two_instance_sweep.drm.yaml
+# (see either file's own header comment):
+#   start_tai_ns: 1767225637000000000 (01 Jan 2026 00:00:00Z)
+#   fault (demo_flt):     start + 1800 s  (00:30:00) -- force_model.gravity_order 8 -> 0
+#   maneuver (demo_mvr):  start + 5400 s  (01:30:00) -- 20 m/s prograde VNB burn, carrying a
+#                         declared Gates execution_error block (see below)
+#   end_tai_ns:            start + 7200 s  (02:00:00)
+# Both boundary epochs land exactly on the sample_interval_s = 60 s output grid, unchanged. The
+# scenario is kept at its full 7200 s length, not shortened -- see
+# drms/drag_sail_vs_burn.sweep.yaml's own header comment for the wall-time budget arithmetic
+# that this decision rests on (the grid/draw count is what was sized to the budget, not the
+# scenario).
+#
+# **Both sweep axes (drms/drag_sail_vs_burn.sweep.yaml) target demo_mvr, not two different
+# instances** -- the manager's own F4 design decision, deliberately different from
+# demo_two_instance_sweep.sweep.yaml (whose DragArea axis sits on demo_flt while its dv_x axis
+# sits on demo_mvr, so neither score in that study responds to both axes and the grid is
+# separable by construction). The intent: make demo_mvr_rmag_at_end a score that genuinely
+# responds to both axes.
+#
+# **That intent does not hold as built, and this is disclosed here rather than worked around**
+# (docs/studies/drag-sail-vs-burn.md has the full measured account). demo_mvr's own
+# SystemInstance.parameter_overrides (drms/demo_two_instance.sos.yaml, reused unmodified) never
+# set `force_model.drag_model` -- only `demo_flt`'s own overrides do (JacchiaRoberts + the CSSI
+# weather-source trio). `crate::drm::binding::materialize_gmat`
+# (crates/av-kernel/src/drm/binding.rs) only constructs a `DragForce` object `if let
+# Some(drag_model) = &spec.drag_model` -- that crate's own pinned test
+# (`no_drag_parameters_at_all_still_classifies_with_drag_model_none`) explicitly documents
+# `demo_mvr`'s own classified `drag_model` as `None`. `spacecraft.DragArea` is a legally
+# declared parameter on `leo_demo_sys` (confirmed against demo_two_instance.system.yaml before
+# relying on it, per this task's own brief) and a sweep axis may legally override it on
+# `demo_mvr` -- but with no `DragForce` object ever constructed for that instance, the override
+# lands on a spacecraft field nothing reads. Measured directly (single draw, Nominal error mode,
+# two-point DragArea-only sweep over this same DRM, scratch check, not part of this study's own
+# recorded samples): `demo_mvr_rmag_at_end` is bit-for-bit identical (6921427.813187283 m) at
+# DragArea=5.0 and DragArea=25.0. The full study below still declares the DragArea axis on
+# demo_mvr exactly as the manager's design specifies (this file does not silently move the axis
+# to demo_flt to manufacture a responsive-looking result), and the recorded aggregates prove the
+# same null result at full scale. Fixing this for real needs a new SosConfiguration declaring
+# `force_model.drag_model`/its three weather-source companions on `demo_mvr` too -- out of this
+# task's authorized scope (drms/demo_two_instance.sos.yaml is an existing, pinned file this task
+# may not edit, and authoring a *new* SOS is not among the files this task was authorized to
+# create) -- and is reported here for the manager's own decision, not silently patched around.
+#
+# Gates execution_error sigmas (question 100's model; ManeuverExecutionError, core.proto):
+# sigma_magnitude_fixed_mps=0.01, sigma_magnitude_proportional=0.02,
+# sigma_pointing_fixed_mps=0.01, sigma_pointing_proportional_rad=0.002 -- unchanged from
+# demo_two_instance_sweep.drm.yaml (that file's own header comment: these were F1b's own
+# starting values, kept as-is because draw-to-draw dispersion was already clearly resolved above
+# numerical noise at these sigmas). Reusing them here keeps this study's own draw-to-draw spread
+# comparable to the F1b/F2b fixture's own measured values.
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/drag_sail_vs_burn.drm.yaml
+id: drag_sail_vs_burn_drm
+version: "1"
+name: Drag-sail area vs burn magnitude (F4) -- Gates-dispersed maneuver, both axes on demo_mvr
+sos_configuration_id: demo_two_instance_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+  frames:
+    - id: EarthICRF
+      body: Earth
+      axes: AXES_KIND_ICRF
+      description: "International Celestial Reference Frame (ICRF): an inertial frame whose axes are fixed to distant quasar positions, origin at Earth's centre of mass."
+  faults:
+    - id: fault1
+      tai_ns: 1767227437000000000
+      target_kind: FAULT_TARGET_KIND_DYNAMICS
+      instance: demo_flt
+      target: force_model.gravity_order
+      kind: parameter
+      params:
+        value: 0.0
+  events:
+    - id: burn1
+      tai_ns: 1767231037000000000
+      kind: maneuver
+      instance: demo_mvr
+      values:
+        dv_x: 20.0
+        dv_y: 0.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_VNB
+      # Question 100's Gates model: a dispersed burn under ExecutionErrorMode::Sampled (this
+      # study's own av-sweep binary selects Sampled because monte_carlo_draws > 1 -- see
+      # drms/drag_sail_vs_burn.sweep.yaml's own header comment on why `dispersed: true` is
+      # declared explicitly anyway, question 192(d), even though it is not load-bearing at this
+      # draw count). dv_x here (20.0) is also this DRM's own baseline for
+      # drms/drag_sail_vs_burn.sweep.yaml's own event axis on event_id burn1, value_key dv_x.
+      execution_error:
+        sigma_magnitude_fixed_mps: 0.01
+        sigma_magnitude_proportional: 0.02
+        sigma_pointing_fixed_mps: 0.01
+        sigma_pointing_proportional_rad: 0.002
+        seed: burn_seed
+  # A seed for every derived per-sample stream this DRM's own execution_error block references --
+  # crates/av-sweep::sample::sample_config replaces this base value with a derived one per
+  # (point, draw) before every sample run; the value here is never itself run against, only its
+  # presence (a real key named "burn_seed") matters (av_sweep::SweepError::
+  # DrawsAboveOneWithoutSeeds/DispersedWithoutSeeds both refuse an empty Scenario.seeds).
+  seeds:
+    burn_seed: 1
+# No objectives declared -- same posture as demo_two_instance_sweep.drm.yaml (F1b's own brief:
+# "declare measures only -- a pass criterion needs a measured target, which is F2's job;
+# inventing one now would be a target fitted to whatever came out"). All three measures report a
+# raw run-time value with no pass/fail concept (ADR-005 sec 6). Kept identical to
+# demo_two_instance_sweep.drm.yaml's own three measures, not narrowed to only the headline score
+# -- docs/studies/drag-sail-vs-burn.md's own brief: "a study that reports only one number hides
+# the cross-checks".
+measures:
+  - name: demo_flt_rmag_at_end
+    expression: "output.demo_flt.rmag@end"
+    unit: UNIT_METER
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+  - name: demo_mvr_rmag_at_end
+    expression: "output.demo_mvr.rmag@end"
+    unit: UNIT_METER
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "F4 drag-sail-vs-burn study authoring"
+hash: "ef8ea78c599e5f529316458e0d1413fcbc925b384da3f8f138edd2fc66be3b93"
