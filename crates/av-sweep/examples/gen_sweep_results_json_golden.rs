@@ -12,11 +12,14 @@
 //!
 //! Deliberately exercises more of the message tree than any single real study output typically
 //! would in one go: both an errored and a successful `SweepSample`, a `ScoreResult` with `passed`
-//! both `Some` and unset, and a `ScoreAggregate` with `pass_fraction` set -- so the oracle test's
-//! coverage is not accidentally narrower than the encoder's own declared behaviour. (Originally
-//! written under F1b, before `aggregate.rs` existed to compute a real `ScoreAggregate` -- this
-//! synthetic one was hand-authored then and still is now; nothing about the golden needed to
-//! change for F2, since it already covered aggregates.)
+//! both `Some` and unset, a `ScoreAggregate` with `pass_fraction` set, and (question 192(b)) a
+//! `seeds` map with TWO keys on the successful sample (so the encoder's map-ordering behaviour is
+//! actually exercised here, not just asserted in `src/json.rs`'s own unit tests) alongside an
+//! EMPTY `seeds` map on the failed one (a failed sample never got far enough to derive any) --
+//! so the oracle test's coverage is not accidentally narrower than the encoder's own declared
+//! behaviour. (Originally written under F1b, before `aggregate.rs` existed to compute a real
+//! `ScoreAggregate` -- this synthetic one was hand-authored then and still is now; nothing about
+//! the golden needed to change for F2, since it already covered aggregates.)
 //!
 //! Mirrors `goldens/gen_*.py`'s own `--reason` convention (standing rule 10: "Goldens are
 //! regenerated only through a generator that takes an explicit `--reason`"), refusing to run at
@@ -54,7 +57,10 @@ fn synthetic_sweep_results() -> pb::SweepResults {
         point_index: 0,
         draw_index: 0,
         axis_values: BTreeMap::from([("demo_flt.spacecraft.DragArea".to_string(), 5.0)]),
-        seed: 15_505_883_566_766_354_181,
+        // Question 192(b): TWO keys, deliberately, so the golden actually exercises
+        // SweepSample.seeds' own map ordering (this crate's own task brief) -- not just the
+        // single value the removed `seed` field could ever carry.
+        seeds: BTreeMap::from([("burn_seed".to_string(), 15_505_883_566_766_354_181), ("fault_seed".to_string(), 42)]),
         run_id: "demo_two_instance_sweep_p0_d0".to_string(),
         config_hash: "b00f732c107f97e801aaa23034e5d7c1a6c9a993eebe82d20dd404e1f42ba23d".to_string(),
         scores: scores_p0d0,
@@ -66,7 +72,7 @@ fn synthetic_sweep_results() -> pb::SweepResults {
         point_index: 1,
         draw_index: 0,
         axis_values: BTreeMap::from([("demo_flt.spacecraft.DragArea".to_string(), 25.0)]),
-        seed: 0,
+        seeds: BTreeMap::new(), // a failed sample never got far enough to derive seeds
         run_id: "demo_two_instance_sweep_p1_d0".to_string(),
         config_hash: String::new(),
         scores: BTreeMap::new(),

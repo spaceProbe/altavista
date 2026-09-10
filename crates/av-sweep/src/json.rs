@@ -22,10 +22,26 @@
 //! `#[cfg(test)]` module):
 //!
 //! - Field names are lowerCamelCase (`sweep_id` -> `sweepId`, `point_index` -> `pointIndex`, ...).
-//! - `uint64`/`int64` fields (`SweepSample.seed`, `Provenance.created_tai_ns`) encode as a JSON
-//!   **string** of decimal digits -- proto3's own canonical mapping for 64-bit integer types
-//!   (a JSON number cannot represent the full 64-bit range without precision loss in every
-//!   mainstream JSON parser, including Python's and JavaScript's).
+//! - `uint64`/`int64` fields (`SweepSample.seeds`' own map VALUES, `Provenance.created_tai_ns`)
+//!   encode as a JSON **string** of decimal digits -- proto3's own canonical mapping for 64-bit
+//!   integer types (a JSON number cannot represent the full 64-bit range without precision loss
+//!   in every mainstream JSON parser, including Python's and JavaScript's). This is exactly what
+//!   the removed single-`uint64` `SweepSample.seed` field did (question 192(b) replaced it with
+//!   the `seeds` map); a `map<string, uint64>`'s VALUES get the same string treatment its own
+//!   scalar `uint64` predecessor did -- proto3's canonical JSON mapping applies per scalar type,
+//!   not per top-level-field-vs-map-value.
+//! - **`SweepSample.seeds`, when non-empty, is a JSON object** keyed by the map's own string
+//!   keys (unescaped further -- `Scenario.seeds` keys are plain identifiers in every fixture this
+//!   crate has seen, and `kv`'s own `esc` call still JSON-escapes them correctly regardless),
+//!   each value a quoted decimal string per the bullet above. Omitted entirely when empty (the
+//!   general "every other scalar/map field at its zero/empty default is omitted" rule below,
+//!   applied to a map the same way it already was for `axisValues`/`scores`). **Field-order
+//!   decision, disclosed:** `seeds` is `run.proto`'s field 10, declared after `error`'s field 9;
+//!   this encoder emits it in that same relative order -- after `error`, last of `SweepSample`'s
+//!   own fields -- matching this module's existing convention of following the proto's own field
+//!   declaration order (see `sweep_sample_json`'s own field-by-field body) rather than, say,
+//!   grouping it next to `axisValues` (both are per-sample "declared inputs") -- pinned exactly
+//!   by `tests::sweep_results_json_matches_a_hand_pinned_expectation`.
 //! - `uint32` fields (`point_index`, `draw_index`, `draws`) stay a plain JSON number -- only the
 //!   64-bit integer types get the string treatment.
 //! - Enum fields (`ScoreResult.unit`, `Provenance.author_kind`) encode by **name**
@@ -166,9 +182,6 @@ pub fn sweep_sample_json(s: &pb::SweepSample) -> String {
         let entries = s.axis_values.iter().map(|(k, v)| kv(k, num(*v))).collect();
         f.push(kv("axisValues", obj(entries)));
     }
-    if s.seed != 0 {
-        f.push(kv("seed", u64s(s.seed)));
-    }
     if !s.run_id.is_empty() {
         f.push(kv("runId", esc(&s.run_id)));
     }
@@ -184,6 +197,12 @@ pub fn sweep_sample_json(s: &pb::SweepSample) -> String {
     }
     if !s.error.is_empty() {
         f.push(kv("error", esc(&s.error)));
+    }
+    // Field 10, declared after error's field 9 -- emitted last, in that same relative order; see
+    // the module doc comment's "seeds" bullet for the full field-order disclosure.
+    if !s.seeds.is_empty() {
+        let entries = s.seeds.iter().map(|(k, v)| kv(k, u64s(*v))).collect();
+        f.push(kv("seeds", obj(entries)));
     }
     obj(f)
 }
@@ -252,18 +271,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_encodes_uint64_as_a_string_and_omits_unset_optionals() {
+    fn json_encodes_uint64_map_values_as_strings_and_omits_unset_optionals() {
         let sample = pb::SweepSample {
             point_index: 0,
             draw_index: 0,
-            seed: 42,
+            seeds: BTreeMap::from([("burn_seed".to_string(), 42u64)]),
             scores: BTreeMap::from([("s1".to_string(), pb::ScoreResult { name: "s1".to_string(), value: 1.5, unit: pb::Unit::Meter as i32, passed: None })]),
             ..Default::default()
         };
         let json = sweep_sample_json(&sample);
-        assert!(json.contains("\"seed\":\"42\""), "uint64 must encode as a quoted string: {json}");
-        assert!(!json.contains("\"seed\":42"), "must never encode as a bare JSON number: {json}");
+        assert!(json.contains("\"seeds\":{\"burn_seed\":\"42\"}"), "a seeds map value must encode as a quoted string: {json}");
+        assert!(!json.contains("\"burn_seed\":42"), "must never encode as a bare JSON number: {json}");
         assert!(!json.contains("passed"), "an unset optional bool must be omitted entirely: {json}");
+
+        // An empty seeds map is omitted entirely, like every other empty map field.
+        let no_seeds = pb::SweepSample { point_index: 0, draw_index: 0, ..Default::default() };
+        assert!(!sweep_sample_json(&no_seeds).contains("seeds"), "an empty seeds map must be omitted, not emitted as {{}}");
 
         let aggregate = pb::ScoreAggregate { name: "a1".to_string(), pass_fraction: None, ..Default::default() };
         let ajson = score_aggregate_json(&aggregate);
@@ -301,16 +324,23 @@ mod tests {
     fn sweep_results_json_matches_a_hand_pinned_expectation() {
         let mut scores = BTreeMap::new();
         scores.insert("demo_flt_rmag_at_end".to_string(), pb::ScoreResult { name: "demo_flt_rmag_at_end".to_string(), value: 6870517.5, unit: pb::Unit::Meter as i32, passed: None });
+        // Two keys, deliberately inserted zeta-before-alpha, so this test also exercises map
+        // ordering (question 192(b)'s own brief: "use a map with TWO keys, so map ordering is
+        // actually exercised") -- BTreeMap<String, u64> already iterates key-sorted (the
+        // generated `pb::SweepSample.seeds` field type, confirmed against
+        // target/debug/build/av-cdm-*/out/altavista.v1.rs's own `#[prost(btree_map = ...)]`), so
+        // the expected JSON below has "aaa_seed" before "zeta_seed" regardless of insertion order.
+        let seeds = BTreeMap::from([("zeta_seed".to_string(), 99999u64), ("aaa_seed".to_string(), 12345u64)]);
         let sample = pb::SweepSample {
             point_index: 1,
             draw_index: 0,
             axis_values: BTreeMap::from([("demo_flt.spacecraft.DragArea".to_string(), 25.0)]),
-            seed: 12345,
             run_id: "sweep1_p1_d0".to_string(),
             config_hash: "abc123".to_string(),
             scores,
             products_uri: "/tmp/out/sample_p1_d0".to_string(),
             error: String::new(),
+            seeds,
         };
         let results = pb::SweepResults {
             sweep_id: "sweep1".to_string(),
@@ -328,7 +358,9 @@ mod tests {
             }),
         };
         let json = sweep_results_to_json(&results);
-        let expected = "{\"sweepId\":\"sweep1\",\"sweepHash\":\"deadbeef\",\"drmHash\":\"beefdead\",\"samples\":[{\"pointIndex\":1,\"axisValues\":{\"demo_flt.spacecraft.DragArea\":25.0},\"seed\":\"12345\",\"runId\":\"sweep1_p1_d0\",\"configHash\":\"abc123\",\"scores\":{\"demo_flt_rmag_at_end\":{\"name\":\"demo_flt_rmag_at_end\",\"value\":6870517.5,\"unit\":\"UNIT_METER\"}},\"productsUri\":\"/tmp/out/sample_p1_d0\"}],\"provenance\":{\"authorKind\":\"AUTHOR_KIND_AGENT\",\"tool\":\"av-sweep\",\"configHash\":\"deadbeef\",\"runId\":\"sweep1\"}}";
+        // seeds (field 10) emitted last, after error (field 9) -- see the module doc comment's
+        // "seeds" bullet for the field-order disclosure this pins.
+        let expected = "{\"sweepId\":\"sweep1\",\"sweepHash\":\"deadbeef\",\"drmHash\":\"beefdead\",\"samples\":[{\"pointIndex\":1,\"axisValues\":{\"demo_flt.spacecraft.DragArea\":25.0},\"runId\":\"sweep1_p1_d0\",\"configHash\":\"abc123\",\"scores\":{\"demo_flt_rmag_at_end\":{\"name\":\"demo_flt_rmag_at_end\",\"value\":6870517.5,\"unit\":\"UNIT_METER\"}},\"productsUri\":\"/tmp/out/sample_p1_d0\",\"seeds\":{\"aaa_seed\":\"12345\",\"zeta_seed\":\"99999\"}}],\"provenance\":{\"authorKind\":\"AUTHOR_KIND_AGENT\",\"tool\":\"av-sweep\",\"configHash\":\"deadbeef\",\"runId\":\"sweep1\"}}";
         assert_eq!(json, expected);
     }
 }

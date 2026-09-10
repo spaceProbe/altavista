@@ -6,10 +6,11 @@
 //!
 //! [`preflight`] checks everything that would fail *identically for every single sample*
 //! (a tampered sweep/DRM/SOS/system, `sweep.drm_id` not matching the DRM, `monte_carlo_draws ==
-//! 0`, `monte_carlo_draws > 1` with no declared `Scenario.seeds`) -- these are refused ONCE,
-//! fatally, before anything is written, exactly the way `crate::sample::sample_config` itself
-//! would refuse them, but without silently producing a "study" of zero samples (a `draws == 0`
-//! sweep would otherwise iterate `0..0` and write an empty, successful-looking result) or of N
+//! 0`, `monte_carlo_draws > 1` with no declared `Scenario.seeds`, and -- question 192(d) --
+//! `sweep.dispersed` with no declared `Scenario.seeds`) -- these are refused ONCE, fatally,
+//! before anything is written, exactly the way `av_sweep::sample::sample_config` itself would
+//! refuse them, but without silently producing a "study" of zero samples (a `draws == 0` sweep
+//! would otherwise iterate `0..0` and write an empty, successful-looking result) or of N
 //! byte-identical failures (every other structural mismatch).
 //!
 //! Everything [`crate::sample::sample_config`] can still refuse per grid point --
@@ -37,6 +38,23 @@
 //! reproduction workspace (`drm.pb`/`sos.pb`/`sys_*.pb`/`stderr.txt`/`run_products.pb` per
 //! sample) that F1b's own tests and this task's per-sample replay both depend on unchanged. When
 //! `--store-dir` is omitted, no store directory is created or written at all.
+//!
+//! ## Question 192 additions: `seeds`, event axes and `dispersed`
+//!
+//! `SweepSample.seed` (one projected value) no longer exists -- [`Running`] now carries the
+//! sample's full `BTreeMap<String, u64>` (`SampleConfig::seeds`), and both success
+//! ([`finalize`]) and failure ([`failed_sample`]) write the whole map into
+//! `SweepSample.seeds`. The old single-value projection (`projected_seed`, F1b) is gone
+//! entirely, not merely unused: `run.proto`'s own `seed` field is `reserved` now (question
+//! 192(b)), so keeping a helper that used to feed it would be documentation for a shape that no
+//! longer exists.
+//!
+//! **`error_mode` selection** (question 192(d)): `ExecutionErrorMode::Sampled` when
+//! `sweep.dispersed || sweep.monte_carlo_draws > 1`, `Nominal` otherwise -- widened from F1b's
+//! "`Sampled` iff `monte_carlo_draws > 1`" rule, which could not express a dispersed *single*
+//! draw per point. [`preflight`] mirrors `av_sweep::sample::sample_config`'s own
+//! `DispersedWithoutSeeds` refusal (`sweep.dispersed` with empty `Scenario.seeds`) the same way
+//! it already mirrors `DrawsAboveOneWithoutSeeds`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -108,6 +126,13 @@ fn preflight(args: &StudyArgs) -> Result<Loaded, String> {
     if sweep.monte_carlo_draws > 1 && seeds_empty {
         return Err(format!("ParameterSweep.monte_carlo_draws={} but Scenario.seeds is empty; every draw would be identical", sweep.monte_carlo_draws));
     }
+    // Question 192(d): the mirror of av_sweep::sample::sample_config's own DispersedWithoutSeeds
+    // check (same message, via that same SweepError type's Display, not a hand-duplicated
+    // string) -- a dispersed draw with nothing to sample from is refused once, up front, the same
+    // way the monte_carlo_draws check just above is.
+    if sweep.dispersed && seeds_empty {
+        return Err(format!("{}: {}", args.drm.display(), av_sweep::SweepError::DispersedWithoutSeeds));
+    }
 
     Ok(Loaded { sweep, sweep_hash, drm, sos, systems })
 }
@@ -142,17 +167,6 @@ pub fn write_sample_inputs(sample_dir: &Path, cfg: &SampleConfig) -> io::Result<
     Ok(SampleInputPaths { drm_pb, sos_pb, system_pbs })
 }
 
-/// [`SampleConfig::seeds`]'s single-`uint64` projection onto `SweepSample.seed` -- the lead's own
-/// decision (this task's own brief): a `BTreeMap` iterates key-sorted already, so `.next()`
-/// alone gives "the one key", "the lexicographically first of several keys", or (empty map)
-/// nothing, uniformly, in all three declared cases at once. The full per-key map always still
-/// lives in the sample's own `drm.pb` (its `Scenario.seeds`), which `run.proto`'s single-field
-/// `SweepSample.seed` cannot itself express -- disclosed here and in this crate's own final
-/// report, not silently narrowed.
-fn projected_seed(seeds: &BTreeMap<String, u64>) -> u64 {
-    seeds.values().next().copied().unwrap_or(0)
-}
-
 fn describe_exit(status: &ExitStatus) -> String {
     format!("{status}")
 }
@@ -183,7 +197,7 @@ struct Running {
     run_id: String,
     config_hash: String,
     axis_values: BTreeMap<String, f64>,
-    seed: u64,
+    seeds: BTreeMap<String, u64>,
     sample_dir: PathBuf,
     stderr_path: PathBuf,
     out_path: PathBuf,
@@ -219,7 +233,7 @@ fn spawn_sample(exe: &Path, inputs: &SampleInputPaths, cfg: &SampleConfig, run_i
         run_id: run_id.to_string(),
         config_hash: cfg.config_hash.clone(),
         axis_values: cfg.axis_values.clone(),
-        seed: projected_seed(&cfg.seeds),
+        seeds: cfg.seeds.clone(),
         sample_dir: sample_dir.to_path_buf(),
         stderr_path,
         out_path,
@@ -232,7 +246,7 @@ fn failed_sample(r: &Running, error: String) -> pb::SweepSample {
         point_index: r.point_index,
         draw_index: r.draw_index,
         axis_values: r.axis_values.clone(),
-        seed: r.seed,
+        seeds: r.seeds.clone(),
         run_id: r.run_id.clone(),
         config_hash: r.config_hash.clone(),
         scores: BTreeMap::new(),
@@ -257,7 +271,7 @@ fn finalize(r: Running, status: ExitStatus) -> pb::SweepSample {
                         point_index: r.point_index,
                         draw_index: r.draw_index,
                         axis_values: r.axis_values,
-                        seed: r.seed,
+                        seeds: r.seeds,
                         run_id: r.run_id,
                         config_hash: r.config_hash,
                         scores: products.scores,
@@ -308,7 +322,9 @@ pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
     let loaded = preflight(&args)?;
     let points = av_sweep::expand_grid(&loaded.sweep).map_err(|e| format!("{}: {e}", args.sweep.display()))?;
     let draws = loaded.sweep.monte_carlo_draws;
-    let error_mode = if draws > 1 { ExecutionErrorMode::Sampled } else { ExecutionErrorMode::Nominal };
+    // Question 192(d): Sampled when the sweep declares more than one draw OR when it forces
+    // dispersion for a single draw (`dispersed: true`); Nominal only when neither applies.
+    let error_mode = if loaded.sweep.dispersed || draws > 1 { ExecutionErrorMode::Sampled } else { ExecutionErrorMode::Nominal };
 
     std::fs::create_dir_all(&args.out_dir).map_err(|e| format!("creating {}: {e}", args.out_dir.display()))?;
 
@@ -530,15 +546,6 @@ mod tests {
         assert_eq!(queue.front().unwrap().point_index, 0);
     }
 
-    #[test]
-    fn projected_seed_picks_the_lexicographically_first_key_or_zero() {
-        assert_eq!(projected_seed(&BTreeMap::new()), 0, "no keys -> 0");
-        let one = BTreeMap::from([("only".to_string(), 777u64)]);
-        assert_eq!(projected_seed(&one), 777, "exactly one key -> that key's value");
-        let many = BTreeMap::from([("zzz".to_string(), 999u64), ("aaa".to_string(), 111u64), ("mmm".to_string(), 555u64)]);
-        assert_eq!(projected_seed(&many), 111, "more than one key -> the lexicographically first key's value");
-    }
-
     /// Writes a tiny, executable shell script (`#!/bin/sh` + `body`) under `dir`, named `name`,
     /// and marks it executable -- a stand-in "child" for [`run_study`]'s own `exe` parameter,
     /// which exists specifically so this crate can drive a whole study's worker-pool/`finalize`
@@ -587,15 +594,20 @@ mod tests {
     }
 
     /// Every recorded sample of a study where every child failed: `Ok(())` from `run_study`
-    /// itself, 4 samples (2 points x 2 draws), sorted `(point, draw)`, each with a non-empty
-    /// `error`, empty `scores`, and empty `products_uri` -- the shared shape every one of this
-    /// gap's three branches (non-zero exit, exited 0 with no output, exited 0 with undecodable
-    /// output) must produce, on top of each branch's own real-cause text (checked by the caller).
-    fn assert_all_four_failed_and_study_completed(out_dir: &Path) -> pb::SweepResults {
+    /// itself, 8 samples (4 points x 2 draws, question 192(c) widened the grid from 2 to 4
+    /// points), sorted `(point, draw)`, each with a non-empty `error`, empty `scores`, and empty
+    /// `products_uri` -- the shared shape every one of this gap's three branches (non-zero exit,
+    /// exited 0 with no output, exited 0 with undecodable output) must produce, on top of each
+    /// branch's own real-cause text (checked by the caller).
+    fn assert_all_eight_failed_and_study_completed(out_dir: &Path) -> pb::SweepResults {
         let results = read_results(out_dir);
-        assert_eq!(results.samples.len(), 4, "2 points x 2 draws = 4 samples, all recorded despite every child failing");
+        assert_eq!(results.samples.len(), 8, "4 points x 2 draws = 8 samples, all recorded despite every child failing");
         let pairs: Vec<(u32, u32)> = results.samples.iter().map(|s| (s.point_index, s.draw_index)).collect();
-        assert_eq!(pairs, vec![(0, 0), (0, 1), (1, 0), (1, 1)], "samples must still be present and sorted by (point, draw), not just however the worker pool finished them");
+        assert_eq!(
+            pairs,
+            vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)],
+            "samples must still be present and sorted by (point, draw), not just however the worker pool finished them"
+        );
         for s in &results.samples {
             assert!(!s.error.is_empty(), "p{} d{}: a failed child must leave a non-empty SweepSample.error", s.point_index, s.draw_index);
             assert!(s.scores.is_empty(), "p{} d{}: a failed sample must carry no scores: {:?}", s.point_index, s.draw_index, s.scores);
@@ -617,7 +629,7 @@ mod tests {
         let result = run_study(study_args_for_fake_child(&out_dir), &exe);
         assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
 
-        let results = assert_all_four_failed_and_study_completed(&out_dir);
+        let results = assert_all_eight_failed_and_study_completed(&out_dir);
         for s in &results.samples {
             assert!(s.error.contains("exit status: 7"), "p{} d{}: error must name the real exit status: {}", s.point_index, s.draw_index, s.error);
             assert!(
@@ -644,7 +656,7 @@ mod tests {
         let result = run_study(study_args_for_fake_child(&out_dir), &exe);
         assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
 
-        let results = assert_all_four_failed_and_study_completed(&out_dir);
+        let results = assert_all_eight_failed_and_study_completed(&out_dir);
         for s in &results.samples {
             assert!(
                 s.error.contains("could not be read"),
@@ -683,7 +695,7 @@ exit 0"#;
         let result = run_study(study_args_for_fake_child(&out_dir), &exe);
         assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
 
-        let results = assert_all_four_failed_and_study_completed(&out_dir);
+        let results = assert_all_eight_failed_and_study_completed(&out_dir);
         for s in &results.samples {
             assert!(
                 s.error.contains("did not decode as altavista.v1.RunProducts"),
@@ -752,6 +764,113 @@ exit 0"#;
         assert!(study_dir.join("sweep_results.pb").exists());
         assert!(study_dir.join("sweep_results.json").exists());
         assert!(study_dir.join("samples.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes a `ParameterSweep` YAML with a correctly-computed `hash:` field -- `preflight`
+    /// (via `av_sweep::verify_sweep_hash`) refuses a mismatched one, so every test below that
+    /// hand-authors a sweep needs a real hash, not a placeholder.
+    fn write_hashed_sweep_yaml(path: &Path, body_without_hash: &str) {
+        let with_empty_hash = format!("{body_without_hash}\nhash: \"\"\n");
+        let parsed = av_sweep::parse_sweep_yaml(&with_empty_hash).expect("the fixture body itself must parse");
+        let hash = av_sweep::canonical_sweep_hash(&parsed);
+        let with_real_hash = format!("{body_without_hash}\nhash: {hash:?}\n");
+        std::fs::write(path, with_real_hash).expect("writing the hashed sweep YAML");
+    }
+
+    /// Question 192(d): `preflight`'s own mirror of `av_sweep::sample::sample_config`'s
+    /// `DispersedWithoutSeeds` refusal -- a `dispersed: true` sweep over a DRM with no
+    /// `Scenario.seeds` (`demo_two_instance.drm.yaml`, the non-sweep fixture) is refused once, up
+    /// front, before any sample is built. Fails against an implementation that added the check
+    /// only to `sample_config` and forgot `preflight`'s own mirror (this crate's own standing
+    /// rule: two copies of the same check can drift apart -- `preflight` hand-duplicates
+    /// `sample_config`'s message text specifically so this is caught if they ever disagree).
+    #[test]
+    fn preflight_refuses_a_dispersed_sweep_with_no_declared_seeds() {
+        let dir = temp_dir("preflight-dispersed-without-seeds");
+        let sweep_path = dir.join("dispersed.sweep.yaml");
+        write_hashed_sweep_yaml(&sweep_path, "id: dispersed_test_sweep\ndrm_id: demo_two_instance_drm\naxes: []\nmonte_carlo_draws: 1\ndispersed: true");
+
+        let args = StudyArgs {
+            sweep: sweep_path,
+            drm: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance.drm.yaml")), // declares no Scenario.seeds at all
+            sos: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance.sos.yaml")),
+            systems: vec![
+                PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance.system.yaml")),
+                PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance_ctrl.system.yaml")),
+            ],
+            out_dir: dir.join("out"),
+            workers: 1,
+            gmat_startup: None,
+            store_dir: None,
+        };
+        // Not `.unwrap_err()`: that requires the `Ok` side (`Loaded`) to implement `Debug` for
+        // its own panic message, which it does not (mirrors `store.rs`'s own tests, which use
+        // the same explicit-match style for the same reason) -- matched explicitly instead.
+        let err = match preflight(&args) {
+            Err(e) => e,
+            Ok(_) => panic!("a dispersed sweep with no declared Scenario.seeds must be refused"),
+        };
+        assert!(err.contains("dispersed is true but Scenario.seeds is empty"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `dispersed: true`, `monte_carlo_draws: 1` sweep over a DRM that DOES declare
+    /// `Scenario.seeds` (`demo_two_instance_sweep.drm.yaml`, its own `burn_seed` key) must
+    /// therefore pass `preflight` and select `ExecutionErrorMode::Sampled` for its one child --
+    /// proven by having the fake child record its own argv, so this checks what `study.rs`
+    /// actually told the child to do, not merely that the study completed. Fails against an
+    /// implementation that kept the old `draws > 1` rule verbatim (`dispersed` ignored): such an
+    /// implementation would tell this single-draw child `--error-mode nominal`.
+    #[test]
+    fn a_dispersed_single_draw_sweep_selects_sampled_error_mode_for_its_child() {
+        let dir = temp_dir("dispersed-error-mode");
+        let sweep_path = dir.join("dispersed.sweep.yaml");
+        write_hashed_sweep_yaml(&sweep_path, "id: dispersed_single_draw_sweep\ndrm_id: demo_two_instance_sweep_drm\naxes: []\nmonte_carlo_draws: 1\ndispersed: true");
+
+        // Fake child: append its own argv (one arg per line) to <sample_dir>/argv.txt (derived
+        // from --out's own directory) and exit 7 -- irrelevant here whether it "succeeds"; this
+        // test only inspects what study.rs told the child to do.
+        let script = r#"out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--out" ]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+dir=$(dirname "$out")
+: > "$dir/argv.txt"
+for arg in "$@"; do
+  echo "$arg" >> "$dir/argv.txt"
+done
+exit 7"#;
+        let exe = write_fake_exe(&dir, "fake_exe.sh", script);
+
+        let out_dir = dir.join("out");
+        let args = StudyArgs {
+            sweep: sweep_path,
+            drm: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance_sweep.drm.yaml")),
+            sos: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance.sos.yaml")),
+            systems: vec![
+                PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance.system.yaml")),
+                PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../drms/demo_two_instance_ctrl.system.yaml")),
+            ],
+            out_dir: out_dir.clone(),
+            workers: 1,
+            gmat_startup: None,
+            store_dir: None,
+        };
+        let result = run_study(args, &exe);
+        assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
+
+        let argv_path = out_dir.join("sample_p0_d0").join("argv.txt");
+        let argv = std::fs::read_to_string(&argv_path).unwrap_or_else(|e| panic!("reading {}: {e}", argv_path.display()));
+        let args_list: Vec<&str> = argv.lines().collect();
+        let error_mode_idx = args_list.iter().position(|a| *a == "--error-mode").expect("--error-mode must have been passed to the child");
+        assert_eq!(args_list[error_mode_idx + 1], "sampled", "a dispersed single-draw sweep must select Sampled, not Nominal: argv={args_list:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -225,7 +225,7 @@ mod tests {
         pb::SweepSample {
             point_index: point,
             draw_index: draw,
-            seed: 1000 + (point as u64) * 10 + draw as u64,
+            seeds: BTreeMap::from([("k".to_string(), 1000 + (point as u64) * 10 + draw as u64)]),
             run_id: format!("study1_p{point}_d{draw}"),
             scores: BTreeMap::from([("m".to_string(), pb::ScoreResult { name: "m".to_string(), value: (point + draw) as f64, ..Default::default() })]),
             ..Default::default()

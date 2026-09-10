@@ -127,3 +127,43 @@ dispersed trajectory crosses the controller's threshold on a different 0.1 s tic
 one of the four samples re-runs **byte for byte**, alone, from its own recorded inputs,
 with no field exclusions, once its recorded `run_id` is supplied (`run_id` appears in every
 nested provenance, not only at the top level).
+
+### F2b update (feasibility worker, 2026-09-09) — question 192 landed
+
+Question 192's four proto follow-ups ((a) `config_hash` scope, already round 1's own decision
+above and unchanged; (b) `SweepSample.seed` → `seeds` map; (c) `SweepAxis` event-value axes; (d)
+`ParameterSweep.dispersed`) are implemented in `crates/av-sweep`, on top of round 1's F1/F2.
+Full account, per-file changes, the axis-key-collision analysis, break-and-restore evidence, and
+measured values are in `crates/av-sweep/REPORT.md`.
+
+**Two round-1 decisions above are now superseded:**
+- ~~`SweepSample.seed` is a single projected value~~ — **superseded.** `SweepSample.seed` (field
+  4) is `reserved` now; every sample records its full `seeds: map<string, uint64>` (field 10,
+  every `Scenario.seeds` key's own derived value), not one projected key. `study.rs`'s
+  `projected_seed` helper is deleted, not merely unused.
+- ~~`ExecutionErrorMode::Sampled` iff the sweep declares more than one draw, `Nominal`
+  otherwise. A dispersed single-draw study is therefore not expressible today.~~ —
+  **superseded.** The rule is now `Sampled` when `sweep.dispersed || sweep.monte_carlo_draws >
+  1`, else `Nominal` — a dispersed single-draw study is expressible via `dispersed: true`,
+  refused with a typed error (`DispersedWithoutSeeds`) when `Scenario.seeds` is empty, the same
+  posture as `DrawsAboveOneWithoutSeeds`.
+
+Also new: `SweepAxis` may target a scenario event value (`event_id`/`value_key`, e.g. a
+maneuver's `dv_x`) instead of an instance parameter — exactly one target per axis, enforced at
+load and in `expand_grid` alike, with the two key spaces (`"{instance}.{parameter}"` vs.
+`"event:{event_id}.{value_key}"`) proven disjoint rather than assumed non-colliding (see
+`REPORT.md`). The fixture study gained a second axis (event `burn1`'s `dv_x`, bracketing its
+20.0 m/s commanded value at 10.0/30.0), widening the grid from 2 to 4 points (8 samples); the
+measured effect on `demo_mvr_rmag_at_end` was ~48–50 km between the two `dv_x` extremes, in the
+hypothesized direction (larger `dv_x` → larger final radius), of the same order of magnitude as
+the order-of-magnitude estimate made before running (~10 km) though larger than that rough
+linear-scaling estimate predicted — both the hypothesis and the measured value are recorded in
+`REPORT.md`.
+
+Gates at F2b: `cargo build --workspace --all-targets` clean; `cargo test -p av-sweep` **88
+passed** (60 library, 18 binary, 10 GMAT integration — up from round 1's 70); `cargo clippy -p
+av-sweep --all-targets -- -D warnings` clean, no new `#[allow]`; the golden
+(`goldens/sweep_results_json/`) regenerated for the `seeds` map and its Python oracle test
+(`tests/test_sweep_results_json.py`) passes. `cargo deny check` and the full `pytest -q` suite
+were not re-run this round (not in F2b's own gate list; no dependency changed). F3/F4 remain not
+started.

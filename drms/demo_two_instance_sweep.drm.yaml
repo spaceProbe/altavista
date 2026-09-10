@@ -17,11 +17,13 @@
 # Both boundary epochs land exactly on the sample_interval_s = 60 s output grid, unchanged.
 # Measured wall time (crates/av-sweep's own task brief requires disclosing this before deciding
 # whether to shorten the scenario): one sample of the byte-identical-length demo_two_instance
-# scenario took 8.18s (debug build, `time ./target/debug/av-run ...`, measured 2026-09-09) --
-# the full 2-point x 2-draw study is 4 such samples, ~33s sequential, comfortably inside the "keep
-# cargo test -p av-sweep under about five minutes" budget even with several more individual
-# sample runs for the crate's other GMAT-needing tests. The scenario is therefore kept at its
-# full 7200 s length -- not shortened.
+# scenario took 8.18s (debug build, `time ./target/debug/av-run ...`, measured 2026-09-09).
+# F2b (question 192(c)) added a second axis (drms/demo_two_instance_sweep.sweep.yaml's own header
+# comment: event burn1's dv_x), widening the grid from 2 to 4 points; the full 4-point x 2-draw
+# study is therefore 8 such samples, ~65s sequential (~35s measured at --workers 2, F2b's own
+# measurement) -- comfortably inside the "keep cargo test -p av-sweep under about five minutes"
+# budget even with several more individual sample runs for the crate's other GMAT-needing tests.
+# The scenario is therefore kept at its full 7200 s length -- not shortened.
 #
 # Gates execution_error sigmas (question 100's model; ManeuverExecutionError, core.proto):
 # sigma_magnitude_fixed_mps=0.01, sigma_magnitude_proportional=0.02,
@@ -67,9 +69,12 @@ scenario:
       attributes:
         frame_id: AXES_KIND_VNB
       # Question 100's Gates model: a dispersed burn under ExecutionErrorMode::Sampled (which
-      # crates/av-sweep's own binary selects whenever a sweep declares monte_carlo_draws > 1 --
-      # see that crate's own study.rs module doc comment), a perfect burn under
-      # ExecutionErrorMode::Nominal regardless of this block being present (M12.1, question 103).
+      # crates/av-sweep's own binary selects whenever a sweep declares monte_carlo_draws > 1 OR
+      # sets dispersed: true -- question 192(d); see that crate's own study.rs module doc
+      # comment), a perfect burn under ExecutionErrorMode::Nominal regardless of this block being
+      # present (M12.1, question 103). dv_x here (20.0) is also this DRM's own baseline for
+      # drms/demo_two_instance_sweep.sweep.yaml's event axis on event_id burn1, value_key dv_x
+      # (question 192(c)) -- see that file's own header comment for the axis and its hypothesis.
       execution_error:
         sigma_magnitude_fixed_mps: 0.01
         sigma_magnitude_proportional: 0.02

@@ -57,9 +57,13 @@ pub enum SweepError {
     #[error("axis on {instance}.{parameter}: max={max} is not greater than min={min}")]
     AxisRangeNotIncreasing { instance: String, parameter: String, min: f64, max: f64 },
 
-    /// Two axes in the same `ParameterSweep.axes` named the same `instance`+`parameter` pair.
-    #[error("two axes both name {instance}.{parameter}; a sweep may declare each instance/parameter pair at most once")]
-    DuplicateAxis { instance: String, parameter: String },
+    /// Two axes in the same `ParameterSweep.axes` named the same target -- the same
+    /// `instance`+`parameter` pair (question 192(c) widens this to also catch two event axes on
+    /// the same `event_id`+`value_key`: `key` is each axis' own `SweepSample.axis_values` key,
+    /// see [`crate::grid::AxisValue::key`], which already names one target uniquely regardless of
+    /// which kind it is).
+    #[error("two axes both target {key:?}; a sweep may declare each target at most once")]
+    DuplicateAxis { key: String },
 
     /// [`crate::seed::derive_seed`] was given a `sweep_hash` that is not exactly 64 lowercase
     /// hex characters -- the byte layout it hashes fixes that field at 64 bytes, so an
@@ -110,6 +114,46 @@ pub enum SweepError {
     /// is a declaration error, not something to run silently.
     #[error("ParameterSweep.monte_carlo_draws={draws} but Scenario.seeds is empty; every draw would be identical")]
     DrawsAboveOneWithoutSeeds { draws: u32 },
+
+    /// Question 192(d): `ParameterSweep.dispersed` is `true` but the DRM's `Scenario.seeds` is
+    /// empty -- the same reason [`SweepError::DrawsAboveOneWithoutSeeds`] exists: a dispersed
+    /// draw with no declared seed has nothing to sample from.
+    #[error("ParameterSweep.dispersed is true but Scenario.seeds is empty; a dispersed draw has nothing to sample from")]
+    DispersedWithoutSeeds,
+
+    /// Question 192(c): a [`SweepAxis`](av_cdm::pb::SweepAxis) declared neither a full instance
+    /// parameter target (`instance` + `parameter`) nor a full event-value target (`event_id` +
+    /// `value_key`) -- including a partial declaration of either (e.g. `instance` set but
+    /// `parameter` empty). Exactly one target is required; this names what was actually given so
+    /// a partial declaration is diagnosable, not just "invalid".
+    #[error("axis declares neither a full instance target (instance={instance:?}, parameter={parameter:?}) nor a full event target (event_id={event_id:?}, value_key={value_key:?}); exactly one target is required")]
+    AxisMissingTarget { instance: String, parameter: String, event_id: String, value_key: String },
+
+    /// Question 192(c): a [`SweepAxis`](av_cdm::pb::SweepAxis) declared BOTH a full instance
+    /// parameter target and a full event-value target at once -- ambiguous, never silently
+    /// resolved by preferring one over the other (the same posture as
+    /// [`SweepError::AmbiguousAxisDeclaration`] for the explicit-values-vs-range ambiguity).
+    #[error("axis declares both a full instance target (instance={instance:?}, parameter={parameter:?}) and a full event target (event_id={event_id:?}, value_key={value_key:?}); exactly one target is required")]
+    AxisBothTargets { instance: String, parameter: String, event_id: String, value_key: String },
+
+    /// Question 192(c): a parameter axis' own `SweepSample.axis_values` key
+    /// (`"{instance}.{parameter}"`) would start with the reserved event-axis-key prefix
+    /// (`"event:"`, see [`crate::grid::EVENT_AXIS_KEY_PREFIX`]) -- refused so the two key spaces
+    /// can never collide, rather than relying on no real instance ever happening to be named
+    /// that way. See `crates/av-sweep/REPORT.md` for the full collision analysis.
+    #[error("axis names instance {instance:?}, parameter {parameter:?}: the key {instance:?}.{parameter:?} would start with the reserved event-axis-key prefix {prefix:?}; rename the instance")]
+    ReservedAxisKeyPrefix { instance: String, parameter: String, prefix: &'static str },
+
+    /// Question 192(c): an event axis named `event_id`, which names no `ScenarioEvent.id` in the
+    /// per-sample DRM's `Scenario.events` (or the DRM has no `Scenario` at all).
+    #[error("axis names event {event_id:?}, which is not in this DRM's Scenario.events")]
+    UnknownEvent { event_id: String },
+
+    /// Question 192(c): an event axis named `value_key`, which is not already a key in that
+    /// event's own `ScenarioEvent.values` map -- a typo must not silently create a new key (the
+    /// same posture as [`SweepError::UndeclaredParameter`] for instance axes).
+    #[error("axis names event {event_id:?}, value_key {value_key:?}, which is not already declared in that event's own values map")]
+    UndeclaredEventValueKey { event_id: String, value_key: String },
 
     /// `ParameterSweep.drm_id` did not match the supplied `DesignReferenceMission.id`.
     #[error("ParameterSweep.drm_id {sweep_drm_id:?} does not match DesignReferenceMission.id {drm_id:?}")]

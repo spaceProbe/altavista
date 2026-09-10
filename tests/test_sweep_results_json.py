@@ -49,7 +49,9 @@ def test_sweep_results_json_round_trips_through_the_real_protobuf_library_to_the
     assert from_binary.sweep_id == "demo_two_instance_sweep"
     assert len(from_binary.samples) == 2
     ok_sample = next(s for s in from_binary.samples if s.point_index == 0)
-    assert ok_sample.seed == 15505883566766354181
+    # Question 192(b): SweepSample.seed (one projected value) -> seeds (a map), field 10 --
+    # the golden's own generator now writes TWO keys, so map ordering is actually exercised.
+    assert dict(ok_sample.seeds) == {"burn_seed": 15505883566766354181, "fault_seed": 42}
     assert ok_sample.error == ""
     assert ok_sample.scores["demo_flt_cd_at_end"].HasField("passed")
     assert ok_sample.scores["demo_flt_cd_at_end"].passed is True
@@ -57,7 +59,7 @@ def test_sweep_results_json_round_trips_through_the_real_protobuf_library_to_the
 
     failed_sample = next(s for s in from_binary.samples if s.point_index == 1)
     assert failed_sample.error != ""
-    assert failed_sample.seed == 0
+    assert len(failed_sample.seeds) == 0, "a failed sample never got far enough to derive any seeds"
     assert len(failed_sample.scores) == 0
 
     assert len(from_binary.aggregates) == 1
@@ -72,6 +74,7 @@ def test_sweep_results_json_encodes_the_uint64_seed_as_a_json_string():
     json_text = (GOLDEN_DIR / "sweep_results.json").read_text()
     # A raw textual check, independent of any parser: proto3 canonical JSON must never emit a
     # bare (unquoted) 64-bit integer -- most JSON parsers (including JavaScript's) cannot
-    # represent the full uint64 range as a native number without precision loss.
-    assert '"seed":"15505883566766354181"' in json_text, json_text
-    assert '"seed":15505883566766354181' not in json_text, "a uint64 must never appear as a bare JSON number"
+    # represent the full uint64 range as a native number without precision loss. Question
+    # 192(b): the seeds MAP's own values get this treatment now, not a single top-level field.
+    assert '"seeds":{"burn_seed":"15505883566766354181","fault_seed":"42"}' in json_text, json_text
+    assert '"burn_seed":15505883566766354181' not in json_text, "a uint64 map value must never appear as a bare JSON number"
