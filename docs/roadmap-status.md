@@ -1,6 +1,6 @@
 # Roadmap status
 
-As of 2026-09-08, against the phase table in `architecture.md`. Milestones are team 1's
+As of 2026-09-10, against the phase table in `architecture.md`. Milestones are team 1's
 (`teamlog/2026-09-02-team-1.md`); decisions are numbered in `open-questions.md` (1–173).
 
 ## By phase
@@ -18,10 +18,10 @@ As of 2026-09-08, against the phase table in `architecture.md`. Milestones are t
 
 | | |
 |---|---|
-| Rust tests | 182 fast-crate + 770 kernel (1 ignored: question 171's reproducer) |
+| Rust tests | 193 fast-crate + 874 kernel (1 ignored: question 171's reproducer); 89 in the sweep crate on the feasibility branch |
 | Python tests | 436 |
 | Viewer headless checks | 93 |
-| Decisions logged | 183 questions; ADRs 000–005 with 12 amendments |
+| Decisions logged | 196 questions; ADRs 000–005 with 12 amendments |
 | Milestones accepted | M1–M26 (M24 closed with a recorded gap; M25 complete: ground segment, telecommands, telemetry, replay) |
 
 ## Open items and risks
