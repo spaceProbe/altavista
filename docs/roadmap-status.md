@@ -18,11 +18,11 @@ As of 2026-09-10, against the phase table in `architecture.md`. Milestones are t
 
 | | |
 |---|---|
-| Rust tests | 193 fast-crate + 874 kernel (1 ignored: question 171's reproducer); 89 in the sweep crate on the feasibility branch |
-| Python tests | 436 |
+| Rust tests | 282 fast-crate (incl. 89 in av-sweep) + 874 kernel (1 ignored: question 171's reproducer) |
+| Python tests | 493 |
 | Viewer headless checks | 93 |
 | Decisions logged | 196 questions; ADRs 000–005 with 12 amendments |
-| Milestones accepted | M1–M26 (M24 closed with a recorded gap; M25 complete: ground segment, telecommands, telemetry, replay) |
+| Milestones accepted | M1–M26, team 2 rounds 4–6 (fault runtimes, decode errors, reproducible image), feasibility F1–F4 merged |
 
 ## Open items and risks
 
