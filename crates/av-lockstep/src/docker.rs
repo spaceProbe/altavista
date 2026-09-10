@@ -40,6 +40,7 @@
 //! already was for the M13.2 `container.address` path).
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::process::Command;
 
 /// Everything that can go wrong pulling, running, or tearing down a Docker-managed
@@ -68,8 +69,180 @@ pub enum DockerError {
 /// test on ("tests run only when `docker info` succeeds, and otherwise skip with a recorded
 /// reason"). `false` on any failure to even launch the `docker` binary (not installed), not
 /// just a non-zero exit (the daemon not running) -- both mean "not available" to a caller.
+///
+/// Kept as a plain bool for every pre-R6.3 call site (M15.3's original shape); see
+/// [`docker_daemon_status`] for the typed, question-194 replacement that distinguishes *why*.
 pub fn docker_available() -> bool {
-    Command::new("docker").arg("info").output().map(|o| o.status.success()).unwrap_or(false)
+    docker_daemon_status().is_ok()
+}
+
+// ------------------------------------------------------------------------------------------
+// Question 194 (M23.4/round 5-6): "the cFS container tests completed in 0.17s with no image
+// present and reported success" -- a green kernel suite did not prove the SIL path ran, because
+// the pre-R6.3 shape was `println!("SKIPPED ...")` then `return`, and `cargo test`'s default
+// runner captures a PASSING test's `println!`/`eprintln!` output and never prints it without
+// `--nocapture` (measured directly, this crate's own R6_3_REPORT.md section 1: a raw write via
+// `std::io::stderr().write_all(...)` remains visible where `println!`/`eprintln!` do not,
+// because libtest's output-capture hook is wired into the `print!`/`eprintln!` macros'
+// `io::_print`/`io::_eprint` helper functions, never into `Stdout`/`Stderr`'s own `Write` impl).
+// Decided by the lead: every Docker- or image-gated test either runs against the image or
+// prints a VISIBLE SKIPPED with the reason; the gating helper returns a typed reason (not a
+// bare `String`) and the test asserts on what the helper actually announced.
+// ------------------------------------------------------------------------------------------
+
+/// Why a Docker- or image-gated test cannot run against the real thing right now. Every variant
+/// renders (via [`fmt::Display`]/[`DockerGateReason::message`]) to a human-readable line naming
+/// the resource and how to obtain it -- at least as informative as the pre-R6.3 printed strings
+/// (`cfs_image_unavailable_reason`/`renode_unavailable_reason`'s own hand-formatted `String`s,
+/// which this type now standardizes without losing any of their detail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerGateReason {
+    /// The `docker` binary itself could not even be launched (not installed / not on `PATH`).
+    DockerNotInstalled,
+    /// `docker` launched but `docker info` returned non-zero -- the CLI exists, the daemon does
+    /// not answer it (not running, permission denied, etc.). `detail` is `docker info`'s own
+    /// trimmed stderr, never swallowed (this workspace's "refuse, typed, never silent" rule,
+    /// already the convention for every [`DockerError`] variant above).
+    DockerDaemonUnreachable { detail: String },
+    /// The daemon answered, but `docker image inspect <image_ref>` did not resolve -- the
+    /// declared image is not built locally. `build_hint` names the concrete command a human (or
+    /// this repository's own build script) runs to produce it.
+    ImageNotBuilt { image_ref: String, build_hint: String },
+    /// A required file this gated test's own non-Docker half needs (a cross-built ELF, the
+    /// Renode binary, a bridge script, ...) is missing from the working tree.
+    RequiredFileMissing { what: String, path: String },
+    /// A non-Docker prerequisite this gated test's own toolchain needs is unavailable (e.g. no
+    /// repo-local `.venv` and no `python3` with `protobuf` importable on `PATH`, for
+    /// `crates/av-lockstep-shim/tests/end_to_end_kernel_path.rs`'s own Python reference peer).
+    /// `hint` names how to obtain it.
+    PrerequisiteUnavailable { what: String, hint: String },
+}
+
+impl DockerGateReason {
+    /// The human-readable message every [`fmt::Display`] impl below renders verbatim.
+    pub fn message(&self) -> String {
+        match self {
+            Self::DockerNotInstalled => "`docker` is not installed or not on PATH".to_string(),
+            Self::DockerDaemonUnreachable { detail } => {
+                if detail.is_empty() {
+                    "`docker info` failed -- the Docker daemon is not reachable".to_string()
+                } else {
+                    format!("`docker info` failed -- the Docker daemon is not reachable: {detail}")
+                }
+            }
+            Self::ImageNotBuilt { image_ref, build_hint } => format!("image {image_ref:?} is not built locally -- {build_hint}"),
+            Self::RequiredFileMissing { what, path } => format!("{what} is missing at {path}"),
+            Self::PrerequisiteUnavailable { what, hint } => format!("{what} is unavailable -- {hint}"),
+        }
+    }
+}
+
+impl fmt::Display for DockerGateReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+/// The typed replacement for a bare `docker_available()` bool: `Ok(())` iff `docker info`
+/// actually succeeds, `Err(reason)` naming which of the two ways that can fail (not installed,
+/// vs installed but the daemon will not answer) -- the two cases the pre-R6.3 helpers already
+/// conflated into one `bool`/`String`.
+pub fn docker_daemon_status() -> Result<(), DockerGateReason> {
+    match Command::new("docker").arg("info").output() {
+        Err(_) => Err(DockerGateReason::DockerNotInstalled),
+        Ok(output) if !output.status.success() => Err(DockerGateReason::DockerDaemonUnreachable { detail: String::from_utf8_lossy(&output.stderr).trim().to_string() }),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// Env var (question 194 item 5): overrides the image reference [`image_gate_status`] looks
+/// for, so a test can prove the "image absent" branch deterministically by pointing this at a
+/// name that cannot exist -- without ever touching, retagging, or removing a real tag (question
+/// 185's amendment: "a test suite must never retag, push or remove an image tag it did not
+/// create in that run").
+pub const IMAGE_OVERRIDE_ENV: &str = "AV_DOCKER_TEST_IMAGE_OVERRIDE";
+
+/// `default_image_ref`, unless [`IMAGE_OVERRIDE_ENV`] is set to a non-empty value, in which
+/// case that value is used instead.
+pub fn resolve_image_ref(default_image_ref: &str) -> String {
+    std::env::var(IMAGE_OVERRIDE_ENV).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default_image_ref.to_string())
+}
+
+/// `Ok(())` iff the image [`resolve_image_ref`] names (`default_image_ref`, or
+/// [`IMAGE_OVERRIDE_ENV`]'s override) can actually be run right now: the daemon is reachable
+/// AND `docker image inspect` resolves it. `build_hint` is folded into
+/// [`DockerGateReason::ImageNotBuilt`] verbatim -- pass the exact command that builds the image.
+pub fn image_gate_status(default_image_ref: &str, build_hint: &str) -> Result<(), DockerGateReason> {
+    docker_daemon_status()?;
+    let image_ref = resolve_image_ref(default_image_ref);
+    let ok = Command::new("docker").args(["image", "inspect", &image_ref, "--format={{.Id}}"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        return Err(DockerGateReason::ImageNotBuilt { image_ref, build_hint: build_hint.to_string() });
+    }
+    Ok(())
+}
+
+/// Env var (question 194 item 4): when set to a truthy value, [`announce_gate_skip`] does not
+/// skip at all -- it panics instead, turning what would otherwise be an invisible-by-default
+/// pass into a hard failure, so a gate that is SUPPOSED to cover the container/image path can
+/// demand it rather than silently accept a skip. Precedent: `AV_CFS_RUN_REPRO_BUILD`
+/// (`services/cfs/tests/test_image_reproducibility.py`), the existing opt-in this repeats the
+/// shape of on the Rust side.
+pub const REQUIRE_DOCKER_TESTS_ENV: &str = "AV_REQUIRE_DOCKER_TESTS";
+
+fn truthy_env(name: &str) -> bool {
+    std::env::var(name).map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")).unwrap_or(false)
+}
+
+/// `true` iff [`REQUIRE_DOCKER_TESTS_ENV`] is set to `1`/`true`/`yes` (case-insensitive).
+pub fn require_docker_tests() -> bool {
+    truthy_env(REQUIRE_DOCKER_TESTS_ENV)
+}
+
+/// Announces a gated test's inability to run against the real thing, in a way genuinely visible
+/// in a plain `cargo test` run (this module's own R6_3_REPORT.md section 1: a raw stderr write,
+/// never `println!`/`eprintln!`, which are captured and invisible for a passing test). Returns
+/// the exact line it wrote, so the caller can assert on it (question 194: "the helper returns
+/// the announced text, and the test asserts it printed") -- the old defect this replaces was a
+/// test body that found no image and merely returned, with nothing asserted at all.
+///
+/// If [`require_docker_tests`] is set, this never returns normally: it panics, turning the skip
+/// into a hard failure (question 194 item 4).
+#[track_caller]
+pub fn announce_gate_skip(test_name: &str, reason: &DockerGateReason) -> String {
+    if require_docker_tests() {
+        panic!("{REQUIRE_DOCKER_TESTS_ENV}=1 is set and {test_name} cannot run against the real thing: {reason}");
+    }
+    let line = format!("SKIPPED {test_name}: {reason}\n");
+    write_real_stderr(&line);
+    line
+}
+
+/// Same contract as [`announce_gate_skip`], for a gated test whose own readiness depends on
+/// more than one independent precondition (e.g. a cross-binding comparison test that needs both
+/// a posix-container image AND a set of Renode files) -- joins every reason's own `.message()`
+/// with `"; "` into one line. Panics instead of returning under [`require_docker_tests`],
+/// exactly like the single-reason form.
+#[track_caller]
+pub fn announce_gate_skip_multi(test_name: &str, reasons: &[DockerGateReason]) -> String {
+    let joined = reasons.iter().map(DockerGateReason::message).collect::<Vec<_>>().join("; ");
+    if require_docker_tests() {
+        panic!("{REQUIRE_DOCKER_TESTS_ENV}=1 is set and {test_name} cannot run against the real thing: {joined}");
+    }
+    let line = format!("SKIPPED {test_name}: {joined}\n");
+    write_real_stderr(&line);
+    line
+}
+
+/// The one place this module writes directly to the process's real stderr file descriptor,
+/// bypassing libtest's output capture (see [`announce_gate_skip`]'s own doc comment). Uses
+/// `std::io::Write::write_all` on the `Stderr` handle directly -- never the `eprintln!`/
+/// `eprint!` macros, which route through `io::_eprint` and ARE captured.
+fn write_real_stderr(text: &str) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    let _ = stderr.write_all(text.as_bytes());
+    let _ = stderr.flush();
 }
 
 fn run_docker(args: &[&str]) -> Result<String, String> {
@@ -123,6 +296,23 @@ pub fn test_label_args(run_id: &str) -> Vec<String> {
 /// -f` failures here (e.g. an id that raced its own removal, or a container something else
 /// still references) are swallowed -- this is a hygiene sweep, not the thing under test, and
 /// must never itself fail a test that would otherwise pass.
+///
+/// **Question 194 item 6 / question 185's amendment.** The image half used to be `docker images
+/// -q --filter label=... | xargs docker rmi -f <ID>` -- removal **by bare image ID**. Measured
+/// directly (this crate's own R6_3_REPORT.md section 4): `docker rmi -f <IMAGE ID>` is
+/// documented, by-design Docker behaviour that removes *every* repository:tag reference
+/// pointing at that image ID in one call, not only the one reference this sweep is tracking --
+/// confirmed with a real two-tag probe image losing both tags to a single such call. So a
+/// labelled test image that ever carries a second tag (from any source, not only this sweep's
+/// own operations) would have that second tag silently destroyed too -- exactly what question
+/// 185's amendment forbids ("never retag, push or remove an image tag it did not create in that
+/// run"). Fixed by removing **by reference** (`<repository>:<tag>`) instead: see
+/// [`image_removal_targets`], the pure function this delegates to, for the exact rule (and its
+/// own doc comment for why a truly dangling image is the one case that still falls back to its
+/// bare ID -- safely, because it has no other tag to strip). This is a fix for the *latent*
+/// hazard the manager's own probe demonstrated, not a claim about the cause of this host's
+/// separately-investigated vanished images (question 194's own record: that cause was a
+/// bulk host-level image prune, unrelated to this function).
 pub fn prune_stale_test_resources() {
     let filter = format!("label={TEST_LABEL_KEY}");
     if let Ok(out) = Command::new("docker").args(["ps", "-aq", "--filter", &filter]).output() {
@@ -130,11 +320,40 @@ pub fn prune_stale_test_resources() {
             let _ = Command::new("docker").args(["rm", "-f", id]).output();
         }
     }
-    if let Ok(out) = Command::new("docker").args(["images", "-q", "--filter", &filter]).output() {
-        for id in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let _ = Command::new("docker").args(["rmi", "-f", id]).output();
+    if let Ok(out) = Command::new("docker").args(["images", "--filter", &filter, "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}"]).output() {
+        for target in image_removal_targets(&String::from_utf8_lossy(&out.stdout)) {
+            let _ = Command::new("docker").args(["rmi", "-f", &target]).output();
         }
     }
+}
+
+/// Parses `docker images --filter label=<TEST_LABEL_KEY> --format '{{.ID}}\t{{.Repository}}:
+/// {{.Tag}}'` output into the exact strings [`prune_stale_test_resources`] passes to `docker
+/// rmi -f` -- pure and `docker`-free, so it is unit-testable without Docker installed, the same
+/// way [`build_run_args`] below is.
+///
+/// **The rule (question 194 item 6):** remove by REFERENCE (`<repository>:<tag>`), one call per
+/// distinct reference, never by bare image ID -- `docker rmi -f <ID>` is documented to remove
+/// *every* tag pointing at that image in a single call, which can strip a tag this sweep never
+/// itself examined. The one exception is a truly dangling row (`<none>:<none>`, or an empty
+/// repo:tag field): it has no reference to remove by at all, so it falls back to its own ID --
+/// safe there, and only there, because by definition no *other* tag can be stripped from an
+/// image that has none.
+fn image_removal_targets(images_tsv: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    for line in images_tsv.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let id = parts.next().unwrap_or("").trim();
+        let repo_tag = parts.next().unwrap_or("").trim();
+        if id.is_empty() {
+            continue;
+        }
+        let target = if repo_tag.is_empty() || repo_tag == "<none>:<none>" { id.to_string() } else { repo_tag.to_string() };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
 }
 
 /// Builds the `docker run` argv for [`ManagedContainer::pull_and_run`] -- a pure function
@@ -279,6 +498,203 @@ impl Drop for ManagedContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------------------------
+    // Question 194 item 6: image_removal_targets -- the pure function prune_stale_test_
+    // resources' image half now delegates to. Docker-free, unconditional.
+    // ---------------------------------------------------------------------------------------
+
+    /// Mirrors the manager's own two-tag probe (R6.3 report section 4, reproduced against this
+    /// host's real Docker for the measurement that motivated this fix): one image ID, two
+    /// distinct tag rows (exactly what `docker images --filter label=... --format ...` returns
+    /// for a labelled image carrying two tags). **What a wrong implementation fails this
+    /// against:** collapsing to the shared bare ID (the pre-fix shape -- `docker rmi -f <ID>`,
+    /// which is documented to strip *every* tag on that image in one call) returns a
+    /// single-element `["363952b07d42"]` here instead of the two references -- executed and
+    /// recorded as a real failure in this crate's own R6_3_REPORT.md section 4, then restored.
+    #[test]
+    fn image_removal_targets_removes_by_reference_not_a_shared_bare_id() {
+        let tsv = "363952b07d42\tav-r63-probe-labeled:tag1\n363952b07d42\tav-r63-probe-labeled:tag2\n";
+        let targets = image_removal_targets(tsv);
+        assert_eq!(
+            targets,
+            vec!["av-r63-probe-labeled:tag1".to_string(), "av-r63-probe-labeled:tag2".to_string()],
+            "must remove each tag BY REFERENCE, one call per distinct reference, never collapsed to the shared bare image ID -- \
+             docker rmi -f <ID> removes every tag on that image in one call (see this module's own doc comment on prune_stale_test_resources)"
+        );
+    }
+
+    /// A dangling (untagged) labelled image -- `<none>:<none>` -- has no reference to remove by
+    /// at all, so this is the one case that still falls back to its own ID. Safe only there:
+    /// with no tag, there is nothing else a bare-ID `docker rmi -f` could strip.
+    #[test]
+    fn image_removal_targets_falls_back_to_bare_id_only_for_a_dangling_image() {
+        let tsv = "abc123def456\t<none>:<none>\n";
+        assert_eq!(image_removal_targets(tsv), vec!["abc123def456".to_string()]);
+    }
+
+    /// Two entirely separate labelled images (different IDs, one tag each) -- the ordinary
+    /// case question 156 was built for -- both get their own single-tag reference, in the order
+    /// `docker images` reported them, with no accidental deduplication across different images
+    /// that happen to share a repository name substring or similar.
+    #[test]
+    fn image_removal_targets_handles_multiple_distinct_images() {
+        let tsv = "aaa111\t127.0.0.1:54321/altavista-cfs-lockstep:test\nbbb222\tlockstep-ref:av-kernel-docker-lifecycle-test\n";
+        assert_eq!(image_removal_targets(tsv), vec!["127.0.0.1:54321/altavista-cfs-lockstep:test".to_string(), "lockstep-ref:av-kernel-docker-lifecycle-test".to_string()]);
+    }
+
+    /// Blank lines (the trailing newline `docker images --format` output always carries, and a
+    /// possible fully-empty invocation with nothing matching the filter) never turn into a
+    /// removal target.
+    #[test]
+    fn image_removal_targets_ignores_blank_lines() {
+        assert_eq!(image_removal_targets(""), Vec::<String>::new());
+        assert_eq!(image_removal_targets("\n\n"), Vec::<String>::new());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Question 194 items 1-5: DockerGateReason / docker_daemon_status / image_gate_status /
+    // resolve_image_ref / announce_gate_skip / require_docker_tests. Every one of these is
+    // testable without a live Docker daemon except docker_daemon_status/image_gate_status
+    // themselves, which shell out for real (still fine: no image/daemon state is touched).
+    // ---------------------------------------------------------------------------------------
+
+    /// `DockerGateReason::message()` names the resource and how to obtain it, for every
+    /// variant -- at least as informative as the pre-R6.3 hand-formatted strings this replaces
+    /// (`cfs_image_unavailable_reason`'s own `format!("{CFS_LOCAL_IMAGE:?} is not built locally
+    /// -- run ...")` shape, reproduced here through the typed constructor instead).
+    #[test]
+    fn every_docker_gate_reason_variant_names_the_resource_and_how_to_fix_it() {
+        assert_eq!(DockerGateReason::DockerNotInstalled.message(), "`docker` is not installed or not on PATH");
+        assert!(DockerGateReason::DockerDaemonUnreachable { detail: "Cannot connect to the Docker daemon".to_string() }.message().contains("Cannot connect to the Docker daemon"));
+        let image_not_built = DockerGateReason::ImageNotBuilt { image_ref: "altavista-cfs-lockstep:local".to_string(), build_hint: "run `docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .`".to_string() };
+        let msg = image_not_built.message();
+        assert!(msg.contains("altavista-cfs-lockstep:local"), "{msg:?}");
+        assert!(msg.contains("docker build"), "{msg:?}");
+        let missing_file = DockerGateReason::RequiredFileMissing { what: "the Renode binary".to_string(), path: "/some/path".to_string() };
+        assert_eq!(missing_file.message(), "the Renode binary is missing at /some/path");
+        let missing_prereq = DockerGateReason::PrerequisiteUnavailable { what: "a working Python + protobuf".to_string(), hint: "run the README's Python setup".to_string() };
+        assert_eq!(missing_prereq.message(), "a working Python + protobuf is unavailable -- run the README's Python setup");
+        // Display must render the same text (announce_gate_skip formats reasons through
+        // Display, via `format!("SKIPPED {test_name}: {reason}")`).
+        assert_eq!(image_not_built.to_string(), image_not_built.message());
+    }
+
+    /// `resolve_image_ref` (question 194 item 5): the override env var, when set to a
+    /// non-empty value, wins over the default -- exactly what lets a test point at a name that
+    /// cannot exist to prove the "image absent" branch deterministically, without touching a
+    /// real tag. Empty-string is treated as unset (an accidentally-exported-but-empty var must
+    /// not silently make every image-gated test look for an empty image reference).
+    #[test]
+    fn resolve_image_ref_prefers_a_non_empty_override_and_ignores_an_empty_one() {
+        // std::env is process-global; run serially within this test via a small critical
+        // section (save/restore) so it cannot race the other env-reading tests in this file
+        // under `cargo test`'s default multi-threaded runner.
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var(IMAGE_OVERRIDE_ENV).ok();
+
+        std::env::remove_var(IMAGE_OVERRIDE_ENV);
+        assert_eq!(resolve_image_ref("altavista-cfs-lockstep:local"), "altavista-cfs-lockstep:local");
+
+        std::env::set_var(IMAGE_OVERRIDE_ENV, "this-image-reference-cannot-possibly-exist:av-r63-probe");
+        assert_eq!(resolve_image_ref("altavista-cfs-lockstep:local"), "this-image-reference-cannot-possibly-exist:av-r63-probe");
+
+        std::env::set_var(IMAGE_OVERRIDE_ENV, "");
+        assert_eq!(resolve_image_ref("altavista-cfs-lockstep:local"), "altavista-cfs-lockstep:local", "an empty override must be treated as unset");
+
+        match saved {
+            Some(v) => std::env::set_var(IMAGE_OVERRIDE_ENV, v),
+            None => std::env::remove_var(IMAGE_OVERRIDE_ENV),
+        }
+    }
+
+    /// `image_gate_status`, pointed at [`IMAGE_OVERRIDE_ENV`] set to a name that cannot exist,
+    /// deterministically exercises the "image absent" branch -- proving that branch without
+    /// ever touching, retagging, or removing a real image tag (question 185's amendment).
+    /// Requires a real, reachable Docker daemon (this host has one; if it does not, this test
+    /// itself is skipped visibly through the same mechanism it is testing -- see its own body).
+    #[test]
+    fn image_gate_status_reports_image_not_built_for_a_deliberately_nonexistent_override() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if docker_daemon_status().is_err() {
+            // Consistent with every other gated test in this workspace: this unit test needs a
+            // real daemon to distinguish "image absent" from "daemon absent" at all, so it
+            // skips through the very mechanism under test rather than failing on a host with no
+            // Docker.
+            let line = announce_gate_skip("image_gate_status_reports_image_not_built_for_a_deliberately_nonexistent_override", &docker_daemon_status().unwrap_err());
+            assert!(line.starts_with("SKIPPED "));
+            return;
+        }
+        let saved = std::env::var(IMAGE_OVERRIDE_ENV).ok();
+        std::env::set_var(IMAGE_OVERRIDE_ENV, "this-image-reference-cannot-possibly-exist:av-r63-probe");
+        let result = image_gate_status("altavista-cfs-lockstep:local", "run `docker build ...`");
+        match saved {
+            Some(v) => std::env::set_var(IMAGE_OVERRIDE_ENV, v),
+            None => std::env::remove_var(IMAGE_OVERRIDE_ENV),
+        }
+        match result {
+            Err(DockerGateReason::ImageNotBuilt { image_ref, .. }) => {
+                assert_eq!(image_ref, "this-image-reference-cannot-possibly-exist:av-r63-probe");
+            }
+            other => panic!("expected DockerGateReason::ImageNotBuilt for a deliberately nonexistent override, got {other:?}"),
+        }
+    }
+
+    /// `announce_gate_skip` returns the exact text it wrote (question 194: "the helper returns
+    /// the announced text, and the test asserts it printed") -- the return value is what a real
+    /// gated test asserts on; the actual real-stderr visibility of that same text is
+    /// established empirically in this crate's own R6_3_REPORT.md section 1, and covered end to
+    /// end by `crates/av-lockstep/tests/docker_lifecycle.rs`'s own visibility-proof test (a
+    /// subprocess `cargo test` whose real captured stdout is inspected directly).
+    #[test]
+    fn announce_gate_skip_returns_the_line_it_announced() {
+        let reason = DockerGateReason::ImageNotBuilt { image_ref: "some/image:tag".to_string(), build_hint: "run the build script".to_string() };
+        let line = announce_gate_skip("some_test_name", &reason);
+        assert_eq!(line, "SKIPPED some_test_name: image \"some/image:tag\" is not built locally -- run the build script\n");
+    }
+
+    /// `announce_gate_skip_multi` joins every reason's own message with `"; "` -- the shape
+    /// `drm_attitude_control_renode.rs`'s own two-precondition (posix-container image + Renode
+    /// files) test needs, now through the shared helper instead of a hand-rolled `Vec<String>`
+    /// join.
+    #[test]
+    fn announce_gate_skip_multi_joins_every_reason() {
+        let reasons = vec![
+            DockerGateReason::ImageNotBuilt { image_ref: "altavista-cfs-lockstep:local".to_string(), build_hint: "run the build script".to_string() },
+            DockerGateReason::RequiredFileMissing { what: "the Renode binary".to_string(), path: "/some/path".to_string() },
+        ];
+        let line = announce_gate_skip_multi("some_cross_binding_test", &reasons);
+        assert_eq!(
+            line,
+            "SKIPPED some_cross_binding_test: image \"altavista-cfs-lockstep:local\" is not built locally -- run the build script; the Renode binary is missing at /some/path\n"
+        );
+    }
+
+    /// `AV_REQUIRE_DOCKER_TESTS=1` turns `announce_gate_skip` into a panic instead of a skip
+    /// (question 194 item 4). **What this fails against:** an implementation that ignores the
+    /// env var (the pre-item-4 shape) would return the announced-text `String` here instead of
+    /// unwinding, and `catch_unwind` would observe `Ok(_)`, not `Err(_)`.
+    #[test]
+    fn require_docker_tests_turns_a_skip_into_a_panic() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var(REQUIRE_DOCKER_TESTS_ENV).ok();
+        std::env::set_var(REQUIRE_DOCKER_TESTS_ENV, "1");
+        assert!(require_docker_tests());
+
+        let reason = DockerGateReason::DockerNotInstalled;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| announce_gate_skip("some_required_test", &reason)));
+
+        match saved {
+            Some(v) => std::env::set_var(REQUIRE_DOCKER_TESTS_ENV, v),
+            None => std::env::remove_var(REQUIRE_DOCKER_TESTS_ENV),
+        }
+        assert!(result.is_err(), "AV_REQUIRE_DOCKER_TESTS=1 must turn announce_gate_skip into a panic, not a returned skip line");
+    }
+
+    /// Serializes the small handful of tests above that mutate process-wide env vars
+    /// (`IMAGE_OVERRIDE_ENV`/`REQUIRE_DOCKER_TESTS_ENV`) -- `cargo test` runs `#[test]`s
+    /// concurrently by default, and `std::env::set_var`/`remove_var` are process-global.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Not gated on `docker_available()`: this exercises the pure argv-building logic
     /// (`pull_and_run`'s port-suffix parsing), not an actual `docker` invocation, so it must

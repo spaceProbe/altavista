@@ -185,21 +185,27 @@ fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosC
 // ------------------------------------------------------------------------------------------
 
 const CFS_LOCAL_IMAGE: &str = "altavista-cfs-lockstep:local";
+const CFS_LOCAL_IMAGE_BUILD_HINT: &str = "run `docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .` from the repository root once (services/cfs/Dockerfile's own top comment has the av-lockstep-shim prebuild step this needs first)";
 
-/// `None` iff the image can be run: `docker info` succeeds AND `altavista-cfs-lockstep:local`
-/// is already built. Otherwise a human-readable, printed skip reason (M15.3's own convention --
-/// see this file's own tests for the `println!("SKIPPED ...")` -- never a silent `#[ignore]`).
-fn cfs_image_unavailable_reason() -> Option<String> {
-    if !av_lockstep::docker::docker_available() {
-        return Some("`docker info` failed or docker is not installed".to_string());
+/// Question 194 (M23.4 round 5-6): the pre-R6.3 shape here was `println!("SKIPPED ...")` then
+/// `return` -- invisible in a plain `cargo test` run (`cargo test`'s default runner never
+/// prints a PASSING test's `println!` output without `--nocapture`, measured directly in
+/// `crates/av-lockstep/R6_3_REPORT.md` section 1), which is exactly how these four tests once
+/// reported `ok` in 0.17s/37.84s with no image present. Now routes through
+/// `av_lockstep::docker::image_gate_status` (a typed `DockerGateReason`, not a bare `String`)
+/// and `announce_gate_skip` (a real stderr write, never `println!`/`eprintln!`), and asserts on
+/// the text the helper actually announced -- a test body that finds no image and merely
+/// `return`s, with nothing asserted, is exactly the defect question 194 requires fixed. Returns
+/// `true` iff the calling test must skip.
+fn skip_if_cfs_image_unavailable(test_name: &str) -> bool {
+    match av_lockstep::docker::image_gate_status(CFS_LOCAL_IMAGE, CFS_LOCAL_IMAGE_BUILD_HINT) {
+        Ok(()) => false,
+        Err(reason) => {
+            let line = av_lockstep::docker::announce_gate_skip(test_name, &reason);
+            assert!(line.starts_with("SKIPPED ") && line.contains(test_name), "the gate helper must announce a visible skip line naming this test: {line:?}");
+            true
+        }
     }
-    let ok = Command::new("docker").args(["image", "inspect", CFS_LOCAL_IMAGE, "--format={{.Id}}"]).output().map(|o| o.status.success()).unwrap_or(false);
-    if !ok {
-        return Some(format!(
-            "{CFS_LOCAL_IMAGE:?} is not built locally -- run `docker build -f services/cfs/Dockerfile -t {CFS_LOCAL_IMAGE} .` from the repository root once (services/cfs/Dockerfile's own top comment has the av-lockstep-shim prebuild step this needs first)"
-        ));
-    }
-    None
 }
 
 fn docker_cmd(args: &[&str]) -> String {
@@ -305,8 +311,7 @@ const COMPARISON_DURATION_S: i64 = 30;
 
 #[test]
 fn the_cfs_bound_loop_settles_and_tracks_the_native_run() {
-    if let Some(reason) = cfs_image_unavailable_reason() {
-        println!("SKIPPED the_cfs_bound_loop_settles_and_tracks_the_native_run: {reason}");
+    if skip_if_cfs_image_unavailable("the_cfs_bound_loop_settles_and_tracks_the_native_run") {
         return;
     }
     run_the_cfs_bound_loop_settles_and_tracks_the_native_run();
@@ -402,8 +407,7 @@ const DETERMINISM_DURATION_S: i64 = 10;
 
 #[test]
 fn byte_identical_run_products_across_two_separately_spawned_cfs_containers() {
-    if let Some(reason) = cfs_image_unavailable_reason() {
-        println!("SKIPPED byte_identical_run_products_across_two_separately_spawned_cfs_containers: {reason}");
+    if skip_if_cfs_image_unavailable("byte_identical_run_products_across_two_separately_spawned_cfs_containers") {
         return;
     }
     run_byte_identical_run_products_across_two_separately_spawned_cfs_containers();
@@ -498,8 +502,7 @@ const REPLAY_DURATION_S: i64 = 10;
 
 #[test]
 fn byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free() {
-    if let Some(reason) = cfs_image_unavailable_reason() {
-        println!("SKIPPED byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free: {reason}");
+    if skip_if_cfs_image_unavailable("byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free") {
         return;
     }
     run_byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free();
@@ -630,8 +633,7 @@ const RESET_FAULT_TAI_OFFSET_S: i64 = 5;
 
 #[test]
 fn a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues() {
-    if let Some(reason) = cfs_image_unavailable_reason() {
-        println!("SKIPPED a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues: {reason}");
+    if skip_if_cfs_image_unavailable("a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues") {
         return;
     }
     run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues();

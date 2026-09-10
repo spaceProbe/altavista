@@ -833,10 +833,18 @@ fn docker_container_instance(name: &str, system_id: &str, image: &str, image_dig
 /// own low-level `ManagedContainer` test (which additionally proves `binding_hash` varies with
 /// the digest) -- this one proves the same lifecycle is actually wired into `classify_binding`/
 /// `materialize_container`/`execute()`, not just that the standalone module works in isolation.
+///
+/// **Question 194:** gated through `av_lockstep::docker::docker_daemon_status` (a typed
+/// `DockerGateReason`, not a bare bool) and `announce_gate_skip` (a real stderr write, verified
+/// visible in a plain `cargo test` run without `--nocapture` -- see
+/// `crates/av-lockstep/R6_3_REPORT.md` section 1 -- never the pre-R6.3 `println!`, which is
+/// captured and invisible for a passing test); the assertion below is on the text the helper
+/// actually announced.
 #[test]
 fn docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes_on_shutdown() {
-    if !av_lockstep::docker::docker_available() {
-        println!("SKIPPED docker_image_lifecycle_through_execute_...: `docker info` failed or docker is not installed (best-effort visibility only -- see this test's own doc comment).");
+    if let Err(reason) = av_lockstep::docker::docker_daemon_status() {
+        let line = av_lockstep::docker::announce_gate_skip("docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes_on_shutdown", &reason);
+        assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
         return;
     }
     let _engine = gmat_sys::engine_lock();

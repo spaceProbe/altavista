@@ -142,16 +142,12 @@ fn systems_map(sysvec: &[&SystemDefinition]) -> BTreeMap<String, SystemDefinitio
 // ------------------------------------------------------------------------------------------
 
 const CFS_LOCAL_IMAGE: &str = "altavista-cfs-lockstep:local";
+const CFS_LOCAL_IMAGE_BUILD_HINT: &str = "run `docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .` from the repository root once";
 
-fn cfs_image_unavailable_reason() -> Option<String> {
-    if !av_lockstep::docker::docker_available() {
-        return Some("`docker info` failed or docker is not installed".to_string());
-    }
-    let ok = Command::new("docker").args(["image", "inspect", CFS_LOCAL_IMAGE, "--format={{.Id}}"]).output().map(|o| o.status.success()).unwrap_or(false);
-    if !ok {
-        return Some(format!("{CFS_LOCAL_IMAGE:?} is not built locally -- run `docker build -f services/cfs/Dockerfile -t {CFS_LOCAL_IMAGE} .` from the repository root once"));
-    }
-    None
+/// Question 194: typed, not a bare `String` -- see `crates/av-lockstep/src/docker.rs`'s
+/// `DockerGateReason`/`image_gate_status`.
+fn cfs_image_unavailable_reason() -> Option<av_lockstep::docker::DockerGateReason> {
+    av_lockstep::docker::image_gate_status(CFS_LOCAL_IMAGE, CFS_LOCAL_IMAGE_BUILD_HINT).err()
 }
 
 fn docker_cmd(args: &[&str]) -> String {
@@ -230,8 +226,9 @@ fn venv_python() -> PathBuf {
 /// (see `cfs_image_unavailable_reason` above) -- a printed, visible skip reason, never a silent
 /// `#[ignore]`. Existence-only (matching `cfs_image_unavailable_reason`'s own shallow depth, not
 /// a deep functional probe) -- a missing/broken file inside one of these that still passes this
-/// check surfaces instead as a real, loud failure when the run itself is attempted.
-fn renode_unavailable_reason() -> Option<String> {
+/// check surfaces instead as a real, loud failure when the run itself is attempted. Question
+/// 194: typed (`DockerGateReason::RequiredFileMissing`), not a bare `String`.
+fn renode_unavailable_reason() -> Option<av_lockstep::docker::DockerGateReason> {
     for (path, what) in [
         (renode_bin(), "the Renode binary (fetch-renode.sh)"),
         (renode_platform(), "this repository's own zynqmp.repl platform file"),
@@ -240,7 +237,7 @@ fn renode_unavailable_reason() -> Option<String> {
         (venv_python(), "the repo-local .venv python3 (needed for renode_bridge.py's altavista.pb protobuf stubs)"),
     ] {
         if !path.is_file() {
-            return Some(format!("{what} is missing at {}", path.display()));
+            return Some(av_lockstep::docker::DockerGateReason::RequiredFileMissing { what: what.to_string(), path: path.display().to_string() });
         }
     }
     None
@@ -476,13 +473,21 @@ const COMPARISON_DURATION_S: i64 = 1;
 fn byte_identical_port_traffic_between_posix_container_and_renode() {
     let mut reasons = Vec::new();
     if let Some(r) = cfs_image_unavailable_reason() {
-        reasons.push(format!("posix-container half: {r}"));
+        reasons.push(r);
     }
     if let Some(r) = renode_unavailable_reason() {
-        reasons.push(format!("Renode half: {r}"));
+        reasons.push(r);
     }
     if !reasons.is_empty() {
-        println!("SKIPPED byte_identical_port_traffic_between_posix_container_and_renode: {}", reasons.join("; "));
+        // Question 194: typed reasons, a real visible skip (never println!/eprintln!, which
+        // cargo test's default runner captures and never prints for a passing test -- measured
+        // in crates/av-lockstep/R6_3_REPORT.md section 1), and the test asserts on what the
+        // helper actually announced -- not merely a return with nothing asserted.
+        let line = av_lockstep::docker::announce_gate_skip_multi("byte_identical_port_traffic_between_posix_container_and_renode", &reasons);
+        assert!(
+            line.starts_with("SKIPPED ") && line.contains("byte_identical_port_traffic_between_posix_container_and_renode"),
+            "the gate helper must announce a visible skip line naming this test: {line:?}"
+        );
         return;
     }
     run_byte_identical_port_traffic_between_posix_container_and_renode();

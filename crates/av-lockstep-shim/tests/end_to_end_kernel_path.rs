@@ -92,9 +92,17 @@ fn the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client() {
                 .map(|s| s.success())
                 .unwrap_or(false);
             if !ok {
-                println!(
-                    "SKIPPED the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client: no .venv/bin/python3 and no python3 with protobuf on PATH (run the README's Python setup)."
-                );
+                // Question 194: a typed reason (not a bare String) and a genuinely visible skip
+                // -- `println!` is captured by libtest and invisible for a passing test in a
+                // plain `cargo test` run (measured directly, `crates/av-lockstep/R6_3_REPORT.md`
+                // section 1); `announce_gate_skip` writes via a raw stderr handle instead, and
+                // returns the announced text so it can be asserted on here.
+                let reason = av_lockstep::docker::DockerGateReason::PrerequisiteUnavailable {
+                    what: "a working Python + protobuf".to_string(),
+                    hint: "no .venv/bin/python3 and no python3 with protobuf importable on PATH -- run the README's Python setup".to_string(),
+                };
+                let line = av_lockstep::docker::announce_gate_skip("the_shim_drives_a_full_run_through_the_kernels_own_lockstep_client", &reason);
+                assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
                 return;
             }
             path_python

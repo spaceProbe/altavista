@@ -16,20 +16,26 @@
 //! regardless of what `IMAGE_DIGEST` is set to, since the two `Bind` calls would otherwise be
 //! byte-identical.
 //!
-//! ## Gated on `docker info`, and a real, disclosed limitation of `cargo test`'s own output
+//! ## Gated on `docker info`, and genuinely visible in a plain `cargo test` run (question 194)
 //!
 //! Question 118: "tests run only when `docker info` succeeds, and otherwise skip with a
 //! recorded reason visible in a plain pytest -q / cargo test run -- never silently, never
-//! buried." For Rust this repository verified empirically (this task's own report) that
-//! `cargo test`'s default runner does **not** print a passing test's `println!`/`eprintln!`
-//! output without `--nocapture` -- so a `docker info` failure recorded only that way is not
-//! actually visible in a *plain* `cargo test` run, only under `cargo test -- --nocapture` or in
-//! a failure's own captured output. This test still gates on [`docker_available`] and prints the
-//! reason (best-effort, for `--nocapture`/CI logs that do not capture), but the canonical,
-//! verified-visible "skip with a recorded reason" location for this requirement is the Python
-//! side (`tests/test_lockstep_ref.py::test_docker_image_lifecycle_...`, gated the same way via
-//! `pytest.skip`, which this repository's `pyproject.toml` now runs with `-rs` so the reason
-//! prints even under a plain `pytest -q`) -- see that test's own doc comment.
+//! buried." Question 194 (round 5-6) sharpened this: the pre-R6.3 shape here was
+//! `println!("SKIPPED ...")` then `return` -- verified empirically (this crate's own
+//! `R6_3_REPORT.md` section 1) to be genuinely INVISIBLE in a plain `cargo test` run, because
+//! `cargo test`'s default runner never prints a PASSING test's `println!`/`eprintln!` output
+//! without `--nocapture`. Every Docker-gated test in this file now goes through
+//! [`av_lockstep::docker::docker_daemon_status`] (a typed `DockerGateReason`, not a bare bool)
+//! and [`av_lockstep::docker::announce_gate_skip`], which writes the skip line via a raw
+//! `std::io::stderr().write_all(...)` -- measured, in the same report section, to remain visible
+//! where `println!`/`eprintln!` do not, because libtest's output-capture hook is wired into the
+//! `print!`/`eprintln!` macros' own `io::_print`/`io::_eprint` helper functions, never into
+//! `Stdout`/`Stderr`'s own `Write` impl. Each test below asserts on the text the helper actually
+//! returned (question 194: "the helper returns the announced text, and the test asserts it
+//! printed"). The Python side (`tests/test_lockstep_ref.py::test_docker_image_lifecycle_...`,
+//! gated via `pytest.skip`, `pyproject.toml`'s `-rs` addopt) remains independently
+//! verified-visible too -- see that test's own doc comment -- but this file no longer needs to
+//! defer to it for the Rust side's own visibility claim.
 //!
 //! Every `docker`/`registry:2` resource this test creates is torn down before it returns, success
 //! or failure (`Drop` guards, mirroring `crates/av-kernel/tests/drm_container.rs`'s own
@@ -41,7 +47,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use av_cdm::pb::{Port, PortDirection, PortKind};
-use av_lockstep::docker::{docker_available, prune_stale_test_resources, test_label_args, test_run_id, ManagedContainer, TEST_LABEL_KEY};
+use av_lockstep::docker::{announce_gate_skip, docker_daemon_status, prune_stale_test_resources, test_label_args, test_run_id, ManagedContainer, TEST_LABEL_KEY};
 use av_lockstep::{BlockingLockstepClient, LockstepBindRequest, LockstepShutdownRequest};
 
 fn repo_root() -> PathBuf {
@@ -114,17 +120,45 @@ fn good_ports() -> Vec<Port> {
     ]
 }
 
+// ------------------------------------------------------------------------------------------
+// Question 194's own visibility requirement, pinned as a permanent regression (not just a
+// one-time manual probe -- see crates/av-lockstep/R6_3_REPORT.md section 1 for that original
+// measurement, which this test automates).
+// ------------------------------------------------------------------------------------------
+
+/// Spawns a genuinely SEPARATE `cargo test` invocation (no `--nocapture`) targeting one
+/// specific unit test that calls `announce_gate_skip` exactly once
+/// (`docker::tests::announce_gate_skip_returns_the_line_it_announced`, `crates/av-lockstep/src/
+/// docker.rs`), and inspects THAT subprocess's own real, captured stdout for the literal
+/// `SKIPPED ...` line -- proving end to end, through a real nested `cargo test` process (not
+/// merely in-process reasoning), that the announcement mechanism is genuinely visible in a
+/// plain `cargo test` run.
+///
+/// **What this fails against.** If `announce_gate_skip` regressed to `println!`/`eprintln!`
+/// (the pre-R6.3 shape every gated test in this workspace used to have), the subprocess's own
+/// captured stdout would show only `test ... ok` with no `SKIPPED` line at all -- measured
+/// directly for this exact regression in this crate's own R6_3_REPORT.md section 1 (the
+/// `r63_probe_println`/`r63_probe_eprintln` probes), and the `assert!` below would fail.
+#[test]
+fn announce_gate_skip_is_actually_visible_in_a_real_cargo_test_subprocess_without_nocapture() {
+    let output = Command::new("cargo")
+        .args(["test", "-p", "av-lockstep", "--lib", "--", "--exact", "docker::tests::announce_gate_skip_returns_the_line_it_announced"])
+        .current_dir(repo_root())
+        .output()
+        .unwrap_or_else(|e| panic!("could not launch `cargo test`: {e}"));
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "the targeted subprocess test must itself pass:\n{combined}");
+    assert!(
+        combined.contains("SKIPPED some_test_name: image \"some/image:tag\" is not built locally -- run the build script"),
+        "the real SKIPPED line must be visible in the subprocess's own captured stdout/stderr without --nocapture -- got:\n{combined}"
+    );
+}
+
 #[test]
 fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
-    if !docker_available() {
-        // See this file's own module doc comment's "Gated on `docker info`" section for why
-        // this print is best-effort, not the verified-visible skip location.
-        println!(
-            "SKIPPED docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove: \
-             `docker info` failed or `docker` is not installed -- this reason is only guaranteed \
-             visible under `cargo test -- --nocapture`; see tests/test_lockstep_ref.py for the \
-             verified-visible pytest-side equivalent."
-        );
+    if let Err(reason) = docker_daemon_status() {
+        let line = announce_gate_skip("docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove", &reason);
+        assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
         return;
     }
     let _lock = DOCKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -251,11 +285,9 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
 /// nothing a *previous* run could have left) and every assertion below would fail.
 #[test]
 fn prune_stale_test_resources_removes_orphaned_labeled_containers_and_images() {
-    if !docker_available() {
-        println!(
-            "SKIPPED prune_stale_test_resources_removes_orphaned_labeled_containers_and_images: \
-             `docker info` failed or `docker` is not installed."
-        );
+    if let Err(reason) = docker_daemon_status() {
+        let line = announce_gate_skip("prune_stale_test_resources_removes_orphaned_labeled_containers_and_images", &reason);
+        assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
         return;
     }
     let _lock = DOCKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
