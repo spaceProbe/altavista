@@ -43,19 +43,26 @@ pub enum SweepError {
 
     /// A [`SweepAxis`](av_cdm::pb::SweepAxis) declared explicit `values` *and* a non-zero
     /// `min`/`max`/`steps` range at the same time -- an ambiguous declaration is never silently
-    /// resolved by preferring one over the other.
-    #[error("axis on {instance}.{parameter}: both explicit `values` and a min/max/steps range were declared; an ambiguous axis is never silently resolved")]
-    AmbiguousAxisDeclaration { instance: String, parameter: String },
+    /// resolved by preferring one over the other. `target` is the axis' own
+    /// [`crate::grid::AxisTarget::key`] -- `"{instance}.{parameter}"` for a parameter axis or
+    /// `"event:{event_id}.{value_key}"` for an event axis (question 192(c)) -- so the message
+    /// names the real target whichever kind it is.
+    #[error("axis on {target}: both explicit `values` and a min/max/steps range were declared; an ambiguous axis is never silently resolved")]
+    AmbiguousAxisDeclaration { target: String },
 
     /// A range-declared axis (`values` empty) had `steps < 2` -- too few points to expand a
     /// range at all (this is also what an axis declaring neither `values` nor a usable range
-    /// looks like: `steps` defaults to `0`, which is `< 2`).
-    #[error("axis on {instance}.{parameter}: steps={steps} is below the minimum of 2 needed to expand a min..max range (values was empty)")]
-    AxisStepsBelowMinimum { instance: String, parameter: String, steps: u32 },
+    /// looks like: `steps` defaults to `0`, which is `< 2`). `target` is the axis' own
+    /// [`crate::grid::AxisTarget::key`] -- see [`SweepError::AmbiguousAxisDeclaration`]'s doc
+    /// comment for why this is a `key`, not separate `instance`/`parameter` fields.
+    #[error("axis on {target}: steps={steps} is below the minimum of 2 needed to expand a min..max range (values was empty)")]
+    AxisStepsBelowMinimum { target: String, steps: u32 },
 
-    /// A range-declared axis had `max <= min`.
-    #[error("axis on {instance}.{parameter}: max={max} is not greater than min={min}")]
-    AxisRangeNotIncreasing { instance: String, parameter: String, min: f64, max: f64 },
+    /// A range-declared axis had `max <= min`. `target` is the axis' own
+    /// [`crate::grid::AxisTarget::key`] -- see [`SweepError::AmbiguousAxisDeclaration`]'s doc
+    /// comment for why this is a `key`, not separate `instance`/`parameter` fields.
+    #[error("axis on {target}: max={max} is not greater than min={min}")]
+    AxisRangeNotIncreasing { target: String, min: f64, max: f64 },
 
     /// Two axes in the same `ParameterSweep.axes` named the same target -- the same
     /// `instance`+`parameter` pair (question 192(c) widens this to also catch two event axes on
