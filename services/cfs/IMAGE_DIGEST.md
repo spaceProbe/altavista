@@ -17,6 +17,26 @@ docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .
 docker image inspect altavista-cfs-lockstep:local --format '{{.Id}}'
 ```
 
+**`docker events` capture (docs/open-questions.md question 194, round 6, second half).**
+`services/cfs/build-image.sh` now starts a live `docker events --format '{{json .}}' --filter
+type=image --filter type=container` capture before doing anything else Docker-related, and stops
+it only at the very end of its own run (a `trap`-based cleanup covers early/failure exits too, so
+a failed build is never hidden by, nor does it hide, whatever the events capture caught up to that
+point). Written to `services/cfs/build/last-build-events.jsonl` -- a fixed name, overwritten each
+run, reflecting the **most recent** `build-image.sh` invocation's own execution window (not an
+ever-growing history), matching how this file's own top section always reflects the current pin.
+When the log is finalised, `exec_create`/`exec_start`/`exec_die`/`health_status` actions from
+unrelated containers are dropped (they made up 77% of the first real capture and cannot tag,
+untag or delete an image); no image event is ever dropped, whatever its action -- see the round-6
+section below for the measurement that motivated this and the numbers after the fix.
+A failure to start or write the capture is logged as a `WARNING` in the script's own output and
+never fails the build. See `services/cfs/R6_4_REPORT.md` section 5 for the full design rationale,
+including a directly-measured finding that this host's Docker daemon retains only a very short
+(tens-of-seconds, under load from unrelated containers on this shared host) in-memory `docker
+events` history -- a *retrospective* `docker events --since` query is not a reliable substitute
+for a *live* capture started ahead of time, which is why this exists as a wrapper around the build
+rather than a query run after the fact.
+
 ## Runtime-content hash definition (docs/open-questions.md question 185, round 5)
 
 In addition to the whole-image digest above (`docker image inspect`'s content-addressed `.Id`,
@@ -51,22 +71,94 @@ one is unlikely to be masked by the same bug in the other):
   digest above).
 - `services/cfs/tests/test_image_reproducibility.py`'s `runtime_content_hash()` (Python), used to
   assert the hash is EQUAL between that test's own two independent `--no-cache` builds -- an
-  always-on assertion (whenever that opt-in test actually runs) that is never weakened or used to
-  narrow the whole-image digest assertion, which stays exactly as strict as before.
+  always-on assertion (whenever that opt-in test actually runs) that is never weakened. As of
+  round 6 (question 190) it is also the **only** hard-asserted reproducibility guarantee there:
+  the whole-image digest assertion is retired to reported-not-asserted, because the one bounded
+  BuildKit + `SOURCE_DATE_EPOCH` experiment question 190 authorised could not be attempted at all
+  on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
+  network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-09-09 for R5.3 / question 185 -- see "Re-pinned 2026-09-09
-(R5.3, question 185)" below for what changed and why, and the manifest-regeneration note
-immediately after this block -- `third_party/cfs` still pinned at
+Recorded digest (re-pinned 2026-09-09 by the round-6 manager after the **third** disappearance of
+this tag, see "Re-pinned 2026-09-09 (round 6, after the third tag disappearance)" below for what
+was rebuilt, what it measured, and what has now been root-caused about the disappearances
+themselves -- `third_party/cfs` still pinned at
 `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:b1300c6fd3c0e323feae1be0db3f3c4b740ea84229c510ceaae7ee0ed5f8ad12
+sha256:c1b727066421202082991afb8e2697d65571e796166f70cb7510a76cad273b0f
 ```
 
 Recorded runtime-content hash for this pin (question 185, see the definition above):
 ```
 sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef
 ```
+
+## Re-pinned 2026-09-09 (round 6, after the third tag disappearance)
+
+**What happened.** At the start of round 6 the `altavista-cfs-lockstep:local` tag was gone from
+this host's Docker store for the third time, and this time its digest-pinned `ubuntu:22.04` base
+was gone with it. Verified by the manager directly, not taken from a report: `docker image
+inspect` failed for both, and `docker image ls -a` showed **105 images of which only 16 carried
+any tag at all** -- every surviving tag belonging to unrelated projects on this shared host
+(supabase, rancher/k8s, `registry:2`, `python:3.13-slim`), and every AltaVista-related tag gone
+while the underlying image data survived as `<none>:<none>`. The images were **untagged, not
+deleted**.
+
+**Root cause of the untagging, now proven rather than suspected.**
+`av_lockstep::docker::prune_stale_test_resources` (`crates/av-lockstep/src/docker.rs`) collects
+image **IDs** with `docker images -q --filter label=av.test` and then runs `docker rmi -f <ID>`
+on each. R4.3 had probed this suspect and excluded it, but the probe tested `docker rmi -f <TAG>`,
+which is a different command with different semantics from the one the code actually runs. Probed
+directly this round, on throwaway images created for the probe (script and output in the round-6
+manager's scratchpad):
+
+- Built one image, gave it two tags of its own, ran `docker rmi -f <IMAGE ID>` -- output
+  `Untagged: av-r6-probe-a:...`, `Untagged: av-r6-probe-b:...`, `Deleted: sha256:...`. **One
+  `rmi -f` on an ID removes EVERY tag on that image, not only the one the caller knows about.**
+- The label filter itself is not the leak: an image's base is *not* returned by
+  `docker images -q --filter label=av.test` (checked against the probe image's own base, which
+  was not in the list), so a base image can only be caught this way by sharing an image ID with
+  a labelled one.
+
+So the sweep is capable of stripping tags it did not create, in direct violation of question
+185's amendment ("a test suite must never retag, push or remove an image tag it did not create in
+that run"). The remaining link -- exactly which labelled ID the two lost tags sat on -- is not
+established, and with the daemon's event history already flushed there is no path to establishing
+it retrospectively for the disappearances that already happened; the `docker events` capture this
+script now writes is what will attribute the next one. Recorded here and escalated; the fix to
+`prune_stale_test_resources` is not made in this section.
+
+**The rebuild, and what it measured.** The base was restored by `docker pull
+ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc` (question
+154's permitted build-fetch window, the same one R5.3 used) -- the pulled digest matched the
+Dockerfile's own pin exactly -- and the image rebuilt with `services/cfs/build-image.sh`.
+
+- New image ID: `sha256:c1b727066421202082991afb8e2697d65571e796166f70cb7510a76cad273b0f`
+  (recorded above). The previous pin,
+  `sha256:b1300c6fd3c0e323feae1be0db3f3c4b740ea84229c510ceaae7ee0ed5f8ad12`, is superseded.
+- Runtime-content hash:
+  `sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef` -- **identical to
+  R5.3's own value**, and now confirmed across the strongest perturbation anyone has applied to
+  it: the base image itself was evicted from this host and re-pulled from the registry between
+  the two measurements. That is a fourth independent confirmation, by a third code path, that
+  the runtime-content hash is stable while the whole-image digest is not -- the evidence question
+  190's decision rests on.
+- `services/cfs/build-image.sh` run a second time immediately afterwards produced the
+  **identical** image ID `sha256:c1b7270664...`, so this pin is stable against a re-run and not
+  an artefact of one invocation.
+- `services/cfs/IMAGE_CONTEXT_MANIFEST.txt` regenerated: 38 entries, unchanged in count.
+
+**A defect in this round's own `docker events` capture, found in review and fixed.** The first
+real capture wrote 93 events of which **72 (77%) were `exec_create`/`exec_start`/`exec_die` from
+unrelated always-on containers' health checks on this shared host**, burying the image events the
+capture exists to preserve at roughly 4:1. `stop_events_capture` now drops those actions (and
+`health_status`) when it finalises the log, never dropping an image event whatever its action --
+an exec inside an already-running container cannot tag, untag or delete an image. Measured after
+the fix on a real run: **6 of 78 captured events kept**, and the one `image tag` event for
+`altavista-cfs-lockstep:local` is among them, which is precisely the class of event an untag has
+to be attributed against. The filtering deliberately happens at finalisation rather than in a
+pipe, because `$!` on a pipeline names the last command, so killing it would have left `docker
+events` itself running as an orphan.
 
 **Manifest regeneration, 2026-09-09 (round-5 manager's acceptance run), and what it measured.**
 R5.3's own last edit to `services/cfs/build/targets.cmake` was a documentation-only comment
@@ -157,6 +249,87 @@ test_image_digest.py` no longer builds anything: it inspects an already-built im
 visibly (naming `build-image.sh`) when Docker is absent or the image is not built, and on a
 mismatch prints which manifest entries changed so drift is attributable rather than merely
 detected. A second, non-Docker-gated test asserts the manifest itself is still accurate.
+
+## R6.4 (`docs/open-questions.md` question 190's bounded BuildKit experiment; question 194's
+## `docker events` record): no re-pin -- see `services/cfs/R6_4_REPORT.md` for the full account
+
+**Question 190's bounded experiment, run.** Question 190 (round 5, R5.3) authorized exactly one
+bounded experiment -- build with BuildKit, `SOURCE_DATE_EPOCH` set to a fixed recorded value, and
+a deterministic tar for the final `COPY --from=builder .../cpu1 /cfs/cpu1` layer, then compare two
+genuinely cold (`--no-cache`) builds' whole-image digests -- and, if it did not close the gap,
+retirement of the whole-image assertion with this question as the record. R6.4 checked this host's
+actual capability *before* building anything, per the question's own instruction: `docker version`
+(Client 29.6.2 / Server 29.5.2, Colima-backed), `docker buildx version` / `docker buildx ls` ->
+`unknown command: docker buildx`, `DOCKER_BUILDKIT=1 docker build` -> `ERROR: BuildKit is enabled
+but the buildx component is missing or broken`. A real, exhaustive search (`which buildx`, `~/
+.docker/cli-plugins/`, `brew list --formula`, a `find` across both Homebrew Cellar prefixes,
+`colima version`) found the `buildx` CLI plugin genuinely absent from this host and not
+installable without a network fetch, which this round's constraints forbid. **This host has zero
+BuildKit build capability** -- not merely a missing flag on an older `buildx`, but no BuildKit
+mechanism of any kind; the legacy (Docker's own words: "deprecated") builder is the only builder
+`docker build` can run here, and it has no `SOURCE_DATE_EPOCH`-aware frontend, no `--output` flag,
+and no deterministic-tar/timestamp-rewrite mechanism. No build was attempted with this
+configuration, because there is no configuration on this host that exercises what question 190
+asked to be tested -- a real, empirical "capability is missing" answer, per the question's own
+anticipation of that outcome, not an assumption. Full transcript:
+`services/cfs/R6_4_REPORT.md` section 3 (and its own cited scratch logs).
+
+**Consequently, per question 190's own decision: the whole-image digest assertion in
+`services/cfs/tests/test_image_reproducibility.py` is retired to reported-not-asserted.** The
+runtime-content hash assertion is unchanged -- still the one hard-asserted, always-on
+reproducibility guarantee. A whole-image mismatch is now printed (both digests, and, if they
+differ, the same dynamic per-`/cfs`-file diff as before) but never fails the test; the code
+comment at the assertion site names question 190 as the record. No `Dockerfile` or
+`build-image.sh` change was made for the experiment (there was nothing to build with), so **the
+currently-recorded digest and runtime-content hash above are unchanged and no re-pin was
+needed or attempted this round.**
+
+**Measurements for the record** (per question 190's "if they do not match" instruction), cited
+from R5.3's own already-real, already-captured two-`--no-cache`-build comparison (2026-09-09, the
+most recent one that exists for this Dockerfile -- R6.4 could not run a fresh pair; see the
+incident below):
+- Whole-image digest 1: `sha256:d568bd98b3f8...`; digest 2: `sha256:972df8296c38...` (differ).
+- Runtime-content hash, both builds: `sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef`
+  (MATCHED).
+- File-level diff (the exact check the test itself performs): **no file under `/cfs` differs
+  between the two images at all** -- the gap is confined to image metadata/OCI layer history, not
+  file content.
+- `docker history --no-trunc` / per-layer digest detail for this specific pair: **still not
+  available** -- R5.3's own test cleanup removed both disposable images before it could be
+  captured, and R6.4 could not reproduce a fresh pair either (see below). Recorded as an open item,
+  not fabricated.
+
+**Live incident discovered during R6.4, before any Docker-mutating command of my own: the
+officially pinned image AND its exact digest-pinned base image were both absent from this host's
+local Docker store.** `docker image inspect altavista-cfs-lockstep:local`, `docker image inspect
+ubuntu:22.04`, and `docker image inspect
+ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc` all returned
+"No such image". This is a live, **third** occurrence of the disappearance question 194 already
+tracks (the first two are recorded earlier in this file, R4.3's "Mid-task incident" and R5.3's
+"Rebuild from a cold cache" section), and this time it took the exact digest-pinned base reference
+too, not just a floating tag. A retrospective `docker events --since <2 hours ago>` query found
+only about 40 seconds of actual daemon history by the time it was run -- flushed by unrelated
+`cohort_backend` Supabase container health-check chatter sharing this daemon -- so no
+attribution was possible from inside this repository this time either, exactly as question 194
+already anticipated. **This blocked any real `docker build` of the actual `services/cfs/Dockerfile`
+this round** (resolving the pinned base digest right now would require a real network fetch,
+which this round's brief forbids and does not authorize) -- both the fresh Part-A measurements
+above and a full end-to-end test of Part B's `docker events` wrapper (below) against the real
+image could not be completed. **Escalated to the manager as the top priority of this round; full
+account in `services/cfs/R6_4_REPORT.md` sections 2 and 6.**
+
+**Question 194's `docker events` capture, added to `build-image.sh`.** See this file's own top
+section ("`docker events` capture") for the design, and `services/cfs/R6_4_REPORT.md` section 5
+for how it was verified given the incident above blocked a real end-to-end run: the exact function
+bodies now in `services/cfs/build-image.sh` were exercised, unmodified, against a trivial
+local-only (`python:3.13-slim`-based, no network) scratch build in three real, executed cases --
+normal (events genuinely captured, real `image`/`container` JSON lines recorded), events-capture
+start failure (real `chmod 000` on the log directory -> a `WARNING` printed, build still succeeded)
+and build failure (a real bad `RUN` command -> the build's own real failure text surfaced, exit
+code propagated correctly via the trap's saved `$?`, not swallowed, and the events log still
+contained the partial capture up to the failure). Not yet verified against the real,
+multi-minute, many-layer `services/cfs/Dockerfile` build -- recorded as the next thing to confirm
+once the incident above is resolved.
 
 ## Re-pinned 2026-09-09 (R5.3, `docs/open-questions.md` question 185): what changed and why
 

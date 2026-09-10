@@ -51,8 +51,8 @@ the manager's review"): three image-content changes landed on top of the questio
 cFE's unit-test/coverage build turned off (services/cfs/build/targets.cmake), `-Wl,--build-id=
 none` added to the native_std link flags (services/cfs/build/global_build_options.cmake), and
 both Dockerfile stages pinned to one digest-identified `ubuntu:22.04` base with the final stage's
-`apt-get install libc6` removed entirely. Two assertions now exist, and the manager's amendment
-is explicit that the second does not replace or narrow the first:
+`apt-get install libc6` removed entirely. Two checks exist below; question 185's amendment is
+explicit that the second must never narrow or replace the first:
 
   1. The RUNTIME-CONTENT HASH (question 185's own term): SHA-256 over the sorted
      "<path> <sha256>" lines for every file this image actually ships and runs --
@@ -61,16 +61,25 @@ is explicit that the second does not replace or narrow the first:
      services/cfs/IMAGE_DIGEST.md's own "Runtime-content hash" section for the canonical
      definition this file's `runtime_content_hash()` independently re-implements (question 164's
      captured-artifact precedent for TWO independent implementations of one defined algorithm --
-     services/cfs/build-image.sh has the other, in bash). This is an ADDITIONAL, ALWAYS-ON
-     assertion: it must hold even when the whole-image digest below does not yet match, and it
-     is not a substitute for that stricter check.
-  2. The WHOLE-IMAGE DIGEST (the original, question-182-era assertion below): stays exactly as
-     strict as before -- a straight `docker image inspect ... .Id` comparison, no narrowing to
-     the runtime set. It is expected to pass now that all three question-185 causes are fixed;
-     if it still fails, the failure message below diffs every file under `/cfs` between the two
-     images and NAMES which ones differ and whether each is inside the runtime-content set or
-     not, rather than repeating R4.3's now-possibly-stale prose about causes that may already be
-     fixed.
+     services/cfs/build-image.sh has the other, in bash). This is the STANDING, ALWAYS-ON,
+     HARD-ASSERTED reproducibility guarantee (question 190's decision): it must hold even though
+     the whole-image digest below no longer is asserted, and it is never weakened.
+  2. The WHOLE-IMAGE DIGEST (the original, question-182-era assertion): question 185 (R5.3) found
+     a third, OCI-layer-shaped non-determinism cause in the multi-file `COPY --from=builder
+     .../cpu1 /cfs/cpu1` layer, with the runtime-content hash already matching and the file-level
+     diff below showing NO file under `/cfs` differs -- i.e. the mismatch is confined to image
+     metadata/layer history, not file content. Question 190 authorized exactly one bounded
+     experiment (BuildKit + `SOURCE_DATE_EPOCH` + a deterministic tar for that layer) to try to
+     close that gap, and retirement of this assertion to REPORTED-NOT-ASSERTED if it didn't.
+     R6.4 ran that experiment (see `services/cfs/R6_4_REPORT.md` section 3): this host has ZERO
+     BuildKit capability (Docker CLI's `buildx` plugin component is entirely absent and cannot be
+     installed without network, which this task forbids) -- there is no configuration on this
+     host that can even attempt `SOURCE_DATE_EPOCH`/deterministic-tar, so the gap could not be
+     closed. Per question 190's own decision, this assertion is now **retired to
+     reported-not-asserted**: both digests and, when they differ, the same dynamic per-file diff
+     as before are always printed, but a mismatch no longer fails this test. See
+     `services/cfs/R6_4_REPORT.md` section 3 and `services/cfs/IMAGE_DIGEST.md` for the full
+     record.
 """
 from __future__ import annotations
 
@@ -271,18 +280,35 @@ def test_two_independent_builds_produce_the_same_image_id() -> None:
                 f"Files differing under /cfs (runtime-set membership marked):\n{diff}"
             )
 
-        # Assertion 2 (the original, question-182-era check): the whole-image digest, still just
-        # as strict as before -- no narrowing to the runtime set.
-        assert digest_1 == digest_2, (
-            f"two independent `docker build --no-cache` runs of {DOCKERFILE} produced DIFFERENT "
-            f"whole-image IDs ({digest_1!r} vs {digest_2!r}) even though the runtime-content "
-            "hash MATCHED (sha256:" + rc_hash_1 + ") -- every file the image actually ships and "
-            "runs is byte-identical between the two builds, so this difference is confined to "
-            "something outside the runtime-content set (or to image metadata/layer history, not "
-            "file content at all). Files differing under /cfs (runtime-set membership marked; "
-            "empty if the cause is metadata-only):\n"
-            + _describe_cfs_file_diff(_all_cfs_file_hashes(tag_1), _all_cfs_file_hashes(tag_2))
-        )
+        # Check 2 (question 190, RETIRED to reported-not-asserted -- see this module's own
+        # docstring amendment and services/cfs/R6_4_REPORT.md section 3 for the full record):
+        # the whole-image digest was the original, question-182-era hard assertion, but R5.3
+        # found it stays non-reproducible for a third, OCI-layer-shaped reason (the multi-file
+        # `COPY --from=builder .../cpu1 /cfs/cpu1` layer) even with the runtime-content hash
+        # matching and no file under /cfs differing -- a metadata/layer-history-only gap. Question
+        # 190 authorized one bounded BuildKit + SOURCE_DATE_EPOCH experiment to try to close it,
+        # with retirement to reported-not-asserted if it didn't; R6.4 found this host has NO
+        # BuildKit capability at all (the `buildx` CLI plugin component is absent and cannot be
+        # installed without network), so the experiment could not even be attempted, let alone
+        # close the gap. This is therefore reported, never asserted -- a whole-image mismatch is
+        # NOT a test failure. The runtime-content hash above remains the one hard-asserted,
+        # always-on reproducibility guarantee.
+        if digest_1 != digest_2:
+            print(
+                f"whole-image digest DIFFERS between two independent `docker build --no-cache` "
+                f"runs of {DOCKERFILE} ({digest_1!r} vs {digest_2!r}) even though the "
+                "runtime-content hash MATCHED (sha256:" + rc_hash_1 + ") -- every file the image "
+                "actually ships and runs is byte-identical between the two builds, so this "
+                "difference is confined to something outside the runtime-content set (or to "
+                "image metadata/layer history, not file content at all). This is REPORTED, NOT "
+                "ASSERTED (docs/open-questions.md question 190 -- see services/cfs/R6_4_REPORT.md "
+                "section 3 for why the one bounded BuildKit experiment question 190 allowed could "
+                "not close this gap on this host). Files differing under /cfs (runtime-set "
+                "membership marked; empty if the cause is metadata-only):\n"
+                + _describe_cfs_file_diff(_all_cfs_file_hashes(tag_1), _all_cfs_file_hashes(tag_2))
+            )
+        else:
+            print(f"whole-image digest MATCHED: sha256:{digest_1}")
     finally:
         _docker_rmi(tag_1)
         _docker_rmi(tag_2)
