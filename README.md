@@ -162,6 +162,25 @@ Options common to both: `frame` (`EarthMJ2000Eq`, `SunMJ2000Ec`, `MarsInertial`,
 `sc.save("scenario.json")` writes the same JSON the browser receives;
 `gv.set_clock(t, playing=True, speed=600)` drives every browser's clock from Python.
 
+## Feasibility studies
+
+A study sweeps a DRM over declared axes (parameter values or event values, explicit lists or
+`min..max` in steps) with dispersed draws per point, runs each sample in its own process
+through the kernel, and aggregates the scores per point. Declare it from Python
+(`altavista.feasibility.SweepDeclaration`, `SweepAxis.parameter_axis`, `SweepAxis.event_axis`),
+or write the YAML by hand; either way the sweep is hashed like the DRM. `run_study(...)`
+launches the `av-sweep` binary (`--sweep --drm --sos --system ... --out-dir --workers N`,
+`--store-dir` for the file-backed study store) and returns the `SweepResults` it wrote.
+Each sample records its seeds and config hash, so any sample re-runs alone, byte for byte,
+with `av-sweep --run-sample`. `POST /api/cdm/sweep` publishes the results; a sweep scenario
+opens in the study layout, with the feasibility panel showing the grid coloured by a score
+and each point's distribution across draws. The worked example is
+`docs/studies/drag-sail-vs-burn.md`:
+
+```bash
+.venv/bin/python altavista/feasibility/study_drag_sail_vs_burn.py --grid both --out-dir /path/to/out
+```
+
 ## Viewer
 
 * Left panel: pick a published scenario, toggle spacecraft/bodies, jump to events,
