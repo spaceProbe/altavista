@@ -8,6 +8,9 @@ target/
 third_party/gmat-src/
 third_party/cspice/
 third_party/cfs/
+# Local bare mirrors fetch-cfs.sh records at fetch time (question 196(c)) -- recreated by
+# third_party/fetch-cfs.sh (CFS_MIRROR_DIR overrides), never a source.
+third_party/mirrors/
 .DS_Store
 # GMAT run products
 GMAT*/output/

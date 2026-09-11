@@ -103,7 +103,14 @@ WORKDIR /build
 COPY third_party/fetch-cfs.sh third_party/fetch-cfs.sh
 # The one permitted network window (question 154): clones the pinned cFS bundle
 # (third_party/fetch-cfs.sh's own header comment records the exact commit and why).
-RUN sh third_party/fetch-cfs.sh
+#
+# CFS_MIRROR_DIR is pointed at a /tmp scratch path (question 196(c)'s local bare mirror --
+# fetch-cfs.sh's own header comment explains the mechanism) and removed at the end of this SAME
+# RUN line, so the mirror never lands in this layer's diff and the image does not grow by the
+# several hundred MB a full set of bare mirrors would otherwise add -- this build never benefits
+# from the mirror across runs anyway (a fresh, cache-busted `docker build` gets a fresh container
+# filesystem each time), so there is nothing worth keeping it around for here.
+RUN CFS_MIRROR_DIR=/tmp/cfs-mirror sh third_party/fetch-cfs.sh && rm -rf /tmp/cfs-mirror
 
 COPY services/cfs/apps/io_lockstep third_party/cfs/apps/io_lockstep
 COPY services/cfs/apps/sch_lockstep third_party/cfs/apps/sch_lockstep

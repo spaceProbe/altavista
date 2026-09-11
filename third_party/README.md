@@ -11,3 +11,14 @@ Sources fetched for building, not vendored in git.
 The GMAT binaries themselves live in the install next to this repo (`GMAT R2026a/`, override
 with `GMAT_ROOT`); the shim links `libGmatBase` and `libGmatUtil` from the app bundle's
 `Frameworks` folder (`GMAT_LIB` overrides).
+
+## cFS local mirror (question 196(c))
+
+`fetch-cfs.sh` records a local bare mirror of each of the seven pinned cFS repos (the bundle plus
+`cfe`/`osal`/`psp`/`tools/tblCRCTool`/`tools/elf2cfetbl`/`tools/commandline-tools`) under
+`third_party/mirrors/<name>.git` (`CFS_MIRROR_DIR` overrides). That directory is gitignored --
+fetched, never committed, same convention as `third_party/cfs/` itself. The mirror is only ever
+cloned from `github.com` the FIRST time a given host runs `sh third_party/fetch-cfs.sh` and does
+not already have it (the one-time network window question 154 permits); every fetch after that,
+and `services/cfs/tests/test_clean_fetch_patches.py`, clones from the local mirror path and never
+touches the network.

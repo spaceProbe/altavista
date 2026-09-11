@@ -20,3 +20,8 @@ node_modules/
 web/node_modules/
 **/__pycache__/
 **/*.pyc
+# Local bare git mirrors third_party/fetch-cfs.sh records at fetch time (question 196(c)) --
+# services/cfs/Dockerfile points CFS_MIRROR_DIR at a /tmp scratch path for its own in-container
+# fetch and removes it in the same RUN layer, but a host that already has this directory (from a
+# developer's own prior host-side fetch) should not have it dragged into the build context either.
+third_party/mirrors/

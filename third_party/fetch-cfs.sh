@@ -12,6 +12,27 @@
 # runs this script itself during `docker build`, which is the same permitted network window.
 #
 # ---------------------------------------------------------------------------------------------
+# Local bare mirror (question 196(c))
+# ---------------------------------------------------------------------------------------------
+# Every one of the seven repos below (the bundle plus cfe/osal/psp/tools/*) is mirrored once,
+# as a bare repo, under $CFS_MIRROR_DIR (default third_party/mirrors/<name>.git, gitignored --
+# never committed, same as third_party/cfs itself). `ensure_mirror` below clones a repo's mirror
+# only if it is missing, or fetches it only if the pinned commit this script wants is not yet in
+# it -- both are the SAME one-time network window question 154 already permits, just amortized:
+# the FIRST fetch on a given host pays for it, every later fetch (and services/cfs/tests/
+# test_clean_fetch_patches.py, which asserts this directly) is network-free because every
+# working clone below is done FROM the local mirror path, never from the https:// URL.
+#
+# Inside `services/cfs/Dockerfile`'s image build: that RUN line points CFS_MIRROR_DIR at a
+# scratch path under /tmp and removes it in the same RUN (same shell invocation, same resulting
+# layer) once this script exits -- so the mirror never becomes part of any image layer's diff,
+# builder stage included, regardless of whether a future change makes this a single-stage build.
+# (As of this writing the build is already multi-stage and only copies out the compiled cpu1
+# binary, so the mirror would not reach the final image either way -- the /tmp + same-layer
+# cleanup is belt-and-suspenders against that assumption changing.) See that Dockerfile's RUN
+# line for the exact command.
+#
+# ---------------------------------------------------------------------------------------------
 # Why this commit (question 148's research note)
 # ---------------------------------------------------------------------------------------------
 # Pinned: the nasa/cFS bundle tag v7.0.1, and the exact submodule commits that tag's
@@ -62,6 +83,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # in-place location so every existing caller (services/cfs/Dockerfile, developers running this
 # by hand) is unaffected.
 dest="${CFS_FETCH_DEST:-$here/cfs}"
+# CFS_MIRROR_DIR overrides where the local bare mirrors (question 196(c), see the header comment
+# above) live; defaults to third_party/mirrors, a sibling of third_party/cfs.
+mirror_dir="${CFS_MIRROR_DIR:-$here/mirrors}"
 
 BUNDLE_COMMIT="088b2fa828db9ff7e00733f1908e0eeb59f66ce3"
 CFE_COMMIT="c5fb2b4d540bd55eb6c3707da7dd13eee679d4dd"
@@ -90,8 +114,34 @@ if [ -f "$dest/cfe/cmake/Makefile.sample" ] && [ -f "$dest/osal/src/os/posix/src
     exit 0
 fi
 
+# Ensures a local bare mirror of $2 (a github URL) exists at $mirror_dir/$1.git and contains
+# commit $3, touching the network only if the mirror is missing entirely or does not yet have
+# that commit (question 196(c)'s one-time-per-host window); prints the resulting mirror path on
+# stdout (nothing else goes to stdout, so `mirror="$(ensure_mirror ...)"` captures cleanly).
+ensure_mirror() {
+    _name="$1"
+    _url="$2"
+    _commit="$3"
+    _mirror="$mirror_dir/$_name.git"
+    if [ ! -d "$_mirror" ]; then
+        mkdir -p "$(dirname "$_mirror")"
+        echo "no local mirror for $_name yet -- cloning $_url into $_mirror (one-time network fetch)" >&2
+        git clone --mirror "$_url" "$_mirror"
+    fi
+    if ! git -C "$_mirror" cat-file -e "$_commit^{commit}" 2>/dev/null; then
+        echo "mirror $_mirror does not yet have $_commit -- fetching (one-time network fetch)" >&2
+        git -C "$_mirror" fetch --quiet origin
+        if ! git -C "$_mirror" cat-file -e "$_commit^{commit}" 2>/dev/null; then
+            echo "fetch-cfs.sh: mirror $_mirror does not contain pinned commit $_commit for $_name, even after fetching origin" >&2
+            exit 1
+        fi
+    fi
+    printf '%s\n' "$_mirror"
+}
+
 rm -rf "$dest" "$dest.tmp"
-git clone --no-checkout "$BUNDLE_URL" "$dest.tmp"
+bundle_mirror="$(ensure_mirror bundle "$BUNDLE_URL" "$BUNDLE_COMMIT")"
+git clone --no-checkout "$bundle_mirror" "$dest.tmp"
 (
     cd "$dest.tmp"
     git checkout --quiet "$BUNDLE_COMMIT"
@@ -109,7 +159,8 @@ for pair in "cfe|$CFE_URL|$CFE_COMMIT" "osal|$OSAL_URL|$OSAL_COMMIT" "psp|$PSP_U
     url="${rest%%|*}"
     commit="${rest#*|}"
     rmdir "$dest.tmp/$name" 2>/dev/null || rm -rf "${dest:?}.tmp/${name:?}"
-    git clone --no-checkout "$url" "$dest.tmp/$name"
+    mirror="$(ensure_mirror "$name" "$url" "$commit")"
+    git clone --no-checkout "$mirror" "$dest.tmp/$name"
     ( cd "$dest.tmp/$name" && git checkout --quiet "$commit" )
     actual="$(cd "$dest.tmp/$name" && git rev-parse HEAD)"
     if [ "$actual" != "$commit" ]; then
