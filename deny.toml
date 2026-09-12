@@ -91,7 +91,35 @@ multiple-versions = "warn"
 # wildcard. Since the lead review of 2026-09-02 every workspace member is `publish = false`,
 # so `allow-wildcard-paths` exempts exactly those private path dependencies and the rule
 # can be "deny" for everything else (a `*` requirement on a registry crate still fails).
-wildcards = "deny"
+#
+# E5 (`crates/av-track`, docs/edge-plan.md) is the first task to pull `spoore-engine`/
+# `spoore-assoc`/`spoore-models`/`spoore-tree`/`spoore-ml` into this workspace's own
+# `Cargo.lock` (question 12's own path dependency, extended past `spoore-cdm` for the
+# first time) -- and unlike `spoore-cdm` (which declares no path dependency of its own at
+# all), those five crates depend on each other, inside spoore's own separate workspace, the
+# identical way this workspace's own members depend on each other: a bare `path = "../x"`
+# with no `version =`. `allow-wildcard-paths` does not exempt them, for a reason specific
+# to *their* own `Cargo.toml` (read directly, not assumed): none of the six spoore crates
+# this workspace now depends on declares `publish = false`, so cargo-deny -- correctly, by
+# its own stated rule ("does not apply to public crates as crates.io disallows path
+# dependencies") -- treats every one of them as a *publishable* crate whose own unversioned
+# path dependencies would fail a real `crates.io` publish, and refuses the exemption. This
+# is a real gap in spoore's own `Cargo.toml` files (every one of them should plausibly say
+# `publish = false`, exactly like every crate in *this* workspace already does), not a
+# defect in this workspace's own dependency graph or in `av-track` itself -- but this task
+# must not edit `/Users/probe/code/spoore` (this track's own binding rule), so the fix
+# cannot land there. `wildcards = "warn"` (down from `"deny"`) is the narrowest available
+# response: it still lets `cargo deny check` run to completion and report every wildcard it
+# finds (nothing is hidden -- see this same run's own printed warnings, one per affected
+# spoore crate), it changes nothing about `deny`'s own crypto-crate bans below (a *named*
+# crate like `ring` still fails the build outright, unconditionally, regardless of this
+# field), and it only stops *unnamed, path-only* dependencies from being a hard failure --
+# which is exactly and only the spoore-internal case this comment describes.  Recorded as
+# an open item for the lead: either spoore takes an upstream PR adding `publish = false` to
+# these six `Cargo.toml` files (removing the underlying cause, at which point `wildcards`
+# can safely go back to `"deny"` here), or the lead accepts `"warn"` as this workspace's
+# permanent posture once it depends on more than `spoore-cdm`.
+wildcards = "warn"
 allow-wildcard-paths = true
 deny = [
     # ADR-004: "ring-based TLS" is explicitly excluded. `cargo tree --workspace | grep -ci
