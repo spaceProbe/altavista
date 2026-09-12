@@ -84,11 +84,26 @@ pub fn sign_batch(batch: &mut pb::MeasurementBatch, prev_hash: &[u8], key: &EcKe
     Ok(())
 }
 
+/// [`sign_batch`], for an E2 caller that has a verified seccert identity: sets
+/// `batch.signer_cert_sha256` to `fingerprint_sha256` (`crate::identity::EdgeIdentity::
+/// fingerprint_sha256` -- lowercase hex SHA-256 of the leaf certificate's DER encoding)
+/// *before* signing, so the fingerprint is covered by the same signature as every other
+/// field -- `hash::canonical_body_bytes` does not clear `signer_cert_sha256`, unlike
+/// `batch_hash`/`signature` themselves. This does nothing [`sign_batch`] does not also
+/// do, beyond setting that one field first; E1's own callers (which have no certificate
+/// in the loop yet) keep calling [`sign_batch`] directly and `signer_cert_sha256` stays
+/// exactly whatever it already was (empty, for every E1 fixture and golden batch).
+pub fn sign_batch_with_signer(batch: &mut pb::MeasurementBatch, prev_hash: &[u8], key: &EcKeyRef<Private>, fingerprint_sha256: &str) -> Result<(), SigningError> {
+    batch.signer_cert_sha256 = fingerprint_sha256.to_string();
+    sign_batch(batch, prev_hash, key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TEST_KEY_PEM: &[u8] = include_bytes!("../tests/fixtures/test_signing_key.pem");
+    const TEST_PUB_PEM: &[u8] = include_bytes!("../tests/fixtures/test_signing_key.pub.pem");
 
     #[test]
     fn load_signing_key_accepts_the_committed_p384_test_key() {
@@ -119,5 +134,21 @@ mod tests {
         assert_eq!(batch.prev_hash, hash::GENESIS);
         assert_eq!(batch.batch_hash.len(), 32);
         assert!(!batch.signature.is_empty());
+    }
+
+    #[test]
+    fn sign_batch_with_signer_sets_the_fingerprint_and_covers_it_with_the_signature() {
+        let key = load_signing_key(TEST_KEY_PEM).unwrap();
+        let mut batch = pb::MeasurementBatch { producer_id: "p1".to_string(), sequence: 1, ..Default::default() };
+        sign_batch_with_signer(&mut batch, hash::GENESIS, &key, "deadbeef").unwrap();
+        assert_eq!(batch.signer_cert_sha256, "deadbeef");
+
+        // The fingerprint is part of the signed body: changing it after signing must
+        // invalidate the recomputed hash exactly like tampering with any other field.
+        let verify_key = crate::verify::load_verifying_key(TEST_PUB_PEM).unwrap();
+        crate::verify::verify_batch(&batch, &verify_key).expect("freshly signed batch must verify");
+        let mut tampered = batch.clone();
+        tampered.signer_cert_sha256 = "0000".to_string();
+        assert!(crate::verify::verify_batch(&tampered, &verify_key).is_err(), "changing signer_cert_sha256 after signing must invalidate the signature");
     }
 }

@@ -75,9 +75,18 @@
 //!   and returns the first defect's sequence, mirroring
 //!   `av-dynamics-service/src/evidence.rs::EvidenceLog::verify`'s `ChainVerification`
 //!   shape.
+//! - [`identity`] -- milestone E2: [`identity::TrustAnchors`] (the two-tier Root as the
+//!   *only* trust anchor, ADR-004) and [`identity::verify_identity`], which verifies a
+//!   seccert-issued leaf against it at a caller-injected TAI instant and hands back an
+//!   [`identity::EdgeIdentity`] -- an EC P-384 public key and SHA-256 fingerprint E1's
+//!   [`verify::verify_batch`] and `MeasurementBatch.signer_cert_sha256` consume directly.
+//!   [`identity::verify_batch_signed_by`] is the E1/E2 bridge: it checks a batch's
+//!   declared `signer_cert_sha256` against a verified identity's own fingerprint before
+//!   ever spending a signature verification on it.
 
 pub mod chain;
 pub mod hash;
+pub mod identity;
 pub mod policy;
 pub mod sign;
 pub mod verify;
