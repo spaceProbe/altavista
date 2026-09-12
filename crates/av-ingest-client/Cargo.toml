@@ -1,0 +1,40 @@
+[package]
+name = "av-ingest-client"
+publish = false
+description = "E3b (docs/edge-plan.md milestone E3, question 202): a tonic client for altavista.v1.EdgeIngest -- the wire contract crates/av-ingest's server speaks (Announce/Submit/GetEvidence/VerifyLedger). Its own small protoc/tonic-build pass, extern_path'd onto av_cdm::pb exactly like crates/av-ingest's own server-side build.rs (see this crate's lib.rs module doc for why this deviates from crates/av-lockstep's 'reuse av-grpc's pb module' precedent: av-grpc's own build.rs does NOT extern the whole altavista.v1 package onto av_cdm::pb, only Port/PortMessage, so reusing it here would hand every call site a second, independently-generated, nominally-distinct MeasurementBatch/PluginManifest type instead of the one av-edge/av-ingest already share). A plaintext loopback connector only, refusing a non-loopback endpoint at connect time; E4's plugin binary and this track's own wire_*.rs tests are its only two callers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `altavista.v1::pb::{MeasurementBatch, BatchVerdict, PluginManifest, ManifestAck,
+# EvidenceRequest/Response, VerifyRequest/Response, ...}` -- the shared prost build,
+# reached through av-edge's own `pub use av_cdm::pb` re-export, exactly like
+# `crates/av-ingest` itself.
+av-edge = { path = "../av-edge" }
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+# This crate's generated `edge_ingest_client` module names `::prost_types::Any` literally
+# wherever `google.protobuf.Any` appears -- see build.rs's `.extern_path`.
+prost-types.workspace = true
+thiserror.workspace = true
+
+# tonic, default features off, "channel" only (never "server", never "tls"/"tls-native-
+# roots"/"tls-webpki-roots" -- those pull `tokio-rustls` -> `ring`, forbidden by ADR-004's
+# crypto rule). This crate is a client only, never a server; plaintext loopback (h2c) needs
+# no TLS stack at all, matching `crates/av-lockstep`'s own `connect_plaintext` precedent.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+# `submit_batches` turns an already-collected `Vec<MeasurementBatch>` into the `Stream`
+# tonic's generated streaming-request signature wants -- see crates/av-ingest/Cargo.toml's
+# identical comment; both crates already have this pulled in transitively via `tonic`.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

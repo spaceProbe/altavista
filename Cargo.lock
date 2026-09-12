@@ -147,10 +147,35 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-edge",
+ "av-ingest-client",
+ "futures-core",
+ "futures-util",
  "openssl",
  "prost",
+ "prost-build",
+ "prost-types",
  "serde_json",
  "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "av-ingest-client"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-edge",
+ "futures-util",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "thiserror",
+ "tokio",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

@@ -106,12 +106,15 @@ impl IngestOutcome {
 /// is reserved for failures `Ingest` itself cannot classify as a verdict at all.
 #[derive(Debug, thiserror::Error)]
 pub enum IngestError {
-    /// [`Signer::Certificate`] was used, but this `Ingest` was constructed with no
-    /// [`TrustAnchors`] to verify it against.
+    /// [`Signer::Certificate`] was used, or [`Ingest::verify_identity_once`] was called,
+    /// but this `Ingest` was constructed with no [`TrustAnchors`] to verify against.
     #[error("a certificate was presented but this Ingest has no configured TrustAnchors")]
     NoTrustAnchors,
     #[error(transparent)]
     Log(#[from] LogError),
+    /// [`Ingest::verify_identity_once`]'s own refusal -- see that method's doc comment.
+    #[error(transparent)]
+    Identity(#[from] IdentityRejection),
 }
 
 /// The ingest pipeline: one directory of per-partition logs, one `av_edge::chain::
@@ -254,18 +257,49 @@ impl Ingest {
     /// submitted producer has -- matching `ChainVerifier`'s own "a fresh producer's
     /// counters start at all zeros" contract, extended to a producer this `Ingest` knows
     /// about but `ChainVerifier` has not seen yet.
+    ///
+    /// Question 202's uniformity change: `shard_mismatch_count` (`edge.proto` field 12) is
+    /// folded in here from this crate's own internal `shard_mismatch_counts` map before
+    /// the value is ever handed to a caller -- "as well as" keeping that map as the actual
+    /// counting mechanism, not "instead of" it. `av_edge::chain::ChainVerifier` never
+    /// learns about `SHARD_MISMATCH` at all (see this module's own doc and `av_edge::
+    /// chain::bump_counter`'s deliberately-unreachable `ShardMismatch` arm): folding the
+    /// count in only at this read boundary means every caller of this method -- in-process
+    /// tests, `crate::evidence::evidence`, and E3b's `GetEvidence`/`GET /admin/api/
+    /// evidence` alike -- sees exactly one `RejectionCounters` shape with all nine kinds
+    /// present, while `ChainVerifier`'s own eight-kind match stays exhaustive and
+    /// untouched by a check that structurally happens before it ever runs.
     pub fn producer_counters(&self, producer_id: &str) -> pb::RejectionCounters {
-        self.chain.counters(producer_id).cloned().unwrap_or_else(|| pb::RejectionCounters {
+        let mut counters = self.chain.counters(producer_id).cloned().unwrap_or_else(|| pb::RejectionCounters {
             producer_id: producer_id.to_string(),
             chain_head: av_edge::hash::GENESIS.to_vec(),
             ..Default::default()
-        })
+        });
+        counters.shard_mismatch_count = self.shard_mismatch_count(producer_id);
+        counters
     }
 
-    /// This producer's `SHARD_MISMATCH` count (kept outside `av_edge::pb::
-    /// RejectionCounters` -- see this module's own doc and `crate::log`'s doc for why).
+    /// This producer's `SHARD_MISMATCH` count, from this crate's own internal bookkeeping
+    /// -- see [`Ingest::producer_counters`]'s doc for why this map still exists even
+    /// though the count it holds also now appears on `pb::RejectionCounters` itself.
     pub fn shard_mismatch_count(&self, producer_id: &str) -> u64 {
         self.shard_mismatch_counts.get(producer_id).copied().unwrap_or(0)
+    }
+
+    /// Verifies `leaf_pem` against this `Ingest`'s own configured [`TrustAnchors`] at
+    /// `now_tai_ns`, bumping this `Ingest`'s own [`IdentityCounters`] by exactly one
+    /// either way -- the same counters [`Ingest::submit`]'s own [`Signer::Certificate`]
+    /// path increments. Exists for `crates/av-ingest::service`'s `Announce` handler
+    /// (E3b, question 202), which verifies a plugin's certificate identity exactly once
+    /// per `Announce` call (that module's own doc comment explains why: once per batch,
+    /// `Signer::Certificate`'s own re-verification cost, would be the wrong amortization
+    /// for a live stream) and then reuses the resulting key via [`Signer::Key`] for every
+    /// subsequent batch -- this method is what lets that one verification still land in
+    /// `producer_counters`/`crate::evidence::evidence` exactly as if it had gone through
+    /// [`Ingest::submit`] itself.
+    pub fn verify_identity_once(&mut self, leaf_pem: &[u8], chain_pem: Option<&[u8]>, now_tai_ns: i64) -> Result<identity::EdgeIdentity, IngestError> {
+        let anchors = self.anchors.as_ref().ok_or(IngestError::NoTrustAnchors)?;
+        identity::verify_identity(leaf_pem, chain_pem, anchors, now_tai_ns, &mut self.identity_counters).map_err(IngestError::from)
     }
 
     /// The aggregate identity counters (`av_edge::identity::IdentityCounters`) -- not
