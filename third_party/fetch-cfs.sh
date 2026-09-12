@@ -15,7 +15,7 @@
 # Local bare mirror (question 196(c))
 # ---------------------------------------------------------------------------------------------
 # Every one of the seven repos below (the bundle plus cfe/osal/psp/tools/*) is mirrored once,
-# as a bare repo, under $CFS_MIRROR_DIR (default third_party/mirrors/<name>.git, gitignored --
+# as a bare repo holding branches and tags only (see `ensure_mirror`), under $CFS_MIRROR_DIR (default third_party/mirrors/<name>.git, gitignored --
 # never committed, same as third_party/cfs itself). `ensure_mirror` below clones a repo's mirror
 # only if it is missing, or fetches it only if the pinned commit this script wants is not yet in
 # it -- both are the SAME one-time network window question 154 already permits, just amortized:
@@ -126,11 +126,18 @@ ensure_mirror() {
     if [ ! -d "$_mirror" ]; then
         mkdir -p "$(dirname "$_mirror")"
         echo "no local mirror for $_name yet -- cloning $_url into $_mirror (one-time network fetch)" >&2
-        git clone --mirror "$_url" "$_mirror"
+        # --bare, not --mirror: a mirror's refspec is +refs/*:refs/*, which on GitHub drags in
+        # every refs/pull/* head -- measured on 2026-09-12 as 76% of the bundle's objects
+        # (11810 vs 2877 reachable from branches and tags), 20% of cfe's, 8% of osal's -- and
+        # every pinned commit above is reachable from a branch or tag. A bare clone brings
+        # branches and tags only; it sets no fetch refspec of its own, so one is written here
+        # for the refresh path below.
+        git clone --bare "$_url" "$_mirror"
+        git -C "$_mirror" config remote.origin.fetch '+refs/heads/*:refs/heads/*'
     fi
     if ! git -C "$_mirror" cat-file -e "$_commit^{commit}" 2>/dev/null; then
         echo "mirror $_mirror does not yet have $_commit -- fetching (one-time network fetch)" >&2
-        git -C "$_mirror" fetch --quiet origin
+        git -C "$_mirror" fetch --quiet --tags origin
         if ! git -C "$_mirror" cat-file -e "$_commit^{commit}" 2>/dev/null; then
             echo "fetch-cfs.sh: mirror $_mirror does not contain pinned commit $_commit for $_name, even after fetching origin" >&2
             exit 1

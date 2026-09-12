@@ -78,20 +78,38 @@ one is unlikely to be masked by the same bug in the other):
   on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
   network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-09-09 by the round-6 manager after the **third** disappearance of
-this tag, see "Re-pinned 2026-09-09 (round 6, after the third tag disappearance)" below for what
-was rebuilt, what it measured, and what has now been root-caused about the disappearances
-themselves -- `third_party/cfs` still pinned at
+Recorded digest (re-pinned 2026-09-12 by the lead for the mirror-backed fetch, see "Re-pinned
+2026-09-12 (round 7, mirror-backed fetch)" below -- `third_party/cfs` still pinned at
 `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:c1b727066421202082991afb8e2697d65571e796166f70cb7510a76cad273b0f
+sha256:9f5b1a537d34d11dffb27d6473c6d836311ddaba0b11c6512ee29ad918f0fde7
 ```
 
-Recorded runtime-content hash for this pin (question 185, see the definition above):
+Recorded runtime-content hash for this pin (question 185, see the definition above; unchanged
+by the 2026-09-12 re-pin, which is the point of that hash):
 ```
 sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef
 ```
+
+## Re-pinned 2026-09-12 (round 7, mirror-backed fetch)
+
+**What changed.** Question 196(c): `third_party/fetch-cfs.sh` now clones every pinned repo from
+a local bare mirror (branches and tags only) and the Dockerfile's fetch step keeps that mirror
+under `/tmp` and removes it in the same `RUN`. The image ID moves because that `RUN` line's
+text is part of the layer's identity; nothing that reaches the runtime changed, and the
+runtime-content hash above is byte-identical to the 2026-09-09 pin (measured by
+`build-image.sh` at the rebuild, `5049bf8f…`). The previous recorded digest was
+`sha256:c1b727066421202082991afb8e2697d65571e796166f70cb7510a76cad273b0f`.
+
+**What it took.** Two builds on 2026-09-11 failed inside the container's clone of `osal` with
+`curl 56 GnuTLS recv error` and `fetch-pack: invalid index-pack output` (a network fault at the
+build's one permitted window, not a script defect: the same clone succeeded on the office
+network on 2026-09-12). A third build succeeded but was launched with `sh`, under which bash's
+POSIX mode rejects the script's process substitution only after the image is built, so the
+manifest was left stale while the exit code read 0; the script now refuses to run under `sh`
+and its exit trap exits with the real status. The fourth run, under `bash` and fully cached,
+wrote the manifest.
 
 ## Re-pinned 2026-09-09 (round 6, after the third tag disappearance)
 

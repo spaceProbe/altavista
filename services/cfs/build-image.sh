@@ -64,6 +64,19 @@
 # re-pin, update IMAGE_DIGEST.md's recorded digest and commit the manifest this script just
 # wrote alongside it.
 
+# This script is bash (arrays, process substitution below). Under `sh` (bash in POSIX mode on
+# macOS) the parser rejects line 230's `<(...)` only when it reaches it -- AFTER the image has
+# been built and the runtime-content hash logged, and before the manifest is written -- so a
+# `sh services/cfs/build-image.sh` run looked complete but left the manifest stale
+# (2026-09-12). Refuse up front instead; bash parses and runs a script command by command, so
+# this guard executes before the parser ever sees the process substitution. Bash invoked as
+# `sh` still sets BASH_VERSION, so POSIX mode is detected through `shopt -o posix` (and a
+# non-bash shell fails the first test, since `shopt` alone is not a POSIX builtin).
+if [ -z "${BASH_VERSION:-}" ] || shopt -qo posix 2>/dev/null; then
+    echo "build-image.sh: run this with bash (\`bash services/cfs/build-image.sh\` or execute it directly), not sh" >&2
+    exit 2
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -154,7 +167,10 @@ _cleanup_on_exit() {
     if [ -n "${TMP_MANIFEST}" ] && [ -f "${TMP_MANIFEST}" ]; then
         rm -f "${TMP_MANIFEST}"
     fi
-    return "${status}"
+    # `exit`, not `return`: a parse error or `die` must reach the caller as non-zero even
+    # after this trap has run its cleanup commands (question 148: an exit code is not evidence,
+    # but a wrong exit code is worse than none).
+    exit "${status}"
 }
 trap _cleanup_on_exit EXIT
 
