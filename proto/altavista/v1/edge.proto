@@ -100,6 +100,23 @@ message MeasurementBatch {
   // against its caller-injected clock; there is no wall-clock read anywhere on this path
   // (question 199).
   int64 batch_tai_ns = 10;
+
+  // The partition this batch belongs to (E3, `crates/av-ingest`'s durable, file-backed,
+  // per-partition log). Explicit and signed -- covered by `batch_hash`/`signature` like
+  // every other field -- rather than inferred from `measurements[*].shard_key`, for two
+  // reasons: (1) a batch is the signed unit, so it cannot be split across partitions
+  // after the fact, and a zero-measurement heartbeat batch (see `measurements`' own doc
+  // comment) would have no measurement to infer a partition from at all; (2) inferring
+  // the partition from the measurements would let a single tampered measurement silently
+  // move an entire batch to another partition without that move ever being checked
+  // against what the producer actually signed. The ingest boundary refuses a batch whose
+  // declared `shard_key` disagrees with any of its own measurements' own
+  // `Measurement.shard_key` (`BatchRejection.BATCH_REJECTION_SHARD_MISMATCH`) rather than
+  // trusting either one over the other. Left at its default (empty string) this field
+  // adds no bytes to the canonical encoding (protobuf3 does not emit default-valued
+  // scalar fields), so this addition does not move E1's pinned goldens
+  // (`crates/av-edge/tests/golden.rs`).
+  string shard_key = 11;
 }
 
 // One rejection kind the ingest boundary (E3) counts and never silently drops (ADR-004:
@@ -133,6 +150,13 @@ enum BatchRejection {
   BATCH_REJECTION_STALE = 7;
   // (producer_id, sequence) was already accepted once before -- a replay.
   BATCH_REJECTION_DUPLICATE = 8;
+  // `MeasurementBatch.shard_key` disagrees with at least one of this batch's own
+  // `measurements[*].shard_key` -- the batch declares one partition but a measurement
+  // inside it claims another (`crates/av-ingest`, E3). Checked by the ingest pipeline,
+  // not by `crates/av-edge::chain::ChainVerifier` itself -- see `crates/av-ingest/src/
+  // ingest.rs`'s module doc for exactly where this sits relative to `ChainVerifier`'s own
+  // documented check order and why.
+  BATCH_REJECTION_SHARD_MISMATCH = 9;
 }
 
 // The result of checking one `MeasurementBatch` against a producer's chain state and

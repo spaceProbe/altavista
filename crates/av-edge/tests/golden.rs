@@ -40,6 +40,10 @@ fn golden_batch() -> pb::MeasurementBatch {
         batch_hash: vec![],
         signature: vec![],
         signer_cert_sha256: String::new(),
+        // Left at its default (empty string): the new `shard_key` field (E3,
+        // `crates/av-ingest`) is additive, and an empty string adds no bytes to the
+        // canonical proto3 encoding, so this does not move the pinned goldens below.
+        shard_key: String::new(),
         label: Some(pb::Label { marking: "CUI".to_string(), caveats: vec!["SP-EXPT".to_string()] }),
         measurements: vec![
             pb::Measurement {

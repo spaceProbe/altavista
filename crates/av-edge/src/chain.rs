@@ -103,6 +103,14 @@ fn bump_counter(counters: &mut pb::RejectionCounters, rejection: pb::BatchReject
         pb::BatchRejection::OverClearance => counters.over_clearance_count += 1,
         pb::BatchRejection::Stale => counters.stale_count += 1,
         pb::BatchRejection::Duplicate => counters.duplicate_count += 1,
+        // ShardMismatch (E3, `crates/av-ingest`) is a batch-vs-measurement partition
+        // check that has nothing to do with any single producer's chain state -- it is
+        // checked by `av-ingest`'s own pipeline, never by `ChainVerifier::submit`, which
+        // is why `pb::RejectionCounters` (a per-*producer* chain-state shape this module
+        // owns) grew no matching counter field for it. This arm exists only so this
+        // match stays exhaustive over `BatchRejection`, exactly like the `Unspecified`
+        // arm above; it can never actually be reached from `submit`.
+        pb::BatchRejection::ShardMismatch => {}
     }
 }
 
