@@ -168,10 +168,13 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-edge",
+ "av-grpc",
  "futures-util",
+ "openssl",
  "prost",
  "prost-build",
  "prost-types",
+ "serde_json",
  "thiserror",
  "tokio",
  "tonic",

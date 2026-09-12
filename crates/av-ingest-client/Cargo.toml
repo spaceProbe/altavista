@@ -32,6 +32,29 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"]
 # identical comment; both crates already have this pulled in transitively via `tonic`.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
+# `src/bin/av-ingest-mtls-client.rs` (question 202's own proof: `tests/
+# test_edge_ingest_mtls.py` needs a real mTLS gRPC client that dials THROUGH a real nginx
+# front, which this crate's own `connect_plaintext` deliberately cannot do -- see this
+# crate's lib.rs module doc, "this client intentionally offers no connect_mtls yet"). Reuses
+# `av-grpc::tls::connect` -- the OpenSSL-backed (never `ring`) `hyper-openssl` connector
+# `crates/av-grpc/src/bin/describe_client.rs` already uses to prove mTLS through
+# `services/gmat-service/deploy`'s own nginx front -- rather than duplicating that ~50-line
+# `SslConnector`/`Endpoint::connect_with_connector` recipe a second time. No dependency
+# cycle: `av-grpc` depends on nothing in this crate's own dependency tree.
+av-grpc = { path = "../av-grpc" }
+# EC P-384 key loading for `--submit-with-key` (signing one `MeasurementBatch` with the
+# same leaf private key presented for mTLS, proving Submit accepts a batch under the
+# identity Announce just cached) -- the same crypto boundary every other crate in this
+# workspace sits on (ADR-004's crypto rule); already present transitively via `av-edge`/
+# `av-grpc`, so this is a direct-dependency declaration, not a new crate.
+openssl = "0.10"
+# This binary's one line of stdout is machine-parsed by `tests/test_edge_ingest_mtls.py`;
+# `serde_json` (already used throughout this workspace, e.g. `crates/av-ingest/src/
+# evidence.rs`) is simpler and less error-prone here than hand-rolling JSON the way
+# `crates/av-edge/src/bin/av-edge-identity.rs` does for its much smaller, flatter output
+# shape -- this binary's output nests an `Announce` result and an optional `Submit` verdict.
+serde_json.workspace = true
+
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
 prost-build.workspace = true

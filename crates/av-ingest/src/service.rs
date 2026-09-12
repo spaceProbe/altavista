@@ -297,6 +297,20 @@ fn refuse(refusal: pb::ManifestRefusal, detail: impl Into<String>) -> pb::Manife
 impl EdgeIngest for EdgeIngestService {
     async fn announce(&self, request: Request<pb::PluginManifest>) -> Result<Response<pb::ManifestAck>, Status> {
         let header = request.metadata().get(forwarded_cert::FORWARDED_CLIENT_CERT_HEADER).map(|v| v.to_str().unwrap_or_default().to_string());
+        // Question 202's own observability requirement, and `crate::forwarded_cert`'s
+        // module doc's "what was actually checked, and what was not": print exactly what
+        // arrived on this header, so a caller running this service behind a real nginx
+        // front (`tests/test_edge_ingest_mtls.py`) can capture this process's own stderr
+        // and compare nginx's documented `$ssl_client_escaped_cert` escaping against what
+        // actually showed up here -- rather than trusting the documentation alone. Always
+        // printed when the header is present at all (never gated on any config flag or
+        // environment variable -- question 199 -- and never on whether the value later
+        // decodes or verifies): a certificate is not secret material, and a defect in
+        // nginx's own escaping is exactly the kind of thing this line exists to surface.
+        if let Some(escaped) = &header {
+            let prefix: String = escaped.chars().take(120).collect();
+            eprintln!("av-ingest: received {} header, first 120 chars: {prefix:?} (total length {})", forwarded_cert::FORWARDED_CLIENT_CERT_HEADER, escaped.len());
+        }
         let manifest = request.into_inner();
         let now = self.now_tai_ns();
 

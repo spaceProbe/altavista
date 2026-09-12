@@ -58,6 +58,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 # only a direct-dependency declaration for two crates already compiled.
 futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# `src/bin/av-ingest-server.rs` (question 202: the real subprocess `tests/
+# test_edge_ingest_mtls.py` runs behind nginx) binds its own `crate::server::
+# bind_loopback` listener (so it can print back the OS-assigned ephemeral port before
+# `tonic::transport::Server` ever starts accepting) and must then hand that already-bound
+# `tokio::net::TcpListener` to `Server::serve_with_incoming` -- `tokio_stream::wrappers::
+# TcpListenerStream` is the plain adapter for that. Promoted here from `[dev-dependencies]`
+# (where `tests/wire_*.rs` already used the identical pattern) because this binary is a
+# normal build target, not a test -- still no new crate to the tree either way: `tonic`
+# itself already depends on `tokio-stream`, so this is a direct-dependency declaration for
+# a crate already compiled into this workspace's `Cargo.lock`.
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
@@ -66,10 +77,3 @@ prost-build.workspace = true
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
 av-ingest-client = { path = "../av-ingest-client" }
-# `wire_*.rs` tests already have a bound `tokio::net::TcpListener` from `crate::server::
-# bind_loopback` and need to hand it to `tonic::transport::Server::serve_with_incoming` (so
-# the test controls the exact ephemeral port/refusal path being exercised, rather than
-# letting `Server::serve` bind its own address a second, different way);
-# `tokio_stream::wrappers::TcpListenerStream` is the plain adapter for that, already
-# present transitively (via `tonic`) in this workspace's `Cargo.lock`.
-tokio-stream = "0.1"
