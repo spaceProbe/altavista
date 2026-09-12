@@ -6,7 +6,7 @@
 # Dockerfile's own header comment for the rebuild recipe). test_manifest_paths_exist_and_
 # hash_match verifies a BUILD_ARTIFACT entry only when the file is present on disk and
 # skips it visibly, by name, when absent; every other entry is verified strictly.
-# Built image ID for this manifest: sha256:9f5b1a537d34d11dffb27d6473c6d836311ddaba0b11c6512ee29ad918f0fde7
+# Built image ID for this manifest: sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d
 # Runtime-content hash for this build (question 185, see IMAGE_DIGEST.md): sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef
 # Regenerate with: services/cfs/build-image.sh -- do not hand-edit.
 cc102cc6939fe35d5e16fbaa3d1f262f24e5f423a46ca067339e3cb0a4af2ee1  services/cfs/apps/adcs/CMakeLists.txt

@@ -83,7 +83,7 @@ Recorded digest (re-pinned 2026-09-12 by the lead for the mirror-backed fetch, s
 `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:9f5b1a537d34d11dffb27d6473c6d836311ddaba0b11c6512ee29ad918f0fde7
+sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d
 ```
 
 Recorded runtime-content hash for this pin (question 185, see the definition above; unchanged
@@ -109,7 +109,15 @@ network on 2026-09-12). A third build succeeded but was launched with `sh`, unde
 POSIX mode rejects the script's process substitution only after the image is built, so the
 manifest was left stale while the exit code read 0; the script now refuses to run under `sh`
 and its exit trap exits with the real status. The fourth run, under `bash` and fully cached,
-wrote the manifest.
+wrote the manifest and confirmed the same ID (`9f5b1a53…`).
+
+**Fifth build, same day.** The tag vanished again within ten minutes of that build (the
+fourth disappearance, question 196(d)); the rebuild from an empty cache produced a different
+image ID (recorded above; the previous one was
+`sha256:9f5b1a537d34d11dffb27d6473c6d836311ddaba0b11c6512ee29ad918f0fde7`) with the same
+runtime-content hash, which is exactly question 190's point: without BuildKit the image ID is
+not reproducible across a cache loss, the runtime content is. Every disappearance therefore
+costs a re-pin of the ID here; the runtime-content hash line does not move.
 
 ## Re-pinned 2026-09-09 (round 6, after the third tag disappearance)
 
