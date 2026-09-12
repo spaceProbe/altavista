@@ -117,8 +117,11 @@ name = "av-edge"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-kernel",
  "openssl",
  "prost",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -169,6 +172,7 @@ dependencies = [
  "av-cdm",
  "av-edge",
  "av-grpc",
+ "av-ingest",
  "futures-util",
  "openssl",
  "prost",
@@ -177,6 +181,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]

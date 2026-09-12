@@ -61,3 +61,12 @@ prost-build.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# `tests/av_edge_plugin_binary.rs` spins up a real `EdgeIngestService` in-process (exactly
+# `crates/av-ingest/tests/wire_evidence.rs`'s own pattern) and drives the actual built
+# `av-edge-plugin` binary (this crate's own `[[bin]]`, `CARGO_BIN_EXE_av-edge-plugin`) at
+# it as a subprocess -- a **test-only** dependency: `av-ingest`'s own regular
+# dependencies do not depend on this crate, so this dev-dependency edge does not cycle
+# (Cargo permits a dev-dependency cycle that a regular-dependency cycle would refuse).
+av-ingest = { path = "../av-ingest" }
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+tokio-stream = "0.1"
