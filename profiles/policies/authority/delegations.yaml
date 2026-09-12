@@ -1,0 +1,32 @@
+# Time-limited command-authority delegations (A2.2, docs/aiplane-plan.md milestone A2's
+# second half; docs/open-questions.md question 54). Loaded once, at process construction, by
+# crates/av-command/src/authz.rs::load_delegations (the profile's own
+# authority.delegations_path, profiles/execution.yaml), the same "static, reviewed,
+# profile-declared file" pattern profiles/policies/authority/command.rego already uses for the
+# Rego policy bundle -- see that module's own doc for why this is the whole storage decision
+# (no delegation-issuing RPC exists or is planned by this task).
+#
+# THIS FILE IS A SECURITY ARTIFACT, exactly like command.rego's own header says of itself: it
+# grants real authority to a real subject over a real command class and entity, bounded only
+# by the [not_before_tai_ns, expires_tai_ns) window below. A change here gets the same review
+# a change to av-command's Rust source gets.
+#
+# Shape (crates/av-command/src/authz.rs's `DelegationConfig`/`Delegation`, authority.proto's
+# `Delegation` message):
+#   id                 - opaque id, matched against AuthorizeRequest.delegation_id
+#   subject            - must equal the authorizing principal's verified Principal.sub
+#   command_classes    - classes this delegation covers; "*" grants every class
+#   entity_ids         - entities (Command.entity_id) this delegation covers; "*" grants every entity
+#   not_before_tai_ns  - nanoseconds on TAI; the mirror image of expires_tai_ns's boundary
+#   expires_tai_ns     - nanoseconds on TAI; expired when now_tai_ns >= expires_tai_ns (the
+#                        same boundary convention crates/av-command/src/oidc.rs's token `exp`
+#                        uses -- see authority.proto's Delegation doc comment)
+#   granted_by         - who granted it, free text
+#   reason             - why, free text
+#
+# No delegation is declared by default in this shipped profile: the execution profile's
+# default role table (authority.roles above) already covers every command class its own
+# `.rego` starter policy admits ("mode", "burn"), so nothing needs a delegation to function
+# out of the box. A real deployment adds entries here as an operator grants time-limited
+# authority beyond a principal's own role.
+delegations: []

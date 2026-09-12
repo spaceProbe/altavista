@@ -34,6 +34,66 @@ dynamics_backend:
       this is the profile the amendment was written for: Execution is deployed, and grpcio's
       bundled BoringSSL must never reach it.
 
+# A1.2: the command authority policy this profile declares (docs/aiplane-plan.md milestone
+# A1.2; docs/open-questions.md question 201(a)). `policy_dir` is a directory of `.rego`
+# files, loaded and hashed by crates/av-command/src/policy.rs::PolicyBundle::load (sorted,
+# deterministic order; a directory with no `.rego` file is a typed error, never an empty
+# allow-everything bundle). `allow_entrypoint`/`deny_entrypoint` are carried here as
+# configuration/documentation and checked against that module's own `ALLOW_ENTRYPOINT`/
+# `DENY_ENTRYPOINT` constants (which is what `evaluate` actually queries today) so this
+# profile's declared entry points can never silently drift from the evaluator's own -- see
+# tests/test_profiles.py and crates/av-command/src/policy.rs's own test of this block.
+# `rate_window_ns` is the trailing window width (nanoseconds) the ledger-backed rate source
+# (crates/av-command/src/rate.rs::LedgerRateSource) counts recent per-class submissions over,
+# fed into `PolicyInputRate.window_ns`.
+#
+# A2.2 additions (docs/aiplane-plan.md milestone A2's second half; docs/open-questions.md
+# question 54, question 34): read by crates/av-command/src/authz.rs::
+# load_profile_authz_config, a second, independent parse of this same block (see that
+# function's own doc for why this is not folded into the A1.2 loader above).
+#   - `roles`: role name -> the command classes it may authorize (crates/av-command/src/
+#     authz.rs::RoleTable). The literal string "*" grants every class. Deny by default: a
+#     role absent here, or present but not listing a class (and not listing "*" either),
+#     grants nothing -- there is no third state that means "allow".
+#   - `mfa_amr_methods`: `amr` claim values that satisfy the MFA gate for a
+#     `Command.hazardous` class (secsso: question 34's `amr`/`acr` MFA claims). This is the
+#     primary MFA check this crate implements -- see crates/av-command/src/authz.rs's module
+#     doc, "MFA gate", for why `amr` containment is primary and `acr` (below) is supported but
+#     not primary.
+#   - `mfa_acr`: the exact `acr` claim value that also satisfies the MFA gate (empty means
+#     "not configured" -- an empty `Principal.acr` can never match an empty configured value
+#     here). Exact string equality only; no acr hierarchy/ordering is implemented.
+#   - `delegations_path`: repo-relative path to the delegations YAML file
+#     crates/av-command/src/authz.rs::load_delegations reads (empty means "no delegations
+#     file configured", an empty delegation table, never an error). Delegations are static,
+#     reviewed, profile-declared configuration -- like the `.rego` bundle above -- not a
+#     runtime-mutable store; there is no delegation-issuing RPC.
+authority:
+  policy_dir: profiles/policies/authority
+  allow_entrypoint: data.altavista.authority.allow
+  deny_entrypoint: data.altavista.authority.deny
+  rate_window_ns: 3600000000000  # 1 hour
+  roles:
+    operators: ["mode"]
+    burn-authorizers: ["mode", "burn"]
+    safety-officers: ["*"]
+  mfa_amr_methods: ["otp", "webauthn"]
+  mfa_acr: ""
+  delegations_path: profiles/policies/authority/delegations.yaml
+
+# A2.2 (docs/aiplane-plan.md milestone A2's second half; ADR-004's "Evidence, verbatim from
+# P0" section: "forwards audit events to syslog/SIEM when `[audit]` is configured"). Read by
+# crates/av-command/src/audit.rs::load_profile_audit_config. `sink_path`, when non-empty, is
+# the file every command-authority transition and every refused `Authorize` attempt is
+# appended to as one RFC 5424 syslog-format line (crates/av-command/src/audit.rs). Empty (or
+# this whole block absent) means no sink is configured -- crates/av-command/src/audit.rs's
+# own module doc names exactly what that does (a documented, explicit no-op, never a silent
+# failure to write) and why a file sink is the SIEM-*forwarding* interface, not a SIEM
+# integration itself. Retention is the ledger (crates/av-command/src/ledger.rs), already
+# unbounded and hash-chained -- this block is the export half only.
+audit:
+  sink_path: var/log/av-command/audit.log
+
 planes:
   ingestion:
     per_architecture: "live edge plugins, HIL boards"
@@ -89,10 +149,25 @@ planes:
 
   command:
     per_architecture: "full path"
-    components: []
-    status: not_yet_built
-    note: >-
-      No command component exists in this repository yet: proto/altavista/v1/command.proto
-      declares the Command message schema, but there is no command state machine, no OPA
-      policy integration, and no dispatch path implemented anywhere in this repository.
-      architecture.md section 8 places the command path at phase P4.
+    components:
+      - name: av-command
+        kind: rust_service
+        path: crates/av-command
+        role: >-
+          The command authority service (A1-A2.2, docs/aiplane-plan.md): the CommandState
+          state machine (propose/check/authorize/dispatch/ack/reject/expire/fail, one
+          transition function per edge, a typed refusal for every illegal edge), the durable
+          hash-chained per-partition ledger, Rego policy evaluation at CHECKED (in process,
+          via the `regorus` crate, over the `.rego` file(s) this profile's `authority` block
+          declares), a real gRPC surface (`CommandAuthorityService`, A1.3) plaintext on
+          loopback only, OIDC identity verification on Authorize against the secsso claims
+          contract (A2.1, crates/av-command/src/oidc.rs), and -- A2.2, this profile's
+          `authority.roles`/`mfa_amr_methods`/`mfa_acr`/`delegations_path` and top-level
+          `audit.sink_path` above -- the role/MFA/delegation gate
+          (crates/av-command/src/authz.rs) and an RFC 5424 syslog-format audit line for every
+          transition and every refused Authorize attempt (crates/av-command/src/audit.rs).
+    status: partial
+    not_yet_built:
+      - "Dispatch into the kernel's real telecommand path with deadline/idempotency/ack levels (A3) -- crate::service::DispatchSink is the seam; RecordingDispatchSink is the only implementor shipped."
+      - "The AI-plane gateway/proposer and the command console panel (A4/A5) -- architecture.md section 8 places the AI plane and the command console at phase P4."
+      - "A two-person policy-change / envelope-enabling workflow -- out of scope: question 53's propose-only stands, and question 54 explicitly rules out a two-person rule for command authorization itself."

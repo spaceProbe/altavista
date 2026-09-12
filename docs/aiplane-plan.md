@@ -129,3 +129,151 @@ simulated asset executes it through the real command path and acks at three leve
 deadline and a wrong role are refused with their reasons; the replay reproduces the trail
 including what the model saw; the ledger verifies; evidence and control matrices exist.
 Every number in the status section is traceable to a run hash.
+
+## Status (AI-plane manager, 2026-09-12)
+
+**Round 1 delivered A1 and A2. A3 was not started** — five tasks filled the round, and A3
+(the kernel telecommand binding, deadlines on the kernel clock, ack levels from the cFS
+command accept, and a replay equal to the live run) is a full task on its own that would
+have been rushed. Five commits on `aiplane`, one per accepted task:
+
+| Commit | Task |
+|---|---|
+| `4a7fb78` | A1.1 the command authority library, ledger and `authority.proto` |
+| `92b24ac` | A1.2 Rego policy at CHECKED, and the decision in the ledger |
+| `9f21548` | A1.3 `CommandAuthorityService` over the OpenSSL-backed tonic stack |
+| `55b06c4` | A2.1 principals from OIDC tokens, verified against the system OpenSSL |
+| `86aa136` | A2.2 role gating, MFA, delegations and the audit line |
+
+### Gates, the manager's own runs at `86aa136` with no worker active
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-command` | **131 passed**, 0 failed, 0 ignored (107 lib, 21 `grpc_service`, 3 `policy_fixture`) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **417 passed**, 0 failed, 0 ignored (286 was `develop`'s baseline; the 131 are this crate) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 warnings; `grep -rn "#\[allow" crates/av-command/` is zero hits |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` |
+| `.venv/bin/python -m pytest -q -rs` | **498 passed, 3 skipped**, every skip printing its reason |
+| `buf breaking` | **not run, and not required**: `git diff --name-status develop...HEAD -- proto/` shows one entry, `A proto/altavista/v1/authority.proto`. No shared proto file was touched. `buf` is also not installed on this host, which the lead should know before a round does need it. |
+
+Full gate output is in the round's scratchpad.
+
+### The regorus gate (question 201(a)), settled at setup
+
+The plan asked for regorus with its crypto built-ins disabled by feature. **regorus 0.12.0
+has no crypto built-ins at all** — no `crypto` feature exists and there is no
+`src/builtins/crypto.rs` — so there was nothing to disable. The real hazard was elsewhere:
+its `std` feature declares `rand/std` without the optional-dependency `?`, which forces the
+`rand` crate in and with it `chacha20`. The crate is therefore pinned at
+`default-features = false, features = ["arc", "regex"]`, which also leaves the `http` and
+`net` features off, so the evaluator has no network builtin — a question 154 guarantee as
+well as a crypto one. `cargo tree -p av-command` shows no `ring`, `sha2`, `md-5`, `sha1`,
+`blake2`, `chacha20`, `rand` or rustls.
+
+`rand_chacha` does appear in this crate's tree through `tonic → tower → rand`. It is
+already in `develop`'s `Cargo.lock` and identical in `av-grpc`'s and
+`av-dynamics-service`'s trees since M5.3, `deny.toml` does not ban it, and this track
+introduces nothing new; recorded rather than changed. `sha2` likewise stays where it was,
+in `av-dynamics`, never in `av-command`.
+
+### What A1 and A2 actually are now
+
+The state machine is a library with one function per edge and a typed refusal for every
+illegal edge, pinned by a test over the whole 7×9 product: nine legal pairs, 54 typed
+refusals. Propose-only (question 53) is enforced in code, not only in policy. The ledger is
+file-backed, append-only and chained per entity with SHA-256 through the `openssl` crate
+and the `GENESIS` convention from `envelope.proto`; `verify` walks a partition from disk and
+names the sequence a tamper broke at; two runs over the same inputs give byte-identical
+files, which holds because nothing in the crate reads a wall clock or generates a random id.
+
+Policy is Rego, evaluated in process with a fresh engine per decision, over a canonical JSON
+input that is also the decision-id preimage. The calling convention is `allow ∧ ¬deny`:
+both entry points are evaluated every time and a non-empty deny set overrides a true allow.
+Evaluation failures are never swallowed — a rule that errors, returns the wrong shape, or
+yields a non-string set element each becomes a named reason. The shipped
+`profiles/policies/authority/command.rego` admits `mode`, rejects `payload`, rate-limits
+`burn`, and refuses any non-empty `envelope_id` for every class. A CHECKED or REJECTED
+record carries the decision and the input it was made over, so both re-evaluate from disk
+to the same decision id and policy hash.
+
+The service is `CommandAuthorityService` over tonic with `tls` never enabled, plaintext on
+loopback only and a typed refusal of any non-loopback bind naming question 155. Dispatch
+never sends an idempotency key twice and that guarantee survives a restart, rebuilt from
+the ledger's DISPATCHED records before the first RPC is served. Nine integration tests
+drive a real service over a real loopback socket.
+
+Identity is real: a compact JWS verified with `openssl::sign::Verifier` alone, RS256, with
+sixteen individually typed refusals including `alg: "none"`, and expiry evaluated against
+the injected clock at the boundary nanosecond. Authorization is role-gated per class from
+the profile's table, deny by default, with MFA required for a hazardous command and
+time-limited delegations whose expiry uses the same boundary convention as the token's.
+Every outcome, refusals included, writes one RFC 5424 line whose timestamp is the injected
+TAI epoch converted to UTC, so two identical runs produce identical lines.
+
+### Declared gaps, all deliberate
+
+- **ES256/ES384** are not implemented; RS256 only. A JWS ECDSA signature is raw `r||s` and
+  needs a DER conversion that is not a few clear lines, so it is a named gap rather than a
+  half-implementation.
+- **`Query` does not survive a restart.** The command index is in memory; the ledger record
+  does not carry enough of a `Command` (no payload, deadline, label or provenance) to
+  rebuild one. Closing it is a ledger-shape decision: widen `LedgerRecord`, or add a command
+  store. Recorded in `service.rs` and as a control-matrix deficiency.
+- **The OPA cross-check is a pinned document shape, not an executed comparison.** No OPA
+  binary exists here and fetching one would be network at test time (question 154). The test
+  says so in its own doc comment; nothing claims OPA compatibility is verified.
+- **The audit sink is a file, not a SIEM.** Question 54's SIEM export is the format, written
+  where a forwarder can read it; no UDP or socket target was added because it would be
+  untested here. The control matrix says so rather than claiming the control.
+- **`acr` is an exact string match**, with no ordering or hierarchy; `amr` containment is
+  the primary MFA check.
+
+### Defects found in review, with their root causes
+
+Five, and every one was the same shape — **a failure or refusal that left no visible trace**:
+
+1. **`#[allow(clippy::too_many_arguments)]` in `ledger.rs`**, in a task that reported "no new
+   `#[allow]`". Cause: the claim was made without grepping the file. Fixed by giving the
+   hash body its own type rather than suppressing the lint; the on-disk bytes are unchanged.
+2. **The ledger's partition filenames were not injective.** The escape alphabet was not
+   prefix-free — `_` was both the escape character and a passthrough character, so `"a/b"`
+   and `"a_002f_b"` mapped to one file and two entities' chains would have interleaved
+   silently. Filenames are now the SHA-256 hex of the partition name, with injectivity and
+   the directory-escape property asserted over an adversarial table.
+3. **The policy evaluator short-circuited `deny` whenever `allow` was true** — a fail-open
+   direction that no test could reach, because the shipped policy guards every allow rule.
+   Overruled and fixed to `allow ∧ ¬deny`, pinned by a fixture the shipped policy cannot
+   itself produce.
+4. **The evaluator swallowed its own errors**, mapping every `Err` and wrong-shaped result
+   to nothing. This is how the same task's own `sprintf("%q", …)` defect nearly shipped:
+   regorus does not implement Go's `%q`, the deny reason vanished, and only an integration
+   test noticed. Three named reasons now cover the three shapes.
+5. **The idempotency guarantee evaporated on restart.** The dispatched-key set was built
+   empty and never read the ledger, so a restarted service would re-dispatch a key it had
+   already sent — the moment a duplicate is most likely, against a `command.proto` contract
+   that is unconditional. `LedgerRecord` gained `idempotency_key` and the set is rebuilt
+   before the first RPC; the test builds a second service over the same directory.
+
+A sixth, caught before it mattered: the test issuer was an ungated `pub mod`, putting a
+token-minting facility in the shipped library's API. Now behind a `test-support` feature,
+proven absent from a default build by `cargo tree` over normal and build edges and by `nm`
+finding no such symbol in the binary.
+
+One defect was found by a worker rather than by review and is worth keeping: an early
+`resolve_loopback_bind_address` would have panicked in production on a bare `"localhost"`
+with no port, because `"localhost"` passes the loopback check and then `rsplit_once(':')`
+returns `None`. A unit test caught it; a `MissingPort` variant fixed it.
+
+### Open items for the lead
+
+1. `buf` is not installed on this host. This round did not need it, but a round that touches
+   a shared proto will.
+2. `altavista/pb/generate.py` needs `grpcio-tools`, which the `dev` extra does not declare,
+   so the documented regeneration command fails on a clean dev install. Not fixed here:
+   `pyproject.toml` is shared with the edge track and a change would conflict.
+3. `oidc.rs` detects "this rule is not defined at all" by matching regorus's own error text.
+   It is documented as 0.12.0-specific with a note on what breaks if it changes, but it is a
+   string match on a dependency's prose.
+4. `rand_chacha` through `tonic → tower → rand` is pre-existing and lead-accepted since
+   M5.3; recorded here so the crypto rule's "no bundled crypto" wording and that crate can be
+   reconciled deliberately rather than re-litigated each round.

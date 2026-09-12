@@ -1,0 +1,114 @@
+[package]
+name = "av-command"
+publish = false
+description = "A1/A2: the command authority service (state machine, ledger, Rego policy, human authorization)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A2.1: gates `src/test_support.rs` (a local OIDC-token-minting issuer -- see that module's
+# own doc comment) out of a default build. `cargo build -p av-command` and the shipped
+# `av-command` binary do NOT compile this module at all -- it is not merely "unreachable from
+# production code", it is not present in the artifact. Enabled two ways: `cargo test`'s own
+# unit-test build (via `cfg(test)`, below, independent of this feature) and this crate's own
+# `[dev-dependencies]` self-reference (below), which is how `tests/*.rs` -- a separate
+# compilation unit that cannot see `cfg(test)` code -- gets access to it.
+[features]
+test-support = []
+
+[dependencies]
+# A1.2 evaluates policy at CHECKED with this crate; kept default-features off with exactly
+# these two features (deliberately, verified at setup): regorus 0.12.0 has no crypto
+# built-ins at all, and turning on its "std" feature would drag in `rand` -> `chacha20`,
+# a bundled-crypto crate ADR-004's rule forbids. Do not add "std" and do not flip
+# default-features on.
+regorus = { version = "0.12", default-features = false, features = ["arc", "regex"] }
+
+# altavista.v1 generated types (Command, CommandState, CommandTransition, AckLevel from
+# command.proto; PolicyInput, PolicyDecision, LedgerRecord from this track's own
+# authority.proto; ChainVerification from envelope.proto) -- this crate never generates a
+# second copy of the wire types av-cdm already compiles via prost-build.
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# A1.2's `profiles/execution.yaml` `authority:` block loader (crates/av-command/src/
+# policy.rs's `load_profile_authority_config`). Not a new crate to the workspace's dependency
+# graph: crates/av-kernel and crates/av-sweep already depend on the identical "0.9" version
+# for their own YAML loaders (checked with `cargo tree` before adding this line -- see this
+# task's final report), so this resolves to the same already-vetted crate already in
+# Cargo.lock rather than introducing a second YAML parser.
+serde_yaml = "0.9"
+
+# SHA-256 for the ledger's hash chain, via the `openssl` crate (openssl-sys -> the
+# system/Homebrew libssl/libcrypto) -- ADR-004's crypto rule: SHA-256 only, the system
+# OpenSSL only, no bundled crypto (no `sha2`, no `ring`). Mirrors
+# crates/av-dynamics-service/src/evidence.rs exactly. Also the *only* crate A2.1's OIDC
+# token verification (src/oidc.rs) uses for signature verification (openssl::sign::Verifier
+# over an openssl::pkey::PKey, SHA-256 digest) -- no ring, no jsonwebtoken, no jwt crate, no
+# bundled crypto of any kind.
+openssl = "0.10"
+
+# A2.1 (`docs/aiplane-plan.md` milestone A2; `crates/av-command/src/oidc.rs`): base64url
+# (no padding) decode/encode of a compact-serialization JWS's three segments. Not a new
+# crate to this workspace's dependency graph: `base64` v0.22.1 is already in `Cargo.lock` at
+# exactly this version, pulled in transitively by the tonic/hyper stack this crate already
+# depends on (`cargo tree -p av-command` before this line was added already showed it under
+# tonic's own subtree) -- this line only promotes an existing transitive dependency to a
+# direct one; `git diff Cargo.lock` after adding it shows no new package entries (see this
+# task's report for the exact diff).
+base64 = "0.22"
+
+# For src/admin.rs's hand-rolled `/admin/api/evidence*` HTTP server: a plain
+# tokio::net::TcpListener with manual GET-only request parsing, not axum/hyper directly --
+# same reasoning as crates/av-dynamics-service/src/admin.rs's own doc comment. "signal" is
+# for src/bin/av-command.rs's graceful-shutdown handling; "rt-multi-thread" and "macros" are
+# for `#[tokio::test]` in this crate's own test suite.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+
+# A1.3: `CommandAuthorityService` (proto/altavista/v1/authority.proto) over the same
+# OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use. Default features off,
+# "server" only (never "tls"/"tls-native-roots"/"tls-webpki-roots") -- those pull
+# `tokio-rustls` -> `ring`, forbidden by ADR-004's crypto rule; see
+# crates/av-dynamics-service/Cargo.toml's identical comment. This crate never dials out as a
+# gRPC client in production (A3's kernel binding is reached through the `DispatchSink` trait
+# this crate defines, not a gRPC call this crate makes), so "channel" is a [dev-dependencies]
+# entry only, for the integration tests' own client (see below).
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+# A2.1: the standard trick for exposing a test-only `pub mod` to `tests/*.rs` (a separate
+# compilation unit, linked against the *ordinary*, non-`cfg(test)` build of this crate)
+# without gating that module behind nothing at all (see the `[features]` block's comment
+# and `src/test_support.rs`'s own doc for why `cfg(test)` alone is not enough). This makes
+# Cargo build a *second*, `test-support`-featured copy of this crate for `tests/*.rs` to
+# depend on, distinct from the artifact `src/bin/av-command.rs` links against -- the
+# production binary is unaffected.
+av-command = { path = ".", features = ["test-support"] }
+# Test-only client channel for crates/av-command/tests/*.rs, which drive the real service
+# over a real loopback socket with a real tonic client (question 154's own module-doc
+# record: binding/connecting on 127.0.0.1 is not "network at test time", the rule is about
+# reaching outside the host). Same restricted feature set av-grpc/av-lockstep's production
+# "channel" dependency uses (default-features off, no "tls*" -- never `ring`); the only
+# difference is this crate needs it in [dev-dependencies] only, since its own production
+# code (src/service.rs, src/bin/av-command.rs) is a server, never a client.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "signal"] }
+# Wraps a `tokio::net::TcpListener` already bound to `127.0.0.1:0` (an OS-assigned ephemeral
+# port) as the `Stream` `tonic::transport::Server::serve_with_incoming` needs -- so every
+# integration test binds its own listener and reads back the real port with no bind-then-
+# drop-then-rebind race (never a fixed port; already transitively in this workspace's tree
+# via tonic's own dependencies, declared directly here only so `tests/*.rs` can `use` it).
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[[bin]]
+name = "av-command"
+path = "src/bin/av-command.rs"
