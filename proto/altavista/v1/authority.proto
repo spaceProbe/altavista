@@ -13,19 +13,26 @@ syntax = "proto3";
 //   - A1.2 will add policy bundle metadata (a bundle id/hash, the `.rego` file(s) in effect,
 //     the evaluator's own version) as its own message(s), referenced from `PolicyDecision`
 //     by id rather than folding new fields into `PolicyDecision`/`PolicyInput` directly.
-//   - A2 will add `Principal` (OIDC claims: `sub`, `groups`, `amr`, `acr`), `Delegation`
-//     (time-limited, evaluated against the injected clock) and role-binding messages
-//     (role -> command_class table). Until A2 lands, `CommandTransition.principal` and
-//     `CommandTransition.delegation_id` (`command.proto`) are the only principal/delegation
-//     fields that exist anywhere in the wire format -- this file adds none of its own.
-//   - A1.3 (this task, additive only -- no field number above moves): `CommandAuthorityService`
+//   - A2.1 (this task, additive only -- no field number above moves): `Principal` below,
+//     the secsso claims contract (question 34, question 201(b)): `sub`, `groups`, `amr`,
+//     `acr`, issuer, audience, `jti`, and issued-at/expiry as TAI nanoseconds. Filled only by
+//     a successful `crates/av-command/src/oidc.rs` verification against a configured issuer
+//     and the injected clock -- there is no path that constructs one from an unverified
+//     token. `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now
+//     verifies `AuthorizeRequest.principal_token` and records the verified `Principal.sub` as
+//     `CommandTransition.principal`.
+//   - A2.2 will add `Delegation` (time-limited, evaluated against the injected clock) and
+//     role-binding messages (role -> command_class table), plus the MFA (`amr`/`acr`) and
+//     role gate itself on `Authorize`. A2.1 verifies *who* the caller is; A2.2 decides
+//     *whether* that caller may authorize a given command class. `CommandTransition.
+//     delegation_id` (`command.proto`) is recorded by A2.1 exactly as it was before --
+//     unevaluated -- for A2.2 to enforce.
+//   - A1.3 (additive only -- no field number above moves): `CommandAuthorityService`
 //     and its request/response messages, below `LedgerRecord`. `AuthorizeRequest.
-//     principal_token`/`delegation_id` are the two fields A2 needs on the wire; A1.3's own
-//     service implementation (`crates/av-command/src/service.rs`) does not verify
-//     `principal_token` in any way -- it records it verbatim as `CommandTransition.principal`
-//     with a reason that says plainly that identity is not yet verified. A2 is the milestone
-//     that parses/verifies this token and performs the real role/MFA/delegation gate; nothing
-//     here should need a second request shape when A2 lands.
+//     principal_token`/`delegation_id` are the two fields A2 needs on the wire; A2.1's
+//     service implementation (`crates/av-command/src/service.rs`) now verifies
+//     `principal_token` for real (see above) but performs no role/MFA/delegation gate --
+//     that is A2.2's job, not earned by this task.
 package altavista.v1;
 
 import "altavista/v1/command.proto";
@@ -155,6 +162,61 @@ message LedgerRecord {
   string idempotency_key = 10;
 }
 
+// A verified principal, from an OIDC access token's claims (A2.1, `docs/aiplane-plan.md`
+// milestone A2; question 34's secsso claims contract; question 201(b)). Filled **only** by a
+// successful `crates/av-command/src/oidc.rs` verification -- there is no code path anywhere
+// in this crate that constructs a `Principal` from a token it has not verified the signature,
+// issuer, audience, expiry (`exp`) and not-before (`nbf`) of, against a real issuer key and
+// the injected `Clock`. `CommandAuthorityService.Authorize` records `sub` as the verified
+// `CommandTransition.principal` (`command.proto`); nothing in this message is consulted for
+// role, MFA or delegation decisions yet -- that gate is A2.2's job (see this file's header
+// comment).
+//
+// TAI conversion (ADR-001 "Time"): a JWT's `exp`/`iat` claims are Unix (UTC) seconds, per
+// RFC 7519's `NumericDate`. The one conversion site is `crates/av-command/src/oidc.rs`'s
+// `unix_seconds_to_tai_ns`, which multiplies by 1_000_000_000 and calls
+// `av_cdm::time::Tai::from_utc_nanos` -- the identical UTC->TAI boundary conversion
+// `crates/av-command/src/clock.rs`'s `SystemClock` itself uses for the wall clock. There is
+// no second, ad hoc UTC/TAI conversion anywhere in this crate.
+//
+// No human-vs-service field: the secsso claims contract this message follows (`sub`,
+// `groups`, `amr`, `acr`, issuer, audience, `jti`, issued-at/expiry) carries no claim that
+// itself declares a subject human or machine. An empty `amr` is a *heuristic* at best (a
+// service-subject token minted by a client-credentials grant typically has no `amr` because
+// no user authentication method ran) -- it is not a declared claim, and a human token issued
+// without an MFA step would also have an empty `amr`. Rather than invent a field the claims
+// contract does not support, this message adds none; A2.2 (which owns the roles/MFA gate) is
+// free to add one additively if a later claims contract does declare a kind, e.g. a `azp`
+// client-id convention or an explicit `account_type` claim.
+message Principal {
+  // The verified `sub` claim. Never empty -- `crates/av-command/src/oidc.rs`'s `verify`
+  // refuses a token with a missing or empty `sub` before this message is ever constructed.
+  string sub = 1;
+  // The `groups` claim (secsso: roles, A2.2's role gate), in the exact order the token's own
+  // JSON array carried them -- `crates/av-command/src/oidc.rs`'s module doc explains why
+  // claim order, not a sorted order, is this crate's deterministic choice for this field.
+  repeated string groups = 2;
+  // The `amr` claim (secsso: authentication methods, A2.2's MFA gate), in claim order, same
+  // reasoning as `groups`. Empty when the token carried no `amr` claim at all.
+  repeated string amr = 3;
+  // The `acr` claim (secsso: authentication context class). Empty when absent.
+  string acr = 4;
+  // The token's own `iss` claim, already verified equal to the configured issuer.
+  string issuer = 5;
+  // The configured audience this principal was verified against (not the full `aud` claim,
+  // which may list more than one audience) -- see `crates/av-command/src/oidc.rs`'s `verify`
+  // for why this field carries the configured value rather than the token's raw `aud`.
+  string audience = 6;
+  // The token's own `jti` claim. Empty when the token carried none (unlike `sub`, `jti` is
+  // never a refusal reason by itself in A2.1).
+  string jti = 7;
+  // The token's own `iat` claim, converted to TAI nanoseconds (see this message's doc).
+  int64 issued_at_tai_ns = 8;
+  // The token's own `exp` claim, converted to TAI nanoseconds (see this message's doc) --
+  // already verified to be strictly after the clock reading `verify` was given.
+  int64 expiry_tai_ns = 9;
+}
+
 // ---------------------------------------------------------------------------------------
 // A1.3: CommandAuthorityService -- propose, check, authorize, dispatch, ack, query, ledger
 // verify, over the same OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use
@@ -185,19 +247,23 @@ message CheckRequest {
 }
 
 // `Authorize` request. See this file's header comment and `AuthorizeRequest.
-// principal_token`'s own doc comment above for what A1.3 does and does not do with these
+// principal_token`'s own doc comment above for what A2.1 does and does not do with these
 // two fields.
 message AuthorizeRequest {
   string command_id = 1;
-  // Opaque bearer token (e.g. an OIDC access token) naming the principal attempting to
-  // authorize. A1.3 never parses or verifies this string -- it is recorded verbatim as
-  // `CommandTransition.principal`, with a `CommandTransition.reason` that states plainly
-  // that identity is not yet verified. A2 is the milestone that verifies it against an OIDC
-  // issuer and performs the real role/MFA gate.
+  // A compact-serialization JWS bearer token (an OIDC access token). A2.1
+  // (`crates/av-command/src/oidc.rs`, wired in `crates/av-command/src/service.rs`) verifies
+  // this for real: signature (against the configured issuer's public key), `alg` allow-list,
+  // `iss`, `aud`, `exp`/`nbf` against the injected clock, and a non-empty `sub` -- an
+  // unverifiable token is refused `UNAUTHENTICATED` before any state transition is attempted.
+  // On success, the verified `Principal.sub` (`authority.proto`) is recorded as
+  // `CommandTransition.principal`. A2.1 verifies *who* the caller is; it performs no role,
+  // MFA or delegation gate of any kind -- that is A2.2's job (see this file's header comment).
   string principal_token = 2;
   // The delegation the principal claims to be acting under, if any -- carried through to
-  // `CommandTransition.delegation_id` unevaluated (A2 enforces expiry/scope against the
-  // injected clock). Empty means "acting under the principal's own authority".
+  // `CommandTransition.delegation_id` exactly as before, still unevaluated (A2.2 enforces
+  // expiry/scope against the injected clock). Empty means "acting under the principal's own
+  // authority".
   string delegation_id = 3;
 }
 

@@ -90,6 +90,8 @@ name = "av-command"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-command",
+ "base64",
  "openssl",
  "prost",
  "prost-build",

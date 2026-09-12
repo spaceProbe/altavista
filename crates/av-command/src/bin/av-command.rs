@@ -12,7 +12,8 @@
 //! environment-variable configuration path to accidentally rely on or accidentally mutate.
 //!
 //! ```text
-//! av-command [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] [--policy-dir PATH]
+//! av-command --oidc-issuer ISS --oidc-audience AUD --oidc-public-key-path PATH
+//!            [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] [--policy-dir PATH]
 //!            [--rate-window-ns NS] [--run-id ID]
 //! ```
 //!
@@ -35,6 +36,17 @@
 //! - `--run-id` (default: a random 16-byte OpenSSL-RNG hex string, matching
 //!   `crates/av-dynamics-service/src/bin/server.rs`'s own `random_run_id`): correlates this
 //!   process's own admin responses; never parsed, only compared for equality.
+//! - `--oidc-issuer`, `--oidc-audience`, `--oidc-public-key-path` (**A2.1, all three
+//!   required -- no default of any kind**, `parse_args` refuses to return `Ok` without every
+//!   one of them): the OIDC issuer string, the audience string, and the path to that
+//!   issuer's public key (PEM), read once here and handed to
+//!   [`av_command::oidc::IssuerConfig::from_public_key_pem`] -- `Authorize` verifies every
+//!   `principal_token` against exactly this configuration (`crate::service`'s module doc,
+//!   "A2.1: `Authorize` verifies *who*, not *whether*"). There being no default is
+//!   deliberate: a default issuer/key would either be a real secret baked into this binary
+//!   (never acceptable) or a placeholder that would silently accept tokens signed by a key
+//!   nobody controls in production -- refusing to start without an operator-supplied
+//!   configuration is the correct failure mode.
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +71,13 @@ struct Args {
     policy_dir: PathBuf,
     rate_window_ns: i64,
     run_id: Option<String>,
+    /// A2.1: the OIDC issuer `Authorize` verifies `principal_token` against. All three are
+    /// required (question 199: no environment-variable fallback, and no silently-weak
+    /// default that would let this service start with authentication effectively
+    /// disabled) -- `parse_args` refuses to return `Ok` without all three set.
+    oidc_issuer: Option<String>,
+    oidc_audience: Option<String>,
+    oidc_public_key_path: Option<PathBuf>,
 }
 
 fn default_ledger_dir() -> PathBuf {
@@ -69,6 +88,11 @@ fn default_policy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/policies/authority")
 }
 
+const USAGE: &str = "usage: av-command --oidc-issuer ISS --oidc-audience AUD \
+                      --oidc-public-key-path PATH [--bind ADDR] [--admin-bind ADDR] \
+                      [--ledger-dir PATH] [--policy-dir PATH] [--rate-window-ns NS] \
+                      [--run-id ID]";
+
 fn parse_args() -> Result<Args, String> {
     let mut bind = DEFAULT_BIND.to_string();
     let mut admin_bind = DEFAULT_ADMIN_BIND.to_string();
@@ -76,6 +100,9 @@ fn parse_args() -> Result<Args, String> {
     let mut policy_dir = default_policy_dir();
     let mut rate_window_ns = DEFAULT_RATE_WINDOW_NS;
     let mut run_id = None;
+    let mut oidc_issuer = None;
+    let mut oidc_audience = None;
+    let mut oidc_public_key_path = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -87,15 +114,21 @@ fn parse_args() -> Result<Args, String> {
             "--policy-dir" => policy_dir = PathBuf::from(val()?),
             "--rate-window-ns" => rate_window_ns = val()?.parse::<i64>().map_err(|e| format!("--rate-window-ns: {e}"))?,
             "--run-id" => run_id = Some(val()?),
-            "--help" | "-h" => {
-                return Err("usage: av-command [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] \
-                            [--policy-dir PATH] [--rate-window-ns NS] [--run-id ID]"
-                    .to_string())
-            }
+            "--oidc-issuer" => oidc_issuer = Some(val()?),
+            "--oidc-audience" => oidc_audience = Some(val()?),
+            "--oidc-public-key-path" => oidc_public_key_path = Some(PathBuf::from(val()?)),
+            "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
-    Ok(Args { bind, admin_bind, ledger_dir, policy_dir, rate_window_ns, run_id })
+    if oidc_issuer.is_none() || oidc_audience.is_none() || oidc_public_key_path.is_none() {
+        return Err(format!(
+            "--oidc-issuer, --oidc-audience and --oidc-public-key-path are all required \
+             (A2.1: Authorize verifies principal_token against a real issuer; there is no \
+             default issuer to fall back to). {USAGE}"
+        ));
+    }
+    Ok(Args { bind, admin_bind, ledger_dir, policy_dir, rate_window_ns, run_id, oidc_issuer, oidc_audience, oidc_public_key_path })
 }
 
 /// 16 bytes from OpenSSL's RNG, hex-encoded -- see `crates/av-dynamics-service/src/bin/
@@ -139,6 +172,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bundle.policy_hash()
     );
 
+    // A2.1: parsed once, at startup -- the one place this binary reads the issuer's public
+    // key from disk. crate::oidc::verify itself does no I/O of any kind (its own module doc,
+    // "Purity"); this is the caller "being handed a key" that doc describes.
+    let oidc_issuer = args.oidc_issuer.expect("parse_args refuses to return Ok without --oidc-issuer");
+    let oidc_audience = args.oidc_audience.expect("parse_args refuses to return Ok without --oidc-audience");
+    let oidc_public_key_path = args.oidc_public_key_path.expect("parse_args refuses to return Ok without --oidc-public-key-path");
+    let oidc_public_key_pem = std::fs::read(&oidc_public_key_path).map_err(|e| format!("reading --oidc-public-key-path {oidc_public_key_path:?}: {e}"))?;
+    let issuer_config = Arc::new(
+        av_command::oidc::IssuerConfig::from_public_key_pem(&oidc_issuer, &oidc_audience, &oidc_public_key_pem)
+            .map_err(|e| format!("--oidc-public-key-path {oidc_public_key_path:?}: {e}"))?,
+    );
+    eprintln!("av-command: OIDC issuer {oidc_issuer:?}, audience {oidc_audience:?} (RS256)");
+
     let admin_state = Arc::new(AdminState { ledger: ledger.clone(), run_id: run_id.clone(), version: env!("CARGO_PKG_VERSION").to_string() });
     eprintln!("av-command: admin API on {admin_addr} (GET /admin/api/evidence, /admin/api/evidence/verify)");
     tokio::spawn(async move {
@@ -153,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dispatch_sink = Arc::new(RecordingDispatchSink::new());
     // Rebuilds the duplicate-dispatch guard from the ledger before serving a single RPC --
     // see crate::service's module doc, "Idempotency ... a guarantee that survives a restart".
-    let servicer = CommandAuthorityServiceImpl::new(ledger, bundle, args.rate_window_ns, Arc::new(SystemClock), dispatch_sink)?;
+    let servicer = CommandAuthorityServiceImpl::new(ledger, bundle, args.rate_window_ns, Arc::new(SystemClock), dispatch_sink, issuer_config)?;
 
     eprintln!("av-command: listening on {grpc_addr} (run_id={run_id})");
     tonic::transport::Server::builder()

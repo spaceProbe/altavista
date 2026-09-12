@@ -48,16 +48,33 @@ use av_cdm::pb::{
 };
 use av_command::clock::{Clock, TestClock};
 use av_command::ledger::Ledger;
+use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_client::CommandAuthorityServiceClient;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
 use av_command::service::{resolve_loopback_bind_address, BindAddressError, CommandAuthorityServiceImpl, DispatchSink, RecordingDispatchSink};
+use av_command::test_support::{valid_claims, TestIssuer};
 use prost::Message as _;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Endpoint, Server};
 use tonic::Code;
+
+/// A2.1: the OIDC issuer/audience every `TestServer` below configures its
+/// `CommandAuthorityServiceImpl` with. Arbitrary strings -- no production meaning, just
+/// something `TestServer::mint` and `TestServer::spawn_over`'s `IssuerConfig` agree on.
+const TEST_ISSUER: &str = "https://sso.test.example/";
+const TEST_AUDIENCE: &str = "av-command";
+/// A fixed, arbitrary Unix-seconds "now" for every minted token's `iat`/`exp` -- unrelated to
+/// (and always vastly larger than) the small `start_tai_ns` values (e.g. `1_000`) this file's
+/// `TestServer::spawn` calls use for the *service's own* `TestClock`, so a minted token's
+/// `exp_tai_ns` is always far in this service's own clock's "future" and never spuriously
+/// expired -- see `av_command::test_support::valid_claims`'s own doc for why no test here
+/// sets `nbf` at all (a default `nbf` would spuriously trigger `NotYetValid` against those
+/// same small `TestClock` values).
+const TOKEN_NOW_UNIX_S: i64 = 1_760_000_000;
+const TOKEN_TTL_S: i64 = 3_600;
 
 /// The real policy directory `profiles/execution.yaml`'s `authority.policy_dir` names,
 /// resolved relative to this crate's manifest (matches `tests/policy_fixture.rs`'s identical
@@ -127,6 +144,9 @@ struct TestServer {
     ledger_dir: PathBuf,
     clock: Arc<TestClock>,
     dispatch_sink: Arc<RecordingDispatchSink>,
+    /// A2.1: the same local test issuer the server's own `IssuerConfig` was built from --
+    /// [`Self::mint`] mints tokens this server's `Authorize` will actually verify.
+    issuer: TestIssuer,
     shutdown_tx: oneshot::Sender<()>,
     handle: tokio::task::JoinHandle<()>,
 }
@@ -149,6 +169,11 @@ impl TestServer {
         let bundle = Arc::new(PolicyBundle::load(real_policy_dir()).expect("load the shipped policy bundle"));
         let clock = Arc::new(TestClock::new(start_tai_ns));
         let dispatch_sink = Arc::new(RecordingDispatchSink::new());
+        let issuer = TestIssuer::new();
+        let issuer_config = Arc::new(
+            IssuerConfig::from_public_key_pem(TEST_ISSUER, TEST_AUDIENCE, issuer.public_key_pem())
+                .expect("a freshly-generated test issuer key parses as a valid public key"),
+        );
 
         let servicer = CommandAuthorityServiceImpl::new(
             ledger,
@@ -156,6 +181,7 @@ impl TestServer {
             3_600_000_000_000, // matches profiles/execution.yaml's authority.rate_window_ns
             clock.clone() as Arc<dyn Clock>,
             dispatch_sink.clone() as Arc<dyn DispatchSink>,
+            issuer_config,
         )
         .expect("rebuild the duplicate-dispatch guard from the ledger at construction");
 
@@ -184,7 +210,14 @@ impl TestServer {
             .expect("connect to the just-spawned server over its real loopback socket");
         let client = CommandAuthorityServiceClient::new(channel);
 
-        Self { client, ledger_dir, clock, dispatch_sink, shutdown_tx, handle }
+        Self { client, ledger_dir, clock, dispatch_sink, issuer, shutdown_tx, handle }
+    }
+
+    /// Mints a real RS256-signed token this server's own `Authorize` will verify: `sub`,
+    /// the fixed `TEST_ISSUER`/`TEST_AUDIENCE`/`TOKEN_NOW_UNIX_S`/`TOKEN_TTL_S` this file uses
+    /// throughout, and no `nbf` (see `TOKEN_NOW_UNIX_S`'s own doc comment for why).
+    fn mint(&self, sub: &str) -> String {
+        self.issuer.mint(&valid_claims(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S))
     }
 
     /// Shuts the server task down cleanly, **joins** it (proves the task actually stopped,
@@ -227,15 +260,17 @@ async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     let decision = checked.decision.expect("Check attaches the PolicyDecision");
     assert!(decision.allow, "{decision:?}");
 
+    let token = server.mint("operator-1");
     let authorized = server
         .client
-        .authorize(AuthorizeRequest { command_id: "cmd-1".to_string(), principal_token: "bearer-abc".to_string(), delegation_id: "delegation-1".to_string() })
+        .authorize(AuthorizeRequest { command_id: "cmd-1".to_string(), principal_token: token, delegation_id: "delegation-1".to_string() })
         .await
         .expect("Authorize")
         .into_inner();
     let authorized_command = authorized.command.expect("command present");
     assert_eq!(authorized_command.state, CommandState::Authorized as i32);
-    assert_eq!(authorized_command.transitions.last().unwrap().principal, "bearer-abc");
+    // A2.1: the recorded principal is the token's verified sub claim, never the raw token.
+    assert_eq!(authorized_command.transitions.last().unwrap().principal, "operator-1");
     assert_eq!(authorized_command.transitions.last().unwrap().delegation_id, "delegation-1");
 
     let dispatched = server.client.dispatch(DispatchRequest { command_id: "cmd-1".to_string() }).await.expect("Dispatch").into_inner();
@@ -297,11 +332,14 @@ async fn check_denies_a_payload_class_command_with_the_policys_exact_reason() {
 async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_typed_message() {
     let mut server = TestServer::spawn("illegal-edges", 1_000).await;
 
-    // Authorize-before-Check.
+    // Authorize-before-Check. A verifiable token (A2.1 verifies identity before attempting
+    // the state edge) -- this must fail on the *state machine's* own edge check, not on
+    // token verification, or this test would no longer be testing what its name says.
     server.client.propose(propose_request(base_command("cmd-a", "sat-1", "mode", ""), "model-x")).await.unwrap();
+    let token = server.mint("operator-1");
     let err = server
         .client
-        .authorize(AuthorizeRequest { command_id: "cmd-a".to_string(), principal_token: "t".to_string(), delegation_id: String::new() })
+        .authorize(AuthorizeRequest { command_id: "cmd-a".to_string(), principal_token: token, delegation_id: String::new() })
         .await
         .expect_err("Authorize before Check must be refused");
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
@@ -317,9 +355,10 @@ async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_ty
     // Ack-before-Dispatch.
     server.client.propose(propose_request(base_command("cmd-c", "sat-1", "mode", ""), "model-x")).await.unwrap();
     server.client.check(CheckRequest { command_id: "cmd-c".to_string() }).await.unwrap();
+    let token = server.mint("operator-1");
     server
         .client
-        .authorize(AuthorizeRequest { command_id: "cmd-c".to_string(), principal_token: "t".to_string(), delegation_id: String::new() })
+        .authorize(AuthorizeRequest { command_id: "cmd-c".to_string(), principal_token: token, delegation_id: String::new() })
         .await
         .unwrap();
     let err = server
@@ -359,7 +398,8 @@ async fn dispatch_refuses_a_duplicate_idempotency_key_and_appends_no_second_ledg
     for id in ["cmd-x", "cmd-y"] {
         server.client.propose(propose_request(base_command(id, "sat-1", "mode", key), "model-x")).await.unwrap();
         server.client.check(CheckRequest { command_id: id.to_string() }).await.unwrap();
-        server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: "t".to_string(), delegation_id: String::new() }).await.unwrap();
+        let token = server.mint("operator-1");
+        server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap();
     }
 
     let first = server.client.dispatch(DispatchRequest { command_id: "cmd-x".to_string() }).await.expect("the first dispatch of this key succeeds").into_inner();
@@ -395,9 +435,10 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
     let mut server1 = TestServer::spawn("idempotency-restart", 1_000).await;
     server1.client.propose(propose_request(base_command("cmd-r1", "sat-r", "mode", key), "model-x")).await.unwrap();
     server1.client.check(CheckRequest { command_id: "cmd-r1".to_string() }).await.unwrap();
+    let token1 = server1.mint("operator-1");
     server1
         .client
-        .authorize(AuthorizeRequest { command_id: "cmd-r1".to_string(), principal_token: "t".to_string(), delegation_id: String::new() })
+        .authorize(AuthorizeRequest { command_id: "cmd-r1".to_string(), principal_token: token1, delegation_id: String::new() })
         .await
         .unwrap();
     let dispatched = server1
@@ -418,7 +459,8 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
     let mut server2 = TestServer::spawn_over(ledger_dir.clone(), 2_000).await;
     server2.client.propose(propose_request(base_command("cmd-r2", "sat-r", "mode", key), "model-x")).await.unwrap();
     server2.client.check(CheckRequest { command_id: "cmd-r2".to_string() }).await.unwrap();
-    server2.client.authorize(AuthorizeRequest { command_id: "cmd-r2".to_string(), principal_token: "t".to_string(), delegation_id: String::new() }).await.unwrap();
+    let token2 = server2.mint("operator-1");
+    server2.client.authorize(AuthorizeRequest { command_id: "cmd-r2".to_string(), principal_token: token2, delegation_id: String::new() }).await.unwrap();
 
     let err = server2
         .client
@@ -481,7 +523,8 @@ async fn verify_ledger_reports_a_tampered_partition_as_broken_at_the_right_seque
 
     server.client.propose(propose_request(base_command("cmd-t", "sat-t", "mode", ""), "model-x")).await.unwrap();
     server.client.check(CheckRequest { command_id: "cmd-t".to_string() }).await.unwrap();
-    server.client.authorize(AuthorizeRequest { command_id: "cmd-t".to_string(), principal_token: "t".to_string(), delegation_id: String::new() }).await.unwrap();
+    let token = server.mint("operator-1");
+    server.client.authorize(AuthorizeRequest { command_id: "cmd-t".to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap();
 
     let mut records = read_ledger_records(&server.ledger_dir, "sat-t");
     assert_eq!(records.len(), 3, "sanity: PROPOSED, CHECKED, AUTHORIZED");
@@ -520,4 +563,105 @@ fn non_loopback_bind_addresses_are_refused_with_a_typed_error_naming_question_15
     for raw in ["127.0.0.1:50070", "localhost:50070", "[::1]:50070"] {
         resolve_loopback_bind_address(raw).unwrap_or_else(|e| panic!("{raw:?} must be accepted: {e}"));
     }
+}
+
+/// **Acceptance test 9** (A2.1): `Authorize` with an unverifiable `principal_token` is
+/// refused `UNAUTHENTICATED`, before any state transition happens and before any ledger
+/// record is appended -- see `crate::service`'s module doc, "A2.1: `Authorize` verifies
+/// *who*, not *whether*".
+#[tokio::test]
+async fn authorize_with_an_unverifiable_token_is_refused_unauthenticated_and_appends_no_record() {
+    let mut server = TestServer::spawn("a2-unverifiable-token", 1_000).await;
+    server.client.propose(propose_request(base_command("cmd-bad-tok", "sat-a2", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-bad-tok".to_string() }).await.unwrap();
+
+    let records_before = read_ledger_records(&server.ledger_dir, "sat-a2").len();
+
+    // Wrong issuer -- a real, correctly-signed token from this server's own issuer, but
+    // minted with an iss the server's IssuerConfig does not match. Not a hand-edited string:
+    // a real signed token whose *claims* are wrong, exactly per this task's brief.
+    let bad_token = server.issuer.mint(&valid_claims("https://not-the-configured-issuer/", TEST_AUDIENCE, "operator-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S));
+    let err = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-bad-tok".to_string(), principal_token: bad_token, delegation_id: String::new() })
+        .await
+        .expect_err("an unverifiable token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert!(err.message().contains("token verification failed"), "{}", err.message());
+    assert!(err.message().contains("does not match the configured issuer"), "{}", err.message());
+
+    let records_after = read_ledger_records(&server.ledger_dir, "sat-a2").len();
+    assert_eq!(records_before, records_after, "a refused Authorize must append no ledger record at all");
+
+    // The command itself is unaffected: still CHECKED, not AUTHORIZED and not anything else.
+    let queried = server
+        .client
+        .query(QueryRequest { selector: Some(Selector::CommandId("cmd-bad-tok".to_string())) })
+        .await
+        .expect("Query")
+        .into_inner();
+    assert_eq!(queried.commands[0].state, CommandState::Checked as i32);
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 10** (A2.1): the refusal message for an unverifiable token contains
+/// neither the raw bearer token nor its raw signature bytes -- `crate::oidc`'s module doc's
+/// and `crate::service`'s module doc's own claim, asserted directly here against a real
+/// refusal over the real wire.
+#[tokio::test]
+async fn authorize_refusal_message_never_contains_the_token_or_signature() {
+    let mut server = TestServer::spawn("a2-no-leak", 1_000).await;
+    server.client.propose(propose_request(base_command("cmd-leak-check", "sat-a2", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-leak-check".to_string() }).await.unwrap();
+
+    // Wrong audience this time (a different refusal reason from test 9, same principle): a
+    // real, correctly-signed token, deliberately minted for the wrong audience.
+    let bad_token = server.issuer.mint(&valid_claims(TEST_ISSUER, "some-other-audience", "operator-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S));
+    let signature_b64 = bad_token.rsplit_once('.').expect("a JWS has a signature segment").1.to_string();
+
+    let err = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-leak-check".to_string(), principal_token: bad_token.clone(), delegation_id: String::new() })
+        .await
+        .expect_err("a wrong-audience token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert!(!err.message().contains(bad_token.as_str()), "refusal message must not contain the raw token: {}", err.message());
+    assert!(!err.message().contains(signature_b64.as_str()), "refusal message must not contain the raw signature: {}", err.message());
+    assert!(err.message().contains("does not contain the configured audience"), "{}", err.message());
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 11** (A2.1): a real, correctly-signed, fully-valid token succeeds, and
+/// the **verified** `sub` claim -- not the raw bearer token -- is what lands in
+/// `CommandTransition.principal`, over the real wire, read back from the durable ledger.
+#[tokio::test]
+async fn authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token() {
+    let mut server = TestServer::spawn("a2-verified-principal", 1_000).await;
+    server.client.propose(propose_request(base_command("cmd-verified", "sat-a2", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-verified".to_string() }).await.unwrap();
+
+    let token = server.mint("astronaut-jane");
+    let authorized = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-verified".to_string(), principal_token: token.clone(), delegation_id: "delegation-9".to_string() })
+        .await
+        .expect("a fresh, correctly-signed token must be accepted")
+        .into_inner();
+    let authorized_command = authorized.command.expect("command present");
+    assert_eq!(authorized_command.state, CommandState::Authorized as i32);
+    let last = authorized_command.transitions.last().unwrap();
+    assert_eq!(last.principal, "astronaut-jane");
+    assert_ne!(last.principal, token, "the recorded principal must never be the raw token string");
+    assert_eq!(last.delegation_id, "delegation-9");
+    assert!(last.reason.contains("verified"), "{}", last.reason);
+    assert!(!last.reason.to_lowercase().contains("not yet verified"), "{}", last.reason);
+
+    // Read back from the durable ledger, not just the in-memory response.
+    let records = read_ledger_records(&server.ledger_dir, "sat-a2");
+    let authorized_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Authorized as i32).expect("an AUTHORIZED record exists");
+    assert_eq!(authorized_record.transition.as_ref().unwrap().principal, "astronaut-jane");
+
+    server.shutdown().await;
 }

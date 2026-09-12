@@ -8,6 +8,16 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# A2.1: gates `src/test_support.rs` (a local OIDC-token-minting issuer -- see that module's
+# own doc comment) out of a default build. `cargo build -p av-command` and the shipped
+# `av-command` binary do NOT compile this module at all -- it is not merely "unreachable from
+# production code", it is not present in the artifact. Enabled two ways: `cargo test`'s own
+# unit-test build (via `cfg(test)`, below, independent of this feature) and this crate's own
+# `[dev-dependencies]` self-reference (below), which is how `tests/*.rs` -- a separate
+# compilation unit that cannot see `cfg(test)` code -- gets access to it.
+[features]
+test-support = []
+
 [dependencies]
 # A1.2 evaluates policy at CHECKED with this crate; kept default-features off with exactly
 # these two features (deliberately, verified at setup): regorus 0.12.0 has no crypto
@@ -37,8 +47,21 @@ serde_yaml = "0.9"
 # SHA-256 for the ledger's hash chain, via the `openssl` crate (openssl-sys -> the
 # system/Homebrew libssl/libcrypto) -- ADR-004's crypto rule: SHA-256 only, the system
 # OpenSSL only, no bundled crypto (no `sha2`, no `ring`). Mirrors
-# crates/av-dynamics-service/src/evidence.rs exactly.
+# crates/av-dynamics-service/src/evidence.rs exactly. Also the *only* crate A2.1's OIDC
+# token verification (src/oidc.rs) uses for signature verification (openssl::sign::Verifier
+# over an openssl::pkey::PKey, SHA-256 digest) -- no ring, no jsonwebtoken, no jwt crate, no
+# bundled crypto of any kind.
 openssl = "0.10"
+
+# A2.1 (`docs/aiplane-plan.md` milestone A2; `crates/av-command/src/oidc.rs`): base64url
+# (no padding) decode/encode of a compact-serialization JWS's three segments. Not a new
+# crate to this workspace's dependency graph: `base64` v0.22.1 is already in `Cargo.lock` at
+# exactly this version, pulled in transitively by the tonic/hyper stack this crate already
+# depends on (`cargo tree -p av-command` before this line was added already showed it under
+# tonic's own subtree) -- this line only promotes an existing transitive dependency to a
+# direct one; `git diff Cargo.lock` after adding it shows no new package entries (see this
+# task's report for the exact diff).
+base64 = "0.22"
 
 # For src/admin.rs's hand-rolled `/admin/api/evidence*` HTTP server: a plain
 # tokio::net::TcpListener with manual GET-only request parsing, not axum/hyper directly --
@@ -62,6 +85,14 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost"]
 prost-build.workspace = true
 
 [dev-dependencies]
+# A2.1: the standard trick for exposing a test-only `pub mod` to `tests/*.rs` (a separate
+# compilation unit, linked against the *ordinary*, non-`cfg(test)` build of this crate)
+# without gating that module behind nothing at all (see the `[features]` block's comment
+# and `src/test_support.rs`'s own doc for why `cfg(test)` alone is not enough). This makes
+# Cargo build a *second*, `test-support`-featured copy of this crate for `tests/*.rs` to
+# depend on, distinct from the artifact `src/bin/av-command.rs` links against -- the
+# production binary is unaffected.
+av-command = { path = ".", features = ["test-support"] }
 # Test-only client channel for crates/av-command/tests/*.rs, which drive the real service
 # over a real loopback socket with a real tonic client (question 154's own module-doc
 # record: binding/connecting on 127.0.0.1 is not "network at test time", the rule is about

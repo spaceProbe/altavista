@@ -10,15 +10,16 @@ Met / Partial / Inherited / Gap legend `secagent`'s `docs/cmmc.md` uses.
 ```{admonition} Not a certification
 This is engineering documentation, not a C3PAO assessment or an attestation. CMMC Level 2
 is a property of the accreditation boundary as a whole, not of one crate. **Most rows below
-are still Gap or Partial — that is the honest state of this milestone (A1, now complete
-through A1.3: "the command state machine as a library, the durable hash-chained ledger, the
-injected clock, Rego policy evaluation at CHECKED, the evidence/admin surface, and now
-`CommandAuthorityService` itself over the wire"), not a defect in this document.** A1.3 gives
-several rows below a real network-facing surface to score for the first time (remote access,
-boundary protection, least functionality, audit), which is why they move from Gap to Partial
-or Met in this revision — but this crate still has no principal, role or delegation model
-(A2); every row a Partial mark below because identity is still unverified says so explicitly,
-and none is marked Met for something A2, not this task, has not built yet.
+are still Gap or Partial — that is the honest state of this milestone (A1 through A2.1: "the
+command state machine as a library, the durable hash-chained ledger, the injected clock,
+Rego policy evaluation at CHECKED, `CommandAuthorityService` over the wire, and now real
+OIDC identity verification on `Authorize`"), not a defect in this document.** A2.1 gives the
+identification/authentication rows (3.5.x) a real implementation to score for the first
+time, which is why they move from Gap to Partial in this revision — but this crate still has
+no role, MFA or delegation *gate* (A2.2): a verified principal, with any claims, authorizes
+any command class today. **The authorization rows (3.1.x) are deliberately left exactly as
+A1.3 scored them** — A2.1 verifies *who* the caller is, not *whether* they may act, so those
+rows have not earned an upgrade; A2.2 is the milestone that will change them.
 ```
 
 ## Legend
@@ -32,10 +33,12 @@ and none is marked Met for something A2, not this task, has not built yet.
 
 ## Scope
 
-This crate is, as of A1.3, a **library plus a real gRPC service plus one localhost HTTP admin
+This crate is, as of A2.1, a **library plus a real gRPC service plus one localhost HTTP admin
 surface** — `CommandAuthorityService` now gives every state-machine edge and the ledger a
-real, network-facing (loopback-only) surface, but there is still no caller-facing
-authentication or authorization of any kind:
+real, network-facing (loopback-only) surface, and `Authorize` now really authenticates its
+caller's `principal_token` against a configured OIDC issuer — but there is still no
+authorization (role/MFA/delegation) gate of any kind, and every RPC other than `Authorize`
+remains reachable by any caller that can reach the bind address:
 
 - `src/state.rs` — the `CommandState` machine (`propose`/`check`/`authorize`/`dispatch`/
   `ack`/`reject`/`expire`/`fail`), in-process, called by `src/service.rs`'s RPC handlers (and
@@ -53,32 +56,51 @@ authentication or authorization of any kind:
   and drives `state::check`/`state::reject` plus the matching `Ledger::append`, with the
   decision id and policy hash written into the transition's `reason` (`format_reason`/
   `parse_reason`).
-- `src/service.rs` (**A1.3, new this task**) — `CommandAuthorityServiceImpl`:
+- `src/service.rs` (A1.3; **A2.1, updated this task**) — `CommandAuthorityServiceImpl`:
   `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack`/`Query`/`VerifyLedger` over a real `tonic`
   gRPC server, plaintext on loopback only (question 155, refused at a typed
   `resolve_loopback_bind_address` boundary — see that function's own doc), a `DispatchSink`
-  seam A3 fills, and duplicate-`idempotency_key` refusal at `Dispatch`. `Authorize` records
-  the bearer `principal_token`/`delegation_id` it was given **without verifying either** —
-  the transition's own reason says so in plain text (`AUTHORIZE_UNVERIFIED_REASON`).
-- `src/bin/av-command.rs` (**A1.3, new this task**) — the service binary: CLI-argument
-  configuration only (question 199: never the process environment), the gRPC server and the
-  admin HTTP server both bound loopback-only.
+  seam A3 fills, and duplicate-`idempotency_key` refusal at `Dispatch`. **`Authorize` now
+  verifies `principal_token` for real** (`crate::oidc::verify`, against the
+  `IssuerConfig` this service is constructed with) before attempting any state transition,
+  and records the verified `Principal.sub` — never the raw token — as `CommandTransition.
+  principal`; an unverifiable token is refused `UNAUTHENTICATED` with `AUTHORIZE_VERIFIED_
+  REASON` no longer claiming identity is unverified, because it now is. `delegation_id` is
+  still recorded exactly as A1.3 left it: unevaluated, for A2.2.
+- `src/oidc.rs` (**A2.1, new this task**) — OIDC token verification against the secsso
+  claims contract: `verify`, `IssuerConfig`, the full `TokenError` refusal vocabulary. RS256
+  only (ES256/ES384 a named, documented gap — see that module's doc). A pure function of
+  (token, issuer configuration, clock reading); no I/O, no environment read, no wall clock.
+- `src/test_support.rs` (**A2.1, new this task**) — test-fixture-only, and gated out of a
+  default build entirely (`#[cfg(any(test, feature = "test-support"))]` on the `pub mod` in
+  `src/lib.rs`, a `test-support` Cargo feature this crate's own `[dev-dependencies]` turns on
+  for the integration-test build only — see that module's doc for why an earlier, ungated
+  revision was rejected on review): `TestIssuer`, a local OpenSSL-backed OIDC issuer that
+  mints real, signed RS256 tokens with caller-chosen claims. Absent from `cargo build
+  -p av-command`'s default-feature artifact, not merely unreferenced by it.
+- `src/bin/av-command.rs` (A1.3; **A2.1, updated this task**) — the service binary:
+  CLI-argument configuration only (question 199: never the process environment), the gRPC
+  server and the admin HTTP server both bound loopback-only. `--oidc-issuer`/
+  `--oidc-audience`/`--oidc-public-key-path` are now required flags with no default of any
+  kind — this binary refuses to start without an operator-supplied OIDC configuration.
 - `src/evidence.rs` + `src/admin.rs` — `GET /admin/api/evidence` and `GET /admin/api/
   evidence/verify`, loopback-only, the same hand-rolled `tokio::net::TcpListener` shape
   `crates/av-dynamics-service/src/admin.rs` uses.
 - `src/fips.rs` — FIPS posture detection, copied from `crates/av-dynamics-service/src/
   fips.rs` (see that module's own doc comment for the copy-vs-import decision).
 
-Not yet: `Principal`/`Delegation`/role bindings/MFA/OIDC verification (A2 — `Authorize`
-already carries the wire fields A2 needs, unverified); dispatch into the kernel's real
-telecommand path (A3 — `DispatchSink` is the seam, `RecordingDispatchSink` the only
-implementor this crate ships). Rows below score what exists today, not those milestones.
+Not yet: role bindings, MFA gating, delegation-expiry enforcement, the SIEM audit-line
+export (A2.2 — `Principal.groups`/`amr`/`acr` and `CommandTransition.delegation_id` already
+exist and are already carried, but nothing in this crate reads them for a decision yet);
+dispatch into the kernel's real telecommand path (A3 — `DispatchSink` is the seam,
+`RecordingDispatchSink` the only implementor this crate ships). Rows below score what exists
+today, not those milestones.
 
 ## 3.1 Access Control (AC)
 
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
-| 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Gap | `CommandAuthorityServiceImpl` (`crates/av-command/src/service.rs`) now serves a real gRPC surface, but no RPC authenticates a caller: `Authorize` records whatever `principal_token`/`delegation_id` it is given verbatim, without verifying either (`AUTHORIZE_UNVERIFIED_REASON` says so on the transition itself) — anything able to reach the bind address is served. Identity verification is A2's job, not earned by this task | N/A |
+| 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Gap | `CommandAuthorityServiceImpl` (`crates/av-command/src/service.rs`) serves a real gRPC surface. **A2.1 (this task) makes `Authorize` verify `principal_token` for real** (`crate::oidc::verify`, `AUTHORIZE_VERIFIED_REASON` on the transition) — but that is authentication, not authorization: no RPC, `Authorize` included, checks whether the now-real identity is *allowed* to do anything, and the other six RPCs (`Propose`/`Check`/`Dispatch`/`Ack`/`Query`/`VerifyLedger`) remain reachable by any caller that can reach the bind address. Limiting system access to *authorized* users/processes is still Gap: role-gated authorization is A2.2's job, not earned by this task | N/A |
 | 3.1.3 | Control the flow of CUI | Partial | `Label` (`altavista.v1.Label`) is carried on `PolicyInput` and reaches the Rego evaluator (`crates/av-command/src/policy.rs`'s `canonical_input_json`), so a policy authored to check it can refuse on label today — but `profiles/policies/authority/command.rego`, the shipped starter policy, does not itself write a label check (its four rules are class-admit/class-reject/rate-limit/envelope-refuse, per A1's own fixture requirements); a real label-flow-control policy is future policy-authoring work, not a code gap in the evaluator. A4's gateway (label-aware query refusal) remains the other, unbuilt half | `cargo test -p av-command --test policy_fixture` |
 | 3.1.5 | Least privilege | Inherited | OS user/systemd hardening this process runs under is a deployment concern, not something this crate's code sets | N/A |
 | 3.1.12 / 3.1.13 | Control & encrypt remote access | Partial | **New this task, the "control" half:** `crates/av-command/src/service.rs:resolve_loopback_bind_address` refuses a non-loopback gRPC/admin bind address at startup with a typed `BindAddressError::NotLoopback` naming question 155 — `src/bin/av-command.rs` calls it for both listeners before either socket is ever bound, so a misconfigured deployment cannot even start non-loopback, not merely "happens to bind loopback in tests" as the previous revision of this row said. The "encrypt" half is still Gap: this crate links no TLS stack of any kind (ADR-004), and no nginx mTLS front (question 84) has been built or proven for this crate the way `av-dynamics-service`'s is | `cargo test -p av-command --lib service::tests::resolve_loopback_bind_address_refuses_every_non_loopback_spelling` and `cargo test -p av-command --test grpc_service non_loopback_bind_addresses_are_refused_with_a_typed_error_naming_question_155` |
@@ -91,7 +113,7 @@ implementor this crate ships). Rows below score what exists today, not those mil
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
 | 3.3.1 | Create and retain audit records | Met | `crates/av-command/src/ledger.rs:Ledger::append` appends one length-prefixed `LedgerRecord` per transition, forever (no rotation/expiry policy — see Deficiencies); retention is unbounded local-file | `cargo test -p av-command --lib ledger::tests::later_records_chain_prev_hash_to_the_previous_records_hash` |
-| 3.3.2 | Trace actions to individual users/processes | Partial | Every `CommandTransition` carries a `principal` string (`crates/av-command/src/state.rs`'s `propose`/`check`/.../`fail`, all take `principal: &str`), and `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now carries this over the wire too (`AuthorizeRequest.principal_token`) — but nothing verifies that string is who it claims to be, over the wire or in-process; identity verification remains A2's job, not earned by this task | `cargo test -p av-command --test grpc_service full_legal_path_propose_check_authorize_dispatch_ack_end_to_end` |
+| 3.3.2 | Trace actions to individual users/processes | Partial | Every `CommandTransition` carries a `principal` string (`crates/av-command/src/state.rs`'s `propose`/`check`/.../`fail`, all take `principal: &str`). **Updated this task (A2.1):** on `Authorize`, that string is now the OIDC-verified `sub` claim (`crates/av-command/src/oidc.rs::verify`), not a caller-supplied token — a real identity, traceable to the configured issuer's own records. Still Partial: `Propose`/`Dispatch`/`Ack`'s own `principal` values (a model/agent id, `"ground-segment"`, an ack reporter) are still caller-supplied strings with no verification of their own, by design (`authority.proto`'s own doc comment: a proposer is not a human OIDC principal) | `cargo test -p av-command --test grpc_service authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token` |
 | 3.3.4 | Alert on audit logging failure | Partial | `Ledger::append`/`Ledger::verify` return `std::io::Result`, so a write/read failure is a real, propagated `Err`, never silently swallowed — but this is fail-loud to the caller (a `tonic::Status` with code `INTERNAL` at the gRPC boundary, `crates/av-command/src/service.rs`'s `to_status`), not an *alert* to an operator/SIEM | N/A (verified by code inspection: every fallible I/O call in `crates/av-command/src/ledger.rs` uses `?`, never `.ok()`/`.unwrap_or_default()`) |
 | 3.3.5 / 3.3.6 | Correlate and report audit review | Gap | No correlation tooling beyond the raw per-partition ledger files, `/admin/api/evidence/verify`'s pass/fail result, and the now-wired `VerifyLedger` RPC (same underlying `Ledger::verify`, just reachable over gRPC too) | N/A |
 | 3.3.7 | Authoritative, time-synced timestamps | Inherited | Every `LedgerRecord.tai_ns` comes from the caller's injected `Clock` (`crates/av-command/src/clock.rs`); NTP synchronization of whatever `SystemClock` reads is the environment's responsibility | N/A |
@@ -111,8 +133,8 @@ implementor this crate ships). Rows below score what exists today, not those mil
 
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
-| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Gap | `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now takes a bearer `principal_token` and a `delegation_id` on the wire (`AuthorizeRequest`, `authority.proto`), but A1.3 verifies neither — every RPC on this service is reachable by any caller that can reach the bind address. ADR-004/A2 name OIDC principals and role-gated authorization, neither of which is built by this task; identity verification is A2's job to earn, not this one's to claim | N/A |
-| 3.5.3 | MFA for privileged/remote access | Gap | A2's plan is an `amr`/`acr`-checked MFA claim on `Authorize` for hazardous command classes; `crates/av-command/src/service.rs`'s `authorize` RPC handler exists today (over the wire, not only `crates/av-command/src/state.rs:authorize` in-process) but performs no MFA check of any kind — anyone who can call it authorizes anything | N/A |
+| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Partial | **New this task (A2.1):** `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now really verifies `AuthorizeRequest.principal_token` — `crates/av-command/src/oidc.rs`'s `verify` checks the RS256 signature (against the configured issuer's public key, `openssl::sign::Verifier`), the `alg` allow-list (`"none"` included), `iss`, `aud`, `exp`/`nbf` against the injected clock, and a non-empty `sub`, before `Authorize` ever attempts a state transition; an unverifiable token is refused `UNAUTHENTICATED` and the transition's own reason (`AUTHORIZE_VERIFIED_REASON`) now honestly says identity is real. **Still Partial, not Met:** `Authorize` is the only one of the seven RPCs that authenticates anything at all — `Propose`/`Check`/`Dispatch`/`Ack`/`Query`/`VerifyLedger` remain reachable by any caller that can reach the bind address, and `Propose`'s own `principal` (a model/agent identity, `authority.proto`'s own doc comment) is deliberately never an OIDC subject to verify. Machine-client OIDC service subjects (question 34) are not distinguished from human subjects by this crate (see `authority.proto`'s `Principal` doc comment for why no field was added) | `cargo test -p av-command --lib oidc::` and `cargo test -p av-command --test grpc_service authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token`, `authorize_with_an_unverifiable_token_is_refused_unauthenticated_and_appends_no_record` |
+| 3.5.3 | MFA for privileged/remote access | Gap | A2.2's plan is an `amr`/`acr`-checked MFA gate on `Authorize` for hazardous command classes. A2.1 gets `Principal.amr`/`Principal.acr` onto the wire for real — parsed from a *verified* token's claims (`crates/av-command/src/oidc.rs`), not invented — but nothing in this crate reads either field for a decision yet; `crates/av-command/src/service.rs`'s `authorize` RPC handler performs no MFA check of any kind — any verified principal, MFA or not, authorizes anything | `cargo test -p av-command --lib oidc::tests::a_valid_token_verifies_and_fills_every_principal_field_in_claim_order` (proves `amr`/`acr` are carried, not that anything gates on them) |
 | 3.5.10 | Cryptographically-protected passwords/secrets | Inherited / N/A | This crate holds no passwords or long-lived secrets | N/A |
 
 ## 3.13 System and Communications Protection (SC)
@@ -123,7 +145,7 @@ implementor this crate ships). Rows below score what exists today, not those mil
 | 3.13.6 | Deny network traffic by default | Partial | `crates/av-command/src/admin.rs:handle_connection` matches an explicit, closed route list and refuses (`404`)/rejects (`405`) everything else; `CommandAuthorityServiceServer` similarly serves exactly the declared RPC set, `UNIMPLEMENTED` for anything else — deny-by-default *within* this process's own HTTP/gRPC surface, not a network-layer control | `cargo test -p av-command --lib admin::tests::unknown_path_is_404_and_non_get_is_405` |
 | 3.13.8 | Encrypt CUI in transit | Gap | This crate links no TLS stack of any kind (ADR-004: `tonic`'s `"server"`/`"channel"` features only, never `"tls"`/`"tls-native-roots"`/`"tls-webpki-roots"` — `cargo tree -p av-command` shows no `rustls`/`ring`) and no nginx mTLS front (question 84) has been built or proven for this crate the way `av-dynamics-service`'s is (`tests/test_grpc_tls.py`'s `..._against_rust_backend` tests) — `src/bin/av-command.rs` is now a real deployable binary for such a front to sit in front of, but none exists yet | N/A |
 | 3.13.11 | **Use FIPS-validated cryptography** | Gap | `crates/av-command/src/fips.rs:detect` *detects* (never claims) the linked OpenSSL's FIPS posture by attempting to load the OpenSSL `"fips"` provider module; on this build (Homebrew `openssl@3`, no `fips.dylib` shipped) the load fails — no FIPS-validated module is present at all | `cargo test -p av-command --lib fips::tests -- --nocapture`, or live: `curl -s http://127.0.0.1:<admin_port>/admin/api/evidence \| python3 -m json.tool` and read the `"fips"` object |
-| 3.13.15 | Protect authenticity of comms sessions | Partial | `AuthorizeRequest` (`authority.proto`, A1.3) now carries a `principal_token`/`delegation_id` pair on the wire, but `crates/av-command/src/service.rs`'s `authorize` RPC handler verifies neither — `AUTHORIZE_UNVERIFIED_REASON` is written onto the transition precisely so this is never mistaken for a real session-authenticity control. Real verification is A2's job, not earned by this task | `cargo test -p av-command --test grpc_service full_legal_path_propose_check_authorize_dispatch_ack_end_to_end` |
+| 3.13.15 | Protect authenticity of comms sessions | Partial | **Updated this task (A2.1):** `AuthorizeRequest.principal_token` (`authority.proto`) is now really verified by `crates/av-command/src/service.rs`'s `authorize` RPC handler (`crates/av-command/src/oidc.rs::verify`) — a session claiming a given principal must present a token whose signature, issuer, audience and expiry actually check out. Still Partial: this is a per-call bearer-token check, not a session-level (e.g. mTLS channel-bound) authenticity property, and it covers only `Authorize` — every other RPC's caller identity is unauthenticated | `cargo test -p av-command --test grpc_service authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token` |
 
 ## 3.14 System and Information Integrity (SI)
 
@@ -157,16 +179,20 @@ crate has no material to implement:
 
 Ranked by what a reviewer would flag first:
 
-1. **No authentication or authorization anywhere in this crate** (AC 3.1.1/3.1.2, IA
-   3.5.1/3.5.2/3.5.3, AU 3.3.9, SC 3.13.15). Every `state.rs` transition function, both admin
-   routes, and now (A1.3) every `CommandAuthorityService` RPC are open to any caller that can
-   reach them. `Authorize` carries a bearer `principal_token` and a `delegation_id` on the
-   wire (`AuthorizeRequest`) precisely so A2 has somewhere to put its own verification without
-   a second request shape — but A1.3 itself verifies neither; the transition's own reason text
-   (`AUTHORIZE_UNVERIFIED_REASON`) says so, so this can never be mistaken for real
-   authorization by a reader of the ledger alone. A2 (`Principal`, `Delegation`, role bindings,
-   MFA) is the milestone that closes this; `authority.proto`'s own header comment names
-   exactly what A2 will add so the next worker does not invent a second shape.
+1. **No authorization anywhere in this crate, and no authentication on six of seven RPCs**
+   (AC 3.1.1/3.1.2, IA 3.5.3, AU 3.3.9). **Partially closed this task (A2.1):** `Authorize`'s
+   `principal_token` is now really verified (`crates/av-command/src/oidc.rs::verify` — RS256
+   signature against a configured issuer, `iss`/`aud`/`exp`/`nbf`/`sub` all checked), and the
+   verified `Principal.sub` is what gets recorded, not a caller-supplied string;
+   `AUTHORIZE_VERIFIED_REASON` says so in plain text and this can now be trusted by a reader
+   of the ledger. **What is still open:** `Propose`/`Check`/`Dispatch`/`Ack`/`Query`/
+   `VerifyLedger` remain reachable by any caller that can reach the bind address (none of them
+   carries or checks any credential); and, on `Authorize` itself, identity is now real but
+   *authorization* is not — a verified principal with any `groups`/`amr`/`acr` authorizes any
+   command class, because nothing in this crate reads those claims for a decision yet. A2.2
+   (`Delegation`, role bindings, the MFA gate, delegation-expiry enforcement, the SIEM audit
+   line) is the milestone that closes the rest; `authority.proto`'s own header comment names
+   exactly what A2.2 will add so the next worker does not invent a second shape.
 2. **Resolved by A1.2: policy at `CHECKED` now exists** (was AC 3.1.3, SI 3.14.6's rate/label
    half). `crates/av-command/src/authority.rs`'s `check_command` evaluates the profile-
    declared Rego bundle (`crates/av-command/src/policy.rs`, in-process `regorus`) over every

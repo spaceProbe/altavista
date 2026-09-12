@@ -47,6 +47,19 @@
 //! - **Ledger/rate-source I/O failure** ([`ServiceError::Io`], and
 //!   [`crate::authority::CheckCommandError::Io`]) -> **`INTERNAL`**: an unexpected
 //!   server-side storage fault, never something the caller's request could have avoided.
+//! - **`Authorize`'s `principal_token` fails OIDC verification** ([`crate::oidc::
+//!   TokenError`], A2.1) -> **`UNAUTHENTICATED`**: chosen deliberately over
+//!   `PERMISSION_DENIED` or `INVALID_ARGUMENT` because gRPC's own definition of
+//!   `UNAUTHENTICATED` ("the request does not have valid authentication credentials for the
+//!   operation") names exactly this case -- the request's *identity claim itself* could not
+//!   be established, which is a different failure from "this identity is known but not
+//!   allowed" (`PERMISSION_DENIED`, A2.2's job, not built here) or "this request is malformed"
+//!   (`INVALID_ARGUMENT`, already used above for a genuinely malformed request payload). The
+//!   status message is the [`crate::oidc::TokenError`]'s own `Display` text, which -- see
+//!   that module's doc -- never contains the raw token string or the raw signature bytes;
+//!   `tests/grpc_service.rs`'s
+//!   `authorize_refusal_message_never_contains_the_token_or_signature` (an integration test,
+//!   since it needs a real running service) asserts this directly against a real refusal.
 //!
 //! # Idempotency ([`CommandAuthorityServiceImpl::dispatch`]) -- a guarantee that survives a
 //! restart, not just an in-memory guard
@@ -89,6 +102,31 @@
 //! [`RecordingDispatchSink`] is the only implementor this crate ships, recording every
 //! dispatched `Command` for a test to inspect; nothing behind it talks to any transport.
 //!
+//! # A2.1: `Authorize` verifies *who*, not *whether* -- that split is deliberate
+//!
+//! [`CommandAuthorityServiceImpl::authorize`] now verifies `AuthorizeRequest.principal_token`
+//! for real, against the [`crate::oidc::IssuerConfig`] this service was constructed with
+//! ([`crate::oidc::verify`], evaluated against `self.clock.now_tai_ns()` -- the injected
+//! clock, never the wall clock read a second time here). An unverifiable token never reaches
+//! [`crate::state::authorize`] at all: it is refused `UNAUTHENTICATED` before any state
+//! transition is attempted or any ledger record is appended (see the module doc's status-code
+//! section for why `UNAUTHENTICATED`). On success, the **verified** `Principal.sub` --
+//! never the raw `principal_token` string -- is what gets recorded as `CommandTransition.
+//! principal`, with [`AUTHORIZE_VERIFIED_REASON`] replacing A1.3's `AUTHORIZE_UNVERIFIED_
+//! REASON` (which no longer exists in this crate -- there is no path left that claims
+//! identity is unverified when it is not).
+//!
+//! **This is identity, not authorization.** A2.2 (`docs/aiplane-plan.md`) is the milestone
+//! that reads `Principal.groups`/`amr`/`acr` for a role/MFA gate and evaluates
+//! `AuthorizeRequest.delegation_id` against the injected clock for expiry. A2.1 (this task)
+//! does neither: `delegation_id` is recorded on the transition exactly as A1.3 left it --
+//! carried through unevaluated -- and nothing here reads `Principal.groups`/`amr`/`acr` for
+//! any decision at all. A verified principal with *any* subject and *any* claims authorizes
+//! *any* command class today; closing that gap is explicitly A2.2's job, not this task's, per
+//! `docs/aiplane-plan.md`'s own milestone split and this task's brief ("do not build it").
+//! `docs/compliance/av-command/control-matrix.md`'s IA rows (3.5.x) reflect A2.1 landing;
+//! its AC rows (3.1.x, the authorization half) are left exactly as they were.
+//!
 //! # Transport (question 155/84)
 //!
 //! [`resolve_loopback_bind_address`] refuses a non-loopback bind address with a typed [`BindAddressError`]
@@ -117,6 +155,7 @@ use av_cdm::pb::{
 use crate::authority::{self, CheckCommandError};
 use crate::clock::Clock;
 use crate::ledger::Ledger;
+use crate::oidc::{self, IssuerConfig};
 use crate::policy::PolicyBundle;
 use crate::rate::LedgerRateSource;
 use crate::state::{self, CommandError};
@@ -128,15 +167,17 @@ pub use crate::pb::command_authority_service_server::{CommandAuthorityService as
 /// (`dispatch(c, "ground-segment", ...)`).
 pub const DISPATCH_PRINCIPAL: &str = "ground-segment";
 
-/// The `CommandTransition.reason` text `Authorize` (A1.3) writes for every request, naming
-/// plainly that this milestone performs no identity verification -- see the module doc's
-/// "`tonic::Status` code per refusal kind" section is about refusals; this text is not a
-/// refusal, it is what a *successful* A1.3 `Authorize` honestly says about itself.
-pub const AUTHORIZE_UNVERIFIED_REASON: &str =
-    "authorize: principal_token/delegation_id recorded as given; A1.3 performs no identity, \
-     role, MFA or delegation verification of any kind -- A2 (docs/aiplane-plan.md) is the \
-     milestone that verifies principal_token against an OIDC issuer and gates on role/MFA/ \
-     delegation expiry";
+/// The `CommandTransition.reason` text `Authorize` (A2.1) writes for every request that
+/// reaches a transition (i.e. every request whose token verified) -- see the module doc's
+/// "A2.1: `Authorize` verifies *who*, not *whether*" section. This text is not a refusal, it
+/// is what a *successful* A2.1 `Authorize` honestly says about itself: identity is real,
+/// authorization is not yet gated.
+pub const AUTHORIZE_VERIFIED_REASON: &str =
+    "authorize: principal_token verified against the configured OIDC issuer (crate::oidc); \
+     the recorded principal is the token's verified sub claim, not the raw token. Role, MFA \
+     and delegation-expiry gating are A2.2 (docs/aiplane-plan.md), not yet built -- this \
+     milestone (A2.1) verifies who the caller is, not whether they may authorize this command \
+     class; delegation_id is recorded unevaluated for A2.2 to enforce.";
 
 /// The `CommandTransition.reason` text `Dispatch` writes -- naming the seam A3 fills, not a
 /// real transport (see the module doc's "`DispatchSink` -- not A3" section).
@@ -194,6 +235,11 @@ pub enum ServiceError {
     /// A ledger append or ledger/rate-source read failed.
     #[error("ledger/rate I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// A2.1: `Authorize`'s `principal_token` failed OIDC verification. See
+    /// [`crate::oidc::TokenError`] for the full refusal vocabulary and the module doc's
+    /// status-code section for why this maps to `UNAUTHENTICATED`.
+    #[error("authorize: token verification failed: {0}")]
+    TokenInvalid(#[from] oidc::TokenError),
 }
 
 /// Maps one [`ServiceError`] to the [`tonic::Status`] the module doc's status-code section
@@ -220,6 +266,7 @@ fn to_status(err: ServiceError) -> Status {
         ServiceError::Check(CheckCommandError::Io(_)) => Status::new(Code::Internal, err.to_string()),
         ServiceError::DuplicateIdempotencyKey(_) => Status::new(Code::AlreadyExists, err.to_string()),
         ServiceError::Io(_) => Status::new(Code::Internal, err.to_string()),
+        ServiceError::TokenInvalid(_) => Status::new(Code::Unauthenticated, err.to_string()),
     }
 }
 
@@ -257,6 +304,9 @@ pub struct CommandAuthorityServiceImpl {
     rate_window_ns: i64,
     clock: Arc<dyn Clock>,
     dispatch_sink: Arc<dyn DispatchSink>,
+    /// A2.1: the issuer `Authorize` verifies `AuthorizeRequest.principal_token` against --
+    /// see the module doc's "A2.1: `Authorize` verifies *who*, not *whether*" section.
+    issuer_config: Arc<IssuerConfig>,
     commands: Mutex<BTreeMap<String, Command>>,
     dispatched_idempotency_keys: Mutex<BTreeSet<String>>,
 }
@@ -272,6 +322,7 @@ impl CommandAuthorityServiceImpl {
         rate_window_ns: i64,
         clock: Arc<dyn Clock>,
         dispatch_sink: Arc<dyn DispatchSink>,
+        issuer_config: Arc<IssuerConfig>,
     ) -> io::Result<Self> {
         let dispatched_idempotency_keys = ledger.scan_dispatched_idempotency_keys()?;
         Ok(Self {
@@ -280,6 +331,7 @@ impl CommandAuthorityServiceImpl {
             rate_window_ns,
             clock,
             dispatch_sink,
+            issuer_config,
             commands: Mutex::new(BTreeMap::new()),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
         })
@@ -352,7 +404,16 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
     async fn authorize(&self, request: Request<AuthorizeRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
         let command = self.get_command(&req.command_id).map_err(to_status)?;
-        let authorized = state::authorize(command, &req.principal_token, AUTHORIZE_UNVERIFIED_REASON, &req.delegation_id, &*self.clock)
+
+        // A2.1: verify identity before attempting any state transition -- an unverifiable
+        // token never reaches state::authorize, never appends a ledger record, and never
+        // touches this service's in-memory index. See the module doc's "A2.1: `Authorize`
+        // verifies *who*, not *whether*" section.
+        let now_tai_ns = self.clock.now_tai_ns();
+        let principal =
+            oidc::verify(&req.principal_token, &self.issuer_config, now_tai_ns).map_err(|e| to_status(ServiceError::TokenInvalid(e)))?;
+
+        let authorized = state::authorize(command, &principal.sub, AUTHORIZE_VERIFIED_REASON, &req.delegation_id, &*self.clock)
             .map_err(|e| to_status(e.into()))?;
         self.append_last_transition(&authorized).map_err(to_status)?;
         self.put_command(authorized.clone());
