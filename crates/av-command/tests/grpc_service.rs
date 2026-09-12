@@ -38,22 +38,28 @@
 //! only see `av_command`'s public API, so it exercises the *documented* on-disk contract the
 //! same way an external auditor would, not an internal shortcut.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use av_cdm::pb::{
     query_request::Selector, AckLevel, AckRequest, AuthorizeRequest, CheckRequest, Command, CommandProposal, CommandState,
-    DispatchRequest, LedgerRecord, ProposeRequest, QueryByEntity, QueryRequest, VerifyLedgerRequest,
+    Delegation, DispatchRequest, LedgerRecord, ProposeRequest, QueryByEntity, QueryRequest, VerifyLedgerRequest,
 };
+use av_cdm::time::Tai;
+use av_command::audit::{AuditSinkConfig, AuditWriter};
+use av_command::authz::{DelegationTable, RoleTable, WILDCARD};
 use av_command::clock::{Clock, TestClock};
 use av_command::ledger::Ledger;
 use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_client::CommandAuthorityServiceClient;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
-use av_command::service::{resolve_loopback_bind_address, BindAddressError, CommandAuthorityServiceImpl, DispatchSink, RecordingDispatchSink};
-use av_command::test_support::{valid_claims, TestIssuer};
+use av_command::service::{
+    resolve_loopback_bind_address, AuthzConfig, BindAddressError, CommandAuthorityServiceImpl, DispatchSink, RecordingDispatchSink,
+};
+use av_command::test_support::{claims_with_roles_and_mfa, valid_claims, RoleAndMfaClaims, TestIssuer};
 use prost::Message as _;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -134,11 +140,45 @@ fn propose_request(command: Command, principal: &str) -> ProposeRequest {
     ProposeRequest { proposal: Some(CommandProposal { command: Some(command), rationale: "integration test".to_string(), evidence_ids: vec![] }), principal: principal.to_string() }
 }
 
+/// A wildcard delegation covering every class/entity for `subject`, expiring far in the
+/// future -- used only to keep this file's *pre-A2.2* tests (which pass a non-empty
+/// `delegation_id` purely to exercise the field being carried, not to test delegation
+/// enforcement itself) authorizing exactly as they did before A2.2 added real delegation
+/// enforcement. Tests that exercise delegation enforcement itself
+/// ([`delegation_expiry_is_refused_at_the_boundary_second_over_the_wire`],
+/// [`a_delegation_grants_a_class_the_role_does_not_and_reaches_the_ledger`]) build their own,
+/// narrower delegation instead of relying on this one.
+fn wildcard_delegation(id: &str, subject: &str) -> Delegation {
+    Delegation {
+        id: id.to_string(),
+        subject: subject.to_string(),
+        command_classes: vec![WILDCARD.to_string()],
+        entity_ids: vec![WILDCARD.to_string()],
+        not_before_tai_ns: 0,
+        expires_tai_ns: i64::MAX,
+        granted_by: "test-fixture".to_string(),
+        reason: "backward-compatible test fixture delegation".to_string(),
+    }
+}
+
+/// A2.2's default test role table: `"operators"` grants `"mode"`, `"burn-authorizers"` grants
+/// `"mode"`/`"burn"` -- matching `av_command::test_support::valid_claims`'s own default
+/// `groups` (`["operators", "burn-authorizers"]`), so every pre-A2.2 test in this file (which
+/// mints tokens via [`TestServer::mint`], always using those default claims) keeps
+/// authorizing its `"mode"`-class commands exactly as before, now through a real role check
+/// rather than an unconditional pass.
+fn default_roles() -> BTreeMap<String, Vec<String>> {
+    let mut roles = BTreeMap::new();
+    roles.insert("operators".to_string(), vec!["mode".to_string()]);
+    roles.insert("burn-authorizers".to_string(), vec!["mode".to_string(), "burn".to_string()]);
+    roles
+}
+
 /// A running `CommandAuthorityServiceImpl` behind a real loopback socket, plus everything a
 /// test needs to inspect what happened: the ledger directory (for
 /// [`read_ledger_records`]/[`write_ledger_records`]), the [`RecordingDispatchSink`] (A3's
-/// seam -- see `crate::service`'s module doc), and the shared clock. [`Self::shutdown`] must
-/// be called at the end of every test that constructs one.
+/// seam -- see `crate::service`'s module doc), the shared clock, and (A2.2) the audit sink
+/// file path. [`Self::shutdown`] must be called at the end of every test that constructs one.
 struct TestServer {
     client: CommandAuthorityServiceClient<Channel>,
     ledger_dir: PathBuf,
@@ -147,24 +187,46 @@ struct TestServer {
     /// A2.1: the same local test issuer the server's own `IssuerConfig` was built from --
     /// [`Self::mint`] mints tokens this server's `Authorize` will actually verify.
     issuer: TestIssuer,
+    /// A2.2: the file this server's `AuditWriter` was configured with -- read back by
+    /// this file's audit-line tests.
+    audit_path: PathBuf,
     shutdown_tx: oneshot::Sender<()>,
     handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestServer {
     /// Spawns over a **fresh** ledger directory, named `name` (wiped first if it somehow
-    /// already exists -- see [`tmp_ledger_dir`]). The overwhelming majority of tests want
-    /// this.
+    /// already exists -- see [`tmp_ledger_dir`]), with the default role table
+    /// ([`default_roles`]) and two wildcard fixture delegations (`"delegation-1"` for
+    /// `"operator-1"`, `"delegation-9"` for `"astronaut-jane"` -- see [`wildcard_delegation`]),
+    /// no MFA methods configured. The overwhelming majority of tests want this.
     async fn spawn(name: &str, start_tai_ns: i64) -> Self {
         Self::spawn_over(tmp_ledger_dir(name), start_tai_ns).await
     }
 
-    /// Spawns over `ledger_dir` **as it already is** -- never wiped, never created fresh --
-    /// so a test can build a *second* `TestServer` over the exact directory a *first* one
-    /// (already shut down via [`Self::shutdown_keep_ledger`]) wrote to, proving a property
-    /// survives a real process restart rather than merely surviving within one process's own
-    /// `Ledger`/`CommandAuthorityServiceImpl` handles.
+    /// As [`Self::spawn`], but over `ledger_dir` **as it already is** -- never wiped, never
+    /// created fresh -- so a test can build a *second* `TestServer` over the exact directory
+    /// a *first* one (already shut down via [`Self::shutdown_keep_ledger`]) wrote to, proving
+    /// a property survives a real process restart rather than merely surviving within one
+    /// process's own `Ledger`/`CommandAuthorityServiceImpl` handles.
     async fn spawn_over(ledger_dir: PathBuf, start_tai_ns: i64) -> Self {
+        let roles = default_roles();
+        let delegations = vec![wildcard_delegation("delegation-1", "operator-1"), wildcard_delegation("delegation-9", "astronaut-jane")];
+        Self::spawn_over_with_authz(ledger_dir, start_tai_ns, roles, delegations, vec![], "").await
+    }
+
+    /// The general constructor every other one delegates to: full control over the role
+    /// table, the delegation set, and the MFA configuration (`mfa_amr_methods`/`mfa_acr`) --
+    /// used by this file's dedicated A2.2 tests (wrong role, missing MFA, expired delegation,
+    /// a delegation granting a class the role does not).
+    async fn spawn_over_with_authz(
+        ledger_dir: PathBuf,
+        start_tai_ns: i64,
+        roles: BTreeMap<String, Vec<String>>,
+        delegations: Vec<Delegation>,
+        mfa_amr_methods: Vec<String>,
+        mfa_acr: &str,
+    ) -> Self {
         let ledger = Arc::new(Ledger::open(&ledger_dir).expect("open ledger"));
         let bundle = Arc::new(PolicyBundle::load(real_policy_dir()).expect("load the shipped policy bundle"));
         let clock = Arc::new(TestClock::new(start_tai_ns));
@@ -175,6 +237,16 @@ impl TestServer {
                 .expect("a freshly-generated test issuer key parses as a valid public key"),
         );
 
+        let audit_path = ledger_dir.join("audit.log");
+        let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
+        let authz = AuthzConfig {
+            role_table: Arc::new(RoleTable::from_config(&roles)),
+            delegations: Arc::new(DelegationTable::from_delegations(delegations)),
+            mfa_amr_methods: Arc::new(mfa_amr_methods),
+            mfa_acr: Arc::new(mfa_acr.to_string()),
+            audit,
+        };
+
         let servicer = CommandAuthorityServiceImpl::new(
             ledger,
             bundle,
@@ -182,6 +254,7 @@ impl TestServer {
             clock.clone() as Arc<dyn Clock>,
             dispatch_sink.clone() as Arc<dyn DispatchSink>,
             issuer_config,
+            authz,
         )
         .expect("rebuild the duplicate-dispatch guard from the ledger at construction");
 
@@ -210,14 +283,29 @@ impl TestServer {
             .expect("connect to the just-spawned server over its real loopback socket");
         let client = CommandAuthorityServiceClient::new(channel);
 
-        Self { client, ledger_dir, clock, dispatch_sink, issuer, shutdown_tx, handle }
+        Self { client, ledger_dir, clock, dispatch_sink, issuer, audit_path, shutdown_tx, handle }
     }
 
     /// Mints a real RS256-signed token this server's own `Authorize` will verify: `sub`,
     /// the fixed `TEST_ISSUER`/`TEST_AUDIENCE`/`TOKEN_NOW_UNIX_S`/`TOKEN_TTL_S` this file uses
-    /// throughout, and no `nbf` (see `TOKEN_NOW_UNIX_S`'s own doc comment for why).
+    /// throughout, and no `nbf` (see `TOKEN_NOW_UNIX_S`'s own doc comment for why). Carries the
+    /// default `groups`/`amr`/`acr` from `valid_claims` -- [`Self::mint_with_claims`] for a
+    /// test that needs to override them.
     fn mint(&self, sub: &str) -> String {
         self.issuer.mint(&valid_claims(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S))
+    }
+
+    /// As [`Self::mint`], but with caller-chosen `groups`/`amr`/`acr` -- for a test that needs
+    /// a specific role or a specific (or absent) MFA claim.
+    fn mint_with_claims(&self, sub: &str, groups: &[&str], amr: &[&str], acr: &str) -> String {
+        let claims = claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups, amr, acr });
+        self.issuer.mint(&claims)
+    }
+
+    /// Every line in this server's audit sink file so far, in order -- read straight from
+    /// disk, the real artifact `crate::audit::AuditWriter` wrote to.
+    fn audit_lines(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.audit_path).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
     }
 
     /// Shuts the server task down cleanly, **joins** it (proves the task actually stopped,
@@ -655,13 +743,336 @@ async fn authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_to
     assert_eq!(last.principal, "astronaut-jane");
     assert_ne!(last.principal, token, "the recorded principal must never be the raw token string");
     assert_eq!(last.delegation_id, "delegation-9");
-    assert!(last.reason.contains("verified"), "{}", last.reason);
-    assert!(!last.reason.to_lowercase().contains("not yet verified"), "{}", last.reason);
+    // A2.2: the reason now names how authorization was granted (crate::authz), not A2.1's old
+    // "principal_token verified ..." text -- the delegation-9 fixture (see
+    // `wildcard_delegation`) is what actually granted this, since "astronaut-jane" has no
+    // configured role.
+    assert!(last.reason.contains("via=delegation=\"delegation-9\""), "{}", last.reason);
+    assert!(last.reason.contains("mfa=not_required"), "{}", last.reason);
 
     // Read back from the durable ledger, not just the in-memory response.
     let records = read_ledger_records(&server.ledger_dir, "sat-a2");
     let authorized_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Authorized as i32).expect("an AUTHORIZED record exists");
     assert_eq!(authorized_record.transition.as_ref().unwrap().principal, "astronaut-jane");
+
+    server.shutdown().await;
+}
+
+// -------------------------------------------------------------------------------------------
+// A2.2: the role gate, the MFA gate, delegation enforcement, and the audit line for every
+// outcome (`docs/aiplane-plan.md` milestone A2's second half). This crate's own
+// `crate::authz` unit tests already pin every refusal shape and the delegation expiry
+// boundary at the library level (no wire, no ledger, no audit sink); the tests below are this
+// task's named acceptance tests, each run **over the wire, end to end**, against the real
+// `CommandAuthorityServiceImpl`, its real ledger, and its real audit sink file.
+// -------------------------------------------------------------------------------------------
+
+/// A fixed, arbitrary "now", chosen so every audit-line test below can assert a real,
+/// human-legible RFC 5424 `TIMESTAMP` rather than a value derived from the leap-second table's
+/// pre-1972 clamped offset (a `TestClock` seeded at a small raw value like `1_000` -- what
+/// this file's earlier, pre-A2.2 tests use -- converts through `av_cdm::time::Tai::
+/// to_utc_nanos` to a UTC instant within a second of the Unix epoch, which is real and
+/// correct but not a timestamp worth pasting into a report by hand). Cross-checked against
+/// `date -u -r 1760000000` (`2025-10-09 08:53:20 UTC`) on this host -- the identical value
+/// `crates/av-command/src/audit.rs`'s own `format_timestamp_matches_known_reference_dates`
+/// test pins.
+fn audit_test_start_tai_ns() -> i64 {
+    Tai::from_utc_nanos(1_760_000_000_000_000_000).as_nanos()
+}
+
+/// **Acceptance test 1: the right role authorizes, over the wire, end to end, with the
+/// ledger asserted.** `"operator-1"`'s default `groups` (`["operators", "burn-authorizers"]`,
+/// `av_command::test_support::valid_claims`) include `"operators"`, which
+/// [`default_roles`] grants `"mode"` -- no delegation is claimed at all (`delegation_id`
+/// empty), so this is a pure role-gate acceptance.
+#[tokio::test]
+async fn authorize_with_the_right_role_authorizes_over_the_wire_with_the_ledger_asserted() {
+    let mut server = TestServer::spawn("right-role", 1_000).await;
+    server.client.propose(propose_request(base_command("cmd-right-role", "sat-role", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-right-role".to_string() }).await.unwrap();
+
+    let token = server.mint("operator-1");
+    let authorized = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-right-role".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect("operators grants mode: this must be authorized")
+        .into_inner();
+    let command = authorized.command.expect("command present");
+    assert_eq!(command.state, CommandState::Authorized as i32);
+    let last = command.transitions.last().unwrap();
+    assert_eq!(last.principal, "operator-1");
+    assert_eq!(last.delegation_id, "", "no delegation was claimed");
+    assert_eq!(last.reason, "authorize: command_class=\"mode\" via=role=\"operators\" mfa=not_required (crate::authz)");
+
+    let records = read_ledger_records(&server.ledger_dir, "sat-role");
+    let authorized_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Authorized as i32).expect("an AUTHORIZED record exists");
+    assert_eq!(authorized_record.transition.as_ref().unwrap().principal, "operator-1");
+    assert_eq!(authorized_record.transition.as_ref().unwrap().reason, last.reason);
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 2: the wrong role is refused with the reason, exact.**
+#[tokio::test]
+async fn authorize_with_the_wrong_role_is_refused_with_the_exact_reason_over_the_wire() {
+    let mut server = TestServer::spawn("wrong-role", 1_000).await;
+    server.client.propose(propose_request(base_command("cmd-wrong-role", "sat-role", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-wrong-role".to_string() }).await.unwrap();
+    let records_before = read_ledger_records(&server.ledger_dir, "sat-role").len();
+
+    // "viewers" is not in the default role table at all -- deny by default.
+    let token = server.mint_with_claims("viewer-1", &["viewers"], &[], "");
+    let err = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-wrong-role".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect_err("a role that does not grant mode must be refused");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert_eq!(
+        err.message(),
+        "authorize: role gate refused -- none of groups [\"viewers\"] is a role granting command_class \"mode\" \
+         (crate::authz, deny-by-default: an unlisted role, or a role that does not list this class, is refused)"
+    );
+
+    let records_after = read_ledger_records(&server.ledger_dir, "sat-role").len();
+    assert_eq!(records_before, records_after, "a denied Authorize must append no ledger record at all");
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 3: hazardous without MFA is refused, exact reason, distinct from the
+/// wrong-role reason.**
+#[tokio::test]
+async fn authorize_of_a_hazardous_class_without_mfa_is_refused_with_the_exact_reason_over_the_wire() {
+    let mut roles = BTreeMap::new();
+    roles.insert("operators".to_string(), vec!["mode".to_string()]);
+    let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("hazardous-no-mfa"), 1_000, roles, vec![], vec!["otp".to_string()], "").await;
+
+    let mut command = base_command("cmd-hazardous", "sat-hazard", "mode", "");
+    command.hazardous = true;
+    server.client.propose(propose_request(command, "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-hazardous".to_string() }).await.unwrap();
+
+    // The right role, but no amr/acr at all -- the MFA gate, not the role gate, must refuse.
+    let token = server.mint_with_claims("operator-1", &["operators"], &[], "");
+    let err = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-hazardous".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect_err("a hazardous command_class without a satisfying amr/acr must be refused");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    let mfa_message = "authorize: MFA gate refused -- command_class \"mode\" is hazardous and requires one of amr [\"otp\"] or acr \"\"; \
+                        principal amr was [] and acr was \"\"";
+    assert_eq!(err.message(), mfa_message);
+
+    let wrong_role_message = "authorize: role gate refused -- none of groups [\"viewers\"] is a role granting command_class \"mode\" \
+                               (crate::authz, deny-by-default: an unlisted role, or a role that does not list this class, is refused)";
+    assert_ne!(mfa_message, wrong_role_message, "the MFA refusal and the wrong-role refusal must read differently");
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 4: an expired delegation is refused at the boundary second -- both
+/// sides asserted exactly, with a `TestClock`, never a sleep.**
+#[tokio::test]
+async fn authorize_under_a_delegation_is_refused_at_the_expiry_boundary_second_one_nanosecond_earlier_is_not() {
+    let expires_tai_ns: i64 = 50_000;
+    let delegation = Delegation {
+        id: "delegation-exp".to_string(),
+        subject: "operator-1".to_string(),
+        command_classes: vec!["mode".to_string()],
+        entity_ids: vec!["sat-exp".to_string()],
+        not_before_tai_ns: 0,
+        expires_tai_ns,
+        granted_by: "ops-lead".to_string(),
+        reason: "contingency".to_string(),
+    };
+    let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("delegation-expiry"), 1_000, BTreeMap::new(), vec![delegation], vec![], "").await;
+
+    // One nanosecond before expiry: accepted.
+    server.client.propose(propose_request(base_command("cmd-before-expiry", "sat-exp", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-before-expiry".to_string() }).await.unwrap();
+    server.clock.set(expires_tai_ns - 1);
+    let token = server.mint("operator-1");
+    let ok = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-before-expiry".to_string(), principal_token: token, delegation_id: "delegation-exp".to_string() })
+        .await
+        .expect("one nanosecond before expires_tai_ns must be accepted")
+        .into_inner();
+    assert_eq!(ok.command.unwrap().state, CommandState::Authorized as i32);
+
+    // Exactly at expires_tai_ns: refused.
+    server.client.propose(propose_request(base_command("cmd-at-expiry", "sat-exp", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-at-expiry".to_string() }).await.unwrap();
+    server.clock.set(expires_tai_ns);
+    let token = server.mint("operator-1");
+    let err = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-at-expiry".to_string(), principal_token: token, delegation_id: "delegation-exp".to_string() })
+        .await
+        .expect_err("at expires_tai_ns exactly, the delegation must be refused");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert_eq!(err.message(), format!("authorize: delegation \"delegation-exp\" expired -- expires_tai_ns={expires_tai_ns} is at or before now_tai_ns={expires_tai_ns}"));
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 6: a delegation grants a class the role does not, and it reaches the
+/// ledger as `CommandTransition.delegation_id`.**
+#[tokio::test]
+async fn a_delegation_grants_a_class_the_role_does_not_and_reaches_the_ledger_as_delegation_id() {
+    let mut roles = BTreeMap::new();
+    roles.insert("operators".to_string(), vec!["mode".to_string()]); // no "burn"
+    let delegation = Delegation {
+        id: "delegation-burn".to_string(),
+        subject: "operator-1".to_string(),
+        command_classes: vec!["burn".to_string()],
+        entity_ids: vec![WILDCARD.to_string()],
+        not_before_tai_ns: 0,
+        expires_tai_ns: i64::MAX,
+        granted_by: "ops-lead".to_string(),
+        reason: "contingency burn authority".to_string(),
+    };
+    let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("delegation-extra-class"), 1_000, roles, vec![delegation], vec![], "").await;
+
+    server.client.propose(propose_request(base_command("cmd-burn", "sat-burn", "burn", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-burn".to_string() }).await.unwrap();
+
+    let token = server.mint("operator-1");
+    let authorized = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-burn".to_string(), principal_token: token, delegation_id: "delegation-burn".to_string() })
+        .await
+        .expect("the delegation must grant burn even though the role does not")
+        .into_inner();
+    let command = authorized.command.expect("command present");
+    assert_eq!(command.state, CommandState::Authorized as i32);
+    assert_eq!(command.transitions.last().unwrap().delegation_id, "delegation-burn");
+
+    let records = read_ledger_records(&server.ledger_dir, "sat-burn");
+    let authorized_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Authorized as i32).expect("an AUTHORIZED record exists");
+    assert_eq!(authorized_record.transition.as_ref().unwrap().delegation_id, "delegation-burn", "CommandTransition.delegation_id must reach the ledger");
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 5a: the audit line for a successful authorization, exact.**
+#[tokio::test]
+async fn audit_line_for_a_successful_authorization_is_exact() {
+    let mut server = TestServer::spawn("audit-success", audit_test_start_tai_ns()).await;
+    server.client.propose(propose_request(base_command("cmd-audit-ok", "sat-audit", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-audit-ok".to_string() }).await.unwrap();
+    let token = server.mint("operator-1");
+    server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-audit-ok".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect("authorized");
+
+    let lines = server.audit_lines();
+    let authorized_line = lines.iter().find(|l| l.contains("- AUTHORIZED ")).expect("an AUTHORIZED audit line exists");
+    assert_eq!(
+        authorized_line,
+        "<134>1 2025-10-09T08:53:20.000000Z - av-command - AUTHORIZED [avCommand@32473 commandId=\"cmd-audit-ok\" entity=\"sat-audit\" \
+         class=\"mode\" state=\"AUTHORIZED\" principal=\"operator-1\"] authorize: command_class=\"mode\" via=role=\"operators\" \
+         mfa=not_required (crate::authz)"
+    );
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 5b: the audit line for a wrong-role refusal, exact.**
+#[tokio::test]
+async fn audit_line_for_a_wrong_role_refusal_is_exact() {
+    let mut server = TestServer::spawn("audit-wrong-role", audit_test_start_tai_ns()).await;
+    server.client.propose(propose_request(base_command("cmd-audit-role", "sat-audit", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-audit-role".to_string() }).await.unwrap();
+    let token = server.mint_with_claims("viewer-1", &["viewers"], &[], "");
+    let _ = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-audit-role".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect_err("refused");
+
+    let lines = server.audit_lines();
+    let refused_line = lines.iter().rev().find(|l| l.contains("REFUSED")).expect("a REFUSED audit line exists");
+    assert_eq!(
+        refused_line,
+        "<132>1 2025-10-09T08:53:20.000000Z - av-command - REFUSED [avCommand@32473 commandId=\"cmd-audit-role\" entity=\"sat-audit\" \
+         class=\"mode\" state=\"REFUSED\" principal=\"viewer-1\"] authorize: role gate refused -- none of groups [\"viewers\"] is a role \
+         granting command_class \"mode\" (crate::authz, deny-by-default: an unlisted role, or a role that does not list this class, is refused)"
+    );
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 5c: the audit line for a missing-MFA refusal, exact.**
+#[tokio::test]
+async fn audit_line_for_a_missing_mfa_refusal_is_exact() {
+    let mut roles = BTreeMap::new();
+    roles.insert("operators".to_string(), vec!["mode".to_string()]);
+    let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("audit-missing-mfa"), audit_test_start_tai_ns(), roles, vec![], vec!["otp".to_string()], "").await;
+
+    let mut command = base_command("cmd-audit-mfa", "sat-audit", "mode", "");
+    command.hazardous = true;
+    server.client.propose(propose_request(command, "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-audit-mfa".to_string() }).await.unwrap();
+    let token = server.mint_with_claims("operator-1", &["operators"], &[], "");
+    let _ = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-audit-mfa".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect_err("refused");
+
+    let lines = server.audit_lines();
+    let refused_line = lines.iter().rev().find(|l| l.contains("REFUSED")).expect("a REFUSED audit line exists");
+    assert_eq!(
+        refused_line,
+        "<132>1 2025-10-09T08:53:20.000000Z - av-command - REFUSED [avCommand@32473 commandId=\"cmd-audit-mfa\" entity=\"sat-audit\" \
+         class=\"mode\" state=\"REFUSED\" principal=\"operator-1\"] authorize: MFA gate refused -- command_class \"mode\" is hazardous and \
+         requires one of amr [\"otp\"] or acr \"\"; principal amr was [] and acr was \"\""
+    );
+
+    server.shutdown().await;
+}
+
+/// **Acceptance test 5d: the audit line for an expired-delegation refusal, exact.**
+#[tokio::test]
+async fn audit_line_for_an_expired_delegation_refusal_is_exact() {
+    let start = audit_test_start_tai_ns();
+    let delegation = Delegation {
+        id: "delegation-exp-audit".to_string(),
+        subject: "operator-1".to_string(),
+        command_classes: vec!["mode".to_string()],
+        entity_ids: vec!["sat-audit".to_string()],
+        not_before_tai_ns: 0,
+        expires_tai_ns: start, // already at the boundary -- expired
+        granted_by: "ops-lead".to_string(),
+        reason: "test".to_string(),
+    };
+    let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("audit-expired-delegation"), start, BTreeMap::new(), vec![delegation], vec![], "").await;
+
+    server.client.propose(propose_request(base_command("cmd-audit-exp", "sat-audit", "mode", ""), "model-x")).await.unwrap();
+    server.client.check(CheckRequest { command_id: "cmd-audit-exp".to_string() }).await.unwrap();
+    let token = server.mint("operator-1");
+    let _ = server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-audit-exp".to_string(), principal_token: token, delegation_id: "delegation-exp-audit".to_string() })
+        .await
+        .expect_err("refused");
+
+    let lines = server.audit_lines();
+    let refused_line = lines.iter().rev().find(|l| l.contains("REFUSED")).expect("a REFUSED audit line exists");
+    assert_eq!(
+        refused_line,
+        &format!(
+            "<132>1 2025-10-09T08:53:20.000000Z - av-command - REFUSED [avCommand@32473 commandId=\"cmd-audit-exp\" entity=\"sat-audit\" \
+             class=\"mode\" state=\"REFUSED\" principal=\"operator-1\" delegationId=\"delegation-exp-audit\"] authorize: delegation \
+             \"delegation-exp-audit\" expired -- expires_tai_ns={start} is at or before now_tai_ns={start}"
+        )
+    );
 
     server.shutdown().await;
 }

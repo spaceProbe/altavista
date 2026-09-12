@@ -45,20 +45,29 @@
 //!   in practice, just the `CommandAuthorityService` server trait and the
 //!   `CommandAuthorityServiceServer<T>` tower wrapper -- never a second copy of the wire
 //!   types `av-cdm` already compiles).
-//! - [`service`] -- [`service::CommandAuthorityServiceImpl`] (A1.3, A2.1): `Propose`/`Check`/
-//!   `Authorize`/`Dispatch`/`Ack`/`Query`/`VerifyLedger` over the wire, the `DispatchSink`
-//!   seam A3 fills, the question-155 loopback-only bind-address check, and (A2.1)
-//!   `Authorize`'s real OIDC verification of `principal_token` via [`oidc::verify`].
+//! - [`authz`] (A2.2, `docs/aiplane-plan.md` milestone A2's second half): the role gate
+//!   ([`authz::RoleTable`], `Principal.groups`), the MFA gate for `Command.hazardous`
+//!   (`Principal.amr`/`acr`), and time-limited [`authz::DelegationTable`] enforcement against
+//!   the injected clock ([`authz::authorize_command`]) -- the one entry point `Authorize`
+//!   calls, after [`oidc::verify`] has already established *who* the caller is.
+//! - [`audit`] (A2.2): every transition, and every refused attempt, as one RFC 5424
+//!   syslog-format line ([`audit::format_line`]) to a configured sink ([`audit::AuditWriter`],
+//!   `profiles/execution.yaml`'s top-level `audit:` block).
+//! - [`service`] -- [`service::CommandAuthorityServiceImpl`] (A1.3, A2.1, A2.2): `Propose`/
+//!   `Check`/`Authorize`/`Dispatch`/`Ack`/`Query`/`VerifyLedger` over the wire, the
+//!   `DispatchSink` seam A3 fills, the question-155 loopback-only bind-address check, (A2.1)
+//!   `Authorize`'s real OIDC verification of `principal_token` via [`oidc::verify`], and
+//!   (A2.2) the role/MFA/delegation gate ([`authz::authorize_command`]) plus an [`audit`] line
+//!   for every transition and every refusal.
 //!
-//! Not yet in this crate (later milestones, so the next worker does not invent a second
-//! shape for something already planned): `Delegation`, role bindings, MFA gating, delegation
-//! expiry enforcement (A2.2 -- `Principal.groups`/`amr`/`acr` and `CommandTransition.
-//! delegation_id` already exist and are already recorded, but nothing in this crate reads
-//! them for an authorization decision yet); dispatch into the kernel's real telecommand path
+//! Not yet in this crate (a later milestone, so the next worker does not invent a second
+//! shape for something already planned): dispatch into the kernel's real telecommand path
 //! (A3, behind [`service::DispatchSink`]).
 
 pub mod admin;
+pub mod audit;
 pub mod authority;
+pub mod authz;
 pub mod clock;
 pub mod evidence;
 pub mod fips;

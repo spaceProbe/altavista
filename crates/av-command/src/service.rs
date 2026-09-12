@@ -53,13 +53,26 @@
 //!   `UNAUTHENTICATED` ("the request does not have valid authentication credentials for the
 //!   operation") names exactly this case -- the request's *identity claim itself* could not
 //!   be established, which is a different failure from "this identity is known but not
-//!   allowed" (`PERMISSION_DENIED`, A2.2's job, not built here) or "this request is malformed"
+//!   allowed" (`PERMISSION_DENIED`, see the next bullet) or "this request is malformed"
 //!   (`INVALID_ARGUMENT`, already used above for a genuinely malformed request payload). The
 //!   status message is the [`crate::oidc::TokenError`]'s own `Display` text, which -- see
 //!   that module's doc -- never contains the raw token string or the raw signature bytes;
 //!   `tests/grpc_service.rs`'s
 //!   `authorize_refusal_message_never_contains_the_token_or_signature` (an integration test,
 //!   since it needs a real running service) asserts this directly against a real refusal.
+//! - **`Authorize`'s role/MFA/delegation gate refuses** ([`crate::authz::AuthzError`], A2.2)
+//!   -> **`PERMISSION_DENIED`**, deliberately distinct from the bullet above's
+//!   `UNAUTHENTICATED`: by the time [`crate::authz::authorize_command`] ever runs,
+//!   [`crate::oidc::verify`] has *already* established who the caller is (a real, verified
+//!   `Principal`) -- what `AuthzError` reports is that this real, known identity is not
+//!   allowed to do the specific thing it asked for, which is exactly gRPC's own definition of
+//!   `PERMISSION_DENIED` ("the caller does not have permission to execute the specified
+//!   operation ... it must not be used for rejections caused by exhausting some resource ...
+//!   It must not be used if the caller cannot be identified" -- the last clause is precisely
+//!   why `UNAUTHENTICATED` and `PERMISSION_DENIED` cannot be the same code here). A denied
+//!   `Authorize` attempt (wrong role, missing MFA, or an invalid/expired delegation) still
+//!   emits an [`crate::audit`] line before this module returns the `Status` -- see
+//!   [`CommandAuthorityServiceImpl::authorize`]'s own body.
 //!
 //! # Idempotency ([`CommandAuthorityServiceImpl::dispatch`]) -- a guarantee that survives a
 //! restart, not just an in-memory guard
@@ -112,20 +125,42 @@
 //! transition is attempted or any ledger record is appended (see the module doc's status-code
 //! section for why `UNAUTHENTICATED`). On success, the **verified** `Principal.sub` --
 //! never the raw `principal_token` string -- is what gets recorded as `CommandTransition.
-//! principal`, with [`AUTHORIZE_VERIFIED_REASON`] replacing A1.3's `AUTHORIZE_UNVERIFIED_
-//! REASON` (which no longer exists in this crate -- there is no path left that claims
-//! identity is unverified when it is not).
+//! principal`. (A1.3's own reason constant claiming identity was unverified no longer exists
+//! in this crate at all -- there is no path left that could say so when it is not true; A2.2,
+//! below, replaced A2.1's own successor constant in turn with a reason that names the real
+//! authorization decision, not merely that identity was checked.)
 //!
-//! **This is identity, not authorization.** A2.2 (`docs/aiplane-plan.md`) is the milestone
-//! that reads `Principal.groups`/`amr`/`acr` for a role/MFA gate and evaluates
-//! `AuthorizeRequest.delegation_id` against the injected clock for expiry. A2.1 (this task)
-//! does neither: `delegation_id` is recorded on the transition exactly as A1.3 left it --
-//! carried through unevaluated -- and nothing here reads `Principal.groups`/`amr`/`acr` for
-//! any decision at all. A verified principal with *any* subject and *any* claims authorizes
-//! *any* command class today; closing that gap is explicitly A2.2's job, not this task's, per
-//! `docs/aiplane-plan.md`'s own milestone split and this task's brief ("do not build it").
-//! `docs/compliance/av-command/control-matrix.md`'s IA rows (3.5.x) reflect A2.1 landing;
-//! its AC rows (3.1.x, the authorization half) are left exactly as they were.
+//! **This was identity, not authorization -- A2.2 (below) is authorization.**
+//!
+//! # A2.2: the role/MFA/delegation gate, and the audit line for every outcome
+//!
+//! [`CommandAuthorityServiceImpl::authorize`] now runs [`crate::authz::authorize_command`]
+//! immediately after `crate::oidc::verify` succeeds and before [`crate::state::authorize`] is
+//! ever called: a verified `Principal` that may not authorize this `Command`'s class (no
+//! granting role, and no valid `delegation_id`), or that has not satisfied the MFA gate for a
+//! hazardous class, is refused `PERMISSION_DENIED` (see the status-code section above) with
+//! **no state transition attempted and no ledger record appended** -- exactly mirroring how
+//! A2.1 already treats an unverifiable token. The one difference from A2.1's own refusal
+//! path: **a refused `Authorize` attempt still writes an [`crate::audit`] line** (severity
+//! `Warning`, `MSGID`/`state` = `"REFUSED"`) before this method returns its `Status` -- "a
+//! denied authorization attempt is exactly what a SIEM needs to see" (this task's own brief).
+//! An unverifiable token (A2.1's own refusal) gets the identical treatment, for the identical
+//! reason -- both refusal kinds are audited by the same two-line pattern in this method's
+//! body (compute the message, write the audit event, return the `Status`), not two different
+//! mechanisms that could drift apart.
+//!
+//! On success, [`crate::authz::format_authz_reason`] -- A2.1's own reason constant no longer
+//! exists in this crate at all -- becomes the `CommandTransition.reason`: which role granted
+//! it (or which delegation), and how MFA was satisfied (or that it was not required).
+//! `docs/compliance/av-command/control-matrix.md`'s AC rows (3.1.x) and
+//! AU rows (3.3.x) are updated to reflect this landing; see that document for exactly what
+//! moved from Gap/Partial and what is still open.
+//!
+//! Every RPC that reaches a real state transition -- not only `Authorize` -- writes an
+//! [`crate::audit`] line too: `CommandAuthorityServiceImpl::append_last_transition` (shared
+//! by `Propose`, `Authorize`'s success path, `Dispatch` and `Ack`) and `Check`'s own body (which does not
+//! go through that helper -- see its own doc comment) each call [`crate::audit::AuditWriter::
+//! write`] once the ledger append itself has already succeeded.
 //!
 //! # Transport (question 155/84)
 //!
@@ -152,7 +187,9 @@ use av_cdm::pb::{
     VerifyLedgerRequest, VerifyLedgerResponse,
 };
 
+use crate::audit::{self, AuditWriter};
 use crate::authority::{self, CheckCommandError};
+use crate::authz::{self, AuthzError, DelegationTable, RoleTable};
 use crate::clock::Clock;
 use crate::ledger::Ledger;
 use crate::oidc::{self, IssuerConfig};
@@ -166,18 +203,6 @@ pub use crate::pb::command_authority_service_server::{CommandAuthorityService as
 /// caller-supplied identity; matches `crates/av-command/src/state.rs`'s own test convention
 /// (`dispatch(c, "ground-segment", ...)`).
 pub const DISPATCH_PRINCIPAL: &str = "ground-segment";
-
-/// The `CommandTransition.reason` text `Authorize` (A2.1) writes for every request that
-/// reaches a transition (i.e. every request whose token verified) -- see the module doc's
-/// "A2.1: `Authorize` verifies *who*, not *whether*" section. This text is not a refusal, it
-/// is what a *successful* A2.1 `Authorize` honestly says about itself: identity is real,
-/// authorization is not yet gated.
-pub const AUTHORIZE_VERIFIED_REASON: &str =
-    "authorize: principal_token verified against the configured OIDC issuer (crate::oidc); \
-     the recorded principal is the token's verified sub claim, not the raw token. Role, MFA \
-     and delegation-expiry gating are A2.2 (docs/aiplane-plan.md), not yet built -- this \
-     milestone (A2.1) verifies who the caller is, not whether they may authorize this command \
-     class; delegation_id is recorded unevaluated for A2.2 to enforce.";
 
 /// The `CommandTransition.reason` text `Dispatch` writes -- naming the seam A3 fills, not a
 /// real transport (see the module doc's "`DispatchSink` -- not A3" section).
@@ -216,6 +241,16 @@ impl DispatchSink for RecordingDispatchSink {
     }
 }
 
+/// A2.2's construction-time configuration for [`CommandAuthorityServiceImpl::new`] -- see
+/// that function's own doc for why this is a group rather than four more bare parameters.
+pub struct AuthzConfig {
+    pub role_table: Arc<RoleTable>,
+    pub delegations: Arc<DelegationTable>,
+    pub mfa_amr_methods: Arc<Vec<String>>,
+    pub mfa_acr: Arc<String>,
+    pub audit: Arc<AuditWriter>,
+}
+
 /// Everything a [`CommandAuthorityServiceImpl`] RPC can fail with, before it is mapped to a
 /// [`tonic::Status`] by [`to_status`]. See the module doc's status-code section for the
 /// mapping and the reasoning behind each choice.
@@ -240,6 +275,11 @@ pub enum ServiceError {
     /// status-code section for why this maps to `UNAUTHENTICATED`.
     #[error("authorize: token verification failed: {0}")]
     TokenInvalid(#[from] oidc::TokenError),
+    /// A2.2: `Authorize`'s role/MFA/delegation gate refused. See [`crate::authz::AuthzError`]
+    /// for the full refusal vocabulary and the module doc's status-code section for why this
+    /// maps to `PERMISSION_DENIED`, distinct from [`Self::TokenInvalid`]'s `UNAUTHENTICATED`.
+    #[error(transparent)]
+    Authz(#[from] AuthzError),
 }
 
 /// Maps one [`ServiceError`] to the [`tonic::Status`] the module doc's status-code section
@@ -267,6 +307,7 @@ fn to_status(err: ServiceError) -> Status {
         ServiceError::DuplicateIdempotencyKey(_) => Status::new(Code::AlreadyExists, err.to_string()),
         ServiceError::Io(_) => Status::new(Code::Internal, err.to_string()),
         ServiceError::TokenInvalid(_) => Status::new(Code::Unauthenticated, err.to_string()),
+        ServiceError::Authz(_) => Status::new(Code::PermissionDenied, err.to_string()),
     }
 }
 
@@ -307,6 +348,17 @@ pub struct CommandAuthorityServiceImpl {
     /// A2.1: the issuer `Authorize` verifies `AuthorizeRequest.principal_token` against --
     /// see the module doc's "A2.1: `Authorize` verifies *who*, not *whether*" section.
     issuer_config: Arc<IssuerConfig>,
+    /// A2.2: the profile's declared role table -- see [`crate::authz::RoleTable`].
+    role_table: Arc<RoleTable>,
+    /// A2.2: the profile's declared delegations -- see [`crate::authz::DelegationTable`].
+    delegations: Arc<DelegationTable>,
+    /// A2.2: `amr` values that satisfy the MFA gate for a hazardous command class.
+    mfa_amr_methods: Arc<Vec<String>>,
+    /// A2.2: the `acr` value that satisfies the MFA gate, or empty for "not configured".
+    mfa_acr: Arc<String>,
+    /// A2.2: every transition, and every `Authorize` refusal, as one RFC 5424 line -- see
+    /// [`crate::audit`].
+    audit: Arc<AuditWriter>,
     commands: Mutex<BTreeMap<String, Command>>,
     dispatched_idempotency_keys: Mutex<BTreeSet<String>>,
 }
@@ -316,6 +368,12 @@ impl CommandAuthorityServiceImpl {
     /// reading the ledger directory this process is about to serve from) -- never silently
     /// starts with an empty duplicate-dispatch guard when the ledger it was asked to rebuild
     /// that guard from could not actually be read.
+    ///
+    /// `authz` groups every A2.2 field (role table, delegations, MFA config, the
+    /// [`AuditWriter`]) -- exactly the way `crate::ledger::CommandMeta` groups `Ledger::
+    /// append`'s own arguments -- so this constructor gains A2.2's fields without tripping
+    /// clippy's `too_many_arguments` lint; this crate's rule against a lint-suppressing attribute on
+    /// hand-written items means the fix is grouping the arguments, never silencing the lint.
     pub fn new(
         ledger: Arc<Ledger>,
         bundle: Arc<PolicyBundle>,
@@ -323,8 +381,10 @@ impl CommandAuthorityServiceImpl {
         clock: Arc<dyn Clock>,
         dispatch_sink: Arc<dyn DispatchSink>,
         issuer_config: Arc<IssuerConfig>,
+        authz: AuthzConfig,
     ) -> io::Result<Self> {
         let dispatched_idempotency_keys = ledger.scan_dispatched_idempotency_keys()?;
+        let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit } = authz;
         Ok(Self {
             ledger,
             bundle,
@@ -332,6 +392,11 @@ impl CommandAuthorityServiceImpl {
             clock,
             dispatch_sink,
             issuer_config,
+            role_table,
+            delegations,
+            mfa_amr_methods,
+            mfa_acr,
+            audit,
             commands: Mutex::new(BTreeMap::new()),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
         })
@@ -353,7 +418,11 @@ impl CommandAuthorityServiceImpl {
     /// Appends one ledger record for `command`'s own last transition, with no attached
     /// `PolicyDecision` (the `Check` RPC is the only caller that attaches one, and it goes
     /// through `crate::authority::check_command` instead of this helper -- see that
-    /// function's own `Ledger::append` call).
+    /// function's own `Ledger::append` call), then writes the matching [`crate::audit`] line
+    /// (A2.2: "every transition -- not only `Authorize` -- is written as one ... audit
+    /// line"). The audit write happens only after the ledger append has already succeeded --
+    /// an audit line is never written for a transition this crate cannot also prove it
+    /// retained.
     fn append_last_transition(&self, command: &Command) -> Result<(), ServiceError> {
         let transition = command
             .transitions
@@ -363,12 +432,24 @@ impl CommandAuthorityServiceImpl {
         self.ledger
             .append(
                 crate::ledger::CommandMeta::new(&command.entity_id, &command.id, &command.command_class, &command.idempotency_key),
-                transition,
+                transition.clone(),
                 None,
                 &*self.clock,
             )
             .map_err(ServiceError::Io)?;
+        self.audit.write(&audit::event_for_transition(command, &transition, None)).map_err(ServiceError::Io)?;
         Ok(())
+    }
+
+    /// Writes a `Warning`-severity, `REFUSED` [`crate::audit`] event for a denied `Authorize`
+    /// attempt -- shared by both of `Self::authorize`'s refusal paths (an unverifiable token,
+    /// A2.1; a role/MFA/delegation refusal, A2.2), so the two refusal kinds are audited by
+    /// one code path, not two that could drift apart. `principal` is empty for a token
+    /// refusal (identity was never established) and the verified `sub` for an A2.2 refusal.
+    fn audit_authorize_refusal(&self, command: &Command, principal: &str, delegation_id: &str, message: &str) -> Result<(), ServiceError> {
+        let now_tai_ns = self.clock.now_tai_ns();
+        let event = audit::event_for_refusal(now_tai_ns, &command.id, &command.entity_id, &command.command_class, principal, delegation_id, message);
+        self.audit.write(&event).map_err(ServiceError::Io)
     }
 }
 
@@ -391,30 +472,63 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         Ok(Response::new(CommandResponse { command: Some(proposed), decision: None }))
     }
 
+    /// Does not go through [`Self::append_last_transition`] (`crate::authority::check_command`
+    /// already appends its own ledger record, with the `PolicyDecision` attached) -- so this
+    /// method writes its own [`crate::audit`] line directly, once `check_command` has
+    /// already succeeded, carrying that same `PolicyDecision` (`decisionId`/`policyHash` in
+    /// the structured data -- see `crate::audit`'s module doc).
     async fn check(&self, request: Request<CheckRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
         let command = self.get_command(&req.command_id).map_err(to_status)?;
         let rate_source = LedgerRateSource::new(&self.ledger);
         let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)
             .map_err(|e| to_status(e.into()))?;
+        let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
+        self.audit
+            .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
+            .map_err(|e| to_status(ServiceError::Io(e)))?;
         self.put_command(result.command.clone());
         Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 
+    /// A2.1 (identity) then A2.2 (authorization), in that order -- see the module doc's "A2.2:
+    /// the role/MFA/delegation gate, and the audit line for every outcome" section for the
+    /// full contract. Neither refusal kind ever reaches [`crate::state::authorize`], appends a
+    /// ledger record, or touches this service's in-memory index; both write an
+    /// [`crate::audit`] line before this method returns its `Status`.
     async fn authorize(&self, request: Request<AuthorizeRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
         let command = self.get_command(&req.command_id).map_err(to_status)?;
 
-        // A2.1: verify identity before attempting any state transition -- an unverifiable
-        // token never reaches state::authorize, never appends a ledger record, and never
-        // touches this service's in-memory index. See the module doc's "A2.1: `Authorize`
-        // verifies *who*, not *whether*" section.
+        // A2.1: verify identity before attempting any state transition.
         let now_tai_ns = self.clock.now_tai_ns();
-        let principal =
-            oidc::verify(&req.principal_token, &self.issuer_config, now_tai_ns).map_err(|e| to_status(ServiceError::TokenInvalid(e)))?;
+        let principal = match oidc::verify(&req.principal_token, &self.issuer_config, now_tai_ns) {
+            Ok(p) => p,
+            Err(e) => {
+                let message = e.to_string();
+                self.audit_authorize_refusal(&command, "", &req.delegation_id, &message).map_err(to_status)?;
+                return Err(to_status(ServiceError::TokenInvalid(e)));
+            }
+        };
 
-        let authorized = state::authorize(command, &principal.sub, AUTHORIZE_VERIFIED_REASON, &req.delegation_id, &*self.clock)
-            .map_err(|e| to_status(e.into()))?;
+        // A2.2: role/MFA/delegation gate, now that identity is real.
+        let ctx = authz::AuthzContext {
+            role_table: &self.role_table,
+            delegations: &self.delegations,
+            mfa_amr_methods: &self.mfa_amr_methods,
+            mfa_acr: &self.mfa_acr,
+        };
+        let decision = match authz::authorize_command(&principal, &command, &req.delegation_id, ctx, now_tai_ns) {
+            Ok(d) => d,
+            Err(e) => {
+                let message = e.to_string();
+                self.audit_authorize_refusal(&command, &principal.sub, &req.delegation_id, &message).map_err(to_status)?;
+                return Err(to_status(ServiceError::Authz(e)));
+            }
+        };
+
+        let reason = authz::format_authz_reason(&command.command_class, &decision);
+        let authorized = state::authorize(command, &principal.sub, &reason, &req.delegation_id, &*self.clock).map_err(|e| to_status(e.into()))?;
         self.append_last_transition(&authorized).map_err(to_status)?;
         self.put_command(authorized.clone());
         Ok(Response::new(CommandResponse { command: Some(authorized), decision: None }))

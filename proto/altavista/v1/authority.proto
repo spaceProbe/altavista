@@ -21,12 +21,24 @@ syntax = "proto3";
 //     token. `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now
 //     verifies `AuthorizeRequest.principal_token` and records the verified `Principal.sub` as
 //     `CommandTransition.principal`.
-//   - A2.2 will add `Delegation` (time-limited, evaluated against the injected clock) and
-//     role-binding messages (role -> command_class table), plus the MFA (`amr`/`acr`) and
-//     role gate itself on `Authorize`. A2.1 verifies *who* the caller is; A2.2 decides
+//   - A2.2 (this task, additive only -- no field number above moves): `RoleBinding` and
+//     `Delegation` below, plus the role/MFA/delegation gate itself on `Authorize`
+//     (`crates/av-command/src/authz.rs`). A2.1 verifies *who* the caller is; A2.2 decides
 //     *whether* that caller may authorize a given command class. `CommandTransition.
 //     delegation_id` (`command.proto`) is recorded by A2.1 exactly as it was before --
-//     unevaluated -- for A2.2 to enforce.
+//     unevaluated by A2.1 itself -- and is now what A2.2 enforces expiry/scope against, at
+//     the injected clock. **No new "authorization decision" message was added**: unlike
+//     `PolicyDecision` (A1.2, a `CHECKED`-time record this crate's own ledger needs to carry
+//     alongside the transition, because a policy decision has structure worth keeping --
+//     reasons, a rule path, the input it saw), A2.2's outcome fits entirely in fields
+//     `command.proto` already has: `CommandTransition.principal` (the verified subject,
+//     A2.1), `CommandTransition.delegation_id` (which delegation, if any) and
+//     `CommandTransition.reason` (`crates/av-command/src/authz.rs`'s `format_authz_reason` --
+//     which role granted it, or which delegation; the MFA outcome). A denial never reaches
+//     the ledger as a `CommandTransition` at all (no state edge is attempted until
+//     authorization succeeds), so there is no denial-carrying counterpart to `PolicyDecision`
+//     needed either -- the audit line (`crates/av-command/src/audit.rs`) is where a denied
+//     attempt is recorded, from the typed refusal directly, not from a new message here.
 //   - A1.3 (additive only -- no field number above moves): `CommandAuthorityService`
 //     and its request/response messages, below `LedgerRecord`. `AuthorizeRequest.
 //     principal_token`/`delegation_id` are the two fields A2 needs on the wire; A2.1's
@@ -168,9 +180,8 @@ message LedgerRecord {
 // in this crate that constructs a `Principal` from a token it has not verified the signature,
 // issuer, audience, expiry (`exp`) and not-before (`nbf`) of, against a real issuer key and
 // the injected `Clock`. `CommandAuthorityService.Authorize` records `sub` as the verified
-// `CommandTransition.principal` (`command.proto`); nothing in this message is consulted for
-// role, MFA or delegation decisions yet -- that gate is A2.2's job (see this file's header
-// comment).
+// `CommandTransition.principal` (`command.proto`); `groups`/`amr`/`acr` are now read by A2.2's
+// role/MFA gate (`crates/av-command/src/authz.rs`) for exactly that decision.
 //
 // TAI conversion (ADR-001 "Time"): a JWT's `exp`/`iat` claims are Unix (UTC) seconds, per
 // RFC 7519's `NumericDate`. The one conversion site is `crates/av-command/src/oidc.rs`'s
@@ -217,6 +228,65 @@ message Principal {
   int64 expiry_tai_ns = 9;
 }
 
+// A role's granted command classes (A2.2, `docs/aiplane-plan.md` milestone A2's second half;
+// `crates/av-command/src/authz.rs`). The role table a profile declares is a list of these,
+// read from `Principal.groups` -- a principal may authorize command class C only if at least
+// one of its groups is a role in the table that grants C, directly or through the wildcard.
+// **Deny by default**, at two levels this message's own shape makes explicit rather than
+// leaving to a caller's convention: a role name absent from the table grants nothing (there
+// is no `RoleBinding` for it to consult at all), and a `RoleBinding` present in the table but
+// whose `command_classes` does not list C (and does not list the wildcard either) also grants
+// nothing -- there is no third state where "role known, class unlisted" means "allow".
+message RoleBinding {
+  // The role name, matched against one entry of `Principal.groups`.
+  string role = 1;
+  // Command classes this role may authorize. The literal string `"*"` grants every class --
+  // chosen over, say, an empty list meaning "every class" so that "this role grants nothing"
+  // (an empty list) and "this role grants everything" (`["*"]`) are two different, equally
+  // explicit list contents, never one list shape silently meaning the other depending on
+  // whether it happens to be empty.
+  repeated string command_classes = 2;
+}
+
+// A time-limited grant to `subject` (matched against `Principal.sub`) to authorize
+// `command_classes` against `entity_ids`, on top of whatever its own role grants -- A2.2,
+// `crates/av-command/src/authz.rs`. `command_classes`/`entity_ids` use the identical `"*"`
+// wildcard convention `RoleBinding.command_classes` does, for the same reason.
+//
+// **Expiry boundary convention -- the same one A2.1's token `exp` uses, not a second one**:
+// a delegation is valid only while `not_before_tai_ns <= now_tai_ns < expires_tai_ns` --
+// `now_tai_ns == expires_tai_ns` is already expired (refused), `now_tai_ns == expires_tai_ns -
+// 1` (one nanosecond earlier) is not. This mirrors `crates/av-command/src/oidc.rs::TokenError::
+// Expired`'s own boundary (`now_tai_ns >= exp_tai_ns` is expired) exactly, so this crate has
+// one expiry-boundary rule across both its token and its delegation paths, not two that could
+// silently drift apart. The mirror image holds for `not_before_tai_ns`, matching `oidc.rs`'s
+// `nbf` handling: `now_tai_ns == not_before_tai_ns` is already valid; one nanosecond earlier
+// is not yet valid.
+message Delegation {
+  // Opaque id, matched against `AuthorizeRequest.delegation_id` /
+  // `CommandTransition.delegation_id` (`command.proto`).
+  string id = 1;
+  // The subject this delegation is granted to -- must equal the authorizing principal's own
+  // verified `Principal.sub` (A2.1) for this delegation to apply to that principal's request.
+  string subject = 2;
+  // Command classes this delegation covers. `"*"` grants every class -- see `RoleBinding.
+  // command_classes`'s doc for why an empty list and `["*"]` are kept as two distinct,
+  // explicit contents rather than one shape meaning the other.
+  repeated string command_classes = 3;
+  // Entities (`Command.entity_id`) this delegation covers. Same `"*"` convention.
+  repeated string entity_ids = 4;
+  // Nanoseconds on TAI. See this message's doc for the exact boundary.
+  int64 not_before_tai_ns = 5;
+  // Nanoseconds on TAI. See this message's doc for the exact boundary.
+  int64 expires_tai_ns = 6;
+  // Who granted this delegation, free text (e.g. an operator's own `sub`) -- not itself
+  // verified by this crate; the grant is only as trustworthy as wherever the delegations file
+  // this came from is reviewed and stored (`crates/av-command/src/authz.rs`'s module doc).
+  string granted_by = 7;
+  // Why, free text, e.g. "temporary burn authority for contingency ops".
+  string reason = 8;
+}
+
 // ---------------------------------------------------------------------------------------
 // A1.3: CommandAuthorityService -- propose, check, authorize, dispatch, ack, query, ledger
 // verify, over the same OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use
@@ -257,13 +327,21 @@ message AuthorizeRequest {
   // `iss`, `aud`, `exp`/`nbf` against the injected clock, and a non-empty `sub` -- an
   // unverifiable token is refused `UNAUTHENTICATED` before any state transition is attempted.
   // On success, the verified `Principal.sub` (`authority.proto`) is recorded as
-  // `CommandTransition.principal`. A2.1 verifies *who* the caller is; it performs no role,
-  // MFA or delegation gate of any kind -- that is A2.2's job (see this file's header comment).
+  // `CommandTransition.principal`. A2.1 verifies *who* the caller is; A2.2
+  // (`crates/av-command/src/authz.rs`) then decides *whether* that caller may authorize this
+  // command class: a role-gated check against `Principal.groups`, an MFA check against
+  // `Principal.amr`/`acr` for a hazardous command class, and -- when `delegation_id` below is
+  // non-empty -- a `Delegation` lookup instead of the role check (see that field's own doc).
   string principal_token = 2;
-  // The delegation the principal claims to be acting under, if any -- carried through to
-  // `CommandTransition.delegation_id` exactly as before, still unevaluated (A2.2 enforces
-  // expiry/scope against the injected clock). Empty means "acting under the principal's own
-  // authority".
+  // The delegation the principal claims to be acting under, if any. Empty means "authorize
+  // under the principal's own role, not a delegation" -- `crate::authz` then checks
+  // `Principal.groups` against the profile's role table. Non-empty means "authorize under
+  // this `Delegation.id` instead of any role" -- `crate::authz` looks it up, checks `subject`
+  // matches the verified `Principal.sub`, `command_classes`/`entity_ids` cover this command,
+  // and the injected clock falls inside `[not_before_tai_ns, expires_tai_ns)`; a delegation
+  // that fails any of those is its own typed refusal, never silently falls back to the role
+  // check. Recorded on `CommandTransition.delegation_id` exactly as A1.3 carried it, now
+  // evaluated rather than passed through unchecked.
   string delegation_id = 3;
 }
 

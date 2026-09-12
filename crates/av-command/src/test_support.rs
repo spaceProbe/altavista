@@ -135,3 +135,27 @@ pub fn valid_claims(issuer: &str, audience: &str, subject: &str, now_unix_s: i64
         "jti": "test-jti-1",
     })
 }
+
+/// The `groups`/`amr`/`acr` override [`claims_with_roles_and_mfa`] takes -- grouped into one
+/// struct (rather than three more bare parameters) so that function's own signature stays at
+/// six parameters, at clippy's default `too_many_arguments` threshold rather than over it;
+/// this crate's rule against a lint-suppressing attribute on hand-written items means the fix is grouping the
+/// arguments, never silencing the lint in place.
+pub struct RoleAndMfaClaims<'a> {
+    pub groups: &'a [&'a str],
+    pub amr: &'a [&'a str],
+    pub acr: &'a str,
+}
+
+/// As [`valid_claims`], but with caller-chosen `groups`/`amr`/`acr` -- for a test that needs a
+/// specific role or a specific (or absent) MFA claim (A2.2). Lives here, not in an integration
+/// test file, so a caller needs no direct `serde_json` dependency of its own to build one of
+/// these -- `tests/grpc_service.rs`'s own `TestServer::mint_with_claims` is exactly such a
+/// caller.
+pub fn claims_with_roles_and_mfa(issuer: &str, audience: &str, subject: &str, now_unix_s: i64, ttl_s: i64, overrides: RoleAndMfaClaims<'_>) -> serde_json::Value {
+    let mut claims = valid_claims(issuer, audience, subject, now_unix_s, ttl_s);
+    claims["groups"] = json!(overrides.groups);
+    claims["amr"] = json!(overrides.amr);
+    claims["acr"] = json!(overrides.acr);
+    claims
+}

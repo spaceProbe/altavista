@@ -14,8 +14,16 @@
 //! ```text
 //! av-command --oidc-issuer ISS --oidc-audience AUD --oidc-public-key-path PATH
 //!            [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] [--policy-dir PATH]
-//!            [--rate-window-ns NS] [--run-id ID]
+//!            [--rate-window-ns NS] [--run-id ID] [--profile-path PATH]
 //! ```
+//!
+//! - `--profile-path` (default `<repo>/profiles/execution.yaml`, **A2.2, new this task**):
+//!   the profile whose `authority:` block (`roles`, `mfa_amr_methods`, `mfa_acr`,
+//!   `delegations_path` -- [`av_command::authz::load_profile_authz_config`]) and top-level
+//!   `audit:` block (`sink_path` -- [`av_command::audit::load_profile_audit_config`]) this
+//!   binary reads once, at startup. `delegations_path`, when non-empty, is resolved relative
+//!   to this crate's repo root (`<CARGO_MANIFEST_DIR>/../..`), matching `--policy-dir`'s own
+//!   repo-relative convention.
 //!
 //! - `--bind` (default `127.0.0.1:50070`): the gRPC listen address. Refused at startup
 //!   (`crate::service::resolve_loopback_bind_address`, a typed [`av_command::service::
@@ -51,12 +59,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use av_command::audit::AuditWriter;
+use av_command::authz::{load_delegations, load_profile_authz_config, RoleTable};
 use av_command::clock::SystemClock;
 use av_command::evidence::AdminState;
 use av_command::ledger::Ledger;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
-use av_command::service::{resolve_loopback_bind_address, CommandAuthorityServiceImpl, RecordingDispatchSink};
+use av_command::service::{resolve_loopback_bind_address, AuthzConfig, CommandAuthorityServiceImpl, RecordingDispatchSink};
 
 const DEFAULT_BIND: &str = "127.0.0.1:50070";
 /// `av-dynamics-service`'s own +100-from-gRPC-port convention (`crates/av-dynamics-service/
@@ -78,6 +88,9 @@ struct Args {
     oidc_issuer: Option<String>,
     oidc_audience: Option<String>,
     oidc_public_key_path: Option<PathBuf>,
+    /// A2.2: the profile this binary reads its `authority:` role/MFA/delegation config and
+    /// its top-level `audit:` sink config from.
+    profile_path: PathBuf,
 }
 
 fn default_ledger_dir() -> PathBuf {
@@ -88,10 +101,20 @@ fn default_policy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/policies/authority")
 }
 
+fn default_profile_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/execution.yaml")
+}
+
+/// This crate's repo root (`<CARGO_MANIFEST_DIR>/../..`) -- `--policy-dir`'s own default is
+/// already repo-relative the same way; A2.2's `delegations_path` is resolved against this.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 const USAGE: &str = "usage: av-command --oidc-issuer ISS --oidc-audience AUD \
                       --oidc-public-key-path PATH [--bind ADDR] [--admin-bind ADDR] \
                       [--ledger-dir PATH] [--policy-dir PATH] [--rate-window-ns NS] \
-                      [--run-id ID]";
+                      [--run-id ID] [--profile-path PATH]";
 
 fn parse_args() -> Result<Args, String> {
     let mut bind = DEFAULT_BIND.to_string();
@@ -103,6 +126,7 @@ fn parse_args() -> Result<Args, String> {
     let mut oidc_issuer = None;
     let mut oidc_audience = None;
     let mut oidc_public_key_path = None;
+    let mut profile_path = default_profile_path();
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -117,6 +141,7 @@ fn parse_args() -> Result<Args, String> {
             "--oidc-issuer" => oidc_issuer = Some(val()?),
             "--oidc-audience" => oidc_audience = Some(val()?),
             "--oidc-public-key-path" => oidc_public_key_path = Some(PathBuf::from(val()?)),
+            "--profile-path" => profile_path = PathBuf::from(val()?),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}")),
         }
@@ -128,7 +153,7 @@ fn parse_args() -> Result<Args, String> {
              default issuer to fall back to). {USAGE}"
         ));
     }
-    Ok(Args { bind, admin_bind, ledger_dir, policy_dir, rate_window_ns, run_id, oidc_issuer, oidc_audience, oidc_public_key_path })
+    Ok(Args { bind, admin_bind, ledger_dir, policy_dir, rate_window_ns, run_id, oidc_issuer, oidc_audience, oidc_public_key_path, profile_path })
 }
 
 /// 16 bytes from OpenSSL's RNG, hex-encoded -- see `crates/av-dynamics-service/src/bin/
@@ -185,6 +210,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     eprintln!("av-command: OIDC issuer {oidc_issuer:?}, audience {oidc_audience:?} (RS256)");
 
+    // A2.2: the profile's authority.roles/mfa_amr_methods/mfa_acr/delegations_path and
+    // top-level audit.sink_path, read once at startup from the same profile file --
+    // resolved (never assumed) to give a clear error if it does not parse.
+    let profile_text = std::fs::read_to_string(&args.profile_path).map_err(|e| format!("reading --profile-path {:?}: {e}", args.profile_path))?;
+    let authz_config = load_profile_authz_config(&profile_text).map_err(|e| format!("parsing authority: block of {:?}: {e}", args.profile_path))?;
+    let audit_config = av_command::audit::load_profile_audit_config(&profile_text).map_err(|e| format!("parsing audit: block of {:?}: {e}", args.profile_path))?;
+
+    let role_table = Arc::new(RoleTable::from_config(&authz_config.roles));
+    let delegations = Arc::new(
+        load_delegations(&repo_root(), &authz_config.delegations_path)
+            .map_err(|e| format!("loading delegations_path {:?}: {e}", authz_config.delegations_path))?,
+    );
+    let audit = Arc::new(AuditWriter::open(&audit_config)?);
+    eprintln!(
+        "av-command: {} role(s), {} delegation(s), audit sink {:?}",
+        authz_config.roles.len(),
+        delegations.all().count(),
+        audit_config
+    );
+
     let admin_state = Arc::new(AdminState { ledger: ledger.clone(), run_id: run_id.clone(), version: env!("CARGO_PKG_VERSION").to_string() });
     eprintln!("av-command: admin API on {admin_addr} (GET /admin/api/evidence, /admin/api/evidence/verify)");
     tokio::spawn(async move {
@@ -197,9 +242,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DispatchSink; this binary ships only the recording implementation (crate::service's
     // module doc, "DispatchSink -- not A3").
     let dispatch_sink = Arc::new(RecordingDispatchSink::new());
+    let authz = AuthzConfig {
+        role_table,
+        delegations,
+        mfa_amr_methods: Arc::new(authz_config.mfa_amr_methods),
+        mfa_acr: Arc::new(authz_config.mfa_acr),
+        audit,
+    };
     // Rebuilds the duplicate-dispatch guard from the ledger before serving a single RPC --
     // see crate::service's module doc, "Idempotency ... a guarantee that survives a restart".
-    let servicer = CommandAuthorityServiceImpl::new(ledger, bundle, args.rate_window_ns, Arc::new(SystemClock), dispatch_sink, issuer_config)?;
+    let servicer = CommandAuthorityServiceImpl::new(ledger, bundle, args.rate_window_ns, Arc::new(SystemClock), dispatch_sink, issuer_config, authz)?;
 
     eprintln!("av-command: listening on {grpc_addr} (run_id={run_id})");
     tonic::transport::Server::builder()

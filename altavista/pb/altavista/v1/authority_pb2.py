@@ -26,7 +26,7 @@ from . import command_pb2 as altavista_dot_v1_dot_command__pb2
 from . import envelope_pb2 as altavista_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1c\x61ltavista/v1/authority.proto\x12\x0c\x61ltavista.v1\x1a\x1a\x61ltavista/v1/command.proto\x1a\x1b\x61ltavista/v1/envelope.proto\"\xa5\x01\n\x0fPolicyInputRate\x12I\n\x0f\x63ounts_by_class\x18\x01 \x03(\x0b\x32\x30.altavista.v1.PolicyInputRate.CountsByClassEntry\x12\x11\n\twindow_ns\x18\x02 \x01(\x03\x1a\x34\n\x12\x43ountsByClassEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x04:\x02\x38\x01\"\xc4\x01\n\x0bPolicyInput\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\tentity_id\x18\x02 \x01(\t\x12\x15\n\rcommand_class\x18\x03 \x01(\t\x12\x11\n\thazardous\x18\x04 \x01(\x08\x12\x13\n\x0b\x65nvelope_id\x18\x05 \x01(\t\x12\"\n\x05label\x18\x06 \x01(\x0b\x32\x13.altavista.v1.Label\x12+\n\x04rate\x18\x07 \x01(\x0b\x32\x1d.altavista.v1.PolicyInputRate\"\xb9\x01\n\x0ePolicyDecision\x12\x13\n\x0b\x64\x65\x63ision_id\x18\x01 \x01(\t\x12\r\n\x05\x61llow\x18\x02 \x01(\x08\x12\x13\n\x0bpolicy_hash\x18\x03 \x01(\t\x12\x0f\n\x07reasons\x18\x04 \x03(\t\x12\x19\n\x11matched_rule_path\x18\x05 \x01(\t\x12\x18\n\x10\x65valuated_tai_ns\x18\x06 \x01(\x03\x12(\n\x05input\x18\x07 \x01(\x0b\x32\x19.altavista.v1.PolicyInput\"\x88\x02\n\x0cLedgerRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x11\n\tpartition\x18\x02 \x01(\t\x12\x11\n\tprev_hash\x18\x03 \x01(\x0c\x12\x0c\n\x04hash\x18\x04 \x01(\x0c\x12\x0e\n\x06tai_ns\x18\x05 \x01(\x03\x12\x12\n\ncommand_id\x18\x06 \x01(\t\x12\x33\n\ntransition\x18\x07 \x01(\x0b\x32\x1f.altavista.v1.CommandTransition\x12.\n\x08\x64\x65\x63ision\x18\x08 \x01(\x0b\x32\x1c.altavista.v1.PolicyDecision\x12\x15\n\rcommand_class\x18\t \x01(\t\x12\x17\n\x0fidempotency_key\x18\n \x01(\t\"\xa2\x01\n\tPrincipal\x12\x0b\n\x03sub\x18\x01 \x01(\t\x12\x0e\n\x06groups\x18\x02 \x03(\t\x12\x0b\n\x03\x61mr\x18\x03 \x03(\t\x12\x0b\n\x03\x61\x63r\x18\x04 \x01(\t\x12\x0e\n\x06issuer\x18\x05 \x01(\t\x12\x10\n\x08\x61udience\x18\x06 \x01(\t\x12\x0b\n\x03jti\x18\x07 \x01(\t\x12\x18\n\x10issued_at_tai_ns\x18\x08 \x01(\x03\x12\x15\n\rexpiry_tai_ns\x18\t \x01(\x03\"T\n\x0eProposeRequest\x12/\n\x08proposal\x18\x01 \x01(\x0b\x32\x1d.altavista.v1.CommandProposal\x12\x11\n\tprincipal\x18\x02 \x01(\t\"\"\n\x0c\x43heckRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\"V\n\x10\x41uthorizeRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x17\n\x0fprincipal_token\x18\x02 \x01(\t\x12\x15\n\rdelegation_id\x18\x03 \x01(\t\"%\n\x0f\x44ispatchRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\"n\n\nAckRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12)\n\tack_level\x18\x02 \x01(\x0e\x32\x16.altavista.v1.AckLevel\x12\x11\n\tprincipal\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t\"i\n\x0f\x43ommandResponse\x12&\n\x07\x63ommand\x18\x01 \x01(\x0b\x32\x15.altavista.v1.Command\x12.\n\x08\x64\x65\x63ision\x18\x02 \x01(\x0b\x32\x1c.altavista.v1.PolicyDecision\"T\n\rQueryByEntity\x12\x11\n\tentity_id\x18\x01 \x01(\t\x12\x30\n\x0cstate_filter\x18\x02 \x01(\x0e\x32\x1a.altavista.v1.CommandState\"_\n\x0cQueryRequest\x12\x14\n\ncommand_id\x18\x01 \x01(\tH\x00\x12-\n\x06\x65ntity\x18\x02 \x01(\x0b\x32\x1b.altavista.v1.QueryByEntityH\x00\x42\n\n\x08selector\"8\n\rQueryResponse\x12\'\n\x08\x63ommands\x18\x01 \x03(\x0b\x32\x15.altavista.v1.Command\"(\n\x13VerifyLedgerRequest\x12\x11\n\tpartition\x18\x01 \x01(\t\"T\n\x14VerifyLedgerResponse\x12\x30\n\x07results\x18\x01 \x03(\x0b\x32\x1f.altavista.v1.ChainVerification\x12\n\n\x02ok\x18\x02 \x01(\x08\x32\x94\x04\n\x17\x43ommandAuthorityService\x12\x46\n\x07Propose\x12\x1c.altavista.v1.ProposeRequest\x1a\x1d.altavista.v1.CommandResponse\x12\x42\n\x05\x43heck\x12\x1a.altavista.v1.CheckRequest\x1a\x1d.altavista.v1.CommandResponse\x12J\n\tAuthorize\x12\x1e.altavista.v1.AuthorizeRequest\x1a\x1d.altavista.v1.CommandResponse\x12H\n\x08\x44ispatch\x12\x1d.altavista.v1.DispatchRequest\x1a\x1d.altavista.v1.CommandResponse\x12>\n\x03\x41\x63k\x12\x18.altavista.v1.AckRequest\x1a\x1d.altavista.v1.CommandResponse\x12@\n\x05Query\x12\x1a.altavista.v1.QueryRequest\x1a\x1b.altavista.v1.QueryResponse\x12U\n\x0cVerifyLedger\x12!.altavista.v1.VerifyLedgerRequest\x1a\".altavista.v1.VerifyLedgerResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1c\x61ltavista/v1/authority.proto\x12\x0c\x61ltavista.v1\x1a\x1a\x61ltavista/v1/command.proto\x1a\x1b\x61ltavista/v1/envelope.proto\"\xa5\x01\n\x0fPolicyInputRate\x12I\n\x0f\x63ounts_by_class\x18\x01 \x03(\x0b\x32\x30.altavista.v1.PolicyInputRate.CountsByClassEntry\x12\x11\n\twindow_ns\x18\x02 \x01(\x03\x1a\x34\n\x12\x43ountsByClassEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x04:\x02\x38\x01\"\xc4\x01\n\x0bPolicyInput\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\tentity_id\x18\x02 \x01(\t\x12\x15\n\rcommand_class\x18\x03 \x01(\t\x12\x11\n\thazardous\x18\x04 \x01(\x08\x12\x13\n\x0b\x65nvelope_id\x18\x05 \x01(\t\x12\"\n\x05label\x18\x06 \x01(\x0b\x32\x13.altavista.v1.Label\x12+\n\x04rate\x18\x07 \x01(\x0b\x32\x1d.altavista.v1.PolicyInputRate\"\xb9\x01\n\x0ePolicyDecision\x12\x13\n\x0b\x64\x65\x63ision_id\x18\x01 \x01(\t\x12\r\n\x05\x61llow\x18\x02 \x01(\x08\x12\x13\n\x0bpolicy_hash\x18\x03 \x01(\t\x12\x0f\n\x07reasons\x18\x04 \x03(\t\x12\x19\n\x11matched_rule_path\x18\x05 \x01(\t\x12\x18\n\x10\x65valuated_tai_ns\x18\x06 \x01(\x03\x12(\n\x05input\x18\x07 \x01(\x0b\x32\x19.altavista.v1.PolicyInput\"\x88\x02\n\x0cLedgerRecord\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x11\n\tpartition\x18\x02 \x01(\t\x12\x11\n\tprev_hash\x18\x03 \x01(\x0c\x12\x0c\n\x04hash\x18\x04 \x01(\x0c\x12\x0e\n\x06tai_ns\x18\x05 \x01(\x03\x12\x12\n\ncommand_id\x18\x06 \x01(\t\x12\x33\n\ntransition\x18\x07 \x01(\x0b\x32\x1f.altavista.v1.CommandTransition\x12.\n\x08\x64\x65\x63ision\x18\x08 \x01(\x0b\x32\x1c.altavista.v1.PolicyDecision\x12\x15\n\rcommand_class\x18\t \x01(\t\x12\x17\n\x0fidempotency_key\x18\n \x01(\t\"\xa2\x01\n\tPrincipal\x12\x0b\n\x03sub\x18\x01 \x01(\t\x12\x0e\n\x06groups\x18\x02 \x03(\t\x12\x0b\n\x03\x61mr\x18\x03 \x03(\t\x12\x0b\n\x03\x61\x63r\x18\x04 \x01(\t\x12\x0e\n\x06issuer\x18\x05 \x01(\t\x12\x10\n\x08\x61udience\x18\x06 \x01(\t\x12\x0b\n\x03jti\x18\x07 \x01(\t\x12\x18\n\x10issued_at_tai_ns\x18\x08 \x01(\x03\x12\x15\n\rexpiry_tai_ns\x18\t \x01(\x03\"4\n\x0bRoleBinding\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x17\n\x0f\x63ommand_classes\x18\x02 \x03(\t\"\xad\x01\n\nDelegation\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0f\n\x07subject\x18\x02 \x01(\t\x12\x17\n\x0f\x63ommand_classes\x18\x03 \x03(\t\x12\x12\n\nentity_ids\x18\x04 \x03(\t\x12\x19\n\x11not_before_tai_ns\x18\x05 \x01(\x03\x12\x16\n\x0e\x65xpires_tai_ns\x18\x06 \x01(\x03\x12\x12\n\ngranted_by\x18\x07 \x01(\t\x12\x0e\n\x06reason\x18\x08 \x01(\t\"T\n\x0eProposeRequest\x12/\n\x08proposal\x18\x01 \x01(\x0b\x32\x1d.altavista.v1.CommandProposal\x12\x11\n\tprincipal\x18\x02 \x01(\t\"\"\n\x0c\x43heckRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\"V\n\x10\x41uthorizeRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x17\n\x0fprincipal_token\x18\x02 \x01(\t\x12\x15\n\rdelegation_id\x18\x03 \x01(\t\"%\n\x0f\x44ispatchRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\"n\n\nAckRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12)\n\tack_level\x18\x02 \x01(\x0e\x32\x16.altavista.v1.AckLevel\x12\x11\n\tprincipal\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t\"i\n\x0f\x43ommandResponse\x12&\n\x07\x63ommand\x18\x01 \x01(\x0b\x32\x15.altavista.v1.Command\x12.\n\x08\x64\x65\x63ision\x18\x02 \x01(\x0b\x32\x1c.altavista.v1.PolicyDecision\"T\n\rQueryByEntity\x12\x11\n\tentity_id\x18\x01 \x01(\t\x12\x30\n\x0cstate_filter\x18\x02 \x01(\x0e\x32\x1a.altavista.v1.CommandState\"_\n\x0cQueryRequest\x12\x14\n\ncommand_id\x18\x01 \x01(\tH\x00\x12-\n\x06\x65ntity\x18\x02 \x01(\x0b\x32\x1b.altavista.v1.QueryByEntityH\x00\x42\n\n\x08selector\"8\n\rQueryResponse\x12\'\n\x08\x63ommands\x18\x01 \x03(\x0b\x32\x15.altavista.v1.Command\"(\n\x13VerifyLedgerRequest\x12\x11\n\tpartition\x18\x01 \x01(\t\"T\n\x14VerifyLedgerResponse\x12\x30\n\x07results\x18\x01 \x03(\x0b\x32\x1f.altavista.v1.ChainVerification\x12\n\n\x02ok\x18\x02 \x01(\x08\x32\x94\x04\n\x17\x43ommandAuthorityService\x12\x46\n\x07Propose\x12\x1c.altavista.v1.ProposeRequest\x1a\x1d.altavista.v1.CommandResponse\x12\x42\n\x05\x43heck\x12\x1a.altavista.v1.CheckRequest\x1a\x1d.altavista.v1.CommandResponse\x12J\n\tAuthorize\x12\x1e.altavista.v1.AuthorizeRequest\x1a\x1d.altavista.v1.CommandResponse\x12H\n\x08\x44ispatch\x12\x1d.altavista.v1.DispatchRequest\x1a\x1d.altavista.v1.CommandResponse\x12>\n\x03\x41\x63k\x12\x18.altavista.v1.AckRequest\x1a\x1d.altavista.v1.CommandResponse\x12@\n\x05Query\x12\x1a.altavista.v1.QueryRequest\x1a\x1b.altavista.v1.QueryResponse\x12U\n\x0cVerifyLedger\x12!.altavista.v1.VerifyLedgerRequest\x1a\".altavista.v1.VerifyLedgerResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -47,28 +47,32 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_LEDGERRECORD']._serialized_end=923
   _globals['_PRINCIPAL']._serialized_start=926
   _globals['_PRINCIPAL']._serialized_end=1088
-  _globals['_PROPOSEREQUEST']._serialized_start=1090
-  _globals['_PROPOSEREQUEST']._serialized_end=1174
-  _globals['_CHECKREQUEST']._serialized_start=1176
-  _globals['_CHECKREQUEST']._serialized_end=1210
-  _globals['_AUTHORIZEREQUEST']._serialized_start=1212
-  _globals['_AUTHORIZEREQUEST']._serialized_end=1298
-  _globals['_DISPATCHREQUEST']._serialized_start=1300
-  _globals['_DISPATCHREQUEST']._serialized_end=1337
-  _globals['_ACKREQUEST']._serialized_start=1339
-  _globals['_ACKREQUEST']._serialized_end=1449
-  _globals['_COMMANDRESPONSE']._serialized_start=1451
-  _globals['_COMMANDRESPONSE']._serialized_end=1556
-  _globals['_QUERYBYENTITY']._serialized_start=1558
-  _globals['_QUERYBYENTITY']._serialized_end=1642
-  _globals['_QUERYREQUEST']._serialized_start=1644
-  _globals['_QUERYREQUEST']._serialized_end=1739
-  _globals['_QUERYRESPONSE']._serialized_start=1741
-  _globals['_QUERYRESPONSE']._serialized_end=1797
-  _globals['_VERIFYLEDGERREQUEST']._serialized_start=1799
-  _globals['_VERIFYLEDGERREQUEST']._serialized_end=1839
-  _globals['_VERIFYLEDGERRESPONSE']._serialized_start=1841
-  _globals['_VERIFYLEDGERRESPONSE']._serialized_end=1925
-  _globals['_COMMANDAUTHORITYSERVICE']._serialized_start=1928
-  _globals['_COMMANDAUTHORITYSERVICE']._serialized_end=2460
+  _globals['_ROLEBINDING']._serialized_start=1090
+  _globals['_ROLEBINDING']._serialized_end=1142
+  _globals['_DELEGATION']._serialized_start=1145
+  _globals['_DELEGATION']._serialized_end=1318
+  _globals['_PROPOSEREQUEST']._serialized_start=1320
+  _globals['_PROPOSEREQUEST']._serialized_end=1404
+  _globals['_CHECKREQUEST']._serialized_start=1406
+  _globals['_CHECKREQUEST']._serialized_end=1440
+  _globals['_AUTHORIZEREQUEST']._serialized_start=1442
+  _globals['_AUTHORIZEREQUEST']._serialized_end=1528
+  _globals['_DISPATCHREQUEST']._serialized_start=1530
+  _globals['_DISPATCHREQUEST']._serialized_end=1567
+  _globals['_ACKREQUEST']._serialized_start=1569
+  _globals['_ACKREQUEST']._serialized_end=1679
+  _globals['_COMMANDRESPONSE']._serialized_start=1681
+  _globals['_COMMANDRESPONSE']._serialized_end=1786
+  _globals['_QUERYBYENTITY']._serialized_start=1788
+  _globals['_QUERYBYENTITY']._serialized_end=1872
+  _globals['_QUERYREQUEST']._serialized_start=1874
+  _globals['_QUERYREQUEST']._serialized_end=1969
+  _globals['_QUERYRESPONSE']._serialized_start=1971
+  _globals['_QUERYRESPONSE']._serialized_end=2027
+  _globals['_VERIFYLEDGERREQUEST']._serialized_start=2029
+  _globals['_VERIFYLEDGERREQUEST']._serialized_end=2069
+  _globals['_VERIFYLEDGERRESPONSE']._serialized_start=2071
+  _globals['_VERIFYLEDGERRESPONSE']._serialized_end=2155
+  _globals['_COMMANDAUTHORITYSERVICE']._serialized_start=2158
+  _globals['_COMMANDAUTHORITYSERVICE']._serialized_end=2690
 # @@protoc_insertion_point(module_scope)
