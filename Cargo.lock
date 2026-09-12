@@ -95,6 +95,7 @@ dependencies = [
  "openssl",
  "prost",
  "prost-build",
+ "prost-types",
  "regorus",
  "serde",
  "serde_json",

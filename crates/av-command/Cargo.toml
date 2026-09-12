@@ -24,7 +24,18 @@ test-support = []
 # built-ins at all, and turning on its "std" feature would drag in `rand` -> `chacha20`,
 # a bundled-crypto crate ADR-004's rule forbids. Do not add "std" and do not flip
 # default-features on.
-regorus = { version = "0.12", default-features = false, features = ["arc", "regex"] }
+#
+# Pinned to the exact resolved version (`=0.12.0`, confirmed via `cargo tree -p av-command -i
+# regorus` and `Cargo.lock`), not a `"0.12"` range -- question 203(b)'s ratified condition for
+# accepting `crate::policy::is_rule_not_defined`'s string match on regorus's own error prose
+# (`"not a valid rule path"`, `src/interpreter.rs::eval_rule_in_path`): that detection is
+# accepted "only with `regorus` pinned to the exact version and a test that fails the build
+# when the prose changes, so an upgrade cannot turn a refusal into a silent pass." An exact
+# pin means `cargo update` never silently drifts this crate onto a regorus release whose error
+# text changed; `crate::policy::tests::is_rule_not_defined_matches_regorus_own_error_text_for_a_
+# path_never_referenced_in_the_bundle` is the test that fails loudly if it ever does anyway
+# (e.g. after a deliberate version bump this pin's own `=` is edited for).
+regorus = { version = "=0.12.0", default-features = false, features = ["arc", "regex"] }
 
 # altavista.v1 generated types (Command, CommandState, CommandTransition, AckLevel from
 # command.proto; PolicyInput, PolicyDecision, LedgerRecord from this track's own
@@ -108,6 +119,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 # drop-then-rebind race (never a fixed port; already transitively in this workspace's tree
 # via tonic's own dependencies, declared directly here only so `tests/*.rs` can `use` it).
 tokio-stream = { version = "0.1", features = ["net"] }
+# Question 203(a)'s restart-survival test builds a `Command` with a real, non-default
+# `payload` (`google.protobuf.Any`, mapped to `::prost_types::Any` by this crate's own
+# `build.rs::extern_path`) so the fix's acceptance test has a non-zero-value field to assert
+# equality on. Already resolved in this workspace's tree (`av-cdm` depends on the identical
+# workspace version for the same mapping) -- declared directly here only so `tests/*.rs` can
+# name the type, not a new crate to the dependency graph.
+prost-types.workspace = true
 
 [[bin]]
 name = "av-command"

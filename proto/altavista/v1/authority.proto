@@ -172,6 +172,33 @@ message LedgerRecord {
   // process lifetime", and this field is what makes that true from the durable ledger, not
   // from RAM alone.
   string idempotency_key = 10;
+  // The full `Command` exactly as it stood at the time of this transition -- its `state` and
+  // its `transitions` list both included, `transitions` carrying this record's own
+  // `transition` as its last element (never a disagreement between the two: this is the same
+  // `Command` value the caller that appended this record already produced by driving the
+  // state machine, cloned onto the record, not a second copy assembled from other fields).
+  // Additive (A1.3-round-2, question 203(a)): the lead's ratified decision on the manager's
+  // own open item ("`Query` does not survive a restart") is "fixed next round by carrying the
+  // full `Command` on `LedgerRecord` ..., not by re-deriving it" -- this field is that fix.
+  // Before this field existed, a `LedgerRecord` had no `payload`, `deadline_tai_ns`,
+  // `not_before_tai_ns`, `label` or `provenance`, so `CommandAuthorityServiceImpl`'s
+  // in-memory `commands` index (`crates/av-command/src/service.rs`) could not be rebuilt from
+  // the ledger at construction and a process restart lost every command it had not itself
+  // proposed. `crates/av-command/src/ledger.rs`'s `Ledger::scan_commands` now reads this field
+  // straight off each partition's records (keeping the last one written per `command_id`,
+  // since a later transition's `Command` snapshot supersedes an earlier one) to rebuild that
+  // index before the first RPC is served -- the same construction-time discipline
+  // `scan_dispatched_idempotency_keys` already established for the idempotency guard.
+  //
+  // Does **not** make `command_class` (field 9) or `idempotency_key` (field 10) redundant,
+  // even though both values are also reachable as `command.command_class`/`command.
+  // idempotency_key` inside this field: those two flat fields stay so `count_proposed_by_
+  // class_in_window` and `scan_dispatched_idempotency_keys` keep reading one scalar field
+  // straight off the wire, on every record, without decoding a nested `Command` message just
+  // to answer "which class" or "which key" -- a cheap, direct read that predates this field
+  // and that this field does not need to replace to do its own, different job (reconstructing
+  // a whole `Command`, not scanning a single scalar across every record in a partition).
+  Command command = 11;
 }
 
 // A verified principal, from an OIDC access token's claims (A2.1, `docs/aiplane-plan.md`

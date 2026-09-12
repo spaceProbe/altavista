@@ -7,15 +7,23 @@
 //! module itself did not already do one -- [`crate::authority::check_command`] appends for
 //! `Check`; every other RPC appends here), and a [`tonic::Status`] mapping for the result.
 //!
-//! # In-memory index
+//! # In-memory index -- rebuilt from the ledger, not durable on its own (question 203(a))
 //!
-//! [`CommandAuthorityServiceImpl`] holds every `Command` it has ever `Propose`d, keyed by
+//! [`CommandAuthorityServiceImpl`] holds every `Command` it knows about, keyed by
 //! `Command.id`, in a `BTreeMap` (ADR-004's determinism rule: no `HashMap` iteration on any
 //! output path -- [`CommandAuthorityServiceImpl::query`]'s "by entity" case iterates this map
 //! and its result order is therefore deterministic, sorted by `Command.id`, never insertion
-//! order). This index is this process's only memory of a command between RPCs; it is not
-//! itself durable -- the durable record is the ledger, and [`CommandAuthorityServiceImpl::
-//! verify_ledger`] answers straight from `Ledger::verify`, never from this map.
+//! order). The map itself is process-memory, not the durable record -- the ledger is, and
+//! [`CommandAuthorityServiceImpl::verify_ledger`] answers straight from `Ledger::verify`,
+//! never from this map -- but [`CommandAuthorityServiceImpl::new`] rebuilds it from the
+//! ledger ([`crate::ledger::Ledger::scan_commands`]) before serving a single RPC, exactly the
+//! way it already rebuilds `dispatched_idempotency_keys` (see the "Idempotency" section
+//! below): a process that restarts and reopens the same ledger directory answers `Query` (and
+//! every other RPC's `command_id` lookup) for a command a *prior* process lifetime `Propose`d,
+//! not only ones this process lifetime has itself seen. This is what closes the manager's own
+//! open item from the previous round ("`Query` does not survive a restart") -- the lead's
+//! ratified fix (question 203(a)): "carrying the full `Command` on `LedgerRecord` ..., not by
+//! re-deriving it" (`authority.proto`'s `LedgerRecord.command` doc comment, field 11).
 //!
 //! # `tonic::Status` code per refusal kind
 //!
@@ -102,10 +110,9 @@
 //! from itself; `Dispatch` can only ever be called once per command's own lifetime via the
 //! `AUTHORIZED -> DISPATCHED` edge).
 //!
-//! **What is *not* rebuilt from the ledger**: the `commands` index behind `Query` (and every
-//! other RPC's `command_id` lookup) is process-lifetime only, a documented completeness gap,
-//! not a safety one -- see [`CommandAuthorityServiceImpl`]'s own doc comment for exactly what
-//! that means and why it is not closed by this task.
+//! **The `commands` index behind `Query`** (and every other RPC's `command_id` lookup) is
+//! rebuilt from the ledger the identical way, by [`crate::ledger::Ledger::scan_commands`] --
+//! see this module's own "In-memory index" section above for that fix (question 203(a)).
 //!
 //! # `DispatchSink` -- not A3
 //!
@@ -312,10 +319,9 @@ fn to_status(err: ServiceError) -> Status {
 }
 
 /// The `CommandAuthorityService` implementation. Owns a [`Ledger`], a [`PolicyBundle`], the
-/// injected [`Clock`], a [`DispatchSink`] and two pieces of in-process state built at
-/// construction ([`Self::new`]) -- see this module's doc for which of the two is a
-/// durability-backed *safety* property and which is a documented, unclosed *completeness*
-/// gap:
+/// injected [`Clock`], a [`DispatchSink`] and two pieces of in-process state, both now
+/// durability-backed and both rebuilt from the ledger at construction ([`Self::new`]), before
+/// this process serves a single RPC of its own:
 ///
 /// - `dispatched_idempotency_keys` is **rebuilt from the ledger** at every construction
 ///   ([`crate::ledger::Ledger::scan_dispatched_idempotency_keys`]) -- the duplicate-dispatch
@@ -325,17 +331,17 @@ fn to_status(err: ServiceError) -> Status {
 ///   `CommandAuthorityServiceImpl` constructed over the *same* ledger directory refuses the
 ///   same key `Dispatch::dispatch` would have refused in the first process, before this
 ///   process has ever handled a single RPC of its own.
-/// - `commands` (the in-memory `Command` index the module doc describes) is **not** rebuilt
-///   from the ledger at construction, and this is a **documented gap, not an oversight**:
-///   `LedgerRecord` does not carry enough of `Command` to reconstruct one (no `entity_id`
-///   beyond the partition key already implies it, no `payload`, no `deadline_tai_ns`, no
-///   `label`/`provenance`) -- closing this needs either widening `LedgerRecord` to carry the
-///   full `Command` or a separate durable command store, a ledger-shape decision out of this
-///   task's scope. The practical effect: `Check`/`Authorize`/`Dispatch`/`Ack`/`Query` against
-///   a `command_id` a *previous* process lifetime `Propose`d are refused `NOT_FOUND` after a
-///   restart, even though the ledger itself still holds that command's full transition
-///   history. See `docs/compliance/av-command/control-matrix.md`'s Deficiency 7 for the
-///   compliance-facing record of this same gap.
+/// - `commands` (the in-memory `Command` index the module doc describes) is likewise
+///   **rebuilt from the ledger** at every construction ([`crate::ledger::Ledger::
+///   scan_commands`]) -- question 203(a)'s fix, this round, for the previous round's own
+///   declared gap ("`Query` does not survive a restart"). `LedgerRecord.command`
+///   (`authority.proto`, A1.3-round-2) is what makes the rebuild possible: every record now
+///   carries the full `Command` as it stood at the time of that transition, not only the four
+///   scalar fields (`partition`/`command_id`/`command_class`/`idempotency_key`) the ledger
+///   already carried -- so `Check`/`Authorize`/`Dispatch`/`Ack`/`Query` against a `command_id`
+///   a *previous* process lifetime `Propose`d now succeed after a restart exactly as they
+///   would have without one. See `docs/compliance/av-command/control-matrix.md`'s Deficiency 7
+///   for the compliance-facing record of this fix.
 ///
 /// Constructed once by `src/bin/av-command.rs` and shared (`Arc`) across every accepted
 /// connection -- every field here is `Send + Sync` and every method takes `&self`.
@@ -364,10 +370,11 @@ pub struct CommandAuthorityServiceImpl {
 }
 
 impl CommandAuthorityServiceImpl {
-    /// Fails only if [`Ledger::scan_dispatched_idempotency_keys`] fails (a real I/O error
-    /// reading the ledger directory this process is about to serve from) -- never silently
-    /// starts with an empty duplicate-dispatch guard when the ledger it was asked to rebuild
-    /// that guard from could not actually be read.
+    /// Fails only if [`Ledger::scan_dispatched_idempotency_keys`] or [`Ledger::scan_commands`]
+    /// fails (a real I/O error reading the ledger directory this process is about to serve
+    /// from) -- never silently starts with an empty duplicate-dispatch guard or an empty
+    /// `commands` index when the ledger it was asked to rebuild either from could not actually
+    /// be read.
     ///
     /// `authz` groups every A2.2 field (role table, delegations, MFA config, the
     /// [`AuditWriter`]) -- exactly the way `crate::ledger::CommandMeta` groups `Ledger::
@@ -384,6 +391,10 @@ impl CommandAuthorityServiceImpl {
         authz: AuthzConfig,
     ) -> io::Result<Self> {
         let dispatched_idempotency_keys = ledger.scan_dispatched_idempotency_keys()?;
+        // Question 203(a): rebuild the `commands` index from the ledger too, before the first
+        // RPC is served -- the same construction-time discipline as the idempotency guard
+        // above, now made possible by `LedgerRecord.command` (`authority.proto`, A1.3-round-2).
+        let commands = ledger.scan_commands()?;
         let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit } = authz;
         Ok(Self {
             ledger,
@@ -397,7 +408,7 @@ impl CommandAuthorityServiceImpl {
             mfa_amr_methods,
             mfa_acr,
             audit,
-            commands: Mutex::new(BTreeMap::new()),
+            commands: Mutex::new(commands),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
         })
     }
@@ -434,6 +445,7 @@ impl CommandAuthorityServiceImpl {
                 crate::ledger::CommandMeta::new(&command.entity_id, &command.id, &command.command_class, &command.idempotency_key),
                 transition.clone(),
                 None,
+                Some(command),
                 &*self.clock,
             )
             .map_err(ServiceError::Io)?;

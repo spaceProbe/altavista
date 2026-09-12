@@ -215,10 +215,6 @@ TAI epoch converted to UTC, so two identical runs produce identical lines.
 - **ES256/ES384** are not implemented; RS256 only. A JWS ECDSA signature is raw `r||s` and
   needs a DER conversion that is not a few clear lines, so it is a named gap rather than a
   half-implementation.
-- **`Query` does not survive a restart.** The command index is in memory; the ledger record
-  does not carry enough of a `Command` (no payload, deadline, label or provenance) to
-  rebuild one. Closing it is a ledger-shape decision: widen `LedgerRecord`, or add a command
-  store. Recorded in `service.rs` and as a control-matrix deficiency.
 - **The OPA cross-check is a pinned document shape, not an executed comparison.** No OPA
   binary exists here and fetching one would be network at test time (question 154). The test
   says so in its own doc comment; nothing claims OPA compatibility is verified.

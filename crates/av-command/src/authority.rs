@@ -134,6 +134,7 @@ pub fn check_command(
         CommandMeta::new(&new_command.entity_id, &new_command.id, &new_command.command_class, &new_command.idempotency_key),
         transition,
         Some(decision.clone()),
+        Some(&new_command),
         clock,
     )?;
 
