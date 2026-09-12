@@ -1,0 +1,24 @@
+[package]
+name = "av-edge"
+publish = false
+description = "E1 (docs/edge-plan.md): signed, chained, labelled `altavista.v1.MeasurementBatch`es -- canonical hashing, ECDSA P-384 signing/verifying against the system OpenSSL, per-producer clearance/label policy, and a pure hash-chain verifier with an injected clock (ADR-004's security boundary and evidence rules)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `altavista.v1::pb::{MeasurementBatch, BatchRejection, BatchVerdict, RejectionCounters,
+# Label, Measurement, Provenance}` -- the shared prost build (`av_cdm::pb`), not a
+# second, independently-generated copy from a build.rs in this crate (question 2's
+# path-dependency convention; the manager's decision for this track).
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+thiserror.workspace = true
+
+# ECDSA P-384 signing/verifying and SHA-256 hashing, against the system/Homebrew
+# libssl+libcrypto -- deliberately NOT `sha2`/`ring`/any other crypto crate (ADR-004's
+# crypto rule, verbatim; see `crates/av-dynamics-service/src/evidence.rs`'s module doc for
+# the precedent this crate follows and `deny.toml`'s ban list for the mechanical check).
+openssl = "0.10"

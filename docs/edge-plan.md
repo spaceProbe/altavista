@@ -128,3 +128,69 @@ lands in a verifiable per-partition log with an evidence endpoint and a control 
 consumed by the spoore engine into tracks within tolerance of the truth, survives a
 disconnection without loss or duplication, and has its latency measured and recorded.
 Every number in the status section is traceable to a run hash.
+
+## Status (edge manager, 2026-09-12)
+
+Round 1. **E1 and E2 delivered and accepted; E3 delivered in half (E3a), with its other
+half blocked on a lead decision.** Three commits on `edge`, one per accepted task:
+
+- `70fd42e` **E1** — `proto/altavista/v1/edge.proto` and `crates/av-edge`: signed,
+  chained, labelled `MeasurementBatch`es, the eight typed rejections, per-producer
+  counters, a live chain verifier and a pure chain walker.
+- `1e8d82d` **E2** — `crates/av-edge/src/identity.rs`, `scripts/edge_local_ca.py`,
+  `tests/test_edge_identity_seccert.py`: machine identity from a locally run seccert CA
+  with a pinned standard ACME client, verified against the Root as the only trust anchor
+  with an injected clock.
+- `55db4e1` **E3a** — `crates/av-ingest`: the durable per-partition chained log that is
+  itself the ledger, the accept/reject pipeline, crash recovery, determinism, the
+  evidence surface as data, and `docs/compliance/av-ingest/control-matrix.md`.
+
+### Gates (run by the manager with no worker active, host otherwise idle)
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-edge -p av-ingest` | 77 passed, 0 failed, 1 ignored |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 363 passed, 0 failed, 1 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean; zero warnings, zero errors, no `#[allow]` added anywhere |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok; `ring` appears nowhere in the output |
+| `.venv/bin/python -m pytest -q -rs` | 505 passed, 3 skipped, 171 s |
+| `buf breaking --against` develop | not applicable and not runnable — see below |
+
+The one `ignored` test is E1's `regenerate_signature_for_reference`, a deliberate manual
+helper for repinning the golden signature if the golden batch or the test key ever
+changes. The three pytest skips are the pre-existing cFS image gates
+(`test_image_digest.py` twice, `test_image_reproducibility.py` once), each printing its
+own reason under `-rs`; none of them is new and none is this track's.
+
+`buf breaking` was not run for two independent reasons, both recorded rather than waved
+past: no shared proto file changed this round (`git diff --name-status develop -- proto/`
+reports exactly one entry, `A proto/altavista/v1/edge.proto`, a new file this track owns,
+against which there is no prior version to break), and `buf` is not installed on this
+host at all. If the lead's gate has `buf`, running it costs nothing and should still find
+nothing.
+
+### Numbers traceable to artifacts
+
+E1's canonical golden is a 407-byte body hashing to
+`af5c6b1ded6e57d2870be6c752b8c34b6b643230c1a286c475c7b4b541473d3e`, verified
+independently by the manager by decoding the pinned hex with the committed Python
+bindings and recomputing `SHA-256("GENESIS" || body)` — so the Rust and Python sides of
+the CDM agree on this batch byte for byte, which is the property E3 and E6 will depend
+on. The identity provenance this round pins: seccert at
+`/Users/probe/code/secdeploy/work/seccert`, `uv.lock` SHA-256
+`6bc7668aef9e9c824b05283c6a97c715a8c1ee32982fdf4fc3691975224396a6`; lego 5.4.1
+(`/opt/homebrew/bin/lego`, SHA-256
+`372cc983957fc20b8e4b01d2d628270ed9d753a3b1ab9f7f9c49db1638da26a0`), installed through
+Homebrew rather than fetched as a release binary, and chosen over acme.sh because
+acme.sh is GPL-3.0 and `deny.toml`'s licence policy is permissive-only.
+
+### E3b, and what it is waiting on
+
+E3's remaining half — the gRPC service, the plugin manifest handshake and mTLS — was not
+attempted. This repository has an OpenSSL TLS *client* connector (`crates/av-grpc/src/
+tls.rs`) and no server acceptor, and question 155 decided that gap with "no new
+crypto-adjacent crate", plaintext on loopback within one host, and the service-owned
+nginx mTLS template whenever the peer is on another host. Applying that standing rule to
+the ingest is the lead's call, not the manager's, so nothing in `crates/av-ingest`
+opens a socket and no transport crate appears in its dependency tree. Everything E3's
+test list asks for other than "through the wire" is delivered and tested in process.

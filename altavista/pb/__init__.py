@@ -10,8 +10,12 @@ from .altavista.v1 import (
     command_pb2,
     core_pb2,
     dynamics_service_pb2,
+    edge_pb2,
     entity_pb2,
     envelope_pb2,
+    lockstep_pb2,
+    packet_pb2,
+    run_pb2,
     system_pb2,
     trajectory_pb2,
 )
@@ -24,13 +28,23 @@ try:
 except ImportError:  # grpcio not installed
     dynamics_service_pb2_grpc = None  # type: ignore[assignment]
 
+try:
+    from .altavista.v1 import lockstep_pb2_grpc
+except ImportError:  # grpcio not installed
+    lockstep_pb2_grpc = None  # type: ignore[assignment]
+
 __all__ = [
-    "core_pb2",
-    "envelope_pb2",
-    "entity_pb2",
-    "trajectory_pb2",
-    "system_pb2",
     "command_pb2",
+    "core_pb2",
     "dynamics_service_pb2",
+    "edge_pb2",
+    "entity_pb2",
+    "envelope_pb2",
+    "lockstep_pb2",
+    "packet_pb2",
+    "run_pb2",
+    "system_pb2",
+    "trajectory_pb2",
     "dynamics_service_pb2_grpc",
+    "lockstep_pb2_grpc",
 ]

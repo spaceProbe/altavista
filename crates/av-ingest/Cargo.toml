@@ -1,0 +1,30 @@
+[package]
+name = "av-ingest"
+publish = false
+description = "E3a (docs/edge-plan.md milestone E3, first half): the ingest as a library -- a durable, file-backed, per-partition hash-chained log that is itself the ledger (ADR-004), the accept/reject pipeline wiring av-edge's chain verifier and identity verification to appends, the counters, crash recovery, determinism, and the evidence surface as data. The wire (gRPC, mTLS, the plugin manifest handshake) is E3b, deliberately out of scope this round -- see this crate's module docs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `altavista.v1::pb::{MeasurementBatch, BatchRejection, BatchVerdict, RejectionCounters,
+# ChainVerification, Measurement}` -- the shared prost build, reached through av-edge's own
+# `pub use av_cdm::pb` re-export rather than a second, independent path onto av-cdm.
+av-edge = { path = "../av-edge" }
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+thiserror.workspace = true
+# The evidence surface (src/evidence.rs) is built as a `serde_json::Value` with
+# `BTreeMap`-ordered keys (ADR-004's determinism rule, exactly as
+# `av-dynamics-service/src/admin.rs::evidence_body` does it) -- data this round, not an
+# HTTP response; E3b mounts it on `GET /admin/api/evidence`.
+serde_json.workspace = true
+
+# ECDSA P-384 signing/verifying and SHA-256 hashing, against the system/Homebrew
+# libssl+libcrypto -- the same crypto boundary `av-edge` itself sits on (ADR-004's crypto
+# rule). This crate names `openssl::ec::{EcKey, EcKeyRef}`/`openssl::pkey::Public` directly
+# in `src/ingest.rs::Signer`'s public API, so it depends on `openssl` itself rather than
+# only reaching those types transitively through `av-edge`.
+openssl = "0.10"
