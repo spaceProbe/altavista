@@ -1,0 +1,41 @@
+[package]
+name = "av-command"
+publish = false
+description = "A1/A2: the command authority service (state machine, ledger, Rego policy, human authorization)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# A1.2 evaluates policy at CHECKED with this crate; kept default-features off with exactly
+# these two features (deliberately, verified at setup): regorus 0.12.0 has no crypto
+# built-ins at all, and turning on its "std" feature would drag in `rand` -> `chacha20`,
+# a bundled-crypto crate ADR-004's rule forbids. Do not add "std" and do not flip
+# default-features on.
+regorus = { version = "0.12", default-features = false, features = ["arc", "regex"] }
+
+# altavista.v1 generated types (Command, CommandState, CommandTransition, AckLevel from
+# command.proto; PolicyInput, PolicyDecision, LedgerRecord from this track's own
+# authority.proto; ChainVerification from envelope.proto) -- this crate never generates a
+# second copy of the wire types av-cdm already compiles via prost-build.
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# SHA-256 for the ledger's hash chain, via the `openssl` crate (openssl-sys -> the
+# system/Homebrew libssl/libcrypto) -- ADR-004's crypto rule: SHA-256 only, the system
+# OpenSSL only, no bundled crypto (no `sha2`, no `ring`). Mirrors
+# crates/av-dynamics-service/src/evidence.rs exactly.
+openssl = "0.10"
+
+# For src/admin.rs's hand-rolled `/admin/api/evidence*` HTTP server: a plain
+# tokio::net::TcpListener with manual GET-only request parsing, not axum/hyper directly --
+# same reasoning as crates/av-dynamics-service/src/admin.rs's own doc comment (those crates
+# are only present in a tonic-based workspace's tree transitively; this crate has no tonic
+# dependency at all yet, so here it is even more clearly not worth pinning). "rt-multi-thread"
+# and "macros" are for `#[tokio::test]` in this crate's own test suite.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

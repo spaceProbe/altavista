@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+// Command authority: the policy input/decision shape evaluated at CHECKED, and one record
+// of the durable, hash-chained command ledger (ADR-004; `docs/open-questions.md` question
+// 201; `docs/aiplane-plan.md` milestone A1). This track owns this file; `command.proto` and
+// every other shared proto stay additive-only under `buf breaking` (this track never edits
+// them).
+//
+// Scope of what this file defines, by milestone -- so the next worker does not invent a
+// second shape for something already planned:
+//   - A1 (this file, as committed by this task): `PolicyInput`, `PolicyDecision`,
+//     `LedgerRecord` below. Nothing about *how* a policy is loaded or *who* a principal is.
+//   - A1.2 will add policy bundle metadata (a bundle id/hash, the `.rego` file(s) in effect,
+//     the evaluator's own version) as its own message(s), referenced from `PolicyDecision`
+//     by id rather than folding new fields into `PolicyDecision`/`PolicyInput` directly.
+//   - A2 will add `Principal` (OIDC claims: `sub`, `groups`, `amr`, `acr`), `Delegation`
+//     (time-limited, evaluated against the injected clock) and role-binding messages
+//     (role -> command_class table). Until A2 lands, `CommandTransition.principal` and
+//     `CommandTransition.delegation_id` (`command.proto`) are the only principal/delegation
+//     fields that exist anywhere in the wire format -- this file adds none of its own.
+package altavista.v1;
+
+import "altavista/v1/command.proto";
+import "altavista/v1/envelope.proto";
+
+// The recent-command-rate section of `PolicyInput`. Carries raw counts and the window's
+// width, not a pre-divided rate: the policy decides which class it rate-limits and what
+// threshold applies, this message only supplies the facts (`docs/aiplane-plan.md` A1: "the
+// rate of recent commands per class").
+message PolicyInputRate {
+  // Recent command count, per `Command.command_class`, in the trailing window ending at
+  // `PolicyDecision.evaluated_tai_ns`. Keys are `command_class` values, e.g. "burn", "mode".
+  map<string, uint64> counts_by_class = 1;
+  // Width of the trailing window, nanoseconds.
+  int64 window_ns = 2;
+}
+
+// The exact input document the Rego policy at CHECKED is evaluated over (ADR-004's "Command
+// authority" section: "OPA policy at CHECKED (label, asset, envelope, rate)"). Shaped so it
+// serializes to the identical JSON document an out-of-process OPA binary would receive --
+// question 201(a): the in-process `regorus` evaluator and a deployed OPA are meant to be
+// interchangeable against the same policy without a second input shape.
+message PolicyInput {
+  // The `Command.id` being evaluated.
+  string command_id = 1;
+  // `Command.entity_id` -- the asset the command targets.
+  string entity_id = 2;
+  // `Command.command_class` -- the unit of authorization policy.
+  string command_class = 3;
+  // `Command.hazardous`.
+  bool hazardous = 4;
+  // `Command.envelope_id`. Empty until an envelope policy exists (question 53: propose-only
+  // stands for this whole track) -- carried here so a policy fixture can exercise "refuse
+  // any envelope" (`docs/aiplane-plan.md` A1's test list) even though nothing ever sets it
+  // to a non-empty value in this track's own code.
+  string envelope_id = 5;
+  Label label = 6;
+  PolicyInputRate rate = 7;
+}
+
+// The result of evaluating a `PolicyInput` against the effective policy. `decision_id` and
+// `policy_hash` are written into the CHECKED `CommandTransition.reason` (`docs/aiplane-
+// plan.md` A1: "the decision id and the policy hash go into the transition's reason"), so a
+// replay can find this exact decision back in the ledger by reason text alone.
+message PolicyDecision {
+  // Deterministic: a content id derived from (policy_hash, the PolicyInput's own canonical
+  // encoding, evaluated_tai_ns) -- never a randomly generated id (this crate generates no
+  // ids at random anywhere; see `crates/av-command/src/ledger.rs`'s module doc for why).
+  string decision_id = 1;
+  bool allow = 2;
+  // SHA-256 hex of the effective policy bundle (the `.rego` source(s) that produced this
+  // decision). A1 reserves this field's meaning; A1.2 wires it from the real bundle loader.
+  string policy_hash = 3;
+  // Human-readable reasons the policy evaluator gave, in the order it gave them.
+  repeated string reasons = 4;
+  // Dotted rule path the decision resolved from, e.g. "data.altavista.command.allow".
+  string matched_rule_path = 5;
+  // When the decision was made, nanoseconds on TAI, always from the injected Clock
+  // (`crates/av-command/src/clock.rs`) -- never the wall clock read directly.
+  int64 evaluated_tai_ns = 6;
+}
+
+// One record of the durable, per-partition command ledger (ADR-004, "Evidence, verbatim
+// from P0": "for the engine and command services the durable log itself is the ledger,
+// chained per partition"). `partition` is the entity id: every record belonging to one
+// entity lives in exactly one partition's chain, one file, in strictly increasing `seq`
+// order; a different entity's records never interleave into the same chain.
+//
+// Chaining convention -- mirrors `envelope.proto`'s `SignedBatch.prev_hash`/`hash` exactly
+// (restated here, not reused, since this is a distinct message in a distinct partitioned
+// log rather than `SignedBatch`'s own per-producer batch chain):
+//   - `prev_hash` is the previous record's own `hash` in this same partition, or the literal
+//     ASCII bytes of "GENESIS" for the first record ever written to a partition.
+//   - `hash` is SHA-256 over `(prev_hash || record_body_bytes)`, where `record_body_bytes`
+//     is the canonical (deterministic prost, `.btree_map(["."])`) encoding of this record
+//     with `prev_hash` and `hash` themselves cleared to their zero value first. See
+//     `crates/av-command/src/ledger.rs`'s module doc for the exact on-disk framing and the
+//     byte-level procedure this description summarizes.
+message LedgerRecord {
+  // Position of this record within its partition's chain, 1-based, strictly increasing.
+  uint64 seq = 1;
+  // The entity id this record's Command belongs to -- the partition key.
+  string partition = 2;
+  bytes prev_hash = 3;
+  bytes hash = 4;
+  // When this record was appended, nanoseconds on TAI, always from the injected Clock
+  // (`crates/av-command/src/clock.rs`) -- never the wall clock read directly.
+  int64 tai_ns = 5;
+  // The `Command.id` this record is about.
+  string command_id = 6;
+  // The transition being recorded.
+  CommandTransition transition = 7;
+  // Present iff `transition.state == COMMAND_STATE_CHECKED`; absent (unset) for every other
+  // transition state.
+  PolicyDecision decision = 8;
+}
