@@ -38,6 +38,12 @@ dynamics_backend:
     path: <repo-relative path>
     role: <what it does, free text>
 
+authority:                       # optional -- only profiles that declare a command plane use this
+  policy_dir: <repo-relative directory of .rego files>
+  allow_entrypoint: <dotted OPA-compatible allow rule path>
+  deny_entrypoint: <dotted OPA-compatible deny rule path>
+  rate_window_ns: <trailing rate-limit window width, nanoseconds>
+
 planes:
   ingestion: { per_architecture: <table cell text>, components: [...], status?, note?, not_yet_built? }
   hot_track: { ... }
@@ -62,6 +68,17 @@ planes:
   Rust `DynamicsService` host every plane's numerical work can call, in every profile,
   Execution included by design (that amendment exists precisely so the Python `gmat-service`
   never has to be).
+- **`authority`** (A1.2, `docs/aiplane-plan.md` milestone A1.2 / question 201(a)) declares the
+  command-authority policy bundle `crates/av-command/src/policy.rs::PolicyBundle::load`
+  reads: `policy_dir` (a directory of `.rego` files, loaded in sorted, deterministic order --
+  a directory with none is a typed error, never an empty allow-everything bundle),
+  `allow_entrypoint`/`deny_entrypoint` (the OPA-compatible dotted rule paths, checked against
+  that module's own `ALLOW_ENTRYPOINT`/`DENY_ENTRYPOINT` constants so this can never silently
+  drift from what the evaluator actually queries), and `rate_window_ns` (the trailing window
+  `crates/av-command/src/rate.rs`'s ledger-backed rate source counts recent per-class
+  submissions over). Only `execution.yaml` declares this block today -- the Command plane is
+  `not_yet_built`/`none` in every other profile (`docs/architecture.md` section 5), so there
+  is nothing for `design.yaml`/`feasibility.yaml`/`analysis.yaml` to point `authority` at yet.
 - **`planes`** has one entry per architecture.md section 5 row: `ingestion`, `hot_track`,
   `heavy_track`, `viewer`, `ai`, `command`. `per_architecture` is that row's own text for this
   profile's column, copied verbatim, so a reader can check this file against the table

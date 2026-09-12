@@ -10,13 +10,13 @@ Met / Partial / Inherited / Gap legend `secagent`'s `docs/cmmc.md` uses.
 ```{admonition} Not a certification
 This is engineering documentation, not a C3PAO assessment or an attestation. CMMC Level 2
 is a property of the accreditation boundary as a whole, not of one crate. **Most rows below
-are Gap — that is the honest state of this milestone (A1: "the command state machine as a
-library, the durable hash-chained ledger, the injected clock, the evidence/admin surface"),
-not a defect in this document.** This crate has no gRPC service, no principal, no role or
-delegation model, and no policy evaluator yet — A1's own service surface, A1.2's policy, and
-A2's human-authorization layer are later milestones that will turn several Gap rows into Met
-or Partial. A row claiming Met for something those milestones have not built yet would be the
-actual defect; none of the rows below do that.
+are Gap — that is the honest state of this milestone (A1/A1.2: "the command state machine as
+a library, the durable hash-chained ledger, the injected clock, Rego policy evaluation at
+CHECKED, the evidence/admin surface"), not a defect in this document.** This crate has no
+gRPC service (A1.3), no principal, and no role or delegation model (A2) yet — those later
+milestones will turn several remaining Gap rows into Met or Partial. A row claiming Met for
+something those milestones have not built yet would be the actual defect; none of the rows
+below do that.
 ```
 
 ## Legend
@@ -36,25 +36,38 @@ authorization of any kind:
 
 - `src/state.rs` — the `CommandState` machine (`propose`/`check`/`authorize`/`dispatch`/
   `ack`/`reject`/`expire`/`fail`), in-process, called by whatever owns a `Command` value —
-  today, that is only this crate's own test suite.
+  today, that is this crate's own test suite and `src/authority.rs`'s check edge.
 - `src/ledger.rs` — the durable, file-backed, hash-chained, per-partition command ledger.
 - `src/clock.rs` — the injected TAI clock (`Clock`, `SystemClock`, `TestClock`).
+- `src/policy.rs` (A1.2) — Rego policy evaluation at `CHECKED`: `PolicyBundle` (loaded from
+  `.rego` files, content-hashed), `evaluate` (in-process `regorus::Engine`, a fresh one per
+  call, no network/crypto builtin compiled in at all — see that module's own doc comment),
+  and the `profiles/execution.yaml` `authority:` block loader.
+- `src/rate.rs` (A1.2) — `RateSource`, and its two implementors: `LedgerRateSource` (real
+  history from `src/ledger.rs`'s `count_proposed_by_class_in_window`) and
+  `FixtureRateSource` (a deterministic test double).
+- `src/authority.rs` (A1.2) — `check_command`: evaluates policy over a `PROPOSED` `Command`
+  and drives `state::check`/`state::reject` plus the matching `Ledger::append`, with the
+  decision id and policy hash written into the transition's `reason` (`format_reason`/
+  `parse_reason`).
 - `src/evidence.rs` + `src/admin.rs` — `GET /admin/api/evidence` and `GET /admin/api/
   evidence/verify`, loopback-only, the same hand-rolled `tokio::net::TcpListener` shape
   `crates/av-dynamics-service/src/admin.rs` uses.
 - `src/fips.rs` — FIPS posture detection, copied from `crates/av-dynamics-service/src/
   fips.rs` (see that module's own doc comment for the copy-vs-import decision).
 
-Not yet: Rego policy evaluation at `CHECKED` (A1.2); the gRPC service surface (the rest of
-A1); `Principal`/`Delegation`/role bindings/MFA (A2); dispatch into the kernel's real
-telecommand path (A3). Rows below score what exists today, not those milestones.
+Not yet: the gRPC service surface (A1.3, a separate task from A1.2); `Principal`/
+`Delegation`/role bindings/MFA (A2); dispatch into the kernel's real telecommand path (A3).
+Rows below score what exists today, not those milestones. `src/policy.rs` and `src/
+authority.rs` are library code only — nothing calls them from outside this crate's own test
+suite yet, because there is no service surface (A1.3) to call them from a caller off-process.
 
 ## 3.1 Access Control (AC)
 
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
 | 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Gap | Neither `admin::serve` nor any `state.rs` transition function authenticates a caller; anything able to call this library in-process, or reach `127.0.0.1:<port>`, is served | N/A |
-| 3.1.3 | Control the flow of CUI | Gap | `Label` (`altavista.v1.Label`, carried on `PolicyInput` and `Command`) is a field this crate's types carry, but nothing in `src/` enforces a label check anywhere — that is A1.2's (policy) and A4's (gateway) job | N/A |
+| 3.1.3 | Control the flow of CUI | Partial | `Label` (`altavista.v1.Label`) is carried on `PolicyInput` and reaches the Rego evaluator (`crates/av-command/src/policy.rs`'s `canonical_input_json`), so a policy authored to check it can refuse on label today — but `profiles/policies/authority/command.rego`, the shipped starter policy, does not itself write a label check (its four rules are class-admit/class-reject/rate-limit/envelope-refuse, per A1's own fixture requirements); a real label-flow-control policy is future policy-authoring work, not a code gap in the evaluator. A4's gateway (label-aware query refusal) remains the other, unbuilt half | `cargo test -p av-command --test policy_fixture` |
 | 3.1.5 | Least privilege | Inherited | OS user/systemd hardening this process runs under is a deployment concern, not something this crate's code sets | N/A |
 | 3.1.12 / 3.1.13 | Control & encrypt remote access | Gap | This crate binds only loopback in its own tests (`crates/av-command/src/admin.rs:spawn_test_server` binds `127.0.0.1:0`); there is no service binary yet to fix a real bind address, and no TLS/mTLS front has been built or proven for this crate the way `av-dynamics-service`'s nginx front is proven against it | N/A |
 | 3.1.20 | Control connections to external systems | Inherited | Host firewall/network segmentation | N/A |
@@ -105,7 +118,7 @@ telecommand path (A3). Rows below score what exists today, not those milestones.
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
 | 3.14.1 | Identify/correct flaws timely | Partial | `cargo deny check advisories` runs the RustSec vulnerability database against this workspace's `Cargo.lock`, including this crate's dependency tree; nothing schedules that check on a cadence | `export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH"; cargo deny check advisories` |
-| 3.14.6 | Monitor for attacks / validate input | Partial | Every `state.rs` edge function validates the attempted edge against the command's current state before doing anything (`crates/av-command/src/state.rs:require_one_of`), refusing every illegal (state, edge) pair with a typed `CommandError::IllegalTransition`; `propose` additionally refuses a non-empty `envelope_id` (question 53) and a non-fresh `Command`. There is no anomaly-detection layer, and no wire-level input exists yet to validate (no gRPC surface) | `cargo test -p av-command --lib state::tests::every_state_edge_pair_in_the_product_is_legal_or_typed_refused` |
+| 3.14.6 | Monitor for attacks / validate input | Partial | Every `state.rs` edge function validates the attempted edge against the command's current state before doing anything (`crates/av-command/src/state.rs:require_one_of`), refusing every illegal (state, edge) pair with a typed `CommandError::IllegalTransition`; `propose` additionally refuses a non-empty `envelope_id` (question 53) and a non-fresh `Command`. **A1.2 adds the rate half**: `crates/av-command/src/policy.rs`'s `evaluate` plus `crates/av-command/src/rate.rs`'s ledger-backed `RateSource` reject a command class once its own recent-submission count (real ledger history, not a caller-supplied guess) crosses a policy-stated threshold — the shipped starter policy's `burn_rate_limit`. There is still no anomaly-detection layer beyond that, and no wire-level input exists yet to validate (no gRPC surface, A1.3) | `cargo test -p av-command --lib state::tests::every_state_edge_pair_in_the_product_is_legal_or_typed_refused` and `cargo test -p av-command --test policy_fixture shipped_policy_admits_rejects_rate_limits_and_refuses_envelopes` |
 
 ## 3.11 Risk Assessment (RA)
 
@@ -137,11 +150,17 @@ Ranked by what a reviewer would flag first:
    admin routes are open to any caller that can reach them. A2 (`Principal`, `Delegation`,
    role bindings, MFA) is the milestone that closes this; `authority.proto`'s own header
    comment names exactly what A2 will add so the next worker does not invent a second shape.
-2. **No policy at `CHECKED`** (AC 3.1.3, SI 3.14.6's rate/label half). `check`
-   (`crates/av-command/src/state.rs`) advances the state unconditionally once called; nothing
-   in this crate today decides whether a command *should* be checked-through versus
-   rejected. A1.2 adds the Rego evaluator; this crate already carries `PolicyInput`/
-   `PolicyDecision` (`authority.proto`) for it to fill in.
+2. **Resolved by A1.2: policy at `CHECKED` now exists** (was AC 3.1.3, SI 3.14.6's rate/label
+   half). `crates/av-command/src/authority.rs`'s `check_command` evaluates the profile-
+   declared Rego bundle (`crates/av-command/src/policy.rs`, in-process `regorus`) over every
+   `PROPOSED` command before it reaches `CHECKED`, and appends the same `PolicyDecision` to
+   the ledger on **both** an allow (`CHECKED`) and a deny (`REJECTED`) — a denial is exactly
+   as reproducible from the ledger as an approval. What is still a gap: this crate does not
+   itself decide *which* policy file ships (the starter policy at `profiles/policies/
+   authority/command.rego` is this task's own fixture, reviewed as a security artifact, not a
+   customer-authored one), there is still no wire-level intake to feed it from (A1.3), and no
+   label-flow-control rule is written into the shipped policy today (see AC 3.1.3's row
+   above).
 3. **No FIPS-validated cryptographic module** (SC 3.13.11). `crates/av-command/src/fips.rs`
    proves this by actually attempting the OpenSSL provider load, not by reading a version
    string — see this task's report for the exact detected result on this host.

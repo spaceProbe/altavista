@@ -34,6 +34,24 @@ dynamics_backend:
       this is the profile the amendment was written for: Execution is deployed, and grpcio's
       bundled BoringSSL must never reach it.
 
+# A1.2: the command authority policy this profile declares (docs/aiplane-plan.md milestone
+# A1.2; docs/open-questions.md question 201(a)). `policy_dir` is a directory of `.rego`
+# files, loaded and hashed by crates/av-command/src/policy.rs::PolicyBundle::load (sorted,
+# deterministic order; a directory with no `.rego` file is a typed error, never an empty
+# allow-everything bundle). `allow_entrypoint`/`deny_entrypoint` are carried here as
+# configuration/documentation and checked against that module's own `ALLOW_ENTRYPOINT`/
+# `DENY_ENTRYPOINT` constants (which is what `evaluate` actually queries today) so this
+# profile's declared entry points can never silently drift from the evaluator's own -- see
+# tests/test_profiles.py and crates/av-command/src/policy.rs's own test of this block.
+# `rate_window_ns` is the trailing window width (nanoseconds) the ledger-backed rate source
+# (crates/av-command/src/rate.rs::LedgerRateSource) counts recent per-class submissions over,
+# fed into `PolicyInputRate.window_ns`.
+authority:
+  policy_dir: profiles/policies/authority
+  allow_entrypoint: data.altavista.authority.allow
+  deny_entrypoint: data.altavista.authority.deny
+  rate_window_ns: 3600000000000  # 1 hour
+
 planes:
   ingestion:
     per_architecture: "live edge plugins, HIL boards"
@@ -89,10 +107,24 @@ planes:
 
   command:
     per_architecture: "full path"
-    components: []
-    status: not_yet_built
-    note: >-
-      No command component exists in this repository yet: proto/altavista/v1/command.proto
-      declares the Command message schema, but there is no command state machine, no OPA
-      policy integration, and no dispatch path implemented anywhere in this repository.
-      architecture.md section 8 places the command path at phase P4.
+    components:
+      - name: av-command
+        kind: rust_crate
+        path: crates/av-command
+        role: >-
+          The command authority library (A1/A1.2, docs/aiplane-plan.md): the CommandState
+          state machine (propose/check/authorize/dispatch/ack/reject/expire/fail, one
+          transition function per edge, a typed refusal for every illegal edge), the
+          durable hash-chained per-partition ledger, and Rego policy evaluation at CHECKED
+          -- in process, via the `regorus` crate, over the `.rego` file(s) this profile's
+          `authority` block above declares. `check_command` (crates/av-command/src/
+          authority.rs) is the wired check edge: on allow it calls state::check and appends
+          the CHECKED ledger record with the PolicyDecision attached; on deny it calls
+          state::reject and appends the REJECTED record with the same PolicyDecision
+          attached, so a denial is exactly as reproducible from the ledger as an approval.
+    status: partial
+    not_yet_built:
+      - "A gRPC service exposing propose/check/authorize/dispatch/ack/query over the wire (A1.3, a separate task from A1.2 -- av-command is a library today, with no network-facing intake of any kind)."
+      - "Principal, roles, MFA and time-limited delegations (A2) -- every check_command call today records the fixed principal \"policy\"; there is no OIDC/human-authorization layer."
+      - "Dispatch into the kernel's real telecommand path with deadline/idempotency/ack levels (A3)."
+      - "The AI-plane gateway/proposer and the command console panel (A4/A5) -- architecture.md section 8 places the AI plane and the command console at phase P4."

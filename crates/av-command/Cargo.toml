@@ -26,6 +26,14 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# A1.2's `profiles/execution.yaml` `authority:` block loader (crates/av-command/src/
+# policy.rs's `load_profile_authority_config`). Not a new crate to the workspace's dependency
+# graph: crates/av-kernel and crates/av-sweep already depend on the identical "0.9" version
+# for their own YAML loaders (checked with `cargo tree` before adding this line -- see this
+# task's final report), so this resolves to the same already-vetted crate already in
+# Cargo.lock rather than introducing a second YAML parser.
+serde_yaml = "0.9"
+
 # SHA-256 for the ledger's hash chain, via the `openssl` crate (openssl-sys -> the
 # system/Homebrew libssl/libcrypto) -- ADR-004's crypto rule: SHA-256 only, the system
 # OpenSSL only, no bundled crypto (no `sha2`, no `ring`). Mirrors

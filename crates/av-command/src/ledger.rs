@@ -66,7 +66,7 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use av_cdm::pb::{ChainVerification, CommandTransition, LedgerRecord, PolicyDecision};
+use av_cdm::pb::{ChainVerification, CommandState, CommandTransition, LedgerRecord, PolicyDecision};
 use openssl::sha::sha256;
 use prost::Message;
 
@@ -202,15 +202,22 @@ impl Ledger {
     }
 
     /// Appends one record for `command_id`'s `transition` in `partition`'s chain.
-    /// `decision` should be `Some` iff `transition.state == COMMAND_STATE_CHECKED` (the
-    /// caller's responsibility; this method does not itself inspect `transition.state`).
-    /// Every epoch and every id in the returned record is exactly what the caller supplied
-    /// or what `clock` reported at the moment of the call -- see the module doc's
+    /// `decision` is `Some` for the transition produced by policy evaluation at CHECKED
+    /// (A1.2): `COMMAND_STATE_CHECKED` when the policy allowed, `COMMAND_STATE_REJECTED` when
+    /// it denied -- a denial must be as reproducible from the ledger as an approval, so it
+    /// carries the same `PolicyDecision`, not a lesser record. `None` for every other
+    /// transition, including a `COMMAND_STATE_REJECTED` that did not come from a policy
+    /// decision. This is the caller's responsibility; this method does not itself inspect
+    /// `transition.state`. `command_class` is `Command.command_class` at the time of this
+    /// transition -- carried on every record (see [`Self::count_proposed_by_class_in_window`]
+    /// for why). Every epoch and every id in the returned record is exactly what the caller
+    /// supplied or what `clock` reported at the moment of the call -- see the module doc's
     /// "Determinism" section.
     pub fn append(
         &self,
         partition: &str,
         command_id: &str,
+        command_class: &str,
         transition: CommandTransition,
         decision: Option<PolicyDecision>,
         clock: &dyn crate::clock::Clock,
@@ -229,7 +236,7 @@ impl Ledger {
 
         // Built with prev_hash/hash still empty: compute_hash clears them anyway (see its
         // own doc), but building the real record shape up front means the fields fed to
-        // the hash and the fields written to disk are provably the same seven values.
+        // the hash and the fields written to disk are provably the same eight values.
         let mut record = LedgerRecord {
             seq,
             partition: partition.to_string(),
@@ -239,6 +246,7 @@ impl Ledger {
             command_id: command_id.to_string(),
             transition: Some(transition),
             decision,
+            command_class: command_class.to_string(),
         };
         let hash = compute_hash(&prev_hash, &record);
         record.prev_hash = prev_hash.clone();
@@ -295,6 +303,18 @@ impl Ledger {
                     detail: format!("expected seq {expected_seq}, found seq {}", record.seq),
                 });
             }
+            if record.partition != partition {
+                return Ok(ChainVerification {
+                    producer_id: partition.to_string(),
+                    ok: false,
+                    checked,
+                    broken_at_sequence: record.seq,
+                    detail: format!(
+                        "seq {}: record's own partition field is {:?}, not the partition being verified {:?} -- this file's records were not all written for the same partition",
+                        record.seq, record.partition, partition
+                    ),
+                });
+            }
             if record.prev_hash != expected_prev {
                 return Ok(ChainVerification {
                     producer_id: partition.to_string(),
@@ -320,6 +340,54 @@ impl Ledger {
         }
 
         Ok(ChainVerification { producer_id: partition.to_string(), ok: true, checked, broken_at_sequence: 0, detail: "chain intact".to_string() })
+    }
+
+    /// Counts, within the trailing window `(as_of_tai_ns - window_ns, as_of_tai_ns]`, the
+    /// records in `partition`'s chain whose transition is `COMMAND_STATE_PROPOSED` --
+    /// deliberately not any other state -- grouped by each record's own `command_class`.
+    ///
+    /// `COMMAND_STATE_PROPOSED` is "the state whose arrival defines a command was submitted"
+    /// (`crate::rate`'s module doc states this same rule; restated here because this is where
+    /// it is enforced): [`crate::state::propose`] is this crate's state machine's *only*
+    /// entry point (its own module doc: "the machine's entry point... rather than advancing
+    /// an already-started one") and the only transition [`crate::state::CommandError::
+    /// AlreadyStarted`] guarantees can never be re-emitted for the same `Command` -- so
+    /// counting `PROPOSED` arrivals counts *submissions*, once each, never a re-count from a
+    /// command's later transitions (`CHECKED`, `AUTHORIZED`, ...) which are advances of a
+    /// command already counted, not new submissions. Counting any other state (e.g.
+    /// `CHECKED`) would double up work already reflected by counting `PROPOSED`, and would
+    /// even undercount a command a policy denies before ever reaching `CHECKED`.
+    ///
+    /// Read straight from disk (like [`Self::verify`]), independent of any in-memory chain
+    /// state -- used by [`crate::rate::LedgerRateSource`] to answer `PolicyInputRate.
+    /// counts_by_class` from real history rather than a caller-supplied guess.
+    pub fn count_proposed_by_class_in_window(
+        &self,
+        partition: &str,
+        as_of_tai_ns: i64,
+        window_ns: i64,
+    ) -> io::Result<BTreeMap<String, u64>> {
+        let path = self.partition_path(partition);
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(counts),
+            Err(e) => return Err(e),
+        };
+        let window_start = as_of_tai_ns.saturating_sub(window_ns);
+        while let Some(record) = read_frame(&mut file)? {
+            if record.tai_ns <= window_start || record.tai_ns > as_of_tai_ns {
+                continue;
+            }
+            let is_proposed = record
+                .transition
+                .as_ref()
+                .is_some_and(|t| t.state == CommandState::Proposed as i32);
+            if is_proposed {
+                *counts.entry(record.command_class.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(counts)
     }
 
     /// Every partition with a ledger file on disk, with its true partition name (read back
@@ -413,7 +481,7 @@ mod tests {
         let dir = tmp_dir("genesis");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(1_000);
-        let record = ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
+        let record = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
         assert_eq!(record.seq, 1);
         assert_eq!(record.prev_hash, GENESIS);
         assert_eq!(record.hash.len(), 32);
@@ -425,11 +493,11 @@ mod tests {
         let dir = tmp_dir("chain");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let r1 = ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let r1 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
         clock.advance(1);
-        let r2 = ledger.append("sat-1", "cmd-1", transition(CommandState::Checked, 1), None, &clock).unwrap();
+        let r2 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
         clock.advance(1);
-        let r3 = ledger.append("sat-1", "cmd-1", transition(CommandState::Authorized, 2), None, &clock).unwrap();
+        let r3 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 2), None, &clock).unwrap();
         assert_eq!(r2.prev_hash, r1.hash);
         assert_eq!(r3.prev_hash, r2.hash);
         assert_ne!(r1.hash, r2.hash);
@@ -442,8 +510,8 @@ mod tests {
         let dir = tmp_dir("partitions");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let a1 = ledger.append("sat-a", "cmd-a", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-        let b1 = ledger.append("sat-b", "cmd-b", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let a1 = ledger.append("sat-a", "cmd-a", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let b1 = ledger.append("sat-b", "cmd-b", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
         assert_eq!(a1.seq, 1);
         assert_eq!(b1.seq, 1, "a second partition's first record also starts at seq 1");
         assert_eq!(a1.prev_hash, GENESIS);
@@ -457,7 +525,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..5 {
-            ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         let result = ledger.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -487,7 +555,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..4 {
-            ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
 
@@ -526,7 +594,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..3 {
-            ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         let path = ledger.partition_path("sat-1");
         let mut file = File::open(&path).unwrap();
@@ -561,18 +629,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Hardens a defect the A1.1 review found:** `verify()` never checked that a decoded
+    /// record's own `partition` field matches the partition being verified. Without that
+    /// check, a record that was correctly hash-chained for a *different* partition (or a
+    /// whole file copied/misfiled under the wrong partition's name) would still pass every
+    /// existing check here -- the recomputed hash matches (it is computed over the record's
+    /// own body, whatever that body's `partition` field says) and `prev_hash` still points at
+    /// the previous record's real `hash` -- and `verify()` would wrongly report `ok: true`.
+    /// This test tampers only the *last* record's `partition` field and recomputes that one
+    /// record's own `hash` to match (so the hash chain alone stays fully self-consistent,
+    /// isolating the assertion to the new partition check, not a hash mismatch it would also
+    /// trip): `verify()` must still report the chain broken, at that record's exact `seq`.
+    #[test]
+    fn verify_detects_a_record_whose_partition_field_does_not_match() {
+        let dir = tmp_dir("tamper-partition");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+        for i in 0..3 {
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
+        }
+        assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
+
+        let path = ledger.partition_path("sat-1");
+        let mut file = File::open(&path).unwrap();
+        let mut records = Vec::new();
+        while let Some(r) = read_frame(&mut file).unwrap() {
+            records.push(r);
+        }
+        drop(file);
+        assert_eq!(records.len(), 3);
+
+        // Tamper the last record's partition field, then recompute *its own* hash (over its
+        // own prev_hash, unchanged) so the hash chain itself stays internally consistent --
+        // the only thing wrong is which partition this record claims to belong to.
+        let last = records.len() - 1;
+        let prev_hash = records[last].prev_hash.clone();
+        records[last].partition = "sat-2".to_string();
+        records[last].hash = compute_hash(&prev_hash, &records[last]);
+
+        let mut rebuilt = Vec::new();
+        for r in &records {
+            let bytes = r.encode_to_vec();
+            rebuilt.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            rebuilt.extend_from_slice(&bytes);
+        }
+        std::fs::write(&path, &rebuilt).unwrap();
+
+        let result = ledger.verify("sat-1").unwrap();
+        assert!(!result.ok, "verify must detect the partition-field mismatch");
+        assert_eq!(result.broken_at_sequence, 3, "must name the exact sequence number the mismatch is at");
+        assert_eq!(result.checked, 2, "records before the mismatched one still verify as good");
+        assert!(result.detail.contains("partition"), "{}", result.detail);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ledger_survives_reopen_and_continues_the_same_chain() {
         let dir = tmp_dir("reopen");
         {
             let ledger = Ledger::open(&dir).unwrap();
             let clock = TestClock::new(0);
-            ledger.append("sat-1", "cmd-1", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-            ledger.append("sat-1", "cmd-1", transition(CommandState::Checked, 1), None, &clock).unwrap();
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
         }
         let ledger2 = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(2);
-        let r3 = ledger2.append("sat-1", "cmd-1", transition(CommandState::Authorized, 2), None, &clock).unwrap();
+        let r3 = ledger2.append("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 2), None, &clock).unwrap();
         assert_eq!(r3.seq, 3, "recovered chain state must count the records already on disk");
         let result = ledger2.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -585,8 +707,8 @@ mod tests {
         let dir = tmp_dir("summary");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        ledger.append("sat/weird name", "cmd-1", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-        let last = ledger.append("sat/weird name", "cmd-1", transition(CommandState::Checked, 1), None, &clock).unwrap();
+        ledger.append("sat/weird name", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let last = ledger.append("sat/weird name", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
 
         let summaries = ledger.partitions().unwrap();
         assert_eq!(summaries.len(), 1);
@@ -614,19 +736,20 @@ mod tests {
             reasons: vec!["command_class burn is admitted".to_string()],
             matched_rule_path: "data.altavista.command.allow".to_string(),
             evaluated_tai_ns: 1_000,
+            input: None,
         };
-        let sequence: Vec<(&str, &str, CommandTransition, Option<PolicyDecision>)> = vec![
-            ("sat-1", "cmd-1", transition(CommandState::Proposed, 1_000), None),
-            ("sat-1", "cmd-1", transition(CommandState::Checked, 1_000), Some(decision)),
-            ("sat-1", "cmd-1", transition(CommandState::Authorized, 1_500), None),
-            ("sat-2", "cmd-2", transition(CommandState::Proposed, 2_000), None),
+        let sequence: Vec<(&str, &str, &str, CommandTransition, Option<PolicyDecision>)> = vec![
+            ("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None),
+            ("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1_000), Some(decision)),
+            ("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 1_500), None),
+            ("sat-2", "cmd-2", "burn", transition(CommandState::Proposed, 2_000), None),
         ];
 
         for ledger in [&ledger_a, &ledger_b] {
             let clock = TestClock::new(1_000);
-            for (partition, command_id, transition, decision) in &sequence {
+            for (partition, command_id, command_class, transition, decision) in &sequence {
                 clock.set(transition.tai_ns);
-                ledger.append(partition, command_id, transition.clone(), decision.clone(), &clock).unwrap();
+                ledger.append(partition, command_id, command_class, transition.clone(), decision.clone(), &clock).unwrap();
             }
         }
 
@@ -646,5 +769,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// [`Ledger::count_proposed_by_class_in_window`] counts only `COMMAND_STATE_PROPOSED`
+    /// records (not `CHECKED`/`AUTHORIZED`/... of the same commands, which would double-count
+    /// a submission already counted at its `PROPOSED` arrival), grouped by `command_class`,
+    /// and only those whose `tai_ns` falls inside `(as_of - window_ns, as_of]` -- exercised
+    /// with a `TestClock` driving each append's epoch explicitly, no sleeping.
+    #[test]
+    fn count_proposed_by_class_in_window_counts_only_proposed_records_inside_the_window() {
+        let dir = tmp_dir("rate-count");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+
+        // Two "burn" submissions and one "mode" submission, all inside the window.
+        clock.set(1_000);
+        ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
+        clock.set(1_100);
+        ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1_100), None, &clock).unwrap();
+        clock.set(1_200);
+        ledger.append("sat-1", "cmd-2", "burn", transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
+        clock.set(1_300);
+        ledger.append("sat-1", "cmd-3", "mode", transition(CommandState::Proposed, 1_300), None, &clock).unwrap();
+
+        // A "burn" submission long before the window opens -- must not be counted. `append`
+        // takes its record's own `tai_ns` from the clock's current value, not from the
+        // `CommandTransition.tai_ns` the `transition()` helper embeds -- so the clock must be
+        // set back explicitly, not just given a transition struct that says "0".
+        clock.set(0);
+        ledger.append("sat-1", "cmd-0", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        clock.set(1_300);
+
+        // A different partition's submission -- must not leak into sat-1's count.
+        ledger.append("sat-2", "cmd-9", "burn", transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
+
+        let counts = ledger.count_proposed_by_class_in_window("sat-1", 1_500, 1_000).unwrap();
+        assert_eq!(counts.get("burn").copied(), Some(2), "{counts:?}");
+        assert_eq!(counts.get("mode").copied(), Some(1), "{counts:?}");
+        assert_eq!(counts.len(), 2, "CHECKED is not counted, and the out-of-window/other-partition records are not counted: {counts:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

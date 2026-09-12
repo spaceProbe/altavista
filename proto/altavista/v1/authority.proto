@@ -78,6 +78,13 @@ message PolicyDecision {
   // When the decision was made, nanoseconds on TAI, always from the injected Clock
   // (`crates/av-command/src/clock.rs`) -- never the wall clock read directly.
   int64 evaluated_tai_ns = 6;
+  // The exact `PolicyInput` this decision was evaluated over (A1.2, additive). Carried on
+  // the decision itself -- not just referenced -- so a replay can re-evaluate the recorded
+  // input against a freshly loaded bundle and reproduce `decision_id`/`allow`/`policy_hash`/
+  // `reasons` from the ledger alone, without needing any other source to reconstruct what
+  // was actually evaluated (`crates/av-command/src/policy.rs`'s module doc, "Reproducibility
+  // from the ledger").
+  PolicyInput input = 7;
 }
 
 // One record of the durable, per-partition command ledger (ADR-004, "Evidence, verbatim
@@ -110,7 +117,18 @@ message LedgerRecord {
   string command_id = 6;
   // The transition being recorded.
   CommandTransition transition = 7;
-  // Present iff `transition.state == COMMAND_STATE_CHECKED`; absent (unset) for every other
-  // transition state.
+  // Present for the transition produced by policy evaluation at CHECKED (A1.2): set on
+  // `COMMAND_STATE_CHECKED` when the policy allowed and on `COMMAND_STATE_REJECTED` when it
+  // denied -- a denial must be as reproducible from the ledger as an approval
+  // (`crates/av-command/src/authority.rs`'s module doc). Absent (unset) for every other
+  // transition state, including a `COMMAND_STATE_REJECTED` transition that did not come from
+  // a policy decision (e.g. a structural rejection straight from `PROPOSED`, `state.rs`'s
+  // `reject` edge called for a reason other than a policy denial).
   PolicyDecision decision = 8;
+  // `Command.command_class` this record's `Command` carried at the time of this transition
+  // (A1.2, additive) -- carried on every record, not only the CHECKED/REJECTED ones, so
+  // `crates/av-command/src/rate.rs`'s ledger-backed rate source can count "a command entered
+  // the machine" (a `COMMAND_STATE_PROPOSED` record) grouped by class without needing a
+  // second index or a join against some other store.
+  string command_class = 9;
 }
