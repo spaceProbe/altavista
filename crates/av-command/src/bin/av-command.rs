@@ -1,0 +1,164 @@
+//! Boots the `av-command` service binary: `altavista.v1.CommandAuthorityService` (gRPC) and
+//! `/admin/api/evidence`(`/verify`) (HTTP), both plaintext on loopback only (question 155;
+//! see `crate::service`'s module doc for the exact refusal). Mirrors
+//! `crates/av-dynamics-service/src/bin/server.rs`'s shape: warm up durable state first (here,
+//! open the ledger and load the policy bundle), start the admin server, then serve gRPC.
+//!
+//! # Configuration (question 199: never the process environment)
+//!
+//! Every setting below comes from a command-line flag (with a fixed default), read once via
+//! `std::env::args()` (the process's argument vector -- not an environment *variable*; this
+//! binary never calls `std::env::var`/`set_var`/`remove_var` anywhere). There is no
+//! environment-variable configuration path to accidentally rely on or accidentally mutate.
+//!
+//! ```text
+//! av-command [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] [--policy-dir PATH]
+//!            [--rate-window-ns NS] [--run-id ID]
+//! ```
+//!
+//! - `--bind` (default `127.0.0.1:50070`): the gRPC listen address. Refused at startup
+//!   (`crate::service::resolve_loopback_bind_address`, a typed [`av_command::service::
+//!   BindAddressError`]) unless it is a recognized loopback spelling -- question 155.
+//! - `--admin-bind` (default `127.0.0.1:50170`, `av-dynamics-service`'s own +100-from-gRPC-
+//!   port convention): same loopback-only refusal, same reason -- the admin surface is never
+//!   fronted by nginx/mTLS either (ADR-004 question 63's own scope, matching
+//!   `crates/av-dynamics-service/src/bin/server.rs`'s identical comment).
+//! - `--ledger-dir` (default `<CARGO_MANIFEST_DIR>/ledger`, i.e. next to this crate, the same
+//!   "next to the crate" convention `av-dynamics-service`'s evidence log default uses):
+//!   where [`av_command::ledger::Ledger::open`] persists every partition.
+//! - `--policy-dir` (default `<repo>/profiles/policies/authority`, `profiles/execution.yaml`'s
+//!   own `authority.policy_dir`): where [`av_command::policy::PolicyBundle::load`] reads
+//!   `.rego` files from.
+//! - `--rate-window-ns` (default `3_600_000_000_000`, one hour -- `profiles/execution.yaml`'s
+//!   own `authority.rate_window_ns`): the trailing window `PolicyInputRate.counts_by_class`
+//!   is computed over.
+//! - `--run-id` (default: a random 16-byte OpenSSL-RNG hex string, matching
+//!   `crates/av-dynamics-service/src/bin/server.rs`'s own `random_run_id`): correlates this
+//!   process's own admin responses; never parsed, only compared for equality.
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use av_command::clock::SystemClock;
+use av_command::evidence::AdminState;
+use av_command::ledger::Ledger;
+use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
+use av_command::policy::PolicyBundle;
+use av_command::service::{resolve_loopback_bind_address, CommandAuthorityServiceImpl, RecordingDispatchSink};
+
+const DEFAULT_BIND: &str = "127.0.0.1:50070";
+/// `av-dynamics-service`'s own +100-from-gRPC-port convention (`crates/av-dynamics-service/
+/// src/bin/server.rs`'s `DEFAULT_ADMIN_PORT`).
+const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:50170";
+const DEFAULT_RATE_WINDOW_NS: i64 = 3_600_000_000_000;
+
+struct Args {
+    bind: String,
+    admin_bind: String,
+    ledger_dir: PathBuf,
+    policy_dir: PathBuf,
+    rate_window_ns: i64,
+    run_id: Option<String>,
+}
+
+fn default_ledger_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ledger")
+}
+
+fn default_policy_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/policies/authority")
+}
+
+fn parse_args() -> Result<Args, String> {
+    let mut bind = DEFAULT_BIND.to_string();
+    let mut admin_bind = DEFAULT_ADMIN_BIND.to_string();
+    let mut ledger_dir = default_ledger_dir();
+    let mut policy_dir = default_policy_dir();
+    let mut rate_window_ns = DEFAULT_RATE_WINDOW_NS;
+    let mut run_id = None;
+
+    let mut it = std::env::args().skip(1);
+    while let Some(flag) = it.next() {
+        let mut val = || it.next().ok_or_else(|| format!("{flag} needs a value"));
+        match flag.as_str() {
+            "--bind" => bind = val()?,
+            "--admin-bind" => admin_bind = val()?,
+            "--ledger-dir" => ledger_dir = PathBuf::from(val()?),
+            "--policy-dir" => policy_dir = PathBuf::from(val()?),
+            "--rate-window-ns" => rate_window_ns = val()?.parse::<i64>().map_err(|e| format!("--rate-window-ns: {e}"))?,
+            "--run-id" => run_id = Some(val()?),
+            "--help" | "-h" => {
+                return Err("usage: av-command [--bind ADDR] [--admin-bind ADDR] [--ledger-dir PATH] \
+                            [--policy-dir PATH] [--rate-window-ns NS] [--run-id ID]"
+                    .to_string())
+            }
+            other => return Err(format!("unrecognized argument: {other}")),
+        }
+    }
+    Ok(Args { bind, admin_bind, ledger_dir, policy_dir, rate_window_ns, run_id })
+}
+
+/// 16 bytes from OpenSSL's RNG, hex-encoded -- see `crates/av-dynamics-service/src/bin/
+/// server.rs`'s identical `random_run_id` for why this is not a bundled `rand`/`uuid` crate
+/// and not a literal RFC 4122 UUID.
+fn random_run_id() -> String {
+    let mut buf = [0u8; 16];
+    openssl::rand::rand_bytes(&mut buf).expect("OpenSSL RNG failed");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("av-command: {e}");
+            std::process::exit(1);
+        }
+    };
+    let run_id = args.run_id.unwrap_or_else(random_run_id);
+
+    // Question 155: refused here, before any socket is ever bound -- never a partially
+    // started process listening on a bad address.
+    let grpc_addr: SocketAddr = resolve_loopback_bind_address(&args.bind).map_err(|e| {
+        eprintln!("av-command: {e}");
+        e
+    })?;
+    let admin_addr: SocketAddr = resolve_loopback_bind_address(&args.admin_bind).map_err(|e| {
+        eprintln!("av-command: {e}");
+        e
+    })?;
+
+    let ledger = Arc::new(Ledger::open(&args.ledger_dir)?);
+    let bundle = Arc::new(PolicyBundle::load(&args.policy_dir).map_err(|e| format!("loading policy bundle from {:?}: {e}", args.policy_dir))?);
+    eprintln!(
+        "av-command: ledger at {} ({} partition(s)); policy bundle {:?} (hash {})",
+        args.ledger_dir.display(),
+        ledger.partitions()?.len(),
+        args.policy_dir,
+        bundle.policy_hash()
+    );
+
+    let admin_state = Arc::new(AdminState { ledger: ledger.clone(), run_id: run_id.clone(), version: env!("CARGO_PKG_VERSION").to_string() });
+    eprintln!("av-command: admin API on {admin_addr} (GET /admin/api/evidence, /admin/api/evidence/verify)");
+    tokio::spawn(async move {
+        if let Err(e) = av_command::admin::serve(admin_addr, admin_state).await {
+            eprintln!("av-command: admin server failed: {e}");
+        }
+    });
+
+    // A3 (docs/aiplane-plan.md) supplies the real kernel telecommand binding behind
+    // DispatchSink; this binary ships only the recording implementation (crate::service's
+    // module doc, "DispatchSink -- not A3").
+    let dispatch_sink = Arc::new(RecordingDispatchSink::new());
+    // Rebuilds the duplicate-dispatch guard from the ledger before serving a single RPC --
+    // see crate::service's module doc, "Idempotency ... a guarantee that survives a restart".
+    let servicer = CommandAuthorityServiceImpl::new(ledger, bundle, args.rate_window_ns, Arc::new(SystemClock), dispatch_sink)?;
+
+    eprintln!("av-command: listening on {grpc_addr} (run_id={run_id})");
+    tonic::transport::Server::builder()
+        .add_service(CommandAuthorityServiceServer::new(servicer))
+        .serve(grpc_addr)
+        .await?;
+    Ok(())
+}

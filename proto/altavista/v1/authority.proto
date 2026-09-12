@@ -18,6 +18,14 @@ syntax = "proto3";
 //     (role -> command_class table). Until A2 lands, `CommandTransition.principal` and
 //     `CommandTransition.delegation_id` (`command.proto`) are the only principal/delegation
 //     fields that exist anywhere in the wire format -- this file adds none of its own.
+//   - A1.3 (this task, additive only -- no field number above moves): `CommandAuthorityService`
+//     and its request/response messages, below `LedgerRecord`. `AuthorizeRequest.
+//     principal_token`/`delegation_id` are the two fields A2 needs on the wire; A1.3's own
+//     service implementation (`crates/av-command/src/service.rs`) does not verify
+//     `principal_token` in any way -- it records it verbatim as `CommandTransition.principal`
+//     with a reason that says plainly that identity is not yet verified. A2 is the milestone
+//     that parses/verifies this token and performs the real role/MFA/delegation gate; nothing
+//     here should need a second request shape when A2 lands.
 package altavista.v1;
 
 import "altavista/v1/command.proto";
@@ -131,4 +139,146 @@ message LedgerRecord {
   // the machine" (a `COMMAND_STATE_PROPOSED` record) grouped by class without needing a
   // second index or a join against some other store.
   string command_class = 9;
+  // `Command.idempotency_key` this record's `Command` carried at the time of this transition
+  // (A1.3, additive), empty when the command declared none. Carried on every record, not
+  // only `COMMAND_STATE_DISPATCHED` ones, for the same reason `command_class` is carried on
+  // every record above: `crates/av-command/src/ledger.rs`'s `scan_dispatched_idempotency_
+  // keys` reads this straight off `COMMAND_STATE_DISPATCHED` records without needing a
+  // second index or a join against some other store, and a caller inspecting any record
+  // never has to ask "which Command's key was this" separately. This is what
+  // `CommandAuthorityServiceImpl` (`crates/av-command/src/service.rs`) rebuilds its
+  // in-process duplicate-dispatch guard from at construction, so that guarantee survives a
+  // process restart -- `command.proto`'s own doc comment on `Command.idempotency_key` ("the
+  // edge never dispatches the same key twice") is unconditional, not "only within one
+  // process lifetime", and this field is what makes that true from the durable ledger, not
+  // from RAM alone.
+  string idempotency_key = 10;
+}
+
+// ---------------------------------------------------------------------------------------
+// A1.3: CommandAuthorityService -- propose, check, authorize, dispatch, ack, query, ledger
+// verify, over the same OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use
+// (`crates/av-command/build.rs`, `crates/av-command/src/service.rs`). Plaintext on loopback
+// only (question 155); mTLS across a host boundary is the service-owned nginx front's job
+// (question 84), not this service's own transport.
+// ---------------------------------------------------------------------------------------
+
+// `Propose` request: the only message a model or agent may emit toward the command path
+// (`command.proto`'s own `CommandProposal` doc comment), plus the principal proposing it --
+// `CommandProposal` itself carries no principal field, so this request carries the one
+// `state::propose` needs to record on the resulting `PROPOSED` transition.
+message ProposeRequest {
+  CommandProposal proposal = 1;
+  // The model/agent identity proposing this command, e.g. "model-x". Recorded verbatim as
+  // the `PROPOSED` transition's `CommandTransition.principal` -- not verified against
+  // anything (A2's OIDC principal work does not reach `Propose`; a proposer is not a human
+  // operator).
+  string principal = 2;
+}
+
+// `Check` request: identifies an already-`PROPOSED` command (held in this service's
+// in-memory index, keyed by `Command.id`) to evaluate policy over. Carries no policy input
+// of its own -- the service reconstructs `PolicyInput` from the stored `Command` plus real
+// ledger rate history, exactly like `crates/av-command/src/authority.rs`'s `check_command`.
+message CheckRequest {
+  string command_id = 1;
+}
+
+// `Authorize` request. See this file's header comment and `AuthorizeRequest.
+// principal_token`'s own doc comment above for what A1.3 does and does not do with these
+// two fields.
+message AuthorizeRequest {
+  string command_id = 1;
+  // Opaque bearer token (e.g. an OIDC access token) naming the principal attempting to
+  // authorize. A1.3 never parses or verifies this string -- it is recorded verbatim as
+  // `CommandTransition.principal`, with a `CommandTransition.reason` that states plainly
+  // that identity is not yet verified. A2 is the milestone that verifies it against an OIDC
+  // issuer and performs the real role/MFA gate.
+  string principal_token = 2;
+  // The delegation the principal claims to be acting under, if any -- carried through to
+  // `CommandTransition.delegation_id` unevaluated (A2 enforces expiry/scope against the
+  // injected clock). Empty means "acting under the principal's own authority".
+  string delegation_id = 3;
+}
+
+// `Dispatch` request: identifies an `AUTHORIZED` command to hand to the `DispatchSink`
+// (`crates/av-command/src/service.rs`; A3 supplies the real kernel binding behind it). No
+// other field -- the dispatching principal is this service itself, not a caller-supplied
+// identity (matching `crates/av-command/src/state.rs`'s own test convention, e.g.
+// `dispatch(c, "ground-segment", ...)`).
+message DispatchRequest {
+  string command_id = 1;
+}
+
+// `Ack` request: reports how far the dispatched command got, per `AckLevel` (`command.proto`)
+// -- "the ack level is a request field" (this task's own brief). `principal`/`reason` are
+// caller-supplied (the edge node, the asset link, or flight software reporting back), unlike
+// `Authorize`'s `principal_token`: an ack report is not itself a human-authorization gate.
+message AckRequest {
+  string command_id = 1;
+  AckLevel ack_level = 2;
+  string principal = 3;
+  string reason = 4;
+}
+
+// The response every one of `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack` returns: the
+// `Command` in its new state, plus the `PolicyDecision` that produced it -- present only for
+// `Check`'s response (the only one of the five that runs a policy decision); unset for the
+// other four.
+message CommandResponse {
+  Command command = 1;
+  PolicyDecision decision = 2;
+}
+
+// `Query` selects either one command by id, or every command for one entity with an optional
+// `CommandState` filter (`COMMAND_STATE_UNSPECIFIED` means no filter -- every state).
+message QueryByEntity {
+  string entity_id = 1;
+  CommandState state_filter = 2;
+}
+
+message QueryRequest {
+  oneof selector {
+    string command_id = 1;
+    QueryByEntity entity = 2;
+  }
+}
+
+message QueryResponse {
+  // Sorted by `Command.id` (this service's in-memory index is a `BTreeMap`, ADR-004's
+  // determinism rule: no `HashMap` iteration on any output path) -- deterministic order,
+  // never the order commands happened to be inserted.
+  repeated Command commands = 1;
+}
+
+// `VerifyLedger` request: one partition by name, or every partition this service's ledger
+// currently has a file for when `partition` is empty.
+message VerifyLedgerRequest {
+  string partition = 1;
+}
+
+message VerifyLedgerResponse {
+  // One `ChainVerification` (`envelope.proto`) per partition checked, in the same order
+  // `crate::ledger::Ledger::partitions` reports them (sorted by the partition's sanitized
+  // filename) when `VerifyLedgerRequest.partition` was empty; a single-element list
+  // otherwise.
+  repeated ChainVerification results = 1;
+  // The logical AND of every result's own `ok` -- `true` only when every checked partition's
+  // chain is intact.
+  bool ok = 2;
+}
+
+// The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
+// verify, over the state machine and ledger `crates/av-command`'s library modules already
+// implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
+// comment above for what it does and does not verify; see that module's own doc comment for
+// the `tonic::Status` code chosen for every refusal.
+service CommandAuthorityService {
+  rpc Propose(ProposeRequest) returns (CommandResponse);
+  rpc Check(CheckRequest) returns (CommandResponse);
+  rpc Authorize(AuthorizeRequest) returns (CommandResponse);
+  rpc Dispatch(DispatchRequest) returns (CommandResponse);
+  rpc Ack(AckRequest) returns (CommandResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc VerifyLedger(VerifyLedgerRequest) returns (VerifyLedgerResponse);
 }

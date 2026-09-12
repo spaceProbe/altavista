@@ -47,7 +47,7 @@ use av_cdm::pb::{Command, PolicyDecision};
 use thiserror::Error;
 
 use crate::clock::Clock;
-use crate::ledger::Ledger;
+use crate::ledger::{CommandMeta, Ledger};
 use crate::policy::{self, PolicyBundle};
 use crate::rate::RateSource;
 use crate::state::{self, CommandError};
@@ -131,9 +131,7 @@ pub fn check_command(
         .clone();
 
     ledger.append(
-        &new_command.entity_id,
-        &new_command.id,
-        &new_command.command_class,
+        CommandMeta::new(&new_command.entity_id, &new_command.id, &new_command.command_class, &new_command.idempotency_key),
         transition,
         Some(decision.clone()),
         clock,

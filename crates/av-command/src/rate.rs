@@ -83,6 +83,7 @@ impl RateSource for FixtureRateSource {
 mod tests {
     use super::*;
     use crate::clock::TestClock;
+    use crate::ledger::CommandMeta;
     use av_cdm::pb::{AckLevel, CommandState, CommandTransition};
 
     fn transition(state: CommandState, tai_ns: i64) -> CommandTransition {
@@ -104,11 +105,11 @@ mod tests {
         let clock = TestClock::new(0);
 
         clock.set(1_000);
-        ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
         clock.set(1_200);
-        ledger.append("sat-1", "cmd-2", "burn", transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", ""), transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
         clock.set(1_400);
-        ledger.append("sat-1", "cmd-3", "mode", transition(CommandState::Proposed, 1_400), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-3", "mode", ""), transition(CommandState::Proposed, 1_400), None, &clock).unwrap();
 
         let source = LedgerRateSource::new(&ledger);
         let counts = source.counts_by_class("sat-1", 1_500, 1_000).unwrap();

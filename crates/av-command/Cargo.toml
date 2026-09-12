@@ -42,8 +42,42 @@ openssl = "0.10"
 
 # For src/admin.rs's hand-rolled `/admin/api/evidence*` HTTP server: a plain
 # tokio::net::TcpListener with manual GET-only request parsing, not axum/hyper directly --
-# same reasoning as crates/av-dynamics-service/src/admin.rs's own doc comment (those crates
-# are only present in a tonic-based workspace's tree transitively; this crate has no tonic
-# dependency at all yet, so here it is even more clearly not worth pinning). "rt-multi-thread"
-# and "macros" are for `#[tokio::test]` in this crate's own test suite.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+# same reasoning as crates/av-dynamics-service/src/admin.rs's own doc comment. "signal" is
+# for src/bin/av-command.rs's graceful-shutdown handling; "rt-multi-thread" and "macros" are
+# for `#[tokio::test]` in this crate's own test suite.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+
+# A1.3: `CommandAuthorityService` (proto/altavista/v1/authority.proto) over the same
+# OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use. Default features off,
+# "server" only (never "tls"/"tls-native-roots"/"tls-webpki-roots") -- those pull
+# `tokio-rustls` -> `ring`, forbidden by ADR-004's crypto rule; see
+# crates/av-dynamics-service/Cargo.toml's identical comment. This crate never dials out as a
+# gRPC client in production (A3's kernel binding is reached through the `DispatchSink` trait
+# this crate defines, not a gRPC call this crate makes), so "channel" is a [dev-dependencies]
+# entry only, for the integration tests' own client (see below).
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+# Test-only client channel for crates/av-command/tests/*.rs, which drive the real service
+# over a real loopback socket with a real tonic client (question 154's own module-doc
+# record: binding/connecting on 127.0.0.1 is not "network at test time", the rule is about
+# reaching outside the host). Same restricted feature set av-grpc/av-lockstep's production
+# "channel" dependency uses (default-features off, no "tls*" -- never `ring`); the only
+# difference is this crate needs it in [dev-dependencies] only, since its own production
+# code (src/service.rs, src/bin/av-command.rs) is a server, never a client.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "signal"] }
+# Wraps a `tokio::net::TcpListener` already bound to `127.0.0.1:0` (an OS-assigned ephemeral
+# port) as the `Stream` `tonic::transport::Server::serve_with_incoming` needs -- so every
+# integration test binds its own listener and reads back the real port with no bind-then-
+# drop-then-rebind race (never a fixed port; already transitively in this workspace's tree
+# via tonic's own dependencies, declared directly here only so `tests/*.rs` can `use` it).
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[[bin]]
+name = "av-command"
+path = "src/bin/av-command.rs"

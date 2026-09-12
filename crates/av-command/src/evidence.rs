@@ -101,6 +101,7 @@ impl From<&av_cdm::pb::ChainVerification> for SerializableChainVerification {
 mod tests {
     use super::*;
     use crate::clock::TestClock;
+    use crate::ledger::CommandMeta;
     use av_cdm::pb::{AckLevel, CommandState, CommandTransition};
 
     fn ledger_with_one_partition(dir: &std::path::Path) -> Ledger {
@@ -114,7 +115,7 @@ mod tests {
             ack_level: AckLevel::Unspecified as i32,
             delegation_id: String::new(),
         };
-        ledger.append("sat-1", "cmd-1", "burn", t, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t, None, &clock).unwrap();
         ledger
     }
 

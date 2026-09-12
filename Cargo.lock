@@ -92,12 +92,16 @@ dependencies = [
  "av-cdm",
  "openssl",
  "prost",
+ "prost-build",
  "regorus",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

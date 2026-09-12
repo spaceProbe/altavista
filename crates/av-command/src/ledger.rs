@@ -60,7 +60,7 @@
 //! that reports a corrupt *interior* record as a finding rather than a hard error, since a
 //! `verify` call must always answer, even about a ledger no `append` will ever touch again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -161,6 +161,30 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Identifies the `Command` a [`Ledger::append`] call is about: the four `LedgerRecord`
+/// fields that come straight from the `Command` itself rather than from the `transition`/
+/// `decision`/`clock` this crate is appending because of. Grouped into one struct (A1.3,
+/// added alongside `idempotency_key`) so `append` itself has one parameter here instead of
+/// four bare `&str`s -- clippy's `too_many_arguments` lint would otherwise flag `append`
+/// once `idempotency_key` joined `partition`/`command_id`/`command_class`, and this crate's
+/// rule against lint-suppressing attributes on hand-written items means the fix is grouping
+/// the arguments, never silencing the lint in place.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandMeta<'a> {
+    /// The entity id -- the ledger partition key.
+    pub partition: &'a str,
+    pub command_id: &'a str,
+    pub command_class: &'a str,
+    /// `Command.idempotency_key`, empty when the command declared none.
+    pub idempotency_key: &'a str,
+}
+
+impl<'a> CommandMeta<'a> {
+    pub fn new(partition: &'a str, command_id: &'a str, command_class: &'a str, idempotency_key: &'a str) -> Self {
+        Self { partition, command_id, command_class, idempotency_key }
+    }
+}
+
 /// Durable, file-backed, append-only, chained-per-partition command ledger. See the module
 /// doc for the on-disk framing and hash chain.
 pub struct Ledger {
@@ -201,27 +225,25 @@ impl Ledger {
         Ok(state)
     }
 
-    /// Appends one record for `command_id`'s `transition` in `partition`'s chain.
-    /// `decision` is `Some` for the transition produced by policy evaluation at CHECKED
-    /// (A1.2): `COMMAND_STATE_CHECKED` when the policy allowed, `COMMAND_STATE_REJECTED` when
-    /// it denied -- a denial must be as reproducible from the ledger as an approval, so it
-    /// carries the same `PolicyDecision`, not a lesser record. `None` for every other
-    /// transition, including a `COMMAND_STATE_REJECTED` that did not come from a policy
-    /// decision. This is the caller's responsibility; this method does not itself inspect
-    /// `transition.state`. `command_class` is `Command.command_class` at the time of this
-    /// transition -- carried on every record (see [`Self::count_proposed_by_class_in_window`]
-    /// for why). Every epoch and every id in the returned record is exactly what the caller
-    /// supplied or what `clock` reported at the moment of the call -- see the module doc's
-    /// "Determinism" section.
-    pub fn append(
-        &self,
-        partition: &str,
-        command_id: &str,
-        command_class: &str,
-        transition: CommandTransition,
-        decision: Option<PolicyDecision>,
-        clock: &dyn crate::clock::Clock,
-    ) -> io::Result<LedgerRecord> {
+    /// Appends one record for [`CommandMeta::command_id`]'s `transition` in
+    /// [`CommandMeta::partition`]'s chain. `decision` is `Some` for the transition produced
+    /// by policy evaluation at CHECKED (A1.2): `COMMAND_STATE_CHECKED` when the policy
+    /// allowed, `COMMAND_STATE_REJECTED` when it denied -- a denial must be as reproducible
+    /// from the ledger as an approval, so it carries the same `PolicyDecision`, not a lesser
+    /// record. `None` for every other transition, including a `COMMAND_STATE_REJECTED` that
+    /// did not come from a policy decision. This is the caller's responsibility; this method
+    /// does not itself inspect `transition.state`. [`CommandMeta::command_class`]/
+    /// [`CommandMeta::idempotency_key`] are `Command.command_class`/`Command.
+    /// idempotency_key` at the time of this transition -- carried on every record (see
+    /// [`Self::count_proposed_by_class_in_window`]/[`Self::scan_dispatched_idempotency_keys`]
+    /// for why); `idempotency_key` empty means the command declared none (this method does
+    /// not itself enforce uniqueness; that is `crate::service::CommandAuthorityServiceImpl::
+    /// dispatch`'s job, in memory *and* now rebuilt from this ledger at construction). Every
+    /// epoch and every id in the returned record is exactly what the caller supplied or what
+    /// `clock` reported at the moment of the call -- see the module doc's "Determinism"
+    /// section.
+    pub fn append(&self, meta: CommandMeta<'_>, transition: CommandTransition, decision: Option<PolicyDecision>, clock: &dyn crate::clock::Clock) -> io::Result<LedgerRecord> {
+        let partition = meta.partition;
         let path = self.partition_path(partition);
         let mut chains = self.chains.lock().unwrap_or_else(|p| p.into_inner());
         if !chains.contains_key(partition) {
@@ -236,17 +258,18 @@ impl Ledger {
 
         // Built with prev_hash/hash still empty: compute_hash clears them anyway (see its
         // own doc), but building the real record shape up front means the fields fed to
-        // the hash and the fields written to disk are provably the same eight values.
+        // the hash and the fields written to disk are provably the same nine values.
         let mut record = LedgerRecord {
             seq,
             partition: partition.to_string(),
             prev_hash: Vec::new(),
             hash: Vec::new(),
             tai_ns,
-            command_id: command_id.to_string(),
+            command_id: meta.command_id.to_string(),
             transition: Some(transition),
             decision,
-            command_class: command_class.to_string(),
+            command_class: meta.command_class.to_string(),
+            idempotency_key: meta.idempotency_key.to_string(),
         };
         let hash = compute_hash(&prev_hash, &record);
         record.prev_hash = prev_hash.clone();
@@ -390,6 +413,46 @@ impl Ledger {
         Ok(counts)
     }
 
+    /// Every non-empty `idempotency_key` carried by a `COMMAND_STATE_DISPATCHED` record,
+    /// across **every partition** this ledger has a file for -- not scoped to one partition,
+    /// since a duplicate-dispatch refusal (`crate::service::CommandAuthorityServiceImpl::
+    /// dispatch`) is a service-wide guarantee, not a per-entity one (`command.proto`'s own
+    /// doc comment on `Command.idempotency_key`, "the edge never dispatches the same key
+    /// twice", names no partition scope). Read straight from disk (like [`Self::verify`] and
+    /// [`Self::partitions`]), independent of any in-memory state -- this is exactly what
+    /// [`crate::service::CommandAuthorityServiceImpl::new`] calls once, at construction, to
+    /// rebuild its in-process duplicate-dispatch guard so that guarantee survives a process
+    /// restart rather than living only in RAM (the defect this method exists to close).
+    ///
+    /// A record with an empty `idempotency_key` is never collected (matches `crate::
+    /// service`'s own reading of an empty key as "this command opts out of deduplication");
+    /// a key that appears on more than one `DISPATCHED` record collapses to one set member,
+    /// since the caller only ever needs "was this key dispatched at all", never a count.
+    pub fn scan_dispatched_idempotency_keys(&self) -> io::Result<BTreeSet<String>> {
+        let mut keys = BTreeSet::new();
+        if !self.dir.exists() {
+            return Ok(keys);
+        }
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "ledger"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let mut file = File::open(&path)?;
+            while let Some(record) = read_frame(&mut file)? {
+                if record.idempotency_key.is_empty() {
+                    continue;
+                }
+                let is_dispatched = record.transition.as_ref().is_some_and(|t| t.state == CommandState::Dispatched as i32);
+                if is_dispatched {
+                    keys.insert(record.idempotency_key.clone());
+                }
+            }
+        }
+        Ok(keys)
+    }
+
     /// Every partition with a ledger file on disk, with its true partition name (read back
     /// from each file's own first record -- never guessed from the sanitized filename),
     /// chain head and record count. Used by `/admin/api/evidence`.
@@ -481,7 +544,7 @@ mod tests {
         let dir = tmp_dir("genesis");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(1_000);
-        let record = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
+        let record = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
         assert_eq!(record.seq, 1);
         assert_eq!(record.prev_hash, GENESIS);
         assert_eq!(record.hash.len(), 32);
@@ -493,11 +556,11 @@ mod tests {
         let dir = tmp_dir("chain");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let r1 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let r1 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
         clock.advance(1);
-        let r2 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
+        let r2 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, &clock).unwrap();
         clock.advance(1);
-        let r3 = ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 2), None, &clock).unwrap();
+        let r3 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, &clock).unwrap();
         assert_eq!(r2.prev_hash, r1.hash);
         assert_eq!(r3.prev_hash, r2.hash);
         assert_ne!(r1.hash, r2.hash);
@@ -510,8 +573,8 @@ mod tests {
         let dir = tmp_dir("partitions");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let a1 = ledger.append("sat-a", "cmd-a", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-        let b1 = ledger.append("sat-b", "cmd-b", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let a1 = ledger.append(CommandMeta::new("sat-a", "cmd-a", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let b1 = ledger.append(CommandMeta::new("sat-b", "cmd-b", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
         assert_eq!(a1.seq, 1);
         assert_eq!(b1.seq, 1, "a second partition's first record also starts at seq 1");
         assert_eq!(a1.prev_hash, GENESIS);
@@ -525,7 +588,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..5 {
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         let result = ledger.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -555,7 +618,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..4 {
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
 
@@ -594,7 +657,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..3 {
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         let path = ledger.partition_path("sat-1");
         let mut file = File::open(&path).unwrap();
@@ -646,7 +709,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..3 {
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, i), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, &clock).unwrap();
         }
         assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
 
@@ -689,12 +752,12 @@ mod tests {
         {
             let ledger = Ledger::open(&dir).unwrap();
             let clock = TestClock::new(0);
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-            ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, &clock).unwrap();
         }
         let ledger2 = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(2);
-        let r3 = ledger2.append("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 2), None, &clock).unwrap();
+        let r3 = ledger2.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, &clock).unwrap();
         assert_eq!(r3.seq, 3, "recovered chain state must count the records already on disk");
         let result = ledger2.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -707,8 +770,8 @@ mod tests {
         let dir = tmp_dir("summary");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        ledger.append("sat/weird name", "cmd-1", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
-        let last = ledger.append("sat/weird name", "cmd-1", "burn", transition(CommandState::Checked, 1), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        let last = ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, &clock).unwrap();
 
         let summaries = ledger.partitions().unwrap();
         assert_eq!(summaries.len(), 1);
@@ -738,18 +801,18 @@ mod tests {
             evaluated_tai_ns: 1_000,
             input: None,
         };
-        let sequence: Vec<(&str, &str, &str, CommandTransition, Option<PolicyDecision>)> = vec![
-            ("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None),
-            ("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1_000), Some(decision)),
-            ("sat-1", "cmd-1", "burn", transition(CommandState::Authorized, 1_500), None),
-            ("sat-2", "cmd-2", "burn", transition(CommandState::Proposed, 2_000), None),
+        let sequence: Vec<(CommandMeta<'_>, CommandTransition, Option<PolicyDecision>)> = vec![
+            (CommandMeta::new("sat-1", "cmd-1", "burn", "idem-1"), transition(CommandState::Proposed, 1_000), None),
+            (CommandMeta::new("sat-1", "cmd-1", "burn", "idem-1"), transition(CommandState::Checked, 1_000), Some(decision)),
+            (CommandMeta::new("sat-1", "cmd-1", "burn", "idem-1"), transition(CommandState::Authorized, 1_500), None),
+            (CommandMeta::new("sat-2", "cmd-2", "burn", ""), transition(CommandState::Proposed, 2_000), None),
         ];
 
         for ledger in [&ledger_a, &ledger_b] {
             let clock = TestClock::new(1_000);
-            for (partition, command_id, command_class, transition, decision) in &sequence {
+            for (meta, transition, decision) in &sequence {
                 clock.set(transition.tai_ns);
-                ledger.append(partition, command_id, command_class, transition.clone(), decision.clone(), &clock).unwrap();
+                ledger.append(*meta, transition.clone(), decision.clone(), &clock).unwrap();
             }
         }
 
@@ -784,29 +847,65 @@ mod tests {
 
         // Two "burn" submissions and one "mode" submission, all inside the window.
         clock.set(1_000);
-        ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, &clock).unwrap();
         clock.set(1_100);
-        ledger.append("sat-1", "cmd-1", "burn", transition(CommandState::Checked, 1_100), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1_100), None, &clock).unwrap();
         clock.set(1_200);
-        ledger.append("sat-1", "cmd-2", "burn", transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", ""), transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
         clock.set(1_300);
-        ledger.append("sat-1", "cmd-3", "mode", transition(CommandState::Proposed, 1_300), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-3", "mode", ""), transition(CommandState::Proposed, 1_300), None, &clock).unwrap();
 
         // A "burn" submission long before the window opens -- must not be counted. `append`
         // takes its record's own `tai_ns` from the clock's current value, not from the
         // `CommandTransition.tai_ns` the `transition()` helper embeds -- so the clock must be
         // set back explicitly, not just given a transition struct that says "0".
         clock.set(0);
-        ledger.append("sat-1", "cmd-0", "burn", transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-0", "burn", ""), transition(CommandState::Proposed, 0), None, &clock).unwrap();
         clock.set(1_300);
 
         // A different partition's submission -- must not leak into sat-1's count.
-        ledger.append("sat-2", "cmd-9", "burn", transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-2", "cmd-9", "burn", ""), transition(CommandState::Proposed, 1_200), None, &clock).unwrap();
 
         let counts = ledger.count_proposed_by_class_in_window("sat-1", 1_500, 1_000).unwrap();
         assert_eq!(counts.get("burn").copied(), Some(2), "{counts:?}");
         assert_eq!(counts.get("mode").copied(), Some(1), "{counts:?}");
         assert_eq!(counts.len(), 2, "CHECKED is not counted, and the out-of-window/other-partition records are not counted: {counts:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [`Ledger::scan_dispatched_idempotency_keys`] is what
+    /// `crate::service::CommandAuthorityServiceImpl::new` calls to rebuild its duplicate-
+    /// dispatch guard from the durable ledger, across a restart -- this is the acceptance
+    /// property for that fix, exercised here at the ledger layer directly (through the real
+    /// `append` path, a `TestClock`, no sleeping): only `COMMAND_STATE_DISPATCHED` records
+    /// with a **non-empty** key are collected, across **every** partition, and a key
+    /// appearing on more than one `DISPATCHED` record collapses to one set member.
+    #[test]
+    fn scan_dispatched_idempotency_keys_collects_only_non_empty_keys_from_dispatched_records_across_every_partition() {
+        let dir = tmp_dir("scan-idempotency");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+
+        // sat-1: PROPOSED then DISPATCHED with a real key -- collected.
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Proposed, 0), None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Dispatched, 1), None, &clock).unwrap();
+
+        // sat-1: a second command, also PROPOSED, but never DISPATCHED -- its key must not
+        // appear even though it carries one (only DISPATCHED records count).
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", "idem-b"), transition(CommandState::Proposed, 2), None, &clock).unwrap();
+
+        // sat-2 (a different partition): DISPATCHED with an empty key -- must not be
+        // collected (empty means "opts out of deduplication", crate::service's own reading).
+        ledger.append(CommandMeta::new("sat-2", "cmd-3", "mode", ""), transition(CommandState::Dispatched, 3), None, &clock).unwrap();
+
+        // sat-2: a second DISPATCHED record reusing "idem-a" -- proves cross-partition
+        // collection (idempotency keys are a service-wide, not per-entity, guarantee) and
+        // that a repeated key collapses to one set member.
+        ledger.append(CommandMeta::new("sat-2", "cmd-4", "mode", "idem-a"), transition(CommandState::Dispatched, 4), None, &clock).unwrap();
+
+        let keys = ledger.scan_dispatched_idempotency_keys().unwrap();
+        assert_eq!(keys, BTreeSet::from(["idem-a".to_string()]), "{keys:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
