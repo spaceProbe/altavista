@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+// Edge ingestion boundary (ADR-004; docs/edge-plan.md milestone E1): a signed, chained,
+// labelled batch of `Measurement`s from one producer, plus the typed verdict and counter
+// shapes the ingest boundary (E3) enforces against it. This file is owned by the edge
+// track; every other `proto/altavista/v1/*.proto` file is untouched this round.
+//
+// Relationship to `envelope.proto`. That file's `Batch`/`SignedBatch` are deliberately
+// generic: `Batch.messages` is `repeated BatchMessage`, and `BatchMessage.payload` is a
+// `google.protobuf.Any`, so one `Batch` can carry any payload type the platform ever
+// defines, wrapped and unwrapped per message. `MeasurementBatch` below is NOT built on
+// top of those, and is not a replacement for them either -- `envelope.proto`'s `Batch`/
+// `SignedBatch` stay exactly as they are. Every producer on this track (E3 through E6)
+// carries `Measurement`s only, and an `Any`-wrapped payload makes byte-exact,
+// cross-language canonical hashing needlessly fragile: a well-known-type encoding detail
+// of the `Any` wrapper, or a change to some unrelated payload schema packed into a
+// different `Batch` elsewhere in the platform, would perturb every hash on this specific
+// path for no reason this track's producers need. So `MeasurementBatch` is a flat,
+// single-payload-type sibling of `Batch`/`SignedBatch`: it follows the exact same
+// hash-chain and signature conventions those messages already document
+// (`prev_hash`/`batch_hash`, the `"GENESIS"` sentinel for a producer's first batch, ECDSA
+// P-384 signatures DER encoded) verbatim, and it reuses `envelope.proto`'s `Label`
+// message directly rather than redeclaring an equivalent shape.
+//
+// Canonical hash definition (pinned here and in `crates/av-edge`'s module doc; E3 and E6
+// depend on this byte for byte):
+//   - body bytes = `prost::Message::encode_to_vec` of the `MeasurementBatch` with its own
+//     `batch_hash` and `signature` fields cleared (and nothing else changed);
+//   - `prev_hash` bytes = the literal ASCII bytes of "GENESIS" for the first batch of a
+//     producer, else the previous batch's 32 raw `batch_hash` bytes;
+//   - `batch_hash` = SHA-256(prev_hash_bytes || body_bytes), 32 raw bytes;
+//   - `signature` = ECDSA P-384 over those 32 raw `batch_hash` bytes, DER encoded
+//     (`envelope.proto`'s `SignedBatch.signature` doc comment, verbatim).
+package altavista.v1;
+
+import "altavista/v1/core.proto";
+import "altavista/v1/envelope.proto";
+
+// A signed, chained, labelled batch of measurements from one producer. See this file's
+// header comment for the canonical hash/signature definition and its relationship to
+// `envelope.proto`'s generic `Batch`/`SignedBatch`.
+message MeasurementBatch {
+  // Producer identity: plugin id, service id, or OIDC subject (`envelope.proto`'s
+  // `Envelope.producer_id` convention, verbatim) -- who signed, and is accountable for,
+  // this batch.
+  string producer_id = 1;
+
+  // Monotonic per producer: a producer picks its own first value and increments by
+  // exactly 1 per batch it ever signs (`envelope.proto`'s `Batch.sequence` convention).
+  // Gaps and out-of-order arrivals are both counted at ingest, never silently accepted.
+  uint64 sequence = 2;
+
+  // Chain link to the previous batch from this same producer: the previous batch's own
+  // `batch_hash` (32 raw bytes), or the literal ASCII bytes of "GENESIS" for the first
+  // batch a producer ever sends (the suite's ledger convention -- see
+  // `crates/av-dynamics-service/src/evidence.rs` and `envelope.proto`'s
+  // `SignedBatch.prev_hash`). Included verbatim in what `batch_hash` is computed over, so
+  // this field is part of the signed content, not metadata alongside it.
+  bytes prev_hash = 3;
+
+  // SHA-256(prev_hash || body), where `body` is this message's own canonical encoding
+  // with `batch_hash` and `signature` cleared (see this file's header comment). 32 raw
+  // bytes, not hex -- hex is a display/log convenience the Rust and Python bindings add,
+  // never what is carried on the wire.
+  bytes batch_hash = 4;
+
+  // ECDSA P-384 signature over `batch_hash`'s 32 raw bytes, DER encoded
+  // (`envelope.proto`'s `SignedBatch.signature` doc comment, verbatim). Empty means this
+  // batch was never signed at all -- refused and counted as UNSIGNED, never treated as
+  // "signed with an empty signature".
+  bytes signature = 5;
+
+  // SHA-256 fingerprint of the seccert-issued leaf certificate whose private key produced
+  // `signature`, so a verifier can look up the matching public key and a revoked or
+  // expired leaf can be traced back to every batch it ever signed. Empty until E2 issues
+  // real certificates; E1 signs and verifies against a bare PEM key pair instead, with no
+  // certificate in the loop yet.
+  string signer_cert_sha256 = 6;
+
+  // The handling marking and caveats this batch's `measurements` are declared under
+  // (`envelope.proto`'s `Label`). Checked at ingest against the producer's declared
+  // policy: a label that disagrees with what the producer declared it emits under is
+  // MISLABELED; a marking ranked above the producer's clearance is OVER_CLEARANCE.
+  Label label = 7;
+
+  // The batch's payload: zero or more measurements from this producer, in emission
+  // order. Zero measurements is valid -- a heartbeat/keep-alive batch still advances the
+  // chain and is still signed like any other.
+  repeated Measurement measurements = 8;
+
+  // Where this batch came from: which plugin/tool produced it, from what run/config, and
+  // when (ADR-001: "every artifact carries provenance"). `Provenance.created_tai_ns` is
+  // the provenance record's own creation time; `batch_tai_ns` below is the batch's own
+  // declared epoch and is what staleness is checked against, not this field.
+  Provenance provenance = 9;
+
+  // This batch's own epoch, nanoseconds on TAI (ADR-001) -- when the producer considers
+  // the batch as a whole to have been emitted, independent of any individual
+  // measurement's own `epoch_ns`. The chain verifier's staleness check compares this
+  // against its caller-injected clock; there is no wall-clock read anywhere on this path
+  // (question 199).
+  int64 batch_tai_ns = 10;
+}
+
+// One rejection kind the ingest boundary (E3) counts and never silently drops (ADR-004:
+// "everything rejected is counted"). Exactly one reason is recorded per rejected batch --
+// the first defect found, in the fixed check order `crates/av-edge`'s chain verifier
+// documents and tests (`crates/av-edge/src/chain.rs`'s module doc).
+enum BatchRejection {
+  BATCH_REJECTION_UNSPECIFIED = 0;
+  // `signature` was empty.
+  BATCH_REJECTION_UNSIGNED = 1;
+  // `signature` did not verify against the signer's public key, or the batch's own
+  // `batch_hash` did not equal its recomputed canonical hash.
+  BATCH_REJECTION_BAD_SIGNATURE = 2;
+  // `sequence` is greater than this producer's last accepted sequence + 1: one or more
+  // batches between them were never seen.
+  BATCH_REJECTION_CHAIN_GAP = 3;
+  // `sequence` is exactly last accepted + 1 (or this is the producer's first batch), but
+  // `prev_hash` does not equal what it should link to -- the last accepted batch's own
+  // `batch_hash`, or "GENESIS" for a first batch -- so the chain forked or was tampered
+  // with.
+  BATCH_REJECTION_CHAIN_BREAK = 4;
+  // `label` names a marking or a caveat set other than what the producer's policy
+  // declares it emits under, or names a marking that is not on the configured clearance
+  // ladder at all.
+  BATCH_REJECTION_MISLABELED = 5;
+  // `label.marking` is on the clearance ladder but ranked above the producer's own
+  // configured clearance.
+  BATCH_REJECTION_OVER_CLEARANCE = 6;
+  // `batch_tai_ns` is older than the verifier's injected clock by more than the
+  // producer's policy's maximum age.
+  BATCH_REJECTION_STALE = 7;
+  // (producer_id, sequence) was already accepted once before -- a replay.
+  BATCH_REJECTION_DUPLICATE = 8;
+}
+
+// The result of checking one `MeasurementBatch` against a producer's chain state and
+// policy. Mirrors `ChainVerification`'s ok/detail convention: exactly one of `accepted`
+// or a non-UNSPECIFIED `rejection` is meaningful for a given verdict.
+message BatchVerdict {
+  // Whether this batch was accepted into the chain.
+  bool accepted = 1;
+  // The first defect found, in the documented fixed check order. UNSPECIFIED when
+  // `accepted` is true.
+  BatchRejection rejection = 2;
+  string producer_id = 3;
+  uint64 sequence = 4;
+  // The batch's own declared `batch_hash` (32 raw bytes), whether or not it was
+  // accepted -- so a rejected batch can still be located and cross-referenced by hash.
+  bytes batch_hash = 5;
+  // Human-readable detail: which check failed and why, e.g. the expected vs. actual
+  // sequence on a CHAIN_GAP, or the marking that was found to be over clearance.
+  string detail = 6;
+}
+
+// Per-producer rejection counters the ingest boundary (E3) exposes at
+// `/admin/api/evidence` (ADR-004: "everything rejected is counted, never silent"). One of
+// these exists for every producer this ingest has ever seen a batch from.
+message RejectionCounters {
+  string producer_id = 1;
+  // Batches accepted into this producer's chain.
+  uint64 accepted = 2;
+  uint64 unsigned_count = 3;
+  uint64 bad_signature_count = 4;
+  uint64 chain_gap_count = 5;
+  uint64 chain_break_count = 6;
+  uint64 mislabeled_count = 7;
+  uint64 over_clearance_count = 8;
+  uint64 stale_count = 9;
+  uint64 duplicate_count = 10;
+  // This producer's current chain head: the last accepted batch's `batch_hash` (32 raw
+  // bytes), or the literal ASCII bytes of "GENESIS" if nothing from this producer has
+  // been accepted yet -- what a verify/evidence endpoint reports as the head to check the
+  // next incoming batch's `prev_hash` against.
+  bytes chain_head = 11;
+}

@@ -113,6 +113,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-edge"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "openssl",
+ "prost",
+ "thiserror",
+]
+
+[[package]]
 name = "av-grpc"
 version = "0.1.0"
 dependencies = [

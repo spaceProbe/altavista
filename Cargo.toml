@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-kernel", "crates/av-grpc", "crates/av-dynamics-service", "crates/av-lockstep", "crates/av-lockstep-shim", "crates/av-run", "crates/av-sweep"]
+members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-kernel", "crates/av-grpc", "crates/av-dynamics-service", "crates/av-lockstep", "crates/av-lockstep-shim", "crates/av-run", "crates/av-sweep", "crates/av-edge"]
 
 [workspace.package]
 version = "0.1.0"
