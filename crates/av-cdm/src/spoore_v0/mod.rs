@@ -153,9 +153,23 @@ pub fn measurement_to_pb(native: &spoore_cdm::Measurement) -> pb::Measurement {
 /// `pb::Measurement` -> `spoore_cdm::Measurement`. Fallible: validated by
 /// `Measurement::from_slices`, and `frame_id` must resolve through [`frame::frame_id_to_frame`]
 /// -- an empty or unrecognized `frame_id` is a typed error, never a silent default frame.
+///
+/// This is [`measurement_from_pb_with_frames`] with an empty registry, so `frame_id`
+/// resolves only through the fixed five ids -- every existing caller and test keeps its
+/// exact current behavior; this function's signature does not change.
 pub fn measurement_from_pb(p: &pb::Measurement) -> Result<spoore_cdm::Measurement> {
+    measurement_from_pb_with_frames(p, &[])
+}
+
+/// `pb::Measurement` -> `spoore_cdm::Measurement`, resolving `frame_id` through
+/// [`frame::resolve_frame_id`]: a real `pb::FrameDefinition` entry of `registry` by declared
+/// origin and axes kind first, falling back to the fixed five ids
+/// ([`frame::frame_id_to_frame`]) when `frame_id` is not in `registry`. An empty `registry`
+/// reduces exactly to the literal path, which is what [`measurement_from_pb`] calls this
+/// with.
+pub fn measurement_from_pb_with_frames(p: &pb::Measurement, registry: &[pb::FrameDefinition]) -> Result<spoore_cdm::Measurement> {
     let utc_ns = Tai::from_nanos(p.epoch_ns).to_utc_nanos();
-    let frame = frame::frame_id_to_frame(&p.frame_id)?;
+    let frame = frame::resolve_frame_id(&p.frame_id, registry)?;
     Ok(spoore_cdm::Measurement::from_slices(
         p.measurement_id.clone(),
         &p.z,

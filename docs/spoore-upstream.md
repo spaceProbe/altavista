@@ -11,6 +11,10 @@ commit per proposal so each can go up as its own PR.
 | `ea19659` | `spoore-cdm/build.rs` generates `BTreeMap` for every proto `map<...>` field (`prost_build::Config` with `.btree_map(["."])`), so `Measurement.meta` encodes in key order instead of `HashMap`'s per-process random order. spoore's ADR-004 already forbids unordered iteration on any output path and names `Measurement::meta` as the example. | `crates/spoore-cdm/build.rs` | Wire bytes become deterministic; no call site changed. |
 | `ccf8d23` | `spoore/v0/cdm.proto` states the time scale of `epoch_ns` on `TrackSeed`, `TrackHandoff` and `TrackUpdate` ("Event time, nanoseconds since the Unix epoch."), matching the comment `GaussianState` and `Measurement` already carry and `spoore_cdm::state::Epoch`'s own doc. | `proto/spoore/v0/cdm.proto` | Comment only; no renumbering, no wire change. |
 | `9d732cc` | `spoore_cdm::state::SYMMETRY_RTOL`, `validate_covariance` and `check_positive_definite` become `pub` with doc comments and are re-exported from `spoore_cdm`, so a downstream crate can apply spoore's canonical covariance check (same checks, same order, same tolerance) to a matrix that is not yet a `GaussianState`. | `crates/spoore-cdm/src/state.rs`, `crates/spoore-cdm/src/lib.rs` | Visibility only. |
+| `fca6323` | Every workspace crate declares `publish = false` (question 207, 2026-09-13). The crates are consumed by path dependency only; cargo-deny's wildcard ban exempts path dependencies only from crates declared private, so a downstream workspace that bans wildcard versions sees six wildcard errors from spoore's own inter-crate path dependencies until this is declared. | `crates/*/Cargo.toml` (eleven files) | Metadata only. **Blocks a downstream gate:** AltaVista's `deny.toml` runs `wildcards = "warn"` instead of `"deny"` until this lands on spoore's `main`. |
+
+A fifth proposal is pending as prose, not yet a commit: the consumer-trait shape `av-track`
+needs from spoore-io, described in `crates/av-track/src/consumer.rs`'s module documentation.
 
 ## Verification
 

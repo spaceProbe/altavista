@@ -10,6 +10,19 @@
 //! pinned hashes. No network, no GMAT call, no filesystem write anywhere in this file
 //! itself -- only reads of the two committed files (question 154: offline and
 //! deterministic).
+//!
+//! # Question 205: the `av_kernel` cross-check moved out of this file
+//!
+//! `av-edge` may not build `gmat-sys` (question 205's ruling), so the one test this file
+//! used to carry that named `av_kernel` at all --
+//! `decoded_measurements_match_av_kernel_codec_element_for_element`, cross-checking
+//! `crate::plugin::packet::decode_numeric_fields` against `av_kernel::codec::decode_packet`
+//! byte for byte -- is now `crates/av-kernel/tests/edge_plugin_codec_crosscheck.rs`, with
+//! `av-edge` a dev-dependency of `av-kernel` there instead of the reverse. Everything else
+//! in this file needs no `av_kernel` and stayed put; `decoded_positions_match_the_flight_
+//! instances_truth_trajectory_within_tolerance` below reads `RunProducts.trajectories` (a
+//! plain protobuf field of this crate's own fixture, decoded via `av_edge::pb`), which was
+//! never an `av_kernel` dependency.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -154,46 +167,6 @@ fn walk_chain_verifies_the_whole_emitted_chain() {
     let result = av_edge::chain::walk_chain("demo-ground-segment-flight-plugin", &batches, &vk);
     assert!(result.ok, "{result:?}");
     assert_eq!(result.checked, EXPECTED_BATCH_COUNT as u64);
-}
-
-/// Cross-check against `av_kernel::codec::decode_packet` directly -- proves
-/// `crate::plugin::packet::decode_numeric_fields` (this plugin's own from-scratch
-/// decoder, kept deliberately separate from `av-kernel` -- see that module's own doc
-/// comment) agrees with the real, shipped decoder byte for byte, element for element,
-/// for every one of this fixture's 900 records. This is the one place in this task's own
-/// test suite that is allowed to depend on `av-kernel` (a dev-dependency only).
-#[test]
-fn decoded_measurements_match_av_kernel_codec_element_for_element() {
-    let run_products = load_run_products();
-    let log = load_verified_port_traffic_log(&run_products.port_traffic_hash);
-    let cfg = config();
-    let source = PortTrafficSource::from_log(&log, &cfg).expect("source builds");
-
-    let apid_map = av_kernel::codec::validate_system_packet_codecs(&[flight_codec()]).expect("codec validates");
-    let mut truth_by_epoch: BTreeMap<i64, (f64, f64, f64)> = BTreeMap::new();
-    for record in &log.records {
-        if record.instance != "flight" || record.port != "tm_out" || record.direction != pb::PortDirection::Out as i32 {
-            continue;
-        }
-        let decoded = av_kernel::codec::decode_packet(&apid_map, &record.payload).expect("av_kernel::codec decodes the same packet");
-        let get = |name: &str| match decoded.fields.get(name).expect("field present") {
-            av_kernel::codec::FieldValue::Numeric(v) => *v,
-            av_kernel::codec::FieldValue::Bytes(_) => panic!("x/y/z are FLOAT64, never BYTES"),
-        };
-        truth_by_epoch.insert(record.tai_ns, (get("x"), get("y"), get("z")));
-    }
-
-    assert_eq!(source.groups().len(), truth_by_epoch.len(), "same number of decoded epochs on both sides");
-    let mut compared = 0usize;
-    for (epoch, measurements) in source.groups() {
-        assert_eq!(measurements.len(), 1, "one measurement per epoch for this fixture");
-        let m = &measurements[0];
-        let (tx, ty, tz) = truth_by_epoch[epoch];
-        assert_eq!(m.z, vec![tx, ty, tz], "epoch {epoch}: crate::plugin's own decode must equal av_kernel::codec's, element for element");
-        compared += 1;
-    }
-    assert_eq!(compared, EXPECTED_BATCH_COUNT);
-    println!("cross-checked {compared} decoded records against av_kernel::codec::decode_packet, byte for byte");
 }
 
 /// E5's own precondition (this task's brief, verbatim): the decoded positions must

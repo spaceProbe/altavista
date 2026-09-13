@@ -90,35 +90,39 @@ multiple-versions = "warn"
 # `version =` (question 2's path-dependency convention), which cargo-deny counts as a
 # wildcard. Since the lead review of 2026-09-02 every workspace member is `publish = false`,
 # so `allow-wildcard-paths` exempts exactly those private path dependencies and the rule
-# can be "deny" for everything else (a `*` requirement on a registry crate still fails).
+# is "deny" for everything else (a `*` requirement on a registry crate still fails) -- per
+# question 205 ruling (7), which overturned round 2's `wildcards = "warn"` and restored
+# `"deny"` deliberately, because `allow-wildcard-paths = true` is what the setting exists
+# for.
 #
-# E5 (`crates/av-track`, docs/edge-plan.md) is the first task to pull `spoore-engine`/
-# `spoore-assoc`/`spoore-models`/`spoore-tree`/`spoore-ml` into this workspace's own
-# `Cargo.lock` (question 12's own path dependency, extended past `spoore-cdm` for the
-# first time) -- and unlike `spoore-cdm` (which declares no path dependency of its own at
-# all), those five crates depend on each other, inside spoore's own separate workspace, the
-# identical way this workspace's own members depend on each other: a bare `path = "../x"`
-# with no `version =`. `allow-wildcard-paths` does not exempt them, for a reason specific
-# to *their* own `Cargo.toml` (read directly, not assumed): none of the six spoore crates
-# this workspace now depends on declares `publish = false`, so cargo-deny -- correctly, by
-# its own stated rule ("does not apply to public crates as crates.io disallows path
-# dependencies") -- treats every one of them as a *publishable* crate whose own unversioned
-# path dependencies would fail a real `crates.io` publish, and refuses the exemption. This
-# is a real gap in spoore's own `Cargo.toml` files (every one of them should plausibly say
-# `publish = false`, exactly like every crate in *this* workspace already does), not a
-# defect in this workspace's own dependency graph or in `av-track` itself -- but this task
-# must not edit `/Users/probe/code/spoore` (this track's own binding rule), so the fix
-# cannot land there. `wildcards = "warn"` (down from `"deny"`) is the narrowest available
-# response: it still lets `cargo deny check` run to completion and report every wildcard it
-# finds (nothing is hidden -- see this same run's own printed warnings, one per affected
-# spoore crate), it changes nothing about `deny`'s own crypto-crate bans below (a *named*
-# crate like `ring` still fails the build outright, unconditionally, regardless of this
-# field), and it only stops *unnamed, path-only* dependencies from being a hard failure --
-# which is exactly and only the spoore-internal case this comment describes.  Recorded as
-# an open item for the lead: either spoore takes an upstream PR adding `publish = false` to
-# these six `Cargo.toml` files (removing the underlying cause, at which point `wildcards`
-# can safely go back to `"deny"` here), or the lead accepts `"warn"` as this workspace's
-# permanent posture once it depends on more than `spoore-cdm`.
+# `cargo deny check` under this setting is NOT currently clean, and this is a knowingly
+# failing check escalated to the lead, not a silenced one. It reports exactly six
+# `error[wildcard]`s, one per spoore crate this workspace depends on beyond `spoore-cdm`
+# (pulled in by `crates/av-track` for E5): `spoore-assoc` (1 wildcard), `spoore-engine` (5),
+# `spoore-math` (1), `spoore-ml` (2), `spoore-models` (2), `spoore-tree` (4) -- each one that
+# crate's own `<crate>.workspace = true` dependency on another spoore crate, resolved by
+# cargo-deny to spoore's own `Cargo.toml` path entries. cargo-deny's own diagnostic text is
+# unchanged from round 2 and confirmed directly against this host's binary (`cargo-deny
+# 0.20.2`): "allow-wildcard-paths is enabled, but does not apply to public crates as
+# crates.io disallows path dependencies." Read directly (not assumed), none of the six
+# crates' `Cargo.toml` under `/Users/probe/code/spoore/crates/<name>/Cargo.toml` declares
+# `publish`: each has only `version.workspace = true`, `edition.workspace = true`,
+# `rust-version.workspace = true`, `license.workspace = true` (and `repository.workspace =
+# true` on all but `spoore-ml`) in its `[package]` table, and spoore's own workspace root
+# sets no `[workspace.package] publish` default either -- so cargo's own default
+# (publishable) applies, and cargo-deny -- correctly, by the rule quoted above -- treats
+# every one of them as a crate whose own unversioned path dependencies would fail a real
+# `crates.io` publish, and refuses the exemption. This is a gap in spoore's own `Cargo.toml`
+# files, not a defect in this workspace's own dependency graph or in `av-track` itself. This
+# task must not edit `/Users/probe/code/spoore` (a binding rule), so the fix cannot land
+# here; it is question 205's `altavista-upstream` fourth proposal (`publish = false` on
+# these six files) if restoring `"deny"` does not resolve it on its own -- which it does
+# not, so that proposal is now live: spoore's `altavista-upstream` branch commit `fca6323`
+# declares `publish = false` on all eleven spoore crates. Question 207 (lead, 2026-09-13):
+# until the user merges that commit into spoore's `main`, this is "warn", not "deny", so the
+# gate stays actionable (a failing gate nobody can act on is not a gate); the lead restores
+# "deny" the day it lands, and no skip or per-crate exception is added meanwhile. Every
+# named-crate ban below is unaffected by this setting.
 wildcards = "warn"
 allow-wildcard-paths = true
 deny = [

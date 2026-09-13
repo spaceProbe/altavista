@@ -1,0 +1,13 @@
+[package]
+name = "av-codec"
+publish = false
+description = "CCSDS Space Packet (CCSDS 133.0-B-2) codec: primary-header framing and declared-field bit packing for a PacketCodec, extracted from av-kernel (question 205) so a caller that needs only the wire format never pulls GMAT or transport in with it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+av-cdm = { path = "../av-cdm" }
+av-dynamics = { path = "../av-dynamics" }

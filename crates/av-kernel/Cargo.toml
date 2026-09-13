@@ -11,6 +11,10 @@ repository.workspace = true
 [dependencies]
 av-cdm = { path = "../av-cdm" }
 av-dynamics = { path = "../av-dynamics" }
+# Question 205: the CCSDS Space Packet codec (formerly src/codec.rs) is now its own crate so
+# `av-edge` can depend on it without pulling in `gmat-sys`. `src/lib.rs` re-exports it as
+# `codec` so every `crate::codec::X` path in this crate is unchanged.
+av-codec = { path = "../av-codec" }
 # M6.1: the `drm` module binds BINDING_KIND_MODEL space-system instances to a real
 # gmat_sys::model::GmatModel -- see src/drm/mod.rs's module doc comment for why this moved
 # out of [dev-dependencies] (previously only tests/golden_acceptance.rs used it). Every other
@@ -53,3 +57,11 @@ prost-types.workspace = true
 # own library code never links against the shim binary, only this one test spawns it
 # out-of-process.
 av-lockstep-shim = { path = "../av-lockstep-shim" }
+# Question 205: `tests/edge_plugin_codec_crosscheck.rs` cross-checks
+# `av_edge::plugin::packet::decode_numeric_fields` against this crate's own `codec::
+# decode_packet` (moved from `crates/av-edge/tests/plugin_replay.rs` -- `av-edge` may not
+# build `gmat-sys`, so the one test in that file needing `av_kernel` had to move here
+# instead). Test-only, like `av-lockstep-shim` above: `av-edge` depends on neither
+# `av-kernel` nor `gmat-sys` (question 205's whole point), so this edge is dev-only and one
+# way, never a cycle.
+av-edge = { path = "../av-edge" }

@@ -89,6 +89,67 @@ container (`services/cfs/`) and the RTEMS toolchain (`third_party/rtems-containe
 their own recorded build recipes, each fetching over the network exactly once at image
 build time.
 
+## Edge track
+
+The edge ingest, its plugin, and the tracker are part of the same Rust workspace ("Building
+the Rust workspace" above); each is a small binary configured entirely on the command line,
+never by environment variable. `docs/edge-plan.md` has the full milestone account;
+`docs/compliance/av-ingest/` and `docs/compliance/av-edge-plugin/` hold their control
+matrices.
+
+**Local CA.** `scripts/edge_local_ca.py` provisions a real seccert (RFC 8555 ACME CA) + lego
+loop for `tests/test_edge_identity_seccert.py`'s end-to-end identity proof. It needs seccert
+checked out with its own venv at `/Users/probe/code/secdeploy/work/seccert` and `lego` on
+`PATH`; the fixture skips **visibly**, never silently, when either is missing:
+
+```bash
+.venv/bin/python -m pytest tests/test_edge_identity_seccert.py -rs
+```
+
+**The ingest.** `av-ingest-server` (`crates/av-ingest/src/bin/av-ingest-server.rs`) serves
+plaintext gRPC plus a `GET`-only admin/evidence endpoint, and only ever binds loopback
+addresses:
+
+```bash
+cargo build -p av-ingest --bin av-ingest-server
+./target/debug/av-ingest-server \
+  --grpc-bind 127.0.0.1:0 --admin-bind 127.0.0.1:0 --log-dir /tmp/av-ingest-log \
+  --clearance-ladder UNCLASSIFIED,CUI --max-batch-age-ns 5000000000 \
+  --no-require-client-cert --real-clock
+```
+
+It prints `GRPC_LISTENING <addr>` / `ADMIN_LISTENING <addr>` once bound. Reaching it from
+another host needs a front, not a different bind address: render the nginx mTLS template at
+`services/av-ingest/deploy/nginx-av-ingest-grpc.conf.template` (see that folder's own
+README for the placeholders).
+
+**The plugin.** `av-edge-plugin` (`crates/av-ingest-client/src/bin/av-edge-plugin.rs`)
+replays a kernel run's recorded telemetry as signed batches against a running ingest:
+
+```bash
+cargo build -p av-ingest-client --bin av-edge-plugin
+./target/debug/av-edge-plugin \
+  --run-products PATH/run_products.pb --port-traffic PATH/port_traffic.pb \
+  --plugin-config PATH/plugin-config.json --signing-key PATH/signing-key.pem \
+  --endpoint host:port   # or https://host:port with --server-ca [--client-cert --client-key]
+```
+
+The containerized build lives at `services/edge-plugin/build-image.sh`; its image is
+occasionally reclaimed by host disk pressure (question 196(d)) and needs rebuilding on
+demand, so `tests/test_edge_plugin_container.py` skips visibly rather than failing when it
+is absent.
+
+**The tracker.** `crates/av-track/src/bin/`: `av-track-demo --out PATH` writes an offline
+demo `RunProducts` (it panics with a usage message if `--out` is omitted); `av-edge-latency`
+takes no arguments and drives the whole path over a real loopback wire, printing one JSON
+latency/track report.
+
+```bash
+cargo build -p av-track --bin av-track-demo --bin av-edge-latency
+./target/debug/av-track-demo --out /tmp/demo_run_products.pb
+./target/debug/av-edge-latency
+```
+
 ## Run
 
 Terminal 1 — the viewer server (binds all interfaces so other machines can connect):
