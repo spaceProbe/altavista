@@ -69,6 +69,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JITTER_HARNESS = REPO_ROOT / "web" / "js" / "jitter_harness.mjs"
 FRAME_GRAPH_CHECK = REPO_ROOT / "web" / "js" / "frame_graph_check.mjs"
+RESOLVE_FRAME_GRAPH_INPUT_CHECK = REPO_ROOT / "web" / "js" / "resolve_frame_graph_input_check.mjs"
 SCENE_JITTER_HARNESS = REPO_ROOT / "web" / "js" / "scene_jitter_harness.mjs"
 RIC_AXES_CHECK = REPO_ROOT / "web" / "js" / "ric_axes_check.mjs"
 RIC_AXES_FIXTURE = REPO_ROOT / "web" / "js" / "fixtures" / "ric_axes_fixture.json"
@@ -132,6 +133,11 @@ def frame_graph_data() -> dict:
 
 
 @pytest.fixture(scope="module")
+def resolve_frame_graph_input_data() -> dict:
+    return _run_node_json(RESOLVE_FRAME_GRAPH_INPUT_CHECK)
+
+
+@pytest.fixture(scope="module")
 def scene_jitter_data() -> dict:
     return _run_node_json(SCENE_JITTER_HARNESS)
 
@@ -189,6 +195,20 @@ def test_frame_switch_is_reparent_not_reload(frame_graph_data):
     failed = [c["name"] for c in frame_graph_data["checks"] if not c["pass"]]
     assert not failed, f"frame graph identity checks failed: {failed}"
     assert frame_graph_data["allPass"] is True
+
+
+def test_resolve_frame_graph_input_tolerates_a_scenario_with_no_declared_frame(resolve_frame_graph_input_data):
+    """Question 209(c): `_buildFrameGraph`'s pure half, `resolveFrameGraphInput`
+    (web/js/scene.js), synthesizes a bare root frame -- never throws -- for a scenario
+    with no `frame` key at all (the empty `{"name", "spacecraft": []}` publish this
+    question's own browser check, tests/test_viewer_net.py, proves end to end), for the
+    pre-existing "declared frame absent from frames[]" case, and for an ordinary
+    matched scenario (no synthesis, no warning) -- exercised here under plain `node`,
+    without a `THREE.WebGLRenderer`, via `web/js/resolve_frame_graph_input_check.mjs`.
+    """
+    failed = [c["name"] for c in resolve_frame_graph_input_data["checks"] if not c["pass"]]
+    assert not failed, f"resolveFrameGraphInput checks failed: {failed}"
+    assert resolve_frame_graph_input_data["allPass"] is True
 
 
 # --------------------------------------------------------------------------- jitter bounds
