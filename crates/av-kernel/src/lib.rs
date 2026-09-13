@@ -76,7 +76,13 @@
 //! the primary header layout and the typed faults it refuses.
 
 pub mod clock;
-pub mod codec;
+/// The CCSDS Space Packet codec now lives in the `av-codec` crate (question 205, extracted so
+/// `av-edge` and any other GMAT-free caller can depend on it without pulling in `gmat-sys`).
+/// Aliased back to `codec` here so every existing `crate::codec::X` / `codec::X` path in this
+/// crate (`drm`, `ports`, `registry`, ...) keeps resolving unchanged -- confirmed by this
+/// crate's own build: `pub use ... as` binds the extern crate's root module under the local
+/// name, so paths through it work exactly like a `pub mod` would.
+pub use av_codec as codec;
 pub mod drm;
 pub mod expr;
 pub mod interpolate;

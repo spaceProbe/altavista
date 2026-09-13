@@ -1,31 +1,53 @@
-//! A minimal, from-scratch re-implementation of exactly the subset of
-//! `av_kernel::codec`'s CCSDS Space Packet decode algorithm
-//! (`crates/av-kernel/src/codec.rs` -- `decode_packet`/`read_field`/`read_bitfield_u64`)
+//! An adapter over `av_codec`'s CCSDS Space Packet decoder, narrowed to exactly the subset
 //! this plugin needs: reading the primary header and every declared **numeric**
 //! `PacketField` (UINT/INT/FLOAT32/FLOAT64) out of one packet's user data, at the
 //! engineering level (`scale`/`offset` already applied, per `packet.proto`'s own
 //! `PacketField.scale`/`.offset` doc comment).
 //!
-//! # Why this is duplicated, not shared, with `av-kernel`
+//! # Question 205: no more duplicated bit arithmetic
 //!
-//! `av-edge` (this crate) is a pure, network-free library the whole edge track depends on
-//! (`crate`'s own module doc). `av-kernel` cannot become one of its dependencies:
-//! `av-kernel` depends on `gmat-sys` (a native GMAT FFI build, `Cargo.toml`'s own
-//! `links = "gmatffi"`) directly, and, transitively through
-//! `av-lockstep -> av-grpc -> tonic`, on a full gRPC transport stack -- exactly the kind
-//! of dependency `docs/edge-plan.md` milestone E4's own task brief says this crate must
-//! never gain, even indirectly (`crate::plugin`'s own module doc, "no transport
-//! dependency"). So this module re-implements the handful of pure bit-arithmetic
-//! functions this plugin actually needs to decode one telemetry packet, rather than
-//! pulling in a crate that would drag GMAT and gRPC into every consumer of this library.
+//! Before this task, `av-edge` could not depend on the real CCSDS decoder at all: it lived
+//! in `av_kernel::codec`, and `av-kernel` depends on `gmat-sys` (native GMAT FFI) directly
+//! and, transitively through `av-lockstep -> av-grpc`, on a full gRPC transport stack --
+//! exactly the kind of dependency `docs/edge-plan.md` milestone E4's own task brief says
+//! this crate must never gain, even indirectly (`crate::plugin`'s own module doc, "no
+//! transport dependency"). So this module used to *reimplement* the primary-header parsing
+//! and bit-level field packing from scratch.
 //!
-//! This is **not** a second, independently-evolving copy of the CCSDS bit layout that
-//! could silently drift from `av-kernel`'s own: `crates/av-edge/tests/plugin_replay.rs`
-//! (a test binary, which -- unlike this library -- is never shipped and never becomes
-//! part of any other crate's own dependency tree, so it may freely dev-depend on
-//! `av-kernel`) decodes the same committed fixture packets through both
-//! [`decode_numeric_fields`] and `av_kernel::codec::decode_packet` and asserts the two
-//! agree, field for field, byte for byte.
+//! Question 205 extracted that codec into its own crate, `av-codec` (`crates/av-codec`,
+//! moved out of `crates/av-kernel/src/codec.rs`), which depends on neither `gmat-sys` nor
+//! any transport crate. `av-edge` now depends on `av-codec` for real (`Cargo.toml`'s
+//! `[dependencies]`, not a dev-dependency), so this module no longer needs its own copy of
+//! [`av_codec::read_bitfield_u64`]/[`av_codec::decode_packet`]'s bit arithmetic -- it calls
+//! them. What remains here is a thin adapter, not a second implementation:
+//!
+//! - `av_codec::decode_packet` takes a whole `ApidMap` (a *set* of codecs) and returns every
+//!   declared field, `BYTES` included, keyed by name; a header APID absent from that map is
+//!   `CodecError::UnknownApid`. This plugin instead names exactly one already-selected
+//!   `PacketCodec` per source (`crate::plugin::PluginConfig`: one port, one codec) and only
+//!   ever replays **telemetry**'s numeric fields (`crate::plugin`'s own module doc) -- so
+//!   [`decode_numeric_fields`] keeps the narrower distinctions [`PacketError`] has always
+//!   made (`ApidMismatch` against the one expected codec, `IsCommand`, numeric-only) and
+//!   builds a one-entry `av_codec::ApidMap` under the hood to call the real decoder.
+//! - **One narrow, documented ordering difference from the old from-scratch decoder**: for a
+//!   codec whose fields are *both* malformed (a field extending past `user_data_bytes`) and
+//!   unsupported (a `BYTES`/`UNSPECIFIED` field) at the same time, `av_codec::decode_packet`
+//!   checks each field's *extent* before its *type*, per field, in declared order -- so a
+//!   `BYTES` field followed by an extent-invalid field now reports the later field's
+//!   `FieldExtentExceedsUserData` rather than the earlier field's `UnsupportedFieldType` (the
+//!   old single-pass implementation checked type immediately after extent for each field and
+//!   so stopped at the `BYTES` field first). No codec this plugin decodes today
+//!   (`drms/demo_ground_segment_flight.system.yaml`'s `x`/`y`/`z`, all FLOAT64, no `BYTES`
+//!   field at all) can trigger this, and no test in this crate's own suite depends on the
+//!   old ordering -- recorded here rather than silently changed.
+//!
+//! `crates/av-kernel/tests/edge_plugin_codec_crosscheck.rs` (moved there from this crate's
+//! own `tests/plugin_replay.rs` -- question 205's ruling that `av-edge` may not build
+//! `gmat-sys`, so the `av_kernel`-cross-check test itself had to move, not just this
+//! module's implementation) still cross-checks [`decode_numeric_fields`] against
+//! `av_kernel::codec::decode_packet` (the *same* `av_codec` crate, re-exported) over all 900
+//! fixture records, byte for byte -- proving this adapter and the decoder it now calls
+//! directly still agree with what `av-kernel` itself sees.
 //!
 //! # What this module deliberately does not support
 //!
@@ -35,7 +57,7 @@
 //!   `Measurement.z` component (`f64`) anyway.
 //! - Commands (`PacketCodec.is_command == true`): refused as [`PacketError::IsCommand`]
 //!   -- this plugin only ever replays telemetry (`edge.proto`'s own `MeasurementSchema`
-//!   doc comment; `av_kernel::codec::measurements_from_field_values`'s identical check).
+//!   doc comment; `av_codec::measurements_from_field_values`'s identical check).
 //! - Encoding: this module only ever reads a packet a run already produced; it has no
 //!   `encode_packet` counterpart.
 //! - An `ApidMap`/multi-codec dispatch: [`decode_numeric_fields`] takes exactly one
@@ -48,16 +70,17 @@ use std::collections::BTreeMap;
 use av_cdm::pb;
 
 /// The CCSDS primary header is always exactly 6 octets (CCSDS 133.0-B-2 section 4.1.3) --
-/// identical constant to `av_kernel::codec::PRIMARY_HEADER_LEN`.
-pub const PRIMARY_HEADER_LEN: usize = 6;
+/// the same constant `av_codec::PRIMARY_HEADER_LEN` names, kept as a local alias so this
+/// module's error messages (`PacketError::TooShortForHeader`) can interpolate it directly.
+pub const PRIMARY_HEADER_LEN: usize = av_codec::PRIMARY_HEADER_LEN;
 
 /// The 11-bit APID field's maximum value (`2^11 - 1`).
 const MAX_APID: u32 = 0x7FF;
 
 /// Everything that can go wrong decoding one packet against a declared [`pb::PacketCodec`],
-/// typed rather than silently dropped or panicking -- mirroring `av_kernel::codec::
-/// CodecError`'s own no-silent-drop rule (`docs/open-questions.md` question 149) for the
-/// numeric-only subset this module implements.
+/// typed rather than silently dropped or panicking -- mirroring `av_codec::CodecError`'s own
+/// no-silent-drop rule (`docs/open-questions.md` question 149) for the numeric-only,
+/// single-codec subset this module implements.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PacketError {
     #[error("packet is {actual} byte(s), shorter than the {PRIMARY_HEADER_LEN}-byte CCSDS primary header")]
@@ -78,68 +101,36 @@ pub enum PacketError {
     UnsupportedFieldType { codec_id: String, field: String },
 }
 
-/// Read `bit_width` (1..=64) bits starting at `bit_offset`, MSB-first, from `data`, returned
-/// right-aligned in a `u64` -- byte-for-byte the same algorithm as
-/// `av_kernel::codec::read_bitfield_u64` (CCSDS's own big-endian, MSB-first bit numbering).
-fn read_bitfield_u64(data: &[u8], bit_offset: u32, bit_width: u32) -> u64 {
-    let mut value: u64 = 0;
-    for i in 0..bit_width {
-        let bit_pos = bit_offset + i;
-        let byte_idx = (bit_pos / 8) as usize;
-        let bit_in_byte = 7 - (bit_pos % 8);
-        let bit = (data[byte_idx] >> bit_in_byte) & 1;
-        value = (value << 1) | (bit as u64);
-    }
-    value
-}
-
-/// Two's-complement sign-extend a `bit_width`-bit raw value (already right-aligned in `raw`
-/// by [`read_bitfield_u64`]) to a full `i64` -- identical to `av_kernel::codec::sign_extend`.
-fn sign_extend(raw: u64, bit_width: u32) -> i64 {
-    let shift = 64 - bit_width;
-    ((raw << shift) as i64) >> shift
-}
-
-/// "scale defaults to 1 when 0 is given" -- `PacketField.scale`'s own proto doc comment,
-/// identical to `av_kernel::codec::effective_scale`.
-fn effective_scale(scale: f64) -> f64 {
-    if scale == 0.0 {
-        1.0
-    } else {
-        scale
-    }
-}
-
-fn read_numeric_field(user_data: &[u8], field: &pb::PacketField, codec_id: &str) -> Result<f64, PacketError> {
-    let ty = pb::PacketFieldType::try_from(field.r#type).unwrap_or(pb::PacketFieldType::Unspecified);
-    let scale = effective_scale(field.scale);
-    match ty {
-        pb::PacketFieldType::Uint => {
-            let raw = read_bitfield_u64(user_data, field.bit_offset, field.bit_width);
-            Ok((raw as f64) * scale + field.offset)
+/// Translate an `av_codec::CodecError` [`av_codec::decode_packet`] returned into this
+/// module's own [`PacketError`] shape. `decode_packet` is called here only after this
+/// module's own pre-checks (short header, apid mismatch, command, apid range) already ran,
+/// so its `PacketTooShortForHeader`/`UnknownApid` variants are unreachable in practice --
+/// `codec_id` is threaded through from the caller rather than read off `CodecError` itself
+/// (`UnknownApid`/`PacketTooShortForHeader` carry no `codec_id`, having failed before a codec
+/// was even matched).
+fn translate(codec_id: &str, err: av_codec::CodecError) -> PacketError {
+    match err {
+        av_codec::CodecError::PacketDataLengthMismatch { expected_user_data_bytes, actual_user_data_bytes, .. } => {
+            PacketError::LengthMismatch { codec_id: codec_id.to_string(), expected: expected_user_data_bytes, actual: actual_user_data_bytes }
         }
-        pb::PacketFieldType::Int => {
-            let raw = read_bitfield_u64(user_data, field.bit_offset, field.bit_width);
-            Ok((sign_extend(raw, field.bit_width) as f64) * scale + field.offset)
+        av_codec::CodecError::PacketLengthMismatch { expected_total_bytes, actual_total_bytes, .. } => {
+            PacketError::TotalLengthMismatch { codec_id: codec_id.to_string(), expected: expected_total_bytes, actual: actual_total_bytes }
         }
-        pb::PacketFieldType::Float32 => {
-            let raw = read_bitfield_u64(user_data, field.bit_offset, 32) as u32;
-            Ok((f32::from_bits(raw) as f64) * scale + field.offset)
+        av_codec::CodecError::FieldExtentExceedsUserData { field, bit_offset, bit_width, user_data_bytes, .. } => {
+            PacketError::FieldExtentExceedsUserData { codec_id: codec_id.to_string(), field, bit_offset, bit_width, user_data_bytes }
         }
-        pb::PacketFieldType::Float64 => {
-            let raw = read_bitfield_u64(user_data, field.bit_offset, 64);
-            Ok(f64::from_bits(raw) * scale + field.offset)
-        }
-        pb::PacketFieldType::Bytes | pb::PacketFieldType::Unspecified => Err(PacketError::UnsupportedFieldType { codec_id: codec_id.to_string(), field: field.name.clone() }),
+        av_codec::CodecError::UnspecifiedFieldType { field, .. } => PacketError::UnsupportedFieldType { codec_id: codec_id.to_string(), field },
+        other => unreachable!("av_codec::decode_packet returned a variant this single-codec, pre-checked caller never expects: {other:?}"),
     }
 }
 
 /// Decode `data` (one CCSDS space packet payload -- exactly what a `PortTrafficRecord.
 /// payload` carries for a FRAMED port whose `Port.schema` is `"ccsds.spp"`) against
 /// `codec`'s declared numeric fields, returning every field's engineering value keyed by
-/// [`pb::PacketField::name`] (a `BTreeMap`, matching `av_kernel::codec::DecodedPacket.
-/// fields`'s own determinism convention). See this module's own doc comment for exactly
-/// which shapes are refused rather than decoded.
+/// [`pb::PacketField::name`] (a `BTreeMap`, matching `av_codec::DecodedPacket.fields`'s own
+/// determinism convention). See this module's own doc comment for exactly which shapes are
+/// refused rather than decoded, and for the one narrow ordering difference from the
+/// from-scratch decoder this replaced.
 pub fn decode_numeric_fields(codec: &pb::PacketCodec, data: &[u8]) -> Result<BTreeMap<String, f64>, PacketError> {
     if codec.is_command {
         return Err(PacketError::IsCommand { codec_id: codec.id.clone() });
@@ -151,42 +142,32 @@ pub fn decode_numeric_fields(codec: &pb::PacketCodec, data: &[u8]) -> Result<BTr
         return Err(PacketError::TooShortForHeader { actual: data.len() });
     }
     let (byte0, byte1) = (data[0], data[1]);
-    let length_field = ((data[4] as u32) << 8) | (data[5] as u32);
-    let apid = (((byte0 & 0x07) as u32) << 8) | (byte1 as u32);
-    if apid != codec.apid {
-        return Err(PacketError::ApidMismatch { codec_id: codec.id.clone(), declared: codec.apid, actual: apid });
+    let actual_apid = (((byte0 & 0x07) as u32) << 8) | (byte1 as u32);
+    if actual_apid != codec.apid {
+        return Err(PacketError::ApidMismatch { codec_id: codec.id.clone(), declared: codec.apid, actual: actual_apid });
     }
 
-    // Inverse of av_kernel::codec::encode_packet: the length field counts the whole Packet
-    // Data Field (secondary header + user data) minus one, per CCSDS 133.0-B 4.1.2.5.
-    let secondary_header_bytes = codec.secondary_header_bytes as usize;
-    let user_data_bytes = codec.user_data_bytes as usize;
-    let declared_packet_data_field_bytes = (length_field as usize) + 1;
-    let expected_packet_data_field_bytes = secondary_header_bytes + user_data_bytes;
-    if declared_packet_data_field_bytes != expected_packet_data_field_bytes {
-        let actual_user_data_bytes = declared_packet_data_field_bytes.saturating_sub(secondary_header_bytes) as u32;
-        return Err(PacketError::LengthMismatch { codec_id: codec.id.clone(), expected: codec.user_data_bytes, actual: actual_user_data_bytes });
-    }
-    let expected_total = PRIMARY_HEADER_LEN + secondary_header_bytes + user_data_bytes;
-    if data.len() != expected_total {
-        return Err(PacketError::TotalLengthMismatch { codec_id: codec.id.clone(), expected: expected_total, actual: data.len() });
-    }
+    // codec.apid == actual_apid, just checked, so this one-entry ApidMap always resolves --
+    // av_codec::decode_packet's own UnknownApid is unreachable here (see `translate`'s doc).
+    let mut apid_map = av_codec::ApidMap::new();
+    apid_map.insert(codec.apid, codec.clone());
+    let decoded = av_codec::decode_packet(&apid_map, data).map_err(|e| translate(&codec.id, e))?;
 
-    let user_data = &data[PRIMARY_HEADER_LEN + secondary_header_bytes..expected_total];
     let mut out = BTreeMap::new();
     for field in &codec.fields {
-        let bit_end = (field.bit_offset as u64) + (field.bit_width as u64);
-        if bit_end > (codec.user_data_bytes as u64) * 8 {
-            return Err(PacketError::FieldExtentExceedsUserData {
-                codec_id: codec.id.clone(),
-                field: field.name.clone(),
-                bit_offset: field.bit_offset,
-                bit_width: field.bit_width,
-                user_data_bytes: codec.user_data_bytes,
-            });
+        match decoded.fields.get(&field.name) {
+            Some(av_codec::FieldValue::Numeric(v)) => {
+                out.insert(field.name.clone(), *v);
+            }
+            // `av_codec::decode_packet` decodes BYTES fields rather than refusing them (it
+            // serves callers that want them); this plugin's own contract does not, so a
+            // BYTES value here -- or, defensively, a field `av_codec` did not populate at
+            // all, which should not happen for a field it just finished decoding -- is this
+            // module's own UnsupportedFieldType, not a panic or a silent gap in `out`.
+            Some(av_codec::FieldValue::Bytes(_)) | None => {
+                return Err(PacketError::UnsupportedFieldType { codec_id: codec.id.clone(), field: field.name.clone() });
+            }
         }
-        let value = read_numeric_field(user_data, field, &codec.id)?;
-        out.insert(field.name.clone(), value);
     }
     Ok(out)
 }
@@ -211,11 +192,11 @@ mod tests {
         }
     }
 
-    /// Hand-encode a packet the same way `av_kernel::codec::encode_packet` would (per that
-    /// module's own hand-computed test vector, `hand_computed_encode_matches_ccsds_bit_
-    /// layout_pinned_by_hand`): a real header plus the three FLOAT64 values' big-endian bit
-    /// patterns, so this test does not depend on this module's own encoder existing (there
-    /// isn't one) or `av_kernel::codec::encode_packet` at all.
+    /// Hand-encode a packet the same way `av_codec::encode_packet` would (per that module's
+    /// own hand-computed test vector, `hand_computed_encode_matches_ccsds_bit_layout_pinned_
+    /// by_hand`): a real header plus the three FLOAT64 values' big-endian bit patterns, so
+    /// this test does not depend on this module's own encoder existing (there isn't one) or
+    /// `av_codec::encode_packet` at all.
     fn encode_float64_packet(apid: u32, sequence_count: u16, x: f64, y: f64, z: f64) -> Vec<u8> {
         let byte0 = (((apid >> 8) & 0x07) as u8) & 0x07;
         let byte1 = (apid & 0xFF) as u8;

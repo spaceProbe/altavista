@@ -11,7 +11,7 @@
 //! `RunProducts.measurements`. Confirmed by reading the real code, not assumed:
 //!
 //! - `flight_tm_out_codec`'s three fields declare **no `PacketField.target`** at all, so
-//!   `av_kernel::codec::measurements_from_field_values` -- confirmed by grep, and by that
+//!   `av_codec::measurements_from_field_values` -- confirmed by grep, and by that
 //!   function's own "never invents a measurement" doc comment -- produces nothing for this
 //!   DRM; `RunProducts.measurements` is empty for it.
 //! - `crate::drm::ground::GroundStationModel::last_measurements` returns `Vec::new()` by
@@ -29,8 +29,9 @@
 //!
 //! # Module map
 //!
-//! - [`packet`] -- a minimal, from-scratch CCSDS decoder (see that module's own doc comment
-//!   for why it duplicates, rather than depends on, `av_kernel::codec`).
+//! - [`packet`] -- a thin adapter over `av_codec::decode_packet` (question 205; that module's
+//!   own doc comment has the detail, including the one narrow, documented ordering
+//!   difference from the from-scratch decoder it replaced).
 //! - [`PluginConfig`] -- every declared knob this plugin's behaviour depends on, in one
 //!   serialisable, hashable value (see [`PluginConfig::config_hash`]) -- nothing here is a
 //!   hard-coded constant.
@@ -238,7 +239,7 @@ pub struct PluginConfig {
     /// `Measurement.r`: the declared measurement-noise covariance, row-major, SPD, exactly
     /// `component_fields.len()^2` entries. Checked via
     /// [`av_cdm::covariance::check_spd_row_major`] at [`PluginConfig::validate`] time --
-    /// never shipped un-checked (`av_kernel::codec::measurements_from_field_values`'s own
+    /// never shipped un-checked (`av_codec::measurements_from_field_values`'s own
     /// identical rule).
     pub noise_r: Vec<f64>,
     /// The declared `Label`'s own canonical `prost::Message::encode_to_vec` bytes.
@@ -461,8 +462,9 @@ impl MeasurementSource for PortTrafficSource {
 /// Hash-verifies `log_bytes` against `expected_hash_hex` (SHA-256 via the system OpenSSL,
 /// `openssl::sha::sha256` -- ADR-004's crypto rule, never `sha2`) **before** ever decoding
 /// them, mirroring `av_kernel::drm::replay::verify_and_load`'s own load-time contract but
-/// through this crate's own hashing primitive rather than `av-kernel`'s (see `crate::plugin::
-/// packet`'s module doc for why this crate cannot depend on `av-kernel` at all). Pure: takes
+/// through this crate's own hashing primitive rather than `av-kernel`'s (this crate still
+/// depends on neither `av-kernel` nor `gmat-sys`/transport -- only on `av-codec`, question
+/// 205's GMAT-free extraction; see `crate::plugin::packet`'s module doc). Pure: takes
 /// already-read bytes, never touches a filesystem itself -- the plugin binary is what reads
 /// the sidecar's bytes off disk.
 pub fn verify_port_traffic_log(log_bytes: &[u8], expected_hash_hex: &str) -> Result<pb::PortTrafficLog, PluginError> {
