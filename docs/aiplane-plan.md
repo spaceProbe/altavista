@@ -487,3 +487,316 @@ silence was indistinguishable from progress.
 6. **The cFS image was absent for this whole round** (question 196(d), sixth disappearance by
    the standing count). Nothing this track needed it for — the demo attitude command fixture is
    native — and the four gated kernel tests skipped visibly throughout.
+
+## Status (AI-plane manager, 2026-09-13) — round 3
+
+**Round 3 delivered the service principals, all of A4b (the proposer, its container and the
+egress proof), question 206's two remaining open items, all of A5 (the console), and A6.**
+Seven commits on `aiplane`, one per accepted task:
+
+| Commit | Task |
+|---|---|
+| `f07300f` | R3.1 service principals on `Dispatch`, `Ack`, `Expire` and `Fail` |
+| `1f87e9f` | A4b `crates/av-proposer`, the deterministic rule-based proposer |
+| `4a545b1` | A4b the proposer's container, its internal network and the egress proof |
+| `c473385` | Question 206's two open items: the gateway on a command trail, a GMAT-bound `ExternalCommandSource` target |
+| `ac335ce` | A5 persist the proposal, and serve the console's data under `/api/command/` |
+| `3936f0e` | A5 the command console panel, in the execution profile's default layout only |
+| `c52d97a` | A6 the ledger decision trail replayed, the control matrices, one evidence bundle |
+
+### Gates, the manager's own runs with no worker active
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-command -p av-gateway -p av-proposer` | **281 passed**, 0 failed, 0 ignored (av-command 178 = 143 lib + 32 `grpc_service` + 3 `policy_fixture`; av-gateway 77; av-proposer 26). 187 was round 2's figure |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **733 passed**, 0 failed, **3 ignored** (639 and 2 ignored was this round's measured baseline; the third ignore is this round's own new fixture generator) |
+| `cargo test -p av-kernel` | **902 passed**, 0 failed, 2 ignored; the four cFS-image tests skip visibly, each naming the missing image and its build command (question 194) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, **0 warnings**. `grep -rn "#\[allow" crates/av-command/ crates/av-gateway/ crates/av-proposer/` is **zero hits** (the generated `pb` modules carry the established inner `#![allow(clippy::all)]`, as every other crate's generated module in this workspace does) |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`. `cargo tree -p av-proposer` has no `ring`, `sha2`, `rustls`, `chacha20`, `md-5` or `blake2` |
+| `.venv/bin/python -m pytest -q -rs` | **539 passed, 5 skipped** (513 and 4 was this round's measured baseline), every skip printing its reason — the four pre-existing image gates plus the proposer's own container test |
+| `buf breaking proto --against <merge base 8184764>` | **exit 0, zero findings.** `git diff --name-status` over `proto/` shows one entry, `M proto/altavista/v1/authority.proto` — this track's own file, additive only. No shared proto was touched |
+
+Full gate output is in the round's scratchpad.
+
+### The manager's decisions this round
+
+1. **The counting primitive moved to `av-command`.** `av-command` had no counter surface at
+   all, while `av-gateway` had the right one (`Counted`/`Counters`, `BTreeMap`-backed,
+   deterministic snapshot). `av-gateway` depends on `av-command` and the reverse is
+   impossible, so the module moved down and `av-gateway` re-exports it. One primitive, no
+   duplicate, and ADR-004's "everything rejected is counted" is now mechanical in both crates.
+2. **A service principal is structural, not a claim.** A verified token is a service principal
+   exactly when one of its groups grants, through the profile's new `authority.service_roles`
+   table, the specific RPC being called — and the service-role keys are required **disjoint**
+   from the human role keys at config load, with a typed error naming the overlap. Without
+   that disjointness a human authorizer's group would silently become a dispatch credential
+   and a token minted for a person could drive the asset. A purely human token is refused on
+   all four RPCs by the same deny-by-default path.
+3. **A caller-declared `principal` that disagrees with the verified subject is refused**
+   (`INVALID_ARGUMENT`), never silently preferred in either direction. An empty declared value
+   declares nothing and is never a disagreement. This closes round 2's declared asymmetry
+   (`Expire`/`Fail` carried no principal while `Ack` carried an unverified one) without
+   inventing a precedence rule nobody could predict.
+4. **`DISPATCH_PRINCIPAL`, `EXPIRE_PRINCIPAL` and `FAIL_PRINCIPAL` are deleted.** A fixed
+   string principal means nothing once identity is real, and a constant that means nothing is
+   worse than no constant.
+5. **A new additive `ModelProposeService` on `authority.proto`, served by `av-gateway`.**
+   `propose_command` existed only as an MCP tool over stdio, and `DataGatewayService`'s own
+   contract promises it can create nothing — so a containerised proposer talking to the
+   gateway over a network had no propose path at all. Adding a propose RPC to
+   `DataGatewayService` would have broken its stated read-only guarantee, and MCP-over-TCP
+   would have invented a transport. A second, structurally separate service puts on the wire
+   the same split `ProposeOnlyAuthority` already makes in code. The MCP tool and the RPC share
+   **one** implementation (`crates/av-gateway/src/propose_flow.rs`) with a test that the two
+   surfaces agree on outcome and on refusal: two independently maintained propose paths is how
+   a propose-only guarantee gets lost on one of them.
+6. **`av-proposer` generates no `CommandAuthorityService` client at all.** It never parses
+   `authority.proto`; its two clients come from hand-declared `tonic_build::manual` descriptors
+   over the already-compiled `av_cdm::pb` types, so propose-only is a property of what exists
+   rather than of a wrapper's discipline. A test greps this crate's own `OUT_DIR` for the
+   absence. The cost is that the two method paths are hand-written rather than generated; the
+   integration tests drive a real server over them, which is what catches a divergence.
+7. **spoore's `ModelService` is served for real, and `ModelInfo` is the load-bearing half.**
+   `WarmStart`/`Predict`/`MeasurementLikelihood`/`Update`/`ClaimTestability` delegate to a
+   `spoore_models::KalmanFilter` over `ConstantVelocity3d`, built exactly as
+   `crates/av-track/src/config.rs` already builds one — a real deterministic closed-form
+   filter, `epistemic_method = "exact"`, not a stub answering `UNIMPLEMENTED`. `ModelInfo`'s
+   `node_id` and `version` are the same two values that land in `ProposalEvidence`, asserted by
+   a test, so the sidecar's declared identity and the attribution on its proposals cannot
+   drift apart.
+8. **Decision 11(a)'s internal network needs the gateway to leave loopback, and that is an
+   explicit opt-in, not a default.** `resolve_internal_network_bind_address` accepts a loopback
+   spelling (by delegating to the existing resolver), the unspecified address and RFC-1918
+   literals, and refuses any global-scope address with a new typed, counted refusal. It is
+   reached only through `av-gateway`'s `--internal-network-bind` flag, never an environment
+   default; question 155's plaintext-on-loopback rule and its typed refusal are untouched
+   everywhere else, and across hosts the answer is still the nginx mTLS front.
+   **The rejected alternative and why:** putting the proposer in the gateway container's
+   network namespace (the edge plugin's own trick) would also expose the **command
+   authority's** loopback port to the proposer, and the isolation claim — "the proposer can
+   reach the gateway and nothing else" — would then be false. The authority instead runs on
+   the gateway container's own loopback, in a namespace the proposer is not in.
+9. **The console's profile signal is stamped the way the imagery already is.** The browser had
+   no profile identity at all; `Hub` now learns the active profile id from `create_app(profile=)`
+   and stamps `scenario.profileId` beside `scenario.imagery`, only when absent, so every
+   scenario published before this change behaves exactly as it did. "Execution profile only"
+   (question 201(d)) governs the **default layout**; the panel joins the registry so any pane
+   can be swapped to it in every profile, which is availability, not default.
+10. **`int64` leaves Python as a decimal string**, which is also protobuf's own canonical JSON
+    mapping. See the defects below for what was actually happening before.
+11. **The evidence bundle is an `av-gateway` admin route, not a new service.** The dependency
+    direction only lets the higher crate see both sides. A section it could not collect is a
+    named `{"reachable": false, "error": ...}` entry, never an omitted key — a bundle with a
+    silently missing section is not evidence.
+### What this round actually is now
+
+`Dispatch`, `Ack`, `Expire` and `Fail` authenticate an OIDC service subject through the
+identical `oidc::verify` path a human token takes — same issuer config, RS256 only, boundary-
+nanosecond expiry on the injected clock, no second verifier and none of the sixteen typed
+refusals relaxed. A service role table in `profiles/execution.yaml` grants a named subset of
+the four RPCs, deny by default, disjoint from the human role table by a check at config load.
+Every refusal on the five authenticated RPCs is typed, counted through the shared primitive,
+reported by `/admin/api/evidence`, and written as one RFC 5424 audit line. `av-run`'s adapter
+presents its service token on every `Ack`/`Expire`/`Fail`.
+
+`crates/av-proposer` is a deterministic rule-based proposer: it reads a run's scores through
+the gateway, and when the named radius score drifts past a declared threshold it proposes a
+burn whose magnitude is a declared, clamped proportional law. It reads no wall clock, generates
+no random value and iterates no `HashMap`; the command id and the idempotency key are two
+SHA-256 digests over one canonical preimage distinguished by a purpose tag, through the
+`openssl` crate, following `query_id.rs`'s convention. Two independent runs over the real
+committed `demo_two_instance` fixture produce byte-identical `Command`s, the same evidence and
+the same query ids, with a non-vacuity guard beside the byte-identity assertion. A score that
+is absent, in the wrong unit, or non-finite is a typed, counted refusal — never defaulted to
+zero and never compared across units.
+
+The console is real on both sides. `/api/command/` serves the proposals with their rationale and
+evidence, the policy decision with its id and policy hash, the trail per command, the counters
+proxied from the real admin endpoint, and an authorize action that forwards the operator's token
+verbatim and never stores, caches or logs it. The endpoints are configuration, never a request
+parameter — the same "identity is never a path" rule `POST /api/cdm/sweep/sample` already
+follows. With `grpcio` absent or no endpoint configured, every command route answers a typed 503
+and every pre-existing route still works. The panel is framework-free, never fetches (every call
+lives in `app.js`, the convention `openFeasibilitySample` set), shows a refusal with the
+server's own reason, and offers no dispatch, ack, expire or fail control — propose-only stands.
+
+A6 is done in all three parts. A replayed decision trail reproduces every transition, the
+decision id and policy hash, and the proposal's rationale and evidence ids from the ledger
+alone, from a second service over the same directory with the writing process gone; the
+**decision id re-derives** through the public `policy::evaluate` over the recorded input and an
+independently reloaded bundle, not merely matching a string read twice; a deliberate on-disk
+tamper is caught and names seq 3 with the two earlier records still good; an empty-ledger
+control proves the assertions discriminate. The control matrices for `av-command` and
+`av-gateway` are in `docs/compliance/`, and both say plainly what is not met — including that
+**`av-gateway` authenticates no caller of its own on any surface**. The evidence bundle is one
+`av-gateway` admin call collecting both services, `BTreeMap` end to end, byte-identical across
+two identical deployments, with an unreachable side named rather than omitted, and asserted to
+contain no key, token or credential.
+
+### Declared gaps, all deliberate
+
+- **The proposer's container has never run end to end on this host.** The image cannot be built
+  (see the host measurement below). `tests/test_proposer_container.py` is complete — the internal
+  network, both egress proofs, the authority-unreachable measurement, the label cleanup guard —
+  and it **skips visibly**, naming the missing image and `services/proposer/build-image.sh`. The
+  isolation claim is therefore implemented and unexercised, and both control matrices say so.
+- **`av-gateway` authenticates no caller.** `caller_clearance` and the proposing `principal` are
+  caller-supplied strings; the MCP stdio surface trusts whoever holds the pipe. Consistent with
+  question 155's loopback-plus-nginx posture, but it is now written down as a gap rather than
+  left to be assumed.
+- **`Propose` and `Check` still carry no credential**, by design (`authority.proto`'s own doc:
+  a proposer is not a human OIDC principal), and `Query`/`VerifyLedger` remain reachable by any
+  caller that can reach the bind address.
+- **No token refresh in `av-run`'s adapter.** A run that outlives one token's lifetime would see
+  its `Ack`/`Expire`/`Fail` refused; the module doc names the shape a solution would take.
+- **`ES256`/`ES384`** are still unimplemented; RS256 only (question 203(c)). **The OPA
+  cross-check** is still a pinned document shape. **The audit sink** is still an RFC 5424 file.
+  **`acr`** is still an exact string match.
+- **The panel does not poll.** Proposals and counters refresh on selection, on authorize, and on
+  an execution-profile scenario load; a new proposal does not arrive on its own.
+- **`av-gateway`'s binary configures its bind addresses from environment defaults** while
+  `av-command`'s are CLI arguments only. The two control matrices disagree on this point
+  deliberately rather than the newer one claiming a parity it does not have.
+
+### The host, measured this round (question 205, and it now blocks more than the cFS image)
+
+The Colima VM's container filesystem is at 99% with about 900 MB free, 870 volumes and 45 GB
+reclaimable, owned by another workload. Measured in sequence:
+
+- `debian:bookworm-slim` with 909 MB free: `apt-get update` succeeds, 9273 kB fetched.
+- `docker pull rust:1.90-bookworm`: available goes from 909 MB to **0**, 100% full.
+- the same `apt-get update` inside that image at 0 bytes free: *"At least one invalid signature
+  was encountered"* on all three `InRelease` files.
+
+The signature error is apt's symptom for a truncated download, not a key problem — which is why
+a direct `gpgv` on a freshly fetched `InRelease` reports a good signature. **No image that needs
+the Rust toolchain image can be built on this host** until those volumes are reclaimed. The
+pulled toolchain image was removed again so the host was not left at 0 bytes for the other
+tracks. This is the same root cause question 205 already named for the cFS image's
+disappearances, now shown to block image *builds* and not only to garbage-collect them.
+
+Also measured, and worth the lead's attention: **`regorus 0.12.0` does not compile on Rust
+1.85**, the workspace's declared `rust-version`. It needs `const_vec_string_slice`. The host
+toolchain is far newer so nothing noticed, but the declared MSRV has been false since round 1
+and any container build or CI pinned at 1.85 will fail.
+### Defects found in review, with their root causes
+
+Nine, and the shape held for the third round running — **a failure, refusal or guarantee that
+leaves no trace**:
+
+1. **The ledger's self-evidence invariants were `debug_assert_eq!`.** Round 2's review installed
+   the `LedgerRecord.command` invariant "in `Ledger::append`", and round 2's status and the
+   lead's acceptance both record it that way. `debug_assert!` is compiled out of a release
+   build, so the guarantee held in the test binaries and **vanished in the shipped `av-command`
+   binary and in the container image** — exactly where a durable, self-contradictory ledger
+   record would matter. Root cause: the fix was written with a macro whose name reads like an
+   assertion and whose behaviour is conditional on the build profile, and nothing in the
+   review checked which profile it survives. Both invariants (and this round's new `proposal`
+   one) are now real checks in every profile that **refuse the append** rather than panicking a
+   running service: the record is never written and the refusal is counted. The tests now assert
+   a returned `Err` *and* that nothing was written, which a panicking check could never
+   establish.
+2. **`Propose` discarded the rationale and the evidence ids.** `CommandProposal.rationale` and
+   `.evidence_ids` were accepted on the wire, used for nothing, and unrecoverable afterwards —
+   so A5's "proposals with their rationale and evidence" could not have been served at all.
+   Root cause: `propose` destructured the proposal for its `command` and dropped the rest, and
+   no test ever asked for them back. `LedgerRecord.proposal` now carries them, enforced
+   self-evident, rebuilt from disk by `scan_proposals`, and returned by `Query`.
+3. **A TAI nanosecond epoch was serialised to the browser as a JSON number.** These are about
+   1.79e18, two orders of magnitude past JavaScript's `MAX_SAFE_INTEGER`, so `JSON.parse`
+   rounded every transition epoch silently. Measured: `1789296161430000000` becomes
+   `1789296161430000128`. Worth recording because the **first version of the check missed it**:
+   comparing `String(Number(x))` with `x` reports "no loss" at this magnitude, because the
+   double's shortest round-trip decimal still prints the original digits once a
+   microsecond-granularity epoch's trailing zeros hide the 256 ns spacing. The check compares
+   `BigInt(Number(x))` with `BigInt(x)` instead. The rounding is invisible in exactly the way
+   that makes it dangerous.
+4. **All four service RPCs loaded the command before authenticating**, so a caller with no
+   credential at all could tell `NOT_FOUND` from `UNAUTHENTICATED` and enumerate the command
+   ids the service holds. The task's own recorded reasoning claimed the opposite property.
+   Authentication now precedes the lookup, pinned by a test that drives all four RPCs with no
+   token against both an existing and a missing id.
+5. **A service-principal refusal was counted but wrote no audit line**, while every `Authorize`
+   refusal has written one since A2.2. A counter lives only in this process and behind the
+   admin endpoint, so a refused dispatch was invisible to the sink question 54's SIEM export
+   reads. `refuse_service_call` now writes one RFC 5424 line per identity or authorization
+   refusal; `entity` and `class` are left empty because the command genuinely has not been
+   loaded at that point, and the writer omits an empty parameter rather than inventing one.
+6. **`Query`'s and `VerifyLedger`'s refusals never reached the counters** — raw `Status`
+   constructions, so the refusals a malformed caller produces most often were the ones
+   ADR-004's rule missed. Found by a worker and left; fixed with a typed `MalformedRequest`
+   variant covering `Propose`'s four as well.
+7. **An `EvidenceRecorder::record` I/O failure bypassed the counting path** in the MCP
+   `propose_command` tool — a real evidence-ledger write failure (full disk, permissions) was
+   reported to the caller and never counted. Found by a worker while extracting the shared
+   propose flow, and fixed there so both surfaces record it identically.
+8. **`av-gateway` raced its gRPC server against its MCP stdio loop in one `tokio::select!`.**
+   The MCP loop ends the instant stdin reports EOF, and a container started with `docker run -d`
+   and no `-i` gets EOF immediately — so the gRPC port closed a fraction of a second after
+   opening, `docker run -d` exited 0, and the container's own logs said nothing. Found as a
+   workaround by a worker (`-i` on its container) and left in the binary; fixed: the MCP surface
+   ending at EOF is reported as the end of that surface alone, and only the gRPC server's exit
+   ends the process.
+9. **The two services' default addresses did not agree with each other.** `av-gateway`'s default
+   gRPC bind was `127.0.0.1:50170`, which is `av-command`'s `DEFAULT_ADMIN_BIND` — two services
+   of this same track started with nothing but their defaults fought over one port. And
+   `AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT` defaulted to `http://127.0.0.1:50110`, an address
+   `av-command` has never listened on (its `DEFAULT_BIND` is `127.0.0.1:50070`) — and because the
+   fallback is a lazy channel, the miss surfaced only later as a connect error on the first
+   `propose_command`, never at startup. Both pre-existing since round 2. The map is now
+   av-command 50070/50170, av-gateway 50071/50171, the `+100` convention both binaries already
+   followed.
+
+Three more, each an in-flight process defect rather than a code one:
+
+- **An intermittent test failure that passed for the worker and failed in review.** All thirteen
+  tests in `av-gateway`'s `mcp` module derived one temp ledger directory from the process id and
+  a *constant* name, and `cargo test` runs them concurrently, so two tests interleaved
+  `remove_dir_all` with the other's `Ledger::open` and the loser failed with `EEXIST`. Latent
+  since round 2; intermittent by construction, with nothing in the failure naming the shared
+  path — the same shape as question 199's own intermittent panic. The helper now folds in a
+  monotonic per-call counter.
+- **A worker wrote its gate logs into the repository worktree** (`scratchpad/` at the repo root),
+  which would have been committed. Moved out; every brief since names the scratchpad path
+  explicitly.
+- **A worker's root cause was wrong and the manager could not reproduce it.** R3.3 attributed a
+  container `apt-get update` failure to a deprecated `apt-key`/`gpgv` wrapper and stated it would
+  block the edge and cFS image builds "equally if run right now". It does not — see the host
+  measurement below. Recorded because a confidently-stated wrong root cause is more expensive
+  than an open question.
+### Open items for the lead
+
+1. **The user's decision on the Colima VM disk is now blocking work, not just annoying it.**
+   Until the dangling volumes are reclaimed (or Kubernetes is disabled in Colima, or the VM disk
+   is raised), no AltaVista image that needs the Rust toolchain image can be built on this host:
+   the pull itself takes the filesystem to 0 bytes and the build's own `apt-get update` then
+   fails on truncated downloads. The proposer's egress proof is written and cannot be run.
+2. **The workspace's `rust-version = "1.85"` is false.** `regorus 0.12.0`, pinned since round 1,
+   needs a `const fn` stabilised later. Either raise the declared MSRV to a version that
+   actually builds this workspace, or the pin is a trap for the first CI or container build that
+   honours it.
+3. **`av-gateway` authenticates no caller on any surface.** This round gave the command
+   authority real service principals; the gateway still takes `caller_clearance` and the
+   proposing `principal` as bare strings. Whether that is acceptable under question 155's
+   loopback-plus-nginx posture, or whether the gateway needs the same OIDC gate, is a decision
+   rather than an oversight — it is now a named Gap row in `docs/compliance/av-gateway/`.
+4. **Decision 5 (a second service, `ModelProposeService`, rather than a propose RPC on
+   `DataGatewayService`) and decision 8 (the explicit non-loopback bind opt-in, and the reason
+   the namespace-sharing alternative was rejected) both need ratifying.** Decision 8 in
+   particular is the one place this round deliberately loosens question 155, under a flag, for
+   one deployment shape.
+5. **No `ListAgents` tool exists in this environment**, so the "run ListAgents before spawning"
+   rule could not be followed literally. Workers were dispatched strictly one at a time and each
+   result was reviewed before the next was spawned, which gives the same guarantee; recorded so
+   the rule can be restated in terms of what the environment actually provides.
+6. **A worker created a background-task suggestion chip** (`task_a2b443d0`, "root-cause the apt
+   failure") while investigating R3.3. The manager has since root-caused that failure to the VM
+   disk, so the chip is stale; the lead or the user may dismiss it.
+7. **`av-command`'s `DEFAULT_BIND` is `127.0.0.1:50070`, which is also the port
+   `tests/test_edge_plugin_container.py` binds inside its containers.** Not a conflict today
+   (different network namespaces) but the two tracks are converging on one host's port space and
+   a single owned map would be cheaper than the next collision. This round's own collision
+   (defect 9) is the warning.
+8. **`Expire`/`Fail` state-machine refusals still write no audit line** — only identity and
+   authorization refusals do. Deliberately not widened this round; it is the next increment of
+   the same rule if the lead wants it.

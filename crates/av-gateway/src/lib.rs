@@ -32,6 +32,13 @@
 //!   one place the ordered typed-refusal chain lives), and
 //!   [`gateway::DataGatewayServiceImpl`], the generated `DataGatewayService` server trait
 //!   implementation over it.
+//! - [`admin`]/[`evidence_bundle`] -- R3.6/A6, Part 3: `GET /admin/api/evidence/bundle`
+//!   ([`admin::serve`], the same hand-rolled loopback-only `TcpListener` shape `av-command`'s
+//!   own admin surface uses) collects THIS process's own real evidence (its evidence-topic
+//!   ledger's partitions, its own [`counters::Counters::snapshot`]) plus a real HTTP fetch of
+//!   the configured `av-command` service's own `/admin/api/evidence` -- one call, both
+//!   services, an unreachable/unconfigured `av-command` side named rather than omitted. See
+//!   [`evidence_bundle`]'s own module doc.
 //! - [`evidence`] -- [`evidence::EvidenceRecorder`] (D6): "an evidence topic" realized as a
 //!   record on the existing, unmodified `av_command::ledger::Ledger`, under its own
 //!   documented partition convention -- never a broker (no Kafka/Redpanda crate exists in
@@ -62,6 +69,7 @@
 //! `av_command::clock::Clock`, never `SystemTime::now()` read directly in this crate), no
 //! random id anywhere (D5's query id and every refusal are pure functions of their inputs).
 
+pub mod admin;
 pub mod catalogue;
 /// R3.1: this module moved to `av_command::counters` unchanged in behaviour -- see that
 /// module's own doc for the full reasoning. Re-exported under this crate's own, pre-existing
@@ -71,6 +79,7 @@ pub mod counters {
     pub use av_command::counters::{Counted, Counters};
 }
 pub mod evidence;
+pub mod evidence_bundle;
 pub mod gateway;
 pub mod labels;
 pub mod mcp;

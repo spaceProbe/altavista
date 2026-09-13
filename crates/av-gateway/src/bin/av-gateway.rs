@@ -50,6 +50,19 @@
 //!   insert`]'s own documented behaviour, not a special case this binary adds. When this flag
 //!   is absent (as it always was before this round), the catalogue is empty, exactly as
 //!   before.
+//!
+//! # R3.6/A6, Part 3: the evidence-bundle admin surface (two environment-variable defaults,
+//! not flags -- matching every OTHER address this binary already configures this way, e.g.
+//! `AV_GATEWAY_BIND`/`AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT` above)
+//!
+//! - `AV_GATEWAY_ADMIN_BIND` (default `"127.0.0.1:50171"`): where THIS process's own
+//!   `GET /admin/api/evidence/bundle` route listens ([`av_gateway::admin::serve`]), refused at
+//!   startup if non-loopback (question 155, [`resolve_loopback_bind_address`]).
+//! - `AV_GATEWAY_COMMAND_ADMIN_BIND` (default empty = not configured): the running
+//!   `av-command` service's own admin address (its own default is
+//!   `crates/av-command/src/bin/av-command.rs::DEFAULT_ADMIN_BIND`, `"127.0.0.1:50170"`) --
+//!   when absent, the bundle still serves, with the `av-command` side of the bundle honestly
+//!   `{"reachable": false, ...}` rather than this binary refusing to start.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -67,6 +80,7 @@ use av_gateway::propose_flow::ModelProposeServiceImpl;
 use av_gateway::propose_only::ProposeOnlyAuthority;
 use av_gateway::pb::model_propose_service_server::ModelProposeServiceServer;
 use av_gateway::unknown_route_counter::UnknownRouteCounterLayer;
+use av_gateway::evidence_bundle::BundleState;
 use prost::Message as _;
 
 fn env_or(name: &str, default: &str) -> String {
@@ -161,7 +175,13 @@ async fn main() {
             std::process::exit(1);
         })
     } else {
-        let bind_raw = env_or("AV_GATEWAY_BIND", "127.0.0.1:50170");
+        // R3.6 (manager's review): this default was `127.0.0.1:50170`, which is
+        // `crates/av-command/src/bin/av-command.rs::DEFAULT_ADMIN_BIND` -- so two services of
+        // this same track, each started with nothing but its own defaults, fought over one
+        // port and whichever lost failed to bind. `50071` restores the convention both
+        // binaries already follow (`av-command` gRPC `50070`, admin `50070 + 100`), giving one
+        // coherent map: av-command 50070/50170, av-gateway 50071/50171.
+        let bind_raw = env_or("AV_GATEWAY_BIND", "127.0.0.1:50071");
         resolve_loopback_bind_address(&bind_raw).unwrap_or_else(|e| {
             eprintln!("av-gateway: refusing to start: {e}");
             std::process::exit(1);
@@ -186,7 +206,14 @@ async fn main() {
         std::process::exit(1);
     }));
 
-    let authority_endpoint = env_or("AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT", "http://127.0.0.1:50110");
+    // R3.6 (manager's review): this default was `http://127.0.0.1:50110`, an address
+    // `av-command` has never listened on -- its own `DEFAULT_BIND` is `127.0.0.1:50070`. Two
+    // services of this track started with nothing but their defaults therefore never found
+    // each other, and because the fallback below is a LAZY channel the miss surfaced only
+    // later, as a connect error on the first `propose_command`, rather than at startup: a
+    // misconfiguration that leaves no trace until someone tries to use it. Pointed at
+    // `av-command`'s real default.
+    let authority_endpoint = env_or("AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT", "http://127.0.0.1:50070");
     let authority = match ProposeOnlyAuthority::connect(authority_endpoint.clone()).await {
         Ok(a) => Arc::new(a),
         Err(e) => {
@@ -212,6 +239,40 @@ async fn main() {
     // of this workspace's code runs -- see crate::unknown_route_counter's own module doc.
     let known_prefixes = vec!["/altavista.v1.DataGatewayService/".to_string(), "/altavista.v1.ModelProposeService/".to_string()];
     let unknown_route_layer = UnknownRouteCounterLayer::new(known_prefixes, counters.clone());
+
+    // R3.6/A6, Part 3: the one call that collects both services' evidence into one bundle.
+    // `AV_GATEWAY_COMMAND_ADMIN_BIND` is the running `av-command` service's own admin address
+    // (its default, `crates/av-command/src/bin/av-command.rs::DEFAULT_ADMIN_BIND`, is
+    // `"127.0.0.1:50170"`) -- absent (the empty-string default below) is a real, honest
+    // configuration state this process starts in fine; the bundle route just names the
+    // `av-command` side unreachable rather than refusing to serve at all.
+    let admin_bind_raw = env_or("AV_GATEWAY_ADMIN_BIND", "127.0.0.1:50171");
+    let admin_addr = resolve_loopback_bind_address(&admin_bind_raw).unwrap_or_else(|e| {
+        eprintln!("av-gateway: refusing to start: {e}");
+        std::process::exit(1);
+    });
+    let command_admin_bind_raw = env_or("AV_GATEWAY_COMMAND_ADMIN_BIND", "");
+    let command_admin_addr = if command_admin_bind_raw.is_empty() {
+        None
+    } else {
+        Some(resolve_loopback_bind_address(&command_admin_bind_raw).unwrap_or_else(|e| {
+            eprintln!("av-gateway: refusing to start: {e}");
+            std::process::exit(1);
+        }))
+    };
+    let bundle_state = Arc::new(BundleState {
+        evidence_ledger: evidence_ledger.clone(),
+        counters: counters.clone(),
+        run_id: "av-gateway".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        command_admin_addr,
+    });
+    let admin_task = tokio::spawn(async move {
+        if let Err(e) = av_gateway::admin::serve(admin_addr, bundle_state).await {
+            eprintln!("av-gateway: admin server exited: {e}");
+        }
+    });
+
     let mcp_ctx = McpContext { gateway: core.clone(), authority, evidence_ledger, clock, counters };
     let mcp_handler = McpHandler::new(mcp_ctx);
 
@@ -223,7 +284,7 @@ async fn main() {
 
     let mcp = serve(tokio::io::stdin(), tokio::io::stdout(), mcp_handler);
 
-    eprintln!("av-gateway: DataGatewayService + ModelProposeService on {bind_addr}, MCP server on stdio");
+    eprintln!("av-gateway: DataGatewayService + ModelProposeService on {bind_addr}, admin (evidence bundle) on {admin_addr}, MCP server on stdio");
     // R3.3 (manager's review, a defect measured not guessed): this used to be a
     // `tokio::select!` over BOTH futures, so whichever finished first ended the process. The
     // MCP stdio loop finishes the instant its stdin reports EOF -- and a container started
@@ -249,6 +310,7 @@ async fn main() {
         eprintln!("av-gateway: gRPC server exited: {e}");
     }
     mcp_task.abort();
+    admin_task.abort();
 }
 
 #[cfg(test)]
