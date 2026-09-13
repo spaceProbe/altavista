@@ -154,7 +154,7 @@ have been rushed. Five commits on `aiplane`, one per accepted task:
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 warnings; `grep -rn "#\[allow" crates/av-command/` is zero hits |
 | `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` |
 | `.venv/bin/python -m pytest -q -rs` | **498 passed, 3 skipped**, every skip printing its reason |
-| `buf breaking` | **not run, and not required**: `git diff --name-status develop...HEAD -- proto/` shows one entry, `A proto/altavista/v1/authority.proto`. No shared proto file was touched. `buf` is also not installed on this host, which the lead should know before a round does need it. |
+| `buf breaking` | **not run, and not required**: `git diff --name-status develop...HEAD -- proto/` shows one entry, `A proto/altavista/v1/authority.proto`. No shared proto file was touched. ~~`buf` is also not installed on this host.~~ **That claim was wrong; see "Correction" at the end of this section.** |
 
 Full gate output is in the round's scratchpad.
 
@@ -262,8 +262,8 @@ returns `None`. A unit test caught it; a `MissingPort` variant fixed it.
 
 ### Open items for the lead
 
-1. `buf` is not installed on this host. This round did not need it, but a round that touches
-   a shared proto will.
+1. ~~`buf` is not installed on this host.~~ **Wrong, corrected 2026-09-13 — see "Correction"
+   at the end of this section.** `buf` is installed; it is simply not linked onto `PATH`.
 2. `altavista/pb/generate.py` needs `grpcio-tools`, which the `dev` extra does not declare,
    so the documented regeneration command fails on a clean dev install. Not fixed here:
    `pyproject.toml` is shared with the edge track and a change would conflict.
@@ -273,6 +273,48 @@ returns `None`. A unit test caught it; a `MissingPort` variant fixed it.
 4. `rand_chacha` through `tonic → tower → rand` is pre-existing and lead-accepted since
    M5.3; recorded here so the crypto rule's "no bundled crypto" wording and that crate can be
    reconciled deliberately rather than re-litigated each round.
+
+### Correction (AI-plane manager, 2026-09-13): `buf` is installed, and both gates now have real numbers
+
+Round 1's status above claimed `buf` was not installed here. **That was wrong.** The claim
+rested on `which buf` failing, and I recorded a conclusion from one negative probe instead of
+waiting for the filesystem search I had myself started — which finished later and found the
+binary at `/opt/homebrew/Cellar/buf/1.73.0/bin/buf` (Homebrew keg, v1.73.0, simply never
+linked onto `PATH`). The round-1 reasoning that the gate was *not required* stands on its own
+— no shared proto was touched — but "the tool is missing" was an unverified inference, and it
+is exactly the kind of claim that would have made a later round skip a gate it could have run.
+Same defect class as the five in the list above: a conclusion with no visible trace behind it.
+
+Both gates, run 2026-09-13 at the current tree with the host quiet:
+
+| Gate | Result |
+|---|---|
+| `buf breaking --against '../.git#branch=develop,subdir=proto'` (from `proto/`) | **exit 0, no findings.** The track's proto changes are non-breaking against `develop`. |
+| `buf lint` (from `proto/`) | exit 100, **34 findings** — and this tree has *never* been lint-clean. |
+
+The lint number needs its baseline to mean anything, so here it is measured rather than
+asserted, at the commit both tracks branched from and at the merged tree:
+
+| Tree | Findings | Where |
+|---|---|---|
+| `4a67641` (pre-track branch point) | **9** | `lockstep.proto` 8, `dynamics_service.proto` 1 |
+| `develop` today (both tracks merged) | **34** | `authority.proto` **16**, `edge.proto` 9, plus the same pre-existing 9 |
+
+So this track added 16 lint findings and the edge track 9. They are already on `develop`,
+merged and accepted, so this is information rather than a blocking defect — but it was never
+measured before, and it should be a deliberate decision rather than a drift. Almost all 16 are
+one design choice: `CommandResponse` is the response type for every state-transition RPC
+(`Propose`, `Check`, `Authorize`, `Dispatch`, `Ack`, `Expire`, `Fail`), which buf's STANDARD
+set flags as both "used for multiple RPCs" and "should be named `<Method>Response`". The rest
+are `GatewayQueryRequest`/`GatewayQueryResponse` naming. Note that only `buf breaking` has ever
+been named in the round protocol; `buf lint` has not, which is why nobody noticed.
+
+**For the lead:** decide whether `buf lint` joins the gate protocol. If it does, it needs either
+a documented baseline of 9 pre-existing findings to hold the line against, or an `except` entry
+in `proto/buf.yaml` for `RPC_RESPONSE_STANDARD_NAME` and `RPC_REQUEST_RESPONSE_UNIQUE` beside
+the `FIELD_LOWER_SNAKE_CASE` exception already there — the shared-response-type shape is
+deliberate and I would not rename seven RPCs' response messages to satisfy a linter. Also worth
+linking `buf` onto `PATH` so the next session does not repeat my probe.
 
 ## Status (AI-plane manager, 2026-09-12) — round 2
 
