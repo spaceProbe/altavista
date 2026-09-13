@@ -63,7 +63,9 @@ impl std::fmt::Display for RunRefusal {
 /// What one run decided.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunOutcome {
-    /// A burn was proposed and accepted at `COMMAND_STATE_PROPOSED`.
+    /// A burn was proposed and accepted -- question 209(a): `Propose` now checks
+    /// automatically, so a successful call lands at `COMMAND_STATE_CHECKED`, not
+    /// `COMMAND_STATE_PROPOSED`.
     Proposed { command_id: String, idempotency_key: String, drift_m: f64, burn_mps: f64 },
     /// The rule found nothing to propose -- D5's "no proposal, and why" line, the typed
     /// non-error outcome (drift within `threshold_m`, not a refusal).
@@ -145,7 +147,20 @@ pub async fn run(client: &mut GatewayClient, config: &ProposerConfig, counters: 
         counters.record(&err);
         err
     })?;
-    debug_assert_eq!(command.state, CommandState::Proposed as i32, "a successful ProposeCommand response is always PROPOSED");
+    // Question 209(a): `Propose` now checks automatically, so a successful `ProposeCommand`
+    // response is CHECKED, never a bare PROPOSED one. This was a `debug_assert_eq!` -- an
+    // invariant that compiles OUT of a release build, exactly the shape this track has
+    // already been burned by once (`docs/open-questions.md`) -- now a real, always-on, typed
+    // and counted check instead, so a server that ever regressed this guarantee is refused
+    // loudly in every profile, not silently trusted in release.
+    if command.state != CommandState::Checked as i32 {
+        let state_name = CommandState::try_from(command.state).map(|s| s.as_str_name().to_string()).unwrap_or_else(|_| command.state.to_string());
+        let err = RunRefusal::Propose {
+            detail: format!("a successful ProposeCommand response must be CHECKED (question 209(a): Propose now checks automatically); got {state_name}"),
+        };
+        counters.record(&err);
+        return Err(err);
+    }
 
     Ok(RunOutcome::Proposed { command_id: command.id, idempotency_key, drift_m, burn_mps })
 }

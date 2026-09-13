@@ -459,19 +459,26 @@ impl TestServer {
 async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     let mut server = TestServer::spawn("legal-path", 1_000).await;
 
+    // Question 209(a): `Propose` now runs the check edge automatically, as a SEPARATE logged
+    // transition -- the response already carries the CHECKED command and its PolicyDecision;
+    // there is no more explicit Check call anywhere in this legal path.
     let proposed = server.client.propose(propose_request(base_command("cmd-1", "sat-1", "mode", "idem-1"), "model-x")).await.expect("Propose").into_inner();
-    let proposed_command = proposed.command.expect("command present");
-    assert_eq!(proposed_command.state, CommandState::Proposed as i32);
-    assert!(proposed.decision.is_none(), "Propose never runs a policy decision");
+    let checked_command = proposed.command.expect("command present");
+    assert_eq!(checked_command.state, CommandState::Checked as i32);
+    let decision = proposed.decision.expect("Propose's automatic check always returns a PolicyDecision on success");
+    assert!(decision.allow, "{decision:?}");
+    // "The trail is unchanged" (the ruling's own words): TWO transitions, PROPOSED then
+    // CHECKED, each with its own principal and its own reason -- never folded into one.
+    assert_eq!(checked_command.transitions.len(), 2, "{:?}", checked_command.transitions);
+    assert_eq!(checked_command.transitions[0].state, CommandState::Proposed as i32);
+    assert_eq!(checked_command.transitions[0].principal, "model-x");
+    assert_eq!(checked_command.transitions[1].state, CommandState::Checked as i32);
+    assert_eq!(checked_command.transitions[1].principal, "policy");
+    assert!(checked_command.transitions[1].reason.contains(&format!("decision_id={}", decision.decision_id)), "{}", checked_command.transitions[1].reason);
     // The injected clock, not the wall clock: every transition's own tai_ns traces back to
     // the TestClock this server was spawned with.
-    assert_eq!(proposed_command.transitions[0].tai_ns, server.clock.now_tai_ns());
-
-    let checked = server.client.check(CheckRequest { command_id: "cmd-1".to_string() }).await.expect("Check").into_inner();
-    let checked_command = checked.command.expect("command present");
-    assert_eq!(checked_command.state, CommandState::Checked as i32);
-    let decision = checked.decision.expect("Check attaches the PolicyDecision");
-    assert!(decision.allow, "{decision:?}");
+    assert_eq!(checked_command.transitions[0].tai_ns, server.clock.now_tai_ns());
+    assert_eq!(checked_command.transitions[1].tai_ns, server.clock.now_tai_ns());
 
     let token = server.mint("operator-1");
     let authorized = server
@@ -514,7 +521,10 @@ async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     // R3.1: the verified service_token subject, not the declared label, is authoritative.
     assert_eq!(acked_command.transitions.last().unwrap().principal, "flight-software");
 
-    // The ledger on disk holds exactly the expected five records, in order.
+    // **The full five-state trail, pinned** (question 209(a)'s own "the trail is unchanged"):
+    // the ledger on disk holds exactly PROPOSED, CHECKED, AUTHORIZED, DISPATCHED, ACKED, in
+    // order -- one `Propose` call now produces the first TWO of these five records, not one,
+    // each with its own principal (asserted below), never merged into a single record.
     let records = read_ledger_records(&server.ledger_dir, "sat-1");
     let states: Vec<CommandState> = records.iter().map(|r| CommandState::try_from(r.transition.as_ref().unwrap().state).unwrap()).collect();
     assert_eq!(
@@ -524,6 +534,8 @@ async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     assert_eq!(records[0].seq, 1);
     assert_eq!(records[4].seq, 5);
     assert!(records[1].decision.is_some(), "the CHECKED record carries the PolicyDecision");
+    assert_eq!(records[0].transition.as_ref().unwrap().principal, "model-x", "the PROPOSED record's own principal");
+    assert_eq!(records[1].transition.as_ref().unwrap().principal, "policy", "the automatic check's own, separate principal -- a distinct logged transition, not a merge");
 
     let verify = server.client.verify_ledger(VerifyLedgerRequest { partition: "sat-1".to_string() }).await.expect("VerifyLedger").into_inner();
     assert!(verify.ok);
@@ -534,49 +546,62 @@ async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     server.shutdown().await;
 }
 
-/// **Acceptance test 2**: a `payload`-class command is `REJECTED` at `Check`, with the
-/// policy's exact reason text in the response, over the wire.
+/// **Acceptance test 2** (question 209(a)/D3): `Propose` of a `payload`-class command is
+/// refused `PERMISSION_DENIED` by its own automatic check, naming the policy's decision id
+/// and deny reasons -- but the `REJECTED` transition and its `PolicyDecision` are still
+/// durable on the ledger and still queryable: the refusal is on the RPC's return value, never
+/// on the record.
 #[tokio::test]
-async fn check_denies_a_payload_class_command_with_the_policys_exact_reason() {
+async fn propose_of_a_payload_class_command_is_refused_policy_denied_and_the_rejected_record_is_still_queryable() {
     let mut server = TestServer::spawn("policy-deny", 1_000).await;
 
-    server.client.propose(propose_request(base_command("cmd-2", "sat-1", "payload", ""), "model-x")).await.expect("Propose");
-    let checked = server.client.check(CheckRequest { command_id: "cmd-2".to_string() }).await.expect("Check").into_inner();
-    let checked_command = checked.command.expect("command present");
-    assert_eq!(checked_command.state, CommandState::Rejected as i32);
-    let decision = checked.decision.expect("Check attaches the PolicyDecision even for a denial");
+    let before = server.counters.get("policy_denied");
+    let err = server
+        .client
+        .propose(propose_request(base_command("cmd-2", "sat-1", "payload", ""), "model-x"))
+        .await
+        .expect_err("a payload-class command must be refused by Propose's own automatic check");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert!(err.message().contains("policy denied"), "{}", err.message());
+    assert!(err.message().contains("command_class payload is not admitted by policy"), "{}", err.message());
+    assert_eq!(server.counters.get("policy_denied"), before + 1, "the typed refusal must be counted");
+
+    // The REJECTED record is still durable, with its PolicyDecision attached -- and the
+    // command is still queryable at REJECTED, not vanished and not stuck at PROPOSED.
+    let queried = server.client.query(QueryRequest { selector: Some(Selector::CommandId("cmd-2".to_string())) }).await.expect("Query").into_inner();
+    assert_eq!(queried.commands.len(), 1, "{queried:?}");
+    let command = &queried.commands[0];
+    assert_eq!(command.state, CommandState::Rejected as i32);
+    assert_eq!(command.transitions.len(), 2, "PROPOSED then REJECTED -- the trail is unchanged");
+    let decision = queried.decisions.get("cmd-2").expect("the REJECTED record's PolicyDecision must be queryable too");
     assert!(!decision.allow);
     assert_eq!(decision.reasons, vec!["command_class payload is not admitted by policy".to_string()]);
+
+    let records = read_ledger_records(&server.ledger_dir, "sat-1");
+    assert_eq!(records.len(), 2);
+    assert_eq!(CommandState::try_from(records[1].transition.as_ref().unwrap().state).unwrap(), CommandState::Rejected);
+    assert!(records[1].decision.is_some(), "the REJECTED record carries the same PolicyDecision a deny gets, not a lesser one");
 
     server.shutdown().await;
 }
 
-/// **Acceptance test 3**: every illegal edge over the wire is refused `FAILED_PRECONDITION`
-/// with the typed `state::CommandError::IllegalTransition` message preserved.
+/// **Acceptance test 3**: an illegal edge over the wire is refused `FAILED_PRECONDITION` with
+/// the typed `state::CommandError::IllegalTransition` message preserved. Question 209(a)
+/// retired this test's old "Authorize-before-Check" case: `Propose` now runs the check edge
+/// automatically, so a command is never left `PROPOSED` in the ordinary path for a caller to
+/// skip ahead from (see [`check_is_refused_as_already_checked_for_every_post_proposed_state`]
+/// for the new shape that case took). `Dispatch`-before-`Authorize` and
+/// `Ack`-before-`Dispatch` still demonstrate the identical refusal.
 #[tokio::test]
 async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_typed_message() {
     let mut server = TestServer::spawn("illegal-edges", 1_000).await;
 
-    // Authorize-before-Check. A verifiable token (A2.1 verifies identity before attempting
-    // the state edge) -- this must fail on the *state machine's* own edge check, not on
-    // token verification, or this test would no longer be testing what its name says.
-    server.client.propose(propose_request(base_command("cmd-a", "sat-1", "mode", ""), "model-x")).await.unwrap();
-    let token = server.mint("operator-1");
-    let err = server
-        .client
-        .authorize(AuthorizeRequest { command_id: "cmd-a".to_string(), principal_token: token, delegation_id: String::new() })
-        .await
-        .expect_err("Authorize before Check must be refused");
-    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
-    assert!(err.message().contains("illegal command transition"), "{}", err.message());
-
     // Dispatch-before-Authorize. A verifiable, granting service_token (R3.1 verifies the
-    // service principal before attempting the state edge, exactly as A2.1 does for
-    // Authorize's own principal_token above) -- this must fail on the *state machine's* own
-    // edge check, not on service-principal verification, or this test would no longer be
-    // testing what its name says.
+    // service principal before attempting the state edge) -- this must fail on the *state
+    // machine's* own edge check, not on service-principal verification, or this test would no
+    // longer be testing what its name says. Propose's own automatic check (question 209(a))
+    // already moved this command to CHECKED by the time Propose returns.
     server.client.propose(propose_request(base_command("cmd-b", "sat-1", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-b".to_string() }).await.unwrap();
     let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
     let err = server
         .client
@@ -588,7 +613,6 @@ async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_ty
 
     // Ack-before-Dispatch.
     server.client.propose(propose_request(base_command("cmd-c", "sat-1", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-c".to_string() }).await.unwrap();
     let token = server.mint("operator-1");
     server
         .client
@@ -638,7 +662,6 @@ async fn dispatch_refuses_a_duplicate_idempotency_key_and_appends_no_second_ledg
 
     for id in ["cmd-x", "cmd-y"] {
         server.client.propose(propose_request(base_command(id, "sat-1", "mode", key), "model-x")).await.unwrap();
-        server.client.check(CheckRequest { command_id: id.to_string() }).await.unwrap();
         let token = server.mint("operator-1");
         server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap();
     }
@@ -686,7 +709,6 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
 
     let mut server1 = TestServer::spawn("idempotency-restart", 1_000).await;
     server1.client.propose(propose_request(base_command("cmd-r1", "sat-r", "mode", key), "model-x")).await.unwrap();
-    server1.client.check(CheckRequest { command_id: "cmd-r1".to_string() }).await.unwrap();
     let token1 = server1.mint("operator-1");
     server1
         .client
@@ -711,7 +733,6 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
     // assertion can pass.
     let mut server2 = TestServer::spawn_over(ledger_dir.clone(), 2_000).await;
     server2.client.propose(propose_request(base_command("cmd-r2", "sat-r", "mode", key), "model-x")).await.unwrap();
-    server2.client.check(CheckRequest { command_id: "cmd-r2".to_string() }).await.unwrap();
     let token2 = server2.mint("operator-1");
     server2.client.authorize(AuthorizeRequest { command_id: "cmd-r2".to_string(), principal_token: token2, delegation_id: String::new() }).await.unwrap();
 
@@ -739,9 +760,13 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
 async fn query_by_id_and_by_entity_with_a_state_filter() {
     let mut server = TestServer::spawn("query", 1_000).await;
 
+    // Question 209(a): Propose now checks automatically, so both commands reach CHECKED the
+    // instant Propose returns -- cmd-q2 is advanced one edge further, to AUTHORIZED, so the
+    // state_filter below still has two genuinely different states to discriminate between.
     server.client.propose(propose_request(base_command("cmd-q1", "sat-q", "mode", ""), "model-x")).await.unwrap();
     server.client.propose(propose_request(base_command("cmd-q2", "sat-q", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-q2".to_string() }).await.unwrap(); // cmd-q2 -> CHECKED; cmd-q1 stays PROPOSED
+    let token = server.mint("operator-1");
+    server.client.authorize(AuthorizeRequest { command_id: "cmd-q2".to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap(); // cmd-q2 -> AUTHORIZED; cmd-q1 stays CHECKED
 
     let by_id = server.client.query(QueryRequest { selector: Some(Selector::CommandId("cmd-q1".to_string())) }).await.expect("Query by id").into_inner();
     assert_eq!(by_id.commands.len(), 1);
@@ -764,7 +789,16 @@ async fn query_by_id_and_by_entity_with_a_state_filter() {
         .expect("Query by entity, filtered to CHECKED")
         .into_inner();
     assert_eq!(by_entity_checked.commands.len(), 1);
-    assert_eq!(by_entity_checked.commands[0].id, "cmd-q2");
+    assert_eq!(by_entity_checked.commands[0].id, "cmd-q1");
+
+    let by_entity_authorized = server
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: "sat-q".to_string(), state_filter: CommandState::Authorized as i32 })) })
+        .await
+        .expect("Query by entity, filtered to AUTHORIZED")
+        .into_inner();
+    assert_eq!(by_entity_authorized.commands.len(), 1);
+    assert_eq!(by_entity_authorized.commands[0].id, "cmd-q2");
 
     server.shutdown().await;
 }
@@ -807,7 +841,6 @@ async fn query_across_a_restart_returns_the_full_command_field_for_field() {
 
     let mut server1 = TestServer::spawn("query-restart", 1_000).await;
     server1.client.propose(propose_request(full_command(command_id, entity_id, "mode", "idem-restart-q"), "model-x")).await.unwrap();
-    server1.client.check(CheckRequest { command_id: command_id.to_string() }).await.unwrap();
     let token1 = server1.mint("operator-1");
     server1
         .client
@@ -862,9 +895,12 @@ async fn query_across_a_restart_returns_the_full_command_field_for_field() {
 
 /// **R3.5a's own acceptance test**: `Propose`'s `rationale`/`evidence_ids` -- previously
 /// accepted on the wire and never persisted anywhere -- now come back through `Query`'s new
-/// `proposals` map, and `Check`'s own `PolicyDecision` comes back through the new `decisions`
-/// map, for both an allowed and a denied command. Then a **second** `TestServer` over the
-/// same ledger directory (a real process restart, mirroring
+/// `proposals` map, and the automatic check's own `PolicyDecision` comes back through the new
+/// `decisions` map, for both an allowed and a (question 209(a)) policy-denied command --
+/// `Propose` itself refuses the denied one, but its proposal and decision must still be
+/// exactly as queryable as the allowed one's (`LedgerRecord.decision`'s own doc comment: "a
+/// denial must be as reproducible from the ledger as an approval"). Then a **second**
+/// `TestServer` over the same ledger directory (a real process restart, mirroring
 /// `query_across_a_restart_returns_the_full_command_field_for_field` above) proves both maps
 /// survive it, exactly like `commands` already does.
 #[tokio::test]
@@ -874,7 +910,7 @@ async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decisi
     let mut server1 = TestServer::spawn("proposal-decision-query", 1_000).await;
 
     // "mode" is unconditionally allowed by the shipped policy (profiles/policies/authority/
-    // command.rego) -- an ALLOW decision.
+    // command.rego) -- an ALLOW decision, from Propose's own automatic check.
     let allowed_id = "cmd-allowed";
     let allowed_request = ProposeRequest {
         proposal: Some(CommandProposal {
@@ -884,14 +920,14 @@ async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decisi
         }),
         principal: "model-x".to_string(),
     };
-    server1.client.propose(allowed_request).await.expect("propose the allowed command");
-    let checked = server1.client.check(CheckRequest { command_id: allowed_id.to_string() }).await.expect("check the allowed command").into_inner();
-    let expected_decision = checked.decision.expect("Check always returns a decision");
+    let proposed = server1.client.propose(allowed_request).await.expect("propose the allowed command").into_inner();
+    let expected_decision = proposed.decision.expect("Propose's automatic check always returns a decision on success");
     assert!(expected_decision.allow, "sanity: mode is unconditionally allowed by the shipped policy");
 
     // "payload" is unconditionally denied by the shipped policy -- a DENY decision, which
-    // must be exactly as recoverable from Query as an allow (LedgerRecord.decision's own doc
-    // comment: "a denial must be as reproducible from the ledger as an approval").
+    // must be exactly as recoverable from Query as an allow, even though Propose itself now
+    // refuses the RPC over it (question 209(a)/D3): the REJECTED record and its
+    // PolicyDecision are still durable and queryable.
     let denied_id = "cmd-denied";
     let denied_request = ProposeRequest {
         proposal: Some(CommandProposal {
@@ -901,43 +937,26 @@ async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decisi
         }),
         principal: "model-y".to_string(),
     };
-    server1.client.propose(denied_request).await.expect("propose the denied command");
-    let rejected = server1.client.check(CheckRequest { command_id: denied_id.to_string() }).await.expect("check the denied command").into_inner();
-    let expected_rejected_decision = rejected.decision.expect("Check always returns a decision, allow or deny");
-    assert!(!expected_rejected_decision.allow, "sanity: payload is unconditionally denied by the shipped policy");
-
-    // A third, still-PROPOSED command -- its proposal must be visible even though it was
-    // never Checked, and it must have no entry in `decisions` at all.
-    let proposed_only_id = "cmd-proposed-only";
-    let proposed_only_request = ProposeRequest {
-        proposal: Some(CommandProposal { command: Some(base_command(proposed_only_id, entity_id, "mode", "")), rationale: "awaiting review".to_string(), evidence_ids: vec![] }),
-        principal: "model-z".to_string(),
-    };
-    server1.client.propose(proposed_only_request).await.expect("propose the still-PROPOSED command");
+    let err = server1.client.propose(denied_request).await.expect_err("Propose itself refuses a policy denial");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
 
     let assert_query_response = |queried: &av_cdm::pb::QueryResponse| {
         let allowed_proposal = queried.proposals.get(allowed_id).expect("the allowed command's proposal must be in the map");
         assert_eq!(allowed_proposal.rationale, "scored radius drifted past threshold");
         assert_eq!(allowed_proposal.evidence_ids, vec!["run-1/query-7".to_string(), "run-1/query-9".to_string()]);
 
-        let denied_proposal = queried.proposals.get(denied_id).expect("the denied command's proposal must be in the map too");
+        let denied_proposal = queried.proposals.get(denied_id).expect("the denied command's proposal must be in the map too, even though Propose itself refused");
         assert_eq!(denied_proposal.rationale, "flagged payload for review");
         assert_eq!(denied_proposal.evidence_ids, vec!["run-2/query-3".to_string()]);
-
-        let proposed_only_proposal = queried.proposals.get(proposed_only_id).expect("a still-PROPOSED command's proposal must be in the map too");
-        assert_eq!(proposed_only_proposal.rationale, "awaiting review");
 
         let allow_decision = queried.decisions.get(allowed_id).expect("the allowed command's decision must be in the map");
         assert_eq!(allow_decision.decision_id, expected_decision.decision_id);
         assert_eq!(allow_decision.policy_hash, expected_decision.policy_hash);
         assert!(allow_decision.allow);
 
-        let deny_decision = queried.decisions.get(denied_id).expect("the denied command's decision must be in the map too");
-        assert_eq!(deny_decision.decision_id, expected_rejected_decision.decision_id);
+        let deny_decision = queried.decisions.get(denied_id).expect("the denied command's decision must be in the map too, even though Propose itself refused");
         assert!(!deny_decision.allow);
-        assert_eq!(deny_decision.reasons, expected_rejected_decision.reasons);
-
-        assert!(!queried.decisions.contains_key(proposed_only_id), "a still-PROPOSED command has no policy decision yet");
+        assert_eq!(deny_decision.reasons, vec!["command_class payload is not admitted by policy".to_string()]);
     };
 
     let queried1 = server1
@@ -946,22 +965,22 @@ async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decisi
         .await
         .expect("Query by entity")
         .into_inner();
-    assert_eq!(queried1.commands.len(), 3, "{queried1:?}");
+    assert_eq!(queried1.commands.len(), 2, "{queried1:?}");
     assert_query_response(&queried1);
 
-    // QueryByEntity with a PROPOSED filter must return exactly the still-PROPOSED command's
-    // own proposal, not the other two's.
-    let proposed_filtered = server1
+    // QueryByEntity with a REJECTED filter must return exactly the denied command's own
+    // proposal, not the allowed one's.
+    let rejected_filtered = server1
         .client
-        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Proposed as i32 })) })
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Rejected as i32 })) })
         .await
-        .expect("Query by entity, filtered to PROPOSED")
+        .expect("Query by entity, filtered to REJECTED")
         .into_inner();
-    assert_eq!(proposed_filtered.commands.len(), 1, "{proposed_filtered:?}");
-    assert_eq!(proposed_filtered.commands[0].id, proposed_only_id);
-    assert_eq!(proposed_filtered.proposals.len(), 1, "{proposed_filtered:?}");
-    assert_eq!(proposed_filtered.proposals.get(proposed_only_id).unwrap().rationale, "awaiting review");
-    assert!(proposed_filtered.decisions.is_empty());
+    assert_eq!(rejected_filtered.commands.len(), 1, "{rejected_filtered:?}");
+    assert_eq!(rejected_filtered.commands[0].id, denied_id);
+    assert_eq!(rejected_filtered.proposals.len(), 1, "{rejected_filtered:?}");
+    assert_eq!(rejected_filtered.proposals.get(denied_id).unwrap().rationale, "flagged payload for review");
+    assert!(!rejected_filtered.decisions.get(denied_id).unwrap().allow);
 
     // The restart proof: a second, independent TestServer over the exact same ledger
     // directory must answer the identical proposals/decisions from the ledger alone.
@@ -973,7 +992,7 @@ async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decisi
         .await
         .expect("Query by entity, after a restart")
         .into_inner();
-    assert_eq!(queried2.commands.len(), 3, "{queried2:?}");
+    assert_eq!(queried2.commands.len(), 2, "{queried2:?}");
     assert_query_response(&queried2);
 
     server2.shutdown().await;
@@ -986,7 +1005,6 @@ async fn verify_ledger_reports_a_tampered_partition_as_broken_at_the_right_seque
     let mut server = TestServer::spawn("verify-tamper", 1_000).await;
 
     server.client.propose(propose_request(base_command("cmd-t", "sat-t", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-t".to_string() }).await.unwrap();
     let token = server.mint("operator-1");
     server.client.authorize(AuthorizeRequest { command_id: "cmd-t".to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap();
 
@@ -1037,7 +1055,6 @@ fn non_loopback_bind_addresses_are_refused_with_a_typed_error_naming_question_15
 async fn authorize_with_an_unverifiable_token_is_refused_unauthenticated_and_appends_no_record() {
     let mut server = TestServer::spawn("a2-unverifiable-token", 1_000).await;
     server.client.propose(propose_request(base_command("cmd-bad-tok", "sat-a2", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-bad-tok".to_string() }).await.unwrap();
 
     let records_before = read_ledger_records(&server.ledger_dir, "sat-a2").len();
 
@@ -1077,7 +1094,6 @@ async fn authorize_with_an_unverifiable_token_is_refused_unauthenticated_and_app
 async fn authorize_refusal_message_never_contains_the_token_or_signature() {
     let mut server = TestServer::spawn("a2-no-leak", 1_000).await;
     server.client.propose(propose_request(base_command("cmd-leak-check", "sat-a2", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-leak-check".to_string() }).await.unwrap();
 
     // Wrong audience this time (a different refusal reason from test 9, same principle): a
     // real, correctly-signed token, deliberately minted for the wrong audience.
@@ -1104,7 +1120,6 @@ async fn authorize_refusal_message_never_contains_the_token_or_signature() {
 async fn authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token() {
     let mut server = TestServer::spawn("a2-verified-principal", 1_000).await;
     server.client.propose(propose_request(base_command("cmd-verified", "sat-a2", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-verified".to_string() }).await.unwrap();
 
     let token = server.mint("astronaut-jane");
     let authorized = server
@@ -1165,7 +1180,6 @@ fn audit_test_start_tai_ns() -> i64 {
 async fn authorize_with_the_right_role_authorizes_over_the_wire_with_the_ledger_asserted() {
     let mut server = TestServer::spawn("right-role", 1_000).await;
     server.client.propose(propose_request(base_command("cmd-right-role", "sat-role", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-right-role".to_string() }).await.unwrap();
 
     let token = server.mint("operator-1");
     let authorized = server
@@ -1194,7 +1208,6 @@ async fn authorize_with_the_right_role_authorizes_over_the_wire_with_the_ledger_
 async fn authorize_with_the_wrong_role_is_refused_with_the_exact_reason_over_the_wire() {
     let mut server = TestServer::spawn("wrong-role", 1_000).await;
     server.client.propose(propose_request(base_command("cmd-wrong-role", "sat-role", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-wrong-role".to_string() }).await.unwrap();
     let records_before = read_ledger_records(&server.ledger_dir, "sat-role").len();
 
     // "viewers" is not in the default role table at all -- deny by default.
@@ -1228,7 +1241,6 @@ async fn authorize_of_a_hazardous_class_without_mfa_is_refused_with_the_exact_re
     let mut command = base_command("cmd-hazardous", "sat-hazard", "mode", "");
     command.hazardous = true;
     server.client.propose(propose_request(command, "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-hazardous".to_string() }).await.unwrap();
 
     // The right role, but no amr/acr at all -- the MFA gate, not the role gate, must refuse.
     let token = server.mint_with_claims("operator-1", &["operators"], &[], "");
@@ -1268,7 +1280,6 @@ async fn authorize_under_a_delegation_is_refused_at_the_expiry_boundary_second_o
 
     // One nanosecond before expiry: accepted.
     server.client.propose(propose_request(base_command("cmd-before-expiry", "sat-exp", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-before-expiry".to_string() }).await.unwrap();
     server.clock.set(expires_tai_ns - 1);
     let token = server.mint("operator-1");
     let ok = server
@@ -1281,7 +1292,6 @@ async fn authorize_under_a_delegation_is_refused_at_the_expiry_boundary_second_o
 
     // Exactly at expires_tai_ns: refused.
     server.client.propose(propose_request(base_command("cmd-at-expiry", "sat-exp", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-at-expiry".to_string() }).await.unwrap();
     server.clock.set(expires_tai_ns);
     let token = server.mint("operator-1");
     let err = server
@@ -1314,7 +1324,6 @@ async fn a_delegation_grants_a_class_the_role_does_not_and_reaches_the_ledger_as
     let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("delegation-extra-class"), 1_000, roles, vec![delegation], vec![], "").await;
 
     server.client.propose(propose_request(base_command("cmd-burn", "sat-burn", "burn", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-burn".to_string() }).await.unwrap();
 
     let token = server.mint("operator-1");
     let authorized = server
@@ -1339,7 +1348,6 @@ async fn a_delegation_grants_a_class_the_role_does_not_and_reaches_the_ledger_as
 async fn audit_line_for_a_successful_authorization_is_exact() {
     let mut server = TestServer::spawn("audit-success", audit_test_start_tai_ns()).await;
     server.client.propose(propose_request(base_command("cmd-audit-ok", "sat-audit", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-audit-ok".to_string() }).await.unwrap();
     let token = server.mint("operator-1");
     server
         .client
@@ -1364,7 +1372,6 @@ async fn audit_line_for_a_successful_authorization_is_exact() {
 async fn audit_line_for_a_wrong_role_refusal_is_exact() {
     let mut server = TestServer::spawn("audit-wrong-role", audit_test_start_tai_ns()).await;
     server.client.propose(propose_request(base_command("cmd-audit-role", "sat-audit", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-audit-role".to_string() }).await.unwrap();
     let token = server.mint_with_claims("viewer-1", &["viewers"], &[], "");
     let _ = server
         .client
@@ -1394,7 +1401,6 @@ async fn audit_line_for_a_missing_mfa_refusal_is_exact() {
     let mut command = base_command("cmd-audit-mfa", "sat-audit", "mode", "");
     command.hazardous = true;
     server.client.propose(propose_request(command, "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-audit-mfa".to_string() }).await.unwrap();
     let token = server.mint_with_claims("operator-1", &["operators"], &[], "");
     let _ = server
         .client
@@ -1431,7 +1437,6 @@ async fn audit_line_for_an_expired_delegation_refusal_is_exact() {
     let mut server = TestServer::spawn_over_with_authz(tmp_ledger_dir("audit-expired-delegation"), start, BTreeMap::new(), vec![delegation], vec![], "").await;
 
     server.client.propose(propose_request(base_command("cmd-audit-exp", "sat-audit", "mode", ""), "model-x")).await.unwrap();
-    server.client.check(CheckRequest { command_id: "cmd-audit-exp".to_string() }).await.unwrap();
     let token = server.mint("operator-1");
     let _ = server
         .client
@@ -1478,12 +1483,12 @@ async fn spawn_r31_server(name: &str) -> TestServer {
     TestServer::spawn_over_with_service_roles(tmp_ledger_dir(name), 1_000, default_roles(), vec![], vec![], "", service_roles_fixture()).await
 }
 
-/// Proposes, checks and authorizes a fresh `"mode"`-class command, returning its id at
-/// `AUTHORIZED` -- the precondition every RPC below's success scenario needs (`Dispatch`
-/// directly; `Ack`/`Expire`/`Fail` via [`dispatched_command`], one real `Dispatch` further).
+/// Proposes (which now checks automatically, question 209(a)) and authorizes a fresh
+/// `"mode"`-class command, returning its id at `AUTHORIZED` -- the precondition every RPC
+/// below's success scenario needs (`Dispatch` directly; `Ack`/`Expire`/`Fail` via
+/// [`dispatched_command`], one real `Dispatch` further).
 async fn authorized_command(server: &mut TestServer, id: &str, entity_id: &str) -> String {
     server.client.propose(propose_request(base_command(id, entity_id, "mode", ""), "model-x")).await.expect("Propose");
-    server.client.check(CheckRequest { command_id: id.to_string() }).await.expect("Check");
     let token = server.mint("operator-1");
     server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
     id.to_string()
@@ -1498,9 +1503,10 @@ async fn dispatched_command(server: &mut TestServer, id: &str, entity_id: &str) 
     id.to_string()
 }
 
-/// A fresh, merely-`PROPOSED` command id -- all that scenarios 2-5 below need (an unverified/
-/// under-scoped `service_token` is refused *before* the state-machine edge is ever consulted,
-/// so these scenarios do not need the command in any particular precondition state).
+/// A fresh command id, freshly `Propose`d (question 209(a): now automatically `CHECKED`, not
+/// merely `PROPOSED`) -- all that scenarios 2-5 below need (an unverified/under-scoped
+/// `service_token` is refused *before* the state-machine edge is ever consulted, so these
+/// scenarios do not need the command in any particular precondition state).
 async fn proposed_command(server: &mut TestServer, id: &str, entity_id: &str) -> String {
     server.client.propose(propose_request(base_command(id, entity_id, "mode", ""), "model-x")).await.expect("Propose");
     id.to_string()
@@ -1932,6 +1938,131 @@ async fn every_service_principal_refusal_writes_one_audit_line_naming_the_comman
     // The disagreement refusal is decided AFTER the token verified, so it can and does name
     // the verified subject as its principal -- the two earlier ones cannot and do not.
     assert!(new_lines[2].contains("ground-segment-1"), "the disagreement refusal names the verified subject: {}", new_lines[2]);
+
+    server.shutdown().await;
+}
+
+// =================================================================================================
+// Question 209(a): `Propose` runs the check edge automatically. D4 (an automatic-check I/O
+// failure leaves the command PROPOSED, a typed, counted refusal) and D5 (the explicit `Check`
+// RPC stays callable, refused as already-checked for every post-PROPOSED state, and still
+// succeeds for a command D4 itself left PROPOSED).
+// =================================================================================================
+
+/// **Question 209(a)/D4**: `Propose`'s own automatic check can itself fail with I/O (never a
+/// policy denial, which is D3's own typed `PolicyDenied` refusal) -- this must leave the
+/// command exactly `PROPOSED`, still durable on the ledger and still queryable, with a typed,
+/// counted refusal whose message says in words that an explicit `Check` is the retry path.
+///
+/// Forced here by a **deterministic filesystem fault**, never a sleep and never a mutation of
+/// this process's own environment (question 199): a first, unrelated command is proposed for
+/// the same partition ("sat-io") first, warming `crate::ledger::Ledger`'s in-memory
+/// chain-state cache for that partition (see `Ledger::append`'s own doc: a cache hit skips the
+/// on-disk `recover_chain_state` READ entirely). The SECOND command's own `PROPOSED` append
+/// therefore needs only WRITE access to the partition file -- so revoking read permission
+/// (`0o200`, write-only) on that one file, between the two `Propose` calls, lets the second
+/// `Propose`'s own `PROPOSED` append succeed exactly as before, while `crate::authority::
+/// check_command`'s own rate-source read (`crate::rate::LedgerRateSource`, a fresh
+/// `File::open` in READ mode, independent of the chain-state cache) fails with a real,
+/// deterministic `PermissionDenied` -- no race, no timing dependency: the permission is
+/// changed entirely between two separate RPC calls, never mid-call.
+#[tokio::test]
+async fn proposes_automatic_check_io_failure_leaves_the_command_proposed_and_check_then_retries_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut server = TestServer::spawn("automatic-check-io-failure", 1_000).await;
+
+    // Warm the partition's chain-state cache with one full legal command, so the SECOND
+    // command's own PROPOSED append (below) never needs to read the file at all.
+    server.client.propose(propose_request(base_command("cmd-warm", "sat-io", "mode", ""), "model-x")).await.expect("warm the partition's chain-state cache");
+
+    let partition_file = ledger_file_path(&server.ledger_dir, "sat-io");
+    let readable_perms = std::fs::metadata(&partition_file).expect("stat the partition file").permissions();
+    let mut write_only = readable_perms.clone();
+    write_only.set_mode(0o200); // write-only: the next PROPOSED append still succeeds (only
+                                 // needs write access, and the chain-state cache is already
+                                 // warm), but the rate-source's own fresh File::open (READ)
+                                 // can no longer succeed.
+    std::fs::set_permissions(&partition_file, write_only).expect("revoke read permission on the partition file");
+
+    let before = server.counters.get("check_io_error");
+    let err = server
+        .client
+        .propose(propose_request(base_command("cmd-io-fail", "sat-io", "mode", ""), "model-x"))
+        .await
+        .expect_err("the automatic check's own rate-source read must fail with I/O, not silently succeed");
+    assert_eq!(err.code(), Code::Internal, "{err:?}");
+    assert!(err.message().contains("remains PROPOSED"), "the message must say in words that the command is untouched: {}", err.message());
+    assert!(err.message().contains("retry with an explicit Check"), "the message must name the retry path: {}", err.message());
+    assert_eq!(server.counters.get("check_io_error"), before + 1, "the typed I/O refusal must be counted");
+
+    // Restore read access before Query/Check below -- neither is the failure under test here.
+    std::fs::set_permissions(&partition_file, readable_perms).expect("restore read permission on the partition file");
+
+    let queried = server
+        .client
+        .query(QueryRequest { selector: Some(Selector::CommandId("cmd-io-fail".to_string())) })
+        .await
+        .expect("Query must still find the command")
+        .into_inner();
+    assert_eq!(queried.commands.len(), 1, "{queried:?}");
+    assert_eq!(queried.commands[0].state, CommandState::Proposed as i32, "the command must remain PROPOSED after the automatic check's own I/O failure");
+    assert_eq!(queried.commands[0].transitions.len(), 1, "only the PROPOSED transition -- the failed automatic check appended nothing to the in-memory index");
+
+    // D5's own retry path: an explicit Check against this still-PROPOSED command now succeeds,
+    // now that I/O is restored.
+    let checked = server
+        .client
+        .check(CheckRequest { command_id: "cmd-io-fail".to_string() })
+        .await
+        .expect("Check must retry successfully now that I/O is restored")
+        .into_inner();
+    assert_eq!(checked.command.unwrap().state, CommandState::Checked as i32);
+
+    server.shutdown().await;
+}
+
+/// **Question 209(a)/D5**: the explicit `Check` RPC is refused `FAILED_PRECONDITION`, naming
+/// the command's actual current state, once `Propose`'s own automatic check has already moved
+/// it past `PROPOSED` -- covers all three post-`PROPOSED` states `Check`'s own source-state
+/// requirement (`PROPOSED` only) can be violated from: `CHECKED` (the ordinary case, the
+/// automatic check already succeeded), `REJECTED` (the automatic check already denied), and
+/// `AUTHORIZED` (further advanced still). The one state `Check` still succeeds from,
+/// `PROPOSED` itself, is
+/// [`proposes_automatic_check_io_failure_leaves_the_command_proposed_and_check_then_retries_it`]'s
+/// own final assertion, immediately above.
+#[tokio::test]
+async fn check_is_refused_as_already_checked_for_every_post_proposed_state() {
+    let mut server = TestServer::spawn("check-already-checked", 1_000).await;
+
+    // CHECKED: the ordinary post-209(a) case.
+    server.client.propose(propose_request(base_command("cmd-already-checked", "sat-x", "mode", ""), "model-x")).await.expect("Propose auto-checks");
+    let err = server.client.check(CheckRequest { command_id: "cmd-already-checked".to_string() }).await.expect_err("Check on an already-CHECKED command must be refused");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("Checked"), "must name the command's actual current state: {}", err.message());
+
+    // REJECTED: the automatic check already denied ("payload" is unconditionally denied).
+    let err = server
+        .client
+        .propose(propose_request(base_command("cmd-already-rejected", "sat-x", "payload", ""), "model-x"))
+        .await
+        .expect_err("Propose itself refuses the policy denial");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    let err = server.client.check(CheckRequest { command_id: "cmd-already-rejected".to_string() }).await.expect_err("Check on an already-REJECTED command must be refused");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("Rejected"), "must name the command's actual current state: {}", err.message());
+
+    // AUTHORIZED: further advanced still.
+    server.client.propose(propose_request(base_command("cmd-already-authorized", "sat-x", "mode", ""), "model-x")).await.expect("Propose auto-checks");
+    let token = server.mint("operator-1");
+    server
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-already-authorized".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect("Authorize");
+    let err = server.client.check(CheckRequest { command_id: "cmd-already-authorized".to_string() }).await.expect_err("Check on an AUTHORIZED command must be refused");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("Authorized"), "must name the command's actual current state: {}", err.message());
 
     server.shutdown().await;
 }

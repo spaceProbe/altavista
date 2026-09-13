@@ -10,15 +10,17 @@
 //!
 //! ## Why this lives in `av-gateway`'s own `tests/`, not `av-command`'s
 //!
-//! The command must arrive at `PROPOSED` through the **gateway's real propose path**
+//! The command must arrive at `CHECKED` (question 209(a): `Propose` now runs the check edge
+//! automatically, as a separate logged transition -- so `PROPOSED` never persists on its own
+//! past the one `Propose` call) through the **gateway's real propose path**
 //! (`av_gateway::propose_flow::propose_command`, the one function both the MCP tool and
 //! `ModelProposeService` call -- see that module's own doc) so a real `ProposalEvidence`
 //! record genuinely exists on the gateway's own evidence ledger, not a hand-built one. That
 //! function needs `av_gateway::propose_only::ProposeOnlyAuthority` and
 //! `av_gateway::evidence::EvidenceRecorder`, both `av-gateway` types `av-command`'s own test
-//! suite cannot reach (the dependency only runs the other direction). `Check`/`Authorize`/
-//! `Dispatch`/`Ack` are then driven directly against the same real `CommandAuthorityService`
-//! over its real loopback socket, using the raw, non-restricted
+//! suite cannot reach (the dependency only runs the other direction). `Authorize`/`Dispatch`/
+//! `Ack` are then driven directly against the same real `CommandAuthorityService` over its
+//! real loopback socket, using the raw, non-restricted
 //! `av_command::pb::command_authority_service_client::CommandAuthorityServiceClient` this
 //! crate already depends on (a regular, non-dev dependency -- `av-gateway`'s own
 //! `Cargo.toml`) -- never through `ProposeOnlyAuthority`, whose whole point (D4) is that it
@@ -206,7 +208,7 @@ mod harness {
 use std::path::Path;
 
 use av_cdm::pb::{
-    AckLevel, AckRequest, AuthorizeRequest, CheckRequest, CommandState, CommandTransition, DispatchRequest, LedgerRecord, RunIdentity,
+    query_request::Selector, AckLevel, AckRequest, AuthorizeRequest, CommandState, CommandTransition, DispatchRequest, LedgerRecord, QueryRequest, RunIdentity,
 };
 use av_command::counters::Counters;
 use av_command::ledger::Ledger;
@@ -294,17 +296,23 @@ async fn ledger_decision_trail_and_proposal_reproduce_after_the_process_is_gone(
     let flow_counters = Counters::new();
     let output = propose_command(&harness.authority, &harness.evidence_ledger, &*harness.clock, &flow_counters, input)
         .await
-        .expect("the gateway's own real propose path succeeds");
-    assert_eq!(output.command.state, CommandState::Proposed as i32);
+        .expect("the gateway's own real propose path succeeds -- Propose now checks automatically (question 209(a))");
+    assert_eq!(output.command.state, CommandState::Checked as i32);
+    assert_eq!(output.command.transitions.len(), 2, "PROPOSED then CHECKED, from the ONE Propose call -- the trail is unchanged, just no longer a second RPC");
     let live_evidence = output.evidence.clone();
     assert_eq!(live_evidence.command_id, COMMAND_ID);
     assert!(!live_evidence.query_ids.is_empty(), "sanity: the evidence is real, not a default");
 
     let mut raw_client = harness.raw_client.clone();
 
-    let checked = raw_client.check(CheckRequest { command_id: COMMAND_ID.to_string() }).await.expect("Check").into_inner();
-    assert_eq!(checked.command.as_ref().unwrap().state, CommandState::Checked as i32);
-    let live_decision = checked.decision.clone().expect("Check attaches a real PolicyDecision");
+    // The automatic check's own PolicyDecision -- `ProposeOnlyAuthority` (D4's structural
+    // minimalism) returns only the `Command`, never the `PolicyDecision` alongside it, so
+    // this reads it back through the raw, unrestricted client's own real `Query` -- the
+    // IDENTICAL decision `Propose`'s own automatic check already recorded, never a second one
+    // this test provokes by calling `Check` again (which would now be refused: the command is
+    // already `CHECKED`).
+    let queried = raw_client.query(QueryRequest { selector: Some(Selector::CommandId(COMMAND_ID.to_string())) }).await.expect("Query").into_inner();
+    let live_decision = queried.decisions.get(COMMAND_ID).expect("Propose's automatic check always records a decision on success").clone();
     assert!(live_decision.allow, "the shipped policy admits the \"mode\" class: {live_decision:?}");
 
     let auth_token = harness.issuer.mint(&valid_claims(TEST_ISSUER, TEST_AUDIENCE, "operator-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S));

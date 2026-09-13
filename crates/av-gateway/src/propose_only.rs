@@ -41,8 +41,19 @@ pub enum ProposeRefusal {
     /// Any other `INVALID_ARGUMENT` (a malformed request the server itself refused, e.g. an
     /// empty `command.id`/`entity_id`).
     InvalidArgument { detail: String },
+    /// Question 209(a)/D3/D6: the real `Propose` RPC's own automatic check denied this
+    /// proposal by policy -- classified from `PERMISSION_DENIED`
+    /// (`av_command::service::ServiceError::PolicyDenied`'s own mapping), never from
+    /// message-text sniffing the way the two `INVALID_ARGUMENT` variants above are (a
+    /// `tonic::Code` is a stable, typed signal `av_command` itself commits to; matching on
+    /// it is strictly more robust than matching this module's other two variants' own
+    /// message substrings, which is why this one does not join them). `detail` is the typed
+    /// error's own `Display` text verbatim -- it already names the decision id and the deny
+    /// reasons (`ServiceError::PolicyDenied`'s own `Display` impl).
+    PolicyDenied { detail: String },
     /// The RPC itself failed (connection refused, deadline, or any other non-`INVALID_
-    /// ARGUMENT` status) rather than being refused by the state machine.
+    /// ARGUMENT`/non-`PERMISSION_DENIED` status) rather than being refused by the state
+    /// machine or by policy.
     Transport { detail: String },
 }
 
@@ -52,6 +63,7 @@ impl Counted for ProposeRefusal {
             ProposeRefusal::EnvelopeNotAllowed { .. } => "propose_envelope_not_allowed",
             ProposeRefusal::AlreadyStarted { .. } => "propose_already_started",
             ProposeRefusal::InvalidArgument { .. } => "propose_invalid_argument",
+            ProposeRefusal::PolicyDenied { .. } => "propose_policy_denied",
             ProposeRefusal::Transport { .. } => "propose_transport_error",
         }
     }
@@ -63,6 +75,7 @@ impl std::fmt::Display for ProposeRefusal {
             ProposeRefusal::EnvelopeNotAllowed { detail }
             | ProposeRefusal::AlreadyStarted { detail }
             | ProposeRefusal::InvalidArgument { detail }
+            | ProposeRefusal::PolicyDenied { detail }
             | ProposeRefusal::Transport { detail } => write!(f, "{detail}"),
         }
     }
@@ -70,9 +83,12 @@ impl std::fmt::Display for ProposeRefusal {
 
 /// Classifies a real `Propose` RPC's returned [`Status`] into a [`ProposeRefusal`]. Pinned
 /// against `av_command::state::CommandError`'s own `Display` text (see this module's own
-/// doc and the "pins the real server error text" test) -- both refusals map to
-/// `INVALID_ARGUMENT` (`crates/av-command/src/service.rs`'s own `to_status` doc: "same
-/// reasoning"), so the message text is the only way to tell them apart.
+/// doc and the "pins the real server error text" test) -- both `INVALID_ARGUMENT` refusals
+/// map to that one code (`crates/av-command/src/service.rs`'s own `to_status` doc: "same
+/// reasoning"), so the message text is the only way to tell them apart. Question 209(a)/D6:
+/// a policy denial is its own, distinct `tonic::Code` (`PERMISSION_DENIED`) -- classified on
+/// the code alone, never on message text, since the code itself is already the stable,
+/// typed signal.
 fn classify_status(status: &Status) -> ProposeRefusal {
     let detail = status.message().to_string();
     if status.code() == tonic::Code::InvalidArgument {
@@ -83,6 +99,9 @@ fn classify_status(status: &Status) -> ProposeRefusal {
             return ProposeRefusal::AlreadyStarted { detail };
         }
         return ProposeRefusal::InvalidArgument { detail };
+    }
+    if status.code() == tonic::Code::PermissionDenied {
+        return ProposeRefusal::PolicyDenied { detail };
     }
     ProposeRefusal::Transport { detail: format!("{}: {}", status.code(), detail) }
 }

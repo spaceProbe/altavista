@@ -5,7 +5,53 @@
 //! contains state-machine or policy logic of its own, only request validation, a call into
 //! [`crate::state`]/[`crate::authority`]/[`crate::ledger`], a ledger append (when the state
 //! module itself did not already do one -- [`crate::authority::check_command`] appends for
-//! `Check`; every other RPC appends here), and a [`tonic::Status`] mapping for the result.
+//! `Check` and for `Propose`'s own automatic check below; every other RPC appends here), and
+//! a [`tonic::Status`] mapping for the result.
+//!
+//! # A1.2 / the check edge, and question 209(a): `Propose` now runs it automatically
+//!
+//! A1.2 gave this crate exactly one place that decides *what happens* with a policy
+//! decision: [`crate::authority::check_command`], which drives [`crate::state::check`]/
+//! [`crate::state::reject`] and the matching ledger append together. Question 209(a) (the
+//! lead's real-browser drive of the console found the human step could never complete: the
+//! console only ever listed `PROPOSED` commands, nothing called `Check` on a human's behalf,
+//! and `Authorize` on a still-`PROPOSED` command is by design an illegal edge) is decided as:
+//! **`Check` runs automatically inside `Propose`**, policy being automatic by ADR-004 -- the
+//! transition stays separate and logged, so the trail is unchanged.
+//!
+//! [`CommandAuthorityServiceImpl::run_check`] (D1) is the **one** implementation of the check
+//! step this crate has: it calls [`crate::authority::check_command`], writes the audit line,
+//! and keeps [`Self::commands`]/[`Self::decisions`] live. **Both** [`Self::propose`] and
+//! [`Self::check`] call this one helper -- two copies of this logic is exactly how the two
+//! surfaces would drift apart. [`Self::propose`]'s own ordering is deliberate and unchanged
+//! in its first half: `state::propose`, [`Self::append_last_transition`] (with the
+//! `CommandProposal` attached), [`Self::put_command`], the `proposals` index -- so the
+//! `PROPOSED` record is durable *first* -- and only **then** does it call [`Self::run_check`],
+//! a second, independent ledger append with its own principal (`"policy"`) and its own
+//! reason (the decision id and policy hash, `crate::authority::format_reason`). A successful
+//! `Propose` therefore returns a `CHECKED` (or `REJECTED`) `Command` with **two** transitions
+//! on it, `decision: Some(...)`, never a bare `PROPOSED` one -- exactly the two ledger records
+//! a `Propose` followed by an explicit `Check` used to produce, just no longer two RPCs.
+//!
+//! A policy **denial** (D3) is a typed, counted refusal on `Propose` itself
+//! ([`ServiceError::PolicyDenied`], `PERMISSION_DENIED`, counter code `"policy_denied"`) --
+//! the `REJECTED` transition and its `PolicyDecision` are still durable on the ledger (`run_
+//! check` already wrote them, audit line included) and the command stays queryable at
+//! `REJECTED`; the refusal is on the RPC's *return value*, never on the record.
+//!
+//! An automatic-check **I/O failure** (D4 -- a ledger/rate read or append fault, never a
+//! policy denial) leaves the command exactly as `Propose`'s first half left it: `PROPOSED`,
+//! durable on the ledger and in [`Self::commands`] (`run_check` never calls [`Self::
+//! put_command`] on its own `Err` path). `Propose` returns the existing typed
+//! [`ServiceError::Check`] (`CheckCommandError::Io`, counter code `"check_io_error"`), whose
+//! message says in words that the command remains `PROPOSED` and that an explicit `Check` is
+//! the retry path.
+//!
+//! The explicit `Check` RPC (D5) therefore stays callable -- it is D4's retry path -- but a
+//! command this crate is holding is normally `CHECKED`/`REJECTED` the instant `Propose`
+//! returns, so calling `Check` again (or on anything past `PROPOSED`) hits the same
+//! [`state::CommandError::IllegalTransition`] refusal any other out-of-order edge in this
+//! file already gets, naming the command's actual current state.
 //!
 //! # In-memory index -- rebuilt from the ledger, not durable on its own (question 203(a))
 //!
@@ -389,6 +435,19 @@ pub enum ServiceError {
     /// A ledger append or ledger/rate-source read failed.
     #[error("ledger/rate I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// Question 209(a): `Propose` now runs the check edge automatically
+    /// ([`CommandAuthorityServiceImpl::run_check`]) as a separate, logged transition right
+    /// after the `PROPOSED` record lands. When policy denies, `Propose` itself must refuse --
+    /// the caller (a proposer, model or human) needs a typed signal it can act on, not a
+    /// `200 OK` carrying a `REJECTED` command it has to notice on its own. The `REJECTED`
+    /// transition and its `PolicyDecision` are already durable on the ledger by the time this
+    /// variant is ever constructed (`run_check` wrote them, exactly as an explicit `Check`
+    /// would have) -- this is a refusal on the RPC's *return value*, never on the record: the
+    /// command stays queryable at `REJECTED` either way. `decision_id`/`reasons` are copied
+    /// from that same `PolicyDecision`, not re-derived, so the caller sees exactly what the
+    /// ledger already recorded.
+    #[error("propose: policy denied (decision_id={decision_id:?}): {reasons:?}")]
+    PolicyDenied { decision_id: String, reasons: Vec<String> },
     /// A2.1: `Authorize`'s `principal_token` failed OIDC verification. See
     /// [`crate::oidc::TokenError`] for the full refusal vocabulary and the module doc's
     /// status-code section for why this maps to `UNAUTHENTICATED`.
@@ -438,6 +497,7 @@ impl Counted for ServiceError {
             ServiceError::Check(CheckCommandError::Io(_)) => "check_io_error",
             ServiceError::DuplicateIdempotencyKey(_) => "duplicate_idempotency_key",
             ServiceError::Io(_) => "io_error",
+            ServiceError::PolicyDenied { .. } => "policy_denied",
             ServiceError::TokenInvalid(e) => e.code(),
             ServiceError::Authz(e) => e.code(),
             ServiceError::ServiceAuthz(e) => e.code(),
@@ -485,6 +545,7 @@ fn to_status(err: ServiceError) -> Status {
         ServiceError::Check(CheckCommandError::Io(_)) => Status::new(Code::Internal, err.to_string()),
         ServiceError::DuplicateIdempotencyKey(_) => Status::new(Code::AlreadyExists, err.to_string()),
         ServiceError::Io(_) => Status::new(Code::Internal, err.to_string()),
+        ServiceError::PolicyDenied { .. } => Status::new(Code::PermissionDenied, err.to_string()),
         ServiceError::TokenInvalid(_) => Status::new(Code::Unauthenticated, err.to_string()),
         ServiceError::Authz(_) => Status::new(Code::PermissionDenied, err.to_string()),
         ServiceError::ServiceAuthz(_) => Status::new(Code::PermissionDenied, err.to_string()),
@@ -661,6 +722,37 @@ impl CommandAuthorityServiceImpl {
         Ok(())
     }
 
+    /// D1 (question 209(a)): the **one** implementation of the check step -- evaluates policy
+    /// over `command` (which must be `PROPOSED`) via [`crate::authority::check_command`],
+    /// writes the matching [`crate::audit`] line, and keeps [`Self::commands`]/[`Self::
+    /// decisions`] live, exactly as the old, single-copy `Check` RPC body used to inline.
+    /// **Both** the `Check` RPC and `Propose`'s new automatic check (question 209(a)) call
+    /// this one helper -- see the module doc's "A1.2 / the check edge" section for why two
+    /// copies of this logic is exactly how the two surfaces would drift apart.
+    ///
+    /// Returns `Ok` for **both** a policy allow and a policy deny (mirroring `crate::
+    /// authority::check_command`'s own contract: a deny is not a `CheckCommandError`, it is a
+    /// successful evaluation whose `PolicyDecision.allow` is `false`) -- only a real I/O
+    /// failure (ledger/rate read, ledger append, or the audit write) is `Err`. It is each
+    /// caller's own job to decide what a deny *means* for its own RPC: `Check` returns it to
+    /// the caller as a normal `CommandResponse` (unchanged since A1.2); `Propose` (D3) turns
+    /// it into a typed [`ServiceError::PolicyDenied`] refusal instead -- this helper itself
+    /// stays neutral between those two policies, exactly as `crate::authority::check_command`
+    /// stays neutral about what an allow/deny even means to the RPC layer.
+    fn run_check(&self, command: Command) -> Result<authority::CheckCommandResult, ServiceError> {
+        let rate_source = LedgerRateSource::new(&self.ledger);
+        let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)?;
+        let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
+        self.audit
+            .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
+            .map_err(ServiceError::Io)?;
+        self.put_command(result.command.clone());
+        // R3.5a: kept live -- `Query`'s `decisions` map (`authority.proto`) answers from this
+        // the instant `check_command`'s own ledger append has already succeeded.
+        self.decisions.lock().unwrap_or_else(|p| p.into_inner()).insert(result.command.id.clone(), result.decision.clone());
+        Ok(result)
+    }
+
     /// Writes a `Warning`-severity, `REFUSED` [`crate::audit`] event for a denied `Authorize`
     /// attempt -- shared by both of `Self::authorize`'s refusal paths (an unverifiable token,
     /// A2.1; a role/MFA/delegation refusal, A2.2), so the two refusal kinds are audited by
@@ -790,28 +882,40 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         // R3.5a: kept live the instant the append above has already succeeded -- mirrors
         // `Self::put_command`'s own "only after the ledger append succeeded" ordering.
         self.proposals.lock().unwrap_or_else(|p| p.into_inner()).insert(proposed.id.clone(), proposal);
-        Ok(Response::new(CommandResponse { command: Some(proposed), decision: None }))
+
+        // Question 209(a), D2: the check edge now runs automatically, right here, as a
+        // *separate* logged transition -- never folded into the `PROPOSED` append above. The
+        // ledger therefore still gets two records for a legal path (a `PROPOSED` one, just
+        // appended, and a `CHECKED`/`REJECTED` one below), each with its own principal and
+        // reason, exactly as it did when a human/model had to call `Check` itself -- "the
+        // trail is unchanged" (the ruling's own words). `self.run_check` (D1) is the *same*
+        // helper the `Check` RPC below calls -- there is exactly one implementation of the
+        // check step, not two that could drift apart.
+        let result = self.run_check(proposed).map_err(|e| self.to_status_counted(e))?;
+        if !result.decision.allow {
+            // D3: a policy denial is a typed, counted refusal on `Propose` itself -- the
+            // `REJECTED` transition and its `PolicyDecision` are already durable (`run_check`
+            // just wrote them, audit line included: do not write it a second time here), so
+            // this is a refusal on the RPC's *return value* only, not on the record.
+            return Err(self.to_status_counted(ServiceError::PolicyDenied { decision_id: result.decision.decision_id.clone(), reasons: result.decision.reasons.clone() }));
+        }
+        Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 
-    /// Does not go through [`Self::append_last_transition`] (`crate::authority::check_command`
-    /// already appends its own ledger record, with the `PolicyDecision` attached) -- so this
-    /// method writes its own [`crate::audit`] line directly, once `check_command` has
-    /// already succeeded, carrying that same `PolicyDecision` (`decisionId`/`policyHash` in
-    /// the structured data -- see `crate::audit`'s module doc).
+    /// Question 209(a): `Propose` now runs this exact check automatically (D1's shared
+    /// [`Self::run_check`] helper) as a separate, logged transition the instant the
+    /// `PROPOSED` record lands -- see [`Self::propose`]'s own doc comment. A command this
+    /// service is holding normally reaches `CHECKED`/`REJECTED` before `Propose` even
+    /// returns, so this RPC exists for exactly one legal case going forward: D4's automatic
+    /// check failed with I/O (a ledger/rate read or append fault, never a policy denial) and
+    /// left the command `PROPOSED` -- this is that retry path. Calling it against a command
+    /// already `CHECKED`/`REJECTED`/anything past `PROPOSED` is refused
+    /// `FAILED_PRECONDITION` by [`state::CommandError::IllegalTransition`], exactly like any
+    /// other out-of-order edge in this file (D5).
     async fn check(&self, request: Request<CheckRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
         let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
-        let rate_source = LedgerRateSource::new(&self.ledger);
-        let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)
-            .map_err(|e| self.to_status_counted(e.into()))?;
-        let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
-        self.audit
-            .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
-            .map_err(|e| self.to_status_counted(ServiceError::Io(e)))?;
-        self.put_command(result.command.clone());
-        // R3.5a: kept live -- `Query`'s new `decisions` map (`authority.proto`) answers from
-        // this the instant `check_command`'s own ledger append has already succeeded.
-        self.decisions.lock().unwrap_or_else(|p| p.into_inner()).insert(result.command.id.clone(), result.decision.clone());
+        let result = self.run_check(command).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 

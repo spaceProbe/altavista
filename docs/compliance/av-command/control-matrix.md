@@ -369,3 +369,33 @@ Ranked by what a reviewer would flag first:
     cannot_reach_the_authority`) that **skips visibly**, naming the missing image and its
     build script (`services/proposer/build-image.sh`) in the skip reason — not a silent
     omission, but also not evidence the isolation claim has ever been exercised on this host.
+14. **Resolved this round (question 209(a)): `Check` now runs automatically inside `Propose`,
+    closing the defect the lead's real-browser drive of the console found ("the console lists
+    only PROPOSED commands, nothing calls `Check` on a human's behalf, and `Authorize` on a
+    PROPOSED command is by design an illegal edge, so the operator can never authorize
+    anything from the console"). `CommandAuthorityServiceImpl::propose` (`crates/av-command/
+    src/service.rs`) still appends the `PROPOSED` record first (durable before anything else
+    runs), then calls the identical, single-implementation check helper
+    (`CommandAuthorityServiceImpl::run_check`, D1 — the SAME helper the `Check` RPC itself
+    calls, so the two surfaces cannot drift apart) as a **separate, logged transition** — the
+    trail is unchanged: a legal path still produces `PROPOSED` then `CHECKED` as two distinct
+    ledger records, each with its own principal (`model-x`/`"policy"`) and its own reason, not
+    a merge. A policy **denial** is now a typed, counted `PERMISSION_DENIED` refusal
+    (`ServiceError::PolicyDenied`, counter code `policy_denied`) on `Propose` itself, naming
+    the decision id and deny reasons — the `REJECTED` record and its `PolicyDecision` are
+    still durable and queryable (`Query`), the refusal is on the RPC's return value only, never
+    on the record (this does not change either of this document's own "`Propose`/`Check` still
+    carry no credential of their own" notes above, AC 3.1.1/3.1.2's and IA 3.5.1/3.5.2's rows:
+    the automatic check's own principal is still the fixed string `"policy"`, not a human
+    identity). An automatic-check **I/O failure** (never a policy denial) leaves the command
+    exactly `PROPOSED`, still durable, with the existing typed `check_io_error` refusal
+    (`ServiceError::Check`) whose message now says in words that an explicit `Check` is the
+    retry path — `Check` therefore stays callable for exactly that one case, refused
+    `FAILED_PRECONDITION` (naming the actual current state) for anything already past
+    `PROPOSED`. Test: `cargo test -p av-command --test grpc_service
+    full_legal_path_propose_check_authorize_dispatch_ack_end_to_end
+    propose_of_a_payload_class_command_is_refused_policy_denied_and_the_rejected_record_is_
+    still_queryable proposes_automatic_check_io_failure_leaves_the_command_proposed_and_check_
+    then_retries_it check_is_refused_as_already_checked_for_every_post_proposed_state` (the
+    first also pins the full five-state trail, `PROPOSED, CHECKED, AUTHORIZED, DISPATCHED,
+    ACKED`, produced by four RPCs instead of five).

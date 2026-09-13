@@ -13,8 +13,9 @@ either:
    routes.py`'s own fixture shape exactly (duplicated, not imported -- this repo's
    existing viewer test files each stay self-contained, `tests/test_viewer_feasibility_
    panel.py`'s own module docstring, restated here): builds and starts a REAL `av-command`
-   service, seeds real ledger state through the raw gRPC stub (`Propose`/`Check`, exactly
-   like a real proposer/policy evaluator would), then drives every `/api/command/*` route
+   service, seeds real ledger state through the raw gRPC stub (`Propose`, which now checks
+   automatically -- question 209(a) -- exactly like a real proposer/policy evaluator would
+   trigger), then drives every `/api/command/*` route
    through a REAL `create_app(profile="execution", ...)` app via `fastapi.testclient.
    TestClient` to collect REAL payloads -- a real rationale, a real decision id and policy
    hash, a real transition sequence, real refusal counters, and (the one deliberately
@@ -192,19 +193,11 @@ def command_service(command_bin, issuer, tmp_path_factory):
             proc.wait(timeout=10)
 
 
-def _propose_and_check(command_service, command_id: str, entity_id: str, command_class: str, rationale: str, evidence_ids: List[str]):
-    channel = grpc.insecure_channel(command_service.grpc_endpoint)
-    try:
-        stub = authority_pb2_grpc.CommandAuthorityServiceStub(channel)
-        command = command_pb2.Command(id=command_id, entity_id=entity_id, command_class=command_class)
-        proposal = command_pb2.CommandProposal(command=command, rationale=rationale, evidence_ids=evidence_ids)
-        stub.Propose(authority_pb2.ProposeRequest(proposal=proposal, principal="model-x"))
-        return stub.Check(authority_pb2.CheckRequest(command_id=command_id))
-    finally:
-        channel.close()
-
-
-def _propose_only(command_service, command_id: str, entity_id: str, command_class: str, rationale: str, evidence_ids: List[str]):
+def _propose(command_service, command_id: str, entity_id: str, command_class: str, rationale: str, evidence_ids: List[str]):
+    """Question 209(a): `Propose` now runs the check edge automatically, as a separate
+    logged transition -- one gRPC call already returns the command at CHECKED (with its
+    `PolicyDecision` attached), so this single helper replaces this file's old
+    `_propose_and_check`/`_propose_only` pair, which a bare `Propose` made identical."""
     channel = grpc.insecure_channel(command_service.grpc_endpoint)
     try:
         stub = authority_pb2_grpc.CommandAuthorityServiceStub(channel)
@@ -213,6 +206,33 @@ def _propose_only(command_service, command_id: str, entity_id: str, command_clas
         return stub.Propose(authority_pb2.ProposeRequest(proposal=proposal, principal="model-x"))
     finally:
         channel.close()
+
+
+def _partition_file(ledger_dir: Path, partition: str) -> Path:
+    """Duplicated from `tests/test_command_console_routes.py`'s own helper of the same name
+    -- see that module's own docstring for the full "documented on-disk contract" rationale."""
+    import hashlib
+
+    digest = hashlib.sha256(partition.encode("utf-8")).hexdigest()
+    return ledger_dir / f"{digest}.ledger"
+
+
+def _propose_leaving_it_proposed_via_a_forced_check_io_failure(command_service, command_id: str, entity_id: str, command_class: str) -> None:
+    """Question 209(a)/D4, reproduced here exactly as in `tests/test_command_console_
+    routes.py`'s own identically-named helper (duplicated, not imported -- see this module's
+    own docstring): the only way a command stays genuinely `PROPOSED` after `Propose` returns
+    is the automatic check's own I/O failing, forced here by a deterministic filesystem
+    fault -- never `time.sleep`, never a process-environment mutation (question 199)."""
+    _propose(command_service, f"{command_id}-warm", entity_id, command_class, "warm the partition's chain-state cache", [])
+
+    partition_file = _partition_file(command_service.ledger_dir, entity_id)
+    original_mode = partition_file.stat().st_mode
+    os.chmod(partition_file, 0o200)
+    try:
+        with pytest.raises(grpc.RpcError):
+            _propose(command_service, command_id, entity_id, command_class, "unchecked", [])
+    finally:
+        os.chmod(partition_file, original_mode)
 
 
 @pytest.fixture()
@@ -266,9 +286,9 @@ def test_design_profile_gets_its_own_real_profile_id(tmp_path):
 # ============================================================================== Part 3
 @pytest.fixture(scope="module")
 def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
-    """Seeds real ledger state (Propose/Check over the raw gRPC stub, `_propose_and_check`/
-    `_propose_only` above -- never through an HTTP route, exactly like
-    tests/test_command_console_routes.py's own convention), then drives EVERY
+    """Seeds real ledger state (`Propose`, which now checks automatically -- question
+    209(a) -- over the raw gRPC stub, `_propose` above -- never through an HTTP route,
+    exactly like tests/test_command_console_routes.py's own convention), then drives EVERY
     `/api/command/*` route through a real `create_app(profile="execution", ...)` app to
     collect the real payloads web/js/command_panel_check.mjs needs. Module-scoped: one
     real server, one real set of seeded commands, shared by every test function below
@@ -281,38 +301,43 @@ def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
         )
         http = TestClient(app)
 
-        # cmd-view: proposed only, never Checked -- stays in the PROPOSED-filtered
-        # proposals list for the whole test, with a real rationale/evidence.
+        # cmd-view: a real, ordinary Propose -- question 209(a) checks it automatically, so
+        # it lands at CHECKED, and the proposals route lists it anyway (commands awaiting a
+        # human are PROPOSED *and* CHECKED now) -- still with its real rationale/evidence.
         expected_proposal = {
             "commandId": "cmd-view", "entityId": CONSOLE_ENTITY, "commandClass": "mode",
             "rationale": "scored radius drifted past the execution-profile threshold",
             "evidenceIds": ["run-42/query-3", "run-42/query-5"],
         }
-        _propose_only(command_service, expected_proposal["commandId"], expected_proposal["entityId"],
-                      expected_proposal["commandClass"], expected_proposal["rationale"], expected_proposal["evidenceIds"])
+        _propose(command_service, expected_proposal["commandId"], expected_proposal["entityId"],
+                 expected_proposal["commandClass"], expected_proposal["rationale"], expected_proposal["evidenceIds"])
 
-        # cmd-a: proposed, Checked (real decision), then Authorized with a REAL valid
+        # cmd-a: proposed (auto-Checked, real decision), then Authorized with a REAL valid
         # operator token over the real HTTP route -- the command this file's decision/
         # trail/authorize sections are all about.
-        checked_a = _propose_and_check(command_service, "cmd-a", CONSOLE_ENTITY, "mode", "reason for cmd-a", [])
+        checked_a = _propose(command_service, "cmd-a", CONSOLE_ENTITY, "mode", "reason for cmd-a", [])
         assert checked_a.decision.allow, "sanity: mode is unconditionally allowed by the shipped policy"
         operator_token = issuer.mint(_valid_claims("operator-ok", ["operators"]))
         authorize_resp = http.post("/api/command/commands/cmd-a/authorize", json={"principalToken": operator_token})
         assert authorize_resp.status_code == 200, authorize_resp.text
         authorize_success_body = authorize_resp.json()
 
-        # cmd-wrong-role: proposed, Checked, then a REAL wrong-role authorize refusal over
-        # the real HTTP route -- both the refusal message AND the resulting counter are
-        # real artifacts of this one real call.
-        _propose_and_check(command_service, "cmd-wrong-role", CONSOLE_ENTITY, "mode", "reason for cmd-wrong-role", [])
+        # cmd-wrong-role: proposed (auto-Checked), then a REAL wrong-role authorize refusal
+        # over the real HTTP route -- both the refusal message AND the resulting counter are
+        # real artifacts of this one real call. It stays CHECKED (the refusal never advances
+        # the state machine), so -- question 209(a) -- it now DOES appear on the proposals
+        # route too (still awaiting a human), unlike before this round.
+        _propose(command_service, "cmd-wrong-role", CONSOLE_ENTITY, "mode", "reason for cmd-wrong-role", [])
         wrong_role_token = issuer.mint(_valid_claims("operator-wrong-role", ["nobody"]))
         refusal_resp = http.post("/api/command/commands/cmd-wrong-role/authorize", json={"principalToken": wrong_role_token})
         assert refusal_resp.status_code == 403, refusal_resp.text
         authorize_refusal_error = {"status": refusal_resp.status_code, "message": refusal_resp.json()["detail"]}
         assert wrong_role_token not in refusal_resp.text  # question 201(b)'s own rule, re-checked here too
 
-        # Real proposals (still-PROPOSED only -- cmd-a/cmd-wrong-role have both moved to
-        # CHECKED/AUTHORIZED by now and correctly do not appear here) and a real empty list.
+        # Real proposals -- commands awaiting a human, question 209(a): PROPOSED and CHECKED
+        # both (cmd-view and cmd-wrong-role, both still CHECKED); cmd-a has moved on to
+        # AUTHORIZED and correctly does not appear here. A real empty list for the other
+        # entity.
         proposals = http.get(f"/api/command/proposals?entity_id={CONSOLE_ENTITY}").json()
         assert any(p["commandId"] == expected_proposal["commandId"] for p in proposals["proposals"])
         empty_proposals = http.get(f"/api/command/proposals?entity_id={EMPTY_ENTITY}").json()
@@ -324,8 +349,10 @@ def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
             "COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED",
         ]
 
-        # cmd-proposed-only: never Checked -- the route's own real 404.
-        _propose_only(command_service, "cmd-proposed-only", CONSOLE_ENTITY, "mode", "unchecked", [])
+        # cmd-proposed-only: question 209(a)/D4 -- the only way a command stays genuinely
+        # PROPOSED now is the automatic check's own I/O failing, forced deterministically --
+        # the route's own real 404 for "not yet Checked".
+        _propose_leaving_it_proposed_via_a_forced_check_io_failure(command_service, "cmd-proposed-only", CONSOLE_ENTITY, "mode")
         not_yet_checked_resp = http.get("/api/command/commands/cmd-proposed-only/decision")
         assert not_yet_checked_resp.status_code == 404, not_yet_checked_resp.text
         decision_not_yet_checked_error = {"status": 404, "message": not_yet_checked_resp.json()["detail"]}

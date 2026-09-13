@@ -407,6 +407,15 @@ message ProposeRequest {
 // in-memory index, keyed by `Command.id`) to evaluate policy over. Carries no policy input
 // of its own -- the service reconstructs `PolicyInput` from the stored `Command` plus real
 // ledger rate history, exactly like `crates/av-command/src/authority.rs`'s `check_command`.
+//
+// Question 209(a): `Propose` now runs this exact check automatically, as a separate logged
+// transition, the instant its own `PROPOSED` record lands -- a command this service is
+// holding therefore normally reaches `CHECKED`/`REJECTED` before `Propose` even returns.
+// This RPC stays callable as the retry path for the one case that still leaves a command
+// `PROPOSED`: `Propose`'s automatic check failing with I/O (never a policy denial, which is
+// itself a typed `PERMISSION_DENIED` refusal on `Propose`, not a `PROPOSED` command left
+// behind). Calling `Check` against anything already past `PROPOSED` is refused
+// `FAILED_PRECONDITION`, naming the command's actual current state.
 message CheckRequest {
   string command_id = 1;
 }
