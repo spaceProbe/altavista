@@ -392,10 +392,36 @@ message AckRequest {
   string reason = 4;
 }
 
-// The response every one of `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack` returns: the
-// `Command` in its new state, plus the `PolicyDecision` that produced it -- present only for
-// `Check`'s response (the only one of the five that runs a policy decision); unset for the
-// other four.
+// `Expire` request (A3.2, D2): moves a `DISPATCHED` (or `AUTHORIZED`) command to `EXPIRED`,
+// e.g. when `crates/av-kernel`'s own `ExternalCommandSource`/`CommandOutcome::Expired`
+// reports that this command's `deadline_tai_ns` passed before it ever reached the wire, or
+// when it never even reached that far (see `state::expire`'s own doc comment for both legal
+// source states). `reason` is caller-supplied free text -- the kernel-side binding names the
+// deadline and the kernel epoch it evaluated the expiry at, so the ledger's own reason text
+// carries the same detail the kernel's own typed `CommandOutcome::Expired` did, not merely
+// "expired".
+message ExpireRequest {
+  string command_id = 1;
+  string reason = 2;
+}
+
+// `Fail` request (A3.2, D2): moves a `DISPATCHED` command to `FAILED`. Exists so every kernel
+// refusal the command already survived `Dispatch` for (`CommandOutcome::
+// DuplicateIdempotencyKey`, `CommandOutcome::Refused`, `CommandOutcome::
+// NotDispatchedRunEnded` -- `crates/av-kernel/src/drm/command_source.rs`) still lands on the
+// ledger, rather than leaving a `DISPATCHED` command with no further record of what actually
+// happened to it once the kernel decided against it (`docs/aiplane-plan.md`'s own "a failure
+// that leaves no trace" is exactly the defect shape round 1 found six times). `reason` is
+// caller-supplied free text naming the kernel's own typed refusal.
+message FailRequest {
+  string command_id = 1;
+  string reason = 2;
+}
+
+// The response every one of `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack`/`Expire`/`Fail`
+// returns: the `Command` in its new state, plus the `PolicyDecision` that produced it --
+// present only for `Check`'s response (the only one of these that runs a policy decision);
+// unset for every other one.
 message CommandResponse {
   Command command = 1;
   PolicyDecision decision = 2;
@@ -439,17 +465,20 @@ message VerifyLedgerResponse {
   bool ok = 2;
 }
 
-// The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
-// verify, over the state machine and ledger `crates/av-command`'s library modules already
-// implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
-// comment above for what it does and does not verify; see that module's own doc comment for
-// the `tonic::Status` code chosen for every refusal.
+// The command authority service: propose, check, authorize, dispatch, ack, expire, fail,
+// query, and ledger verify, over the state machine and ledger `crates/av-command`'s library
+// modules already implement (`crates/av-command/src/service.rs`). See each RPC's own request
+// message doc comment above for what it does and does not verify; see that module's own doc
+// comment for the `tonic::Status` code chosen for every refusal. `Expire`/`Fail` are A3.2
+// additions (D2) -- additive only, no existing rpc or field number above moves.
 service CommandAuthorityService {
   rpc Propose(ProposeRequest) returns (CommandResponse);
   rpc Check(CheckRequest) returns (CommandResponse);
   rpc Authorize(AuthorizeRequest) returns (CommandResponse);
   rpc Dispatch(DispatchRequest) returns (CommandResponse);
   rpc Ack(AckRequest) returns (CommandResponse);
+  rpc Expire(ExpireRequest) returns (CommandResponse);
+  rpc Fail(FailRequest) returns (CommandResponse);
   rpc Query(QueryRequest) returns (QueryResponse);
   rpc VerifyLedger(VerifyLedgerRequest) returns (VerifyLedgerResponse);
 }

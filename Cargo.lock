@@ -223,9 +223,13 @@ name = "av-run"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-command",
  "av-kernel",
  "gmat-sys",
  "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]

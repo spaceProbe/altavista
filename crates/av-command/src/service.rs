@@ -165,9 +165,28 @@
 //!
 //! Every RPC that reaches a real state transition -- not only `Authorize` -- writes an
 //! [`crate::audit`] line too: `CommandAuthorityServiceImpl::append_last_transition` (shared
-//! by `Propose`, `Authorize`'s success path, `Dispatch` and `Ack`) and `Check`'s own body (which does not
-//! go through that helper -- see its own doc comment) each call [`crate::audit::AuditWriter::
-//! write`] once the ledger append itself has already succeeded.
+//! by `Propose`, `Authorize`'s success path, `Dispatch`, `Ack`, `Expire` and `Fail`) and
+//! `Check`'s own body (which does not go through that helper -- see its own doc comment)
+//! each call [`crate::audit::AuditWriter::write`] once the ledger append itself has already
+//! succeeded.
+//!
+//! # `Expire`/`Fail` -- A3.2 (D2), closing the kernel-refusal-visibility gap
+//!
+//! `docs/aiplane-plan.md` milestone A3's binding (`crates/av-run`, out of this crate's own
+//! dependency graph -- see this module doc's own "`DispatchSink` -- not A3" section) drives
+//! `crates/av-kernel`'s `ExternalCommandSource`. Every one of that trait's
+//! `CommandOutcome`s that means "this command will never reach `ACKED`" must still land on
+//! this crate's own ledger -- a `DISPATCHED` command that silently stays `DISPATCHED`
+//! forever, because the kernel refused or expired it, is exactly the "a failure that leaves
+//! no trace" defect shape round 1's own review found six times. Two RPCs give the A3 binding
+//! a way to record that: `Expire` (`CommandOutcome::Expired` -> [`state::expire`],
+//! `DISPATCHED -> EXPIRED`) and `Fail` (`CommandOutcome::DuplicateIdempotencyKey`/`Refused`/
+//! `NotDispatchedRunEnded` -> [`state::fail`], `DISPATCHED -> FAILED`). Both are thin wire
+//! adapters exactly like `Dispatch`/`Ack` above: no state-machine logic of their own, a fixed
+//! service-identity principal (never a caller-supplied one -- neither RPC is a human-
+//! authorization gate), [`Self::append_last_transition`] for the ledger append and audit
+//! line, and a [`tonic::Status`] mapping through [`to_status`] identical to every other
+//! [`state::CommandError`] this module already handles.
 //!
 //! # Transport (question 155/84)
 //!
@@ -190,8 +209,8 @@ use tonic::{Code, Request, Response, Status};
 
 use av_cdm::pb::{
     query_request::Selector as QuerySelector, AckLevel, AckRequest, AuthorizeRequest, ChainVerification, CheckRequest, Command,
-    CommandResponse, CommandState, DispatchRequest, ProposeRequest, QueryByEntity, QueryRequest, QueryResponse,
-    VerifyLedgerRequest, VerifyLedgerResponse,
+    CommandResponse, CommandState, DispatchRequest, ExpireRequest, FailRequest, ProposeRequest, QueryByEntity, QueryRequest,
+    QueryResponse, VerifyLedgerRequest, VerifyLedgerResponse,
 };
 
 use crate::audit::{self, AuditWriter};
@@ -214,6 +233,16 @@ pub const DISPATCH_PRINCIPAL: &str = "ground-segment";
 /// The `CommandTransition.reason` text `Dispatch` writes -- naming the seam A3 fills, not a
 /// real transport (see the module doc's "`DispatchSink` -- not A3" section).
 pub const DISPATCH_REASON: &str = "handed to the DispatchSink (docs/aiplane-plan.md milestone A3 supplies the real kernel binding behind it)";
+
+/// The principal recorded on an `EXPIRED` transition produced by `Expire` (A3.2, D2) -- this
+/// service's own clock-driven bookkeeping, not a caller-supplied identity, mirroring
+/// [`DISPATCH_PRINCIPAL`]'s reasoning.
+pub const EXPIRE_PRINCIPAL: &str = "kernel-clock";
+
+/// The principal recorded on a `FAILED` transition produced by `Fail` (A3.2, D2) -- the
+/// kernel binding reporting its own refusal, not a caller-supplied identity, mirroring
+/// [`DISPATCH_PRINCIPAL`]'s reasoning.
+pub const FAIL_PRINCIPAL: &str = "kernel";
 
 /// Hands an `AUTHORIZED`-turned-`DISPATCHED` [`Command`] to whatever transport reaches the
 /// simulated asset. The one seam A3 (`docs/aiplane-plan.md`) fills with the real
@@ -299,6 +328,13 @@ fn to_status(err: ServiceError) -> Status {
                 CommandError::IllegalTransition { .. } => Code::FailedPrecondition,
                 CommandError::AlreadyStarted { .. } => Code::InvalidArgument,
                 CommandError::EnvelopeNotAllowed { .. } => Code::InvalidArgument,
+                // A3.2/D2: the `ACKED -> ACKED` edge itself exists (this is not an
+                // IllegalTransition); what is refused is the specific non-increasing
+                // ack_level value being re-asserted against a `Command` already in the
+                // required state -- FAILED_PRECONDITION for the identical reason
+                // IllegalTransition is: "the system is not in a state required for the
+                // operation's execution" (this ack_level can never legally apply now).
+                CommandError::AckLevelNotIncreasing { .. } => Code::FailedPrecondition,
             };
             Status::new(code, err.to_string())
         }
@@ -307,6 +343,13 @@ fn to_status(err: ServiceError) -> Status {
                 CommandError::IllegalTransition { .. } => Code::FailedPrecondition,
                 CommandError::AlreadyStarted { .. } => Code::InvalidArgument,
                 CommandError::EnvelopeNotAllowed { .. } => Code::InvalidArgument,
+                // A3.2/D2: the `ACKED -> ACKED` edge itself exists (this is not an
+                // IllegalTransition); what is refused is the specific non-increasing
+                // ack_level value being re-asserted against a `Command` already in the
+                // required state -- FAILED_PRECONDITION for the identical reason
+                // IllegalTransition is: "the system is not in a state required for the
+                // operation's execution" (this ack_level can never legally apply now).
+                CommandError::AckLevelNotIncreasing { .. } => Code::FailedPrecondition,
             };
             Status::new(code, err.to_string())
         }
@@ -579,6 +622,27 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         self.append_last_transition(&acked).map_err(to_status)?;
         self.put_command(acked.clone());
         Ok(Response::new(CommandResponse { command: Some(acked), decision: None }))
+    }
+
+    /// A3.2/D2: `DISPATCHED -> EXPIRED` (or `AUTHORIZED -> EXPIRED`, `state::expire`'s other
+    /// legal source state) -- see the module doc's "`Expire`/`Fail`" section.
+    async fn expire(&self, request: Request<ExpireRequest>) -> Result<Response<CommandResponse>, Status> {
+        let req = request.into_inner();
+        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let expired = state::expire(command, EXPIRE_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
+        self.append_last_transition(&expired).map_err(to_status)?;
+        self.put_command(expired.clone());
+        Ok(Response::new(CommandResponse { command: Some(expired), decision: None }))
+    }
+
+    /// A3.2/D2: `DISPATCHED -> FAILED` -- see the module doc's "`Expire`/`Fail`" section.
+    async fn fail(&self, request: Request<FailRequest>) -> Result<Response<CommandResponse>, Status> {
+        let req = request.into_inner();
+        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let failed = state::fail(command, FAIL_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
+        self.append_last_transition(&failed).map_err(to_status)?;
+        self.put_command(failed.clone());
+        Ok(Response::new(CommandResponse { command: Some(failed), decision: None }))
     }
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResponse>, Status> {
