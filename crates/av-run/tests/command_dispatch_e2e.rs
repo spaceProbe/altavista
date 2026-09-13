@@ -25,6 +25,28 @@
 //! grpc_service.rs`'s own module doc, which makes the identical record. No test calls
 //! `std::env::set_var`/`remove_var`; every clock is a `TestClock` this test constructs and
 //! never advances by sleeping.
+//!
+//! # `generate_command_trail_run_products_fixture` (R3.4, `docs/open-questions.md` question 206)
+//!
+//! `#[ignore]`d, mirroring `crates/av-kernel/tests/generate_e4a_ground_segment_fixture.rs`'s own
+//! convention exactly: this file already drives the whole A3.2 path end to end and holds the
+//! resulting `RunProducts` in memory (this test function's own `commanded`, above) -- the
+//! generator below re-runs the identical `safe1` dispatch and `execute()` call (same helpers,
+//! same constants, so it is byte-for-byte the same run, just under its own frozen `run_id`) and
+//! writes the result to `tests/fixtures/demo_command_trail.runproducts.bin`, a REAL `RunProducts`
+//! whose `events` genuinely include a command trail (`docs/aiplane-plan.md`'s round-2 declared
+//! gap: the existing `demo_measurements.runproducts.bin` fixture carries none). See `crates/
+//! av-gateway/tests/command_trail_run_products.rs` for the gateway proof this fixture exists to
+//! support. Regenerate with:
+//! ```text
+//! export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+//! export GMAT_ROOT="/Users/probe/code/AltaVista/GMAT R2026a"
+//! export CFS_MIRROR_DIR=/Users/probe/code/AltaVista/third_party/mirrors
+//! cargo test -p av-run --test command_dispatch_e2e -- --ignored --nocapture generate_command_trail_run_products_fixture
+//! ```
+//! Must only ever be re-run if this file's own `mode_command`/`load_bundle`/`TestService::spawn`
+//! helpers, or `drms/demo_attitude_command.{drm,sos}.yaml` themselves, change -- routine test
+//! runs must never regenerate this file, which is exactly why this test carries `#[ignore]`.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -36,15 +58,16 @@ use av_cdm::pb::{
     SosConfiguration, SystemDefinition,
 };
 use av_command::audit::{AuditSinkConfig, AuditWriter};
-use av_command::authz::{DelegationTable, RoleTable};
+use av_command::authz::{DelegationTable, RoleTable, ServiceRoleTable};
 use av_command::clock::{Clock, TestClock};
+use av_command::counters::Counters;
 use av_command::ledger::Ledger;
 use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_client::CommandAuthorityServiceClient;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
 use av_command::service::{AuthzConfig, CommandAuthorityServiceImpl, DispatchSink};
-use av_command::test_support::{valid_claims, TestIssuer};
+use av_command::test_support::{claims_with_roles_and_mfa, valid_claims, RoleAndMfaClaims, TestIssuer};
 use av_kernel::drm::command_source::{pack_double_value, ExternalCommandSource};
 use av_kernel::drm::{execute, schema, RunConfig};
 use av_run::command_adapter::KernelCommandAdapter;
@@ -76,6 +99,15 @@ fn tmp_dir(name: &str) -> PathBuf {
 fn default_roles() -> BTreeMap<String, Vec<String>> {
     let mut roles = BTreeMap::new();
     roles.insert("operators".to_string(), vec!["mode".to_string()]);
+    roles
+}
+
+/// R3.1: the service-role table this test's `TestService` grants -- `"ground-segment"` may
+/// call all four service RPCs. Disjoint from [`default_roles`]'s `"operators"` by
+/// construction, matching `av_command::authz::check_service_roles_disjoint`'s own requirement.
+fn default_service_roles() -> BTreeMap<String, Vec<String>> {
+    let mut roles = BTreeMap::new();
+    roles.insert("ground-segment".to_string(), vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]);
     roles
 }
 
@@ -163,7 +195,16 @@ impl TestService {
         let addr: SocketAddr = listener.local_addr().expect("local_addr");
         let channel = Endpoint::from_shared(format!("http://{addr}")).expect("valid endpoint URI").connect_lazy();
 
-        let adapter = Arc::new(KernelCommandAdapter::new(CommandAuthorityServiceClient::new(channel.clone()), tokio::runtime::Handle::current()));
+        // R3.1: the adapter's own service_token, minted under a service role
+        // (default_service_roles's "ground-segment") the servicer's own service_role_table
+        // below actually grants -- see crates/av-command/src/service.rs's module doc, "R3.1: a
+        // service principal, verified like a human token". KERNEL_PRINCIPAL ("kernel" --
+        // av_run::command_adapter's own module doc) is the label the adapter declares on
+        // every Ack/Expire/Fail, so this token's own verified sub must equal it or every one
+        // of those calls would be refused PrincipalMismatch.
+        let adapter_service_token =
+            issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, av_run::command_adapter::KERNEL_PRINCIPAL, TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["ground-segment"], amr: &[], acr: "" }));
+        let adapter = Arc::new(KernelCommandAdapter::new(CommandAuthorityServiceClient::new(channel.clone()), adapter_service_token, tokio::runtime::Handle::current()));
 
         let audit_path = ledger_dir.join("audit.log");
         let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
@@ -173,6 +214,8 @@ impl TestService {
             mfa_amr_methods: Arc::new(vec![]),
             mfa_acr: Arc::new(String::new()),
             audit,
+            service_role_table: Arc::new(ServiceRoleTable::from_config(&default_service_roles()).expect("this file's own service-role fixture always uses recognized rpc names")),
+            counters: Arc::new(Counters::new()),
         };
 
         let servicer = CommandAuthorityServiceImpl::new(
@@ -206,6 +249,14 @@ impl TestService {
         self.issuer.mint(&valid_claims(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S))
     }
 
+    /// R3.1: mints a real, fully-valid service token carrying `groups` -- for this test's own
+    /// direct `Dispatch` RPC calls (`Self::client`, never the adapter's own client, which is
+    /// wired to a separate, fixed service_token at construction -- see `Self::spawn`'s own
+    /// comment).
+    fn mint_service(&self, sub: &str, groups: &[&str]) -> String {
+        self.issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups, amr: &[], acr: "" }))
+    }
+
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         self.handle.await.expect("server task joins cleanly at test end");
@@ -231,7 +282,8 @@ async fn propose_check_authorize_dispatch(service: &mut TestService, command: Co
         .authorize(av_cdm::pb::AuthorizeRequest { command_id: id.clone(), principal_token: token, delegation_id: String::new() })
         .await
         .expect("Authorize");
-    service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: id }).await.expect("Dispatch");
+    let dispatch_token = service.mint_service("ground-segment-1", &["ground-segment"]);
+    service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: id, service_token: dispatch_token }).await.expect("Dispatch");
 }
 
 fn read_port_traffic_log(path: &Path) -> PortTrafficLog {
@@ -408,7 +460,8 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
         service.client.check(av_cdm::pb::CheckRequest { command_id: "dup1".to_string() }).await.expect("Check");
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup1".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
-        service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup1".to_string() }).await.expect("first Dispatch must succeed");
+        let dispatch_token1 = service.mint_service("ground-segment-1", &["ground-segment"]);
+        service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup1".to_string(), service_token: dispatch_token1 }).await.expect("first Dispatch must succeed");
 
         // A second Propose/Check/Authorize for a fresh command id, but the identical
         // idempotency_key -- the second Dispatch must be refused ALREADY_EXISTS.
@@ -418,7 +471,8 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
         service.client.check(av_cdm::pb::CheckRequest { command_id: "dup2".to_string() }).await.expect("Check");
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup2".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
-        let err = service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup2".to_string() }).await.expect_err("a second Dispatch sharing dup1's own idempotency_key must be refused");
+        let dispatch_token2 = service.mint_service("ground-segment-1", &["ground-segment"]);
+        let err = service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup2".to_string(), service_token: dispatch_token2 }).await.expect_err("a second Dispatch sharing dup1's own idempotency_key must be refused");
         assert_eq!(err.code(), Code::AlreadyExists, "{err:?}");
     });
 
@@ -427,6 +481,70 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
     let queued = service.adapter.poll(0);
     assert_eq!(queued.len(), 1, "the refused second Dispatch must never have reached the DispatchSink at all: {queued:#?}");
     assert_eq!(queued[0].id, "dup1");
+
+    rt.block_on(service.shutdown());
+}
+
+// =================================================================================================
+// R3.4 fixture generator (docs/open-questions.md question 206) -- see this file's own module doc,
+// "generate_command_trail_run_products_fixture", for the full rationale and the exact recipe.
+// =================================================================================================
+
+fn repo_root_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+}
+
+/// This test's own `run_id`, frozen -- the same convention `crates/av-gateway/tests/
+/// real_run_products.rs`'s own `FIXTURE_RUN_ID`/`demo-measurements-frozen` and `crates/
+/// av-proposer/tests/common/mod.rs`'s own `FIXTURE_RUN_ID`/`demo_two_instance_frozen_fixture`
+/// already use for a committed `RunProducts` fixture's own run identity.
+pub const COMMAND_TRAIL_FIXTURE_RUN_ID: &str = "demo-command-trail-frozen";
+
+#[test]
+#[ignore = "writes into tests/fixtures/ -- run manually, see this file's own module doc"]
+fn generate_command_trail_run_products_fixture() {
+    let rt = tokio::runtime::Runtime::new().expect("build a tokio runtime");
+    let mut service = rt.block_on(TestService::spawn("fixture-gen", 1_000));
+
+    let safe_at = START_TAI_NS + 10_000_000_000;
+    rt.block_on(propose_check_authorize_dispatch(&mut service, mode_command("safe1", 0.0, safe_at, 0)));
+
+    let _engine = gmat_sys::engine_lock();
+    let (drm, sos, systems) = load_bundle();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let products = execute(RunConfig {
+        gmat: &gmat,
+        drm: &drm,
+        sos: &sos,
+        systems: &systems,
+        run_id: COMMAND_TRAIL_FIXTURE_RUN_ID.to_string(),
+        error_mode: Default::default(),
+        products_dir: None,
+        replay: None,
+        command_source: Some(service.adapter.as_ref()),
+    })
+    .expect("commanded run executes");
+
+    // Sanity, before committing anything to disk: the real command trail this fixture exists
+    // to carry is genuinely present -- mirrors `full_command_trail_through_the_real_service_and_
+    // kernel_acks_at_all_three_levels_with_a_physical_effect`'s own identical assertion above
+    // (this generator must never silently drift from what that test already proves this exact
+    // setup produces).
+    let transitions: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "safe1").collect();
+    let states: Vec<&str> = transitions.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(states, vec!["COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED", "COMMAND_STATE_DISPATCHED", "COMMAND_STATE_ACKED"], "{transitions:#?}");
+
+    let out_dir = repo_root_fixtures_dir();
+    std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| panic!("creating {}: {e}", out_dir.display()));
+    let out_path = out_dir.join("demo_command_trail.runproducts.bin");
+    let bytes = products.to_proto().encode_to_vec();
+    std::fs::write(&out_path, &bytes).unwrap_or_else(|e| panic!("writing {}: {e}", out_path.display()));
+
+    println!("wrote {} ({} bytes)", out_path.display(), bytes.len());
+    println!("run_id = {}", products.provenance.run_id);
+    for e in &transitions {
+        println!("  {} @ tai_ns={} reference_id={}", e.name, e.tai_ns, e.reference_id);
+    }
 
     rt.block_on(service.shutdown());
 }

@@ -161,6 +161,7 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-command",
+ "http",
  "openssl",
  "prost",
  "prost-build",
@@ -172,6 +173,8 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -276,6 +279,31 @@ dependencies = [
  "prost-types",
  "thiserror",
  "tokio",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "av-proposer"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "av-cdm",
+ "av-command",
+ "av-gateway",
+ "http",
+ "nalgebra",
+ "openssl",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "spoore-cdm",
+ "spoore-ml",
+ "spoore-models",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
 ]

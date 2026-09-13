@@ -1,0 +1,104 @@
+[package]
+name = "av-proposer"
+publish = false
+description = "A4b (milestone A4, docs/aiplane-plan.md): the first model sidecar -- a deterministic, rule-based station-keeping proposer over the av-gateway network propose path (ModelProposeService/DataGatewayService), implementing spoore's ModelService contract (a real spoore_models::KalmanFilter, decision 11(b))."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1 generated types (RunIdentity, GatewayQueryRequest/Response, GatewaySelector,
+# Command, CommandProposal, CommandState, ProposalEvidence, ProposeCommandRequest/Response,
+# ScoreResult, Unit -- from run.proto/core.proto/command.proto/authority.proto) -- this crate
+# never generates a second, independently-compiled copy of a wire type av-cdm already
+# compiles (crates/av-cdm/build.rs walks every proto/altavista/v1/*.proto file, this one
+# included), mirroring crates/av-gateway/Cargo.toml's own comment.
+av-cdm = { path = "../av-cdm" }
+# D8/D4: av_command::clock::Clock (the injected clock this crate's own rule and command-id
+# derivation use -- never a direct wall-clock read) and av_command::counters::{Counted,
+# Counters} (ADR-004's "everything rejected is counted" primitive, moved to this crate in
+# R3.1). NOT for av_command::pb or av_command::service: this crate must generate no client
+# for CommandAuthorityService at all (D4a's own acceptance line 1) and this dependency's own
+# generated `pb` module is never `pub use`d or referenced by this crate's code -- see
+# crates/av-proposer/tests/no_command_authority_client.rs for the structural proof.
+av-command = { path = "../av-command" }
+prost.workspace = true
+prost-types.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# D2: the ModelService contract by path dependency on spoore (decision 11(b); question 12's
+# precedent), genuinely implemented over a real spoore_models::KalmanFilter -- never a stub.
+# spoore-cdm is already a workspace path dependency (crates/av-track/Cargo.toml's own
+# convention, matched here exactly); spoore-models is declared the same way
+# crates/av-track/Cargo.toml declares it, by direct path (not yet a workspace.dependencies
+# entry -- av-track's own Cargo.toml does not use one for it either).
+spoore-cdm.workspace = true
+spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }
+nalgebra.workspace = true
+
+# D4: SHA-256 for Command.id/idempotency_key, through the openssl crate against the system
+# OpenSSL (ADR-004's crypto rule) -- copies crates/av-gateway/src/query_id.rs's convention
+# byte for byte (this crate's own crates/av-proposer/src/command_id.rs). No sha2, no ring.
+openssl = "0.10"
+
+# This crate is BOTH a client (DataGatewayService/ModelProposeService, dialing av-gateway)
+# AND a server (spoore's ModelService, D2/D5's `--serve-model-service` mode) -- both
+# directions live in this one crate's production code, mirroring crates/av-gateway/
+# Cargo.toml's own tonic-dependency comment verbatim. Default features off, "tls"/
+# "tls-native-roots"/"tls-webpki-roots" never enabled -- those pull `tokio-rustls` -> `ring`,
+# forbidden by ADR-004's crypto rule.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync"] }
+# `src/bin/av-proposer.rs`'s `--serve-model-service` mode needs a `Stream` of accepted
+# connections for `tonic::transport::Server::serve_with_incoming` (mirroring `crates/
+# av-ingest/src/bin/av-ingest-server.rs`'s own `TcpListenerStream` use, itself needed only so
+# this binary can print the bound address BEFORE the server starts accepting -- question 199's
+# "readiness line" convention). A regular dependency, not dev-only: this is production binary
+# code, not a test.
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[build-dependencies]
+# D2: build_server(true)/build_client(false) over spoore's model_service.proto, extern_path
+# onto spoore_cdm::proto -- mirrors crates/spoore-ml/build.rs's own build.rs exactly (that
+# crate's own doc: "spoore deliberately generates no Rust server of its own").
+#
+# The SAME crate also drives tonic_build::manual (unconditionally compiled into tonic-build,
+# not behind any cargo feature -- see crates/av-proposer/build.rs's own doc) to generate ONLY
+# a DataGatewayService/ModelProposeService CLIENT, by hand-declared Service/Method
+# descriptors against av_cdm::pb's already-compiled message types -- never by parsing
+# authority.proto's own text, which is what keeps CommandAuthorityService's client (also
+# declared in that file) out of this crate's OUT_DIR structurally, not by convention.
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+
+[dev-dependencies]
+# This crate's own integration tests spin up a REAL av-gateway (DataGatewayService +
+# ModelProposeService) in front of a REAL av_command::service::CommandAuthorityServiceImpl
+# and a real on-disk ledger, mirroring crates/av-gateway/tests/propose_only.rs's own
+# TestServer pattern -- see that crate's Cargo.toml comment for exactly why test-support is
+# needed only for tests.
+av-command = { path = "../av-command", features = ["test-support"] }
+av-gateway = { path = "../av-gateway" }
+approx = "0.5"
+# `tests/no_command_authority_client.rs`'s own crafted raw-path call builds a
+# `tonic::client::Grpc` request by hand -- already in this workspace's Cargo.lock as tonic
+# 0.12's own non-optional dependency (`[dependencies.http]`, version "1"), naming it directly
+# adds no new crate to this crate's dependency tree.
+http = "1"
+# D2's own acceptance evidence needs A client for the ModelService this crate serves --
+# build.rs deliberately compiles that contract with build_client(false) (mirroring
+# spoore-ml/build.rs's own build_server(false): each side of the contract generates only its
+# own half), so this crate's own production code never carries a ModelService client at all.
+# `spoore-ml` IS that contract's real calling half (`ModelClient`, the same type a real
+# engine would use to call this exact sidecar) -- a dev-dependency, never linked into the
+# shipped `av-proposer` binary, used only by `tests/model_service.rs` to drive the served
+# ModelService over a real loopback channel and decode its answers through the same fallible
+# `TryFrom` boundary spoore-ml's own module doc describes.
+spoore-ml = { path = "/Users/probe/code/spoore/crates/spoore-ml" }
+
+[[bin]]
+name = "av-proposer"
+path = "src/bin/av-proposer.rs"

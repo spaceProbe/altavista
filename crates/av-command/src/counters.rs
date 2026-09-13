@@ -1,12 +1,25 @@
 //! ADR-004: "Everything rejected is counted." One shared counting primitive so every
-//! refusal in this crate (D1's identity refusals, D2's label refusals, D3's tool/frame
-//! refusals, D4's crafted-authorize refusals) increments through the same mechanism,
-//! never a bespoke `AtomicU64` per call site that a future refusal path could forget to
-//! wire up.
+//! refusal increments through the same mechanism, never a bespoke `AtomicU64` per call site
+//! that a future refusal path could forget to wire up.
+//!
+//! **R3.1: moved here from `crates/av-gateway/src/counters.rs`, unchanged in behaviour**
+//! (`docs/aiplane-plan.md` round 3; `docs/open-questions.md` question 206's open item on
+//! service principals). `av-gateway` originated this primitive (A4a) for its own D1-D4
+//! refusal families ([`crate::catalogue::ResolveError`], [`crate::labels::LabelRefusal`],
+//! [`crate::mcp::McpRefusal`], [`crate::propose_only::ProposeRefusal`]); this round gives
+//! `av-command` its own refusal surface for the first time ([`crate::oidc::TokenError`],
+//! [`crate::authz::AuthzError`]/[`crate::authz::ServiceAuthzError`], [`crate::state::
+//! CommandError`], [`crate::service::ServiceError`]) and needs the identical mechanism.
+//! `av-command` cannot depend on `av-gateway` (the reverse dependency already exists and a
+//! cycle is impossible), so the module moves to the lower crate in the dependency graph
+//! rather than being duplicated: `av-gateway` now re-exports this module under its own
+//! `counters` path (`crates/av-gateway/src/lib.rs`) so no existing `av-gateway` call site
+//! changed at all -- every `crate::counters::{Counted, Counters}` reference there still
+//! resolves, to this exact type.
 //!
 //! Keyed by a stable `&'static str` code (each typed refusal enum names its own code via a
 //! `code()` method) rather than the enum type itself, so [`Counters`] stays one simple type
-//! usable from every module in this crate without a generic parameter per refusal kind.
+//! usable from every module in either crate without a generic parameter per refusal kind.
 //! `BTreeMap`, not `HashMap` (ADR-004's determinism rule: [`Counters::snapshot`] is a
 //! deterministic, sorted report, never insertion- or hash-order-dependent).
 
@@ -14,9 +27,11 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 /// A deny-by-default refusal reason that can be counted. Implemented by every typed
-/// refusal enum in this crate ([`crate::catalogue::ResolveError`],
-/// [`crate::labels::LabelRefusal`], [`crate::mcp::McpRefusal`], [`crate::propose_only::
-/// ProposeRefusal`]) so [`Counters::record`] takes any of them uniformly.
+/// refusal enum in either crate ([`crate::oidc::TokenError`], [`crate::authz::AuthzError`],
+/// [`crate::authz::ServiceAuthzError`], [`crate::state::CommandError`], [`crate::service::
+/// ServiceError`] here; `av_gateway::catalogue::ResolveError`, `av_gateway::labels::
+/// LabelRefusal`, `av_gateway::mcp::McpRefusal`, `av_gateway::propose_only::ProposeRefusal`
+/// there) so [`Counters::record`] takes any of them uniformly.
 pub trait Counted {
     /// A stable, `snake_case` identifier for this exact refusal kind -- never the
     /// `Display`/`Debug` text (which may carry caller-supplied, non-deterministic detail),

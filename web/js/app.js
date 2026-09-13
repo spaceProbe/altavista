@@ -14,7 +14,7 @@ import { timelineTickPlan } from './timeline_events.js';
 // uses to pick the ICRF/RIC/globe triple-viewport default layout -- reused here (not
 // re-derived) to decide whether to actually populate those three panes with live
 // Viewport instances once a scenario loads into them.
-import { hasRicFrame, ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID } from './layout/default_layouts.js';
+import { hasRicFrame, isExecutionProfile, ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID } from './layout/default_layouts.js';
 // M26.4 (docs/ui-rework-plan.md): the three panels. Each module's render() is pure DOM-
 // building from data app.js already has, including `sc.scores` -- as of M26.4b
 // (docs/open-questions.md question 165, web/js/REPORT_M26_4b.md) `altavista/server.py`'s
@@ -32,6 +32,13 @@ import { render as renderConsole } from './panels/console_panel.js';
 // scenario, which feasibility_panel.js's own render() turns into an honest "no study in
 // this scenario" notice, never invented data (see that module's own top comment).
 import { render as renderFeasibility } from './panels/feasibility_panel.js';
+// R3.5b (docs/aiplane-plan.md milestone A5's browser half): the command console panel.
+// Unlike every panel above, its data does NOT come from the scenario the WebSocket
+// already pushed -- it comes from the `/api/command/*` HTTP routes `altavista/server.py`
+// added in R3.5a, fetched directly by THIS file (never by command_panel.js itself -- see
+// that module's own top comment for why, mirroring `openFeasibilitySample` above being
+// the one place THAT panel's one network action lives).
+import { render as renderCommandPanel } from './panels/command_panel.js';
 
 const SEC_PER_DAY = 86400;
 const SPEEDS = [
@@ -53,6 +60,8 @@ const els = {
   runProductsPanel: $('panel-run-products'), mapPanel: $('panel-map'), consolePanel: $('panel-console'),
   // F3b: the feasibility-study panel's pane content (index.html's #panel-feasibility).
   feasibilityPanel: $('panel-feasibility'),
+  // R3.5b: the command console panel's pane content (index.html's #panel-command-console).
+  commandPanel: $('panel-command-console'),
 };
 
 // M26.4: the console/log panel accumulates a message log across the whole page lifetime
@@ -200,6 +209,117 @@ async function openFeasibilitySample(sc, drawRow) {
     window.alert(`Could not open this sample's run (${drawRow.runId}): ${e.message}`);
   }
 }
+// ---------------------------------------------------------- R3.5b: command console panel
+// All state command_panel.js's render() needs, owned here (same split as
+// `feasibilityState` above) -- `command_panel.js` itself never fetches and never holds
+// state across calls (see that module's own top comment).
+const commandPanelState = {
+  proposals: null, proposalsError: null,
+  selectedCommandId: null,
+  decision: null, decisionError: null,
+  trail: null, trailError: null,
+  counters: null, countersError: null,
+  authorizeResult: null,
+};
+
+function renderCommandPanelNow() {
+  renderCommandPanel(els.commandPanel, {
+    ...commandPanelState,
+    onSelectCommand: selectCommand,
+    onAuthorize: authorizeCommand,
+  });
+}
+
+/** GET/POST `/api/command/*` and normalize the outcome to `{ok:true, data}` or
+ * `{ok:false, status, message}` -- `message` is the server's OWN `detail` text (this
+ * task's own explicit rule: never a generic message), mirroring `openFeasibilitySample`'s
+ * own `detail.detail` convention above. Never throws -- every failure this function can
+ * see (a non-2xx response, a network error) becomes the `{ok:false, ...}` shape instead. */
+async function commandFetch(url, options) {
+  try {
+    const resp = await fetch(url, options);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null);
+      const message = body && typeof body.detail === 'string' ? body.detail : `HTTP ${resp.status}`;
+      return { ok: false, status: resp.status, message };
+    }
+    return { ok: true, data: await resp.json() };
+  } catch (e) {
+    return { ok: false, status: 0, message: e.message };
+  }
+}
+
+async function refreshCommandProposals() {
+  const result = await commandFetch('/api/command/proposals');
+  if (result.ok) { commandPanelState.proposals = result.data; commandPanelState.proposalsError = null; } else {
+    commandPanelState.proposals = null; commandPanelState.proposalsError = result;
+  }
+  renderCommandPanelNow();
+}
+
+async function refreshCommandCounters() {
+  const result = await commandFetch('/api/command/counters');
+  if (result.ok) { commandPanelState.counters = result.data; commandPanelState.countersError = null; } else {
+    commandPanelState.counters = null; commandPanelState.countersError = result;
+  }
+  renderCommandPanelNow();
+}
+
+async function refreshCommandDecisionAndTrail(commandId) {
+  const [decisionResult, trailResult] = await Promise.all([
+    commandFetch(`/api/command/commands/${encodeURIComponent(commandId)}/decision`),
+    commandFetch(`/api/command/commands/${encodeURIComponent(commandId)}/trail`),
+  ]);
+  if (decisionResult.ok) { commandPanelState.decision = decisionResult.data; commandPanelState.decisionError = null; } else {
+    commandPanelState.decision = null; commandPanelState.decisionError = decisionResult;
+  }
+  if (trailResult.ok) { commandPanelState.trail = trailResult.data; commandPanelState.trailError = null; } else {
+    commandPanelState.trail = null; commandPanelState.trailError = trailResult;
+  }
+  renderCommandPanelNow();
+}
+
+function selectCommand(commandId) {
+  commandPanelState.selectedCommandId = commandId;
+  commandPanelState.decision = null; commandPanelState.decisionError = null;
+  commandPanelState.trail = null; commandPanelState.trailError = null;
+  commandPanelState.authorizeResult = null;
+  renderCommandPanelNow();
+  refreshCommandDecisionAndTrail(commandId);
+}
+
+// The ONE state-changing action command_panel.js's render() ever calls (question 53:
+// propose-only otherwise) -- `token` exists in this function's own local scope only,
+// for exactly the duration of this one `fetch` call; it is never assigned to any
+// variable that outlives it, never logged, never placed in `commandPanelState` (which
+// is what `renderCommandPanelNow()` re-renders from on every call).
+async function authorizeCommand(commandId, token) {
+  const result = await commandFetch(`/api/command/commands/${encodeURIComponent(commandId)}/authorize`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ principalToken: token }),
+  });
+  commandPanelState.authorizeResult = result.ok
+    ? { ok: true, state: result.data.state }
+    : { ok: false, status: result.status, message: result.message };
+  renderCommandPanelNow();
+  if (result.ok) refreshCommandDecisionAndTrail(commandId); // the trail just grew by one transition
+}
+
+// Initial (empty) scaffold only -- NO fetch at page boot. Most profiles/test servers
+// run with no command service configured at all (`--command-endpoint` is optional,
+// `altavista/command_client.py`'s own module doc), and this panel is only ever in the
+// DEFAULT layout for an execution-profile scenario (question 201(d)) -- an eager
+// `/api/command/*` fetch before any scenario has even loaded would ask a route that,
+// for most servers, answers a real 503 for no reason yet to. (Found the hard way: an
+// earlier version of this fetched proposals/counters unconditionally here, which broke
+// tests/test_viewer_net.py's own `test_zero_console_errors_on_load_against_a_live_
+// server` -- question 168's real, load-bearing "zero console errors on load" gate --
+// against the ordinary `python -m altavista serve` default, which configures no
+// command service.) `loadScenario()` below is the one real trigger: it refreshes
+// proposals/counters exactly when an execution-profile scenario actually loads.
+renderCommandPanelNow();
+
 let lastFrame = performance.now();
 let lastClockSend = 0;
 let suppressSync = false;
@@ -293,6 +413,15 @@ function loadScenario(sc) {
   feasibilityState.selectedScore = null;
   feasibilityState.selectedPoint = null;
   renderFeasibilityPanel(sc);
+  // R3.5b: an execution-profile scenario is the one case the command console panel is
+  // in the DEFAULT layout for (question 201(d)) -- refresh its proposals/counters on
+  // every such load so a freshly-opened default layout is not showing stale data from
+  // page boot. Harmless (just a refetch of the same routes) for every other profile too,
+  // where the panel is chooser-reachable but not shown by default.
+  if (isExecutionProfile(sc)) {
+    refreshCommandProposals();
+    refreshCommandCounters();
+  }
 }
 
 function pickDefaultSpeed() {

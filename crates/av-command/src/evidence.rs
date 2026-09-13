@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::counters::Counters;
 use crate::fips;
 use crate::ledger::Ledger;
 
@@ -33,10 +34,16 @@ pub struct AdminState {
     pub run_id: String,
     /// This crate's own `CARGO_PKG_VERSION`.
     pub version: String,
+    /// R3.1: ADR-004's "everything rejected is counted" primitive, shared with
+    /// [`crate::service::CommandAuthorityServiceImpl`] (the same `Arc`, constructed once by
+    /// `src/bin/av-command.rs`) -- exposed here so the counts are observable evidence, not
+    /// merely in-memory state invisible outside this process.
+    pub counters: Arc<Counters>,
 }
 
 /// The `GET /admin/api/evidence` body: this crate's version, every partition's chain head
-/// and record count, and the FIPS posture `crate::fips::detect` observed.
+/// and record count, the FIPS posture `crate::fips::detect` observed, and (R3.1) every
+/// refusal this process has counted so far, sorted by code.
 pub fn evidence_body(state: &AdminState) -> std::io::Result<Value> {
     let partitions = state.ledger.partitions()?;
     let posture = fips::detect();
@@ -55,6 +62,9 @@ pub fn evidence_body(state: &AdminState) -> std::io::Result<Value> {
     let mut m: BTreeMap<&str, Value> = BTreeMap::new();
     m.insert("fips", serde_json::to_value(&posture).expect("FipsPosture always serializes"));
     m.insert("partitions", Value::Array(partition_values));
+    // R3.1: `Counters::snapshot` is already a sorted `BTreeMap<&'static str, u64>` (ADR-004's
+    // determinism rule) -- serializes directly to a sorted JSON object, no re-sorting needed.
+    m.insert("refusals", serde_json::to_value(state.counters.snapshot()).expect("Counters::snapshot always serializes"));
     m.insert("run_id", Value::String(state.run_id.clone()));
     m.insert("version", Value::String(state.version.clone()));
     Ok(serde_json::to_value(m).expect("BTreeMap<&str, Value> always serializes"))
@@ -115,7 +125,7 @@ mod tests {
             ack_level: AckLevel::Unspecified as i32,
             delegation_id: String::new(),
         };
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t, None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t, None, None, None, &clock).unwrap();
         ledger
     }
 
@@ -124,7 +134,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("av-command-evidence-test-body-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ledger = ledger_with_one_partition(&dir);
-        let state = AdminState { ledger: Arc::new(ledger), run_id: "run-42".to_string(), version: "0.1.0".to_string() };
+        let state = AdminState { ledger: Arc::new(ledger), run_id: "run-42".to_string(), version: "0.1.0".to_string(), counters: Arc::new(Counters::new()) };
 
         let body = evidence_body(&state).unwrap();
         assert_eq!(body["version"], "0.1.0");
@@ -134,6 +144,28 @@ mod tests {
         assert_eq!(partitions[0]["partition"], "sat-1");
         assert_eq!(partitions[0]["records"], 1);
         assert!(body["fips"]["openssl_version"].as_str().unwrap().starts_with("OpenSSL"));
+        assert_eq!(body["refusals"], serde_json::json!({}), "no refusal has been counted yet");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R3.1: the counters this process has already recorded show up in the evidence body,
+    /// sorted by code -- observable evidence, not merely in-memory state.
+    #[test]
+    fn evidence_body_reports_a_refusal_this_process_already_counted() {
+        let dir = std::env::temp_dir().join(format!("av-command-evidence-test-refusals-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ledger = ledger_with_one_partition(&dir);
+        let counters = Arc::new(Counters::new());
+        counters.record(&crate::oidc::TokenError::MissingSubject);
+        counters.record(&crate::oidc::TokenError::MissingSubject);
+        counters.record(&crate::authz::ServiceAuthzError::ServiceRoleNotGranted { groups: vec![], rpc: crate::authz::ServiceRpc::Dispatch });
+        let state = AdminState { ledger: Arc::new(ledger), run_id: "run-refusals".to_string(), version: "0.1.0".to_string(), counters };
+
+        let body = evidence_body(&state).unwrap();
+        assert_eq!(body["refusals"]["token_missing_subject"], 2);
+        assert_eq!(body["refusals"]["service_role_not_granted"], 1);
+        assert_eq!(body["refusals"].as_object().unwrap().len(), 2, "only the two codes actually recorded appear, sorted by code: {:?}", body["refusals"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -143,7 +175,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("av-command-evidence-test-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ledger = ledger_with_one_partition(&dir);
-        let state = AdminState { ledger: Arc::new(ledger), run_id: "run-1".to_string(), version: "0.1.0".to_string() };
+        let state = AdminState { ledger: Arc::new(ledger), run_id: "run-1".to_string(), version: "0.1.0".to_string(), counters: Arc::new(Counters::new()) };
 
         let body = verify_body(&state).unwrap();
         assert_eq!(body["ok"], true);

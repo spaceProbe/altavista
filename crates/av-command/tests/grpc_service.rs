@@ -45,13 +45,17 @@ use std::sync::Arc;
 
 use av_cdm::pb::{
     query_request::Selector, AckLevel, AckRequest, AuthorizeRequest, AuthorKind, CheckRequest, Command, CommandProposal,
-    CommandState, Delegation, DispatchRequest, Label, LedgerRecord, Provenance, ProposeRequest, QueryByEntity, QueryRequest,
-    VerifyLedgerRequest,
+    CommandState, Delegation, DispatchRequest, ExpireRequest, FailRequest, Label, LedgerRecord, Provenance, ProposeRequest,
+    QueryByEntity, QueryRequest, VerifyLedgerRequest,
 };
 use av_cdm::time::Tai;
+use av_command::admin;
+use base64::Engine as _;
 use av_command::audit::{AuditSinkConfig, AuditWriter};
-use av_command::authz::{DelegationTable, RoleTable, WILDCARD};
+use av_command::authz::{DelegationTable, RoleTable, ServiceRoleTable, WILDCARD};
 use av_command::clock::{Clock, TestClock};
+use av_command::counters::Counters;
+use av_command::evidence::AdminState;
 use av_command::ledger::Ledger;
 use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_client::CommandAuthorityServiceClient;
@@ -62,7 +66,8 @@ use av_command::service::{
 };
 use av_command::test_support::{claims_with_roles_and_mfa, valid_claims, RoleAndMfaClaims, TestIssuer};
 use prost::Message as _;
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Channel, Endpoint, Server};
@@ -208,7 +213,19 @@ fn default_roles() -> BTreeMap<String, Vec<String>> {
     roles
 }
 
-/// A running `CommandAuthorityServiceImpl` behind a real loopback socket, plus everything a
+/// R3.1's default test service-role table: `"dispatchers"` grants all four service RPCs
+/// (`"dispatch"`/`"ack"`/`"expire"`/`"fail"`) -- disjoint from [`default_roles`]'s keys by
+/// construction (`"dispatchers"` is not `"operators"` or `"burn-authorizers"`), matching
+/// `av_command::authz::check_service_roles_disjoint`'s own requirement. [`TestServer::
+/// mint_service`] mints tokens carrying this group by default.
+fn default_service_roles() -> BTreeMap<String, Vec<String>> {
+    let mut roles = BTreeMap::new();
+    roles.insert("dispatchers".to_string(), vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]);
+    roles
+}
+
+/// A running `CommandAuthorityServiceImpl` behind a real loopback socket, plus a real
+/// `/admin/api/evidence*` HTTP server sharing the same [`Counters`] (R3.1), plus everything a
 /// test needs to inspect what happened: the ledger directory (for
 /// [`read_ledger_records`]/[`write_ledger_records`]), the [`RecordingDispatchSink`] (A3's
 /// seam -- see `crate::service`'s module doc), the shared clock, and (A2.2) the audit sink
@@ -224,16 +241,28 @@ struct TestServer {
     /// A2.2: the file this server's `AuditWriter` was configured with -- read back by
     /// this file's audit-line tests.
     audit_path: PathBuf,
+    /// R3.1: the same [`Counters`] instance the servicer records every refusal into --
+    /// shared, not a second one, with the admin server below, exactly as
+    /// `src/bin/av-command.rs` wires the real binary.
+    counters: Arc<Counters>,
+    /// R3.1: the real `/admin/api/evidence*` HTTP server's own bound address.
+    admin_addr: SocketAddr,
     shutdown_tx: oneshot::Sender<()>,
     handle: tokio::task::JoinHandle<()>,
+    /// R3.1: `av_command::admin::serve` has no graceful-shutdown signal of its own (unlike the
+    /// gRPC server above) -- aborted, not joined, at [`Self::shutdown_keep_ledger`]. Aborting
+    /// a task that is only ever `.await`ing `accept()` on a socket this test process owns
+    /// leaves nothing else to clean up.
+    admin_handle: tokio::task::JoinHandle<()>,
 }
 
 impl TestServer {
     /// Spawns over a **fresh** ledger directory, named `name` (wiped first if it somehow
     /// already exists -- see [`tmp_ledger_dir`]), with the default role table
-    /// ([`default_roles`]) and two wildcard fixture delegations (`"delegation-1"` for
-    /// `"operator-1"`, `"delegation-9"` for `"astronaut-jane"` -- see [`wildcard_delegation`]),
-    /// no MFA methods configured. The overwhelming majority of tests want this.
+    /// ([`default_roles`]), the default service-role table ([`default_service_roles`]), and
+    /// two wildcard fixture delegations (`"delegation-1"` for `"operator-1"`, `"delegation-9"`
+    /// for `"astronaut-jane"` -- see [`wildcard_delegation`]), no MFA methods configured. The
+    /// overwhelming majority of tests want this.
     async fn spawn(name: &str, start_tai_ns: i64) -> Self {
         Self::spawn_over(tmp_ledger_dir(name), start_tai_ns).await
     }
@@ -249,10 +278,10 @@ impl TestServer {
         Self::spawn_over_with_authz(ledger_dir, start_tai_ns, roles, delegations, vec![], "").await
     }
 
-    /// The general constructor every other one delegates to: full control over the role
-    /// table, the delegation set, and the MFA configuration (`mfa_amr_methods`/`mfa_acr`) --
-    /// used by this file's dedicated A2.2 tests (wrong role, missing MFA, expired delegation,
-    /// a delegation granting a class the role does not).
+    /// As [`Self::spawn_over_with_service_roles`], but with [`default_service_roles`] -- used
+    /// by this file's dedicated A2.2 tests (wrong role, missing MFA, expired delegation, a
+    /// delegation granting a class the role does not), none of which exercise R3.1's service
+    /// role gate itself and so want the default granting table rather than repeating it.
     async fn spawn_over_with_authz(
         ledger_dir: PathBuf,
         start_tai_ns: i64,
@@ -260,6 +289,23 @@ impl TestServer {
         delegations: Vec<Delegation>,
         mfa_amr_methods: Vec<String>,
         mfa_acr: &str,
+    ) -> Self {
+        Self::spawn_over_with_service_roles(ledger_dir, start_tai_ns, roles, delegations, mfa_amr_methods, mfa_acr, default_service_roles()).await
+    }
+
+    /// The general constructor every other one delegates to: full control over the human role
+    /// table, the delegation set, the MFA configuration (`mfa_amr_methods`/`mfa_acr`), and
+    /// (R3.1) the service-role table -- used by this file's dedicated R3.1 tests (deny by
+    /// default, a role granting only some RPCs, a purely human token, the disjointness-at-
+    /// runtime shape).
+    async fn spawn_over_with_service_roles(
+        ledger_dir: PathBuf,
+        start_tai_ns: i64,
+        roles: BTreeMap<String, Vec<String>>,
+        delegations: Vec<Delegation>,
+        mfa_amr_methods: Vec<String>,
+        mfa_acr: &str,
+        service_roles: BTreeMap<String, Vec<String>>,
     ) -> Self {
         let ledger = Arc::new(Ledger::open(&ledger_dir).expect("open ledger"));
         let bundle = Arc::new(PolicyBundle::load(real_policy_dir()).expect("load the shipped policy bundle"));
@@ -273,16 +319,19 @@ impl TestServer {
 
         let audit_path = ledger_dir.join("audit.log");
         let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
+        let counters = Arc::new(Counters::new());
         let authz = AuthzConfig {
             role_table: Arc::new(RoleTable::from_config(&roles)),
             delegations: Arc::new(DelegationTable::from_delegations(delegations)),
             mfa_amr_methods: Arc::new(mfa_amr_methods),
             mfa_acr: Arc::new(mfa_acr.to_string()),
             audit,
+            service_role_table: Arc::new(ServiceRoleTable::from_config(&service_roles).expect("this file's own service-role fixtures always use recognized rpc names")),
+            counters: counters.clone(),
         };
 
         let servicer = CommandAuthorityServiceImpl::new(
-            ledger,
+            ledger.clone(),
             bundle,
             3_600_000_000_000, // matches profiles/execution.yaml's authority.rate_window_ns
             clock.clone() as Arc<dyn Clock>,
@@ -317,7 +366,20 @@ impl TestServer {
             .expect("connect to the just-spawned server over its real loopback socket");
         let client = CommandAuthorityServiceClient::new(channel);
 
-        Self { client, ledger_dir, clock, dispatch_sink, issuer, audit_path, shutdown_tx, handle }
+        // R3.1: the real admin HTTP server, sharing the identical `counters` `Arc` the gRPC
+        // servicer above records every refusal into -- so `/admin/api/evidence` can report a
+        // refusal this test provokes over the real gRPC surface. `av_command::admin::serve`
+        // binds its own listener (unlike the gRPC server above, which takes an already-bound
+        // one) -- bind-then-drop-then-rebind to discover a free ephemeral port first; the
+        // window between drop and rebind is negligible for a single local test process on
+        // loopback.
+        let admin_addr: SocketAddr = TcpListener::bind("127.0.0.1:0").await.expect("bind an ephemeral loopback port for the admin probe").local_addr().expect("local_addr");
+        let admin_state = Arc::new(AdminState { ledger, run_id: "grpc-service-it".to_string(), version: "0.1.0".to_string(), counters: counters.clone() });
+        let admin_handle = tokio::spawn(async move {
+            let _ = admin::serve(admin_addr, admin_state).await;
+        });
+
+        Self { client, ledger_dir, clock, dispatch_sink, issuer, audit_path, counters, admin_addr, shutdown_tx, handle, admin_handle }
     }
 
     /// Mints a real RS256-signed token this server's own `Authorize` will verify: `sub`,
@@ -336,10 +398,36 @@ impl TestServer {
         self.issuer.mint(&claims)
     }
 
+    /// R3.1: mints a real, fully-valid token carrying `groups` and nothing else notable (no
+    /// `amr`/`acr` -- a service call is not a human-authorization gate, so this file's R3.1
+    /// tests never need MFA claims) -- for a caller presenting a `service_token`. Defaults to
+    /// `["dispatchers"]` via [`Self::mint_service`]'s own callers that want the default
+    /// granting group; a test exercising the service-role gate itself calls
+    /// [`Self::mint_with_claims`] directly with the specific groups it needs (including zero,
+    /// for "no service role at all").
+    fn mint_service(&self, sub: &str, groups: &[&str]) -> String {
+        self.mint_with_claims(sub, groups, &[], "")
+    }
+
     /// Every line in this server's audit sink file so far, in order -- read straight from
     /// disk, the real artifact `crate::audit::AuditWriter` wrote to.
     fn audit_lines(&self) -> Vec<String> {
         std::fs::read_to_string(&self.audit_path).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    }
+
+    /// R3.1: a real `GET` against this server's own real admin HTTP surface -- `(status_line,
+    /// body)`, mirroring `src/admin.rs`'s own private test helper of the identical shape
+    /// (that one is unreachable from this file, a separate integration-test crate).
+    async fn admin_get(&self, path: &str) -> (String, String) {
+        let mut stream = TcpStream::connect(self.admin_addr).await.expect("connect to the real admin HTTP server");
+        stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let mut parts = text.splitn(2, "\r\n\r\n");
+        let head = parts.next().unwrap_or("").to_string();
+        let body = parts.next().unwrap_or("").to_string();
+        (head.lines().next().unwrap_or("").to_string(), body)
     }
 
     /// Shuts the server task down cleanly, **joins** it (proves the task actually stopped,
@@ -358,6 +446,9 @@ impl TestServer {
     async fn shutdown_keep_ledger(self) -> PathBuf {
         let _ = self.shutdown_tx.send(());
         self.handle.await.expect("server task joins cleanly at test end");
+        // R3.1: av_command::admin::serve has no shutdown signal of its own -- see this
+        // struct's own `admin_handle` doc comment for why abort (not join) is correct here.
+        self.admin_handle.abort();
         self.ledger_dir
     }
 }
@@ -395,21 +486,33 @@ async fn full_legal_path_propose_check_authorize_dispatch_ack_end_to_end() {
     assert_eq!(authorized_command.transitions.last().unwrap().principal, "operator-1");
     assert_eq!(authorized_command.transitions.last().unwrap().delegation_id, "delegation-1");
 
-    let dispatched = server.client.dispatch(DispatchRequest { command_id: "cmd-1".to_string() }).await.expect("Dispatch").into_inner();
+    let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let dispatched = server.client.dispatch(DispatchRequest { command_id: "cmd-1".to_string(), service_token: dispatch_token }).await.expect("Dispatch").into_inner();
     let dispatched_command = dispatched.command.expect("command present");
     assert_eq!(dispatched_command.state, CommandState::Dispatched as i32);
+    // R3.1: the recorded principal is the verified service_token subject, not a fixed string.
+    assert_eq!(dispatched_command.transitions.last().unwrap().principal, "ground-segment-1");
     assert_eq!(server.dispatch_sink.dispatched().len(), 1);
     assert_eq!(server.dispatch_sink.dispatched()[0].id, "cmd-1");
 
+    let ack_token = server.mint_service("flight-software", &["dispatchers"]);
     let acked = server
         .client
-        .ack(AckRequest { command_id: "cmd-1".to_string(), ack_level: AckLevel::AssetExecuted as i32, principal: "flight-software".to_string(), reason: "executed".to_string() })
+        .ack(AckRequest {
+            command_id: "cmd-1".to_string(),
+            ack_level: AckLevel::AssetExecuted as i32,
+            principal: "flight-software".to_string(),
+            reason: "executed".to_string(),
+            service_token: ack_token,
+        })
         .await
         .expect("Ack")
         .into_inner();
     let acked_command = acked.command.expect("command present");
     assert_eq!(acked_command.state, CommandState::Acked as i32);
     assert_eq!(acked_command.transitions.last().unwrap().ack_level, AckLevel::AssetExecuted as i32);
+    // R3.1: the verified service_token subject, not the declared label, is authoritative.
+    assert_eq!(acked_command.transitions.last().unwrap().principal, "flight-software");
 
     // The ledger on disk holds exactly the expected five records, in order.
     let records = read_ledger_records(&server.ledger_dir, "sat-1");
@@ -467,10 +570,19 @@ async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_ty
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
     assert!(err.message().contains("illegal command transition"), "{}", err.message());
 
-    // Dispatch-before-Authorize.
+    // Dispatch-before-Authorize. A verifiable, granting service_token (R3.1 verifies the
+    // service principal before attempting the state edge, exactly as A2.1 does for
+    // Authorize's own principal_token above) -- this must fail on the *state machine's* own
+    // edge check, not on service-principal verification, or this test would no longer be
+    // testing what its name says.
     server.client.propose(propose_request(base_command("cmd-b", "sat-1", "mode", ""), "model-x")).await.unwrap();
     server.client.check(CheckRequest { command_id: "cmd-b".to_string() }).await.unwrap();
-    let err = server.client.dispatch(DispatchRequest { command_id: "cmd-b".to_string() }).await.expect_err("Dispatch before Authorize must be refused");
+    let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let err = server
+        .client
+        .dispatch(DispatchRequest { command_id: "cmd-b".to_string(), service_token: dispatch_token })
+        .await
+        .expect_err("Dispatch before Authorize must be refused");
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
     assert!(err.message().contains("illegal command transition"), "{}", err.message());
 
@@ -483,9 +595,16 @@ async fn illegal_edges_over_the_wire_are_refused_failed_precondition_with_the_ty
         .authorize(AuthorizeRequest { command_id: "cmd-c".to_string(), principal_token: token, delegation_id: String::new() })
         .await
         .unwrap();
+    let ack_token = server.mint_service("flight-software", &["dispatchers"]);
     let err = server
         .client
-        .ack(AckRequest { command_id: "cmd-c".to_string(), ack_level: AckLevel::AssetExecuted as i32, principal: "p".to_string(), reason: "r".to_string() })
+        .ack(AckRequest {
+            command_id: "cmd-c".to_string(),
+            ack_level: AckLevel::AssetExecuted as i32,
+            principal: "flight-software".to_string(),
+            reason: "r".to_string(),
+            service_token: ack_token,
+        })
         .await
         .expect_err("Ack before Dispatch must be refused");
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
@@ -524,12 +643,23 @@ async fn dispatch_refuses_a_duplicate_idempotency_key_and_appends_no_second_ledg
         server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: token, delegation_id: String::new() }).await.unwrap();
     }
 
-    let first = server.client.dispatch(DispatchRequest { command_id: "cmd-x".to_string() }).await.expect("the first dispatch of this key succeeds").into_inner();
+    let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let first = server
+        .client
+        .dispatch(DispatchRequest { command_id: "cmd-x".to_string(), service_token: dispatch_token })
+        .await
+        .expect("the first dispatch of this key succeeds")
+        .into_inner();
     assert_eq!(first.command.unwrap().state, CommandState::Dispatched as i32);
 
     let records_before = read_ledger_records(&server.ledger_dir, "sat-1").len();
 
-    let err = server.client.dispatch(DispatchRequest { command_id: "cmd-y".to_string() }).await.expect_err("a second command sharing the dispatched key must be refused");
+    let dispatch_token2 = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let err = server
+        .client
+        .dispatch(DispatchRequest { command_id: "cmd-y".to_string(), service_token: dispatch_token2 })
+        .await
+        .expect_err("a second command sharing the dispatched key must be refused");
     assert_eq!(err.code(), Code::AlreadyExists, "{err:?}");
     assert!(err.message().contains(&format!("idempotency_key {key:?}")), "{}", err.message());
     assert!(err.message().contains("twice"), "{}", err.message());
@@ -563,9 +693,10 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
         .authorize(AuthorizeRequest { command_id: "cmd-r1".to_string(), principal_token: token1, delegation_id: String::new() })
         .await
         .unwrap();
+    let dispatch_token1 = server1.mint_service("ground-segment-1", &["dispatchers"]);
     let dispatched = server1
         .client
-        .dispatch(DispatchRequest { command_id: "cmd-r1".to_string() })
+        .dispatch(DispatchRequest { command_id: "cmd-r1".to_string(), service_token: dispatch_token1 })
         .await
         .expect("the first process lifetime's dispatch succeeds")
         .into_inner();
@@ -584,9 +715,10 @@ async fn dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime()
     let token2 = server2.mint("operator-1");
     server2.client.authorize(AuthorizeRequest { command_id: "cmd-r2".to_string(), principal_token: token2, delegation_id: String::new() }).await.unwrap();
 
+    let dispatch_token2 = server2.mint_service("ground-segment-1", &["dispatchers"]);
     let err = server2
         .client
-        .dispatch(DispatchRequest { command_id: "cmd-r2".to_string() })
+        .dispatch(DispatchRequest { command_id: "cmd-r2".to_string(), service_token: dispatch_token2 })
         .await
         .expect_err("a second process lifetime must still refuse a key the first already dispatched");
     assert_eq!(err.code(), Code::AlreadyExists, "{err:?}");
@@ -682,9 +814,10 @@ async fn query_across_a_restart_returns_the_full_command_field_for_field() {
         .authorize(AuthorizeRequest { command_id: command_id.to_string(), principal_token: token1, delegation_id: String::new() })
         .await
         .unwrap();
+    let dispatch_token = server1.mint_service("ground-segment-1", &["dispatchers"]);
     let dispatched = server1
         .client
-        .dispatch(DispatchRequest { command_id: command_id.to_string() })
+        .dispatch(DispatchRequest { command_id: command_id.to_string(), service_token: dispatch_token })
         .await
         .expect("the first process lifetime's dispatch succeeds")
         .into_inner();
@@ -723,6 +856,125 @@ async fn query_across_a_restart_returns_the_full_command_field_for_field() {
     // second process lifetime's Query answer is not merely "close enough" to the first
     // process's own Dispatch response, it is identical.
     assert_eq!(actual, expected, "Query across a restart must return the exact same Command the first process lifetime already produced");
+
+    server2.shutdown().await;
+}
+
+/// **R3.5a's own acceptance test**: `Propose`'s `rationale`/`evidence_ids` -- previously
+/// accepted on the wire and never persisted anywhere -- now come back through `Query`'s new
+/// `proposals` map, and `Check`'s own `PolicyDecision` comes back through the new `decisions`
+/// map, for both an allowed and a denied command. Then a **second** `TestServer` over the
+/// same ledger directory (a real process restart, mirroring
+/// `query_across_a_restart_returns_the_full_command_field_for_field` above) proves both maps
+/// survive it, exactly like `commands` already does.
+#[tokio::test]
+async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decision_surviving_a_restart() {
+    let entity_id = "sat-proposal-q";
+
+    let mut server1 = TestServer::spawn("proposal-decision-query", 1_000).await;
+
+    // "mode" is unconditionally allowed by the shipped policy (profiles/policies/authority/
+    // command.rego) -- an ALLOW decision.
+    let allowed_id = "cmd-allowed";
+    let allowed_request = ProposeRequest {
+        proposal: Some(CommandProposal {
+            command: Some(base_command(allowed_id, entity_id, "mode", "")),
+            rationale: "scored radius drifted past threshold".to_string(),
+            evidence_ids: vec!["run-1/query-7".to_string(), "run-1/query-9".to_string()],
+        }),
+        principal: "model-x".to_string(),
+    };
+    server1.client.propose(allowed_request).await.expect("propose the allowed command");
+    let checked = server1.client.check(CheckRequest { command_id: allowed_id.to_string() }).await.expect("check the allowed command").into_inner();
+    let expected_decision = checked.decision.expect("Check always returns a decision");
+    assert!(expected_decision.allow, "sanity: mode is unconditionally allowed by the shipped policy");
+
+    // "payload" is unconditionally denied by the shipped policy -- a DENY decision, which
+    // must be exactly as recoverable from Query as an allow (LedgerRecord.decision's own doc
+    // comment: "a denial must be as reproducible from the ledger as an approval").
+    let denied_id = "cmd-denied";
+    let denied_request = ProposeRequest {
+        proposal: Some(CommandProposal {
+            command: Some(base_command(denied_id, entity_id, "payload", "")),
+            rationale: "flagged payload for review".to_string(),
+            evidence_ids: vec!["run-2/query-3".to_string()],
+        }),
+        principal: "model-y".to_string(),
+    };
+    server1.client.propose(denied_request).await.expect("propose the denied command");
+    let rejected = server1.client.check(CheckRequest { command_id: denied_id.to_string() }).await.expect("check the denied command").into_inner();
+    let expected_rejected_decision = rejected.decision.expect("Check always returns a decision, allow or deny");
+    assert!(!expected_rejected_decision.allow, "sanity: payload is unconditionally denied by the shipped policy");
+
+    // A third, still-PROPOSED command -- its proposal must be visible even though it was
+    // never Checked, and it must have no entry in `decisions` at all.
+    let proposed_only_id = "cmd-proposed-only";
+    let proposed_only_request = ProposeRequest {
+        proposal: Some(CommandProposal { command: Some(base_command(proposed_only_id, entity_id, "mode", "")), rationale: "awaiting review".to_string(), evidence_ids: vec![] }),
+        principal: "model-z".to_string(),
+    };
+    server1.client.propose(proposed_only_request).await.expect("propose the still-PROPOSED command");
+
+    let assert_query_response = |queried: &av_cdm::pb::QueryResponse| {
+        let allowed_proposal = queried.proposals.get(allowed_id).expect("the allowed command's proposal must be in the map");
+        assert_eq!(allowed_proposal.rationale, "scored radius drifted past threshold");
+        assert_eq!(allowed_proposal.evidence_ids, vec!["run-1/query-7".to_string(), "run-1/query-9".to_string()]);
+
+        let denied_proposal = queried.proposals.get(denied_id).expect("the denied command's proposal must be in the map too");
+        assert_eq!(denied_proposal.rationale, "flagged payload for review");
+        assert_eq!(denied_proposal.evidence_ids, vec!["run-2/query-3".to_string()]);
+
+        let proposed_only_proposal = queried.proposals.get(proposed_only_id).expect("a still-PROPOSED command's proposal must be in the map too");
+        assert_eq!(proposed_only_proposal.rationale, "awaiting review");
+
+        let allow_decision = queried.decisions.get(allowed_id).expect("the allowed command's decision must be in the map");
+        assert_eq!(allow_decision.decision_id, expected_decision.decision_id);
+        assert_eq!(allow_decision.policy_hash, expected_decision.policy_hash);
+        assert!(allow_decision.allow);
+
+        let deny_decision = queried.decisions.get(denied_id).expect("the denied command's decision must be in the map too");
+        assert_eq!(deny_decision.decision_id, expected_rejected_decision.decision_id);
+        assert!(!deny_decision.allow);
+        assert_eq!(deny_decision.reasons, expected_rejected_decision.reasons);
+
+        assert!(!queried.decisions.contains_key(proposed_only_id), "a still-PROPOSED command has no policy decision yet");
+    };
+
+    let queried1 = server1
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Unspecified as i32 })) })
+        .await
+        .expect("Query by entity")
+        .into_inner();
+    assert_eq!(queried1.commands.len(), 3, "{queried1:?}");
+    assert_query_response(&queried1);
+
+    // QueryByEntity with a PROPOSED filter must return exactly the still-PROPOSED command's
+    // own proposal, not the other two's.
+    let proposed_filtered = server1
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Proposed as i32 })) })
+        .await
+        .expect("Query by entity, filtered to PROPOSED")
+        .into_inner();
+    assert_eq!(proposed_filtered.commands.len(), 1, "{proposed_filtered:?}");
+    assert_eq!(proposed_filtered.commands[0].id, proposed_only_id);
+    assert_eq!(proposed_filtered.proposals.len(), 1, "{proposed_filtered:?}");
+    assert_eq!(proposed_filtered.proposals.get(proposed_only_id).unwrap().rationale, "awaiting review");
+    assert!(proposed_filtered.decisions.is_empty());
+
+    // The restart proof: a second, independent TestServer over the exact same ledger
+    // directory must answer the identical proposals/decisions from the ledger alone.
+    let ledger_dir = server1.shutdown_keep_ledger().await;
+    let mut server2 = TestServer::spawn_over(ledger_dir.clone(), 2_000).await;
+    let queried2 = server2
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Unspecified as i32 })) })
+        .await
+        .expect("Query by entity, after a restart")
+        .into_inner();
+    assert_eq!(queried2.commands.len(), 3, "{queried2:?}");
+    assert_query_response(&queried2);
 
     server2.shutdown().await;
 }
@@ -1197,6 +1449,489 @@ async fn audit_line_for_an_expired_delegation_refusal_is_exact() {
              \"delegation-exp-audit\" expired -- expires_tai_ns={start} is at or before now_tai_ns={start}"
         )
     );
+
+    server.shutdown().await;
+}
+
+// =============================================================================================
+// R3.1: service principals on Dispatch, Ack, Expire and Fail (`docs/aiplane-plan.md` round 2's
+// declared gap; `docs/open-questions.md` question 206's open item). Every test below drives
+// the real service over the real loopback socket `TestServer` already sets up; every refusal
+// is asserted against a real `tonic::Status` AND a real counted refusal (`server.counters`,
+// the identical `Arc<Counters>` the servicer itself records into -- never an exit code,
+// question 148).
+// =============================================================================================
+
+/// R3.1's own service-role fixture, richer than [`default_service_roles`]: `"dispatchers"`
+/// grants all four RPCs (the success-path fixture every test below's scenario 1 uses);
+/// `"dispatch-only"`/`"ack-only"` each grant exactly one RPC, used as the "verified service
+/// token whose role does not list this RPC" fixture (scenario 5) for the other three RPCs.
+fn service_roles_fixture() -> BTreeMap<String, Vec<String>> {
+    let mut m = BTreeMap::new();
+    m.insert("dispatchers".to_string(), vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]);
+    m.insert("dispatch-only".to_string(), vec!["dispatch".to_string()]);
+    m.insert("ack-only".to_string(), vec!["ack".to_string()]);
+    m
+}
+
+async fn spawn_r31_server(name: &str) -> TestServer {
+    TestServer::spawn_over_with_service_roles(tmp_ledger_dir(name), 1_000, default_roles(), vec![], vec![], "", service_roles_fixture()).await
+}
+
+/// Proposes, checks and authorizes a fresh `"mode"`-class command, returning its id at
+/// `AUTHORIZED` -- the precondition every RPC below's success scenario needs (`Dispatch`
+/// directly; `Ack`/`Expire`/`Fail` via [`dispatched_command`], one real `Dispatch` further).
+async fn authorized_command(server: &mut TestServer, id: &str, entity_id: &str) -> String {
+    server.client.propose(propose_request(base_command(id, entity_id, "mode", ""), "model-x")).await.expect("Propose");
+    server.client.check(CheckRequest { command_id: id.to_string() }).await.expect("Check");
+    let token = server.mint("operator-1");
+    server.client.authorize(AuthorizeRequest { command_id: id.to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
+    id.to_string()
+}
+
+/// As [`authorized_command`], then one real, successfully-granted `Dispatch` -- the
+/// precondition `Ack`/`Expire`/`Fail`'s own success scenario needs.
+async fn dispatched_command(server: &mut TestServer, id: &str, entity_id: &str) -> String {
+    authorized_command(server, id, entity_id).await;
+    let token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    server.client.dispatch(DispatchRequest { command_id: id.to_string(), service_token: token }).await.expect("Dispatch");
+    id.to_string()
+}
+
+/// A fresh, merely-`PROPOSED` command id -- all that scenarios 2-5 below need (an unverified/
+/// under-scoped `service_token` is refused *before* the state-machine edge is ever consulted,
+/// so these scenarios do not need the command in any particular precondition state).
+async fn proposed_command(server: &mut TestServer, id: &str, entity_id: &str) -> String {
+    server.client.propose(propose_request(base_command(id, entity_id, "mode", ""), "model-x")).await.expect("Propose");
+    id.to_string()
+}
+
+/// **`Dispatch`, all five required scenarios.**
+#[tokio::test]
+async fn dispatch_service_principal_acceptance_and_refusals() {
+    let mut server = spawn_r31_server("r31-dispatch").await;
+
+    // 1: a valid service token with a granting role succeeds, and the ledger's transition
+    // records the verified service `sub` as its principal.
+    let id = authorized_command(&mut server, "d1", "sat-d1").await;
+    let token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let dispatched = server.client.dispatch(DispatchRequest { command_id: id.clone(), service_token: token }).await.expect("granting service token must succeed").into_inner();
+    assert_eq!(dispatched.command.as_ref().unwrap().state, CommandState::Dispatched as i32);
+    assert_eq!(dispatched.command.unwrap().transitions.last().unwrap().principal, "ground-segment-1");
+    let records = read_ledger_records(&server.ledger_dir, "sat-d1");
+    let dispatched_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Dispatched as i32).unwrap();
+    assert_eq!(dispatched_record.transition.as_ref().unwrap().principal, "ground-segment-1", "the real, durable ledger record too, not only the response");
+
+    // 2: no token at all -- refused Unauthenticated, counted.
+    let id = proposed_command(&mut server, "d2", "sat-d2").await;
+    let before = server.counters.get("token_wrong_segment_count");
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: String::new() }).await.expect_err("an empty service_token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(server.counters.get("token_wrong_segment_count"), before + 1);
+
+    // 3a: a token that fails verification -- expired.
+    let id = proposed_command(&mut server, "d3a", "sat-d3a").await;
+    let token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let exp_tai_ns = Tai::from_utc_nanos((TOKEN_NOW_UNIX_S + TOKEN_TTL_S) * 1_000_000_000).as_nanos();
+    server.clock.set(exp_tai_ns); // now_tai_ns == exp_tai_ns: expired at the boundary
+    let before = server.counters.get("token_expired");
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: token }).await.expect_err("an expired service token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(server.counters.get("token_expired"), before + 1);
+    server.clock.set(1_000); // restore, for the remaining scenarios below
+
+    // 3b: a token that fails verification -- bad signature (a different issuer's key entirely).
+    let id = proposed_command(&mut server, "d3b", "sat-d3b").await;
+    let wrong_issuer = TestIssuer::new();
+    let bad_token = wrong_issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, "ground-segment-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["dispatchers"], amr: &[], acr: "" }));
+    let before = server.counters.get("token_signature_invalid");
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: bad_token }).await.expect_err("a token signed by the wrong key must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(server.counters.get("token_signature_invalid"), before + 1);
+
+    // 4: a verified HUMAN token (its groups grant a human command class via `authority.roles`,
+    // but no service role at all) is refused -- this is the test that proves "service
+    // principal" means something.
+    let id = proposed_command(&mut server, "d4", "sat-d4").await;
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    let before = server.counters.get("service_role_not_granted");
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: human_token }).await.expect_err("a purely human token must be refused on Dispatch");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert!(err.message().contains("service role gate refused"), "{}", err.message());
+    assert_eq!(server.counters.get("service_role_not_granted"), before + 1);
+
+    // 5: a verified service token whose role does not list this RPC ("ack-only" grants only
+    // "ack").
+    let id = proposed_command(&mut server, "d5", "sat-d5").await;
+    let scoped_token = server.mint_service("svc-ack-only", &["ack-only"]);
+    let before = server.counters.get("service_role_not_granted");
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: scoped_token }).await.expect_err("ack-only must not grant dispatch");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+    assert_eq!(server.counters.get("service_role_not_granted"), before + 1);
+
+    server.shutdown().await;
+}
+
+/// **`Ack`, all five required scenarios, plus the `principal`-disagreement rule.**
+#[tokio::test]
+async fn ack_service_principal_acceptance_and_refusals() {
+    let mut server = spawn_r31_server("r31-ack").await;
+
+    // 1: valid + granting role succeeds; the verified sub lands as principal, not the
+    // caller-declared label (which agrees with it here).
+    let id = dispatched_command(&mut server, "a1", "sat-a1").await;
+    let token = server.mint_service("flight-software", &["dispatchers"]);
+    let acked = server
+        .client
+        .ack(AckRequest { command_id: id.clone(), ack_level: AckLevel::AssetExecuted as i32, principal: "flight-software".to_string(), reason: "executed".to_string(), service_token: token })
+        .await
+        .expect("granting service token must succeed")
+        .into_inner();
+    assert_eq!(acked.command.unwrap().transitions.last().unwrap().principal, "flight-software");
+
+    // 2: no token.
+    let id = dispatched_command(&mut server, "a2", "sat-a2").await;
+    let before = server.counters.get("token_wrong_segment_count");
+    let err = server
+        .client
+        .ack(AckRequest { command_id: id, ack_level: AckLevel::AssetExecuted as i32, principal: String::new(), reason: "r".to_string(), service_token: String::new() })
+        .await
+        .expect_err("an empty service_token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(server.counters.get("token_wrong_segment_count"), before + 1);
+
+    // 3: a tampered signature.
+    let id = dispatched_command(&mut server, "a3", "sat-a3").await;
+    let token = server.mint_service("flight-software", &["dispatchers"]);
+    let parts: Vec<&str> = token.split('.').collect();
+    let mut sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+    sig[0] ^= 0xFF;
+    let tampered = format!("{}.{}.{}", parts[0], parts[1], base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig));
+    let before = server.counters.get("token_signature_invalid");
+    let err = server
+        .client
+        .ack(AckRequest { command_id: id, ack_level: AckLevel::AssetExecuted as i32, principal: String::new(), reason: "r".to_string(), service_token: tampered })
+        .await
+        .expect_err("a tampered signature must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert_eq!(server.counters.get("token_signature_invalid"), before + 1);
+
+    // 4: a purely human token.
+    let id = dispatched_command(&mut server, "a4", "sat-a4").await;
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    let err = server
+        .client
+        .ack(AckRequest { command_id: id, ack_level: AckLevel::AssetExecuted as i32, principal: String::new(), reason: "r".to_string(), service_token: human_token })
+        .await
+        .expect_err("a purely human token must be refused on Ack");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // 5: a service token scoped to a different rpc ("dispatch-only" grants only "dispatch").
+    let id = dispatched_command(&mut server, "a5", "sat-a5").await;
+    let scoped_token = server.mint_service("svc-dispatch-only", &["dispatch-only"]);
+    let err = server
+        .client
+        .ack(AckRequest { command_id: id, ack_level: AckLevel::AssetExecuted as i32, principal: String::new(), reason: "r".to_string(), service_token: scoped_token })
+        .await
+        .expect_err("dispatch-only must not grant ack");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // The principal-disagreement rule: a declared principal that disagrees with the verified
+    // service subject is refused INVALID_ARGUMENT and counted, never silently overridden.
+    let id = dispatched_command(&mut server, "a6", "sat-a6").await;
+    let token = server.mint_service("flight-software", &["dispatchers"]);
+    let before = server.counters.get("principal_mismatch");
+    let err = server
+        .client
+        .ack(AckRequest { command_id: id.clone(), ack_level: AckLevel::AssetExecuted as i32, principal: "someone-else".to_string(), reason: "r".to_string(), service_token: token })
+        .await
+        .expect_err("a declared principal disagreeing with the verified subject must be refused");
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+    assert!(err.message().contains("someone-else"), "{}", err.message());
+    assert!(err.message().contains("flight-software"), "{}", err.message());
+    assert_eq!(server.counters.get("principal_mismatch"), before + 1);
+    // The command itself is unaffected by the refused attempt -- still DISPATCHED.
+    let queried = server.client.query(QueryRequest { selector: Some(Selector::CommandId(id)) }).await.expect("Query").into_inner();
+    assert_eq!(queried.commands[0].state, CommandState::Dispatched as i32);
+
+    // An EMPTY declared principal is never a disagreement -- accepted, and the verified sub
+    // still lands as CommandTransition.principal.
+    let id = dispatched_command(&mut server, "a7", "sat-a7").await;
+    let token = server.mint_service("flight-software", &["dispatchers"]);
+    let acked = server
+        .client
+        .ack(AckRequest { command_id: id, ack_level: AckLevel::AssetExecuted as i32, principal: String::new(), reason: "r".to_string(), service_token: token })
+        .await
+        .expect("an empty declared principal must never be refused")
+        .into_inner();
+    assert_eq!(acked.command.unwrap().transitions.last().unwrap().principal, "flight-software");
+
+    server.shutdown().await;
+}
+
+/// **`Expire`, all five required scenarios.** `Expire`'s legal source states are `AUTHORIZED`
+/// and `DISPATCHED`; scenarios 2-5 use a merely-`PROPOSED` command (the refusal happens before
+/// the state edge is ever consulted, see [`proposed_command`]'s own doc), and scenario 1 uses
+/// an `AUTHORIZED` one (the cheaper of the two legal source states to reach).
+#[tokio::test]
+async fn expire_service_principal_acceptance_and_refusals() {
+    let mut server = spawn_r31_server("r31-expire").await;
+
+    let id = authorized_command(&mut server, "e1", "sat-e1").await;
+    let token = server.mint_service("kernel-binding-1", &["dispatchers"]);
+    let expired = server
+        .client
+        .expire(ExpireRequest { command_id: id.clone(), reason: "deadline passed".to_string(), principal: "kernel-binding-1".to_string(), service_token: token })
+        .await
+        .expect("granting service token must succeed")
+        .into_inner();
+    assert_eq!(expired.command.as_ref().unwrap().state, CommandState::Expired as i32);
+    assert_eq!(expired.command.unwrap().transitions.last().unwrap().principal, "kernel-binding-1");
+    let records = read_ledger_records(&server.ledger_dir, "sat-e1");
+    let expired_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Expired as i32).unwrap();
+    assert_eq!(expired_record.transition.as_ref().unwrap().principal, "kernel-binding-1");
+
+    let id = proposed_command(&mut server, "e2", "sat-e2").await;
+    let err = server
+        .client
+        .expire(ExpireRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: String::new() })
+        .await
+        .expect_err("an empty service_token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+
+    let id = proposed_command(&mut server, "e3", "sat-e3").await;
+    let wrong_issuer = TestIssuer::new();
+    let bad_token = wrong_issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, "kernel-binding-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["dispatchers"], amr: &[], acr: "" }));
+    let err = server
+        .client
+        .expire(ExpireRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: bad_token })
+        .await
+        .expect_err("a token signed by the wrong key must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+
+    let id = proposed_command(&mut server, "e4", "sat-e4").await;
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    let err = server
+        .client
+        .expire(ExpireRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: human_token })
+        .await
+        .expect_err("a purely human token must be refused on Expire");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    let id = proposed_command(&mut server, "e5", "sat-e5").await;
+    let scoped_token = server.mint_service("svc-dispatch-only", &["dispatch-only"]);
+    let err = server
+        .client
+        .expire(ExpireRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: scoped_token })
+        .await
+        .expect_err("dispatch-only must not grant expire");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    // The principal-disagreement rule, for Expire too (the identical rule Ack's own test pins
+    // in full; asserted here once more to prove it is not Ack-specific).
+    let id = authorized_command(&mut server, "e6", "sat-e6").await;
+    let token = server.mint_service("kernel-binding-1", &["dispatchers"]);
+    let err = server
+        .client
+        .expire(ExpireRequest { command_id: id, reason: "r".to_string(), principal: "someone-else".to_string(), service_token: token })
+        .await
+        .expect_err("a disagreeing declared principal must be refused on Expire too");
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+
+    server.shutdown().await;
+}
+
+/// **`Fail`, all five required scenarios.** `Fail`'s only legal source state is `DISPATCHED`;
+/// scenario 1 uses [`dispatched_command`], scenarios 2-5 a merely-`PROPOSED` one (see
+/// [`proposed_command`]'s own doc).
+#[tokio::test]
+async fn fail_service_principal_acceptance_and_refusals() {
+    let mut server = spawn_r31_server("r31-fail").await;
+
+    let id = dispatched_command(&mut server, "f1", "sat-f1").await;
+    let token = server.mint_service("kernel-binding-1", &["dispatchers"]);
+    let failed = server
+        .client
+        .fail(FailRequest { command_id: id.clone(), reason: "kernel refused".to_string(), principal: "kernel-binding-1".to_string(), service_token: token })
+        .await
+        .expect("granting service token must succeed")
+        .into_inner();
+    assert_eq!(failed.command.as_ref().unwrap().state, CommandState::Failed as i32);
+    assert_eq!(failed.command.unwrap().transitions.last().unwrap().principal, "kernel-binding-1");
+    let records = read_ledger_records(&server.ledger_dir, "sat-f1");
+    let failed_record = records.iter().find(|r| r.transition.as_ref().unwrap().state == CommandState::Failed as i32).unwrap();
+    assert_eq!(failed_record.transition.as_ref().unwrap().principal, "kernel-binding-1");
+
+    let id = proposed_command(&mut server, "f2", "sat-f2").await;
+    let err = server
+        .client
+        .fail(FailRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: String::new() })
+        .await
+        .expect_err("an empty service_token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+
+    let id = proposed_command(&mut server, "f3", "sat-f3").await;
+    let wrong_issuer = TestIssuer::new();
+    let bad_token = wrong_issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, "kernel-binding-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["dispatchers"], amr: &[], acr: "" }));
+    let err = server
+        .client
+        .fail(FailRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: bad_token })
+        .await
+        .expect_err("a token signed by the wrong key must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+
+    let id = proposed_command(&mut server, "f4", "sat-f4").await;
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    let err = server
+        .client
+        .fail(FailRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: human_token })
+        .await
+        .expect_err("a purely human token must be refused on Fail");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    let id = proposed_command(&mut server, "f5", "sat-f5").await;
+    let scoped_token = server.mint_service("svc-dispatch-only", &["dispatch-only"]);
+    let err = server
+        .client
+        .fail(FailRequest { command_id: id, reason: "r".to_string(), principal: String::new(), service_token: scoped_token })
+        .await
+        .expect_err("dispatch-only must not grant fail");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    let id = dispatched_command(&mut server, "f6", "sat-f6").await;
+    let token = server.mint_service("kernel-binding-1", &["dispatchers"]);
+    let err = server
+        .client
+        .fail(FailRequest { command_id: id, reason: "r".to_string(), principal: "someone-else".to_string(), service_token: token })
+        .await
+        .expect_err("a disagreeing declared principal must be refused on Fail too");
+    assert_eq!(err.code(), Code::InvalidArgument, "{err:?}");
+
+    server.shutdown().await;
+}
+
+/// **The refusal message never contains the raw `service_token` or its raw signature bytes**
+/// -- extends `authorize_refusal_message_never_contains_the_token_or_signature`'s identical
+/// guarantee (this file's Acceptance test 10) to the new `service_token` verification path;
+/// same guarantee, never weakened.
+#[tokio::test]
+async fn dispatch_refusal_message_never_contains_the_service_token_or_signature() {
+    let mut server = spawn_r31_server("r31-no-leak").await;
+    let id = proposed_command(&mut server, "leak1", "sat-leak").await;
+
+    let bad_token = server.issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, "some-other-audience", "ground-segment-1", TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["dispatchers"], amr: &[], acr: "" }));
+    let signature_b64 = bad_token.rsplit_once('.').expect("a JWS has a signature segment").1.to_string();
+
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: bad_token.clone() }).await.expect_err("a wrong-audience service token must be refused");
+    assert_eq!(err.code(), Code::Unauthenticated, "{err:?}");
+    assert!(!err.message().contains(bad_token.as_str()), "refusal message must not contain the raw token: {}", err.message());
+    assert!(!err.message().contains(signature_b64.as_str()), "refusal message must not contain the raw signature: {}", err.message());
+
+    server.shutdown().await;
+}
+
+/// **The admin endpoint reporting counts**: `GET /admin/api/evidence` (the real HTTP surface,
+/// `src/admin.rs`) reports a refusal this test just provoked over the real gRPC surface --
+/// counters are observable evidence, not merely in-memory state invisible outside this
+/// process.
+#[tokio::test]
+async fn admin_evidence_endpoint_reports_a_refusal_it_just_provoked() {
+    let mut server = spawn_r31_server("r31-admin-evidence").await;
+    let id = proposed_command(&mut server, "admin1", "sat-admin").await;
+
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    let err = server.client.dispatch(DispatchRequest { command_id: id, service_token: human_token }).await.expect_err("a purely human token must be refused");
+    assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+
+    let (status, body) = server.admin_get("/admin/api/evidence").await;
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON body");
+    assert_eq!(json["refusals"]["service_role_not_granted"], 1, "{json:#?}");
+
+    server.shutdown().await;
+}
+
+// =================================================================================================
+// R3.1, the manager's review: two properties the task's own tests did not pin.
+// =================================================================================================
+
+/// **The existence oracle is closed.** With the command lookup ahead of authentication, a
+/// caller presenting *no* credential at all could tell `NOT_FOUND` (this id has never been
+/// proposed) from `UNAUTHENTICATED` (it has), and so enumerate the ids this service holds.
+/// Authentication now happens first on all four service RPCs, so an unauthenticated caller
+/// gets the same answer either way -- asserted here over BOTH an id that exists and one that
+/// does not, for each of the four, because a test on only one of the two proves nothing about
+/// the pair being indistinguishable.
+#[tokio::test]
+async fn an_unauthenticated_service_call_cannot_distinguish_an_existing_command_from_a_missing_one() {
+    let mut server = spawn_r31_server("r31-no-oracle").await;
+    let existing = proposed_command(&mut server, "oracle-exists", "sat-oracle").await;
+    let missing = "oracle-does-not-exist".to_string();
+
+    for id in [existing, missing] {
+        let d = server.client.dispatch(DispatchRequest { command_id: id.clone(), service_token: String::new() }).await.expect_err("Dispatch with no token");
+        assert_eq!(d.code(), Code::Unauthenticated, "Dispatch({id:?}): {d:?}");
+        let a = server
+            .client
+            .ack(AckRequest { command_id: id.clone(), ack_level: AckLevel::Edge as i32, principal: String::new(), reason: String::new(), service_token: String::new() })
+            .await
+            .expect_err("Ack with no token");
+        assert_eq!(a.code(), Code::Unauthenticated, "Ack({id:?}): {a:?}");
+        let e = server
+            .client
+            .expire(ExpireRequest { command_id: id.clone(), reason: String::new(), principal: String::new(), service_token: String::new() })
+            .await
+            .expect_err("Expire with no token");
+        assert_eq!(e.code(), Code::Unauthenticated, "Expire({id:?}): {e:?}");
+        let f = server
+            .client
+            .fail(FailRequest { command_id: id.clone(), reason: String::new(), principal: String::new(), service_token: String::new() })
+            .await
+            .expect_err("Fail with no token");
+        assert_eq!(f.code(), Code::Unauthenticated, "Fail({id:?}): {f:?}");
+    }
+
+    server.shutdown().await;
+}
+
+/// **A service-principal refusal reaches the audit sink, not only the counters.** Every
+/// `Authorize` refusal has written one RFC 5424 line since A2.2 (question 54's SIEM export);
+/// a counter lives only in this process and behind `/admin/api/evidence`, so a refused
+/// `Dispatch` whose only trace was a counter would be invisible to the sink a SIEM reads.
+/// Asserted against the real audit file on disk (question 148), for all three refusal shapes
+/// the new gate can produce, and asserting the raw token never reaches the sink either.
+#[tokio::test]
+async fn every_service_principal_refusal_writes_one_audit_line_naming_the_command_and_the_reason() {
+    let mut server = spawn_r31_server("r31-audit-refusals").await;
+    let id = proposed_command(&mut server, "audit-svc-1", "sat-audit-svc").await;
+    let before = server.audit_lines().len();
+
+    // (a) no token at all.
+    server.client.dispatch(DispatchRequest { command_id: id.clone(), service_token: String::new() }).await.expect_err("no token");
+    // (b) a verified token with no granting service role.
+    let human_token = server.mint_service("operator-1", &["operators"]);
+    server.client.dispatch(DispatchRequest { command_id: id.clone(), service_token: human_token.clone() }).await.expect_err("human token");
+    // (c) a declared principal disagreeing with the verified subject.
+    let service_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    server
+        .client
+        .expire(ExpireRequest { command_id: id.clone(), reason: "r".to_string(), principal: "somebody-else".to_string(), service_token: service_token.clone() })
+        .await
+        .expect_err("declared principal disagreement");
+
+    let lines = server.audit_lines();
+    let new_lines = &lines[before..];
+    assert_eq!(new_lines.len(), 3, "one audit line per refusal, got {new_lines:#?}");
+    for line in new_lines {
+        assert!(line.contains(&id), "every refusal line names the command id it was about: {line}");
+        assert!(line.contains("REFUSED"), "every refusal line is a REFUSED event: {line}");
+        assert!(!line.contains(human_token.as_str()) && !line.contains(service_token.as_str()), "no audit line ever contains a raw token: {line}");
+    }
+    assert!(new_lines[1].contains("ground-segment") || new_lines[1].contains("service_role"), "the role-gate refusal names what was refused: {}", new_lines[1]);
+    assert!(new_lines[2].contains("somebody-else"), "the disagreement refusal names the declared label it refused: {}", new_lines[2]);
+    // The disagreement refusal is decided AFTER the token verified, so it can and does name
+    // the verified subject as its principal -- the two earlier ones cannot and do not.
+    assert!(new_lines[2].contains("ground-segment-1"), "the disagreement refusal names the verified subject: {}", new_lines[2]);
 
     server.shutdown().await;
 }

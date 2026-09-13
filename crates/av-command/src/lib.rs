@@ -8,6 +8,12 @@
 //!
 //! - [`clock`] -- the injected TAI-nanosecond clock (`Clock`, `SystemClock`, `TestClock`).
 //!   Nothing else in this crate reads the wall clock.
+//! - [`counters`] (R3.1) -- [`counters::Counters`]/[`counters::Counted`], ADR-004's
+//!   "everything rejected is counted" primitive, moved here unchanged from `crates/
+//!   av-gateway/src/counters.rs` (see that module's own doc for why the move direction is
+//!   this one) -- every typed refusal `Dispatch`/`Ack`/`Expire`/`Fail`/`Authorize` can
+//!   produce implements [`counters::Counted`]; `av-gateway` re-exports this module under its
+//!   own `counters` path so its own call sites are unchanged.
 //! - [`state`] -- the `CommandState` machine: one transition function per edge
 //!   (`propose`, `check`, `authorize`, `dispatch`, `ack`, `reject`, `expire`, `fail`), a
 //!   typed [`state::CommandError`] for every illegal edge, and question 53's propose-only
@@ -69,6 +75,7 @@ pub mod audit;
 pub mod authority;
 pub mod authz;
 pub mod clock;
+pub mod counters;
 pub mod evidence;
 pub mod fips;
 pub mod ledger;

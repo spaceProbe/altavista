@@ -18,12 +18,24 @@
 //! real physical effect (the `ACK_LEVEL_ASSET_RECEIVED` third level needs a framed consumer
 //! that emits a decode-time ack -- `crates/av-kernel/tests/drm_attitude_command.rs`, the
 //! attitude controller's own new mode-command port, covers that level).
+//!
+//! 8. **R3.4** (`docs/open-questions.md` question 206, `docs/aiplane-plan.md`'s round-2 declared
+//!    gap: "`ExternalCommandSource` against a GMAT-bound target is wired but has no dedicated
+//!    acceptance test"). Every test above targets `flight`, a native `ConstantAccelModel`
+//!    (`crate::registry::ModelKind::Native`); `crates/av-run/tests/command_dispatch_e2e.rs`
+//!    targets `controller` (`ModelKind::Controller`). `a_command_through_the_external_source_
+//!    reaches_a_gmat_bound_target_and_has_a_real_physical_effect`, below, targets `demo_flt`, a
+//!    real, live-propagated GMAT spacecraft (`ModelKind::Gmat`/`BindingPlan::Gmat`/
+//!    `GmatFramedCommandModel`) -- drms/demo_external_command_gmat.drm.yaml`, reusing
+//!    `drms/demo_ground_command.sos.yaml` (and its two system files) completely unchanged, the
+//!    identical topology `crates/av-kernel/tests/demo_ground_command.rs`'s own DRM-declared-
+//!    command test already exercises this same binding resolution against.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use av_cdm::pb::{Command, DesignReferenceMission, EventKind, Provenance, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{AckLevel, Command, DesignReferenceMission, EventKind, Provenance, SosConfiguration, SystemDefinition};
 use av_kernel::drm::command_source::{decide_disposition, pack_double_value, CommandOutcome, Disposition, RecordingCommandSource, RefusalReason};
 use av_kernel::drm::{execute, schema, RunConfig};
 use gmat_sys::Gmat;
@@ -343,4 +355,174 @@ fn two_runs_over_the_same_source_are_byte_identical() {
     let bytes_b = prost::Message::encode_to_vec(&products_b.to_proto());
     assert_eq!(bytes_a, bytes_b, "two runs over the same source contents must produce byte-identical RunProducts");
     assert_eq!(source_a.outcomes(), source_b.outcomes(), "and byte-identical reported outcomes");
+}
+
+// =================================================================================================
+// Evidence 8 (R3.4, docs/open-questions.md question 206): the GMAT-bound target.
+// =================================================================================================
+
+/// `drms/demo_external_command_gmat.drm.yaml`'s own bundle. `demo_flt` is a real,
+/// GMAT-propagated spacecraft (`crate::registry::ModelKind::Gmat` / `BindingPlan::Gmat` /
+/// `GmatFramedCommandModel`) -- unlike this file's own [`load_bundle`], whose `flight` is the
+/// native `ConstantAccelModel`. Reuses `drms/demo_ground_command.sos.yaml` and its two system
+/// files completely unchanged (see that DRM's own header comment and `crates/av-kernel/tests/
+/// demo_ground_command.rs`'s own module doc for the topology this shares).
+fn load_gmat_bundle() -> (DesignReferenceMission, SosConfiguration, BTreeMap<String, SystemDefinition>) {
+    let drm = schema::parse_drm_yaml(&read("demo_external_command_gmat.drm.yaml")).expect("DRM parses");
+    let sos = schema::parse_sos_yaml(&read("demo_ground_command.sos.yaml")).expect("SosConfiguration parses");
+    let flight = load_system("demo_ground_command_flight");
+    let ground = load_system("demo_ground_command_ground");
+    let mut systems = BTreeMap::new();
+    systems.insert(flight.id.clone(), flight);
+    systems.insert(ground.id.clone(), ground);
+    (drm, sos, systems)
+}
+
+/// `drms/demo_external_command_gmat.drm.yaml`'s own declared `scenario.start_tai_ns`
+/// (reproduced verbatim from `drms/demo_ground_command.drm.yaml`'s own window, for direct
+/// comparability -- see that DRM's own header comment).
+const GMAT_START_TAI_NS: i64 = 1_767_225_637_000_000_000;
+const GMAT_END_TAI_NS: i64 = GMAT_START_TAI_NS + 7_200_000_000_000;
+/// One hour into the 7200 s window -- well clear of both ends. Unlike a DRM-declared `command`
+/// `Scenario.event`, an `ExternalCommandSource`-sourced command is never subject to `DrmError::
+/// CommandEpochNotOnSampleGrid` at all (`crate::drm::executor::run_shared_group`'s own
+/// event-parsing loop is the only call site of that check, and this fixture's own command never
+/// passes through it -- see the DRM's own header comment), so no grid alignment is needed here.
+const GMAT_COMMAND_TAI_NS: i64 = GMAT_START_TAI_NS + 3_600_000_000_000;
+
+/// A well-formed `Command` targeting `demo_flt`'s own drag coefficient (`Cd`, the one entry in
+/// `crate::drm::binding::GMAT_WRITABLE_PARAMETERS`), dispatched from `demo_ground` -- the
+/// identical `attributes["from"]` convention [`accel_scale_command`] already uses for the native
+/// target.
+fn cd_command(id: &str, idempotency_key: &str, value: f64, not_before_tai_ns: i64, deadline_tai_ns: i64) -> Command {
+    Command {
+        id: id.to_string(),
+        idempotency_key: idempotency_key.to_string(),
+        entity_id: "demo_flt".to_string(),
+        command_class: "drag_sail".to_string(),
+        hazardous: false,
+        payload: Some(pack_double_value(value)),
+        deadline_tai_ns,
+        not_before_tai_ns,
+        provenance: Some(Provenance { attributes: BTreeMap::from([("from".to_string(), "demo_ground".to_string())]), ..Default::default() }),
+        ..Default::default()
+    }
+}
+
+/// **R3.4 acceptance evidence, closing `docs/aiplane-plan.md`'s round-2 declared gap verbatim**:
+/// "`ExternalCommandSource` against a GMAT-bound target is wired but has no dedicated acceptance
+/// test ... `ConstantAccel` and `Controller` targets are both exercised." This test is the third,
+/// missing one: `demo_flt`, a real GMAT spacecraft. The binding *resolution* itself
+/// (`crate::drm::binding::resolve_gmat_command_port`, and `crate::drm::executor::
+/// run_shared_group`'s own external-command dispatch arm's `Some(BindingPlan::Gmat(spec)) =>
+/// spec.consume_framed...`) is already exercised by `crates/av-kernel/tests/
+/// demo_ground_command.rs`'s DRM-declared-command test against this identical topology -- this
+/// test proves the other half: an `ExternalCommandSource`-sourced command (never a
+/// `Scenario.event`) reaches that same resolution and the same real, live GMAT object, with a
+/// real, measured physical effect on its own propagated trajectory (question 148: never merely
+/// an event-name check).
+#[test]
+fn a_command_through_the_external_source_reaches_a_gmat_bound_target_and_has_a_real_physical_effect() {
+    let _engine = gmat_sys::engine_lock();
+    let (drm, sos, systems) = load_gmat_bundle();
+    let source = RecordingCommandSource::new(vec![cd_command("gmat1", "gmat1-key", 220.0, GMAT_COMMAND_TAI_NS, 0)]);
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let products = execute(RunConfig {
+        gmat: &gmat,
+        drm: &drm,
+        sos: &sos,
+        systems: &systems,
+        run_id: "test-ext-cmd-gmat".to_string(),
+        error_mode: Default::default(),
+        products_dir: None,
+        replay: None,
+        command_source: Some(&source),
+    })
+    .expect("run executes end to end");
+
+    // -- The real state machine, sourced externally, against a real GMAT target. Order-
+    //    independent, mirroring `crates/av-kernel/tests/demo_ground_command.rs`'s own identical
+    //    accommodation: that file's module doc measured, against this exact same GMAT-bound
+    //    topology (`demo_flt`/`cd_cmd_in`), a real, reproducible ONE-STEP delivery difference --
+    //    a pre-loop-dispatched telecommand applies one whole step (100 ms at demo_flt's own
+    //    declared 10 Hz) before its own DISPATCHED epoch, so ACKED (recorded at the actually-
+    //    applied epoch) sorts BEFORE DISPATCHED (recorded at the declared epoch) in `RunProducts.
+    //    events`'s own `(epoch, id)` order. This test measures the identical effect below rather
+    //    than assuming synchronous delivery. --
+    let mut transitions: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "gmat1").collect();
+    transitions.sort_by_key(|e| e.name.clone());
+    let mut states: Vec<&str> = transitions.iter().map(|e| e.name.as_str()).collect();
+    states.sort_unstable();
+    let mut expected = ["COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED", "COMMAND_STATE_DISPATCHED", "COMMAND_STATE_ACKED"];
+    expected.sort_unstable();
+    assert_eq!(states, expected, "{transitions:#?}");
+    let dispatched = products.events.iter().find(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "gmat1" && e.name == "COMMAND_STATE_DISPATCHED").expect("a DISPATCHED transition exists (checked above)");
+    assert_eq!(dispatched.tai_ns, GMAT_COMMAND_TAI_NS, "DISPATCHED must land exactly at the command's own not_before epoch (the sender's own hand-off to the router, not subject to the one-step receiver-side effect)");
+
+    // -- Every outcome the source itself was told about: EDGE at dispatch, then ASSET_EXECUTED.
+    //    `demo_ground_command_flight.system.yaml`'s own `ground_command_flight_ack_out_codec`
+    //    carries no "level" field, so it is not levelled -- exactly like `flight`'s own
+    //    ConstantAccel ack codec above; only a genuinely levelled ack codec (the attitude
+    //    controller's own, `crates/av-kernel/tests/drm_attitude_command.rs`) ever reports
+    //    ASSET_RECEIVED. --
+    let outcomes = source.outcomes();
+    assert!(outcomes.contains(&CommandOutcome::Dispatched { id: "gmat1".to_string(), epoch_tai_ns: GMAT_COMMAND_TAI_NS, seq: 0 }), "{outcomes:#?}");
+    assert!(outcomes.contains(&CommandOutcome::Acked { id: "gmat1".to_string(), level: AckLevel::Edge, epoch_tai_ns: GMAT_COMMAND_TAI_NS }), "ACK_LEVEL_EDGE must be reported at the dispatch epoch: {outcomes:#?}");
+    assert!(!outcomes.iter().any(|o| matches!(o, CommandOutcome::Acked { level: AckLevel::AssetReceived, .. })), "this fixture's own ack codec is not levelled; ASSET_RECEIVED must never be reported: {outcomes:#?}");
+    let executed = outcomes.iter().find(|o| matches!(o, CommandOutcome::Acked { level: AckLevel::AssetExecuted, .. })).unwrap_or_else(|| panic!("ACK_LEVEL_ASSET_EXECUTED must be reported: {outcomes:#?}"));
+    let CommandOutcome::Acked { epoch_tai_ns: applied_tai_ns, .. } = *executed else { unreachable!() };
+
+    // ACKED must land at the command's own REAL applied epoch -- measured, on this exact
+    // topology, to be exactly one 10 Hz step (100 ms) BEFORE the declared dispatch epoch (the
+    // same one-step effect `demo_ground_command.rs` measured and disclosed for the DRM-declared
+    // path; not asserted to be zero or "before/after", but to the exact measured delta, so a
+    // future change to either mechanism that altered this timing would fail loudly here).
+    let acked = products.events.iter().find(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "gmat1" && e.name == "COMMAND_STATE_ACKED").expect("an ACKED transition exists (checked above)");
+    assert_eq!(acked.tai_ns, applied_tai_ns, "ACKED must be recorded at the actually-applied epoch, matching the ASSET_EXECUTED outcome reported to the source");
+    const STEP_NS: i64 = 100_000_000; // demo_flt's own declared 10 Hz step_rate_hz
+    assert_eq!(GMAT_COMMAND_TAI_NS - applied_tai_ns, STEP_NS, "measured delivery-timing delta must be exactly one 10 Hz step, in the pre-loop-dispatched path's favor -- the identical effect crates/av-kernel/tests/demo_ground_command.rs measured against this same topology's DRM-declared-command path; a different delta here would mean ExternalCommandSource's own dispatch timing disagrees with the DRM-declared path's, which this test exists to rule out");
+
+    // -- The real, physically meaningful applied command on the real GMAT spacecraft itself:
+    //    the EVENT_KIND_PORT_COMMAND, and demo_flt's own Cd readback (GmatModel's own
+    //    real-parameter readback, gmat_sys::model::OUTPUT_CD -- never merely relayed from the
+    //    command payload). --
+    let port_commands: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32 && e.entity_id == "demo_flt").collect();
+    assert_eq!(port_commands.len(), 1, "{port_commands:#?}");
+    assert_eq!(port_commands[0].name, "Cd", "the commanded field is Cd, GMAT_WRITABLE_PARAMETERS's own declared-writable target");
+    assert_eq!(port_commands[0].values.get("value").copied(), Some(220.0));
+    assert_eq!(port_commands[0].tai_ns, applied_tai_ns, "the event's own applied_tai_ns must match what was reported as ASSET_EXECUTED");
+    let cd_score = products.scores.get("demo_flt_cd_at_end").expect("drms/demo_external_command_gmat.drm.yaml declares demo_flt_cd_at_end");
+    assert!((cd_score.value - 220.0).abs() < 1e-9, "demo_flt's own Cd readback must equal the commanded value; got {}", cd_score.value);
+
+    // -- The real physical effect: measured against a baseline run over the identical
+    //    DRM/SOS/systems with NO command source at all (Cd stays at its declared 2.2 the whole
+    //    run) -- mirrors crates/av-run/tests/command_dispatch_e2e.rs's own baseline-vs-commanded
+    //    methodology and crates/av-kernel/tests/demo_two_instance.rs's own commanded-vs-
+    //    uncommanded divergence measurement (GMAT's own drag force has no simple closed form, so
+    //    a real baseline run, not a hand-derived prediction, is the honest comparison here too). --
+    let baseline = execute(RunConfig {
+        gmat: &gmat,
+        drm: &drm,
+        sos: &sos,
+        systems: &systems,
+        run_id: "test-ext-cmd-gmat-baseline".to_string(),
+        error_mode: Default::default(),
+        products_dir: None,
+        replay: None,
+        command_source: None,
+    })
+    .expect("baseline run (no command source at all) executes");
+    let baseline_cd = baseline.scores.get("demo_flt_cd_at_end").expect("baseline also declares demo_flt_cd_at_end");
+    assert_eq!(baseline_cd.value, 2.2, "demo_ground_command_flight.system.yaml's own declared baseline spacecraft.Cd, unchanged with no command source at all");
+
+    let traj_commanded = products.trajectories.get("demo_flt").expect("demo_flt produces a trajectory");
+    let traj_baseline = baseline.trajectories.get("demo_flt").expect("demo_flt produces a trajectory");
+    let last_commanded = traj_commanded.samples.last().expect("demo_flt has at least one sample");
+    let last_baseline = traj_baseline.samples.last().expect("demo_flt has at least one sample");
+    assert_eq!(last_commanded.tai_ns, last_baseline.tai_ns, "both runs share the identical DRM window and sample grid");
+    assert_eq!(last_commanded.tai_ns, GMAT_END_TAI_NS - (GMAT_END_TAI_NS - GMAT_START_TAI_NS) % 60_000_000_000, "sanity: the last sample lands on drms/demo_external_command_gmat.drm.yaml's own 60 s output grid");
+    let dr = (0..3).map(|i| (last_commanded.mean[i] - last_baseline.mean[i]).powi(2)).sum::<f64>().sqrt();
+    eprintln!("[external_command_source::gmat] commanded (Cd=220 from t={}s) vs baseline (Cd=2.2 throughout) final position divergence = {dr:.4} m", (GMAT_COMMAND_TAI_NS - GMAT_START_TAI_NS) / 1_000_000_000);
+    assert!(dr > 10.0, "the drag-sail Cd command must measurably change demo_flt's own real, GMAT-propagated arc; measured only {dr} m of divergence");
+    assert!(dr < 100_000.0, "measured divergence {dr} m is implausibly large for 3600 s of Cd=220 drag on this LEO spacecraft -- check for a units or configuration error before trusting this number");
 }
