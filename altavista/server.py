@@ -99,7 +99,7 @@ class RevalidatingStaticFiles(StaticFiles):
 class Hub:
     """In-memory scenario store + WebSocket fan-out."""
 
-    def __init__(self, imagery: Optional[dict] = None) -> None:
+    def __init__(self, imagery: Optional[dict] = None, profile_id: Optional[str] = None) -> None:
         self.scenarios: Dict[str, dict] = {}
         self.order: List[str] = []
         self.clients: Set[WebSocket] = set()
@@ -112,12 +112,30 @@ class Hub:
         # gets it uniformly from this single point, without each handler having to know
         # about profiles at all.
         self.imagery = imagery
+        # R3.5b (docs/aiplane-plan.md milestone A5's browser half, question 201(d)): the
+        # active profile's OWN id (e.g. "execution", "design", "feasibility", "analysis"
+        # -- the same string `create_app`'s own `profile` parameter already carries, just
+        # never previously threaded any further than `profile_loader.load_imagery_config`
+        # above). Stamped onto every scenario the same way `imagery` already is, beside
+        # it, under `"profileId"` -- this is the ONLY profile-derived signal that
+        # distinguishes the execution profile from every other one on the wire today
+        # (see web/js/layout/default_layouts.js's own module comment on how little
+        # profile information reaches the browser); nothing else about `profile_id`
+        # changes what this class does. `None` (the "no profile info at all" case --
+        # every scenario published before this change, and every test fixture that
+        # builds a Hub directly) leaves `"profileId"` off the scenario entirely, exactly
+        # like a `None` `imagery` already leaves `"imagery"` off -- a client reading a
+        # scenario with no `profileId` key degrades to its pre-existing, non-execution
+        # behaviour rather than guessing (this task's own explicit rule).
+        self.profile_id = profile_id
 
     # -- scenario store -------------------------------------------------
     def put(self, scenario: dict) -> str:
         name = str(scenario.get("name") or "scenario")
         if self.imagery is not None and "imagery" not in scenario:
             scenario["imagery"] = self.imagery
+        if self.profile_id is not None and "profileId" not in scenario:
+            scenario["profileId"] = self.profile_id
         if name not in self.scenarios:
             self.order.append(name)
         self.scenarios[name] = scenario
@@ -166,6 +184,13 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     ``altavista/profile.py``'s module docstring). Raises ``altavista.profile.ProfileError``
     (never silently falls back) if the named profile has no usable ``imagery:`` section.
 
+    R3.5b (question 201(d)): ``profile`` itself is now ALSO threaded straight through to
+    ``Hub`` as ``profile_id``, which stamps it onto every scenario as ``scenario["profileId"]``
+    beside ``scenario["imagery"]`` -- the one signal ``web/js/layout/default_layouts.js``
+    uses to decide whether a scenario's DEFAULT layout includes the command console panel
+    (only when ``profileId == "execution"``). No new parameter, no new profile-file field --
+    this is the exact same string this function already took.
+
     ``command_endpoint``/``command_admin_endpoint``/``command_entities`` (R3.5a, question
     199): where the ``/api/command/*`` routes reach a real ``av-command`` service --
     ``"host:port"`` for the gRPC service and its admin HTTP server respectively, and the
@@ -177,7 +202,7 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     failing this function or the app's startup.
     """
     app = FastAPI(title="altavista")
-    hub = Hub(imagery=profile_loader.load_imagery_config(profile))
+    hub = Hub(imagery=profile_loader.load_imagery_config(profile), profile_id=profile)
     app.state.hub = hub
     command_config = command_client.CommandServiceConfig(
         grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))

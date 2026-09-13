@@ -163,10 +163,25 @@ def _call(config: CommandServiceConfig, method_name: str, request: Any) -> Any:
         raise CommandServiceRpcError(code, exc.details() or "") from None
 
 
+def _int64(value: int) -> str:
+    """An ``int64`` rendered for JSON as a decimal STRING, not a number.
+
+    TAI nanosecond epochs on this platform are around ``1.77e18``, comfortably past
+    JavaScript's ``Number.MAX_SAFE_INTEGER`` (``2**53 - 1``, about ``9.01e15``). A plain JSON
+    number therefore reaches the browser already rounded -- ``JSON.parse`` does it silently,
+    with no error anywhere, so a console showing a transition epoch would show a wrong time
+    and nothing would say so. That is the "failure that leaves no trace" shape this track's
+    reviews keep finding, and it is also exactly what protobuf's own canonical JSON mapping
+    avoids by specifying that ``int64`` is encoded as a string. This function is that mapping,
+    applied at the one boundary where these values leave Python.
+    """
+    return str(int(value))
+
+
 def _transition_to_dict(t: Any) -> Dict[str, Any]:
     return {
         "state": command_pb2.CommandState.Name(t.state),
-        "taiNs": t.tai_ns,
+        "taiNs": _int64(t.tai_ns),
         "principal": t.principal,
         "reason": t.reason,
         "ackLevel": command_pb2.AckLevel.Name(t.ack_level),
@@ -183,7 +198,7 @@ def _policy_input_to_dict(pi: Any) -> Dict[str, Any]:
         "envelopeId": pi.envelope_id,
         "rate": {
             "countsByClass": dict(pi.rate.counts_by_class),
-            "windowNs": pi.rate.window_ns,
+            "windowNs": _int64(pi.rate.window_ns),
         }
         if pi.HasField("rate")
         else None,
@@ -197,7 +212,7 @@ def _decision_to_dict(d: Any) -> Dict[str, Any]:
         "policyHash": d.policy_hash,
         "reasons": list(d.reasons),
         "matchedRulePath": d.matched_rule_path,
-        "evaluatedTaiNs": d.evaluated_tai_ns,
+        "evaluatedTaiNs": _int64(d.evaluated_tai_ns),
         "input": _policy_input_to_dict(d.input) if d.HasField("input") else None,
     }
 
