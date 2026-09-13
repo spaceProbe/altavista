@@ -273,3 +273,217 @@ returns `None`. A unit test caught it; a `MissingPort` variant fixed it.
 4. `rand_chacha` through `tonic → tower → rand` is pre-existing and lead-accepted since
    M5.3; recorded here so the crypto rule's "no bundled crypto" wording and that crate can be
    reconciled deliberately rather than re-litigated each round.
+
+## Status (AI-plane manager, 2026-09-12) — round 2
+
+**Round 2 delivered the two question-203 fixes, all of A3, and A4's gateway half.
+`crates/av-proposer` (A4's sidecar) was not started** and is the one deliberate omission —
+five tasks filled the round, and the proposer carries a design decision (below, decision 11)
+that should be ratified before it is built rather than after. Five commits on `aiplane`, one
+per accepted task:
+
+| Commit | Task |
+|---|---|
+| `33929c9` | R2.1 question 203(a) full `Command` on `LedgerRecord`; 203(b) the regorus prose tripwire |
+| `60921fa` | A3.1 the kernel's `ExternalCommandSource`, deadlines, idempotency, three real ack levels |
+| `20461ec` | A3.2 the service→kernel adapter, the tenth legal edge, `Expire`/`Fail` |
+| `6c112d9` | A3.3 a replayed run reproduces the command trail bit for bit |
+| `36a0ca9` | A4a `crates/av-gateway`, the read-only label-aware gateway and its MCP surface |
+
+### Gates, the manager's own runs at `36a0ca9` with no worker active
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-command -p av-gateway` | **187 passed**, 0 failed, 0 ignored (av-command 138: 112 lib, 23 `grpc_service`, 3 `policy_fixture`; av-gateway 49: 42 lib, 4 `propose_only`, 3 `real_run_products`) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **553 passed**, 0 failed, 1 ignored (417 was round 1's figure; the rest is this round plus the `develop` merge) |
+| `cargo test -p av-kernel` | **901 passed**, 0 failed, 1 ignored; the four cFS-image tests skip visibly, each naming the missing image and its build command (question 194) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, **0 warnings**. `grep -rn "#\[allow" crates/av-gateway/` is zero hits; the diff adds no `#[allow]` anywhere this round |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`. `cargo tree -p av-gateway` has no `ring`, `sha2`, `rustls`, `chacha20`, `md-5` or `blake2` |
+| `.venv/bin/python -m pytest -q -rs` | **505 passed, 3 skipped**, every skip printing its reason. This track added no Python test; the delta from round 1's 498 is the `develop` merge |
+| `buf breaking` | **clean against this branch's own merge base `a7623e5`, exit 0, zero findings.** Against `/Users/probe/code/AltaVista/proto` it exits 100 with 15 findings, **every one of them in `edge.proto`** and none outside it — see decision 8 |
+
+Full gate output is in the round's scratchpad. Only `proto/altavista/v1/authority.proto` (this
+track's own file) changed this round, plus its regenerated Python bindings; no shared proto
+was touched.
+
+### The manager's decisions this round
+
+1. **A command-authority service is not a `DynamicsModel`**, so it did not become a
+   `ModelKind`/`BindingPlan` variant — that would have been a lie about what the type is.
+   There is also no dynamic binding registry in this codebase: `BindingPlan` is a closed enum,
+   `classify_binding` its constructor, `registry::kind_for` a string-prefix dispatcher. The
+   binding-registry change A3 genuinely needed is the **attitude controller gaining a FRAMED IN
+   command port**, resolved by `classify_binding` the way that binding kind already resolves its
+   star, IMU and wheel-torque codecs. The service enters the run through `RunConfig.
+   command_source`, shaped exactly like the existing `replay` field.
+2. **`poll` is called once, at the scenario start epoch.** `run_shared_group` is a batch
+   simulation with no wall clock to wait on between two simulated instants, so a command's
+   whole `not_before`/`deadline` fate is decidable analytically from three numbers by one pure
+   function. The consequence is stated in the module doc rather than left to be discovered: **a
+   command the service authorizes after a run has started cannot reach that run.**
+3. **The cFS command accept and the ADCS execution report are a declared gap**, verified not
+   assumed: `adcs_app.c` subscribes only to the star-tracker, IMU and wakeup MIDs, and
+   `services/cfs/` has no command-accept counter anywhere. Adding a ground-telecommand path
+   there is a SIL-track change needing an image rebuild, on a host that prunes that image
+   (question 196(d)). The three ack levels are delivered instead from the SIL asset's own real
+   wire packets, and `ACK_LEVEL_ASSET_RECEIVED` is now a **real decode ack** rather than the
+   inference from an `AppliedCommand` that it was before.
+4. **The levelled ack is opt-in by ack-codec shape**, so no existing fixture's port traffic or
+   `port_traffic_hash` moves. No golden moved this round.
+5. **A tenth legal edge, `ACKED -> ACKED`, permitted only on a strictly increasing ack level.**
+   `CommandTransition.ack_level` exists so an asset acking at three levels produces three
+   transitions; if a later ack could only be dropped once `state` was `ACKED`, that field would
+   be pointless and no ledger, replay or console could ever see the asset's more-executed acks.
+   A non-increasing level is the new typed refusal `AckLevelNotIncreasing`, kept distinct from
+   `IllegalTransition` because the edge does exist and it is the *value* being refused. The
+   product test is now **ten legal pairs and 53 typed refusals** over the same 7×9.
+6. **`Expire` and `Fail` as additive RPCs**, so every kernel refusal a command survived
+   `Dispatch` for lands on the ledger. Without them a command the kernel refused would sit at
+   DISPATCHED forever with no record of what happened to it.
+7. **A3's wiring lives in `crates/av-run`, not `av-command`**, so `av-command` stays free of an
+   `av-kernel` dependency: `av-kernel` pulls GMAT in through `gmat-sys`, and
+   `cargo test -p av-command` must not need GMAT. No new crate and no cargo feature.
+8. **`buf breaking` is run against this branch's own merge base**, not the main tree. The edge
+   track's round 2 landed a larger `edge.proto` in the main tree mid-round (201 lines here, 381
+   there), so `--against /Users/probe/code/AltaVista/proto` reports that track's newer content
+   as deletions from this branch. Both runs are recorded above; the merge-base run is the one
+   that isolates this track's own change.
+9. **"An evidence topic" is a ledger partition, not a broker.** The phrase appears only in
+   `architecture.md`; nothing in code implements a topic and there is no Kafka or Redpanda
+   crate in the tree. The proposal evidence record is an additive message on `authority.proto`
+   written to the existing ledger, with the module doc saying a broker can replace it later —
+   the same call the edge track made for its durable log (question 200(d)).
+10. **The MCP server is hand-rolled JSON-RPC 2.0 over stdio**, with no new crate. No MCP or
+    JSON-RPC implementation exists in this workspace or in spoore's, `serde_json` is already a
+    workspace dependency, and `admin.rs` is the precedent for a hand-parsed minimal server.
+    stdio also means no listening socket, which is question 154's guarantee for free.
+11. **For `av-proposer`, not yet built, two decisions the lead should ratify before it is:**
+    (a) "`--network none` plus the gateway endpoint" is only coherent if the endpoint is a
+    **bind-mounted Unix domain socket** — with `--network none` there is no TCP path at all, so
+    a UDS is both the only possibility and strictly stronger than an internal Docker network
+    (no DNS, no other container reachable, no egress), and it makes the isolation assertable.
+    (b) The `ModelService` contract comes from spoore **by path dependency**, not by vendoring
+    its proto: `spoore-cdm` is already a workspace path dependency (question 12's precedent),
+    and `av-proposer`'s `build.rs` can mirror `spoore-ml/build.rs` with `build_server(true)`,
+    since spoore deliberately generates no Rust server of its own.
+
+### What A3 and A4a actually are now
+
+`ExternalCommandSource` is a two-method trait — `poll` and `report` — whose commands run
+through the existing M25.2b machinery unchanged: `command_out_packet_codec`,
+`assign_sequence_numbers`, `dispatched_event`, `acked_event`, `ack_emission_epoch` and
+`router.deliver` are reused, never duplicated into a second path. `CommandOutcome` is
+exhaustive over every way a command can fail to reach ACKED — expired, run ended before
+`not_before`, duplicate idempotency key, and four structural refusals — and every one is
+reported, so no refusal leaves the run without a trace. The deadline's boundary convention is
+`av-command`'s own (`now >= expiry` refused, one nanosecond earlier not), tested on both sides;
+`deadline_tai_ns == 0` is no deadline. Idempotency is enforced kernel-side as well as in the
+service, because `command.proto`'s contract is unconditional, and an empty key is deliberately
+never a duplicate of another empty key.
+
+The attitude controller's one writable parameter is `mode`: REGULATE runs the PD law, SAFE
+publishes an explicit zero wheel torque rather than publishing nothing, so a mode change is
+visible on the wire and in the trajectory rather than being an absence. An out-of-allowlist
+mode value is a recorded decode-error episode with the last good mode retained (question 188's
+shape), never a silent ignore and never a run abort. The end-to-end test measures the physical
+effect: SAFE leaves `pointing_error_rad` at 0.0858 against the always-REGULATE 0.0816.
+
+Replay now reproduces the trail. The executor derived ACKED only from `span.applied_commands`,
+and a replayed instance has none — `ReplayModel` correctly computes no `AppliedCommand`, and one
+that fabricated one would be lying about what it did, which is why `tests/replay.rs`'s fixture
+used to avoid a command target. With the levelled ack on the wire the evidence is in the
+recorded port traffic, so a replayed target's ACKED is derived from that recorded frame,
+correlated by the packet's own `cmd_seq` through the existing sequence map. `Router::
+take_port_traffic` is a genuine drain, so the one drain moved into `run_shared_group` and is
+threaded back out rather than letting `execute()` drain it a second time and get nothing.
+Question 187's epoch trap, on its third encounter, is handled by inverting the relation through
+`ack_emission_epoch` with a negated period rather than an open-coded subtraction, and the test
+asserts the replayed ACKED lands on the live run's exact `tai_ns`. The byte-identity assertion
+has a separate non-vacuity block beside it, because two runs with no command events would
+compare identical while proving nothing.
+
+`av-gateway` routes every refusal through one `Counters` primitive rather than ad hoc
+per-module counters, so ADR-004's "everything rejected is counted" is mechanical rather than
+something each module has to remember. Addressing is identity-never-a-path, copied from
+`altavista/server.py`'s sweep-sample handler including its ordered typed-refusal chain; labels
+are `av-edge`'s clearance ladder verbatim, with a marking absent from the ladder refused on
+either side of the comparison rather than defaulted to a rank. `propose_command` is
+structurally propose-only: `ProposeOnlyAuthority` exposes only `connect`, `from_channel` and
+`propose`, and the generated client carrying `check`/`authorize`/`dispatch`/`ack`/`expire`/
+`fail` is private to it. The crafted-call tests come from several directions — a `tools/call`
+naming `authorize`, a raw JSON-RPC method named `authorize`, and `tools/call` naming each of the
+other five — and each asserts the refusal *and* the counter. `tools/list` is derived from the
+same table `dispatch` uses, with a test that the two can never disagree.
+
+### Declared gaps, all deliberate
+
+- **`crates/av-proposer` does not exist.** A4's gateway half is done; the sidecar is not.
+  Decision 11 above is why it was not rushed.
+- **A command authorized after a run has started cannot reach that run** (decision 2).
+- **The cFS command accept and the ADCS execution report** (decision 3).
+- **`ExternalCommandSource` against a GMAT-bound target is wired but has no dedicated
+  acceptance test** — it reuses the identical resolution the DRM-declared path already tests,
+  and `ConstantAccel` and `Controller` targets are both exercised.
+- **The gateway's run-products fixture carries no command events.** It is a real, tracked
+  `RunProducts` from a real `execute()` run (`tests/fixtures/demo_measurements.runproducts.bin`,
+  committed at `a25dd05`), which is what "not a hand-built literal" required, but it is the
+  measurements demo — so the gateway is not yet proven against a run whose events include a
+  command trail.
+- **`ExpireRequest`/`FailRequest` carry no principal**, attributing to a fixed service
+  principal, while `AckRequest` carries an unverified caller-supplied one. Neither is
+  authenticated, which is consistent with question 155's loopback-plus-nginx-mTLS posture that
+  A1.3 was accepted under, but the asymmetry is now in the wire contract.
+- **ES256/ES384** are still not implemented; RS256 only, as question 203(c) ratified.
+- **The OPA cross-check** is still a pinned document shape, not an executed comparison.
+- **The audit sink** is still an RFC 5424 file, "Partial" for the SIEM control per 203(d).
+
+### Defects found in review, with their root causes
+
+1. **The `LedgerRecord.command` self-evidence invariant was documented but unenforced.** The
+   field's doc comment states that the attached `Command` is the post-transition value, and the
+   task pinned it with a fixture that built a consistent `Command` and checked it had stayed
+   consistent — a tautology. Nothing stopped a future call site attaching a stale `Command`, and
+   the ledger would have recorded the disagreement durably for `scan_commands` to hand straight
+   back to `Query`. Root cause: the invariant lived in prose and in one hand-built fixture,
+   never in code. Fixed by checking it in `Ledger::append`, which **immediately caught the same
+   task's own `scan_commands` fixture violating it** on the first run.
+2. **A3.1 broke `cargo clippy --workspace --all-targets`.** Adding `RunConfig.command_source`
+   left the `RunConfig` literal in `crates/av-sweep/src/bin/av-sweep/sample_mode.rs`
+   unupdated, so the workspace lint failed from `60921fa` until `20461ec`. Root cause: both the
+   task's own gate and **the manager's review** ran clippy per-crate (`-p av-kernel -p av-run`),
+   not workspace-wide, and a new required struct field is exactly the change only the
+   workspace-wide run catches. Found by the next task. Standing lesson for this track: a task
+   that adds a field to a type other crates construct must run the workspace clippy, not a
+   per-crate one.
+3. **A worker spent its whole turn waiting and produced nothing.** A3.3's first attempt ran a
+   baseline suite in the background, ended its turn on the wait, and left an empty diff — 128
+   tool uses for no artifact. Root cause: the brief permitted background execution and did not
+   supply the baseline. Fixed by resuming the same agent with the baseline figures supplied and
+   background waits forbidden; it then delivered the whole task. Briefs on this track now say
+   "no Monitor, no `run_in_background`, wait in the foreground."
+
+Round 1's lesson held: every defect this round was again **a failure that would have left no
+trace** — an unenforced invariant, a lint that only one gate shape catches, and a worker whose
+silence was indistinguishable from progress.
+
+### Open items for the lead
+
+1. **Decision 11 needs ratifying before `av-proposer` is built** — the Unix-socket reading of
+   `--network none`, and the path dependency onto spoore's `model_service.proto` rather than
+   vendoring it.
+2. **`buf breaking` against the main tree is no longer a usable gate mid-round** while two
+   tracks own different proto files and the main tree moves under both. Either the gate compares
+   against each branch's own merge base, or the lead runs it once at the acceptance merge.
+3. **The non-`Authorize` RPCs are unauthenticated** (`Dispatch`, `Ack`, and now `Expire`/`Fail`),
+   and `Expire`/`Fail` do not even accept a caller-supplied principal while `Ack` does. Worth a
+   deliberate decision on whether any of them ever needs a verified principal, rather than
+   letting the asymmetry settle by accident.
+4. **`docs/aiplane-plan.md`'s round-1 open item 3 names the wrong file** — the regorus prose
+   match is in `policy.rs`, not `oidc.rs`. Left as written so the record is not rewritten after
+   the fact; corrected here.
+5. **`altavista/pb/generate.py` and `grpcio-tools`**: round 1's open item 2 is closed by the
+   edge track's `pyproject.toml` fix, which this branch took at the merge (question 202). The
+   regeneration command worked this round.
+6. **The cFS image was absent for this whole round** (question 196(d), sixth disappearance by
+   the standing count). Nothing this track needed it for — the demo attitude command fixture is
+   native — and the four gated kernel tests skipped visibly throughout.
