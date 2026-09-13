@@ -979,6 +979,40 @@ pub enum BindAddressError {
     /// `u16` port (e.g. it is larger than `65535`).
     #[error("bind address {raw:?} is a recognized loopback host but its port does not fit u16: {detail}")]
     UnparseablePort { raw: String, detail: String },
+    /// R3.3 ([`resolve_internal_network_bind_address`] only -- [`resolve_loopback_bind_address`]
+    /// never produces this variant): `raw` is neither loopback, unspecified (`0.0.0.0`/`[::]`)
+    /// nor an RFC-1918 private literal -- a publicly-routable, link-local, or multicast address,
+    /// none of which is ever a legitimate answer to "what does this container's peer dial on
+    /// a `docker network create --internal` segment".
+    #[error(
+        "bind address {raw:?} is neither loopback, unspecified (0.0.0.0/[::]), nor an RFC-1918 \
+         private literal -- resolve_internal_network_bind_address (--internal-network-bind) \
+         exists solely for a docker network create --internal segment with no route off the \
+         host (question 155's plaintext-on-loopback rule is untouched for every other \
+         deployment; mTLS across a real host boundary is still the nginx front's job, \
+         question 84)"
+    )]
+    GlobalScope { raw: String },
+}
+
+/// R3.3-only: every [`BindAddressError`] variant, [`Counted`](crate::counters::Counted) like
+/// every other typed refusal this workspace produces (ADR-004's "everything rejected is
+/// counted" rule) -- including the three pre-existing variants, which this impl block gains no
+/// differently than [`GlobalScope`] does, since they are equally real, equally typed refusals.
+/// Neither `av-command` nor `av-gateway`'s own binary has a live [`crate::counters::Counters`]
+/// instance at the point a bind address is resolved (both refuse and exit before one is
+/// constructed) -- this impl exists so a caller that DOES have one (a future binary, or a test)
+/// can count a bind refusal the identical way every other refusal in this workspace is counted,
+/// not because today's two binaries currently wire it up.
+impl crate::counters::Counted for BindAddressError {
+    fn code(&self) -> &'static str {
+        match self {
+            BindAddressError::NotLoopback { .. } => "bind_address_not_loopback",
+            BindAddressError::MissingPort { .. } => "bind_address_missing_port",
+            BindAddressError::UnparseablePort { .. } => "bind_address_unparseable_port",
+            BindAddressError::GlobalScope { .. } => "bind_address_global_scope",
+        }
+    }
 }
 
 /// Question 155: is `address` (a bare `"host:port"` string) a recognized loopback endpoint?
@@ -1032,6 +1066,112 @@ pub fn resolve_loopback_bind_address(raw: &str) -> Result<SocketAddr, BindAddres
         .parse()
         .map_err(|e: std::num::ParseIntError| BindAddressError::UnparseablePort { raw: raw.to_string(), detail: e.to_string() })?;
     Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+}
+
+/// Is `ip` an address [`resolve_internal_network_bind_address`] accepts, given that
+/// [`is_loopback_address`] has already been checked (and returned `false`) for the string it
+/// came from? Exactly two shapes: the unspecified address (`0.0.0.0`/`[::]` -- what a
+/// container binds when its own IP is not known before it starts) and an RFC-1918 private
+/// IPv4 literal (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` -- `Ipv4Addr::is_private`,
+/// stable since Rust 1.12, implements exactly this). No IPv6 private-range literal is
+/// accepted (RFC-1918 has no IPv6 analogue; `docs/open-questions.md` question 206's decision
+/// 11(a) names "private/RFC-1918-range literals" specifically) -- only IPv6's own unspecified
+/// address, `::`.
+fn is_internal_network_address(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_unspecified() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => v6.is_unspecified(),
+    }
+}
+
+/// R3.3 (`docs/open-questions.md` question 206's decision 11(a); `docs/aiplane-plan.md`
+/// milestone A4): a second, SEPARATELY NAMED resolver for `av-gateway`'s own gRPC bind
+/// address, reached only when an operator passes an explicit `--internal-network-bind` flag
+/// (`crates/av-gateway/src/bin/av-gateway.rs`) -- **never** an environment default, and never
+/// the resolver `av-command`'s own gRPC/admin listeners go through
+/// ([`resolve_loopback_bind_address`], question 155, completely untouched by this function's
+/// existence: the authority never leaves loopback, in this function or anywhere else).
+///
+/// # Why this exists at all
+///
+/// Two containers on a Docker bridge network do not share a network namespace, so they do not
+/// share loopback: a gateway container ("Container G" in this task's own design) must listen
+/// on an address its peer container can actually dial by name over that shared network. A
+/// container's own address on that network is not known before the container starts, so
+/// `0.0.0.0` (this function's own "unspecified" case) is what gets bound in practice; an
+/// operator who already knows a deployment's fixed private address may bind that literal
+/// instead.
+///
+/// # Why this is safe here and nowhere else -- measured, not merely asserted
+///
+/// Question 155's rule (this crate's plaintext transport binds loopback only) is untouched
+/// for every OTHER deployment of `av-gateway`, and the answer for a plaintext service reached
+/// across a real host boundary is unchanged: a service-owned nginx mTLS front (question 84).
+/// This function's own narrow use case is different in kind, not merely in degree: a
+/// `docker network create --internal` segment has **no default route off the host at all** --
+/// there is nowhere for a byte bound to this address to reach outside the containers that
+/// segment holds. `tests/test_proposer_container.py` measures that claim directly for the
+/// exact network this function's own caller binds to (a raw connect to a public address from
+/// inside that network fails immediately, `ENETUNREACH`), the identical shape
+/// `tests/test_edge_plugin_container.py` already measures for its own `--internal` network --
+/// this function's own doc asserts nothing about the network that its caller's test does not
+/// also measure.
+///
+/// # Why a flag, never an environment variable
+///
+/// Question 199's rule, applied one level up, at the CLI-parsing boundary: a knob this
+/// dangerous (it is, after all, the one deliberate weakening of question 155's rule this
+/// crate ships) must never be reachable by an inherited environment variable an operator might
+/// not even remember is set. `--internal-network-bind`'s own name says exactly what it is
+/// for, so a reader of a deploy script sees it named for what it is, never merely
+/// `--bind 0.0.0.0` (which says nothing about why that spelling is safe here and would be
+/// dangerous anywhere else this binary runs).
+///
+/// # What is accepted, and what is refused
+///
+/// - Every spelling [`resolve_loopback_bind_address`] itself accepts (delegated to that
+///   function directly for [`is_loopback_address`] hosts -- there is no second copy of the
+///   loopback check, and no loopback spelling is ever refused here that function would
+///   accept).
+/// - The unspecified address, numeric ([`is_internal_network_address`]).
+/// - An RFC-1918 private IPv4 literal, numeric.
+/// - A bare host of either accepted shape above with no `:port` at all, or a `:port` that
+///   does not fit `u16` -- refused [`BindAddressError::MissingPort`]/
+///   [`BindAddressError::UnparseablePort`] respectively, the identical typed refusals
+///   [`resolve_loopback_bind_address`] already defines for the identical failure shape (this
+///   function reuses them rather than defining a second, redundant pair).
+/// - Refused [`BindAddressError::GlobalScope`]: everything else -- any publicly-routable
+///   IPv4/IPv6 literal, any link-local or multicast literal, any hostname (deliberately no DNS
+///   resolution, the identical determinism reasoning [`is_loopback_address`]'s own doc gives).
+pub fn resolve_internal_network_bind_address(raw: &str) -> Result<SocketAddr, BindAddressError> {
+    if is_loopback_address(raw) {
+        return resolve_loopback_bind_address(raw);
+    }
+    // Mirrors is_loopback_address's own "host:port, or the whole string as a bare host" split
+    // (see that function's doc) so a bare host with no port and a numeric "host:port" are
+    // classified by the identical rule, never a second, divergent copy of it.
+    let host = match raw.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
+        _ => raw,
+    };
+    let stripped = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let accepted = stripped.parse::<std::net::IpAddr>().map(is_internal_network_address).unwrap_or(false);
+    if !accepted {
+        return Err(BindAddressError::GlobalScope { raw: raw.to_string() });
+    }
+    if let Ok(addr) = raw.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    // Accepted as a host, but `raw` did not parse directly as a numeric SocketAddr -- the
+    // only other way the split above can accept a string is a bare host with no ':' at all,
+    // mirroring resolve_loopback_bind_address's own identical fallback for "localhost".
+    let Some((_, port)) = raw.rsplit_once(':') else {
+        return Err(BindAddressError::MissingPort { raw: raw.to_string() });
+    };
+    let port: u16 = port
+        .parse()
+        .map_err(|e: std::num::ParseIntError| BindAddressError::UnparseablePort { raw: raw.to_string(), detail: e.to_string() })?;
+    Ok(SocketAddr::new(stripped.parse().expect("already validated above: stripped parses as IpAddr"), port))
 }
 
 #[cfg(test)]
@@ -1088,6 +1228,88 @@ mod tests {
     fn resolve_loopback_bind_address_refuses_a_port_that_overflows_u16() {
         let err = resolve_loopback_bind_address("localhost:99999999999").unwrap_err();
         assert!(matches!(err, BindAddressError::UnparseablePort { .. }), "{err:?}");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R3.3: resolve_internal_network_bind_address's own adversarial table, mirroring
+    // resolve_loopback_bind_address's own table above line for line -- every accepted
+    // spelling, every refused one, a bare host with no port, a port that overflows u16.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn resolve_internal_network_bind_address_accepts_every_loopback_spelling_via_delegation() {
+        // Delegated straight to resolve_loopback_bind_address -- no second copy of the
+        // loopback check, and every loopback spelling that function accepts is accepted here.
+        assert_eq!(resolve_internal_network_bind_address("127.0.0.1:50170").unwrap(), "127.0.0.1:50170".parse().unwrap());
+        assert_eq!(resolve_internal_network_bind_address("[::1]:50170").unwrap(), "[::1]:50170".parse().unwrap());
+        assert_eq!(resolve_internal_network_bind_address("localhost:50170").unwrap(), SocketAddr::from((Ipv4Addr::LOCALHOST, 50170)));
+    }
+
+    #[test]
+    fn resolve_internal_network_bind_address_accepts_the_unspecified_address() {
+        // What a container must bind, since its own address on the --internal network is not
+        // known before the container starts (docs/open-questions.md question 206's decision
+        // 11(a)).
+        assert_eq!(resolve_internal_network_bind_address("0.0.0.0:50170").unwrap(), "0.0.0.0:50170".parse().unwrap());
+        assert_eq!(resolve_internal_network_bind_address("[::]:50170").unwrap(), "[::]:50170".parse().unwrap());
+    }
+
+    #[test]
+    fn resolve_internal_network_bind_address_accepts_every_rfc1918_private_range() {
+        for raw in ["10.0.0.5:50170", "172.16.0.1:50170", "172.31.255.254:50170", "192.168.1.1:50170"] {
+            resolve_internal_network_bind_address(raw).unwrap_or_else(|e| panic!("{raw:?} should be an accepted RFC-1918 literal, got {e:?}"));
+        }
+    }
+
+    #[test]
+    fn resolve_internal_network_bind_address_refuses_every_global_scope_spelling() {
+        for raw in ["8.8.8.8:443", "1.1.1.1:50170", "198.51.100.1:9443", "169.254.1.1:50170", "224.0.0.1:50170", "example.com:50170"] {
+            let err = resolve_internal_network_bind_address(raw).unwrap_err();
+            assert!(matches!(err, BindAddressError::GlobalScope { .. }), "{raw:?} -> {err:?}");
+            assert!(err.to_string().contains("docker network create --internal"), "{err}");
+        }
+    }
+
+    /// A bare host with no port: an RFC-1918 literal is a recognized internal-network host,
+    /// but there is nothing to bind without a port -- a typed `MissingPort`, never a panic,
+    /// mirroring `resolve_loopback_bind_address_refuses_a_bare_localhost_with_no_port` above.
+    #[test]
+    fn resolve_internal_network_bind_address_refuses_a_bare_private_host_with_no_port() {
+        let err = resolve_internal_network_bind_address("10.0.0.5").unwrap_err();
+        assert!(matches!(err, BindAddressError::MissingPort { .. }), "{err:?}");
+    }
+
+    /// A port that does not fit `u16` against an otherwise-accepted host is `UnparseablePort`,
+    /// mirroring `resolve_loopback_bind_address_refuses_a_port_that_overflows_u16` above.
+    #[test]
+    fn resolve_internal_network_bind_address_refuses_a_port_that_overflows_u16() {
+        let err = resolve_internal_network_bind_address("172.20.0.4:99999999999").unwrap_err();
+        assert!(matches!(err, BindAddressError::UnparseablePort { .. }), "{err:?}");
+    }
+
+    /// A non-digit port against an otherwise-accepted host fails closed as `GlobalScope`
+    /// (the whole string fails to parse as any recognized address, exactly mirroring
+    /// `resolve_loopback_bind_address_treats_a_non_digit_port_as_not_loopback_at_all`'s
+    /// "fail closed on a garbled port" reasoning, restated for this resolver's own refusal).
+    #[test]
+    fn resolve_internal_network_bind_address_treats_a_non_digit_port_as_global_scope() {
+        let err = resolve_internal_network_bind_address("10.0.0.5:not-a-port").unwrap_err();
+        assert!(matches!(err, BindAddressError::GlobalScope { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn every_bind_address_error_has_a_distinct_stable_code() {
+        use crate::counters::Counted;
+        let codes: Vec<&'static str> = vec![
+            BindAddressError::NotLoopback { raw: "r".to_string() }.code(),
+            BindAddressError::MissingPort { raw: "r".to_string() }.code(),
+            BindAddressError::UnparseablePort { raw: "r".to_string(), detail: "d".to_string() }.code(),
+            BindAddressError::GlobalScope { raw: "r".to_string() }.code(),
+        ];
+        let mut sorted = codes.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "codes must be pairwise distinct: {codes:?}");
     }
 
     #[test]
