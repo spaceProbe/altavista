@@ -2603,9 +2603,15 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
         // propagation" split.
         crate::registry::ModelKind::AttitudeController => {
             let spec = controller::parse_attitude_controller_spec(&params).map_err(|e| DrmError::InvalidControllerSpec { instance: instance.name.clone(), reason: e.to_string() })?;
+            // A3.1/D7: `resolve_controller_ports` also resolves the optional mode-command-in/
+            // mode-ack-out codecs now (by fixed name+shape, `controller::CONTROLLER_MODE_IN_
+            // PORT`'s own doc comment) -- `None` exactly when the DRM declares neither, in
+            // which case this instance behaves exactly as it always has (D4's own "must not
+            // move a single existing golden" rule: every fixture through M22.4 declares
+            // neither).
             let ports = resolve_controller_ports(sys, &instance.name)?;
             // See the identical `epoch_tai_ns: 0` note on the `ModelKind::StarTracker` arm above.
-            AttitudeControllerModel::new(spec.clone(), ports.star_codec, ports.imu_codec, ports.command_codec, 0, &sys.dynamics_model).map_err(|e| DrmError::InvalidControllerSpec { instance: instance.name.clone(), reason: e.to_string() })?;
+            AttitudeControllerModel::new(spec.clone(), ports, 0, &sys.dynamics_model).map_err(|e| DrmError::InvalidControllerSpec { instance: instance.name.clone(), reason: e.to_string() })?;
             Ok(Classification::Model(BindingPlan::Controller(spec)))
         }
         // M25.1 (`docs/sil-plan.md`'s M25 milestone): the `"ground."` binding kind this batch
@@ -3086,8 +3092,8 @@ pub(crate) fn materialize_imu(spec: &ImuSpec, codec: PacketCodec, output_port: S
 /// before this instance was accepted; re-resolved (not threaded through `BindingPlan::
 /// Controller`) at every materialization, the same convention every other native binding kind's
 /// own `materialize_*` function already follows.
-pub(crate) fn materialize_controller(spec: &AttitudeControllerSpec, star_codec: PacketCodec, imu_codec: PacketCodec, command_codec: PacketCodec, epoch_tai_ns: i64, model_id: &str) -> Result<Materialized, ControllerSpecError> {
-    let model = AttitudeControllerModel::new(spec.clone(), star_codec, imu_codec, command_codec, epoch_tai_ns, model_id)?;
+pub(crate) fn materialize_controller(spec: &AttitudeControllerSpec, ports: ControllerPorts, epoch_tai_ns: i64, model_id: &str) -> Result<Materialized, ControllerSpecError> {
+    let model = AttitudeControllerModel::new(spec.clone(), ports, epoch_tai_ns, model_id)?;
     // `AttitudeControllerModel::state_dim() == 0` always (see the module doc comment) -- same
     // empty-initial-state convention `materialize_star_tracker` already uses.
     Ok(Materialized { model: AnyModel::Controller(model), t0_tai_ns: epoch_tai_ns, x0_si: Vec::new(), settings: BTreeMap::new() })
@@ -3255,10 +3261,24 @@ pub(crate) fn resolve_attitude_wheel_command_input(sys: &SystemDefinition, insta
 /// ports (one per required name) and exactly one `PORT_DIRECTION_OUT` port (the wheel-torque
 /// name). Any count other than what is described here is a typed [`DrmError::
 /// SensorPortConfiguration`], never silently defaulted.
-pub(crate) struct ControllerPorts {
+/// A3.1: `pub`, not `pub(crate)` -- unlike every other `*Ports` struct in this module, this one
+/// is now also a parameter type of two `pub` functions (`controller::AttitudeControllerModel::
+/// new`, `crate::registry::ModelRegistry::construct_attitude_controller`), so it must be at
+/// least as visible as they are (`private_interfaces`, a real rustc lint, not merely clippy).
+pub struct ControllerPorts {
     pub star_codec: PacketCodec,
     pub imu_codec: PacketCodec,
     pub command_codec: PacketCodec,
+    /// A3.1/D7: `Some` iff this instance's own `SystemDefinition` declares [`controller::
+    /// CONTROLLER_MODE_IN_PORT`] (`PORT_KIND_FRAMED`/`PORT_DIRECTION_IN`) together with a
+    /// shaped mode-command codec (`is_command=true`, a `"value"` field) -- resolved by name+
+    /// shape, never by a declared `"port.*"` parameter (see that constant's own doc comment for
+    /// why). `None` for every fixture through M22.4, which declares neither.
+    pub mode_codec: Option<PacketCodec>,
+    /// A3.1/D3: [`Self::mode_codec`]'s ack-out counterpart -- `Some` iff [`controller::
+    /// CONTROLLER_MODE_ACK_OUT_PORT`] (`PORT_DIRECTION_OUT`) is declared together with a shaped
+    /// ack codec (`is_command=false`, a `"cmd_seq"` field).
+    pub ack_codec: Option<PacketCodec>,
 }
 
 /// M25.1 (`docs/sil-plan.md`'s M25 milestone; `docs/open-questions.md` question 149's "a FRAMED
@@ -3310,8 +3330,11 @@ pub(crate) fn resolve_ground_ports(sys: &SystemDefinition, instance: &str) -> Re
 }
 
 pub(crate) fn resolve_controller_ports(sys: &SystemDefinition, instance: &str) -> Result<ControllerPorts, DrmError> {
-    if sys.packet_codecs.len() != 3 {
-        return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("expected exactly 3 declared packet_codecs entries (star tracker input, imu input, wheel-torque command output), found {}", sys.packet_codecs.len()) });
+    // A3.1/D7: `>= 3`, not `!= 3` -- an instance may additionally declare a mode-command-in
+    // codec/port and a mode-ack-out codec/port (resolved below, by fixed name+shape, never by a
+    // declared `"port.*"` parameter -- `controller::CONTROLLER_MODE_IN_PORT`'s own doc comment).
+    if sys.packet_codecs.len() < 3 {
+        return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("expected at least 3 declared packet_codecs entries (star tracker input, imu input, wheel-torque command output), found {}", sys.packet_codecs.len()) });
     }
     let has_fields = |c: &PacketCodec, names: &[&str]| names.iter().all(|n| c.fields.iter().any(|f| f.name == *n));
     let star: Vec<&PacketCodec> = sys.packet_codecs.iter().filter(|c| has_fields(c, &["qx", "qy", "qz", "qw"])).collect();
@@ -3328,25 +3351,59 @@ pub(crate) fn resolve_controller_ports(sys: &SystemDefinition, instance: &str) -
         return Err(bad(format!("expected exactly one declared packet_codecs entry shaped as a wheel-torque command (the command output codec), found {}", command.len())));
     };
 
+    // A3.1/D7: `>= 2`/named, not `!= 2` -- an additional PORT_DIRECTION_IN port (the mode-command
+    // port, resolved separately by name below) may also be declared; the two fixed names below
+    // must still both be present, exactly as before this task.
     let framed_in: Vec<&Port> = sys.ports.iter().filter(|p| p.kind == PortKind::Framed as i32 && p.direction == PortDirection::In as i32).collect();
-    if framed_in.len() != 2 || !framed_in.iter().any(|p| p.name == controller::CONTROLLER_STARTRACKER_IN_PORT) || !framed_in.iter().any(|p| p.name == controller::CONTROLLER_IMU_IN_PORT) {
+    if !framed_in.iter().any(|p| p.name == controller::CONTROLLER_STARTRACKER_IN_PORT) || !framed_in.iter().any(|p| p.name == controller::CONTROLLER_IMU_IN_PORT) {
         return Err(bad(format!(
-            "expected exactly two declared PORT_KIND_FRAMED/PORT_DIRECTION_IN ports named {:?} and {:?}, found {} port(s) named {:?}",
+            "expected declared PORT_KIND_FRAMED/PORT_DIRECTION_IN ports named {:?} and {:?}, found {} port(s) named {:?}",
             controller::CONTROLLER_STARTRACKER_IN_PORT,
             controller::CONTROLLER_IMU_IN_PORT,
             framed_in.len(),
             framed_in.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
         )));
     }
+    // A3.1/D3: `>= 1`/named, not `!= 1` -- an additional PORT_DIRECTION_OUT port (the mode-ack
+    // port, resolved separately by name below) may also be declared; the wheel-torque-out port
+    // itself must still be present and correctly named, exactly as before this task.
     let framed_out: Vec<&Port> = sys.ports.iter().filter(|p| p.kind == PortKind::Framed as i32 && p.direction == PortDirection::Out as i32).collect();
-    let [out_port] = framed_out.as_slice() else {
-        return Err(bad(format!("expected exactly one declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port, found {}", framed_out.len())));
-    };
-    if out_port.name != controller::CONTROLLER_WHEEL_TORQUE_OUT_PORT {
-        return Err(bad(format!("the declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port must be named {:?}, found {:?}", controller::CONTROLLER_WHEEL_TORQUE_OUT_PORT, out_port.name)));
+    if !framed_out.iter().any(|p| p.name == controller::CONTROLLER_WHEEL_TORQUE_OUT_PORT) {
+        return Err(bad(format!("expected a declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port named {:?}, found {} port(s) named {:?}", controller::CONTROLLER_WHEEL_TORQUE_OUT_PORT, framed_out.len(), framed_out.iter().map(|p| p.name.as_str()).collect::<Vec<_>>())));
     }
 
-    Ok(ControllerPorts { star_codec: (*star_codec).clone(), imu_codec: (*imu_codec).clone(), command_codec: (*command_codec).clone() })
+    // A3.1/D7: the mode-command-in codec/port -- resolved by fixed name+shape (never a declared
+    // `"port.*"` parameter), `None` when this instance declares neither, and a typed refusal if
+    // it declares one without the other (a lone port with nothing shaped to decode, or a lone
+    // shaped codec nothing routes to, is a fixture-authoring mistake, not a silent no-op).
+    let mode_ports: Vec<&Port> = sys.ports.iter().filter(|p| p.kind == PortKind::Framed as i32 && p.direction == PortDirection::In as i32 && p.name == controller::CONTROLLER_MODE_IN_PORT).collect();
+    let mode_codecs: Vec<&PacketCodec> = sys.packet_codecs.iter().filter(|c| c.is_command && c.fields.iter().any(|f| f.name == "value") && !has_fields(c, &["qx", "qy", "qz", "qw"]) && !controller::is_wheel_torque_command_codec(c)).collect();
+    let mode_codec = match (mode_ports.len(), mode_codecs.len()) {
+        (0, 0) => None,
+        (1, 1) => Some(mode_codecs[0].clone()),
+        (ports, codecs) => {
+            return Err(bad(format!(
+                "a mode-command port/codec must be declared together or not at all: found {ports} declared PORT_KIND_FRAMED/PORT_DIRECTION_IN port(s) named {:?} and {codecs} is_command=true packet_codecs entry/entries with a \"value\" field",
+                controller::CONTROLLER_MODE_IN_PORT
+            )));
+        }
+    };
+    // A3.1/D3: the mode-ack-out codec/port -- identical by-name-then-by-shape resolution, the
+    // ack-out counterpart.
+    let ack_ports: Vec<&Port> = sys.ports.iter().filter(|p| p.kind == PortKind::Framed as i32 && p.direction == PortDirection::Out as i32 && p.name == controller::CONTROLLER_MODE_ACK_OUT_PORT).collect();
+    let ack_codecs: Vec<&PacketCodec> = sys.packet_codecs.iter().filter(|c| !c.is_command && c.fields.iter().any(|f| f.name == "cmd_seq")).collect();
+    let ack_codec = match (ack_ports.len(), ack_codecs.len()) {
+        (0, 0) => None,
+        (1, 1) => Some(ack_codecs[0].clone()),
+        (ports, codecs) => {
+            return Err(bad(format!(
+                "a mode-ack port/codec must be declared together or not at all: found {ports} declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port(s) named {:?} and {codecs} is_command=false packet_codecs entry/entries with a \"cmd_seq\" field",
+                controller::CONTROLLER_MODE_ACK_OUT_PORT
+            )));
+        }
+    };
+
+    Ok(ControllerPorts { star_codec: (*star_codec).clone(), imu_codec: (*imu_codec).clone(), command_codec: (*command_codec).clone(), mode_codec, ack_codec })
 }
 
 #[cfg(test)]
@@ -5526,7 +5583,8 @@ mod tests {
         let star_codec = sensors::star_tracker_packet_codec("ctrl_star_codec", 100);
         let imu_codec = sensors::imu_packet_codec("ctrl_imu_codec", 101);
         let cmd_codec = controller::wheel_torque_command_packet_codec("ctrl_cmd_codec", 102);
-        materialize_controller(spec, star_codec, imu_codec, cmd_codec, 1_700_000_000_000_000_000, "attctrl.test").expect("a valid spec/codec triple must materialize")
+        let ports = ControllerPorts { star_codec, imu_codec, command_codec: cmd_codec, mode_codec: None, ack_codec: None };
+        materialize_controller(spec, ports, 1_700_000_000_000_000_000, "attctrl.test").expect("a valid spec/codec triple must materialize")
     }
 
     fn simple_controller_spec() -> AttitudeControllerSpec {

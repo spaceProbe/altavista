@@ -1,0 +1,227 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- A3.1
+# (`docs/aiplane-plan.md`'s A3 milestone; D7: "the attitude controller's mode command"). A NEW
+# system definition, never a modification of `drms/demo_attitude_control_controller.system.yaml`
+# (D8: "a new fixture family, never a modified one") -- field-for-field identical to that file's
+# own star-tracker-in/imu-in/wheel-torque-out ports and codecs (apid 200/201/300, the same
+# `attctrl.` dispatch), PLUS two new declared ports this task adds: `mode_in` (FRAMED IN, apid
+# 210 -- a ground-issued `mode` telecommand, `crate::drm::command::command_out_packet_codec`'s
+# own single-`"value"`-field convention) and `mode_ack_out` (FRAMED OUT, apid 211 -- the
+# acknowledged packet's own CCSDS `sequence_count` PLUS which `AckLevel` this ack reports,
+# `controller_mode_ack_out_codec`'s own two-field shape below) -- resolved by FIXED name+shape
+# (`crate::drm::controller::CONTROLLER_MODE_IN_PORT`/`.ACK_OUT_PORT`), never a declared
+# `"port.*"` parameter naming them a second way -- see that constant's own doc comment for why.
+#
+# `1.0` commanded on `mode_in` = REGULATE (the PD control law runs exactly as `demo_attitude_
+# control`'s own identical gains describe); `0.0` = SAFE (an explicit `[0.0, 0.0, 0.0]`
+# wheel-torque command is published on the same schedule instead -- see `crate::drm::controller::
+# ControllerMode`'s own doc comment). `crates/av-kernel/tests/drm_attitude_command.rs` drives a
+# SAFE command through a `crate::drm::command_source::ExternalCommandSource` and asserts the
+# physical effect against the identical fixture run with no command at all.
+id: attitude_command_controller_sys
+version: "1"
+name: Native attitude controller with a ground-issued mode command (A3.1/D7)
+dynamics_model: attctrl.command_demo
+state_space_id: attctrl.command_demo.space
+state_space:
+  id: attctrl.command_demo.space
+  components: []
+ports:
+  - name: startracker_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: imu_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+  - name: wheel_torque_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+  - name: mode_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+  - name: mode_ack_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+packet_codecs:
+  - id: controller_star_in_codec
+    apid: 200
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "star tracker attitude measurement, decoded (A3.1, field-for-field == M22.4)"
+    fields:
+      - name: qx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: qw
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: controller_imu_in_codec
+    apid: 201
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 48
+    description: "IMU rate + specific-force measurement, decoded (A3.1, field-for-field == M22.4)"
+    fields:
+      - name: wx
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wy
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: wz
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_RADIAN_PER_SECOND
+        scale: 1.0
+        offset: 0.0
+      - name: ax
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: ay
+        bit_offset: 256
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+      - name: az
+        bit_offset: 320
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER_PER_SECOND_SQUARED
+        scale: 1.0
+        offset: 0.0
+  - id: controller_wheel_torque_out_codec
+    apid: 300
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 24
+    description: "reaction wheel torque command, wheel k aligned with body axis k (A3.1, field-for-field == M22.4)"
+    fields:
+      - name: tau_1
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_2
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+      - name: tau_3
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_NEWTON_METER
+        scale: 1.0
+        offset: 0.0
+  - id: controller_mode_in_codec
+    apid: 210
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 8
+    description: "ground-issued mode telecommand: 1.0 = REGULATE, 0.0 = SAFE (A3.1/D7)"
+    fields:
+      - name: value
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: controller_mode_ack_out_codec
+    apid: 211
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 4
+    description: "mode-command levelled ack: acknowledged packet's own CCSDS sequence_count PLUS which AckLevel this packet reports (A3.1/D3/D4 -- a NEW, opt-in-by-shape codec: a declared ack codec with only \"cmd_seq\" stays the pre-existing single-level ack every other consume_framed/ack_framed binding kind already uses unchanged; declaring \"level\" too, as this fixture does, opts this ONE instance into a second, decode-time ack emission -- crate::drm::controller::AttitudeControllerModel's own step_with_ports)"
+    fields:
+      - name: cmd_seq
+        bit_offset: 0
+        bit_width: 16
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+      - name: level
+        bit_offset: 16
+        bit_width: 16
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: controller.kp
+    value: 0.25
+  - name: controller.kd
+    value: 5.0
+  - name: controller.target_q.x
+    value: 0.0
+  - name: controller.target_q.y
+    value: 0.0
+  - name: controller.target_q.z
+    value: 0.0
+  - name: controller.target_q.w
+    value: 1.0
+  - name: controller.update_rate_hz
+    value: 10.0
+    unit: UNIT_HERTZ
+  - name: output.seq
+    unit: UNIT_DIMENSIONLESS
+  - name: output.pointing_error_rad
+    unit: UNIT_RADIAN
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_attitude_command_controller.system.yaml
+hash: "ce97cb971f29323602fe82ee86b486f5f04ef742e4a252a53201e74f67242597"

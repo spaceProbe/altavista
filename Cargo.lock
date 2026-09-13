@@ -103,6 +103,7 @@ dependencies = [
  "openssl",
  "prost",
  "prost-build",
+ "prost-types",
  "regorus",
  "serde",
  "serde_json",
@@ -152,6 +153,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "av-gateway"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-command",
+ "openssl",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -227,6 +247,7 @@ dependencies = [
  "av-lockstep-shim",
  "gmat-sys",
  "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -264,9 +285,13 @@ name = "av-run"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-command",
  "av-kernel",
  "gmat-sys",
  "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
 ]
 
 [[package]]

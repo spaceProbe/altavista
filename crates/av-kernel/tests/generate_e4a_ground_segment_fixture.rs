@@ -90,6 +90,7 @@ fn regenerate_the_ground_segment_fixture_for_av_edges_plugin_tests() {
         error_mode: Default::default(),
         products_dir: Some(scratch_dir.clone()),
         replay: None,
+        command_source: None,
     };
     let products = execute(cfg).expect("the ground-segment DRM executes end to end");
     assert!(!products.port_traffic_hash.is_empty(), "products_dir was set, so a real PortTrafficLog sidecar must have been written and hashed");

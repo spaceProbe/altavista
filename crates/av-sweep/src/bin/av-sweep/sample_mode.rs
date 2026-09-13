@@ -52,7 +52,12 @@ pub fn run_sample(args: SampleArgs) -> Result<(), String> {
     let startup = args.gmat_startup.clone().unwrap_or_else(gmat_sys::Gmat::default_startup_file);
     let gmat = gmat_sys::Gmat::setup(&startup).map_err(|e| format!("GMAT setup ({startup}): {e}"))?;
 
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: args.run_id.clone(), error_mode: args.error_mode, products_dir: None, replay: None };
+    // `command_source: None` -- a sweep sample never drives a command through an
+    // `ExternalCommandSource` (A3.1, `docs/aiplane-plan.md`'s A3 milestone, added this field
+    // to `RunConfig` in commit 60921fa without updating this call site, which this A3.2 task
+    // found only because it broke `cargo clippy --workspace --all-targets`; a pre-existing
+    // defect, root-caused and fixed here rather than left for a later round to rediscover).
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: args.run_id.clone(), error_mode: args.error_mode, products_dir: None, replay: None, command_source: None };
     let products = execute(cfg).map_err(|e| format!("DRM execution failed: {e}"))?;
 
     eprintln!(

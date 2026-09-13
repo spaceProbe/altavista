@@ -26,11 +26,12 @@ if _version_not_supported:
 
 
 class CommandAuthorityServiceStub:
-    """The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
-    verify, over the state machine and ledger `crates/av-command`'s library modules already
-    implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
-    comment above for what it does and does not verify; see that module's own doc comment for
-    the `tonic::Status` code chosen for every refusal.
+    """The command authority service: propose, check, authorize, dispatch, ack, expire, fail,
+    query, and ledger verify, over the state machine and ledger `crates/av-command`'s library
+    modules already implement (`crates/av-command/src/service.rs`). See each RPC's own request
+    message doc comment above for what it does and does not verify; see that module's own doc
+    comment for the `tonic::Status` code chosen for every refusal. `Expire`/`Fail` are A3.2
+    additions (D2) -- additive only, no existing rpc or field number above moves.
     """
 
     def __init__(self, channel):
@@ -64,6 +65,16 @@ class CommandAuthorityServiceStub:
                 request_serializer=altavista_dot_v1_dot_authority__pb2.AckRequest.SerializeToString,
                 response_deserializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.FromString,
                 _registered_method=True)
+        self.Expire = channel.unary_unary(
+                '/altavista.v1.CommandAuthorityService/Expire',
+                request_serializer=altavista_dot_v1_dot_authority__pb2.ExpireRequest.SerializeToString,
+                response_deserializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.FromString,
+                _registered_method=True)
+        self.Fail = channel.unary_unary(
+                '/altavista.v1.CommandAuthorityService/Fail',
+                request_serializer=altavista_dot_v1_dot_authority__pb2.FailRequest.SerializeToString,
+                response_deserializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.FromString,
+                _registered_method=True)
         self.Query = channel.unary_unary(
                 '/altavista.v1.CommandAuthorityService/Query',
                 request_serializer=altavista_dot_v1_dot_authority__pb2.QueryRequest.SerializeToString,
@@ -77,11 +88,12 @@ class CommandAuthorityServiceStub:
 
 
 class CommandAuthorityServiceServicer:
-    """The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
-    verify, over the state machine and ledger `crates/av-command`'s library modules already
-    implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
-    comment above for what it does and does not verify; see that module's own doc comment for
-    the `tonic::Status` code chosen for every refusal.
+    """The command authority service: propose, check, authorize, dispatch, ack, expire, fail,
+    query, and ledger verify, over the state machine and ledger `crates/av-command`'s library
+    modules already implement (`crates/av-command/src/service.rs`). See each RPC's own request
+    message doc comment above for what it does and does not verify; see that module's own doc
+    comment for the `tonic::Status` code chosen for every refusal. `Expire`/`Fail` are A3.2
+    additions (D2) -- additive only, no existing rpc or field number above moves.
     """
 
     def Propose(self, request, context):
@@ -109,6 +121,18 @@ class CommandAuthorityServiceServicer:
         raise NotImplementedError('Method not implemented!')
 
     def Ack(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Expire(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Fail(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -154,6 +178,16 @@ def add_CommandAuthorityServiceServicer_to_server(servicer, server):
                     request_deserializer=altavista_dot_v1_dot_authority__pb2.AckRequest.FromString,
                     response_serializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.SerializeToString,
             ),
+            'Expire': grpc.unary_unary_rpc_method_handler(
+                    servicer.Expire,
+                    request_deserializer=altavista_dot_v1_dot_authority__pb2.ExpireRequest.FromString,
+                    response_serializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.SerializeToString,
+            ),
+            'Fail': grpc.unary_unary_rpc_method_handler(
+                    servicer.Fail,
+                    request_deserializer=altavista_dot_v1_dot_authority__pb2.FailRequest.FromString,
+                    response_serializer=altavista_dot_v1_dot_authority__pb2.CommandResponse.SerializeToString,
+            ),
             'Query': grpc.unary_unary_rpc_method_handler(
                     servicer.Query,
                     request_deserializer=altavista_dot_v1_dot_authority__pb2.QueryRequest.FromString,
@@ -173,11 +207,12 @@ def add_CommandAuthorityServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class CommandAuthorityService:
-    """The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
-    verify, over the state machine and ledger `crates/av-command`'s library modules already
-    implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
-    comment above for what it does and does not verify; see that module's own doc comment for
-    the `tonic::Status` code chosen for every refusal.
+    """The command authority service: propose, check, authorize, dispatch, ack, expire, fail,
+    query, and ledger verify, over the state machine and ledger `crates/av-command`'s library
+    modules already implement (`crates/av-command/src/service.rs`). See each RPC's own request
+    message doc comment above for what it does and does not verify; see that module's own doc
+    comment for the `tonic::Status` code chosen for every refusal. `Expire`/`Fail` are A3.2
+    additions (D2) -- additive only, no existing rpc or field number above moves.
     """
 
     @staticmethod
@@ -316,6 +351,60 @@ class CommandAuthorityService:
             _registered_method=True)
 
     @staticmethod
+    def Expire(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/altavista.v1.CommandAuthorityService/Expire',
+            altavista_dot_v1_dot_authority__pb2.ExpireRequest.SerializeToString,
+            altavista_dot_v1_dot_authority__pb2.CommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Fail(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/altavista.v1.CommandAuthorityService/Fail',
+            altavista_dot_v1_dot_authority__pb2.FailRequest.SerializeToString,
+            altavista_dot_v1_dot_authority__pb2.CommandResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def Query(request,
             target,
             options=(),
@@ -359,6 +448,96 @@ class CommandAuthorityService:
             '/altavista.v1.CommandAuthorityService/VerifyLedger',
             altavista_dot_v1_dot_authority__pb2.VerifyLedgerRequest.SerializeToString,
             altavista_dot_v1_dot_authority__pb2.VerifyLedgerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+class DataGatewayServiceStub:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Query = channel.unary_unary(
+                '/altavista.v1.DataGatewayService/Query',
+                request_serializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.SerializeToString,
+                response_deserializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.FromString,
+                _registered_method=True)
+
+
+class DataGatewayServiceServicer:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    def Query(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_DataGatewayServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Query': grpc.unary_unary_rpc_method_handler(
+                    servicer.Query,
+                    request_deserializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.FromString,
+                    response_serializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'altavista.v1.DataGatewayService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('altavista.v1.DataGatewayService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class DataGatewayService:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    @staticmethod
+    def Query(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/altavista.v1.DataGatewayService/Query',
+            altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.SerializeToString,
+            altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.FromString,
             options,
             channel_credentials,
             insecure,

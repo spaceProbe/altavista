@@ -1,0 +1,33 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- A3.1
+# (`docs/aiplane-plan.md`'s A3 milestone: "an external command source that dispatches Commands
+# into the kernel's existing telecommand path"). **Deliberately zero `scenario.events`** -- every
+# command this run's own trajectory sees comes from a `crate::drm::command_source::
+# ExternalCommandSource` the test wires through `RunConfig.command_source`, never from a
+# DRM-declared `command` `ScenarioEvent`. Reuses `drms/demo_command.sos.yaml` (and, through it,
+# `demo_command_flight.system.yaml`/`demo_command_ground.system.yaml`) completely unchanged --
+# `flight` already declares `port.consume_framed`/`port.consume_framed_field=accel_scale`/
+# `port.ack_framed`, and `ground` already declares `port.cmd_out` -- so this fixture needs no new
+# system definitions at all, only a DRM with an empty command scenario naming that same topology.
+#
+# crates/av-kernel/tests/external_command_source.rs drives this fixture.
+id: external_command_demo_drm
+version: "1"
+name: "A3.1: external command source demo (every command comes from an ExternalCommandSource, none from a declared ScenarioEvent)"
+sos_configuration_id: demo_command_sos
+scenario:
+  start_tai_ns: 1700000000000000000
+  end_tai_ns: 1700000100000000000
+options:
+  covariance: false
+  default_step_rate_hz: 1.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_external_command.drm.yaml
+hash: "dbe5aa115676cabe5b7307a13470ec8fe0382b76e3dd9982525778bc94d086d8"

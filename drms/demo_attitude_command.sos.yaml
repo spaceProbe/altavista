@@ -1,0 +1,133 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- A3.1
+# (D8: "a new fixture family... adding a ground instance and the connection to the controller's
+# new command port"). Derived from `drms/demo_attitude_control.sos.yaml` (unchanged: same four
+# instances -- `attitude`/`startracker`/`imu`/`controller` -- same seventeen connections) PLUS a
+# fifth instance, `ground` (reusing `drms/demo_ground_command_ground.system.yaml`'s own
+# `ground_command_demo_ground_sys` completely unchanged -- a non-physical dispatch instance with
+# no live model logic of its own, exactly `crate::drm::executor::run_shared_group`'s own
+# command-dispatch code needs), and one new FRAMED connection: `ground.cmd_out ->
+# controller.mode_in` (`crate::drm::controller::AttitudeControllerSpec::consume_framed_port`'s
+# own new A3.1/D7 command port, resolved on `drms/demo_attitude_command_controller.system.yaml`).
+#
+# `controller`'s own new `mode_ack_out` port is declared (that system's own file) but **not**
+# connected to anything here -- mirrors `demo_ground_command_ground.system.yaml`'s own identical,
+# already-precedented choice ("no ack_in port is declared... it is simply never routed anywhere
+# -- harmless, not an error," that file's own header comment): this fixture's own acceptance
+# test does not exercise ack correlation on the ground's receiving end, only that the ack packet
+# is genuinely sent (`crate::router::Router`'s own port-traffic recording proves the OUT emission
+# regardless of whether anything downstream consumes it).
+id: attitude_command_sos
+version: "1"
+name: Closed-loop attitude control with a ground-issued mode command (A3.1/D7)
+instances:
+  - name: attitude
+    system_id: attitude_control_truth_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_truth_sys
+  - name: startracker
+    system_id: attitude_control_startracker_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_startracker_sys
+  - name: imu
+    system_id: attitude_control_imu_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_control_imu_sys
+  - name: controller
+    system_id: attitude_command_controller_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_command_controller_sys
+  - name: ground
+    system_id: ground_command_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_command_demo_ground_sys
+connections:
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: startracker
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: startracker
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: startracker
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: startracker
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: startracker
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: startracker
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: startracker
+    to_port: truth_wz
+  - from_instance: attitude
+    from_port: truth_qx
+    to_instance: imu
+    to_port: truth_qx
+  - from_instance: attitude
+    from_port: truth_qy
+    to_instance: imu
+    to_port: truth_qy
+  - from_instance: attitude
+    from_port: truth_qz
+    to_instance: imu
+    to_port: truth_qz
+  - from_instance: attitude
+    from_port: truth_qw
+    to_instance: imu
+    to_port: truth_qw
+  - from_instance: attitude
+    from_port: truth_wx
+    to_instance: imu
+    to_port: truth_wx
+  - from_instance: attitude
+    from_port: truth_wy
+    to_instance: imu
+    to_port: truth_wy
+  - from_instance: attitude
+    from_port: truth_wz
+    to_instance: imu
+    to_port: truth_wz
+  - from_instance: startracker
+    from_port: st_meas
+    to_instance: controller
+    to_port: startracker_in
+  - from_instance: imu
+    from_port: imu_meas
+    to_instance: controller
+    to_port: imu_in
+  - from_instance: controller
+    from_port: wheel_torque_out
+    to_instance: attitude
+    to_port: wheel_torque_in
+  - from_instance: ground
+    from_port: cmd_out
+    to_instance: controller
+    to_port: mode_in
+    link_model: "latency"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_attitude_command.sos.yaml
+hash: "fab025159513ebfda24e4b7b7f5555c34a7c980b801b22a5b56c62b0b660826f"

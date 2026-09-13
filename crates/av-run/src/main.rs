@@ -201,7 +201,7 @@ fn run(args: &[String]) -> Result<(), String> {
     // task -- `av-run` always passes `None` here. Wiring a flag through to `ReplayConfig::{log_path,
     // expected_hash, instances}` is deliberately left for a later task; this line only keeps
     // `av-run` compiling against `RunConfig`'s new field.
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
     let products = execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))?;
 
     eprintln!(

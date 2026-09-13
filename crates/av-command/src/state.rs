@@ -38,8 +38,29 @@
 //!
 //! Implemented edges: `PROPOSED -> CHECKED`, `PROPOSED -> REJECTED`, `CHECKED ->
 //! AUTHORIZED`, `CHECKED -> REJECTED`, `AUTHORIZED -> DISPATCHED`, `AUTHORIZED -> EXPIRED`,
-//! `DISPATCHED -> ACKED`, `DISPATCHED -> FAILED`, `DISPATCHED -> EXPIRED`. [`reject`] and
-//! [`expire`] each cover two legal source states; every other edge function covers one.
+//! `DISPATCHED -> ACKED`, `DISPATCHED -> FAILED`, `DISPATCHED -> EXPIRED`, and (A3.2, D2)
+//! `ACKED -> ACKED`. [`reject`] and [`expire`] each cover two legal source states; [`ack`]
+//! now covers two as well (`DISPATCHED` and `ACKED`); every other edge function covers one.
+//!
+//! ## A3.2/D2: the tenth edge, `ACKED -> ACKED`
+//!
+//! `command.proto`'s `CommandTransition.ack_level` exists so an asset that acks a command at
+//! more than one [`AckLevel`] (edge received, asset received, asset executed --
+//! `docs/aiplane-plan.md` A3) produces more than one transition -- if a second, third ack
+//! could only ever be silently dropped once `state` was already `ACKED`, that field would be
+//! pointless: nothing downstream (the ledger, a replay, the console) could ever see the
+//! asset's later, more-executed acks at all. [`ack`] therefore accepts `ACKED` as a second
+//! legal source state, **but only when the newly reported [`AckLevel`] is strictly greater
+//! than the previous transition's own `ack_level`** (`ACK_LEVEL_UNSPECIFIED` (0) < `_EDGE` (1)
+//! < `_ASSET_RECEIVED` (2) < `_ASSET_EXECUTED` (3), the enum's own declared ordinal order --
+//! `command.proto` declares no other ordering, and this is the only one that matches "ack
+//! levels arrive in increasing order of how far the command actually got"). A non-increasing
+//! (equal or lower) level is refused as [`CommandError::AckLevelNotIncreasing`] -- a typed
+//! refusal, structurally legal (the `ACKED -> ACKED` edge itself exists) but rejected on the
+//! *value* being re-asserted, never silently ignored and never folded into
+//! [`CommandError::IllegalTransition`] (that variant means "no edge exists from this state to
+//! this one at all," which is false here: the edge exists, this one instance of it is what is
+//! refused).
 //!
 //! [`propose`] is not one of the nine: it is the machine's entry point, building a fresh
 //! `Command` (`CommandState::Unspecified` -> `CommandState::Proposed`) rather than advancing
@@ -70,6 +91,12 @@ pub enum CommandError {
     /// enforced in code as well as in policy).
     #[error("propose refuses a non-empty envelope_id {envelope_id:?}: propose-only stands (question 53), no envelope is enabled by this track")]
     EnvelopeNotAllowed { envelope_id: String },
+    /// A3.2/D2: `ack` was called on a `Command` already `ACKED`, with an `ack_level` that is
+    /// not strictly greater than the previous transition's own `ack_level` -- see the module
+    /// doc's "A3.2/D2: the tenth edge" section. The edge `ACKED -> ACKED` itself is legal;
+    /// this specific `(previous, requested)` pair is refused.
+    #[error("ack refuses a non-increasing ack_level: previous transition already recorded {previous:?}, this call requested {requested:?} (must be strictly greater)")]
+    AckLevelNotIncreasing { previous: AckLevel, requested: AckLevel },
 }
 
 /// The `CommandState` a `Command`'s `state` field currently encodes, defaulting to
@@ -155,10 +182,23 @@ pub fn dispatch(command: Command, principal: &str, reason: &str, clock: &dyn Clo
     Ok(push_transition(command, CommandState::Dispatched, principal, reason, AckLevel::Unspecified, "", clock))
 }
 
-/// `DISPATCHED -> ACKED`: `ack_level` is the separate axis the module doc describes, never
-/// folded into `CommandState`.
+/// `DISPATCHED -> ACKED`, or `ACKED -> ACKED` (A3.2/D2) when the newly reported `ack_level`
+/// strictly exceeds the previous transition's own `ack_level` -- see the module doc's
+/// "A3.2/D2: the tenth edge" section for the full rationale and the enum ordinal order this
+/// compares by. `ack_level` is the separate axis the module doc describes, never folded into
+/// `CommandState`.
 pub fn ack(command: Command, principal: &str, reason: &str, ack_level: AckLevel, clock: &dyn Clock) -> Result<Command, CommandError> {
-    require_one_of(&command, &[CommandState::Dispatched], CommandState::Acked)?;
+    require_one_of(&command, &[CommandState::Dispatched, CommandState::Acked], CommandState::Acked)?;
+    if current_state(&command) == CommandState::Acked {
+        let previous = command
+            .transitions
+            .last()
+            .map(|t| AckLevel::try_from(t.ack_level).unwrap_or(AckLevel::Unspecified))
+            .unwrap_or(AckLevel::Unspecified);
+        if ack_level as i32 <= previous as i32 {
+            return Err(CommandError::AckLevelNotIncreasing { previous, requested: ack_level });
+        }
+    }
     Ok(push_transition(command, CommandState::Acked, principal, reason, ack_level, "", clock))
 }
 
@@ -205,6 +245,23 @@ mod tests {
         Command { state: state as i32, ..Command::default() }
     }
 
+    /// Like [`fresh_command_in_state`], but for `CommandState::Acked` also carries one prior
+    /// `ACKED` transition at [`AckLevel::Edge`] -- the invariant every real `ACKED` command
+    /// actually has (`push_transition` always appends before setting `state`), and what
+    /// `ack`'s own A3.2/D2 "previous transition's `ack_level`" read needs to make `(Acked,
+    /// ack)` a genuinely legal pair in the product test below rather than one that would
+    /// panic or silently read `AckLevel::Unspecified` from an empty `transitions` list. Every
+    /// OTHER edge function only reads `command.state` (`current_state`, via `require_one_of`),
+    /// never `command.transitions`, so this extra transition changes nothing about how any of
+    /// the other six edge functions treat a from-`Acked` `Command`.
+    fn fresh_command_in_state_with_ack_history(state: CommandState) -> Command {
+        let mut command = fresh_command_in_state(state);
+        if state == CommandState::Acked {
+            command.transitions.push(CommandTransition { state: CommandState::Acked as i32, ack_level: AckLevel::Edge as i32, ..Default::default() });
+        }
+        command
+    }
+
     type EdgeFn = Box<dyn Fn(Command, &TestClock) -> Result<Command, CommandError>>;
 
     /// (edge name, function, target state, legal source states) -- every non-`propose` edge
@@ -229,7 +286,11 @@ mod tests {
                 "ack",
                 Box::new(|c, clk| ack(c, "flight-software", "executed", AckLevel::AssetExecuted, clk)),
                 CommandState::Acked,
-                &[CommandState::Dispatched][..],
+                // A3.2/D2: `ACKED` is now legal too -- `fresh_command_in_state_with_ack_history`
+                // seeds a from-`Acked` fixture with a prior `AckLevel::Edge` transition, and
+                // this edge always requests `AckLevel::AssetExecuted`, which strictly exceeds
+                // `Edge` -- a genuine, legal increase, not a construction artefact.
+                &[CommandState::Dispatched, CommandState::Acked][..],
             ),
             (
                 "reject",
@@ -253,10 +314,22 @@ mod tests {
     }
 
     /// The acceptance test for this module: walks every (state, edge) pair in the full
-    /// product (7 edge functions x 9 states = 63 pairs) and asserts that exactly the nine
+    /// product (7 edge functions x 9 states = 63 pairs) and asserts that exactly the ten
     /// legal pairs succeed -- landing on the right target state, with exactly one new
-    /// transition appended -- and that every other pair (54 of them) is refused with
-    /// `CommandError::IllegalTransition { from, to }` naming the exact attempted edge.
+    /// transition appended (two, for the seeded `(Acked, ack)` fixture) -- and that every
+    /// other pair (53 of them) is refused with a typed [`CommandError`] naming the exact
+    /// attempted edge: `CommandError::IllegalTransition { from, to }` for every pair with no
+    /// edge at all, except `(Acked, ack)`'s own single non-increasing-level counterpart, which
+    /// this test does not exercise here at all (the edge DOES exist from `Acked`; what would
+    /// make it fail is the *level*, not the *state*, and this table only ever requests
+    /// `AckLevel::AssetExecuted`, which is a genuine increase over the seeded `AckLevel::Edge`
+    /// -- see `ack_from_acked_refuses_a_non_increasing_ack_level`, below, for that case).
+    ///
+    /// Arithmetic (checked against this test's own construction, not asserted from memory):
+    /// 7 edge functions x 9 states (`ALL_STATES`, `Unspecified` included) = 63 pairs. Legal:
+    /// check(1: Proposed) + authorize(1: Checked) + dispatch(1: Authorized) + ack(2:
+    /// Dispatched, Acked) + reject(2: Proposed, Checked) + expire(2: Authorized, Dispatched) +
+    /// fail(1: Dispatched) = 10. Illegal: 63 - 10 = 53.
     #[test]
     fn every_state_edge_pair_in_the_product_is_legal_or_typed_refused() {
         let clock = TestClock::new(1_000);
@@ -264,14 +337,15 @@ mod tests {
         let mut illegal = 0usize;
         for (name, f, to, legal_from) in edges() {
             for &from in &ALL_STATES {
-                let command = fresh_command_in_state(from);
+                let command = fresh_command_in_state_with_ack_history(from);
+                let expected_transitions_before = command.transitions.len();
                 let result = f(command, &clock);
                 if legal_from.contains(&from) {
                     legal += 1;
                     let command = result.unwrap_or_else(|e| panic!("{name} from {from:?} must succeed, got {e:?}"));
                     assert_eq!(current_state(&command), to, "{name} from {from:?}");
-                    assert_eq!(command.transitions.len(), 1, "{name} from {from:?} must append exactly one transition");
-                    assert_eq!(command.transitions[0].state, to as i32);
+                    assert_eq!(command.transitions.len(), expected_transitions_before + 1, "{name} from {from:?} must append exactly one transition");
+                    assert_eq!(command.transitions.last().unwrap().state, to as i32);
                 } else {
                     illegal += 1;
                     let err = result.expect_err(&format!("{name} from {from:?} must be refused"));
@@ -279,8 +353,45 @@ mod tests {
                 }
             }
         }
-        assert_eq!(legal, 9, "must match the nine legal edges exactly");
-        assert_eq!(illegal, 7 * 9 - 9);
+        assert_eq!(legal, 10, "must match the ten legal edges exactly (A3.2/D2 added ACKED -> ACKED)");
+        assert_eq!(illegal, 7 * 9 - 10, "must match 53 typed refusals exactly");
+    }
+
+    /// A3.2/D2's own required test: a non-increasing (equal, or lower) `ack_level` from an
+    /// already-`ACKED` command is refused as [`CommandError::AckLevelNotIncreasing`] -- never
+    /// `IllegalTransition` (the edge exists) and never silently ignored (the command's state
+    /// and transitions are unchanged on the `Err` path, since `ack` returns before calling
+    /// `push_transition` at all).
+    #[test]
+    fn ack_from_acked_refuses_a_non_increasing_ack_level() {
+        let clock = TestClock::new(1_000);
+        // Equal to the previous level (`AckLevel::Edge`, seeded by the fixture below).
+        let command = fresh_command_in_state_with_ack_history(CommandState::Acked);
+        let err = ack(command, "flight-software", "repeat", AckLevel::Edge, &clock).unwrap_err();
+        assert_eq!(err, CommandError::AckLevelNotIncreasing { previous: AckLevel::Edge, requested: AckLevel::Edge });
+
+        // Lower than the previous level.
+        let mut command = fresh_command_in_state(CommandState::Acked);
+        command.transitions.push(CommandTransition { state: CommandState::Acked as i32, ack_level: AckLevel::AssetExecuted as i32, ..Default::default() });
+        let err = ack(command, "flight-software", "regressed", AckLevel::AssetReceived, &clock).unwrap_err();
+        assert_eq!(err, CommandError::AckLevelNotIncreasing { previous: AckLevel::AssetExecuted, requested: AckLevel::AssetReceived });
+    }
+
+    /// The positive counterpart: `ACKED -> ACKED` with a strictly increasing level, at every
+    /// real step of the ladder (`Edge` -> `AssetReceived` -> `AssetExecuted`), succeeds and
+    /// appends exactly one transition each time.
+    #[test]
+    fn ack_from_acked_accepts_each_strictly_increasing_ack_level_in_turn() {
+        let clock = TestClock::new(1_000);
+        let command = fresh_command_in_state(CommandState::Dispatched);
+        let command = ack(command, "flight-software", "edge", AckLevel::Edge, &clock).unwrap();
+        assert_eq!(command.transitions.len(), 1);
+        let command = ack(command, "flight-software", "received", AckLevel::AssetReceived, &clock).unwrap();
+        assert_eq!(command.transitions.len(), 2);
+        assert_eq!(current_state(&command), CommandState::Acked);
+        let command = ack(command, "flight-software", "executed", AckLevel::AssetExecuted, &clock).unwrap();
+        assert_eq!(command.transitions.len(), 3);
+        assert_eq!(command.transitions.iter().map(|t| t.ack_level).collect::<Vec<_>>(), vec![AckLevel::Edge as i32, AckLevel::AssetReceived as i32, AckLevel::AssetExecuted as i32]);
     }
 
     #[test]
