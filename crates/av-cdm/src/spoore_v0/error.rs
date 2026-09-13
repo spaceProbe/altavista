@@ -19,11 +19,28 @@ pub enum Error {
     Spoore(#[from] spoore_cdm::CdmError),
 
     /// A v1 `frame_id` string did not match any entry of this adapter's frame table
-    /// ([`crate::spoore_v0::frame`]). Never defaulted to a frame silently.
+    /// ([`crate::spoore_v0::frame`]) and was not found in a caller-supplied registry either
+    /// (the [`crate::spoore_v0::frame::resolve_frame_id`] path). Never defaulted to a frame
+    /// silently.
     #[error("unknown altavista.v1 frame_id {frame_id:?}; expected one of {known:?}")]
     UnknownFrameId {
         frame_id: String,
         known: &'static [&'static str],
+    },
+
+    /// A registry `FrameDefinition` *was* found by id ([`crate::spoore_v0::frame::
+    /// resolve_frame_id`]/[`crate::spoore_v0::frame::frame_from_definition`]), but its
+    /// declared `origin` and `axes` have no `spoore.v0` fixed-frame counterpart -- e.g. a
+    /// body-fixed/ENU/NED frame about a body other than `"Earth"` (never silently folded
+    /// onto the Earth-only `Ecef`/`Enu`/`Ned` variants), or an axes kind this adapter's five
+    /// fixed ids simply do not cover (`RIC`, `VNB`, `VVLH`, `ICRF`, `MJ2000_EQ`, `MJ2000_EC`,
+    /// `UNSPECIFIED`, `LOCAL_CARTESIAN`, or any future variant). Distinct from
+    /// `UnknownFrameId`, which means "no definition by this id at all."
+    #[error("v1 frame {frame_id:?} declares origin {origin} and axes {axes}; no spoore.v0 fixed frame corresponds")]
+    UnmappableFrame {
+        frame_id: String,
+        origin: String,
+        axes: String,
     },
 
     /// A `pb` message field that spoore.v0's shape requires (an embedded message spoore

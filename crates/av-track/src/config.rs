@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use av_edge::pb;
 use spoore_assoc::{Associator, ChiSquareGate, GlobalNearestNeighbor};
 use spoore_cdm::{IntroducedComponent, NodePrior};
 use spoore_engine::{SensorConfig, ShardConfig};
@@ -157,6 +158,18 @@ pub struct TrackConfig {
     /// a wire/viewer concern, not a filtering one -- `av_cdm::spoore_v0::frame`'s own
     /// module doc).
     pub frame_id: String,
+    /// The body [`Self::frame_id`]'s frame is body-fixed to, e.g. `"Earth"` -- with
+    /// [`Self::frame_id`] and [`Self::frame_description`], the whole of the one
+    /// `pb::FrameDefinition` [`Self::frame_registry`] declares for this shard's boundary
+    /// conversion (`av_cdm::spoore_v0::frame::resolve_frame_id`). Declared and hashed
+    /// alongside `frame_id`, per this module's own "every knob... declared in one hashable
+    /// value" rule -- even though, like `frame_id` itself, it does not change filtering
+    /// results, only which frame the engine bridge resolves `frame_id` to. See
+    /// [`Self::frame_registry`]'s own doc for why `AXES_KIND_BODY_FIXED` (never `ENU`/`NED`/
+    /// an inertial kind) is the honest axes kind for this demo's own data.
+    pub frame_origin_body: String,
+    /// Free-form, for [`Self::frame_registry`]'s `pb::FrameDefinition.description`.
+    pub frame_description: String,
 }
 
 impl TrackConfig {
@@ -238,6 +251,46 @@ impl TrackConfig {
         Arc::new(GlobalNearestNeighbor)
     }
 
+    /// The `pb::FrameDefinition` registry [`crate::bridge::EngineBridge::run`] resolves
+    /// `frame_id` through (`av_cdm::spoore_v0::frame::resolve_frame_id`), declaring exactly
+    /// the one frame this config names ([`Self::frame_id`]).
+    ///
+    /// **Why this exists at all, and why it lives here rather than in `av-cdm`.** The real,
+    /// committed E4 fixture's own measurements carry `frame_id = "earth_fixed_demo_frame"`
+    /// (`av_edge::plugin::PluginConfig.frame_id`, copied verbatim from `drms/
+    /// demo_ground_segment_flight.system.yaml`'s own `parameters: frame_id`), but that
+    /// string is a `scenario.frames` registry id, and the DRM's own `scenario.frames` block
+    /// (`drms/demo_ground_segment.drm.yaml`) declares exactly one frame --
+    /// `ground_station_enu` -- never `earth_fixed_demo_frame`. There is therefore no
+    /// `FrameDefinition` on disk anywhere to look up, and the DRM cannot be made to declare
+    /// one: its canonical hash is embedded in the committed, GMAT-generated fixture
+    /// binaries (`crates/av-edge/tests/fixtures/ground_segment/*.pb`) that E4's pinned
+    /// chain-hash goldens depend on byte-for-byte, so changing it would invalidate them.
+    /// The consequence (the round 2 lead's ruling, question 205's "frame-namespace gap"):
+    /// the registry is a parameter the *caller* supplies, and this crate is that caller --
+    /// it declares the `FrameDefinition` the DRM's own `frame_id` parameter means, in its
+    /// own config, as the narrowest thing that lets `frame_id` resolve without touching the
+    /// DRM or its pinned hash.
+    ///
+    /// **Why `AXES_KIND_BODY_FIXED` about `frame_origin_body`, not `ENU`/`NED` or an
+    /// inertial kind.** Taken from the DRM's own words, not chosen for convenience: `drms/
+    /// demo_ground_segment_flight.system.yaml`'s `packet_codecs[0].description` reads "own
+    /// Earth-fixed Cartesian position telemetry", and its header comment names the encoded
+    /// state `x0`/`v0` as "Earth-fixed/ECEF metres, metres-per-second" -- a rotating,
+    /// body-fixed Cartesian frame, exactly `AxesKind`'s own doc for `AXES_KIND_BODY_FIXED`
+    /// ("Body-fixed of the origin body (ITRF for Earth...)"), not a local tangent plane
+    /// (`ENU`/`NED`, which the DRM never mentions) and not an inertial frame (`ICRF`/
+    /// `MJ2000_EQ`, which "Earth-fixed" explicitly rules out).
+    pub fn frame_registry(&self) -> Vec<pb::FrameDefinition> {
+        vec![pb::FrameDefinition {
+            id: self.frame_id.clone(),
+            origin: Some(pb::frame_definition::Origin::Body(self.frame_origin_body.clone())),
+            axes: pb::AxesKind::BodyFixed as i32,
+            description: self.frame_description.clone(),
+            ..Default::default()
+        }]
+    }
+
     /// `spoore_node::config::NodeConfig::build_builtin_cv2d`'s own mirror in 3D -- see this
     /// module's own top-level doc for exactly why 3D, and why this is a direct swap of
     /// `spoore_models`' already-existing 3D motion/measurement models rather than a new
@@ -304,6 +357,14 @@ pub fn demo_ground_segment_config() -> TrackConfig {
         process_noise_density: 1e-3,
         velocity_prior_sigma_mps: 20_000.0,
         frame_id: "earth_fixed_demo_frame".to_string(),
+        frame_origin_body: "Earth".to_string(),
+        frame_description: "Earth body-fixed Cartesian position frame the demo ground-segment \
+            flight DRM's own packet_codecs[0] telemetry is encoded in (drms/\
+            demo_ground_segment_flight.system.yaml: \"own Earth-fixed Cartesian position \
+            telemetry\"); named by that DRM's `parameters: frame_id` but not registered in \
+            its `scenario.frames` (a recorded platform gap, question 205) -- declared here \
+            instead, by this config, as the frame that parameter means."
+            .to_string(),
     }
 }
 
