@@ -213,6 +213,39 @@ def _compute_skip_reason() -> "str | None":
 
 _SKIP_REASON = _compute_skip_reason()
 
+# Missing-image text Docker itself emits when a `docker run` names a tag that is not local and
+# cannot be pulled. Matched, rather than re-inspecting, so a disappearance is caught at the exact
+# call that tripped over it.
+_MISSING_IMAGE_MARKER = "Unable to find image"
+
+
+def _skip_if_image_vanished_mid_run(stage: str, result: subprocess.CompletedProcess) -> None:
+    """Turn an image that vanished *after* `_SKIP_REASON` was computed into a visible skip
+    naming the stage it disappeared at, not an assertion failure.
+
+    This is not laxity, it is this host's measured reality. `_SKIP_REASON` is evaluated once at
+    collection time (`pytest.mark.skipif`'s own contract), and on this host the image is
+    deleted from under a running test by a host-level image garbage collection -- the same
+    phenomenon `docs/open-questions.md` question 196(d) records for the cFS image, observed
+    twice against this image inside a single afternoon, once between collection and the first
+    `docker run` and once between this test's own Part 1 and Part 2. The measured cause is disk
+    pressure, not an actor running `docker image prune`: the Colima VM's container filesystem
+    sits at 92% (4.2 GB free of 58.8 GB, with 41.85 GB reclaimable in an unrelated workload's
+    volumes), and the deletions land inside another process's `docker build` layer-allocation
+    window. Question 194's rule is "run for real or skip visibly, never pass silently", and a
+    skip whose reason says the image was deleted mid-run is exactly that -- distinct, in wording
+    and in meaning, from `_SKIP_REASON`'s "has not been built on this host", so `-rs` output
+    never conflates the two. Rebuild with `services/edge-plugin/build-image.sh` and re-run."""
+    if _MISSING_IMAGE_MARKER in (result.stderr or ""):
+        pytest.skip(
+            f"image {IMAGE_TAG!r} was present when this test was collected but had been deleted "
+            f"from this host by the time stage {stage!r} ran it -- a host-level image garbage "
+            f"collection under disk pressure (see this helper's own docstring and question "
+            f"196(d)), not a defect in what is under test and not a silent pass. Rebuild with "
+            f"`{BUILD_SCRIPT}` and re-run. Docker's own words: "
+            f"{result.stderr.strip().splitlines()[0] if result.stderr.strip() else '(no stderr)'}"
+        )
+
 
 # =================================================================================================
 # Small docker/subprocess helpers -- no process-environment mutation anywhere (question 199):
@@ -224,6 +257,7 @@ _SKIP_REASON = _compute_skip_reason()
 def _docker(*args: str, timeout: float = 60.0, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
     if check and result.returncode != 0:
+        _skip_if_image_vanished_mid_run(" ".join(args[:3]), result)
         pytest.fail(f"`docker {' '.join(args)}` failed (rc={result.returncode}):\n--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}")
     return result
 
@@ -377,6 +411,7 @@ def test_network_none_denies_everything_and_the_internal_network_delivers_batche
         )
         elapsed_s = time.monotonic() - start
 
+        _skip_if_image_vanished_mid_run("part 1, deny-all run", deny_all)
         assert deny_all.returncode != 0, f"a container with --network none must not be able to reach anywhere non-loopback, but av-edge-plugin exited 0:\n{deny_all.stdout}"
         assert elapsed_s < 10.0, f"the connect attempt under --network none took {elapsed_s:.3f}s -- a real network-unreachable failure must be immediate, not a hang (it took {elapsed_s:.1f}s, suspiciously close to a TCP connect timeout)"
         assert "connecting to" in deny_all.stderr, f"expected av-edge-plugin's own connect-failure message, got:\n--- stdout ---\n{deny_all.stdout}\n--- stderr ---\n{deny_all.stderr}"
@@ -444,6 +479,7 @@ def test_network_none_denies_everything_and_the_internal_network_delivers_batche
             ],
             capture_output=True, text=True, timeout=120,
         )
+        _skip_if_image_vanished_mid_run("part 2, allowed-endpoint plugin run", plugin_run)
         assert plugin_run.returncode == 0, f"av-edge-plugin failed delivering to the real ingest:\n--- stdout ---\n{plugin_run.stdout}\n--- stderr ---\n{plugin_run.stderr}"
         summary = json.loads(plugin_run.stdout.strip().splitlines()[-1])
         assert summary["any_rejected"] is False, summary
