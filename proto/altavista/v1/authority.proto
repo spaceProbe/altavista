@@ -80,6 +80,15 @@ syntax = "proto3";
 //     Served by `av-gateway`, on the same `tonic::transport::Server` (and therefore the same
 //     port) as `DataGatewayService` -- two `add_service` calls on one server, never a second
 //     listening socket.
+//   - R3.5a (additive only -- no field number above moves; `docs/aiplane-plan.md` milestone
+//     A5, the command console's server half): `LedgerRecord.proposal` (field 12) and
+//     `QueryResponse.proposals`/`QueryResponse.decisions` (fields 2/3) below. Fixes the
+//     defect that `CommandAuthorityServiceImpl::propose` accepted `CommandProposal.
+//     rationale`/`evidence_ids` on the wire and never persisted either anywhere -- "proposals
+//     with their rationale and evidence" (A5's own milestone text) could not be served at
+//     all before this round. See each field's own doc comment above for the exact
+//     self-evidence invariant `Ledger::append` now enforces on `proposal`, mirroring
+//     `LedgerRecord.command`'s (field 11) identical, already-enforced invariant.
 package altavista.v1;
 
 import "altavista/v1/command.proto";
@@ -243,6 +252,21 @@ message LedgerRecord {
   // and that this field does not need to replace to do its own, different job (reconstructing
   // a whole `Command`, not scanning a single scalar across every record in a partition).
   Command command = 11;
+  // R3.5a (`docs/aiplane-plan.md` milestone A5; `docs/open-questions.md` question 201(d)):
+  // the `CommandProposal` (`command.proto`) a model or agent submitted at `Propose` --
+  // `rationale` and `evidence_ids` included. Self-evidence about THIS record, exactly like
+  // `command` (field 11) above, and enforced the identical way at the identical site
+  // (`crates/av-command/src/ledger.rs`'s `Ledger::append`, following that field's own
+  // enforced-not-merely-documented precedent): set **only** on the `PROPOSED` record (never
+  // re-attached on a later transition of the same command), and its own `command.id` must
+  // agree with this record's own `command_id` -- a caller that gets either wrong is refused
+  // there, not trusted. Before this field existed, `CommandAuthorityServiceImpl::propose`
+  // used only `CommandProposal.command`; `rationale`/`evidence_ids` were accepted on the wire
+  // and never persisted anywhere, so "proposals with their rationale and evidence" (A5) could
+  // not be served at all -- `crates/av-command/src/ledger.rs`'s `Ledger::scan_proposals` now
+  // reads this field straight off each partition's `PROPOSED` records to answer `Query`'s new
+  // `proposals` map below, surviving a restart exactly like `command` (field 11) does.
+  CommandProposal proposal = 12;
 }
 
 // A verified principal, from an OIDC access token's claims (A2.1, `docs/aiplane-plan.md`
@@ -563,6 +587,27 @@ message QueryResponse {
   // determinism rule: no `HashMap` iteration on any output path) -- deterministic order,
   // never the order commands happened to be inserted.
   repeated Command commands = 1;
+  // R3.5a (`docs/aiplane-plan.md` milestone A5): the original `CommandProposal` (rationale,
+  // evidence ids) for every command in `commands` above that has one -- every command does,
+  // in this crate's own production paths, since `propose` is the state machine's only entry
+  // point (`crate::state`'s module doc) and `Propose` always attaches one
+  // (`crates/av-command/src/service.rs::propose`, R3.5a). Keyed by `Command.id`, rebuilt from
+  // the ledger by `crates/av-command/src/ledger.rs`'s `Ledger::scan_proposals` -- additive,
+  // `map<string, ...>` (proto3 map, generated as a `BTreeMap`, ADR-004's determinism rule,
+  // matching every other map in this package). A command absent from this map (only possible
+  // for a ledger record a test appended with no `proposal` attached) has no entry, never a
+  // zero-valued `CommandProposal`.
+  map<string, CommandProposal> proposals = 2;
+  // R3.5a: the `PolicyDecision` for every command in `commands` above that has been
+  // `CHECKED`/`REJECTED` by policy -- previously only ever returned by `Check`'s own
+  // response (`CommandResponse.decision`), so a caller that queries later (a command console
+  // that was not itself the one that called `Check`) could never see why a command was
+  // checked or rejected. Keyed by `Command.id`, rebuilt from the ledger by
+  // `crates/av-command/src/ledger.rs`'s `Ledger::scan_decisions` off `LedgerRecord.decision`
+  // (field 8). A command not yet `CHECKED`/`REJECTED` (still `PROPOSED`, or checked
+  // structurally-invalid before a policy decision ever ran) has no entry, never a
+  // zero-valued `PolicyDecision`.
+  map<string, PolicyDecision> decisions = 3;
 }
 
 // `VerifyLedger` request: one partition by name, or every partition this service's ledger

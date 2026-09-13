@@ -860,6 +860,125 @@ async fn query_across_a_restart_returns_the_full_command_field_for_field() {
     server2.shutdown().await;
 }
 
+/// **R3.5a's own acceptance test**: `Propose`'s `rationale`/`evidence_ids` -- previously
+/// accepted on the wire and never persisted anywhere -- now come back through `Query`'s new
+/// `proposals` map, and `Check`'s own `PolicyDecision` comes back through the new `decisions`
+/// map, for both an allowed and a denied command. Then a **second** `TestServer` over the
+/// same ledger directory (a real process restart, mirroring
+/// `query_across_a_restart_returns_the_full_command_field_for_field` above) proves both maps
+/// survive it, exactly like `commands` already does.
+#[tokio::test]
+async fn query_returns_the_proposal_rationale_and_evidence_and_the_policy_decision_surviving_a_restart() {
+    let entity_id = "sat-proposal-q";
+
+    let mut server1 = TestServer::spawn("proposal-decision-query", 1_000).await;
+
+    // "mode" is unconditionally allowed by the shipped policy (profiles/policies/authority/
+    // command.rego) -- an ALLOW decision.
+    let allowed_id = "cmd-allowed";
+    let allowed_request = ProposeRequest {
+        proposal: Some(CommandProposal {
+            command: Some(base_command(allowed_id, entity_id, "mode", "")),
+            rationale: "scored radius drifted past threshold".to_string(),
+            evidence_ids: vec!["run-1/query-7".to_string(), "run-1/query-9".to_string()],
+        }),
+        principal: "model-x".to_string(),
+    };
+    server1.client.propose(allowed_request).await.expect("propose the allowed command");
+    let checked = server1.client.check(CheckRequest { command_id: allowed_id.to_string() }).await.expect("check the allowed command").into_inner();
+    let expected_decision = checked.decision.expect("Check always returns a decision");
+    assert!(expected_decision.allow, "sanity: mode is unconditionally allowed by the shipped policy");
+
+    // "payload" is unconditionally denied by the shipped policy -- a DENY decision, which
+    // must be exactly as recoverable from Query as an allow (LedgerRecord.decision's own doc
+    // comment: "a denial must be as reproducible from the ledger as an approval").
+    let denied_id = "cmd-denied";
+    let denied_request = ProposeRequest {
+        proposal: Some(CommandProposal {
+            command: Some(base_command(denied_id, entity_id, "payload", "")),
+            rationale: "flagged payload for review".to_string(),
+            evidence_ids: vec!["run-2/query-3".to_string()],
+        }),
+        principal: "model-y".to_string(),
+    };
+    server1.client.propose(denied_request).await.expect("propose the denied command");
+    let rejected = server1.client.check(CheckRequest { command_id: denied_id.to_string() }).await.expect("check the denied command").into_inner();
+    let expected_rejected_decision = rejected.decision.expect("Check always returns a decision, allow or deny");
+    assert!(!expected_rejected_decision.allow, "sanity: payload is unconditionally denied by the shipped policy");
+
+    // A third, still-PROPOSED command -- its proposal must be visible even though it was
+    // never Checked, and it must have no entry in `decisions` at all.
+    let proposed_only_id = "cmd-proposed-only";
+    let proposed_only_request = ProposeRequest {
+        proposal: Some(CommandProposal { command: Some(base_command(proposed_only_id, entity_id, "mode", "")), rationale: "awaiting review".to_string(), evidence_ids: vec![] }),
+        principal: "model-z".to_string(),
+    };
+    server1.client.propose(proposed_only_request).await.expect("propose the still-PROPOSED command");
+
+    let assert_query_response = |queried: &av_cdm::pb::QueryResponse| {
+        let allowed_proposal = queried.proposals.get(allowed_id).expect("the allowed command's proposal must be in the map");
+        assert_eq!(allowed_proposal.rationale, "scored radius drifted past threshold");
+        assert_eq!(allowed_proposal.evidence_ids, vec!["run-1/query-7".to_string(), "run-1/query-9".to_string()]);
+
+        let denied_proposal = queried.proposals.get(denied_id).expect("the denied command's proposal must be in the map too");
+        assert_eq!(denied_proposal.rationale, "flagged payload for review");
+        assert_eq!(denied_proposal.evidence_ids, vec!["run-2/query-3".to_string()]);
+
+        let proposed_only_proposal = queried.proposals.get(proposed_only_id).expect("a still-PROPOSED command's proposal must be in the map too");
+        assert_eq!(proposed_only_proposal.rationale, "awaiting review");
+
+        let allow_decision = queried.decisions.get(allowed_id).expect("the allowed command's decision must be in the map");
+        assert_eq!(allow_decision.decision_id, expected_decision.decision_id);
+        assert_eq!(allow_decision.policy_hash, expected_decision.policy_hash);
+        assert!(allow_decision.allow);
+
+        let deny_decision = queried.decisions.get(denied_id).expect("the denied command's decision must be in the map too");
+        assert_eq!(deny_decision.decision_id, expected_rejected_decision.decision_id);
+        assert!(!deny_decision.allow);
+        assert_eq!(deny_decision.reasons, expected_rejected_decision.reasons);
+
+        assert!(!queried.decisions.contains_key(proposed_only_id), "a still-PROPOSED command has no policy decision yet");
+    };
+
+    let queried1 = server1
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Unspecified as i32 })) })
+        .await
+        .expect("Query by entity")
+        .into_inner();
+    assert_eq!(queried1.commands.len(), 3, "{queried1:?}");
+    assert_query_response(&queried1);
+
+    // QueryByEntity with a PROPOSED filter must return exactly the still-PROPOSED command's
+    // own proposal, not the other two's.
+    let proposed_filtered = server1
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Proposed as i32 })) })
+        .await
+        .expect("Query by entity, filtered to PROPOSED")
+        .into_inner();
+    assert_eq!(proposed_filtered.commands.len(), 1, "{proposed_filtered:?}");
+    assert_eq!(proposed_filtered.commands[0].id, proposed_only_id);
+    assert_eq!(proposed_filtered.proposals.len(), 1, "{proposed_filtered:?}");
+    assert_eq!(proposed_filtered.proposals.get(proposed_only_id).unwrap().rationale, "awaiting review");
+    assert!(proposed_filtered.decisions.is_empty());
+
+    // The restart proof: a second, independent TestServer over the exact same ledger
+    // directory must answer the identical proposals/decisions from the ledger alone.
+    let ledger_dir = server1.shutdown_keep_ledger().await;
+    let mut server2 = TestServer::spawn_over(ledger_dir.clone(), 2_000).await;
+    let queried2 = server2
+        .client
+        .query(QueryRequest { selector: Some(Selector::Entity(QueryByEntity { entity_id: entity_id.to_string(), state_filter: CommandState::Unspecified as i32 })) })
+        .await
+        .expect("Query by entity, after a restart")
+        .into_inner();
+    assert_eq!(queried2.commands.len(), 3, "{queried2:?}");
+    assert_query_response(&queried2);
+
+    server2.shutdown().await;
+}
+
 /// **Acceptance test 7**: `VerifyLedger` reports a tampered partition as broken, at the
 /// exact sequence number the tamper is at.
 #[tokio::test]

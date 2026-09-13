@@ -272,8 +272,8 @@ use tonic::{Code, Request, Response, Status};
 
 use av_cdm::pb::{
     query_request::Selector as QuerySelector, AckLevel, AckRequest, AuthorizeRequest, ChainVerification, CheckRequest, Command,
-    CommandResponse, CommandState, DispatchRequest, ExpireRequest, FailRequest, ProposeRequest, QueryByEntity, QueryRequest,
-    QueryResponse, VerifyLedgerRequest, VerifyLedgerResponse,
+    CommandProposal, CommandResponse, CommandState, DispatchRequest, ExpireRequest, FailRequest, PolicyDecision, ProposeRequest,
+    QueryByEntity, QueryRequest, QueryResponse, VerifyLedgerRequest, VerifyLedgerResponse,
 };
 
 use crate::audit::{self, AuditWriter};
@@ -369,6 +369,15 @@ pub enum ServiceError {
     /// `command_id` names no `Command` this service's in-memory index has ever `Propose`d.
     #[error("command {0:?} not found")]
     NotFound(String),
+    /// R3.5a (manager's review): a request that is malformed on its own terms -- a missing
+    /// `proposal`, an empty `command.id`, a `Query` with no selector. These were raw
+    /// `Status::invalid_argument` constructions that never reached [`Counted`], so ADR-004's
+    /// "everything rejected is counted" held for every refusal in this file except the ones a
+    /// malformed caller produces most often. `field` is a `&'static str` deliberately: it
+    /// names the field, never caller-supplied content, so the counter key and the message
+    /// both stay bounded.
+    #[error("malformed request: {field}")]
+    MalformedRequest { field: &'static str },
     #[error(transparent)]
     State(#[from] CommandError),
     #[error(transparent)]
@@ -423,6 +432,7 @@ impl Counted for ServiceError {
     fn code(&self) -> &'static str {
         match self {
             ServiceError::NotFound(_) => "not_found",
+            ServiceError::MalformedRequest { .. } => "malformed_request",
             ServiceError::State(e) => e.code(),
             ServiceError::Check(CheckCommandError::State(e)) => e.code(),
             ServiceError::Check(CheckCommandError::Io(_)) => "check_io_error",
@@ -441,6 +451,7 @@ impl Counted for ServiceError {
 fn to_status(err: ServiceError) -> Status {
     match err {
         ServiceError::NotFound(_) => Status::new(Code::NotFound, err.to_string()),
+        ServiceError::MalformedRequest { .. } => Status::new(Code::InvalidArgument, err.to_string()),
         ServiceError::State(ref state_err) => {
             let code = match state_err {
                 CommandError::IllegalTransition { .. } => Code::FailedPrecondition,
@@ -536,6 +547,17 @@ pub struct CommandAuthorityServiceImpl {
     counters: Arc<Counters>,
     commands: Mutex<BTreeMap<String, Command>>,
     dispatched_idempotency_keys: Mutex<BTreeSet<String>>,
+    /// R3.5a: every command's original `CommandProposal` (rationale, evidence ids), keyed by
+    /// `Command.id` -- rebuilt from the ledger at construction ([`Ledger::scan_proposals`]),
+    /// exactly like [`Self::commands`] above, then kept live by [`Self::propose`] inserting
+    /// its own request's proposal the instant it appends. Answers `Query`'s new
+    /// `QueryResponse.proposals` map (`authority.proto`).
+    proposals: Mutex<BTreeMap<String, CommandProposal>>,
+    /// R3.5a: every command's [`PolicyDecision`] (the `Check` RPC's own decision), keyed by
+    /// `Command.id` -- rebuilt from the ledger at construction ([`Ledger::scan_decisions`]),
+    /// kept live by [`Self::check`]. Answers `Query`'s new `QueryResponse.decisions` map --
+    /// previously only ever visible in `Check`'s own `CommandResponse.decision`.
+    decisions: Mutex<BTreeMap<String, PolicyDecision>>,
 }
 
 impl CommandAuthorityServiceImpl {
@@ -564,6 +586,11 @@ impl CommandAuthorityServiceImpl {
         // RPC is served -- the same construction-time discipline as the idempotency guard
         // above, now made possible by `LedgerRecord.command` (`authority.proto`, A1.3-round-2).
         let commands = ledger.scan_commands()?;
+        // R3.5a: the identical construction-time rebuild for the proposals/decisions maps
+        // `Query` now answers from -- see [`Ledger::scan_proposals`]/[`Ledger::scan_decisions`]
+        // for why this survives a restart the same way `commands` does.
+        let proposals = ledger.scan_proposals()?;
+        let decisions = ledger.scan_decisions()?;
         let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit, service_role_table, counters } = authz;
         Ok(Self {
             ledger,
@@ -581,6 +608,8 @@ impl CommandAuthorityServiceImpl {
             counters,
             commands: Mutex::new(commands),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
+            proposals: Mutex::new(proposals),
+            decisions: Mutex::new(decisions),
         })
     }
 
@@ -605,7 +634,14 @@ impl CommandAuthorityServiceImpl {
     /// line"). The audit write happens only after the ledger append has already succeeded --
     /// an audit line is never written for a transition this crate cannot also prove it
     /// retained.
-    fn append_last_transition(&self, command: &Command) -> Result<(), ServiceError> {
+    ///
+    /// `proposal` (R3.5a) is `Some` only from [`Self::propose`]'s own call, carrying the
+    /// `CommandProposal` (rationale, evidence ids) `Ledger::append` records self-evidently on
+    /// this exact `PROPOSED` record -- every other caller (`Authorize`'s success path,
+    /// `Dispatch`, `Ack`, `Expire`, `Fail`) passes `None`, since `Ledger::append` itself
+    /// refuses a `proposal` attached to any transition other than `PROPOSED` (see that
+    /// method's own doc).
+    fn append_last_transition(&self, command: &Command, proposal: Option<CommandProposal>) -> Result<(), ServiceError> {
         let transition = command
             .transitions
             .last()
@@ -617,6 +653,7 @@ impl CommandAuthorityServiceImpl {
                 transition.clone(),
                 None,
                 Some(command),
+                proposal,
                 &*self.clock,
             )
             .map_err(ServiceError::Io)?;
@@ -733,18 +770,26 @@ fn format_service_reason(base_reason: &str, role: &str, declared_label: &str) ->
 impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
     async fn propose(&self, request: Request<ProposeRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let proposal = req.proposal.ok_or_else(|| Status::invalid_argument("proposal is required"))?;
-        let command = proposal.command.ok_or_else(|| Status::invalid_argument("proposal.command is required"))?;
+        let proposal = req.proposal.ok_or_else(|| self.to_status_counted(ServiceError::MalformedRequest { field: "proposal is required" }))?;
+        // R3.5a: `proposal.command` is cloned out here, not moved, so `proposal` itself (its
+        // `rationale`/`evidence_ids` included) survives whole to the `append_last_transition`
+        // call below -- `Ledger::append` records it self-evidently on this exact `PROPOSED`
+        // record (see that method's own doc), closing the defect that `rationale`/
+        // `evidence_ids` were accepted on the wire and never persisted anywhere.
+        let command = proposal.command.clone().ok_or_else(|| self.to_status_counted(ServiceError::MalformedRequest { field: "proposal.command is required" }))?;
         if command.id.is_empty() {
-            return Err(Status::invalid_argument("proposal.command.id must not be empty"));
+            return Err(self.to_status_counted(ServiceError::MalformedRequest { field: "proposal.command.id must not be empty" }));
         }
         if command.entity_id.is_empty() {
-            return Err(Status::invalid_argument("proposal.command.entity_id must not be empty"));
+            return Err(self.to_status_counted(ServiceError::MalformedRequest { field: "proposal.command.entity_id must not be empty" }));
         }
 
-        let proposed = state::propose(command, &req.principal, "proposed via CommandAuthorityService.Propose", &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&proposed).map_err(to_status)?;
+        let proposed = state::propose(command, &req.principal, "proposed via CommandAuthorityService.Propose", &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&proposed, Some(proposal.clone())).map_err(|e| self.to_status_counted(e))?;
         self.put_command(proposed.clone());
+        // R3.5a: kept live the instant the append above has already succeeded -- mirrors
+        // `Self::put_command`'s own "only after the ledger append succeeded" ordering.
+        self.proposals.lock().unwrap_or_else(|p| p.into_inner()).insert(proposed.id.clone(), proposal);
         Ok(Response::new(CommandResponse { command: Some(proposed), decision: None }))
     }
 
@@ -755,15 +800,18 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
     /// the structured data -- see `crate::audit`'s module doc).
     async fn check(&self, request: Request<CheckRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
         let rate_source = LedgerRateSource::new(&self.ledger);
         let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)
-            .map_err(|e| to_status(e.into()))?;
+            .map_err(|e| self.to_status_counted(e.into()))?;
         let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
         self.audit
             .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
-            .map_err(|e| to_status(ServiceError::Io(e)))?;
+            .map_err(|e| self.to_status_counted(ServiceError::Io(e)))?;
         self.put_command(result.command.clone());
+        // R3.5a: kept live -- `Query`'s new `decisions` map (`authority.proto`) answers from
+        // this the instant `check_command`'s own ledger append has already succeeded.
+        self.decisions.lock().unwrap_or_else(|p| p.into_inner()).insert(result.command.id.clone(), result.decision.clone());
         Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 
@@ -805,7 +853,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = authz::format_authz_reason(&command.command_class, &decision);
         let authorized = state::authorize(command, &principal.sub, &reason, &req.delegation_id, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&authorized).map_err(|e| self.to_status_counted(e))?;
+        self.append_last_transition(&authorized, None).map_err(|e| self.to_status_counted(e))?;
         self.put_command(authorized.clone());
         Ok(Response::new(CommandResponse { command: Some(authorized), decision: None }))
     }
@@ -841,7 +889,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(DISPATCH_REASON, &role, "");
         let dispatched = state::dispatch(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&dispatched).map_err(|e| self.to_status_counted(e))?;
+        self.append_last_transition(&dispatched, None).map_err(|e| self.to_status_counted(e))?;
         if !dispatched.idempotency_key.is_empty() {
             seen.insert(dispatched.idempotency_key.clone());
         }
@@ -869,7 +917,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let ack_level = AckLevel::try_from(req.ack_level).unwrap_or(AckLevel::Unspecified);
         let acked = state::ack(command, &principal.sub, &reason, ack_level, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&acked).map_err(|e| self.to_status_counted(e))?;
+        self.append_last_transition(&acked, None).map_err(|e| self.to_status_counted(e))?;
         self.put_command(acked.clone());
         Ok(Response::new(CommandResponse { command: Some(acked), decision: None }))
     }
@@ -890,7 +938,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let expired = state::expire(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&expired).map_err(|e| self.to_status_counted(e))?;
+        self.append_last_transition(&expired, None).map_err(|e| self.to_status_counted(e))?;
         self.put_command(expired.clone());
         Ok(Response::new(CommandResponse { command: Some(expired), decision: None }))
     }
@@ -909,7 +957,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let failed = state::fail(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&failed).map_err(|e| self.to_status_counted(e))?;
+        self.append_last_transition(&failed, None).map_err(|e| self.to_status_counted(e))?;
         self.put_command(failed.clone());
         Ok(Response::new(CommandResponse { command: Some(failed), decision: None }))
     }
@@ -920,16 +968,27 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let results: Vec<Command> = match req.selector {
             Some(QuerySelector::CommandId(id)) => match commands.get(&id) {
                 Some(c) => vec![c.clone()],
-                None => return Err(Status::not_found(format!("command {id:?} not found"))),
+                None => return Err(self.to_status_counted(ServiceError::NotFound(id))),
             },
             Some(QuerySelector::Entity(QueryByEntity { entity_id, state_filter })) => commands
                 .values()
                 .filter(|c| c.entity_id == entity_id && (state_filter == CommandState::Unspecified as i32 || c.state == state_filter))
                 .cloned()
                 .collect(),
-            None => return Err(Status::invalid_argument("selector (command_id or entity) is required")),
+            None => return Err(self.to_status_counted(ServiceError::MalformedRequest { field: "selector (command_id or entity) is required" })),
         };
-        Ok(Response::new(QueryResponse { commands: results }))
+        // R3.5a: `proposals`/`decisions`, populated for exactly the commands in `results`
+        // above (never the full maps) -- a caller querying one entity must not learn about
+        // every other entity's proposals/decisions through this response.
+        let proposals_index = self.proposals.lock().unwrap_or_else(|p| p.into_inner());
+        let decisions_index = self.decisions.lock().unwrap_or_else(|p| p.into_inner());
+        let proposals: BTreeMap<String, CommandProposal> =
+            results.iter().filter_map(|c| proposals_index.get(&c.id).map(|p| (c.id.clone(), p.clone()))).collect();
+        let decisions: BTreeMap<String, PolicyDecision> =
+            results.iter().filter_map(|c| decisions_index.get(&c.id).map(|d| (c.id.clone(), d.clone()))).collect();
+        drop(proposals_index);
+        drop(decisions_index);
+        Ok(Response::new(QueryResponse { commands: results, proposals, decisions }))
     }
 
     async fn verify_ledger(&self, request: Request<VerifyLedgerRequest>) -> Result<Response<VerifyLedgerResponse>, Status> {
@@ -937,7 +996,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let partitions: Vec<String> = if req.partition.is_empty() {
             self.ledger
                 .partitions()
-                .map_err(|e| to_status(ServiceError::Io(e)))?
+                .map_err(|e| self.to_status_counted(ServiceError::Io(e)))?
                 .into_iter()
                 .map(|p| p.partition)
                 .collect()
@@ -948,7 +1007,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let mut results: Vec<ChainVerification> = Vec::with_capacity(partitions.len());
         let mut ok = true;
         for partition in &partitions {
-            let result = self.ledger.verify(partition).map_err(|e| to_status(ServiceError::Io(e)))?;
+            let result = self.ledger.verify(partition).map_err(|e| self.to_status_counted(ServiceError::Io(e)))?;
             ok &= result.ok;
             results.push(result);
         }

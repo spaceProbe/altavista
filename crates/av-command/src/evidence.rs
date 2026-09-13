@@ -125,7 +125,7 @@ mod tests {
             ack_level: AckLevel::Unspecified as i32,
             delegation_id: String::new(),
         };
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t, None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t, None, None, None, &clock).unwrap();
         ledger
     }
 

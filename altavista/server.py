@@ -31,6 +31,20 @@ POST /api/cdm/sweep/sample  open one already-run sample of a published sweep by 
 POST /api/clock             broadcast a playback clock to all browsers
 GET  /textures/{file}       planet textures from the GMAT install
 WS   /ws                    push channel (scenario, list, clock messages)
+
+Command console (R3.5a, docs/aiplane-plan.md milestone A5's server half) -- every route
+below is a thin adapter over a REAL, already-running av-command gRPC service
+(``altavista.command_client``), configured once at ``create_app``/``serve`` time, never a
+request parameter (see that module's own docstring, "identity, never a path"'s sibling rule
+for a service endpoint). Answers a typed 503 -- never an import-time or startup failure --
+when grpcio is absent, no endpoint is configured, or the configured endpoint is unreachable.
+GET  /api/command/proposals                     PROPOSED commands (rationale, evidence ids)
+                                                  for ?entity_id=, or every configured entity
+GET  /api/command/commands/{id}/decision         the PolicyDecision for one command
+GET  /api/command/commands/{id}/trail            every CommandTransition, in order
+POST /api/command/commands/{id}/authorize        forwards the operator's token verbatim to
+                                                  Authorize; never stores/logs it
+GET  /api/command/counters                       proxies av-command's /admin/api/evidence
 """
 from __future__ import annotations
 
@@ -39,7 +53,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -48,6 +62,7 @@ from google.protobuf import json_format
 from google.protobuf.message import DecodeError
 
 from . import cdm as cdm_adapter
+from . import command_client
 from . import profile as profile_loader
 from .model import Frame, ScenarioData
 from .pb import core_pb2, trajectory_pb2
@@ -142,16 +157,30 @@ class Hub:
 
 
 def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.PathLike] = None,
-                profile: str = profile_loader.DEFAULT_PROFILE_ID) -> FastAPI:
+                profile: str = profile_loader.DEFAULT_PROFILE_ID,
+                command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
+                command_entities: Sequence[str] = ()) -> FastAPI:
     """``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
     section every published scenario gets stamped with (``Hub.put``) -- defaults to the
     "design" profile (altavista has no running "current profile" console yet; see
     ``altavista/profile.py``'s module docstring). Raises ``altavista.profile.ProfileError``
     (never silently falls back) if the named profile has no usable ``imagery:`` section.
+
+    ``command_endpoint``/``command_admin_endpoint``/``command_entities`` (R3.5a, question
+    199): where the ``/api/command/*`` routes reach a real ``av-command`` service --
+    ``"host:port"`` for the gRPC service and its admin HTTP server respectively, and the
+    entity ids ``GET /api/command/proposals`` sweeps by default. Configuration, exactly like
+    ``profile`` above, never read from the process environment and never a request
+    parameter -- see ``altavista/command_client.py``'s module doc. Every one of the three may
+    be left at its default (``None``/empty): every OTHER route in this app still starts and
+    serves normally, and the command routes themselves answer a typed 503 rather than ever
+    failing this function or the app's startup.
     """
     app = FastAPI(title="altavista")
     hub = Hub(imagery=profile_loader.load_imagery_config(profile))
     app.state.hub = hub
+    command_config = command_client.CommandServiceConfig(
+        grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))
     web = Path(web_dir) if web_dir else WEB_DIR
     textures = Path(texture_dir) if texture_dir else _default_texture_dir()
     # Shared with the app.mount(...) below (question 139, M21.1): the "/" route is a
@@ -675,6 +704,113 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             raise HTTPException(404, f"texture {file!r} not found in {textures}")
         return FileResponse(path)
 
+    def _raise_command_service_error(exc: command_client.CommandServiceError) -> None:
+        """Maps `exc` through `command_client.command_service_error_to_http_status` and
+        raises the resulting `fastapi.HTTPException` -- the one place every `/api/command/*`
+        route below turns a `CommandServiceError` into an HTTP response, so a refusal never
+        reaches a caller flattened to a generic 500 (R3.5a's own design rule)."""
+        status, message = command_client.command_service_error_to_http_status(exc)
+        raise HTTPException(status, message)
+
+    @app.get("/api/command/proposals")
+    async def command_proposals(entity_id: Optional[str] = None):
+        """The `PROPOSED` commands for `entity_id` (or, when omitted, for every entity this
+        server was started with via `--command-entity`), each with its rationale and
+        evidence ids -- a real `altavista.v1.CommandAuthorityService.Query` call
+        (`altavista.command_client.list_proposed_commands`), never a Python-side
+        re-implementation of the state machine or a reader of the service's own ledger
+        files. `entity_id` is an ordinary lookup key the real service itself already accepts
+        on `Query`, not a path -- the service ENDPOINT, not this parameter, is what R3.5a's
+        design rule keeps out of the request (see `altavista/command_client.py`'s module
+        doc). Answers a typed 503 when no command service is configured or reachable, or
+        when `grpcio` is not installed -- this route never fails the app's own startup.
+        """
+        try:
+            proposals = command_client.list_proposed_commands(command_config, entity_id=entity_id)
+        except command_client.CommandServiceError as exc:
+            _raise_command_service_error(exc)
+        return {"proposals": proposals}
+
+    @app.get("/api/command/commands/{command_id}/decision")
+    async def command_decision(command_id: str):
+        """The policy decision for `command_id`: decision id, policy hash, allow/deny and
+        reasons, and the exact `PolicyInput` it was decided over -- `crates/av-command`'s
+        own `LedgerRecord.decision`, previously visible only in `Check`'s own RPC response
+        and now recoverable by any later caller through `Query` (R3.5a). `404` when
+        `command_id` has not been `Checked` yet (still `PROPOSED`) -- distinct from a
+        `command_id` this service has never held at all, which is `_call`'s own real
+        `NOT_FOUND` (see `altavista.command_client.get_decision`'s own docstring).
+        """
+        try:
+            decision = command_client.get_decision(command_config, command_id)
+        except command_client.CommandServiceError as exc:
+            _raise_command_service_error(exc)
+        if decision is None:
+            raise HTTPException(404, f"command {command_id!r} has not been Checked yet -- no policy decision recorded")
+        return decision
+
+    @app.get("/api/command/commands/{command_id}/trail")
+    async def command_trail(command_id: str):
+        """Every `CommandTransition` `command_id` has recorded, in order, with its
+        principal, reason, ack level and delegation -- a real `Query` by `command_id`
+        (`altavista.command_client.get_trail`), never a ledger file read.
+        """
+        try:
+            trail = command_client.get_trail(command_config, command_id)
+        except command_client.CommandServiceError as exc:
+            _raise_command_service_error(exc)
+        return {"commandId": command_id, "transitions": trail}
+
+    @app.post("/api/command/commands/{command_id}/authorize")
+    async def command_authorize(command_id: str, request: Request):
+        """Authorizes `command_id`, forwarding the OPERATOR'S OWN TOKEN verbatim to the real
+        service's `Authorize` rpc as `AuthorizeRequest.principal_token`.
+
+        **The token contract (R3.5a, non-negotiable):** the request body is exactly
+        ``{"principalToken": str, "delegationId": str}`` (the second optional, default
+        ``""``); this route reads `principalToken` off the body and hands it straight to
+        `altavista.command_client.authorize_command`, which forwards it to the real gRPC
+        call and returns. This server -- this route, `command_client`, and every function
+        either calls -- **never mints, stores, caches, or logs a token, anywhere**: there is
+        no code path here that writes `principalToken` to a log, a file, or any structure
+        that outlives this one request/response cycle. A refusal from the real service (a
+        wrong role, an expired or invalid token, a missing MFA claim, ...) is surfaced with
+        ITS OWN gRPC status code and message (`command_client.command_service_error_to_http_
+        status`), never flattened to a generic 500 -- and that message is already guaranteed
+        token-free by the Rust side's own test (see `command_client.authorize_command`'s own
+        docstring), so this route adds no scrubbing of its own on top.
+        """
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, f"malformed JSON body: {exc}")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "expected a JSON object with 'principalToken'")
+        principal_token = body.get("principalToken")
+        if not isinstance(principal_token, str) or not principal_token:
+            raise HTTPException(400, "'principalToken' must be a non-empty string")
+        delegation_id = body.get("delegationId") or ""
+        if not isinstance(delegation_id, str):
+            raise HTTPException(400, "'delegationId' must be a string")
+        try:
+            result = command_client.authorize_command(command_config, command_id, principal_token, delegation_id)
+        except command_client.CommandServiceError as exc:
+            _raise_command_service_error(exc)
+        return result
+
+    @app.get("/api/command/counters")
+    async def command_counters():
+        """Proxies `av-command`'s own `GET /admin/api/evidence` (R3.1 extended it with a
+        sorted `refusals` object) -- this route never counts anything itself; the real
+        service's own counters are the one source of truth (ADR-004's "everything rejected
+        is counted").
+        """
+        try:
+            counters = command_client.get_counters(command_config)
+        except command_client.CommandServiceError as exc:
+            _raise_command_service_error(exc)
+        return counters
+
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -1008,14 +1144,19 @@ def _default_texture_dir() -> Path:
 
 
 def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional[os.PathLike] = None,
-          log_level: str = "info", profile: str = profile_loader.DEFAULT_PROFILE_ID) -> None:
+          log_level: str = "info", profile: str = profile_loader.DEFAULT_PROFILE_ID,
+          command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
+          command_entities: Sequence[str] = ()) -> None:
     """Run the viewer server (blocking). ``profile`` -- see ``create_app``'s docstring
-    (M19.5, question 132)."""
+    (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
+    ``command_entities`` -- see ``create_app``'s docstring (R3.5a); all three passed straight
+    through, never read from the process environment (question 199)."""
     import uvicorn
 
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO),
                         format="%(asctime)s %(name)s: %(message)s")
-    app = create_app(texture_dir=texture_dir, profile=profile)
-    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s)",
-             host, port, _default_texture_dir(), profile)
+    app = create_app(texture_dir=texture_dir, profile=profile, command_endpoint=command_endpoint,
+                      command_admin_endpoint=command_admin_endpoint, command_entities=command_entities)
+    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s)",
+             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

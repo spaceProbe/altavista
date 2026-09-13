@@ -101,7 +101,7 @@ impl<'a> EvidenceRecorder<'a> {
             ..Default::default()
         };
         self.ledger
-            .append(CommandMeta::new(&partition, &evidence.command_id, EVIDENCE_COMMAND_CLASS, ""), transition, None, Some(&command), clock)
+            .append(CommandMeta::new(&partition, &evidence.command_id, EVIDENCE_COMMAND_CLASS, ""), transition, None, Some(&command), None, clock)
             .map(|_record| ())
     }
 
