@@ -4,6 +4,69 @@
 runs as a labelled container with `--network none` plus its allowed endpoint(s) -- not
 merely that the Dockerfile parses.
 
+# Container hardening (question 207, edge round 3's review defect 2)
+
+The Part 2 test below also runs the real plugin container with `services/edge-plugin/
+Dockerfile`'s own expected hardening flags (`--read-only` plus its one declared writable
+volume, `--cap-drop ALL`, `--security-opt no-new-privileges`, and -- by naming no `--security-
+opt seccomp=...` override at all -- the DEFAULT seccomp profile) and asserts the posture two
+ways: from `docker inspect` of that same container (valid whether it is still running or has
+merely exited-but-not-yet-removed) and from `docker exec` of a second, deliberately long-lived
+container of the SAME image with the SAME flags (see that block's own comment for why a second
+container, not a race against the first one's own fast, `Pacing::AsFastAsPossible` completion).
+Both assertion functions (`assert_inspect_hardening`/`assert_exec_hardening`) live in
+`altavista/container_hardening.py`, shared verbatim with `tests/
+test_edge_plugin_hardening_alpine.py` -- a second, self-contained test using `alpine:latest`
+(present locally as of this writing; see that file's own module doc) that proves the identical
+flags and the identical assertions really produce those values on THIS Docker/Colima host
+TODAY, independent of whether `av-edge-plugin:local` exists. Read that file's module doc for
+"same flags, same assertions, one gated on the plugin image and one not."
+
+Question 207 also ruled what this Dockerfile does NOT attempt: rootless podman, Quadlet-managed
+units, and the UBI9 FIPS base image are the PRODUCTION substrate's concern (ADR-003, secdeploy
+on fedora-fips), not reproducible with Docker on Colima -- see `services/edge-plugin/
+Dockerfile`'s own "Container hardening" header section and `docs/adr/
+004-security-boundary-and-evidence.md`'s clarification beside its "Plugins are untrusted code"
+bullet.
+
+# Why this test is skipped on this host today, and the disk state behind it
+
+As of this round's own measurement (2026-09-13, immediately before writing this test):
+`docker system df` reports 21 images (12.42 GB, 0% reclaimable), 31 containers (15 active,
+230.7 MB, 96% reclaimable), 899 local volumes (46.92 GB, 99% reclaimable -- an unrelated
+Supabase/Kubernetes workload's, exactly what question 196(d)/205 already escalated), and 0
+build-cache entries. `docker run --rm --entrypoint df alpine:latest -h /` reports the Colima
+VM's container filesystem itself: `overlay 58.8G 56.0G 0 100% /` -- 58.8 GB total, 56.0 GB used,
+**0 bytes available**. `av-edge-plugin:local` and even this Dockerfile's own base image,
+`debian:bookworm-slim`, are BOTH already absent from this host (`docker image inspect` on
+either returns "No such image") -- consistent with `_skip_if_image_vanished_mid_run`'s own
+docstring below: Colima's kubelet image garbage collector deletes unused images under this
+exact disk pressure, and `services/edge-plugin/build-image.sh` cannot be re-run to replace them
+(a build allocates fresh layers on a filesystem already at 0 bytes free). The remedy is the
+user's, already on record at question 196(d)/205: reclaim the 899 dangling volumes, disable
+Colima's Kubernetes, or raise `disk:` in `~/.colima/default/colima.yaml`. Until one of those
+happens, this test (and `build-image.sh`) stay unusable on this host, and
+`tests/test_edge_plugin_hardening_alpine.py` is what actually runs today.
+
+A follow-up re-measurement, same day, after implementing and running the hardening work above:
+`docker system df` moved to 22 images (12.46 GB), 31 containers, 904 local volumes (47.21 GB,
+99% reclaimable -- the same unrelated workload, slightly larger), still 0 build-cache entries;
+`docker run --rm --entrypoint df alpine:latest -h /` still reported `overlay 58.8G ~56.1-56.2G 0
+100% /` throughout -- genuinely 0 bytes available, not a rounding artifact. Direct confirmation:
+`tests/test_edge_plugin_hardening_alpine.py`'s own real run against `alpine:latest` (present at
+that moment) got through every hardening check -- non-root uid, `NoNewPrivs: 1`, `Seccomp: 2`,
+the read-only-root write correctly failing -- and then hit `sh: write error: No space left on
+device` on the ONE-declared-writable-volume write probe, i.e. this filesystem is now so full
+that even a fresh named Docker volume (not the image layer store) cannot absorb a few bytes.
+That specific, narrower failure is distinguished from a hardening defect by
+`altavista.container_hardening.VolumeWriteDiskExhausted` (see that module's own docstring) --
+caught here and in the alpine test, both of which then skip visibly rather than reporting a
+false failure. Also observed directly during this same work: `alpine:latest` itself was evicted
+from this host BETWEEN two successive `docker image inspect` checks a few minutes apart with no
+`docker rmi`/prune run by this test suite in between -- Colima's kubelet image GC reclaiming
+even a several-MB image under this pressure, in real time, exactly as `_skip_if_image_vanished_
+mid_run` already documents for the larger plugin/prebuild images.
+
 Docker-gated, and gated the way `services/cfs/tests/test_image_digest.py` already does it
 for a *Python* test (question 194): a module-level `_compute_skip_reason()` runs once at
 import time, and `pytest.mark.skipif` on every gated test uses its result as the printed
@@ -124,6 +187,14 @@ from pathlib import Path
 
 import pytest
 
+from altavista.container_hardening import (
+    HARDENING_RUN_FLAGS,
+    VolumeWriteDiskExhausted,
+    assert_exec_hardening,
+    assert_inspect_hardening,
+    label_args as hardening_label_args,
+    prune_stale_labelled_resources,
+)
 from altavista.docker_test_lock import lock_docker_tests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -156,9 +227,15 @@ CLOCK_TAI_NS = 1_767_225_637_000_000_000
 # `TEST_LABEL_VALUE`), reused verbatim here -- this is a *test* resource, not the persistent
 # build artifact `services/edge-plugin/Dockerfile` produces (that one carries only
 # `org.altavista.project`/`org.altavista.component`, never `av.test`), so cleanup below can
-# never mistake one for the other.
+# never mistake one for the other. Re-exported by `altavista.container_hardening` under the
+# same names -- both modules must agree on this label, by construction, since both prune and
+# assert against it.
 TEST_LABEL_KEY = "av.test"
 TEST_LABEL_VALUE = "1"
+
+# The one writable path `services/edge-plugin/Dockerfile`'s own "Container hardening" header
+# section declares under `--read-only` -- see that file's own comment for why this exact path.
+WRITABLE_MOUNT_DEST = "/var/lib/edge-plugin"
 
 # See this module's own doc, "Why every bind-mount source lives under .av-test-tmp/, not
 # tempfile/tmp_path" -- must be under $HOME for Colima to actually bind-mount it.
@@ -232,12 +309,17 @@ def _skip_if_image_vanished_mid_run(stage: str, result: subprocess.CompletedProc
     twice against this image inside a single afternoon, once between collection and the first
     `docker run` and once between this test's own Part 1 and Part 2. The measured cause is disk
     pressure, not an actor running `docker image prune`: the Colima VM's container filesystem
-    sits at 92% (4.2 GB free of 58.8 GB, with 41.85 GB reclaimable in an unrelated workload's
-    volumes), and the deletions land inside another process's `docker build` layer-allocation
-    window. Question 194's rule is "run for real or skip visibly, never pass silently", and a
-    skip whose reason says the image was deleted mid-run is exactly that -- distinct, in wording
-    and in meaning, from `_SKIP_REASON`'s "has not been built on this host", so `-rs` output
-    never conflates the two. Rebuild with `services/edge-plugin/build-image.sh` and re-run."""
+    sat at 92% (4.2 GB free of 58.8 GB, with 41.85 GB reclaimable in an unrelated workload's
+    volumes) when this was first measured, and the deletions land inside another process's
+    `docker build` layer-allocation window. This module's own top-of-file doc has this round's
+    fresher re-measurement (2026-09-13): the same filesystem is now at 0 bytes free (58.8 GB
+    total, 56.0 GB used, 100% full), 899 of that unrelated workload's volumes now account for
+    46.92 GB (99% reclaimable), and both `av-edge-plugin:local` and this Dockerfile's own base
+    image are already gone -- the same phenomenon, worse. Question 194's rule is "run for real
+    or skip visibly, never pass silently", and a skip whose reason says the image was deleted
+    mid-run is exactly that -- distinct, in wording and in meaning, from `_SKIP_REASON`'s "has
+    not been built on this host", so `-rs` output never conflates the two. Rebuild with
+    `services/edge-plugin/build-image.sh` and re-run."""
     if _MISSING_IMAGE_MARKER in (result.stderr or ""):
         pytest.skip(
             f"image {IMAGE_TAG!r} was present when this test was collected but had been deleted "
@@ -280,6 +362,7 @@ class ResourceGuard:
         self.run_id = run_id
         self.containers: list[str] = []
         self.networks: list[str] = []
+        self.volumes: list[str] = []
 
     def label_args(self) -> list[str]:
         return ["--label", f"{TEST_LABEL_KEY}={TEST_LABEL_VALUE}", "--label", f"av.test.run_id={self.run_id}"]
@@ -290,11 +373,17 @@ class ResourceGuard:
     def track_network(self, name: str) -> None:
         self.networks.append(name)
 
+    def track_volume(self, name: str) -> None:
+        self.volumes.append(name)
+
     def cleanup(self) -> None:
         for name in self.containers:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
         for name in self.networks:
             subprocess.run(["docker", "network", "rm", name], capture_output=True, timeout=30)
+        # Volumes last -- removing one still referenced by a not-yet-removed container fails.
+        for name in self.volumes:
+            subprocess.run(["docker", "volume", "rm", name], capture_output=True, timeout=30)
 
     def assert_nothing_left(self) -> None:
         label_filter = f"label=av.test.run_id={self.run_id}"
@@ -302,6 +391,8 @@ class ResourceGuard:
         assert remaining_containers == "", f"container(s) labelled {label_filter} still exist after cleanup: {remaining_containers!r}"
         remaining_networks = _docker("network", "ls", "--filter", label_filter, "-q").stdout.strip()
         assert remaining_networks == "", f"network(s) labelled {label_filter} still exist after cleanup: {remaining_networks!r}"
+        remaining_volumes = _docker("volume", "ls", "--filter", label_filter, "-q").stdout.strip()
+        assert remaining_volumes == "", f"volume(s) labelled {label_filter} still exist after cleanup: {remaining_volumes!r}"
         # This test never builds or tags an image of its own (it only ever runs the
         # already-built IMAGE_TAG and the already-present PROBE_IMAGE) -- so there is, by
         # construction, no image for this guard to have created or to need removing. Stated
@@ -390,6 +481,9 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
     run_scratch = SCRATCH_ROOT / run_id
     run_scratch.mkdir(parents=True, exist_ok=True)
     guard = ResourceGuard(run_id)
+
+    # Question 156: prune by label before creating.
+    prune_stale_labelled_resources()
 
     try:
         # -----------------------------------------------------------------------------------
@@ -483,11 +577,28 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
         )
         _wait_for_container_stdout_lines(ingest_container, ("GRPC_LISTENING", "ADMIN_LISTENING"), timeout_s=15.0)
 
+        # Question 207 (edge round 3 review defect 2 / question 207's ruling): the SAME real
+        # plugin run also carries this image's expected hardening posture (`services/
+        # edge-plugin/Dockerfile`'s own "Container hardening" header section) -- the non-root
+        # `USER` it bakes in, `--read-only` plus its one declared writable volume, `--cap-drop
+        # ALL`, `--security-opt no-new-privileges`, and (by naming no `--security-opt seccomp=
+        # ...` at all) the DEFAULT seccomp profile. `--rm` is deliberately NOT used here (unlike
+        # every other container in this file): every field `assert_inspect_hardening` below
+        # checks is fixed at `docker run` time and survives the container's own exit, but only
+        # until it is actually removed -- so this container is left in place (still tracked by
+        # `guard`, still removed by `guard.cleanup()` at the very end) until this test has read
+        # it back.
+        plugin_volume = _labelled_id(run_id, "plugin-state")
+        _docker("volume", "create", *hardening_label_args(run_id), plugin_volume)
+        guard.track_volume(plugin_volume)
+
         plugin_container = _labelled_id(run_id, "plugin")
         guard.track_container(plugin_container)
         plugin_run = subprocess.run(
             [
-                "docker", "run", "--rm", "--name", plugin_container, "--network", f"container:{ingest_container}", *guard.label_args(),
+                "docker", "run", "--name", plugin_container, "--network", f"container:{ingest_container}", *guard.label_args(),
+                *HARDENING_RUN_FLAGS,
+                "-v", f"{plugin_volume}:{WRITABLE_MOUNT_DEST}",
                 "-v", f"{SIGNING_KEY_PEM}:/keys/signing.pem:ro",
                 IMAGE_TAG,
                 "--signing-key", "/keys/signing.pem",
@@ -502,6 +613,66 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
         assert summary["batch_count"] == EXPECTED_BATCH_COUNT, summary
         assert summary["measurement_count"] == EXPECTED_BATCH_COUNT, summary
         assert summary["chain_head_hex"] == EXPECTED_CHAIN_HEAD_HEX, summary
+
+        # `docker inspect` of that same, now-exited-but-not-removed container -- valid
+        # regardless of whether the process inside it is still running (see this block's own
+        # comment above): non-root `.Config.User`, `.HostConfig.ReadonlyRootfs`, `.HostConfig.
+        # CapDrop`, `.HostConfig.SecurityOpt`, and the `/var/lib/edge-plugin` mount, RW.
+        plugin_inspect = assert_inspect_hardening(plugin_container, writable_mount_dest=WRITABLE_MOUNT_DEST)
+        print(f"\n--- plugin container hardening, from docker inspect (question 148) ---\n"
+              f"Config.User={plugin_inspect['Config']['User']!r} "
+              f"HostConfig.ReadonlyRootfs={plugin_inspect['HostConfig']['ReadonlyRootfs']!r} "
+              f"HostConfig.CapDrop={plugin_inspect['HostConfig'].get('CapDrop')!r} "
+              f"HostConfig.SecurityOpt={plugin_inspect['HostConfig'].get('SecurityOpt')!r}")
+        # Done reading it back -- remove it now rather than leaving it to linger through Parts
+        # 2's evidence read and Part 3 below (guard.cleanup() would also catch it, but there is
+        # no reason to keep an exited container around once this test is finished with it).
+        subprocess.run(["docker", "rm", "-f", plugin_container], capture_output=True, timeout=30)
+
+        # -----------------------------------------------------------------------------------
+        # The kernel's own view of that SAME posture, from `docker exec` of a RUNNING container
+        # -- id -u, /proc/1/status's NoNewPrivs/Seccomp fields, and the two write probes. The
+        # real plugin run above (`Pacing::AsFastAsPossible`, `crates/av-edge/src/plugin/mod.rs`)
+        # finishes in a bounded, short amount of wall time by design -- racing `docker exec`
+        # against it catching it "still running" would be exactly the kind of flaky, timing-
+        # dependent test this platform's own rules reject. So this file proves the identical
+        # posture instead on a SEPARATE, deliberately long-lived instance of the SAME image with
+        # the SAME hardening flags and the SAME writable volume, using `--entrypoint sh -c
+        # "sleep ..."` in place of the real ENTRYPOINT purely so there is something to `docker
+        # exec` into -- `assert_exec_hardening` (shared with `tests/
+        # test_edge_plugin_hardening_alpine.py`, see that file's own module doc for "same flags,
+        # same assertions") is what actually asserts the posture; overriding the entrypoint
+        # changes nothing about which user/rootfs/caps/seccomp/mount the image is given, since
+        # every one of those is a `docker run`-time or image-baked property, never a function of
+        # which command is executed.
+        # -----------------------------------------------------------------------------------
+        hardening_probe_container = _labelled_id(run_id, "plugin-hardening-probe")
+        guard.track_container(hardening_probe_container)
+        _docker(
+            "run", "-d", "--name", hardening_probe_container, "--network", network_name, *guard.label_args(),
+            *HARDENING_RUN_FLAGS,
+            "-v", f"{plugin_volume}:{WRITABLE_MOUNT_DEST}",
+            "--entrypoint", "sh",
+            IMAGE_TAG, "-c", "sleep 30",
+        )
+        try:
+            probe_facts = assert_exec_hardening(hardening_probe_container, writable_path=WRITABLE_MOUNT_DEST)
+        except VolumeWriteDiskExhausted as e:
+            # See `altavista.container_hardening.VolumeWriteDiskExhausted`'s own docstring and
+            # `tests/test_edge_plugin_hardening_alpine.py`'s identical handling: a real,
+            # host-wide disk condition (this module's own "Why this test is skipped" section
+            # above has the numbers), not a hardening defect -- every OTHER fact already passed.
+            print(f"\n--- plugin container hardening, from docker exec of the RUNNING container "
+                  f"(question 148) -- PARTIAL, before the disk-exhausted volume write ---\n"
+                  f"{json.dumps(e.partial_facts)}")
+            subprocess.run(["docker", "rm", "-f", hardening_probe_container], capture_output=True, timeout=30)
+            pytest.skip(
+                f"user/NoNewPrivs/Seccomp/read-only-root posture confirmed ({json.dumps(e.partial_facts)}), "
+                f"but the final write-to-volume probe could not complete: {e}"
+            )
+        print(f"\n--- plugin container hardening, from docker exec of the RUNNING container (question 148) ---\n"
+              f"{json.dumps(probe_facts)}")
+        subprocess.run(["docker", "rm", "-f", hardening_probe_container], capture_output=True, timeout=30)
 
         # Read the evidence surface back independently -- a second, disposable container
         # joined to the SAME shared namespace (never published to the Docker host at all;
