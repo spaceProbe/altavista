@@ -83,7 +83,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use av_cdm::pb::{self, ModelInfo, PacketCodec, Parameter};
+use av_cdm::pb::{self, AckLevel, ModelInfo, PacketCodec, Parameter};
 use av_dynamics::{AppliedCommand, DynamicsModel, Inbox, Outbox, StepResult};
 
 use crate::codec::{self, ApidMap, CodecError, FieldValue};
@@ -177,6 +177,66 @@ fn require_positive(v: Option<f64>, name: &str) -> Result<f64, ControllerSpecErr
     Ok(v)
 }
 
+/// A3.1/D7: the attitude controller's own new mode-command FRAMED IN port and mode-ack FRAMED
+/// OUT port -- **fixed conventional names, never a declared `"port.*"` parameter naming them a
+/// second way** (mirrors [`CONTROLLER_STARTRACKER_IN_PORT`]/`._IMU_IN_PORT`/`_WHEEL_TORQUE_OUT_
+/// PORT`'s own existing convention exactly, one port pair over -- this binding kind, unlike
+/// `super::binding::ConstantAccelSpec`, has never taken a declared port name for any of its own
+/// ports). Deliberately **not** stored on [`AttitudeControllerSpec`] at all: [`super::binding::
+/// resolve_controller_ports`] re-resolves whether these two ports/codecs are present, purely by
+/// name+shape, from the instance's own `SystemDefinition` at every materialization (the identical
+/// "re-resolved fresh each time, never persisted on the spec" pattern `star_codec`/`imu_codec`/
+/// `command_codec` already use for this binding kind) -- so this port pair survives a fault/
+/// maneuver boundary's own re-materialization for free, with zero change to [`BindingPlan::
+/// Controller`]'s own shape (a bare `AttitudeControllerSpec`, unchanged since M22.4).
+pub const CONTROLLER_MODE_IN_PORT: &str = "mode_in";
+/// See [`CONTROLLER_MODE_IN_PORT`]'s own doc comment.
+pub const CONTROLLER_MODE_ACK_OUT_PORT: &str = "mode_ack_out";
+
+/// A3.1/D7 (`docs/aiplane-plan.md`'s A3 milestone): the only [`AttitudeControllerModel`] field a
+/// [`CONTROLLER_MODE_IN_PORT`] telecommand may write -- mirrors `super::binding::
+/// CONSTANT_ACCEL_WRITABLE_PARAMETERS`'s own single-entry-today, `const`-not-a-literal shape
+/// exactly (that constant's own doc comment). `"mode"` selects between the two control laws
+/// [`AttitudeControllerModel::step_with_ports`] runs: `1.0` = REGULATE (today's PD control law,
+/// unchanged), `0.0` = SAFE (an explicit, published zero wheel torque -- see [`ControllerMode`]'s
+/// own doc comment for why SAFE must be visible on the wire, never a silent absence).
+pub const ATTITUDE_CONTROLLER_WRITABLE_PARAMETERS: &[&str] = &["mode"];
+
+/// D7's two reachable modes -- a decoded `mode` value that is neither is a typed, recorded
+/// outcome (question 188/193's own shape: an event, the last good mode retained, the run
+/// continues), never a silent ignore and never a hard failure of the run. See [`ControllerMode::
+/// from_wire`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ControllerMode {
+    /// `1.0`: the PD control law in [`AttitudeControllerModel::step_with_ports`] runs exactly as
+    /// it always has.
+    Regulate,
+    /// `0.0`: the control law is bypassed and an explicit `[0.0, 0.0, 0.0]` wheel-torque command
+    /// is published on schedule instead -- "a mode change must be visible on the wire and in the
+    /// trajectory, not an absence" (this task's own decision text). Never simply skipping the
+    /// emission: a ground operator (or, here, a test) watching the wire must be able to tell
+    /// "commanding zero" apart from "the controller stopped emitting at all."
+    Safe,
+}
+
+impl ControllerMode {
+    pub const REGULATE_WIRE_VALUE: f64 = 1.0;
+    pub const SAFE_WIRE_VALUE: f64 = 0.0;
+
+    /// `Some` for exactly the two declared wire values; `None` for anything else (D7's own
+    /// "typed, recorded outcome, never a silent ignore" rule -- the caller is responsible for
+    /// recording that `None` case, not this pure classifier).
+    pub fn from_wire(value: f64) -> Option<Self> {
+        if value == Self::REGULATE_WIRE_VALUE {
+            Some(Self::Regulate)
+        } else if value == Self::SAFE_WIRE_VALUE {
+            Some(Self::Safe)
+        } else {
+            None
+        }
+    }
+}
+
 /// Parsed, typed parameters for [`AttitudeControllerModel`] -- built by
 /// [`parse_attitude_controller_spec`]. Parameter vocabulary (a name matching none of these is
 /// [`ControllerSpecError::UnknownParameter`]):
@@ -187,6 +247,10 @@ fn require_positive(v: Option<f64>, name: &str) -> Result<f64, ControllerSpecErr
 /// - `controller.update_rate_hz` (required, `> 0`): declared control-law evaluation rate, Hz --
 ///   the controller runs at this rate, not the kernel step (see [`AttitudeControllerModel::
 ///   step_with_ports`]).
+///
+/// **Unchanged by A3.1/D7**: the mode-command port is declared purely by name+shape
+/// (`CONTROLLER_MODE_IN_PORT`/`.ACK_OUT_PORT`'s own doc comment) and is never parsed here or
+/// stored on this struct at all -- see that doc comment for exactly why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttitudeControllerSpec {
     pub kp: f64,
@@ -277,13 +341,38 @@ pub struct AttitudeControllerModel {
     last_star_q: RefCell<Option<[f64; 4]>>,
     last_imu_omega: RefCell<Option<[f64; 3]>>,
     info: ModelInfo,
+    /// A3.1/D7: `Some` when this instance's own `SystemDefinition` declares [`CONTROLLER_MODE_
+    /// IN_PORT`]/a shaped mode-command codec (resolved fresh, by `super::binding::resolve_
+    /// controller_ports`, at every materialization -- never stored on [`AttitudeControllerSpec`]
+    /// itself, see [`CONTROLLER_MODE_IN_PORT`]'s own doc comment for why).
+    mode_apid_map: Option<ApidMap>,
+    /// A3.1/D7: the commanded mode, [`ControllerMode::REGULATE_WIRE_VALUE`] until a `mode`
+    /// telecommand actually decodes and applies -- `Cell`, not `RefCell<ControllerMode>`,
+    /// mirroring `commanded_accel_scale`'s own identical role one binding kind over (`super::
+    /// binding::ConstantAccelModel`'s own doc comment): the *wire* value is what is stored (so
+    /// the "changed, or first" apply-reporting gate below can compare it directly), decoded back
+    /// to a [`ControllerMode`] only where the control law itself needs to branch on it.
+    mode: Cell<f64>,
+    /// A3.1/D6 (question 137's "changed, or first" rule, mirrored from `super::binding::
+    /// ConstantAccelModel::last_applied_command_value`'s own doc comment): `Some(v)` once a
+    /// `mode` command has actually applied at least once, so a repeated identical command is
+    /// decoded (and, if an ack codec is declared, acknowledged) but not reported as a second
+    /// `AppliedCommand`.
+    last_applied_mode: Cell<Option<f64>>,
+    /// A3.1/D3: `Some` when this instance's own `SystemDefinition` declares [`CONTROLLER_MODE_
+    /// ACK_OUT_PORT`]/a shaped ack codec -- see [`Self::mode_codec`]'s own doc comment for the
+    /// identical "resolved fresh, never persisted" contract.
+    ack_codec: Option<PacketCodec>,
     /// Question 188 (R5.2): every undecodable frame this instance's own most recent
     /// `step_with_ports` call received on [`CONTROLLER_STARTRACKER_IN_PORT`]/
     /// [`CONTROLLER_IMU_IN_PORT`] and skipped, continuing with `last_star_q`/`last_imu_omega`'s
     /// own last good value rather than aborting the run -- cleared and repopulated at the top of
     /// every call, mirrored back out via [`Self::drain_decode_errors`], exactly the `RefCell`
     /// pattern `super::sensors::StarTrackerModel::measurements`'s own doc comment already
-    /// establishes for question 173.
+    /// establishes for question 173. A3.1/D7: a *decoded* `mode` value outside {0.0, 1.0} is
+    /// recorded here too (the last good `mode` is retained, unchanged) -- question 188/193's own
+    /// shape, applied to a value the packet codec itself decoded successfully but this model's
+    /// own allowlist rejects, not only to an undecodable frame.
     decode_errors_this_step: RefCell<Vec<av_dynamics::DecodeErrorOccurrence>>,
 }
 
@@ -303,7 +392,18 @@ impl AttitudeControllerModel {
     /// `epoch_tai_ns`: seeds `next_due` as `epoch_tai_ns + period_ns` -- the identical M22.2b bug
     /// fix `super::sensors::StarTrackerModel::new`'s own doc comment explains (a realistic TAI
     /// epoch, not `0`, is what every real DRM actually starts from).
-    pub fn new(spec: AttitudeControllerSpec, star_codec: PacketCodec, imu_codec: PacketCodec, command_codec: PacketCodec, epoch_tai_ns: i64, model_id: &str) -> Result<Self, ControllerSpecError> {
+    /// A3.1/D7: `mode_codec`/`ack_codec` are `Some` exactly when this instance's own
+    /// `SystemDefinition` declares [`CONTROLLER_MODE_IN_PORT`]/`.ACK_OUT_PORT` respectively --
+    /// resolved by the caller (`super::binding::resolve_controller_ports`), fresh, from `sys`,
+    /// the identical "never stored on the spec, re-derived at every materialization" pattern
+    /// `star_codec`/`imu_codec`/`command_codec` already use for this binding kind (see
+    /// [`CONTROLLER_MODE_IN_PORT`]'s own doc comment for exactly why).
+    /// `ports` bundles all five codecs into one value (clippy's own `too_many_arguments`
+    /// threshold, crossed the moment this task added `mode_codec`/`ack_codec` to the previous
+    /// three -- a struct, not a `#[allow]`, is this codebase's own fix, mirrored from `super::
+    /// binding::ControllerPorts`'s own existing role bundling the original three).
+    pub fn new(spec: AttitudeControllerSpec, ports: super::binding::ControllerPorts, epoch_tai_ns: i64, model_id: &str) -> Result<Self, ControllerSpecError> {
+        let super::binding::ControllerPorts { star_codec, imu_codec, command_codec, mode_codec, ack_codec } = ports;
         codec::validate_codec(&star_codec).map_err(ControllerSpecError::Codec)?;
         codec::validate_codec(&imu_codec).map_err(ControllerSpecError::Codec)?;
         codec::validate_codec(&command_codec).map_err(ControllerSpecError::Codec)?;
@@ -316,10 +416,32 @@ impl AttitudeControllerModel {
         if !is_wheel_torque_command_codec(&command_codec) {
             return Err(ControllerSpecError::InvalidParameter { name: "controller.command_codec".to_string(), reason: format!("declared PacketCodec {:?} must declare exactly {WHEEL_TORQUE_FIELD_NAMES:?}, got {:?}", command_codec.id, command_codec.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>()) });
         }
+        // A3.1/D7: `mode_codec` must declare a `"value"` field wide enough for a Numeric value
+        // -- mirrors `super::binding::ConstantAccelModel`'s own identical `resolve_constant_
+        // accel_command_port`-time check, run here (the model's own remaining check, same as
+        // every other codec above) since this constructor has no DRM/registry in scope to have
+        // run it earlier.
+        if let Some(codec) = &mode_codec {
+            codec::validate_codec(codec).map_err(ControllerSpecError::Codec)?;
+            if !has_all_fields(codec, &["value"]) {
+                return Err(ControllerSpecError::InvalidParameter { name: "controller.mode_codec".to_string(), reason: format!("declared PacketCodec {:?} is missing a required \"value\" field", codec.id) });
+            }
+        }
+        if let Some(codec) = &ack_codec {
+            codec::validate_codec(codec).map_err(ControllerSpecError::Codec)?;
+            if !has_all_fields(codec, &["cmd_seq"]) {
+                return Err(ControllerSpecError::InvalidParameter { name: "controller.ack_codec".to_string(), reason: format!("declared PacketCodec {:?} is missing a required \"cmd_seq\" field", codec.id) });
+            }
+        }
         let mut star_apid_map = ApidMap::new();
         star_apid_map.insert(star_codec.apid, star_codec.clone());
         let mut imu_apid_map = ApidMap::new();
         imu_apid_map.insert(imu_codec.apid, imu_codec.clone());
+        let mode_apid_map = mode_codec.as_ref().map(|codec| {
+            let mut m = ApidMap::new();
+            m.insert(codec.apid, codec.clone());
+            m
+        });
 
         let period_ns = (1.0e9 / spec.update_rate_hz).round() as i64;
         let mut settings = BTreeMap::new();
@@ -332,6 +454,17 @@ impl AttitudeControllerModel {
         settings.insert("star_apid".to_string(), star_codec.apid.to_string());
         settings.insert("imu_apid".to_string(), imu_codec.apid.to_string());
         settings.insert("command_apid".to_string(), command_codec.apid.to_string());
+        // A3.1/D7: declared, hashed configuration, exactly like every codec above -- a DRM
+        // declaring a mode/ack port hashes differently, never silently. Omitted entirely (not
+        // merely empty strings) when `None`, so every fixture through M22.4 -- which declares
+        // neither -- hashes byte-for-byte identically to before this task (D4's own "must not
+        // move a single existing golden" rule).
+        if let Some(codec) = &mode_codec {
+            settings.insert("mode_apid".to_string(), codec.apid.to_string());
+        }
+        if let Some(codec) = &ack_codec {
+            settings.insert("ack_apid".to_string(), codec.apid.to_string());
+        }
         let settings_hash = av_dynamics::settings_hash(&settings);
         let info = ModelInfo { id: model_id.to_string(), version: "1".to_string(), state_space_id: format!("{model_id}.no_state"), frame_id: String::new(), settings_hash, depth: "native".to_string(), ..Default::default() };
 
@@ -346,6 +479,10 @@ impl AttitudeControllerModel {
             last_star_q: RefCell::new(None),
             last_imu_omega: RefCell::new(None),
             info,
+            mode_apid_map,
+            mode: Cell::new(ControllerMode::REGULATE_WIRE_VALUE),
+            last_applied_mode: Cell::new(None),
+            ack_codec,
             decode_errors_this_step: RefCell::new(Vec::new()),
         })
     }
@@ -416,15 +553,79 @@ impl DynamicsModel for AttitudeControllerModel {
             }
         }
 
+        // A3.1/D7: decode a `mode` telecommand off `consume_framed`'s own port, every call --
+        // mirrors `super::binding::ConstantAccelModel::step_with_ports`'s own identical
+        // "decode, then apply" ordering (the newly-commanded mode must already be in effect
+        // before the emission loop below runs, in *this* same call, not a later one).
+        let mut applied: Vec<AppliedCommand> = Vec::new();
+        let mut newly_applied_mode_seq: Option<u16> = None;
+        // A3.1/D3: set on EVERY successful, in-allowlist decode (never gated by "changed, or
+        // first") -- `ACK_LEVEL_ASSET_RECEIVED`'s own real-wire moment is decode itself, not
+        // apply, so a repeated identical command still gets a decode-time ack even though it is
+        // never re-reported as a second `AppliedCommand`.
+        let mut newly_decoded_mode_seq: Option<u16> = None;
+        if let Some(mode_apid_map) = &self.mode_apid_map {
+            if let Some((msg, _sender)) = inbox.last_on_port(CONTROLLER_MODE_IN_PORT) {
+                match codec::decode_packet(mode_apid_map, &msg.payload) {
+                    Ok(decoded) => {
+                        if let Some(FieldValue::Numeric(value)) = decoded.fields.get("value") {
+                            match ControllerMode::from_wire(*value) {
+                                Some(_mode) => {
+                                    // The write always happens, unconditionally, on every
+                                    // decoded, in-allowlist message -- mirrors `ConstantAccelModel
+                                    // ::step_with_ports`'s own identical "write unconditionally,
+                                    // report only if changed-or-first" split.
+                                    self.mode.set(*value);
+                                    newly_decoded_mode_seq = Some(decoded.sequence_count);
+                                    let changed_or_first = self.last_applied_mode.get() != Some(*value);
+                                    if changed_or_first {
+                                        self.last_applied_mode.set(Some(*value));
+                                        applied.push(AppliedCommand { port: CONTROLLER_MODE_IN_PORT.to_string(), field: "mode".to_string(), value: *value, applied_tai_ns: t_tai_ns });
+                                        newly_applied_mode_seq = Some(decoded.sequence_count);
+                                    }
+                                }
+                                // D7: a decoded value outside the declared allowlist -- the last
+                                // good mode is retained (self.mode untouched), and this is
+                                // recorded through the identical decode-error-episode channel a
+                                // genuinely undecodable frame uses (question 188/193's own
+                                // shape: an event, the last good value kept, the run continues),
+                                // never a silent ignore and never a hard failure of the run.
+                                None => self.decode_errors_this_step.borrow_mut().push(av_dynamics::DecodeErrorOccurrence {
+                                    port: CONTROLLER_MODE_IN_PORT.to_string(),
+                                    tai_ns: msg.tai_ns,
+                                    sequence_count: Some(decoded.sequence_count),
+                                    error: format!("mode value {value} is not one of the declared modes ({}={}, {}={}); retaining last good mode {}", ControllerMode::REGULATE_WIRE_VALUE, "REGULATE", ControllerMode::SAFE_WIRE_VALUE, "SAFE", self.mode.get()),
+                                }),
+                            }
+                        }
+                    }
+                    // Question 188 (R5.2): an undecodable frame is recorded, never propagated --
+                    // `self.mode` is deliberately left untouched.
+                    Err(e) => self.decode_errors_this_step.borrow_mut().push(codec::decode_error_occurrence(CONTROLLER_MODE_IN_PORT, msg, &e)),
+                }
+            }
+        }
+
         let end = t_tai_ns + dt_ns;
         let mut outbox = Outbox::new();
         let mut outputs = BTreeMap::new();
-        let mut applied = Vec::new();
         while end >= self.next_due.get() {
             let due = self.next_due.get();
             if let (Some(q), Some(omega)) = (*self.last_star_q.borrow(), *self.last_imu_omega.borrow()) {
-                let qv = signed_error_vector(self.spec.target_q, q);
-                let tau = [self.spec.kp * qv[0] + self.spec.kd * omega[0], self.spec.kp * qv[1] + self.spec.kd * omega[1], self.spec.kp * qv[2] + self.spec.kd * omega[2]];
+                // D7: SAFE (mode == 0.0) publishes an explicit zero wheel-torque command instead
+                // of running the PD control law -- "a mode change must be visible on the wire
+                // and in the trajectory, not an absence" (this task's own decision text): the
+                // packet is still sent, on the same schedule, every period, just carrying
+                // [0.0, 0.0, 0.0] rather than the computed law's own output.
+                let tau = match ControllerMode::from_wire(self.mode.get()) {
+                    Some(ControllerMode::Safe) => [0.0, 0.0, 0.0],
+                    // REGULATE, or (unreachable in practice: `self.mode` is only ever written a
+                    // declared-allowlist value above) anything else -- run the control law.
+                    _ => {
+                        let qv = signed_error_vector(self.spec.target_q, q);
+                        [self.spec.kp * qv[0] + self.spec.kd * omega[0], self.spec.kp * qv[1] + self.spec.kd * omega[1], self.spec.kp * qv[2] + self.spec.kd * omega[2]]
+                    }
+                };
                 let mut values = BTreeMap::new();
                 values.insert("tau_1".to_string(), FieldValue::Numeric(tau[0]));
                 values.insert("tau_2".to_string(), FieldValue::Numeric(tau[1]));
@@ -443,6 +644,39 @@ impl DynamicsModel for AttitudeControllerModel {
             let qv = signed_error_vector(self.spec.target_q, q);
             let vnorm = (qv[0] * qv[0] + qv[1] * qv[1] + qv[2] * qv[2]).sqrt().clamp(-1.0, 1.0);
             outputs.insert("pointing_error_rad".to_string(), 2.0 * vnorm.asin());
+        }
+        // A3.1/D3/D4: "acknowledged by the flight software's telemetry" -- mirrors
+        // `ConstantAccelModel::step_with_ports`'s own identical `ack_framed` emission, extended
+        // with the OPT-IN-BY-SHAPE levelled ack this task adds: a declared ack codec with only
+        // `"cmd_seq"` (every existing binding kind's own shape, untouched by this task) still
+        // sends exactly one packet, only on apply, exactly as before; a declared codec that ALSO
+        // carries `"level"` (this fixture's own `controller_mode_ack_out_codec`) additionally
+        // sends a SECOND, real wire packet on decode alone, carrying `ACK_LEVEL_ASSET_RECEIVED`
+        // -- so `crate::drm::executor::run_shared_group`'s own applied-commands drain (which
+        // derives the level it reports back to an `ExternalCommandSource` from this model's own
+        // resolved ack-codec shape, never by decoding these bytes itself -- the identical "Scope
+        // disclosed, not hidden" choice `crate::drm::command`'s own module doc comment already
+        // makes for the single-level case) has a real decode-time wire event to point to, not
+        // merely an inferred one.
+        let ack_is_levelled = self.ack_codec.as_ref().is_some_and(|c| c.fields.iter().any(|f| f.name == "level"));
+        let encode_ack = |ack_codec: &PacketCodec, seq: u16, level: AckLevel| {
+            let mut values = BTreeMap::new();
+            values.insert("cmd_seq".to_string(), FieldValue::Numeric(seq as f64));
+            if ack_is_levelled {
+                values.insert("level".to_string(), FieldValue::Numeric(level as i32 as f64));
+            }
+            codec::encode_packet(ack_codec, seq, &[], &values)
+                .expect("ack_codec was resolved by classify_binding's own resolve_controller_ports, which already requires a \"cmd_seq\" field (and, when levelled, a \"level\" field) wide enough for a Numeric value -- encode_packet can only fail for a missing/mistyped/out-of-range field, none of which can happen here")
+        };
+        if let Some(ack_codec) = &self.ack_codec {
+            if ack_is_levelled {
+                if let Some(seq) = newly_decoded_mode_seq {
+                    outbox.push(CONTROLLER_MODE_ACK_OUT_PORT.to_string(), end, encode_ack(ack_codec, seq, AckLevel::AssetReceived));
+                }
+            }
+            if let Some(seq) = newly_applied_mode_seq {
+                outbox.push(CONTROLLER_MODE_ACK_OUT_PORT.to_string(), end, encode_ack(ack_codec, seq, AckLevel::AssetExecuted));
+            }
         }
         Ok((StepResult { state: Vec::new(), t_tai_ns: end, outputs }, outbox, applied))
     }
@@ -645,6 +879,9 @@ mod tests {
     fn spec(kp: f64, kd: f64, target_q: [f64; 4]) -> AttitudeControllerSpec {
         AttitudeControllerSpec { kp, kd, target_q, update_rate_hz: 4.0 }
     }
+    fn ports(star_codec: PacketCodec, imu_codec: PacketCodec, command_codec: PacketCodec) -> super::super::binding::ControllerPorts {
+        super::super::binding::ControllerPorts { star_codec, imu_codec, command_codec, mode_codec: None, ack_codec: None }
+    }
 
     // ---------------------------------------------------------------------------------------
     // parse_attitude_controller_spec: typed refusal + acceptance.
@@ -695,7 +932,7 @@ mod tests {
     fn new_refuses_a_command_codec_missing_a_wheel_torque_field() {
         let mut bad_command = command_codec();
         bad_command.fields.truncate(2); // only tau_1, tau_2
-        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), bad_command, 0, "ctrl_test").unwrap_err();
+        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), ports(star_codec(), imu_codec(), bad_command), 0, "ctrl_test").unwrap_err();
         assert!(matches!(err, ControllerSpecError::InvalidParameter { ref name, .. } if name == "controller.command_codec"), "{err:?}");
     }
 
@@ -703,7 +940,7 @@ mod tests {
     fn new_refuses_a_star_codec_missing_a_required_field() {
         let mut bad_star = star_codec();
         bad_star.fields.retain(|f| f.name != "qw");
-        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), bad_star, imu_codec(), command_codec(), 0, "ctrl_test").unwrap_err();
+        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), ports(bad_star, imu_codec(), command_codec()), 0, "ctrl_test").unwrap_err();
         assert!(matches!(err, ControllerSpecError::InvalidParameter { ref name, .. } if name == "controller.star_codec"), "{err:?}");
     }
 
@@ -729,7 +966,7 @@ mod tests {
         if let Some(f) = bad_star.fields.iter_mut().find(|f| f.name == "qw") {
             f.bit_offset = 256;
         }
-        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), bad_star, imu_codec(), command_codec(), 0, "ctrl_test").unwrap_err();
+        let err = AttitudeControllerModel::new(spec(1.0, 1.0, [0.0, 0.0, 0.0, 1.0]), ports(bad_star, imu_codec(), command_codec()), 0, "ctrl_test").unwrap_err();
         assert!(matches!(err, ControllerSpecError::Codec(CodecError::FieldExtentExceedsUserData { .. })), "{err:?}");
     }
 
@@ -810,7 +1047,7 @@ mod tests {
     /// see 1, not 8) or that ignores `next_due` bookkeeping entirely.
     #[test]
     fn controller_emits_at_its_own_declared_rate_not_the_caller_step_size() {
-        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
+        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), ports(star_codec(), imu_codec(), command_codec()), 0, "ctrl_test").unwrap();
         let star = star_codec();
         let imu = imu_codec();
         let inbox = Inbox::new(vec![star_message(&star, 0, [0.0, 0.0, 0.1, (1.0f64 - 0.01).sqrt()], 0), imu_message(&imu, 0, [0.0, 0.0, 0.0], 0)]);
@@ -824,7 +1061,7 @@ mod tests {
     /// commands zero torque (or any other default) instead of genuinely waiting.
     #[test]
     fn controller_emits_nothing_before_the_first_measurement_arrives() {
-        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
+        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), ports(star_codec(), imu_codec(), command_codec()), 0, "ctrl_test").unwrap();
         let (_result, outbox, applied) = model.step_with_ports(&[], 0, &[], 2_000_000_000, &Inbox::empty()).unwrap();
         assert!(outbox.messages().is_empty());
         assert!(applied.is_empty());
@@ -843,7 +1080,7 @@ mod tests {
     /// `None`.
     #[test]
     fn a_malformed_star_packet_is_recorded_and_the_run_continues_on_the_last_good_input() {
-        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
+        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), ports(star_codec(), imu_codec(), command_codec()), 0, "ctrl_test").unwrap();
         // 6-byte primary header only: apid 511 (0x1FF), sequence_count 42 -- long enough for
         // `peek_sequence_count` to read a real value, short enough (and wrong-APID enough) that
         // `decode_packet` refuses it as `UnknownApid`, never `PacketTooShortForHeader`.
@@ -881,7 +1118,7 @@ mod tests {
     /// headline test).
     #[test]
     fn after_a_malformed_star_packet_a_later_good_one_resumes_normal_control() {
-        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), star_codec(), imu_codec(), command_codec(), 0, "ctrl_test").unwrap();
+        let model = AttitudeControllerModel::new(spec(0.5, 5.0, [0.0, 0.0, 0.0, 1.0]), ports(star_codec(), imu_codec(), command_codec()), 0, "ctrl_test").unwrap();
         let star = star_codec();
         let imu = imu_codec();
         let bad = av_dynamics::PortMessage { port: CONTROLLER_STARTRACKER_IN_PORT.to_string(), tai_ns: 0, payload: vec![0x01, 0xFF, 0xC0, 0x2A, 0x00, 0x03] };

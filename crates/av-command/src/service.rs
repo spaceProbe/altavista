@@ -7,15 +7,23 @@
 //! module itself did not already do one -- [`crate::authority::check_command`] appends for
 //! `Check`; every other RPC appends here), and a [`tonic::Status`] mapping for the result.
 //!
-//! # In-memory index
+//! # In-memory index -- rebuilt from the ledger, not durable on its own (question 203(a))
 //!
-//! [`CommandAuthorityServiceImpl`] holds every `Command` it has ever `Propose`d, keyed by
+//! [`CommandAuthorityServiceImpl`] holds every `Command` it knows about, keyed by
 //! `Command.id`, in a `BTreeMap` (ADR-004's determinism rule: no `HashMap` iteration on any
 //! output path -- [`CommandAuthorityServiceImpl::query`]'s "by entity" case iterates this map
 //! and its result order is therefore deterministic, sorted by `Command.id`, never insertion
-//! order). This index is this process's only memory of a command between RPCs; it is not
-//! itself durable -- the durable record is the ledger, and [`CommandAuthorityServiceImpl::
-//! verify_ledger`] answers straight from `Ledger::verify`, never from this map.
+//! order). The map itself is process-memory, not the durable record -- the ledger is, and
+//! [`CommandAuthorityServiceImpl::verify_ledger`] answers straight from `Ledger::verify`,
+//! never from this map -- but [`CommandAuthorityServiceImpl::new`] rebuilds it from the
+//! ledger ([`crate::ledger::Ledger::scan_commands`]) before serving a single RPC, exactly the
+//! way it already rebuilds `dispatched_idempotency_keys` (see the "Idempotency" section
+//! below): a process that restarts and reopens the same ledger directory answers `Query` (and
+//! every other RPC's `command_id` lookup) for a command a *prior* process lifetime `Propose`d,
+//! not only ones this process lifetime has itself seen. This is what closes the manager's own
+//! open item from the previous round ("`Query` does not survive a restart") -- the lead's
+//! ratified fix (question 203(a)): "carrying the full `Command` on `LedgerRecord` ..., not by
+//! re-deriving it" (`authority.proto`'s `LedgerRecord.command` doc comment, field 11).
 //!
 //! # `tonic::Status` code per refusal kind
 //!
@@ -102,10 +110,9 @@
 //! from itself; `Dispatch` can only ever be called once per command's own lifetime via the
 //! `AUTHORIZED -> DISPATCHED` edge).
 //!
-//! **What is *not* rebuilt from the ledger**: the `commands` index behind `Query` (and every
-//! other RPC's `command_id` lookup) is process-lifetime only, a documented completeness gap,
-//! not a safety one -- see [`CommandAuthorityServiceImpl`]'s own doc comment for exactly what
-//! that means and why it is not closed by this task.
+//! **The `commands` index behind `Query`** (and every other RPC's `command_id` lookup) is
+//! rebuilt from the ledger the identical way, by [`crate::ledger::Ledger::scan_commands`] --
+//! see this module's own "In-memory index" section above for that fix (question 203(a)).
 //!
 //! # `DispatchSink` -- not A3
 //!
@@ -158,9 +165,28 @@
 //!
 //! Every RPC that reaches a real state transition -- not only `Authorize` -- writes an
 //! [`crate::audit`] line too: `CommandAuthorityServiceImpl::append_last_transition` (shared
-//! by `Propose`, `Authorize`'s success path, `Dispatch` and `Ack`) and `Check`'s own body (which does not
-//! go through that helper -- see its own doc comment) each call [`crate::audit::AuditWriter::
-//! write`] once the ledger append itself has already succeeded.
+//! by `Propose`, `Authorize`'s success path, `Dispatch`, `Ack`, `Expire` and `Fail`) and
+//! `Check`'s own body (which does not go through that helper -- see its own doc comment)
+//! each call [`crate::audit::AuditWriter::write`] once the ledger append itself has already
+//! succeeded.
+//!
+//! # `Expire`/`Fail` -- A3.2 (D2), closing the kernel-refusal-visibility gap
+//!
+//! `docs/aiplane-plan.md` milestone A3's binding (`crates/av-run`, out of this crate's own
+//! dependency graph -- see this module doc's own "`DispatchSink` -- not A3" section) drives
+//! `crates/av-kernel`'s `ExternalCommandSource`. Every one of that trait's
+//! `CommandOutcome`s that means "this command will never reach `ACKED`" must still land on
+//! this crate's own ledger -- a `DISPATCHED` command that silently stays `DISPATCHED`
+//! forever, because the kernel refused or expired it, is exactly the "a failure that leaves
+//! no trace" defect shape round 1's own review found six times. Two RPCs give the A3 binding
+//! a way to record that: `Expire` (`CommandOutcome::Expired` -> [`state::expire`],
+//! `DISPATCHED -> EXPIRED`) and `Fail` (`CommandOutcome::DuplicateIdempotencyKey`/`Refused`/
+//! `NotDispatchedRunEnded` -> [`state::fail`], `DISPATCHED -> FAILED`). Both are thin wire
+//! adapters exactly like `Dispatch`/`Ack` above: no state-machine logic of their own, a fixed
+//! service-identity principal (never a caller-supplied one -- neither RPC is a human-
+//! authorization gate), [`Self::append_last_transition`] for the ledger append and audit
+//! line, and a [`tonic::Status`] mapping through [`to_status`] identical to every other
+//! [`state::CommandError`] this module already handles.
 //!
 //! # Transport (question 155/84)
 //!
@@ -183,8 +209,8 @@ use tonic::{Code, Request, Response, Status};
 
 use av_cdm::pb::{
     query_request::Selector as QuerySelector, AckLevel, AckRequest, AuthorizeRequest, ChainVerification, CheckRequest, Command,
-    CommandResponse, CommandState, DispatchRequest, ProposeRequest, QueryByEntity, QueryRequest, QueryResponse,
-    VerifyLedgerRequest, VerifyLedgerResponse,
+    CommandResponse, CommandState, DispatchRequest, ExpireRequest, FailRequest, ProposeRequest, QueryByEntity, QueryRequest,
+    QueryResponse, VerifyLedgerRequest, VerifyLedgerResponse,
 };
 
 use crate::audit::{self, AuditWriter};
@@ -207,6 +233,16 @@ pub const DISPATCH_PRINCIPAL: &str = "ground-segment";
 /// The `CommandTransition.reason` text `Dispatch` writes -- naming the seam A3 fills, not a
 /// real transport (see the module doc's "`DispatchSink` -- not A3" section).
 pub const DISPATCH_REASON: &str = "handed to the DispatchSink (docs/aiplane-plan.md milestone A3 supplies the real kernel binding behind it)";
+
+/// The principal recorded on an `EXPIRED` transition produced by `Expire` (A3.2, D2) -- this
+/// service's own clock-driven bookkeeping, not a caller-supplied identity, mirroring
+/// [`DISPATCH_PRINCIPAL`]'s reasoning.
+pub const EXPIRE_PRINCIPAL: &str = "kernel-clock";
+
+/// The principal recorded on a `FAILED` transition produced by `Fail` (A3.2, D2) -- the
+/// kernel binding reporting its own refusal, not a caller-supplied identity, mirroring
+/// [`DISPATCH_PRINCIPAL`]'s reasoning.
+pub const FAIL_PRINCIPAL: &str = "kernel";
 
 /// Hands an `AUTHORIZED`-turned-`DISPATCHED` [`Command`] to whatever transport reaches the
 /// simulated asset. The one seam A3 (`docs/aiplane-plan.md`) fills with the real
@@ -292,6 +328,13 @@ fn to_status(err: ServiceError) -> Status {
                 CommandError::IllegalTransition { .. } => Code::FailedPrecondition,
                 CommandError::AlreadyStarted { .. } => Code::InvalidArgument,
                 CommandError::EnvelopeNotAllowed { .. } => Code::InvalidArgument,
+                // A3.2/D2: the `ACKED -> ACKED` edge itself exists (this is not an
+                // IllegalTransition); what is refused is the specific non-increasing
+                // ack_level value being re-asserted against a `Command` already in the
+                // required state -- FAILED_PRECONDITION for the identical reason
+                // IllegalTransition is: "the system is not in a state required for the
+                // operation's execution" (this ack_level can never legally apply now).
+                CommandError::AckLevelNotIncreasing { .. } => Code::FailedPrecondition,
             };
             Status::new(code, err.to_string())
         }
@@ -300,6 +343,13 @@ fn to_status(err: ServiceError) -> Status {
                 CommandError::IllegalTransition { .. } => Code::FailedPrecondition,
                 CommandError::AlreadyStarted { .. } => Code::InvalidArgument,
                 CommandError::EnvelopeNotAllowed { .. } => Code::InvalidArgument,
+                // A3.2/D2: the `ACKED -> ACKED` edge itself exists (this is not an
+                // IllegalTransition); what is refused is the specific non-increasing
+                // ack_level value being re-asserted against a `Command` already in the
+                // required state -- FAILED_PRECONDITION for the identical reason
+                // IllegalTransition is: "the system is not in a state required for the
+                // operation's execution" (this ack_level can never legally apply now).
+                CommandError::AckLevelNotIncreasing { .. } => Code::FailedPrecondition,
             };
             Status::new(code, err.to_string())
         }
@@ -312,10 +362,9 @@ fn to_status(err: ServiceError) -> Status {
 }
 
 /// The `CommandAuthorityService` implementation. Owns a [`Ledger`], a [`PolicyBundle`], the
-/// injected [`Clock`], a [`DispatchSink`] and two pieces of in-process state built at
-/// construction ([`Self::new`]) -- see this module's doc for which of the two is a
-/// durability-backed *safety* property and which is a documented, unclosed *completeness*
-/// gap:
+/// injected [`Clock`], a [`DispatchSink`] and two pieces of in-process state, both now
+/// durability-backed and both rebuilt from the ledger at construction ([`Self::new`]), before
+/// this process serves a single RPC of its own:
 ///
 /// - `dispatched_idempotency_keys` is **rebuilt from the ledger** at every construction
 ///   ([`crate::ledger::Ledger::scan_dispatched_idempotency_keys`]) -- the duplicate-dispatch
@@ -325,17 +374,17 @@ fn to_status(err: ServiceError) -> Status {
 ///   `CommandAuthorityServiceImpl` constructed over the *same* ledger directory refuses the
 ///   same key `Dispatch::dispatch` would have refused in the first process, before this
 ///   process has ever handled a single RPC of its own.
-/// - `commands` (the in-memory `Command` index the module doc describes) is **not** rebuilt
-///   from the ledger at construction, and this is a **documented gap, not an oversight**:
-///   `LedgerRecord` does not carry enough of `Command` to reconstruct one (no `entity_id`
-///   beyond the partition key already implies it, no `payload`, no `deadline_tai_ns`, no
-///   `label`/`provenance`) -- closing this needs either widening `LedgerRecord` to carry the
-///   full `Command` or a separate durable command store, a ledger-shape decision out of this
-///   task's scope. The practical effect: `Check`/`Authorize`/`Dispatch`/`Ack`/`Query` against
-///   a `command_id` a *previous* process lifetime `Propose`d are refused `NOT_FOUND` after a
-///   restart, even though the ledger itself still holds that command's full transition
-///   history. See `docs/compliance/av-command/control-matrix.md`'s Deficiency 7 for the
-///   compliance-facing record of this same gap.
+/// - `commands` (the in-memory `Command` index the module doc describes) is likewise
+///   **rebuilt from the ledger** at every construction ([`crate::ledger::Ledger::
+///   scan_commands`]) -- question 203(a)'s fix, this round, for the previous round's own
+///   declared gap ("`Query` does not survive a restart"). `LedgerRecord.command`
+///   (`authority.proto`, A1.3-round-2) is what makes the rebuild possible: every record now
+///   carries the full `Command` as it stood at the time of that transition, not only the four
+///   scalar fields (`partition`/`command_id`/`command_class`/`idempotency_key`) the ledger
+///   already carried -- so `Check`/`Authorize`/`Dispatch`/`Ack`/`Query` against a `command_id`
+///   a *previous* process lifetime `Propose`d now succeed after a restart exactly as they
+///   would have without one. See `docs/compliance/av-command/control-matrix.md`'s Deficiency 7
+///   for the compliance-facing record of this fix.
 ///
 /// Constructed once by `src/bin/av-command.rs` and shared (`Arc`) across every accepted
 /// connection -- every field here is `Send + Sync` and every method takes `&self`.
@@ -364,10 +413,11 @@ pub struct CommandAuthorityServiceImpl {
 }
 
 impl CommandAuthorityServiceImpl {
-    /// Fails only if [`Ledger::scan_dispatched_idempotency_keys`] fails (a real I/O error
-    /// reading the ledger directory this process is about to serve from) -- never silently
-    /// starts with an empty duplicate-dispatch guard when the ledger it was asked to rebuild
-    /// that guard from could not actually be read.
+    /// Fails only if [`Ledger::scan_dispatched_idempotency_keys`] or [`Ledger::scan_commands`]
+    /// fails (a real I/O error reading the ledger directory this process is about to serve
+    /// from) -- never silently starts with an empty duplicate-dispatch guard or an empty
+    /// `commands` index when the ledger it was asked to rebuild either from could not actually
+    /// be read.
     ///
     /// `authz` groups every A2.2 field (role table, delegations, MFA config, the
     /// [`AuditWriter`]) -- exactly the way `crate::ledger::CommandMeta` groups `Ledger::
@@ -384,6 +434,10 @@ impl CommandAuthorityServiceImpl {
         authz: AuthzConfig,
     ) -> io::Result<Self> {
         let dispatched_idempotency_keys = ledger.scan_dispatched_idempotency_keys()?;
+        // Question 203(a): rebuild the `commands` index from the ledger too, before the first
+        // RPC is served -- the same construction-time discipline as the idempotency guard
+        // above, now made possible by `LedgerRecord.command` (`authority.proto`, A1.3-round-2).
+        let commands = ledger.scan_commands()?;
         let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit } = authz;
         Ok(Self {
             ledger,
@@ -397,7 +451,7 @@ impl CommandAuthorityServiceImpl {
             mfa_amr_methods,
             mfa_acr,
             audit,
-            commands: Mutex::new(BTreeMap::new()),
+            commands: Mutex::new(commands),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
         })
     }
@@ -434,6 +488,7 @@ impl CommandAuthorityServiceImpl {
                 crate::ledger::CommandMeta::new(&command.entity_id, &command.id, &command.command_class, &command.idempotency_key),
                 transition.clone(),
                 None,
+                Some(command),
                 &*self.clock,
             )
             .map_err(ServiceError::Io)?;
@@ -567,6 +622,27 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         self.append_last_transition(&acked).map_err(to_status)?;
         self.put_command(acked.clone());
         Ok(Response::new(CommandResponse { command: Some(acked), decision: None }))
+    }
+
+    /// A3.2/D2: `DISPATCHED -> EXPIRED` (or `AUTHORIZED -> EXPIRED`, `state::expire`'s other
+    /// legal source state) -- see the module doc's "`Expire`/`Fail`" section.
+    async fn expire(&self, request: Request<ExpireRequest>) -> Result<Response<CommandResponse>, Status> {
+        let req = request.into_inner();
+        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let expired = state::expire(command, EXPIRE_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
+        self.append_last_transition(&expired).map_err(to_status)?;
+        self.put_command(expired.clone());
+        Ok(Response::new(CommandResponse { command: Some(expired), decision: None }))
+    }
+
+    /// A3.2/D2: `DISPATCHED -> FAILED` -- see the module doc's "`Expire`/`Fail`" section.
+    async fn fail(&self, request: Request<FailRequest>) -> Result<Response<CommandResponse>, Status> {
+        let req = request.into_inner();
+        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let failed = state::fail(command, FAIL_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
+        self.append_last_transition(&failed).map_err(to_status)?;
+        self.put_command(failed.clone());
+        Ok(Response::new(CommandResponse { command: Some(failed), decision: None }))
     }
 
     async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryResponse>, Status> {

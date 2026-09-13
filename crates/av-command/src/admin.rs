@@ -152,7 +152,7 @@ mod tests {
             ack_level: AckLevel::Unspecified as i32,
             delegation_id: String::new(),
         };
-        ledger.append(CommandMeta::new("sat-admin-test", "cmd-1", "burn", ""), t, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-admin-test", "cmd-1", "burn", ""), t, None, None, &clock).unwrap();
         Arc::new(AdminState { ledger: Arc::new(ledger), run_id: "run-admin-test".to_string(), version: "0.1.0".to_string() })
     }
 

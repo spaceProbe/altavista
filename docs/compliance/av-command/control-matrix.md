@@ -244,20 +244,26 @@ Ranked by what a reviewer would flag first:
    this crate has no nginx mTLS front proven against it (question 84) — `src/bin/
    av-command.rs` (A1.3) is now a real deployable binary such a front could sit in front of,
    but building and proving that front is not this task's scope.
-7. **The in-memory `Command` index is not durable — a declared, unclosed completeness gap**
-   (AU 3.3.1's completeness half). `CommandAuthorityServiceImpl`'s `commands: Mutex<BTreeMap<
-   String, Command>>` (`crates/av-command/src/service.rs`) is this process's only memory of a
-   command's current state between RPCs — a process restart loses it, even though the ledger
-   itself (the durable record) survives untouched. `Check`/`Authorize`/`Dispatch`/`Ack`/`Query`
-   against a `command_id` this process has forgotten (because it restarted) are refused
-   `NOT_FOUND`, not silently reconstructed from the ledger. **Why this is not closed by this
-   task, unlike Deficiency 8 below**: closing it needs `LedgerRecord` to carry enough of
-   `Command` to reconstruct one (today it carries only `partition`/`command_id`/
-   `command_class`/`idempotency_key` plus the transition — no `payload`, no
-   `deadline_tai_ns`/`not_before_tai_ns`, no `label`/`provenance`), or a separate durable
-   command store — a ledger-shape decision the manager reviewing this task declined to take
-   mid-round. `crates/av-command/src/service.rs`'s own doc comment on
-   `CommandAuthorityServiceImpl` records the identical gap for a code reader.
+7. **Resolved this round: the in-memory `Command` index now survives a process restart**
+   (was: "not durable — a declared, unclosed completeness gap", AU 3.3.1's completeness
+   half). Question 203(a) ratified the fix the previous round's manager declined to take
+   mid-round: `LedgerRecord.command` (`authority.proto`, field 11, additive) now carries the
+   full `Command` exactly as it stood at the time of each transition — payload,
+   `deadline_tai_ns`/`not_before_tai_ns`, `label`, `provenance` included, none of which the
+   record could carry before. `Ledger::scan_commands` (`crates/av-command/src/ledger.rs`)
+   rebuilds each `command_id`'s latest snapshot from the ledger across every partition, and
+   `CommandAuthorityServiceImpl::new` calls it once, at construction, to rebuild the
+   `commands` map before serving a single RPC — the same construction-time discipline
+   Deficiency 8 below already established for the idempotency guard. `Check`/`Authorize`/
+   `Dispatch`/`Ack`/`Query` against a `command_id` a *prior* process lifetime `Propose`d now
+   succeed after a restart exactly as they would have without one, instead of being refused
+   `NOT_FOUND`. Test: `cargo test -p av-command --test grpc_service
+   query_across_a_restart_returns_the_full_command_field_for_field` (dispatches a command
+   with a real payload/deadline/not_before/label/provenance through one `TestServer`, shuts
+   it down keeping its ledger directory, builds a *second*, independent `TestServer` over
+   that same directory, and asserts `Query` on the second instance returns the full `Command`
+   field-for-field equal to what the first instance's own `Dispatch` response already
+   returned).
 8. **Resolved this task: the duplicate-`idempotency_key` guard now survives a process
    restart** (was: "also in-memory only", AU 3.3.1). `LedgerRecord.idempotency_key`
    (`authority.proto`, A1.3, additive) is now carried on every record, and

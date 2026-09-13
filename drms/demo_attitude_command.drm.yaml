@@ -1,0 +1,44 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- A3.1
+# (`docs/aiplane-plan.md`'s A3 milestone; D8: "a new fixture family, never a modified one").
+# Derived from `drms/demo_attitude_control.drm.yaml` (same closed-loop topology, same
+# critically-damped `kp`/`kd` against the same truth plant -- see that file's own header comment
+# for the full control-law derivation, unchanged here) over `drms/demo_attitude_command.sos.yaml`
+# instead (the same four instances PLUS `ground`, and the controller's own new `mode_in` port).
+#
+# **Deliberately zero `scenario.events`** -- the `mode` command this fixture's own acceptance
+# test (`crates/av-kernel/tests/drm_attitude_command.rs`) drives comes entirely from a `crate::
+# drm::command_source::ExternalCommandSource`, never a declared `command` `ScenarioEvent`
+# (mirrors `drms/demo_external_command.drm.yaml`'s own identical choice, one binding kind over).
+#
+# 40 s run (shorter than `demo_attitude_control`'s own 300 s -- this fixture's own test compares
+# a SAFE-mode run against an uncommanded REGULATE run over the *same* window, which needs only
+# enough time for the two to visibly diverge, not for either to fully settle): at the declared
+# `tau = 2*Jz/kd = 20 s` envelope time constant, 40 s = 2*tau is long enough for the REGULATE
+# baseline's own pointing error to visibly decay while a SAFE run's own pointing error, driven by
+# zero commanded torque, does not track the same decay -- the physical effect this fixture's own
+# test measures, not merely asserted event names.
+id: attitude_command_drm
+version: "1"
+name: "A3.1/D7: a ground-issued mode command through an ExternalCommandSource, driving the attitude controller between REGULATE and SAFE"
+sos_configuration_id: attitude_command_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225677000000000
+measures:
+  - name: pointing_error_end
+    expression: "output.controller.pointing_error_rad@end"
+    unit: UNIT_RADIAN
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.1)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_command.drm.yaml
+hash: "165b0f512c80a9b2cdb8da5446f306c05806ac55f6dd0fcf519f51110996a544"

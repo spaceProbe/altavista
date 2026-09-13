@@ -1,0 +1,37 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- A3.3
+# (`docs/aiplane-plan.md`'s A3 milestone: "the replay binding reproduces the trail bit for
+# bit"). See `drms/demo_attitude_command_replay.sos.yaml`'s own header comment for exactly why
+# this fixture drops the closed loop (`attitude`/`startracker`/`imu`) `demo_attitude_command.*
+# .yaml` wires -- root-caused there, not repeated here.
+#
+# **Deliberately zero `scenario.events` AND zero `measures`/`objectives`.** The `mode` command
+# this fixture's own acceptance test (`crates/av-kernel/tests/replay.rs`) drives comes entirely
+# from a `crate::drm::command_source::ExternalCommandSource`, mirroring `drms/demo_external_
+# command.drm.yaml`'s own identical choice, one binding kind over. Zero `measures`/`objectives`
+# is the OTHER half of the same substitution `demo_attitude_command_replay.sos.yaml`'s header
+# already explains: with no `startracker`/`imu` wired, `controller` never produces a `pointing_
+# error_rad` output at all (live run or replayed), so a `measures` entry reading it would fail
+# to evaluate (`DrmError::InvalidExpression`), not merely diverge -- this fixture's own test is
+# about the command trail (`CommandTransition`/`PortCommand` events), not the control law, so
+# there is nothing here for an `Objective`/`MeasureOfEffectiveness` to usefully score anyway.
+id: attitude_command_replay_drm
+version: "1"
+name: "A3.3: a ground-issued mode command through an ExternalCommandSource, replayed from its own recorded port traffic"
+sos_configuration_id: attitude_command_replay_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767225657000000000
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 1.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_attitude_command_replay.drm.yaml
+hash: "c96e031ac718d6a7d51faa8fbb7674a5c758a973911d4f7c1a4385bf99e2a904"

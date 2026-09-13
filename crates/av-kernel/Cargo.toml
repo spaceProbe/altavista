@@ -36,6 +36,11 @@ sha2.workspace = true
 # Already a transitive dependency via av-cdm/av-dynamics; named directly here since drm/hash.rs
 # calls it explicitly.
 prost.workspace = true
+# A3.1 (src/drm/command_source.rs): `Command.payload`'s `google.protobuf.Any` carries a packed
+# `google.protobuf.DoubleValue` -- a well-known type this crate already reaches transitively
+# through av-cdm (whose own Cargo.toml already depends on it); named directly here since
+# command_source.rs calls it explicitly, mirroring prost's own identical justification above.
+prost-types.workspace = true
 
 [dev-dependencies]
 # M24.4c: crates/av-kernel/tests/drm_attitude_control_renode.rs spawns the real

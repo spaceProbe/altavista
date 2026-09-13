@@ -644,6 +644,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Question 203(b)'s required tripwire.** Provokes the real condition through regorus
+    /// itself -- a bundle that defines rules (so the engine compiles and evaluates
+    /// successfully), then evaluates a rule path that bundle never references anywhere,
+    /// through the exact same `Engine::eval_rule` -> `eval_rule_in_path` path
+    /// [`resolve_allow_rule`]/[`resolve_deny_rule`] use -- and asserts on **regorus's own
+    /// error text**, not a local constant. If this assertion ever fails, it means the
+    /// `regorus` version actually linked (pinned `=0.12.0` in `Cargo.toml`, specifically so a
+    /// `cargo update` cannot silently drift this) changed the exact wording
+    /// `is_rule_not_defined` matches (`"not a valid rule path"`,
+    /// `regorus-0.12.0/src/interpreter.rs::eval_rule_in_path`'s `bail!` text) -- which means
+    /// [`is_rule_not_defined`] would stop recognizing a rule-not-defined case for what it is,
+    /// and **every** such case (not just this test's own fixture) would be reported as a
+    /// genuine evaluation failure instead of this module's deny-by-default case. Do not weaken
+    /// this assertion or delete it to "fix" a failing build after a regorus upgrade -- fix
+    /// [`is_rule_not_defined`]'s match text (and re-verify [`a_policy_with_no_allow_rule_
+    /// denies`] still fails without it, per that test's own doc comment) instead, then update
+    /// this test and the `Cargo.toml` pin together.
+    #[test]
+    fn is_rule_not_defined_matches_regorus_own_error_text_for_a_path_never_referenced_in_the_bundle() {
+        let mut engine = regorus::Engine::new();
+        engine
+            .add_policy("probe.rego".to_string(), "package altavista.authority\n\nallow if { input.x == 1 }\n".to_string())
+            .expect("a bundle that does define something still compiles");
+        engine.add_data(regorus::Value::new_object()).expect("empty data document attaches");
+        engine.set_input_json("{\"x\": 1}").expect("input parses");
+
+        // "data.altavista.authority.nonexistent_rule" is never referenced anywhere in the
+        // loaded bundle above -- the real, unmodified condition is_rule_not_defined exists to
+        // recognize, provoked through regorus itself, not asserted against a stand-in string.
+        let err = engine.eval_rule("data.altavista.authority.nonexistent_rule".to_string()).expect_err("evaluating an undefined rule path is an error");
+
+        assert!(
+            err.to_string().contains("not a valid rule path"),
+            "regorus's own error text for an undefined rule path changed from \"not a valid rule path\" to {:?} -- \
+             `crate::policy::is_rule_not_defined` (crates/av-command/src/policy.rs) matches this exact prose, pinned \
+             to regorus =0.12.0 in Cargo.toml specifically for this reason (question 203(b)). Update \
+             `is_rule_not_defined`'s match text to whatever regorus now says, re-run \
+             `a_policy_with_no_allow_rule_denies` with the OLD match text to confirm it still fails loudly (its own \
+             doc comment's claim), then update this test's expected text and the Cargo.toml pin comment together. \
+             Until fixed, every rule-not-defined case is silently miscategorized as a genuine evaluation failure \
+             instead of this module's deny-by-default case.",
+            err.to_string()
+        );
+        assert!(is_rule_not_defined(&err), "is_rule_not_defined must recognize this exact real regorus error: {err}");
+    }
+
     /// **Defect fix, pinned so it cannot regress silently: `deny` always wins over an
     /// unconditionally-true `allow`.** The shipped `command.rego` can never exercise this --
     /// every `allow` rule there is already guarded by `not envelope_claimed` -- so this

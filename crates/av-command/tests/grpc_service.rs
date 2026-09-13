@@ -44,8 +44,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use av_cdm::pb::{
-    query_request::Selector, AckLevel, AckRequest, AuthorizeRequest, CheckRequest, Command, CommandProposal, CommandState,
-    Delegation, DispatchRequest, LedgerRecord, ProposeRequest, QueryByEntity, QueryRequest, VerifyLedgerRequest,
+    query_request::Selector, AckLevel, AckRequest, AuthorizeRequest, AuthorKind, CheckRequest, Command, CommandProposal,
+    CommandState, Delegation, DispatchRequest, Label, LedgerRecord, Provenance, ProposeRequest, QueryByEntity, QueryRequest,
+    VerifyLedgerRequest,
 };
 use av_cdm::time::Tai;
 use av_command::audit::{AuditSinkConfig, AuditWriter};
@@ -138,6 +139,39 @@ fn base_command(id: &str, entity_id: &str, command_class: &str, idempotency_key:
 
 fn propose_request(command: Command, principal: &str) -> ProposeRequest {
     ProposeRequest { proposal: Some(CommandProposal { command: Some(command), rationale: "integration test".to_string(), evidence_ids: vec![] }), principal: principal.to_string() }
+}
+
+/// Like [`base_command`], but with every field question 203(a)'s restart fix actually needed
+/// `LedgerRecord.command` to carry (`payload`, `deadline_tai_ns`, `not_before_tai_ns`, `label`,
+/// `provenance`) given a real, non-default value -- these are exactly the fields the old
+/// `LedgerRecord` (only `partition`/`command_id`/`command_class`/`idempotency_key`) could not
+/// carry, so a test that only checked `id`/`state` across a restart would pass against the
+/// unfixed code too. `envelope_id` is deliberately left empty (question 53: propose-only
+/// forbids a non-empty one).
+fn full_command(id: &str, entity_id: &str, command_class: &str, idempotency_key: &str) -> Command {
+    Command {
+        id: id.to_string(),
+        idempotency_key: idempotency_key.to_string(),
+        entity_id: entity_id.to_string(),
+        command_class: command_class.to_string(),
+        hazardous: false,
+        payload: Some(prost_types::Any { type_url: "type.googleapis.com/altavista.v1.TestPayload".to_string(), value: vec![1, 2, 3, 4, 5] }),
+        deadline_tai_ns: 9_999_999,
+        not_before_tai_ns: 500,
+        label: Some(Label { marking: "CUI".to_string(), caveats: vec!["NOFORN".to_string(), "FEDCON".to_string()] }),
+        provenance: Some(Provenance {
+            author_kind: AuthorKind::Agent as i32,
+            principal: "model-x".to_string(),
+            tool: "grpc_service.rs integration test".to_string(),
+            config_hash: "config-hash-abc".to_string(),
+            data_pack_hash: "data-pack-hash-def".to_string(),
+            dataset_hash: "dataset-hash-ghi".to_string(),
+            created_tai_ns: 42,
+            run_id: "run-restart-test".to_string(),
+            attributes: BTreeMap::new(),
+        }),
+        ..Command::default()
+    }
 }
 
 /// A wildcard delegation covering every class/entity for `subject`, expiring far in the
@@ -601,6 +635,96 @@ async fn query_by_id_and_by_entity_with_a_state_filter() {
     assert_eq!(by_entity_checked.commands[0].id, "cmd-q2");
 
     server.shutdown().await;
+}
+
+/// `Query` for a `command_id` this service's index has never held (never proposed, in this
+/// process or any prior one) is still refused `NOT_FOUND` -- the plain gRPC meaning
+/// (`crate::service`'s own module doc, "Unknown `command_id`") -- exactly the same typed
+/// refusal it was before question 203(a)'s restart fix (rebuilding `commands` from the ledger
+/// does not turn "genuinely never seen" into anything other than `NOT_FOUND`).
+#[tokio::test]
+async fn query_for_an_unknown_id_is_still_not_found() {
+    let mut server = TestServer::spawn("query-unknown", 1_000).await;
+
+    let err = server
+        .client
+        .query(QueryRequest { selector: Some(Selector::CommandId("cmd-never-seen".to_string())) })
+        .await
+        .expect_err("an id this service has never held must be refused, not answered");
+    assert_eq!(err.code(), Code::NotFound, "{err:?}");
+    assert!(err.message().contains("cmd-never-seen"), "{}", err.message());
+
+    server.shutdown().await;
+}
+
+/// **The cross-restart acceptance test for question 203(a).** Drives a command with a full,
+/// non-default payload/deadline/not_before/label/provenance through `Propose` -> `Check` ->
+/// `Authorize` -> `Dispatch` over the real gRPC surface, drops that `TestServer` (keeping its
+/// ledger directory), builds a **second**, independent `TestServer` over the exact same
+/// directory (a fresh `Ledger` handle, a fresh `CommandAuthorityServiceImpl`, a fresh
+/// in-memory `commands` `BTreeMap` before `new` rebuilds it), and asserts `Query` on the
+/// second instance returns the **full** `Command` field-for-field equal to what the first
+/// instance's own `Dispatch` response already returned -- not merely a `Command` sharing the
+/// same `id`/`state`, which the unfixed code (an empty `commands` map at construction) could
+/// never have produced at all: before this fix, this exact `Query` call was refused
+/// `NOT_FOUND`, full stop.
+#[tokio::test]
+async fn query_across_a_restart_returns_the_full_command_field_for_field() {
+    let command_id = "cmd-restart-q";
+    let entity_id = "sat-restart-q";
+
+    let mut server1 = TestServer::spawn("query-restart", 1_000).await;
+    server1.client.propose(propose_request(full_command(command_id, entity_id, "mode", "idem-restart-q"), "model-x")).await.unwrap();
+    server1.client.check(CheckRequest { command_id: command_id.to_string() }).await.unwrap();
+    let token1 = server1.mint("operator-1");
+    server1
+        .client
+        .authorize(AuthorizeRequest { command_id: command_id.to_string(), principal_token: token1, delegation_id: String::new() })
+        .await
+        .unwrap();
+    let dispatched = server1
+        .client
+        .dispatch(DispatchRequest { command_id: command_id.to_string() })
+        .await
+        .expect("the first process lifetime's dispatch succeeds")
+        .into_inner();
+    let expected = dispatched.command.expect("Dispatch always returns the command");
+    assert_eq!(expected.state, CommandState::Dispatched as i32, "sanity: reached DISPATCHED before the restart");
+    assert_eq!(expected.transitions.len(), 4, "sanity: PROPOSED, CHECKED, AUTHORIZED, DISPATCHED all recorded before the restart");
+
+    let ledger_dir = server1.shutdown_keep_ledger().await;
+
+    // A second, independent process lifetime: a fresh Ledger handle, a fresh
+    // CommandAuthorityServiceImpl, over the SAME on-disk ledger directory. Its own in-memory
+    // `commands` map starts empty and must be rebuilt by `new` (`Ledger::scan_commands`)
+    // before this Query can answer at all.
+    let mut server2 = TestServer::spawn_over(ledger_dir.clone(), 2_000).await;
+    let queried = server2
+        .client
+        .query(QueryRequest { selector: Some(Selector::CommandId(command_id.to_string())) })
+        .await
+        .expect("Query must answer for a command a PRIOR process lifetime proposed, after this fix")
+        .into_inner();
+    assert_eq!(queried.commands.len(), 1, "{queried:?}");
+    let actual = queried.commands.into_iter().next().unwrap();
+
+    // Exactly the fields the old, narrow LedgerRecord could not carry (no payload, no
+    // deadline_tai_ns, no not_before_tai_ns, no label, no provenance) -- asserted individually
+    // so a partial reconstruction (e.g. id/state right, everything else defaulted) is caught,
+    // not just "some Command with this id came back".
+    assert_eq!(actual.payload, expected.payload, "payload must survive the restart");
+    assert_eq!(actual.deadline_tai_ns, expected.deadline_tai_ns, "deadline_tai_ns must survive the restart");
+    assert_eq!(actual.not_before_tai_ns, expected.not_before_tai_ns, "not_before_tai_ns must survive the restart");
+    assert_eq!(actual.label, expected.label, "label must survive the restart");
+    assert_eq!(actual.provenance, expected.provenance, "provenance must survive the restart");
+    assert_eq!(actual.envelope_id, expected.envelope_id, "envelope_id must survive the restart");
+
+    // And the whole message, field-for-field -- the strongest form of this assertion: the
+    // second process lifetime's Query answer is not merely "close enough" to the first
+    // process's own Dispatch response, it is identical.
+    assert_eq!(actual, expected, "Query across a restart must return the exact same Command the first process lifetime already produced");
+
+    server2.shutdown().await;
 }
 
 /// **Acceptance test 7**: `VerifyLedger` reports a tampered partition as broken, at the

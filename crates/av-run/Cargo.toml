@@ -16,7 +16,46 @@ av-cdm = { path = "../av-cdm" }
 # av-dynamics-service's altavista.v1.DynamicsService proto has no DRM-level RPC to extend
 # without a proto change).
 av-kernel = { path = "../av-kernel" }
+# A3.2 (`docs/aiplane-plan.md`'s A3 milestone, D1): `src/command_adapter.rs` is the one seam
+# that wires `av_command::service::DispatchSink` (the command-authority service's own dispatch
+# seam) to `av_kernel::drm::command_source::ExternalCommandSource` (the kernel's own external
+# telecommand source) -- deliberately here, in `av-run`, and not in `av-command` itself: the
+# manager's own D1 decision keeps `av-command` free of any `av-kernel` dependency (`av-kernel`
+# pulls in GMAT through `gmat-sys`, and `cargo test -p av-command` must not need GMAT).
+# `av-run` already depends on both crates, so the adapter -- and only the adapter -- lives
+# here. Default features (no `test-support`): production code never mints its own tokens.
+av-command = { path = "../av-command" }
 # Constructing the one live Gmat handle a DRM run needs (crates/av-kernel/tests/drm_maneuver.rs
 # and golden_acceptance.rs's own established pattern: Gmat::setup + gmat_sys::engine_lock()).
 gmat-sys = { path = "../gmat-sys" }
 prost.workspace = true
+# `src/command_adapter.rs`'s own gRPC client (`av_command::pb::command_authority_service_
+# client::CommandAuthorityServiceClient<Channel>`), reporting kernel `CommandOutcome`s back to
+# a real `CommandAuthorityService` over `Ack`/`Expire`/`Fail` -- default features off, no
+# "tls*" (ADR-004's crypto rule: no `ring`), mirroring `crates/av-command/Cargo.toml`'s own
+# `tonic` dev-dependency entry exactly (that crate needs "channel" only in
+# `[dev-dependencies]`, since it is a server, never a client; `av-run`'s adapter dials out for
+# real, so this crate needs it in `[dependencies]`).
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+# `src/command_adapter.rs`'s `ExternalCommandSource::report` is a synchronous trait method
+# (`av_kernel::drm::command_source`'s own contract -- the kernel executor is a synchronous,
+# batch-simulation call, never an async one) that must still make a real async gRPC call back
+# to the service; `tokio::runtime::Handle::block_on` is the bridge (called from a plain OS/
+# blocking-pool thread the kernel run executes on, never from inside an already-polling async
+# task on the same thread -- see the module's own doc comment). "rt-multi-thread" for
+# `Handle`/`block_on` in production; "macros"/"net"/"time" are for this crate's own
+# `tests/*.rs` (`#[tokio::test]`, a real loopback `TcpListener`, and `spawn_blocking`).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[dev-dependencies]
+# `tests/*.rs` mints a real OIDC token exactly like `crates/av-command/tests/grpc_service.rs`
+# does -- `av_command::test_support::TestIssuer` (gated behind this feature, out of a default
+# build; see `crates/av-command/Cargo.toml`'s own comment on why `test-support` exists at
+# all). This crate's own `[dependencies]` entry above stays feature-default (no
+# `test-support`) -- only the test-only second copy of the dependency graph gains it, exactly
+# the way `av-command`'s own tests do it for itself.
+av-command = { path = "../av-command", features = ["test-support"] }
+# Wraps a `tokio::net::TcpListener` already bound to `127.0.0.1:0` as the `Stream`
+# `tonic::transport::Server::serve_with_incoming_shutdown` needs -- mirrors `crates/av-command/
+# tests/grpc_service.rs`'s identical dev-dependency exactly.
+tokio-stream = { version = "0.1", features = ["net"] }

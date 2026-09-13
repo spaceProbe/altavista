@@ -362,9 +362,8 @@ impl ModelRegistry {
     /// [`ModelError::InvalidSpec`] wrapping whatever `materialize_controller` returned (a
     /// `crate::drm::controller::ControllerSpecError`, stringified) -- mirrors
     /// [`ModelRegistry::construct_attitude`]'s own error shape.
-    #[allow(clippy::too_many_arguments)]
-    pub fn construct_attitude_controller(spec: &AttitudeControllerSpec, star_codec: PacketCodec, imu_codec: PacketCodec, command_codec: PacketCodec, epoch_tai_ns: i64, model_id: &str) -> Result<ModelHandle, ModelError> {
-        let Materialized { model, t0_tai_ns, x0_si, settings } = binding::materialize_controller(spec, star_codec, imu_codec, command_codec, epoch_tai_ns, model_id)
+    pub fn construct_attitude_controller(spec: &AttitudeControllerSpec, ports: binding::ControllerPorts, epoch_tai_ns: i64, model_id: &str) -> Result<ModelHandle, ModelError> {
+        let Materialized { model, t0_tai_ns, x0_si, settings } = binding::materialize_controller(spec, ports, epoch_tai_ns, model_id)
             .map_err(|e| ModelError::InvalidSpec { model_id: model_id.to_string(), detail: e.to_string() })?;
         Ok(ModelHandle { model, t0_tai_ns, x0_si, settings })
     }
@@ -668,7 +667,8 @@ mod tests {
         let star_codec = crate::drm::sensors::star_tracker_packet_codec("ctrl_star", 100);
         let imu_codec = crate::drm::sensors::imu_packet_codec("ctrl_imu", 101);
         let cmd_codec = crate::drm::controller::wheel_torque_command_packet_codec("ctrl_cmd", 102);
-        let handle = ModelRegistry::construct_attitude_controller(&spec, star_codec, imu_codec, cmd_codec, 1_700_000_000_000_000_000, "attctrl.test").expect("a valid spec/codec triple must construct");
+        let ports = binding::ControllerPorts { star_codec, imu_codec, command_codec: cmd_codec, mode_codec: None, ack_codec: None };
+        let handle = ModelRegistry::construct_attitude_controller(&spec, ports, 1_700_000_000_000_000_000, "attctrl.test").expect("a valid spec/codec triple must construct");
         assert_eq!(handle.t0_tai_ns, 1_700_000_000_000_000_000);
         assert_eq!(handle.state_dim(), 0);
         assert_eq!(handle.describe().id, "attctrl.test");
@@ -690,7 +690,8 @@ mod tests {
         let star_codec = crate::drm::sensors::star_tracker_packet_codec("ctrl_star", 100);
         let imu_codec = crate::drm::sensors::imu_packet_codec("ctrl_imu", 101);
         let cmd_codec = crate::drm::controller::wheel_torque_command_packet_codec("ctrl_cmd", 102);
-        let handle = ModelRegistry::construct_attitude_controller(&spec, star_codec.clone(), imu_codec.clone(), cmd_codec, 0, "attctrl.test").expect("constructs");
+        let ports = binding::ControllerPorts { star_codec: star_codec.clone(), imu_codec: imu_codec.clone(), command_codec: cmd_codec, mode_codec: None, ack_codec: None };
+        let handle = ModelRegistry::construct_attitude_controller(&spec, ports, 0, "attctrl.test").expect("constructs");
         let model = handle.into_boxed("attctrl.test");
 
         let mut star_values = BTreeMap::new();

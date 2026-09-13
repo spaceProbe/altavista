@@ -1,0 +1,85 @@
+[package]
+name = "av-gateway"
+publish = false
+description = "A4a: the read-only, label-aware gateway over run products (gRPC + a hand-rolled MCP/JSON-RPC stdio server), plus the propose-only seam into the command authority."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1 generated types (Trajectory, Event, ScoreResult, Measurement, Label,
+# RunIdentity, GatewayQueryRequest/Response, ProposalEvidence, Command, CommandProposal --
+# from run.proto/trajectory.proto/core.proto/envelope.proto/command.proto/this track's own
+# authority.proto) -- this crate never generates a second, independently-compiled copy of a
+# wire type av-cdm already compiles (crates/av-cdm/build.rs walks every proto/altavista/v1/
+# *.proto file, this one included).
+av-cdm = { path = "../av-cdm" }
+# D6/D8: crate::evidence packs a ProposalEvidence into an existing, unmodified
+# av_command::ledger::Ledger::append call (never a field added to LedgerRecord -- see
+# authority.proto's A4a doc and crate::evidence's own module doc for why); D4's
+# crate::propose_only::ProposeOnlyAuthority dials the real CommandAuthorityService this
+# crate depends on for its clock/ledger types. Not a dev-only dependency: the production
+# gateway binary both writes evidence and dials the command authority service, so this is a
+# regular [dependencies] entry, exactly like av-command's own av-cdm dependency.
+av-command = { path = "../av-command" }
+prost.workspace = true
+prost-types.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# SHA-256 for D5's deterministic query id (mirrors crates/av-command/src/policy.rs's
+# compute_decision_id preimage convention byte for byte) -- ADR-004's crypto rule: SHA-256
+# only, the system OpenSSL only, no bundled crypto. No `sha2`, no `ring` anywhere in this
+# crate's own dependency list (see this task's report for the `cargo tree -p av-gateway`
+# grep proving none reaches this crate's tree transitively either).
+openssl = "0.10"
+
+# A4a's gRPC read surface (DataGatewayService, this crate's own generated server) AND D4's
+# gRPC client half (dialing the real CommandAuthorityService, av-command's authority.proto
+# service) -- both directions live in this one crate's production code, unlike av-command
+# (server only) or av-grpc (client only), so both "server" and "channel" are regular
+# [dependencies] features here, not a dev-only split. Default features off, "tls"/
+# "tls-native-roots"/"tls-webpki-roots" never enabled -- those pull `tokio-rustls` -> `ring`,
+# forbidden by ADR-004's crypto rule; mirrors crates/av-command/Cargo.toml's identical
+# tonic-dependency comment verbatim.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server", "channel"] }
+
+# "net"/"io-util" for this crate's own gRPC and MCP-stdio listeners (a plain
+# tokio::net::TcpListener, mirroring crates/av-command/src/admin.rs's hand-rolled precedent,
+# plus the injected-stream MCP server -- crate::mcp takes any `AsyncBufRead`/`AsyncWrite`
+# pair, so a test never touches the process's real stdin/stdout, question 199); "rt-multi-
+# thread"/"macros" for `#[tokio::main]`/`#[tokio::test]`; "signal" for the shipped binary's
+# graceful shutdown, mirroring crates/av-command/src/bin/av-command.rs.
+#
+# "time" is for this crate's own test suite only (`tokio::time::timeout` bounding a spawned
+# server task's join in `crates/av-gateway/src/mcp.rs`'s stdio-transport test, after a real,
+# reproduced hang from a `tokio::io::split` half not signalling EOF -- see that test's own
+# comment) -- never a live clock read on any production output path (D8; ADR-004): no
+# production code in this crate imports `tokio::time`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal", "sync", "time"] }
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
+# This crate's own integration tests (crates/av-gateway/tests/*.rs) spin up a REAL
+# `av_command::service::CommandAuthorityServiceImpl` over a real loopback socket (mirroring
+# crates/av-command/tests/grpc_service.rs's own TestServer pattern) so D4's acceptance
+# evidence -- propose_command reaches the real state machine and ledger, and a crafted
+# authorize attempt is refused by that real service, not a stub -- is proven against real
+# code. Constructing that service needs a real `av_command::oidc::IssuerConfig`, even though
+# no test here ever calls `Authorize` (this crate's own `ProposeOnlyAuthority` cannot);
+# `av_command::test_support::TestIssuer` is the standard, already-reviewed way this workspace
+# builds one, gated the same way `av-command`'s own tests gate it (`features =
+# ["test-support"]`, active for `cargo test` only -- see that crate's own Cargo.toml comment).
+av-command = { path = "../av-command", features = ["test-support"] }
+prost-types.workspace = true
+
+[[bin]]
+name = "av-gateway"
+path = "src/bin/av-gateway.rs"
