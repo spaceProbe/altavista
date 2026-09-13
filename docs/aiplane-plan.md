@@ -800,3 +800,194 @@ Three more, each an in-flight process defect rather than a code one:
 8. **`Expire`/`Fail` state-machine refusals still write no audit line** — only identity and
    authorization refusals do. Deliberately not widened this round; it is the next increment of
    the same rule if the lead wants it.
+
+## Status (AI-plane manager, 2026-09-13) — round 4, PAUSED
+
+**The user stopped work partway through the consolidation round.** Three of the round's six
+planned tasks landed and were reviewed; no worker was running when the round was paused, and
+the worktree has no uncommitted edits. Round 4's charter was question 209 (the lead's browser
+drive of the console, which found the human step cannot complete) plus question 208's
+remaining items.
+
+| Commit | Task | State |
+|---|---|---|
+| `cb8b4ed` | R4.1 — question 209(a): `Check` runs automatically inside `Propose` on every surface | landed, reviewed |
+| `bf4fcfa` | R4.2 — question 209(b) and (c): the console lists CHECKED commands, refreshes counters after every authorize, and an empty scenario no longer aborts `loadScenario` | landed, reviewed |
+| `f3f7f69` | R4.2b — the manager's own review defect: the in-memory index is committed before the audit write, not after | landed, reviewed |
+
+### Gates, the manager's own runs with no worker active
+
+Run at `f3f7f69` unless noted. The full round-end gate set was **not** run — the round was
+paused, and the three commits' own gates were each verified by the manager at the time.
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-command -p av-gateway -p av-proposer` | **287 passed**, 0 failed, 0 ignored (281 was this round's measured baseline at `2c2387b`; +3 from R4.1, +3 from R4.2b) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, **0 warnings**. `grep -rn "#\[allow" crates/av-command/src crates/av-gateway/src crates/av-proposer/src` is zero hits |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **801 passed**, 0 failed, 3 ignored at `f3f7f69` (the worker's run; 795/3 was the manager's measured baseline at `2c2387b`) |
+| `.venv/bin/python -m pytest -q -rs` | **545 passed, 5 skipped** (539/5 was the measured baseline), every skip printing its reason — the four pre-existing image gates plus the proposer's container test |
+| `tests/test_viewer_net.py` (headless Chrome) | **3 passed**, including the new empty-scenario check, verified by the manager to RUN on this host, not skip |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`, six accepted spoore wildcard warnings (question 207) |
+
+Baselines were measured by the manager at `2c2387b` before any worker started: trio 281,
+workspace 795/3 ignored, pytest 539 passed / 5 skipped. Full gate output is in the round's
+scratchpad.
+
+### The manager's decisions this round
+
+1. **`Propose` runs the check as a second, separate ledger append, never a folded one.** The
+   `PROPOSED` record lands and is durable first; only then does the same shared helper the
+   explicit `Check` RPC calls run the policy edge. The ledger therefore still holds two
+   records with two principals (`"model-x"`, then `"policy"`) and the full five-state trail
+   `PROPOSED → CHECKED → AUTHORIZED → DISPATCHED → ACKED` is pinned by a test, so ruling
+   209(a)'s "the trail is unchanged" is proven rather than asserted.
+2. **A policy denial is a typed `PERMISSION_DENIED` refusal on `Propose` itself**
+   (`ServiceError::PolicyDenied`, counter `policy_denied`), not a `200 OK` carrying a
+   `REJECTED` command the caller must notice. The `REJECTED` transition and its
+   `PolicyDecision` stay durable and queryable — the refusal is on the RPC's return value,
+   never on the record. The gateway classifies it from the `tonic::Code` alone
+   (`ProposeRefusal::PolicyDenied`, `propose_policy_denied`), not from message prose, which is
+   strictly better than the two pre-existing `INVALID_ARGUMENT` siblings that must sniff text.
+3. **An automatic-check I/O failure leaves the command `PROPOSED` and says so in words.** The
+   explicit `Check` RPC is kept for exactly that retry path, and is refused
+   `FAILED_PRECONDITION` naming the actual current state for `CHECKED`, `REJECTED` and
+   `AUTHORIZED`. The alternative — returning `Ok` with a bare `PROPOSED` command — was
+   rejected: it tells the caller the proposal succeeded while policy has not run.
+4. **The console lists commands *awaiting a human*, not "proposals".** Both `PROPOSED` and
+   `CHECKED`, via two real per-state `Query` calls per entity (`QueryByEntity` takes exactly
+   one `CommandState`, and this needed no proto change), each row carrying the real
+   `CommandState` name read off the `Command` itself — never inferred from which of the two
+   queries produced it. The HTTP path `/api/command/proposals` is unchanged because the panel
+   and its tests depend on it.
+5. **`scene.js` gained a WebGL-free pure half.** `resolveFrameGraphInput(sc)` resolves the
+   origin frame id, the frame-definition list and a `warning` string; `_buildFrameGraph` calls
+   that one function and does the `console.warn` itself. Same split, and the same reason, as
+   `trajectoryRenderPositions` — a plain `node` check can now exercise the degraded shapes
+   without a `THREE.WebGLRenderer`.
+6. **The panel's authorize path is proven without inventing a browser dependency.** The
+   headless node check clicks the *real* button `render()` built and captures the exact
+   `(commandId, token)` pair the panel hands to `onAuthorize`; pytest then replays those exact
+   captured pairs through the real `/api/command/commands/{id}/authorize` route against a real
+   `av-command` — wrong-role first (403, the real role-gate reason), right-role second (200,
+   the command advances to `AUTHORIZED`). The panel's own control produced the arguments, and
+   those arguments really authorize.
+7. **The index is committed the instant the ledger append succeeds, before the audit write.**
+   The documented rule "an audit line is never written for a transition this crate cannot also
+   prove it retained" is kept; what moved is the index commit, the idempotency-key insert and
+   the dispatch side effect, all of which had been placed *after* a best-effort log write. See
+   the defects below for what that was actually costing.
+
+### What this round actually is now
+
+A proposer, the MCP tool, `ModelProposeService` and a human calling `Propose` directly all get
+the policy decision automatically, as a separate logged transition, and a denial comes back
+typed and counted on every one of those surfaces through one shared implementation. The
+console lists the commands a human can actually act on, shows each one's real state, and
+refreshes the counters after a refusal as well as a success — the case where a refusal counter
+is the only thing that changed. An execution-profile scenario with no bodies and no frames
+loads without throwing, and a real headless-Chrome check proves `loadScenario` reaches the
+command-console refresh by reading the real command's real rationale out of the real page's
+DOM.
+
+### Declared gaps, all deliberate
+
+- Everything in round 3's "declared gaps" section still stands except the console's inability
+  to complete the human step, which this round closed.
+- **The panel still does not poll.** Proposals and counters refresh on selection, on every
+  authorize outcome, and on an execution-profile scenario load; a new proposal still does not
+  arrive on its own.
+- A scenario with `frames` but no `frame` has its frame definitions dropped with a
+  `console.warn`, rather than one of them being guessed as the root.
+
+### Defects found in review, with their root causes
+
+Two, and the shape held for the fourth round running — **a failure, refusal or guarantee that
+leaves no trace**:
+
+1. **The in-memory index was committed after the audit write, so an audit-sink failure
+   silently forked the service from its own ledger** (found by the manager reviewing R4.1;
+   pre-existing since A2.2 and widened by R4.1's automatic check). The documented ordering rule
+   is about the *audit line*, and it is right; but `put_command`, the idempotency-key insert
+   and `DispatchSink::dispatch` had all been placed after it too, which quietly made a
+   best-effort log the gate on committing state the ledger had already made durable. Two
+   demonstrated consequences: after an audit failure on the automatic check, the ledger held
+   `PROPOSED, CHECKED` while the index still said `PROPOSED`, so an explicit `Check` retry was
+   accepted and appended a **second** `CHECKED` record with a different decision id — the trail
+   A6's replay reproduces, now self-contradictory; and in `Dispatch`, the ledger said
+   `DISPATCHED` while the asset had never received it and the idempotency key was never
+   recorded, so a retry really dispatched and appended a second `DISPATCHED` record, defeating
+   A3's "an idempotency key the binding never dispatches twice". Root cause: no invariant
+   anywhere tied the index to the ledger, and no test could fail the audit sink, so the
+   ordering was argued about rather than exercised. Fixed by making the append and the index
+   commit one function no caller can half-use, and by adding a feature-gated failing line sink
+   (absent from a default build, proven with `nm`) so both paths are now tested for real. Both
+   new tests were watched failing against the unfixed code before the fix landed.
+2. **The headless-Chrome console-error collector never watched `Runtime.exceptionThrown`**
+   (found by the R4.2 worker while proving its own check had teeth). Question 168's
+   "zero console errors on load" gate — the one that should have caught the very crash
+   question 209(c) describes — watched only `Log.entryAdded` and `Runtime.consoleAPICalled`.
+   An uncaught synchronous exception inside a page event handler is delivered by Chrome on
+   `Runtime.exceptionThrown` **and on no other event**, so the real, 100%-reproducible
+   `TypeError` in `_buildFrameGraph` produced `errors == []`: a false pass on the exact gate
+   that existed to catch it. Root cause: the collector was built against the two failure
+   shapes question 168's own investigation had captured live (a failed WebSocket, a 404
+   resource) and was never tested against a page that throws. Fixed for every test in that
+   file, and the fix is pinned by capturing the real pre-fix stack trace.
+
+One more, an in-flight process defect rather than a code one:
+
+- **A worker raced two `cargo test` invocations against one target directory** (one
+  auto-backgrounded on a timeout, then re-run in the foreground) and reported a corrupted
+  count with interleaved output before catching it. It also saw one real-clock `av-ingest`
+  mTLS test fail under the resulting host load and pass in isolation. Recorded because the
+  contention rule exists for exactly this, and because the first symptom was a wrong number,
+  not an error.
+
+### What was in flight and what remains
+
+Nothing was in flight when the round was paused — the third worker had finished and been
+reviewed. Three of round 4's planned tasks were **not started**:
+
+1. **Question 208(b): `av-gateway` authenticates every caller.** A service subject for the
+   proposer, a human token for a console or MCP client, both through `av-command`'s existing
+   OIDC verifier shared as a library rather than duplicated; every refusal typed and counted;
+   the proposer's container presenting its service token; the Gap row in
+   `docs/compliance/av-gateway/` closing to Met with its evidence command. This is still the
+   largest open item on the track: the gateway authenticates **no** caller on any surface
+   today, and both control matrices say so.
+2. **Question 208(a) and (c): the MSRV and the port map.** `rust-version = "1.85"` in
+   `Cargo.toml` is still false — `regorus 0.12.0` needs a `const fn` stabilised later, so the
+   declared MSRV has been wrong since round 1 and any CI or container build that honours it
+   fails. Raising it requires measuring the lowest toolchain that compiles `av-command`
+   (`cargo +<version> check -p av-command`), which needs a one-time rustup toolchain install.
+   And one owned port map in `docs/architecture.md` (service, gRPC default, admin default)
+   with every `DEFAULT_BIND` citing it and a test that the constants and the table agree —
+   round 3's defect 9 was that collision arriving, and the survey needed here spans
+   `av-command` 50070/50170, `av-gateway` 50071/50171, `av-dynamics-service` 50062/50162,
+   `av-lockstep-shim` 50080, and the `container.address` example in the kernel's binding
+   registry, which is also `50070`.
+3. **The capacity items**, neither started: replacing `oidc.rs`/`policy.rs`'s prose-match
+   dependence on regorus's error text with a structural check if `regorus 0.12.0` exposes one
+   (question 203(b)'s tripwire otherwise stands), and extending the A5 headless checks with a
+   replay of a run driven through the console's authorize, its trail compared.
+
+### Open items for the lead
+
+1. **Round 4 is paused, not finished.** The three landed commits are self-consistent and every
+   gate the manager ran at `f3f7f69` is green, so `aiplane` is in a mergeable state — but the
+   full round-end gate set (`cargo test -p av-kernel`, `buf breaking` against the merge base)
+   was not re-run at `f3f7f69`. No proto file was touched after `cb8b4ed`, whose own `buf
+   breaking` run was clean, and no kernel file was touched at all this round.
+2. **Question 208(b), (a) and (c) are all still open**, as listed above. 208(b) in particular
+   is a security item the lead has already ruled on.
+3. **Ruling 209 is fully implemented and the human step now completes end to end**, proven by
+   a real headless browser against a real service: an empty publish loads cleanly, the console
+   lists a CHECKED command, and the panel's own Authorize button produces the arguments that
+   really authorize it with the right role and are really refused with the wrong one. A
+   re-drive by the lead in a real browser would be the natural acceptance step.
+4. **Question 168's browser gate was passing for the wrong reason** until this round (defect 2
+   above). Worth a platform lesson beside round 3's `debug_assert` and TAI-epoch findings: a
+   detector is not a gate until it has been shown to fail against a real instance of the
+   failure it exists to catch.
+5. **The Colima VM disk is still full** and the proposer's container test still skips visibly.
+   Nothing this round changed that; it remains the user's decision (question 196(d)).
