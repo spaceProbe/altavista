@@ -662,3 +662,303 @@ appears nowhere in the output.
 8. **No latency number was taken this round** and none should be believed from a shared
    host. If question 43's budget line is to be tightened, it needs a quiet machine.
 
+
+
+## Status (edge manager, 2026-09-13) — round 4 (consolidation), PAUSED
+
+Round 4 is a consolidation round: every milestone in this plan was delivered and accepted in
+rounds 1-3, and question 207 set this round's list. **The round was paused by the user before
+its end-of-round gate sweep.** Seven commits on `edge`, every one of them reviewed from its
+artifacts (not from a worker's claims) with workspace clippy re-run by the manager after each:
+
+- `34a3e7c` **Question 204** — every `sha2` use migrated to `openssl::sha::sha256`; `sha2`
+  removed from the three crates and from `[workspace.dependencies]`, and banned in
+  `deny.toml`.
+- `fbd2454` **Question 207's daemon-wide lock** — `flock(2)` on
+  `$HOME/.altavista/locks/docker-tests.lock`, in Rust (`av_lockstep::docker::
+  lock_docker_tests`) and Python (`altavista.docker_test_lock`), taken by every docker-gated
+  test for its whole body; `prune_stale_test_resources(&DockerTestLock)` makes holding it a
+  compile-time requirement.
+- `543bb29` **The same lock, made visible** — a blocked acquire announces itself on stderr
+  with the path, the question and the measured wait, instead of stalling silently.
+- `5b05309` **Round 3's defect 3 closed** — the plugin binary verifies its own seccert leaf
+  (`--trust-anchor`, `--now-tai-ns`) and presents it to the ingest; a wrong-CA leaf is
+  refused and counted end to end; `--buffer-dir` gives the plugin E6-backed durable state.
+- `235c446` **Round 3's defect 2 closed as far as this substrate allows** — the plugin
+  container's non-root user, read-only root with one declared writable volume, `--cap-drop
+  ALL`, `--security-opt no-new-privileges` and the default seccomp profile, asserted from
+  `docker inspect` and from `/proc/1/status` inside a running container; ADR-004 gains
+  question 207's substrate clarification.
+- `b067e54` **Round 3's open item 4 closed** — the track config hash and E5's three accuracy
+  statistics are pinned by a test with a negative control; `earth_fixed_demo_frame` is
+  registered in the demo DRM's `scenario.frames`.
+- `2885b15` **Question 200's second plugin** — ADS-B replay from a committed synthetic CSV
+  through the same plugin library and batch path, with its batch count and chain head pinned.
+
+### Counts, measured per task on this host (NOT an end-of-round gate sweep)
+
+| Gate | Baseline at 7e5a252 | Latest measured | Where |
+|---|---|---|---|
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 701 passed, 0 failed, 2 ignored | **734 passed, 0 failed, 2 ignored** | at `2885b15` |
+| `cargo test -p av-kernel --no-fail-fast` | 872 passed, 0 failed, 2 ignored, 4 visible skips | **873 passed, 0 failed, 2 ignored, 4 visible skips** | at `2885b15` |
+| `.venv/bin/python -m pytest -q -rs` | 513 passed, 4 skipped (round 3) | **516 passed, 5 skipped** | manager's own run at `b067e54` |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean | **clean, exit 0, zero warnings** | manager, after every commit incl. `2885b15` |
+| `cargo deny check` | four `ok`, six spoore wildcard warnings | **advisories ok, bans ok, licenses ok, sources ok**, six wildcard warnings | manager at `5b05309`, worker at `2885b15` |
+| `cargo tree -e normal --workspace \| grep -c sha2` | 3 | **0** | manager at `2885b15` |
+| `buf breaking` | n/a | **not run — no proto file changed this round** (`git diff --name-status develop -- proto/` is empty) | — |
+
+The workspace figure reconciles by name: 701 + 1 (task 1's `settings_hash` oracle) + 2 (the
+lock tests) + 8 (the plugin identity and buffer tests) + 1 (the pinned config-hash/accuracy
+test) + 22 (ADS-B: 11 unit, 7 replay, 4 frame-resolution) − 1 (one identity test that
+replaced an existing one) = 734. The kernel's +1 is the ADS-B ECEF cross-check
+(`crates/av-kernel/tests/edge_plugin_adsb_ecef_crosscheck.rs`), placed there so `av-edge`
+stays GMAT-free — `cargo tree -p av-edge --all-targets | grep -iE "gmat|tonic"` is still
+empty. Python's 516/5 is 513 + the docker-lock cross-process tests + the new alpine
+hardening test, with the fifth skip being that test's own visible ENOSPC skip (below).
+
+**The end-of-round gate sweep was not run.** The round was paused, and at the pause the
+AI-plane track was running its own `pytest` gate in `/Users/probe/code/AltaVista-aiplane`;
+a gate run against a contended host is not a gate (the standing rule). Every commit above is
+individually covered by the counts in this table, and the working tree is clean.
+
+### Numbers traceable to artifacts
+
+**Question 204's migration moved no recorded hash.** The three digests
+`crates/av-kernel/tests/drm_executor.rs` pins by hand for `leo_1day_golden`
+(`bf49e03b…`, `ab9f1233…`, `4694f388…`) are unchanged, and all 75 `drms/*.yaml` declared
+`hash:` fields still verify at load through `verify_drm_hash`/`verify_sos_hash`/
+`verify_system_hash` — which is what makes 872 unchanged kernel tests the real proof, not
+the exit code. `av-dynamics::settings_hash` gained an external oracle test:
+`{"a":"1","b":"2"}` encodes to `b"a=1\nb=2\n"` and the system `shasum -a 256` over exactly
+those bytes prints
+`4a73850fde34aad40ff8649b93a66523a5fe744357a3931caea0f10609d0d930`, which the test pins.
+
+**Question 204 named the wrong third crate, and this is worth the lead's attention.**
+`gmat-sys` has never had a `sha2` dependency or any SHA-256 code at all. The three real
+dependents were `av-dynamics`, `av-kernel` and **`av-sweep`** — the feasibility track's
+crate, created after question 204 was framed. `av-sweep` was migrated too, because the
+`deny.toml` ban is mechanical and `cargo deny check` would otherwise fail for the feasibility
+track on every branch. Three `av-kernel` dev-only files (`tests/replay.rs`,
+`tests/port_traffic_sidecar.rs`, `examples/gen_expr_goldens.rs`) imported `sha2` directly and
+were migrated with them.
+
+**The lock is measured, not assumed.** `flock(2)` on separate open file descriptions
+serialises two threads of one process on this host (thread B's `LOCK_EX|LOCK_NB` returned
+`-1`, errno 35, while thread A held it, and `0` after release), and across processes AND
+languages (a Rust guard held while a `python3` child observed `BLOCKED`, then `ACQUIRED`
+once dropped) — so the pre-existing process-local `DOCKER_TEST_LOCK` mutex was removed
+rather than kept alongside. A real observed wait, from the crate's own test run:
+`ACQUIRED the docker-test lock (/Users/probe/.altavista/locks/docker-tests.lock) after
+waiting 30.368439s`. Consequence, stated because it is a real cost: `cargo test -p
+av-lockstep` went from ~33 s to ~104 s, because two of its test binaries now correctly
+serialise on a host-wide lock instead of racing.
+
+**The container posture is asserted from the kernel's own view, not from the script's
+intent.** On this host today, with the identical flags the plugin image expects:
+`Config.User='10001:10001'`, `HostConfig.ReadonlyRootfs=True`, `HostConfig.CapDrop=['ALL']`,
+`HostConfig.SecurityOpt=['no-new-privileges']`, and from inside the running container
+`{"uid": 10001, "no_new_privs": "1", "seccomp": "2", "root_write_failed": true}` —
+`Seccomp: 2` being filter mode, which is how the DEFAULT seccomp profile is proven applied
+rather than inferred from the absence of a flag.
+
+**E5's pinned numbers, re-measured before being pinned** (question 148: measure first, pin
+second). `TrackConfig::config_hash()` is still
+`7a2d33df306ae9861161e1c64eb2cf79c67e7657e419b93fa9365105a53bb06b` — no drift since round 3 —
+and is now asserted exactly. The three error statistics came back bit-identical across two
+separate process runs: `max 0.0018749988892797183 m`, `p50 5.587935447692871e-9 m`,
+`p99 8.517093334593117e-5 m`, 900 matched, 0 unmatched. They are pinned as BANDS, with a
+lower bound as well as an upper one, because an upper-bound-only assertion cannot see the
+regression class where the comparison quietly stops doing real work and reports an
+implausibly small error. The negative control is recorded: perturbing the expected value
+produces `max_error_m out of its pinned band (0.0001, 0.001) m: measured
+0.0018749988892797183 m`.
+
+**The ADS-B plugin's pinned numbers.** 45 measurements in 15 batches from a 47-line committed
+synthetic CSV (`crates/av-edge/tests/fixtures/adsb/sample.csv`, SHA-256
+`c116bc4113f8914d4c54a7670164945967223a7e213cd9a8b551a42bf1fede68`, one row deliberately
+malformed so the typed refusal path is exercised by a real fixture row). Chain head
+`8f6bd8ce345cf4155b60f0126727c2e0ff2c4a8c8c198c3545d9eafa58158668`; `PluginConfig::
+config_hash()` `a550bf530c860876ed51f371221b0092770ab01572b07a8819ec01d2e26977d5`. The
+WGS-84 geodetic-to-ECEF transform `av-edge` implements agrees with
+`av_kernel::drm::ground::geodetic_to_ecef_m` to a **worst deviation of 0e0 m** over every
+fixture row. UTC timestamps convert through `av_cdm::time`'s leap-second table, never a
+hand-rolled offset; the frame resolves through the registry (Earth origin,
+`AXES_KIND_BODY_FIXED`) to `spoore_cdm::Frame::Ecef` rather than a hard-coded literal.
+
+### Question 156's amendment (the lead copies this to open-questions)
+
+> `av_lockstep::docker::prune_stale_test_resources()` deletes every Docker container and
+> image labelled `av.test` daemon-wide, and its only lock was a process-local `Mutex<()>`
+> invisible to any other worktree's test process — round 3's own gate measured this directly:
+> the prune test failed with a connection-refused error while a concurrent `cargo test -p
+> av-kernel` in another track tore out its containers, and passed when re-run alone. The fix
+> is a host-wide `flock(2)` lock at `$HOME/.altavista/locks/docker-tests.lock` (never `/tmp`
+> or `/private/var`, since Colima mounts only `$HOME` and macOS reclaims those paths),
+> implemented identically in Rust (`av_lockstep::docker::lock_docker_tests`) and Python
+> (`altavista.docker_test_lock.lock_docker_tests`), each acquired for a docker-gated test's
+> whole body. `prune_stale_test_resources` now takes `&DockerTestLock` as a parameter, making
+> "the caller already holds the lock" a compile-time requirement rather than a convention —
+> deliberately not acquired internally, since `flock` on a second descriptor in the same
+> process would deadlock a caller already holding it. A blocked acquire prints a `WAITING`
+> line naming the path and the question, and an `ACQUIRED … after waiting <duration>` line,
+> so a serialised gate never looks like a hang. What is still NOT covered:
+> `services/edge-plugin/build-image.sh` prunes by its own component label and takes no lock,
+> and `services/cfs/build-image.sh` takes none either (it prunes nothing) — both remain
+> exposed to cross-worktree contention. If a docker gate still fails under contention, check
+> `ps` for a concurrent `cargo test`/`pytest`/build script first; if none is running, treat it
+> as a genuine failure, because the lock serialises AltaVista's own test suites and not those
+> two scripts.
+
+### Decisions taken this round (for the lead to ratify or overturn)
+
+1. **`av-sweep` was migrated off `sha2` although question 204 did not name it**, because the
+   ban is mechanical and the alternative was a `cargo deny` failure the feasibility track
+   could not act on. The edit is confined to its two hashing modules and changes no digest.
+   The lead may want to tell that track it happened; nothing in their worktree was touched.
+2. **`libc = "0.2"` is a new `[workspace.dependencies]` entry**, used only by the docker-test
+   lock for `flock`. It was already in `Cargo.lock` transitively, is MIT/Apache-2.0, and is
+   not crypto-adjacent. A `Drop`-based or PID-file lock was rejected explicitly: neither
+   survives `SIGKILL`, which is the exact failure mode question 156 exists for.
+3. **`prune_stale_test_resources` takes the lock as a parameter rather than acquiring it
+   internally**, so holding it is checked by the compiler and re-entrant `flock` deadlock is
+   impossible by construction.
+4. **`crates/av-kernel/tests/drm_attitude_control_cfs.rs`'s four docker-gated tests were
+   deliberately left without the lock.** They neither prune by label nor label their own
+   containers, so they are not exposed to question 207's race. That they do not label is
+   itself a question 156 gap in another team's test — recorded as a defect below, not fixed
+   here, because the tests skip on this host (no cFS image) and a fix I cannot run is a fix I
+   cannot verify.
+5. **The plugin verifies its own leaf before connecting, and also presents it on the wire.**
+   Local verification refuses an untrusted identity before any socket is opened; the leaf is
+   still forwarded as `x-ssl-client-escaped-cert` on the plaintext path so `av-ingest` — the
+   enforcement point under questions 202/205(1) — verifies it independently and counts the
+   result. On the `https://` path nginx sets that header itself, so the binary does not.
+6. **The verified fingerprint overrides `PluginConfig.leaf_fingerprint_sha256`**, and a
+   config that declares a different one is a hard error naming both values, so the manifest,
+   every batch's `signer_cert_sha256` and the certificate cannot drift apart.
+7. **`--buffer-dir` routes batches through E6's `EdgeBuffer`/`UplinkDriver`**, which gives the
+   container a real reason to have exactly one writable path. Without the flag, behaviour is
+   byte-for-byte what it was.
+8. **`earth_fixed_demo_frame` IS now registered in `drms/demo_ground_segment.drm.yaml`'s
+   `scenario.frames`, overturning round 3's decision 8** — but only after tracing the
+   constraint instead of restating it. Every reader of the embedded DRM hash was enumerated:
+   nothing in `av-edge`, `av-ingest` or `av-track` ever re-verifies
+   `RunProducts.provenance.config_hash` against a freshly computed DRM hash (only `run_id`
+   and `created_tai_ns` are read back), and E4's pinned chain head is built from
+   `PluginConfig`, batch content and the run id, never from the DRM's hash. The DRM's own
+   `hash:` moved from `7a5944b319fa…412d0` to
+   `c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2` and the kernel's loader
+   verifies the new value: 872 kernel tests and 516 Python tests still pass, unchanged.
+   **The disclosed cost:** the committed fixtures still record the OLD hash as their
+   generation provenance, so that value now names a DRM that no longer exists in the tree.
+   That mismatch is recorded at the place a reader would look
+   (`crates/av-edge/tests/fixtures/ground_segment/README.md`). If the lead prefers true
+   provenance over a registered frame, reverting is two hunks — the DRM and that README —
+   and the alternative (regenerating the GMAT fixtures) was not attempted because it would
+   repin E4's goldens for a cosmetic gain.
+9. **The `TrackConfig` frame declaration was NOT removed** even though the DRM now registers
+   the frame: `av-track` has no code path that reads `Scenario.frames` or `RunProducts.frames`
+   at all. Removing it would have broken the bridge; the two declarations are now documented
+   as deliberate, with the reason in `TrackConfig`'s own doc comment.
+10. **E5's statistics are pinned as bands with both an upper and a lower bound**, not as exact
+    values, although they were measured bit-identical across two runs — `f64`
+    non-associativity across a toolchain or platform this repository does not control is a
+    real risk, and a band that catches a three-order-of-magnitude regression is worth more
+    than an exact assertion that breaks on a compiler upgrade.
+11. **The ADS-B plugin is a source and a batch path, not a binary and not a container.**
+    Question 200(a) and question 207 ask for the second plugin's measurements, frame, label
+    and pinned chain; a second binary and a second image are follow-on work, and the image
+    could not be built on this host anyway.
+12. **ADS-B is labelled `UNCLASSIFIED` with a declared (25 m)² isotropic position noise.**
+    1090ES is an unencrypted public broadcast; labelling it as if it were sensitive would be
+    a wrong answer wearing a right answer's clothes. The noise figure is declared, not
+    derived from the fixture.
+13. **Task 3 was split into two commits** (the binary's identity path, then the container),
+    because the image bakes the binary: doing the binary first meant the image would have
+    needed exactly one rebuild — which, as it turned out, the host could not give.
+
+### Defects found in review this round
+
+1. **The docker-test lock blocked silently** (found in review of this round's own new code).
+   A contended gate was indistinguishable from a hang, which is the class of problem
+   questions 148 and 194 exist to prevent. Cause definitive: `flock(LOCK_EX)` was called
+   blocking, with no non-blocking first attempt and no output. Fixed in `543bb29`.
+2. **`crates/av-kernel/tests/drm_attitude_control_cfs.rs` labels none of the containers it
+   creates** (it runs a throwaway `registry:2` and tags images) and calls no prune. Cause
+   definitive, confirmed by grep: it predates question 156's labelling convention and was
+   never retrofitted. Consequence: a killed run leaks a running registry container — question
+   156's original finding, verbatim. Not this track's file and unverifiable on this host
+   (its tests skip, no cFS image). **For the lead.**
+3. **A fresh named Docker volume mounted into a non-root container is owned by root**, so the
+   hardened container could not write its own state directory. Found by the test failing for
+   real. Cause definitive: Docker propagates ownership from the image's own directory only
+   when the image pre-creates it — which the plugin Dockerfile now does, and which a bare
+   named volume in a synthetic test does not. Fixed by priming ownership in the test.
+4. **Question 204's own premise was wrong about which crates hash with `sha2`** (defect 1 of
+   the round, in the ruling rather than the code). Cause definitive: `av-sweep` was created
+   after the question was written, and `gmat-sys` never had the dependency it was credited
+   with.
+5. **Two workers ended their turns waiting on background jobs**, despite briefs that forbid
+   it in bold. Both tasks were reviewed from their artifacts and committed by the manager
+   (`5b05309`, `b067e54`). This is the same failure question 206 already recorded for the
+   AI-plane track; the brief wording is evidently not sufficient on its own.
+6. **A diagnostic `docker pull alpine:latest` was run** while measuring disk state — by a
+   worker, and possibly by the manager's own `docker run --rm alpine` probe before it. Not at
+   test time, so question 154's rule is not broken in the sense it was written, but it is a
+   network call this round did not plan and should not have made. The tests themselves check
+   image presence with `docker image inspect` and never pull.
+
+### Question 196(d): the disk is now full, and the plugin image cannot be rebuilt
+
+Measured this round: the Colima VM's container filesystem is **58.8 GB, 56.0 GB used, 0 bytes
+available — 100% full**. `docker system df` reports 899-904 local volumes holding 46.9-47.2 GB
+at 99% reclaimable, owned by the unrelated Supabase/Kubernetes workload question 205 already
+named. `av-edge-plugin:local` and its `debian:bookworm-slim` base have been garbage-collected
+again, and `alpine:latest` was observed being evicted between two checks minutes apart with no
+explicit prune — real-time confirmation of the kubelet image collector question 205 closed this
+on. Consequences, all recorded rather than worked around:
+
+- `services/edge-plugin/build-image.sh` was NOT run; the plugin container test skips visibly
+  with its existing reason, and nothing in this round claims the plugin container was measured.
+- The hardening flags are proven instead against `alpine:latest` in
+  `tests/test_edge_plugin_hardening_alpine.py`, with the identical flags and the identical
+  assertions, so the plugin test's assertions are known-good the day the image can be built.
+- Even a write to a **named volume** now fails with ENOSPC, so the one posture fact that could
+  not be proven today is "the writable volume is writable". That test distinguishes the
+  environmental block from a hardening failure and skips visibly rather than reporting either
+  a false failure or a silent pass.
+- The remedy remains the user's and is unchanged: reclaim those volumes, disable Colima's
+  Kubernetes, or raise `disk:`.
+
+### What remains when the round resumes
+
+1. **Task 6 (E5's latency retake) was never eligible and was not attempted.** The host was
+   never quiet: the AI-plane track ran cargo and pytest gates throughout, and at the pause it
+   was running its own `pytest` suite. Round 2's `p50 ≈ 6.1 ms / p99 ≈ 8.3 ms` stands,
+   unretested, and should not be believed from a shared host.
+2. **The end-of-round gate sweep** (`cargo test --workspace --exclude av-kernel`,
+   `cargo test -p av-kernel`, clippy, `cargo deny check`, full `pytest -q -rs`, and the
+   `sha2` tree count) with nothing else active on the host. Every commit is covered
+   individually by the table above; the single clean sweep is not done.
+3. **A second plugin binary and image for ADS-B**, if the lead wants the second plugin to run
+   as a container the way the first does.
+4. **The two build scripts still take no docker lock** (the amendment says so explicitly).
+
+### Open items for the lead
+
+1. **Decision 8 is the one that most deserves a ratify-or-overturn**: `earth_fixed_demo_frame`
+   is registered, and the committed fixtures' recorded generation hash now names a DRM that no
+   longer exists. Nothing verifies it, the mismatch is documented where a reader will find it,
+   and the revert is two hunks.
+2. **`av-sweep` was edited by this track** (decision 1). The feasibility track should know.
+3. **`drm_attitude_control_cfs.rs` violates question 156** (defect 2) and is another team's
+   file.
+4. **`deny.toml` still carries `wildcards = "warn"`** with question 207 cited, pending the
+   spoore `publish = false` commit landing on its `main`. Unchanged this round; `cargo deny
+   check` is green with exactly the six accepted warnings.
+5. **`sha2` is now banned**, so any track adding a new hashing call site must use
+   `openssl::sha::sha256`. Three crates each carry their own six-line `hex_encode` helper now
+   (as `av-command` and `av-dynamics-service` already did); a shared one would be a small,
+   separate cleanup.
+6. **The disk is full** (question 196(d)) and no image on this host can be rebuilt until the
+   user acts. Every image-gated test on every track is skipping.
