@@ -849,12 +849,20 @@ fn docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes
     }
     let _engine = gmat_sys::engine_lock();
 
+    // Question 207: a same-binary concurrent test was never the actual exposure here (this
+    // file has exactly one Docker-using `#[test]`) -- a *different worktree's* `cargo test -p
+    // av-kernel`/`pytest` process racing this daemon-wide prune sweep was (round 3's own gate:
+    // this exact test failed with a connection-refused error while another track's `cargo test
+    // -p av-kernel` ran concurrently). `av_lockstep::docker::lock_docker_tests()`'s host-wide
+    // `flock` is held for this whole test body, not just around the prune call below --
+    // `prune_stale_test_resources`'s own doc comment explains why it now requires proof (a `&
+    // DockerTestLock` parameter) that the caller already holds it, rather than acquiring
+    // internally.
+    let _lock = av_lockstep::docker::lock_docker_tests();
+
     // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its
     // own `Drop` guards never ran if that run was killed) before this test creates anything.
-    // See `crates/av-lockstep/tests/docker_lifecycle.rs`'s own `DOCKER_TEST_LOCK` doc comment
-    // for why a same-binary concurrent test could otherwise race this: this file has exactly
-    // one Docker-using `#[test]`, so no equivalent lock is needed here yet.
-    prune_stale_test_resources();
+    prune_stale_test_resources(&_lock);
     let run_id = test_run_id();
     let labels = test_label_args(&run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();

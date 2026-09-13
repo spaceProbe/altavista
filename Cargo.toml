@@ -16,6 +16,19 @@ prost-types = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Question 207 (av-lockstep's host-wide docker-test lock, crates/av-lockstep/src/
+# docker_test_lock.rs): a raw `flock(2)` call is the one part of that fix with no equivalent in
+# the standard library, so this is a genuinely new dependency, not a substitute for one already
+# in the tree. Why a dependency at all, and why this one: a lock file with a PID in it, or any
+# `Drop`-based guard with no kernel-owned resource behind it, cannot survive `SIGKILL` (a killed
+# process never runs its own `Drop` impls) -- `flock` can, because the lock is attached to the
+# open file description, which the kernel itself releases when a killed process's file
+# descriptors are closed, with no userspace code involved. `libc` is MIT/Apache-2.0 (already
+# `allow`ed by deny.toml), already present in Cargo.lock transitively (0.2.189, pulled in by
+# several existing dependencies), and is not crypto-adjacent -- ADR-004's "no ring, no bundled
+# crypto" rule has nothing to do with a raw syscall wrapper. Never add `fs2`/`fs4`/`nix` for
+# this: `libc::flock` is the whole need, and every one of those pulls in far more than that.
+libc = "0.2"
 # Matches spoore/Cargo.toml's pin: av-cdm's spoore.v0 adapter needs to name
 # `nalgebra::DMatrix<f64>` (the type spoore-cdm's own accessors return) directly.
 nalgebra = "0.33"

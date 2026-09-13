@@ -47,7 +47,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use av_cdm::pb::{Port, PortDirection, PortKind};
-use av_lockstep::docker::{announce_gate_skip, docker_daemon_status, prune_stale_test_resources, test_label_args, test_run_id, ManagedContainer, TEST_LABEL_KEY};
+use av_lockstep::docker::{announce_gate_skip, docker_daemon_status, lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id, ManagedContainer, TEST_LABEL_KEY};
 use av_lockstep::{BlockingLockstepClient, LockstepBindRequest, LockstepShutdownRequest};
 
 fn repo_root() -> PathBuf {
@@ -84,14 +84,28 @@ impl Drop for ImageGuard {
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `cargo test` runs every `#[test]` in one file concurrently by default (same process,
-/// multiple threads) unless told otherwise. That is fine for tests with no shared state, but
-/// every test below shares the Docker daemon's own global namespace and, more sharply, the
-/// [`av_lockstep::docker::TEST_LABEL_KEY`] prune sweep -- two tests racing would let one's
-/// `prune_stale_test_resources()` call rip out a container or image the other is still using
-/// mid-run. Held for a whole test's duration (not just around the prune call) so "build this
-/// image" in one test can never interleave with "prune everything labeled" in another.
-static DOCKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// `cargo test` runs every `#[test]` in one file concurrently by default (same process,
+// multiple threads) unless told otherwise. That is fine for tests with no shared state, but
+// every test below shares the Docker daemon's own global namespace and, more sharply, the
+// `av_lockstep::docker::TEST_LABEL_KEY` prune sweep -- two tests racing would let one's
+// `prune_stale_test_resources()` call rip out a container or image the other is still using
+// mid-run. Held for a whole test's duration (not just around the prune call) so "build this
+// image" in one test can never interleave with "prune everything labeled" in another.
+//
+// **Question 207: this used to be a process-local `static DOCKER_TEST_LOCK: Mutex<()>` here.**
+// That guarded only the two threads *this test binary* runs concurrently -- invisible to a
+// *different* worktree's *different* `cargo test`/`pytest` process racing the same daemon-wide
+// prune sweep, which is exactly how round 3's own gate failed
+// (`prune_stale_test_resources_removes_orphaned_labeled_containers_and_images`: `dial tcp
+// 127.0.0.1:34751: connect: connection refused` while another track's `cargo test -p av-kernel`
+// ran concurrently). `av_lockstep::docker::lock_docker_tests()`'s host-wide `flock` replaces it
+// outright, not just alongside it: `av_lockstep::docker_test_lock`'s own
+// `flock_serializes_two_threads_of_the_same_process_on_separate_open_file_descriptions` test
+// measures directly (question 207's "measure, do not assume" standard) that `flock` on two
+// separate, independently-opened file descriptors in ONE process serialises those two threads
+// exactly the way this bare `Mutex` used to -- so the file lock alone is both correct and
+// sufficient, in-process or cross-process, cross-worktree or not. Every `#[test]` below now
+// acquires it via `lock_docker_tests()` and holds the returned guard for its whole body.
 
 /// `docker run -d` returning (and `docker port` resolving a host port) only means the container
 /// process has *started*, not that `lockstep_ref`'s own gRPC server inside it is already
@@ -161,12 +175,12 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
         assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
         return;
     }
-    let _lock = DOCKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = lock_docker_tests();
 
     // Question 156's amendment: prune whatever a previous, interrupted run of this (or any
     // other) AltaVista test left behind (a `Drop` guard never runs on `SIGKILL`) *before*
     // creating anything new -- see `prune_stale_test_resources`'s own doc comment.
-    prune_stale_test_resources();
+    prune_stale_test_resources(&_lock);
     let run_id = test_run_id();
     let labels = test_label_args(&run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -290,9 +304,9 @@ fn prune_stale_test_resources_removes_orphaned_labeled_containers_and_images() {
         assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
         return;
     }
-    let _lock = DOCKER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = lock_docker_tests();
 
-    prune_stale_test_resources(); // clean slate, same as every other test in this file
+    prune_stale_test_resources(&_lock); // clean slate, same as every other test in this file
 
     let run_id = test_run_id();
     let labels = test_label_args(&run_id);
@@ -328,7 +342,7 @@ fn prune_stale_test_resources_removes_orphaned_labeled_containers_and_images() {
         "the labeled image must exist before pruning, or this test proves nothing"
     );
 
-    prune_stale_test_resources();
+    prune_stale_test_resources(&_lock);
 
     let remaining_containers = docker(&["ps", "-a", "-q", "--filter", &format!("label={TEST_LABEL_KEY}")]);
     assert!(remaining_containers.is_empty(), "a labeled container survived prune_stale_test_resources: {remaining_containers:?}");

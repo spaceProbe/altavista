@@ -52,6 +52,8 @@ from pathlib import Path
 
 import pytest
 
+from altavista.docker_test_lock import lock_docker_tests
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO_ROOT / "services" / "cfs" / "Dockerfile"
 DIGEST_DOC = REPO_ROOT / "services" / "cfs" / "IMAGE_DIGEST.md"
@@ -295,6 +297,20 @@ def test_manifest_paths_exist_and_hash_match() -> None:
 # ---------------------------------------------------------------------------------------------
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_image_digest_matches_recorded_value() -> None:
+    # Question 207: this test only ever READS (`docker image inspect`) -- it never builds,
+    # tags, or removes anything, and `altavista-cfs-lockstep:local` itself never carries
+    # `av.test` (that label is reserved for TEST-created resources; this is a persistent build
+    # artifact `services/cfs/build-image.sh` produces by hand). So it is not exposed to
+    # question 207's actual race the way a labelled-resource test is. It still takes the
+    # host-wide lock for its whole body anyway, for the same reason every Docker-gated test in
+    # this workspace now does: a concurrent `docker rmi`/prune from ANY other Docker-gated
+    # process on this host, however unlikely to target this exact image, is a race this test has
+    # no need to ever run concurrently with.
+    with lock_docker_tests():
+        _run_image_digest_matches_recorded_value()
+
+
+def _run_image_digest_matches_recorded_value() -> None:
     actual = built_digest()
     expected = recorded_digest()
     if actual == expected:

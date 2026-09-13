@@ -124,6 +124,8 @@ from pathlib import Path
 
 import pytest
 
+from altavista.docker_test_lock import lock_docker_tests
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EDGE_PLUGIN_DIR = REPO_ROOT / "services" / "edge-plugin"
 DOCKERFILE = EDGE_PLUGIN_DIR / "Dockerfile"
@@ -370,6 +372,20 @@ def _wait_for_container_stdout_lines(name: str, prefixes: tuple[str, ...], timeo
 
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_network_none_denies_everything_and_the_internal_network_delivers_batches_to_a_real_ingest():
+    # Question 207: every container this test creates carries `av.test`/`av.test.run_id`
+    # (`ResourceGuard.label_args()` above) -- exactly the label
+    # `av_lockstep::docker::prune_stale_test_resources` sweeps DAEMON-WIDE. A concurrent Rust
+    # `cargo test` process in ANY worktree on this host calling that sweep mid-run could tear
+    # this test's own containers out from under it -- the identical exposure question 207 found
+    # on the Rust side. Held for this whole test body (not just around any one docker command),
+    # via the SAME `$HOME`-rooted lock file the Rust side uses (`altavista.docker_test_lock`'s
+    # own module doc names the exact path and the cross-language proof that both sides agree on
+    # it).
+    with lock_docker_tests():
+        _run_network_none_denies_everything_and_the_internal_network_delivers_batches_to_a_real_ingest()
+
+
+def _run_network_none_denies_everything_and_the_internal_network_delivers_batches_to_a_real_ingest():
     run_id = uuid.uuid4().hex[:12]
     run_scratch = SCRATCH_ROOT / run_id
     run_scratch.mkdir(parents=True, exist_ok=True)

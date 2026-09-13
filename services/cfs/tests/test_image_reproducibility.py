@@ -92,6 +92,8 @@ from pathlib import Path
 
 import pytest
 
+from altavista.docker_test_lock import lock_docker_tests
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKERFILE = REPO_ROOT / "services" / "cfs" / "Dockerfile"
 OPT_IN_VAR = "AV_CFS_RUN_REPRO_BUILD"
@@ -249,6 +251,16 @@ def _describe_cfs_file_diff(hashes_1: dict[str, str], hashes_2: dict[str, str]) 
 
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_two_independent_builds_produce_the_same_image_id() -> None:
+    # Question 207: opt-in and rare (AV_CFS_RUN_REPRO_BUILD=1, ~10-20 minutes per build) as this
+    # test is, it still shells out to `docker build`/`docker rmi` against the SAME shared
+    # daemon every other Docker-gated test on this host uses -- held for the whole body, before
+    # either build starts, for the same reason every other Docker-gated test in this workspace
+    # now does.
+    with lock_docker_tests():
+        _run_two_independent_builds_produce_the_same_image_id()
+
+
+def _run_two_independent_builds_produce_the_same_image_id() -> None:
     run_id = str(int(time.time()))
     tag_1 = f"altavista-cfs-repro-test-1-{run_id}:local"
     tag_2 = f"altavista-cfs-repro-test-2-{run_id}:local"

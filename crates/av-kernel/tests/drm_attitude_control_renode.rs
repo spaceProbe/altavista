@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 
 use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, Fault, Parameter, SosConfiguration, SystemDefinition};
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
-use av_lockstep::docker::{prune_stale_test_resources, test_label_args, test_run_id};
+use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id};
 use gmat_sys::Gmat;
 
 /// Not a real item -- just an anchor for the module doc comment's own cross-reference above.
@@ -497,9 +497,17 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let _engine = gmat_sys::engine_lock();
     let (truth, star, imu, base_sos) = load_native_fixtures_and_base_sos();
 
+    // Question 207: held for this whole (`#[ignore]`d, but still real when run explicitly)
+    // test body -- a different worktree's own docker-gated `cargo test`/`pytest` process racing
+    // this daemon-wide prune sweep is exactly what round 3's own gate measured failing
+    // elsewhere in this workspace (crates/av-lockstep/tests/docker_lifecycle.rs's own doc
+    // comment has the full account). `prune_stale_test_resources` now requires proof (a `&
+    // DockerTestLock` parameter) that the caller already holds this lock.
+    let _lock = lock_docker_tests();
+
     // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its own
     // `Drop` guards never ran if that run was killed) before this test creates anything.
-    prune_stale_test_resources();
+    prune_stale_test_resources(&_lock);
     let run_id = test_run_id();
 
     // --- Posix-container half (ContainerBinding.image path, digest-pulled). ---
