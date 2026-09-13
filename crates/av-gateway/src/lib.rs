@@ -5,10 +5,15 @@
 //!
 //! ## Module map
 //!
-//! - [`counters`] -- [`counters::Counters`], the shared refusal-counting primitive every
-//!   other module in this crate increments through: ADR-004's "everything rejected is
-//!   counted" rule, mechanically enforced by having exactly one counting type rather than
-//!   ad hoc counters per module.
+//! - [`counters`] -- **moved to `av_command::counters` (R3.1)**, unchanged in behaviour, and
+//!   re-exported here under the identical `crate::counters::{Counted, Counters}` path so no
+//!   call site in this crate changed: `av-command` gained its own refusal surface this round
+//!   (service-principal verification on `Dispatch`/`Ack`/`Expire`/`Fail`) and needed the
+//!   identical shared counting primitive; the move goes to the lower crate in the dependency
+//!   graph (`av-gateway` already depends on `av-command`, never the reverse) rather than
+//!   duplicating the type. Still ADR-004's "everything rejected is counted" rule,
+//!   mechanically enforced by having exactly one counting type rather than ad hoc counters
+//!   per module, now shared by both crates instead of owned by this one alone.
 //! - [`labels`] -- [`labels::ClearanceLadder`] (D2): an explicit, deployment-configured,
 //!   ordered clearance ladder (rank = index), copied from `crates/av-edge/src/policy.rs`'s
 //!   `ProducerPolicy` convention verbatim -- never a hardcoded enum or a numeric level. A
@@ -52,7 +57,13 @@
 //! random id anywhere (D5's query id and every refusal are pure functions of their inputs).
 
 pub mod catalogue;
-pub mod counters;
+/// R3.1: this module moved to `av_command::counters` unchanged in behaviour -- see that
+/// module's own doc for the full reasoning. Re-exported under this crate's own, pre-existing
+/// `counters` path so every call site here (`crate::counters::{Counted, Counters}`) keeps
+/// resolving without change.
+pub mod counters {
+    pub use av_command::counters::{Counted, Counters};
+}
 pub mod evidence;
 pub mod gateway;
 pub mod labels;

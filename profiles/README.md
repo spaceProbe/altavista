@@ -47,6 +47,7 @@ authority:                       # optional -- only profiles that declare a comm
   mfa_amr_methods: [<amr claim value that satisfies the MFA gate>, ...]        # A2.2
   mfa_acr: <exact acr claim value that satisfies the MFA gate, or "">          # A2.2
   delegations_path: <repo-relative path to a delegations YAML file, or "">     # A2.2
+  service_roles: { <role name>: [<"dispatch"|"ack"|"expire"|"fail">, ...], ... } # R3.1
 
 audit:                           # optional -- omitted or sink_path: "" means no sink configured
   sink_path: <repo-relative file every transition/refusal is appended to as an RFC 5424 line>  # A2.2
@@ -96,6 +97,16 @@ planes:
   load_delegations`; empty means no delegations file, an empty table, never an error).
   Delegations are static, reviewed, profile-declared configuration, loaded once at process
   construction -- like the `.rego` bundle above -- never a runtime-mutable store.
+  **R3.1 addition** (`docs/aiplane-plan.md` round 2's declared gap; question 206's open item),
+  read by the identical loader above: `service_roles` (role name -> the service RPCs it may
+  call, `"dispatch"`/`"ack"`/`"expire"`/`"fail"` only, never `"authorize"`; a role absent here
+  grants nothing -- deny by default). **Must be disjoint from `roles` above** -- checked at
+  load time (`crates/av-command/src/authz.rs::check_service_roles_disjoint`) with a typed error
+  naming any overlapping role, so a human authorizer's own group can never silently double as
+  a dispatch/ack/expire/fail credential. A verified OIDC token is a service principal exactly
+  when at least one of its groups grants, via this table, the RPC being called -- see
+  `crates/av-command/src/service.rs`'s module doc, "R3.1: a service principal, verified like a
+  human token".
   A **top-level `audit` block** (also A2.2, `crates/av-command/src/audit.rs::
   load_profile_audit_config`) declares `sink_path`: the file every command-authority
   transition and every refused `Authorize` attempt is appended to as one RFC 5424

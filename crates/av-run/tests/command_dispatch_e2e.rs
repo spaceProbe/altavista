@@ -36,15 +36,16 @@ use av_cdm::pb::{
     SosConfiguration, SystemDefinition,
 };
 use av_command::audit::{AuditSinkConfig, AuditWriter};
-use av_command::authz::{DelegationTable, RoleTable};
+use av_command::authz::{DelegationTable, RoleTable, ServiceRoleTable};
 use av_command::clock::{Clock, TestClock};
+use av_command::counters::Counters;
 use av_command::ledger::Ledger;
 use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_client::CommandAuthorityServiceClient;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
 use av_command::service::{AuthzConfig, CommandAuthorityServiceImpl, DispatchSink};
-use av_command::test_support::{valid_claims, TestIssuer};
+use av_command::test_support::{claims_with_roles_and_mfa, valid_claims, RoleAndMfaClaims, TestIssuer};
 use av_kernel::drm::command_source::{pack_double_value, ExternalCommandSource};
 use av_kernel::drm::{execute, schema, RunConfig};
 use av_run::command_adapter::KernelCommandAdapter;
@@ -76,6 +77,15 @@ fn tmp_dir(name: &str) -> PathBuf {
 fn default_roles() -> BTreeMap<String, Vec<String>> {
     let mut roles = BTreeMap::new();
     roles.insert("operators".to_string(), vec!["mode".to_string()]);
+    roles
+}
+
+/// R3.1: the service-role table this test's `TestService` grants -- `"ground-segment"` may
+/// call all four service RPCs. Disjoint from [`default_roles`]'s `"operators"` by
+/// construction, matching `av_command::authz::check_service_roles_disjoint`'s own requirement.
+fn default_service_roles() -> BTreeMap<String, Vec<String>> {
+    let mut roles = BTreeMap::new();
+    roles.insert("ground-segment".to_string(), vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]);
     roles
 }
 
@@ -163,7 +173,16 @@ impl TestService {
         let addr: SocketAddr = listener.local_addr().expect("local_addr");
         let channel = Endpoint::from_shared(format!("http://{addr}")).expect("valid endpoint URI").connect_lazy();
 
-        let adapter = Arc::new(KernelCommandAdapter::new(CommandAuthorityServiceClient::new(channel.clone()), tokio::runtime::Handle::current()));
+        // R3.1: the adapter's own service_token, minted under a service role
+        // (default_service_roles's "ground-segment") the servicer's own service_role_table
+        // below actually grants -- see crates/av-command/src/service.rs's module doc, "R3.1: a
+        // service principal, verified like a human token". KERNEL_PRINCIPAL ("kernel" --
+        // av_run::command_adapter's own module doc) is the label the adapter declares on
+        // every Ack/Expire/Fail, so this token's own verified sub must equal it or every one
+        // of those calls would be refused PrincipalMismatch.
+        let adapter_service_token =
+            issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, av_run::command_adapter::KERNEL_PRINCIPAL, TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups: &["ground-segment"], amr: &[], acr: "" }));
+        let adapter = Arc::new(KernelCommandAdapter::new(CommandAuthorityServiceClient::new(channel.clone()), adapter_service_token, tokio::runtime::Handle::current()));
 
         let audit_path = ledger_dir.join("audit.log");
         let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
@@ -173,6 +192,8 @@ impl TestService {
             mfa_amr_methods: Arc::new(vec![]),
             mfa_acr: Arc::new(String::new()),
             audit,
+            service_role_table: Arc::new(ServiceRoleTable::from_config(&default_service_roles()).expect("this file's own service-role fixture always uses recognized rpc names")),
+            counters: Arc::new(Counters::new()),
         };
 
         let servicer = CommandAuthorityServiceImpl::new(
@@ -206,6 +227,14 @@ impl TestService {
         self.issuer.mint(&valid_claims(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S))
     }
 
+    /// R3.1: mints a real, fully-valid service token carrying `groups` -- for this test's own
+    /// direct `Dispatch` RPC calls (`Self::client`, never the adapter's own client, which is
+    /// wired to a separate, fixed service_token at construction -- see `Self::spawn`'s own
+    /// comment).
+    fn mint_service(&self, sub: &str, groups: &[&str]) -> String {
+        self.issuer.mint(&claims_with_roles_and_mfa(TEST_ISSUER, TEST_AUDIENCE, sub, TOKEN_NOW_UNIX_S, TOKEN_TTL_S, RoleAndMfaClaims { groups, amr: &[], acr: "" }))
+    }
+
     async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         self.handle.await.expect("server task joins cleanly at test end");
@@ -231,7 +260,8 @@ async fn propose_check_authorize_dispatch(service: &mut TestService, command: Co
         .authorize(av_cdm::pb::AuthorizeRequest { command_id: id.clone(), principal_token: token, delegation_id: String::new() })
         .await
         .expect("Authorize");
-    service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: id }).await.expect("Dispatch");
+    let dispatch_token = service.mint_service("ground-segment-1", &["ground-segment"]);
+    service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: id, service_token: dispatch_token }).await.expect("Dispatch");
 }
 
 fn read_port_traffic_log(path: &Path) -> PortTrafficLog {
@@ -408,7 +438,8 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
         service.client.check(av_cdm::pb::CheckRequest { command_id: "dup1".to_string() }).await.expect("Check");
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup1".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
-        service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup1".to_string() }).await.expect("first Dispatch must succeed");
+        let dispatch_token1 = service.mint_service("ground-segment-1", &["ground-segment"]);
+        service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup1".to_string(), service_token: dispatch_token1 }).await.expect("first Dispatch must succeed");
 
         // A second Propose/Check/Authorize for a fresh command id, but the identical
         // idempotency_key -- the second Dispatch must be refused ALREADY_EXISTS.
@@ -418,7 +449,8 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
         service.client.check(av_cdm::pb::CheckRequest { command_id: "dup2".to_string() }).await.expect("Check");
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup2".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
-        let err = service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup2".to_string() }).await.expect_err("a second Dispatch sharing dup1's own idempotency_key must be refused");
+        let dispatch_token2 = service.mint_service("ground-segment-1", &["ground-segment"]);
+        let err = service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup2".to_string(), service_token: dispatch_token2 }).await.expect_err("a second Dispatch sharing dup1's own idempotency_key must be refused");
         assert_eq!(err.code(), Code::AlreadyExists, "{err:?}");
     });
 

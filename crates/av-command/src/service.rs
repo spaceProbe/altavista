@@ -81,6 +81,66 @@
 //!   `Authorize` attempt (wrong role, missing MFA, or an invalid/expired delegation) still
 //!   emits an [`crate::audit`] line before this module returns the `Status` -- see
 //!   [`CommandAuthorityServiceImpl::authorize`]'s own body.
+//! - **`Dispatch`/`Ack`/`Expire`/`Fail`'s `service_token` fails OIDC verification** (R3.1,
+//!   [`crate::oidc::TokenError`]) -> **`UNAUTHENTICATED`**, the identical mapping and identical
+//!   reasoning as `Authorize`'s `principal_token` above -- there is no second verifier and no
+//!   second status-code decision for it.
+//! - **A verified `service_token` names no service role granting the RPC being called** (R3.1,
+//!   [`crate::authz::ServiceAuthzError`]) -> **`PERMISSION_DENIED`**, the identical reasoning as
+//!   `Authorize`'s `AuthzError` bullet above: identity is already established
+//!   ([`crate::oidc::verify`] already succeeded), what is refused is whether this real, known
+//!   identity may do this specific thing. This is also the refusal a **purely human** token
+//!   gets on any of these four RPCs (its groups are never a `service_roles` key at all,
+//!   [`crate::authz::check_service_roles_disjoint`]'s own construction) -- see the module doc's
+//!   "R3.1: a service principal, verified like a human token" section below for why that is
+//!   exactly the right refusal, not a distinct one.
+//! - **`Ack`/`Expire`/`Fail`'s caller-declared `principal` disagrees with the verified
+//!   `service_token` subject** (R3.1, [`ServiceError::PrincipalMismatch`]) ->
+//!   **`INVALID_ARGUMENT`**: a property of the request's own payload (a self-contradictory
+//!   declared label), the identical reasoning `AlreadyStarted`/`EnvelopeNotAllowed` above
+//!   already use for the same code -- never `PERMISSION_DENIED` (this is not about whether the
+//!   verified identity may act; it already may, by the point this check runs) and never
+//!   `UNAUTHENTICATED` (identity is already established).
+//!
+//! # R3.1: a service principal, verified like a human token (`docs/aiplane-plan.md` round 2's
+//! declared gap; `docs/open-questions.md` question 206's open item)
+//!
+//! `Dispatch`, `Ack`, `Expire` and `Fail` each now authenticate a real OIDC **service**
+//! subject through [`CommandAuthorityServiceImpl::authenticate_service_principal`] -- the
+//! **same** [`oidc::verify`] path `Authorize`'s `principal_token` already takes: the same
+//! [`IssuerConfig`] this service was constructed with, the same RS256-only allow-list, the
+//! same boundary-nanosecond expiry against [`Self::clock`]. There is no second verifier
+//! anywhere in this crate, and none of [`crate::oidc::TokenError`]'s sixteen typed refusals
+//! was relaxed to make this possible.
+//!
+//! **How a service subject is distinguished from a human one**: structurally, not by any
+//! claim the secsso contract declares (`authority.proto`'s own `Principal` doc comment
+//! explains why that message has no human-vs-service field). A verified token is treated as a
+//! service principal *exactly when* at least one of its groups grants -- via
+//! [`crate::authz::ServiceRoleTable`], the profile's `authority.service_roles` block -- the
+//! specific RPC being called. [`crate::authz::check_service_roles_disjoint`] (enforced at
+//! [`crate::authz::load_profile_authz_config`] load time, before this service ever serves an
+//! RPC) is what makes this distinction real rather than accidental: `service_roles` and the
+//! human `authority.roles` table can never share a role name, so a group that grants a human
+//! command class can never *also* grant a service RPC, and a token minted for a person (which
+//! carries that group precisely because they hold a human authorization role) can therefore
+//! never drive the asset through these four RPCs. A purely human token is refused the
+//! identical [`crate::authz::ServiceAuthzError::ServiceRoleNotGranted`] an unrecognized or
+//! under-scoped service role gets -- one refusal, not two, because "service principal" is
+//! *defined* as "holds a granting service role," and a human token simply never does.
+//!
+//! **The `principal`-disagreement rule** (`Ack`/`Expire`/`Fail`, `AckRequest.principal`'s own
+//! doc comment restated here at the enforcement site): the verified `service_token` subject is
+//! always what lands on `CommandTransition.principal` -- never the request's own `principal`
+//! field, which is a caller-*declared* label (e.g. the kernel binding's own identity string),
+//! recorded only in `CommandTransition.reason` via [`format_service_reason`]. When that
+//! declared label is non-empty and disagrees with the verified subject,
+//! [`CommandAuthorityServiceImpl::check_declared_principal`] refuses the request
+//! (`INVALID_ARGUMENT`) rather than silently preferring either value: this crate's rule
+//! against a generic refusal applies here too (a typed [`ServiceError::PrincipalMismatch`],
+//! not a warning-and-continue), and a discrepancy between what a caller claims and what it is
+//! verified to be is exactly the kind of fact ADR-004's "everything rejected is counted" rule
+//! exists to surface. An empty declared `principal` declares nothing and is always accepted.
 //!
 //! # Idempotency ([`CommandAuthorityServiceImpl::dispatch`]) -- a guarantee that survives a
 //! restart, not just an in-memory guard
@@ -182,11 +242,14 @@
 //! a way to record that: `Expire` (`CommandOutcome::Expired` -> [`state::expire`],
 //! `DISPATCHED -> EXPIRED`) and `Fail` (`CommandOutcome::DuplicateIdempotencyKey`/`Refused`/
 //! `NotDispatchedRunEnded` -> [`state::fail`], `DISPATCHED -> FAILED`). Both are thin wire
-//! adapters exactly like `Dispatch`/`Ack` above: no state-machine logic of their own, a fixed
-//! service-identity principal (never a caller-supplied one -- neither RPC is a human-
-//! authorization gate), [`Self::append_last_transition`] for the ledger append and audit
-//! line, and a [`tonic::Status`] mapping through [`to_status`] identical to every other
-//! [`state::CommandError`] this module already handles.
+//! adapters exactly like `Dispatch`/`Ack` above: no state-machine logic of their own,
+//! [`Self::append_last_transition`] for the ledger append and audit line, and a
+//! [`tonic::Status`] mapping through [`to_status`] identical to every other
+//! [`state::CommandError`] this module already handles. **R3.1 update**: the principal
+//! recorded on either edge is no longer a fixed, unauthenticated service-identity string --
+//! see the module doc's "R3.1: a service principal, verified like a human token" section
+//! above. Neither RPC is a human-authorization gate (that is still `Authorize`'s own job,
+//! untouched by R3.1); both now require a verified **service** subject instead.
 //!
 //! # Transport (question 155/84)
 //!
@@ -215,8 +278,9 @@ use av_cdm::pb::{
 
 use crate::audit::{self, AuditWriter};
 use crate::authority::{self, CheckCommandError};
-use crate::authz::{self, AuthzError, DelegationTable, RoleTable};
+use crate::authz::{self, AuthzError, DelegationTable, RoleTable, ServiceAuthzError, ServiceRoleTable, ServiceRpc};
 use crate::clock::Clock;
+use crate::counters::{Counted, Counters};
 use crate::ledger::Ledger;
 use crate::oidc::{self, IssuerConfig};
 use crate::policy::PolicyBundle;
@@ -225,24 +289,17 @@ use crate::state::{self, CommandError};
 
 pub use crate::pb::command_authority_service_server::{CommandAuthorityService as CommandAuthorityServiceTrait, CommandAuthorityServiceServer};
 
-/// The principal recorded on a `DISPATCHED` transition -- this service itself, not a
-/// caller-supplied identity; matches `crates/av-command/src/state.rs`'s own test convention
-/// (`dispatch(c, "ground-segment", ...)`).
-pub const DISPATCH_PRINCIPAL: &str = "ground-segment";
-
 /// The `CommandTransition.reason` text `Dispatch` writes -- naming the seam A3 fills, not a
-/// real transport (see the module doc's "`DispatchSink` -- not A3" section).
+/// real transport (see the module doc's "`DispatchSink` -- not A3" section). R3.1: the
+/// *principal* `Dispatch` records is no longer a fixed constant (`DISPATCH_PRINCIPAL`, the
+/// literal `"ground-segment"`, used to be this whole story) -- it is now the verified service
+/// subject `Dispatch.service_token` names, so that constant (and `EXPIRE_PRINCIPAL`/
+/// `FAIL_PRINCIPAL`, the identical shape for `Expire`/`Fail`) is deleted rather than kept as a
+/// misleading leftover: none of the three means anything once identity is real. This reason
+/// text still means something (it still names *why* -- the DispatchSink seam -- even though it
+/// no longer needs to also carry *who*), so it stays, now composed with the granting service
+/// role by [`format_service_reason`].
 pub const DISPATCH_REASON: &str = "handed to the DispatchSink (docs/aiplane-plan.md milestone A3 supplies the real kernel binding behind it)";
-
-/// The principal recorded on an `EXPIRED` transition produced by `Expire` (A3.2, D2) -- this
-/// service's own clock-driven bookkeeping, not a caller-supplied identity, mirroring
-/// [`DISPATCH_PRINCIPAL`]'s reasoning.
-pub const EXPIRE_PRINCIPAL: &str = "kernel-clock";
-
-/// The principal recorded on a `FAILED` transition produced by `Fail` (A3.2, D2) -- the
-/// kernel binding reporting its own refusal, not a caller-supplied identity, mirroring
-/// [`DISPATCH_PRINCIPAL`]'s reasoning.
-pub const FAIL_PRINCIPAL: &str = "kernel";
 
 /// Hands an `AUTHORIZED`-turned-`DISPATCHED` [`Command`] to whatever transport reaches the
 /// simulated asset. The one seam A3 (`docs/aiplane-plan.md`) fills with the real
@@ -279,12 +336,29 @@ impl DispatchSink for RecordingDispatchSink {
 
 /// A2.2's construction-time configuration for [`CommandAuthorityServiceImpl::new`] -- see
 /// that function's own doc for why this is a group rather than four more bare parameters.
+/// R3.1 adds `service_role_table`/`counters` to this same group for the identical reason
+/// (clippy's `too_many_arguments`, and this crate's rule against silencing it): `new` was
+/// already at seven parameters before this round.
 pub struct AuthzConfig {
     pub role_table: Arc<RoleTable>,
     pub delegations: Arc<DelegationTable>,
     pub mfa_amr_methods: Arc<Vec<String>>,
     pub mfa_acr: Arc<String>,
     pub audit: Arc<AuditWriter>,
+    /// R3.1: the profile's declared service-role table (`authority.service_roles`) --
+    /// `Dispatch`/`Ack`/`Expire`/`Fail` each check the verified `service_token`'s
+    /// `Principal.groups` against this table for a role granting that specific RPC. Disjoint
+    /// from `role_table` above by construction (checked at config load,
+    /// `crate::authz::load_profile_authz_config`) -- see [`crate::authz::
+    /// check_service_roles_disjoint`]'s own doc for why that matters.
+    pub service_role_table: Arc<ServiceRoleTable>,
+    /// R3.1: ADR-004's "everything rejected is counted" primitive (moved here from
+    /// `crates/av-gateway/src/counters.rs`, `crate::counters`) -- every refusal `Authorize`/
+    /// `Dispatch`/`Ack`/`Expire`/`Fail` can produce increments through this shared instance,
+    /// which is also handed to `crate::evidence::AdminState` so `/admin/api/evidence` reports
+    /// the identical counts as observable evidence, not just in-memory state invisible outside
+    /// this process.
+    pub counters: Arc<Counters>,
 }
 
 /// Everything a [`CommandAuthorityServiceImpl`] RPC can fail with, before it is mapped to a
@@ -316,6 +390,50 @@ pub enum ServiceError {
     /// maps to `PERMISSION_DENIED`, distinct from [`Self::TokenInvalid`]'s `UNAUTHENTICATED`.
     #[error(transparent)]
     Authz(#[from] AuthzError),
+    /// R3.1: a verified `service_token` names no service role granting the RPC being called
+    /// (`Dispatch`/`Ack`/`Expire`/`Fail`) -- see [`crate::authz::ServiceAuthzError`] for the
+    /// full refusal (today, exactly one shape) and the module doc's status-code section for
+    /// why this maps to `PERMISSION_DENIED`, the identical reasoning as [`Self::Authz`]:
+    /// identity is already established by this point, what is refused is whether that real,
+    /// known identity may do this specific thing.
+    #[error(transparent)]
+    ServiceAuthz(#[from] ServiceAuthzError),
+    /// R3.1: `Ack`/`Expire`/`Fail`'s caller-declared `principal` label disagrees with the
+    /// verified `service_token` subject -- see the module doc's "R3.1: the `principal`
+    /// disagreement rule" section for the full reasoning behind refusing rather than silently
+    /// preferring one value. `INVALID_ARGUMENT`: this is a property of the request's own
+    /// payload (a self-contradictory declared label), not of who is calling or whether they
+    /// may -- the identical reasoning `Self::DuplicateIdempotencyKey`'s sibling refusals
+    /// above (`AlreadyStarted`/`EnvelopeNotAllowed`) already use for the same code.
+    #[error(
+        "principal {declared:?} disagrees with the verified service subject {verified:?} -- a \
+         caller-declared principal label must agree with the verified service_token subject or \
+         be empty; it is never silently overridden"
+    )]
+    PrincipalMismatch { declared: String, verified: String },
+}
+
+/// R3.1: every [`ServiceError`] this module can produce now counts through
+/// [`crate::counters::Counters`] -- ADR-004's "everything rejected is counted" rule, applied
+/// uniformly rather than per call site. Delegates to the wrapped typed error's own
+/// [`Counted::code`] wherever one exists (so there is exactly one place each nested enum's
+/// code is spelled), and supplies this type's own code directly for its own, non-delegating
+/// variants.
+impl Counted for ServiceError {
+    fn code(&self) -> &'static str {
+        match self {
+            ServiceError::NotFound(_) => "not_found",
+            ServiceError::State(e) => e.code(),
+            ServiceError::Check(CheckCommandError::State(e)) => e.code(),
+            ServiceError::Check(CheckCommandError::Io(_)) => "check_io_error",
+            ServiceError::DuplicateIdempotencyKey(_) => "duplicate_idempotency_key",
+            ServiceError::Io(_) => "io_error",
+            ServiceError::TokenInvalid(e) => e.code(),
+            ServiceError::Authz(e) => e.code(),
+            ServiceError::ServiceAuthz(e) => e.code(),
+            ServiceError::PrincipalMismatch { .. } => "principal_mismatch",
+        }
+    }
 }
 
 /// Maps one [`ServiceError`] to the [`tonic::Status`] the module doc's status-code section
@@ -358,6 +476,8 @@ fn to_status(err: ServiceError) -> Status {
         ServiceError::Io(_) => Status::new(Code::Internal, err.to_string()),
         ServiceError::TokenInvalid(_) => Status::new(Code::Unauthenticated, err.to_string()),
         ServiceError::Authz(_) => Status::new(Code::PermissionDenied, err.to_string()),
+        ServiceError::ServiceAuthz(_) => Status::new(Code::PermissionDenied, err.to_string()),
+        ServiceError::PrincipalMismatch { .. } => Status::new(Code::InvalidArgument, err.to_string()),
     }
 }
 
@@ -408,6 +528,12 @@ pub struct CommandAuthorityServiceImpl {
     /// A2.2: every transition, and every `Authorize` refusal, as one RFC 5424 line -- see
     /// [`crate::audit`].
     audit: Arc<AuditWriter>,
+    /// R3.1: the profile's declared service-role table -- see [`crate::authz::
+    /// ServiceRoleTable`] and [`AuthzConfig::service_role_table`].
+    service_role_table: Arc<ServiceRoleTable>,
+    /// R3.1: ADR-004's "everything rejected is counted" primitive -- see [`AuthzConfig::
+    /// counters`].
+    counters: Arc<Counters>,
     commands: Mutex<BTreeMap<String, Command>>,
     dispatched_idempotency_keys: Mutex<BTreeSet<String>>,
 }
@@ -438,7 +564,7 @@ impl CommandAuthorityServiceImpl {
         // RPC is served -- the same construction-time discipline as the idempotency guard
         // above, now made possible by `LedgerRecord.command` (`authority.proto`, A1.3-round-2).
         let commands = ledger.scan_commands()?;
-        let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit } = authz;
+        let AuthzConfig { role_table, delegations, mfa_amr_methods, mfa_acr, audit, service_role_table, counters } = authz;
         Ok(Self {
             ledger,
             bundle,
@@ -451,6 +577,8 @@ impl CommandAuthorityServiceImpl {
             mfa_amr_methods,
             mfa_acr,
             audit,
+            service_role_table,
+            counters,
             commands: Mutex::new(commands),
             dispatched_idempotency_keys: Mutex::new(dispatched_idempotency_keys),
         })
@@ -506,6 +634,99 @@ impl CommandAuthorityServiceImpl {
         let event = audit::event_for_refusal(now_tai_ns, &command.id, &command.entity_id, &command.command_class, principal, delegation_id, message);
         self.audit.write(&event).map_err(ServiceError::Io)
     }
+
+    /// R3.1: increments [`Self::counters`] for `err`'s own [`Counted::code`] and maps it to a
+    /// [`tonic::Status`] via [`to_status`] -- the one place every RPC below turns a
+    /// [`ServiceError`] into a wire response, so a refusal can never reach a caller without
+    /// also leaving a trace in the counters `/admin/api/evidence` reports (ADR-004:
+    /// "everything rejected is counted"). Takes `&self` (not a bare function) precisely so it
+    /// can reach `self.counters` without every call site threading it through separately.
+    fn to_status_counted(&self, err: ServiceError) -> Status {
+        self.counters.record(&err);
+        to_status(err)
+    }
+
+    /// R3.1: `Dispatch`/`Ack`/`Expire`/`Fail`'s shared service-principal gate -- see the
+    /// module doc's "R3.1: a service principal, verified like a human token" section for the
+    /// full contract. Verifies `service_token` through the **identical** [`oidc::verify`]
+    /// path `Authorize`'s own `principal_token` takes (same [`IssuerConfig`], same clock
+    /// reading, same RS256-only rule -- there is no second verifier anywhere in this crate),
+    /// then checks the verified [`av_cdm::pb::Principal::groups`] against
+    /// [`Self::service_role_table`] for a role granting `rpc`. Returns the verified principal
+    /// together with the granting role's own name (folded into the transition's reason by
+    /// [`format_service_reason`]) -- never partially: a token that verifies but grants no
+    /// service role for this RPC returns [`ServiceError::ServiceAuthz`], not `Ok`.
+    fn authenticate_service_principal(&self, service_token: &str, rpc: ServiceRpc, now_tai_ns: i64) -> Result<(av_cdm::pb::Principal, String), ServiceError> {
+        let principal = oidc::verify(service_token, &self.issuer_config, now_tai_ns).map_err(ServiceError::TokenInvalid)?;
+        let role = authz::authorize_service_call(&principal, rpc, &self.service_role_table).map_err(ServiceError::ServiceAuthz)?;
+        Ok((principal, role))
+    }
+
+    /// R3.1: the `principal`-disagreement rule shared by `Ack`/`Expire`/`Fail` -- see
+    /// `proto/altavista/v1/authority.proto`'s `AckRequest.principal` doc comment for the full
+    /// contract this enforces. `declared` is the request's own caller-supplied `principal`
+    /// field (a label, never trusted as identity on its own); `verified` is the
+    /// [`authenticate_service_principal`]-verified subject, always authoritative. An empty
+    /// `declared` value declares nothing and is never a disagreement; a non-empty value that
+    /// differs from `verified` is refused [`ServiceError::PrincipalMismatch`] rather than one
+    /// of the two being silently preferred.
+    fn check_declared_principal(&self, declared: &str, verified: &str) -> Result<(), ServiceError> {
+        if declared.is_empty() || declared == verified {
+            Ok(())
+        } else {
+            Err(ServiceError::PrincipalMismatch { declared: declared.to_string(), verified: verified.to_string() })
+        }
+    }
+
+    /// R3.1 (manager's review): the one refusal path for `Dispatch`/`Ack`/`Expire`/`Fail`'s
+    /// **identity and authorization** refusals -- an unverifiable or missing `service_token`, a
+    /// verified token granting no service role for this RPC, and a caller-declared `principal`
+    /// that disagrees with the verified subject. It does what
+    /// [`Self::audit_authorize_refusal`] already does for the human `Authorize` path: writes
+    /// one RFC 5424 audit line (question 54's SIEM export) *as well as* counting the refusal,
+    /// because a counter lives only in this process's memory and behind
+    /// `/admin/api/evidence` -- a security refusal whose only trace is a counter is invisible
+    /// to the sink a SIEM actually reads, and the asymmetry ("a human's refused authorization
+    /// is exported, a service's refused dispatch is not") is not one any reader of ADR-004
+    /// would predict.
+    ///
+    /// `entity` and `class` are deliberately empty: this refusal is decided **before** the
+    /// command is loaded (see each RPC's own body for why that order is the secure one), so
+    /// the service genuinely does not know them at this point, and
+    /// [`crate::audit::AuditWriter::write`] omits an empty structured-data parameter rather
+    /// than emitting a placeholder. `command_id` comes from the request, which is the one
+    /// identifier the caller did supply.
+    ///
+    /// An audit-sink write failure is reported as `Internal` exactly as
+    /// [`CommandAuthorityServiceImpl::authorize`] already reports it -- but the original
+    /// refusal is counted **first**, so a failing sink can never erase the refusal's trace in
+    /// the counters as well.
+    fn refuse_service_call(&self, command_id: &str, principal: &str, err: ServiceError) -> Status {
+        let message = err.to_string();
+        let event = audit::event_for_refusal(self.clock.now_tai_ns(), command_id, "", "", principal, "", &message);
+        match self.audit.write(&event) {
+            Ok(()) => self.to_status_counted(err),
+            Err(io) => {
+                self.counters.record(&err);
+                self.to_status_counted(ServiceError::Io(io))
+            }
+        }
+    }
+}
+
+/// R3.1: composes the base reason text a `Dispatch`/`Ack`/`Expire`/`Fail` transition carries
+/// with the service role that granted the call and (when the caller declared one, and it
+/// agreed with the verified subject -- [`CommandAuthorityServiceImpl::check_declared_
+/// principal`] already refused a disagreeing one before this is ever called) the caller's own
+/// declared label -- so the ledger and audit line show not merely *that* a service principal
+/// acted, but *which role* granted it, mirroring [`authz::format_authz_reason`]'s identical
+/// "name which role granted it" convention for the human `Authorize` path.
+fn format_service_reason(base_reason: &str, role: &str, declared_label: &str) -> String {
+    if declared_label.is_empty() {
+        format!("{base_reason} (service_role={role:?})")
+    } else {
+        format!("{base_reason} (service_role={role:?} declared_principal={declared_label:?})")
+    }
 }
 
 #[tonic::async_trait]
@@ -553,7 +774,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
     /// [`crate::audit`] line before this method returns its `Status`.
     async fn authorize(&self, request: Request<AuthorizeRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
 
         // A2.1: verify identity before attempting any state transition.
         let now_tai_ns = self.clock.now_tai_ns();
@@ -561,8 +782,8 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
             Ok(p) => p,
             Err(e) => {
                 let message = e.to_string();
-                self.audit_authorize_refusal(&command, "", &req.delegation_id, &message).map_err(to_status)?;
-                return Err(to_status(ServiceError::TokenInvalid(e)));
+                self.audit_authorize_refusal(&command, "", &req.delegation_id, &message).map_err(|e| self.to_status_counted(e))?;
+                return Err(self.to_status_counted(ServiceError::TokenInvalid(e)));
             }
         };
 
@@ -577,21 +798,37 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
             Ok(d) => d,
             Err(e) => {
                 let message = e.to_string();
-                self.audit_authorize_refusal(&command, &principal.sub, &req.delegation_id, &message).map_err(to_status)?;
-                return Err(to_status(ServiceError::Authz(e)));
+                self.audit_authorize_refusal(&command, &principal.sub, &req.delegation_id, &message).map_err(|e| self.to_status_counted(e))?;
+                return Err(self.to_status_counted(ServiceError::Authz(e)));
             }
         };
 
         let reason = authz::format_authz_reason(&command.command_class, &decision);
-        let authorized = state::authorize(command, &principal.sub, &reason, &req.delegation_id, &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&authorized).map_err(to_status)?;
+        let authorized = state::authorize(command, &principal.sub, &reason, &req.delegation_id, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&authorized).map_err(|e| self.to_status_counted(e))?;
         self.put_command(authorized.clone());
         Ok(Response::new(CommandResponse { command: Some(authorized), decision: None }))
     }
 
+    /// R3.1: a real OIDC **service** subject, verified through [`Self::
+    /// authenticate_service_principal`] -- the identical path `Authorize` takes -- gated on a
+    /// service role granting `"dispatch"`. See the module doc's "R3.1: a service principal,
+    /// verified like a human token" section for the full contract; every refusal below counts
+    /// through [`Self::to_status_counted`].
+    ///
+    /// **Authentication happens before the command is loaded**, here and in `Ack`/`Expire`/
+    /// `Fail` (manager's review, R3.1): with the lookup first, an unauthenticated caller could
+    /// tell `NOT_FOUND` from `UNAUTHENTICATED` and so enumerate which command ids exist on this
+    /// service -- an existence oracle available to a caller with no credential at all. The
+    /// order below means an unauthenticated caller learns exactly one thing, that it is not
+    /// authenticated.
     async fn dispatch(&self, request: Request<DispatchRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let now_tai_ns = self.clock.now_tai_ns();
+        let (principal, role) = self
+            .authenticate_service_principal(&req.service_token, ServiceRpc::Dispatch, now_tai_ns)
+            .map_err(|e| self.refuse_service_call(&req.command_id, "", e))?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
 
         // Held across the state edge and the ledger append (both synchronous, no `.await`
         // point in between) so a racing second Dispatch for the same key either sees it
@@ -599,11 +836,12 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         // doc's "Idempotency" section.
         let mut seen = self.dispatched_idempotency_keys.lock().unwrap_or_else(|p| p.into_inner());
         if !command.idempotency_key.is_empty() && seen.contains(&command.idempotency_key) {
-            return Err(to_status(ServiceError::DuplicateIdempotencyKey(command.idempotency_key.clone())));
+            return Err(self.to_status_counted(ServiceError::DuplicateIdempotencyKey(command.idempotency_key.clone())));
         }
 
-        let dispatched = state::dispatch(command, DISPATCH_PRINCIPAL, DISPATCH_REASON, &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&dispatched).map_err(to_status)?;
+        let reason = format_service_reason(DISPATCH_REASON, &role, "");
+        let dispatched = state::dispatch(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&dispatched).map_err(|e| self.to_status_counted(e))?;
         if !dispatched.idempotency_key.is_empty() {
             seen.insert(dispatched.idempotency_key.clone());
         }
@@ -614,33 +852,64 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         Ok(Response::new(CommandResponse { command: Some(dispatched), decision: None }))
     }
 
+    /// R3.1: a real OIDC service subject gated on a role granting `"ack"` -- see
+    /// [`Self::dispatch`]'s own doc comment for the shared contract. `req.principal` is now a
+    /// caller-declared label (never trusted as identity); [`Self::check_declared_principal`]
+    /// refuses one that disagrees with the verified subject before any state transition is
+    /// attempted.
     async fn ack(&self, request: Request<AckRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
+        let now_tai_ns = self.clock.now_tai_ns();
+        let (principal, role) = self
+            .authenticate_service_principal(&req.service_token, ServiceRpc::Ack, now_tai_ns)
+            .map_err(|e| self.refuse_service_call(&req.command_id, "", e))?;
+        self.check_declared_principal(&req.principal, &principal.sub).map_err(|e| self.refuse_service_call(&req.command_id, &principal.sub, e))?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
+
+        let reason = format_service_reason(&req.reason, &role, &req.principal);
         let ack_level = AckLevel::try_from(req.ack_level).unwrap_or(AckLevel::Unspecified);
-        let acked = state::ack(command, &req.principal, &req.reason, ack_level, &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&acked).map_err(to_status)?;
+        let acked = state::ack(command, &principal.sub, &reason, ack_level, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&acked).map_err(|e| self.to_status_counted(e))?;
         self.put_command(acked.clone());
         Ok(Response::new(CommandResponse { command: Some(acked), decision: None }))
     }
 
     /// A3.2/D2: `DISPATCHED -> EXPIRED` (or `AUTHORIZED -> EXPIRED`, `state::expire`'s other
-    /// legal source state) -- see the module doc's "`Expire`/`Fail`" section.
+    /// legal source state) -- see the module doc's "`Expire`/`Fail`" section. R3.1: a real
+    /// OIDC service subject gated on a role granting `"expire"`, and `req.principal` is now
+    /// additive with the identical caller-declared-label contract [`Self::ack`] enforces --
+    /// see [`Self::dispatch`]'s own doc comment for the shared verification contract.
     async fn expire(&self, request: Request<ExpireRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
-        let expired = state::expire(command, EXPIRE_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&expired).map_err(to_status)?;
+        let now_tai_ns = self.clock.now_tai_ns();
+        let (principal, role) = self
+            .authenticate_service_principal(&req.service_token, ServiceRpc::Expire, now_tai_ns)
+            .map_err(|e| self.refuse_service_call(&req.command_id, "", e))?;
+        self.check_declared_principal(&req.principal, &principal.sub).map_err(|e| self.refuse_service_call(&req.command_id, &principal.sub, e))?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
+
+        let reason = format_service_reason(&req.reason, &role, &req.principal);
+        let expired = state::expire(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&expired).map_err(|e| self.to_status_counted(e))?;
         self.put_command(expired.clone());
         Ok(Response::new(CommandResponse { command: Some(expired), decision: None }))
     }
 
     /// A3.2/D2: `DISPATCHED -> FAILED` -- see the module doc's "`Expire`/`Fail`" section.
+    /// R3.1: identical service-principal and `principal`-disagreement contract as
+    /// [`Self::expire`], gated on a role granting `"fail"`.
     async fn fail(&self, request: Request<FailRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
-        let command = self.get_command(&req.command_id).map_err(to_status)?;
-        let failed = state::fail(command, FAIL_PRINCIPAL, &req.reason, &*self.clock).map_err(|e| to_status(e.into()))?;
-        self.append_last_transition(&failed).map_err(to_status)?;
+        let now_tai_ns = self.clock.now_tai_ns();
+        let (principal, role) = self
+            .authenticate_service_principal(&req.service_token, ServiceRpc::Fail, now_tai_ns)
+            .map_err(|e| self.refuse_service_call(&req.command_id, "", e))?;
+        self.check_declared_principal(&req.principal, &principal.sub).map_err(|e| self.refuse_service_call(&req.command_id, &principal.sub, e))?;
+        let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
+
+        let reason = format_service_reason(&req.reason, &role, &req.principal);
+        let failed = state::fail(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
+        self.append_last_transition(&failed).map_err(|e| self.to_status_counted(e))?;
         self.put_command(failed.clone());
         Ok(Response::new(CommandResponse { command: Some(failed), decision: None }))
     }

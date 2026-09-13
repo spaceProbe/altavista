@@ -99,6 +99,20 @@ pub enum CommandError {
     AckLevelNotIncreasing { previous: AckLevel, requested: AckLevel },
 }
 
+/// R3.1: the state-machine refusals `Dispatch`/`Ack`/`Expire`/`Fail` can already return
+/// (`IllegalTransition`, `AckLevelNotIncreasing`) now count too, through
+/// [`crate::counters::Counters`] -- ADR-004's "everything rejected is counted" rule.
+impl crate::counters::Counted for CommandError {
+    fn code(&self) -> &'static str {
+        match self {
+            CommandError::IllegalTransition { .. } => "state_illegal_transition",
+            CommandError::AlreadyStarted { .. } => "state_already_started",
+            CommandError::EnvelopeNotAllowed { .. } => "state_envelope_not_allowed",
+            CommandError::AckLevelNotIncreasing { .. } => "state_ack_level_not_increasing",
+        }
+    }
+}
+
 /// The `CommandState` a `Command`'s `state` field currently encodes, defaulting to
 /// `Unspecified` for a value outside the enum's range (a malformed/foreign `i32` is treated
 /// as "no state", never as a panic).
@@ -435,6 +449,27 @@ mod tests {
         let acked = ack(command, "flight-software", "executed", AckLevel::AssetExecuted, &clock).unwrap();
         assert_eq!(current_state(&acked), CommandState::Acked);
         assert_eq!(acked.transitions[0].ack_level, AckLevel::AssetExecuted as i32);
+    }
+
+    /// R3.1: every `CommandError` variant has its own stable, distinct, `snake_case` counter
+    /// code.
+    #[test]
+    fn command_error_counted_codes_are_distinct_and_snake_case() {
+        use crate::counters::Counted;
+        let codes: Vec<&'static str> = vec![
+            CommandError::IllegalTransition { from: CommandState::Proposed, to: CommandState::Dispatched }.code(),
+            CommandError::AlreadyStarted { state: CommandState::Checked }.code(),
+            CommandError::EnvelopeNotAllowed { envelope_id: "e".to_string() }.code(),
+            CommandError::AckLevelNotIncreasing { previous: AckLevel::Edge, requested: AckLevel::Edge }.code(),
+        ];
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "every variant must have its own distinct code: {codes:?}");
+        for code in &codes {
+            assert_eq!(*code, code.to_lowercase(), "codes must be snake_case: {code}");
+            assert!(code.starts_with("state_"), "codes must be namespaced: {code}");
+        }
     }
 
     /// `authorize` threads a non-empty `delegation_id` onto the transition -- A2 will enforce

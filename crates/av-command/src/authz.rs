@@ -132,6 +132,8 @@ use std::path::Path;
 use av_cdm::pb::{Command, Delegation, Principal, RoleBinding};
 use thiserror::Error;
 
+use crate::counters::Counted;
+
 /// The literal command-class/entity-id wildcard `RoleBinding.command_classes`/`Delegation.
 /// command_classes`/`Delegation.entity_ids` all use to mean "every value" -- see
 /// `authority.proto`'s own doc comments on those fields for why an empty list and `["*"]` are
@@ -256,6 +258,197 @@ pub fn load_delegations_file(yaml: &str) -> Result<DelegationTable, serde_yaml::
     Ok(DelegationTable::from_delegations(delegations))
 }
 
+// ---------------------------------------------------------------------------------------
+// R3.1 (`docs/aiplane-plan.md` round 2's declared gap; `docs/open-questions.md` question
+// 206's open item): a service role table, gating `Dispatch`/`Ack`/`Expire`/`Fail` on a
+// verified OIDC **service** subject -- the identical `crate::oidc::verify` path `Authorize`'s
+// `principal_token` already takes, never a second verifier. A service principal is
+// distinguished from a human one structurally, not by any claim the secsso contract itself
+// declares (there is no human-vs-service field on `Principal`, `authority.proto`'s own doc
+// comment on that message explains why not): **a verified token is treated as a service
+// principal exactly when at least one of its groups grants -- via this table -- the specific
+// RPC being called.** A purely-human token (every one of its groups is a human `roles` entry,
+// never a `service_roles` one) therefore always fails this table's own lookup and is refused
+// [`ServiceAuthzError::ServiceRoleNotGranted`] -- the same refusal a service token naming no
+// granting role at all gets, which is exactly the point: "service principal" means "holds a
+// service role," not "isn't human" (a property this crate has no other way to observe), and
+// [`check_service_roles_disjoint`] is what makes that distinction meaningful rather than
+// accidental (see its own doc comment).
+// ---------------------------------------------------------------------------------------
+
+/// The four service RPCs a `service_roles` entry may grant (R3.1) -- `Dispatch`/`Ack`/
+/// `Expire`/`Fail`, spelled in `profiles/execution.yaml` exactly as [`Self::name`] renders
+/// them (lowercase, the RPC's own wire name). Not `Authorize`: that RPC's own gate is
+/// [`authorize_command`]/[`RoleTable`] above, human-oriented (roles, MFA, delegations), and
+/// deliberately untouched by this table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ServiceRpc {
+    Dispatch,
+    Ack,
+    Expire,
+    Fail,
+}
+
+impl ServiceRpc {
+    /// The exact lowercase spelling `profiles/execution.yaml`'s `authority.service_roles`
+    /// lists use, and the identical spelling this type's own `Display` below renders (so a
+    /// counted refusal's `Debug`/`Display` text and the profile's own YAML never show two
+    /// different spellings of the same RPC).
+    pub fn name(self) -> &'static str {
+        match self {
+            ServiceRpc::Dispatch => "dispatch",
+            ServiceRpc::Ack => "ack",
+            ServiceRpc::Expire => "expire",
+            ServiceRpc::Fail => "fail",
+        }
+    }
+
+    /// The inverse of [`Self::name`] -- `None` for anything else, never a panic; a profile
+    /// that misspells an entry is a [`ServiceRoleConfigError::UnknownRpc`], not a silent
+    /// no-op.
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dispatch" => Some(ServiceRpc::Dispatch),
+            "ack" => Some(ServiceRpc::Ack),
+            "expire" => Some(ServiceRpc::Expire),
+            "fail" => Some(ServiceRpc::Fail),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceRpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A profile's declared service-role table (`profiles/execution.yaml`'s `authority.
+/// service_roles`, loaded by [`ServiceRoleTable::from_config`] and validated for disjointness
+/// against the human [`RoleTable`] by [`check_service_roles_disjoint`] at
+/// [`load_profile_authz_config`] time) -- the service-principal analogue of [`RoleTable`],
+/// gating [`ServiceRpc`] values instead of command classes. Deny by default, structurally: an
+/// empty table (no `service_roles:` block at all) makes [`Self::granting_role`] return `None`
+/// for every group and every RPC, exactly [`RoleTable::granting_role`]'s own reasoning.
+#[derive(Debug, Clone, Default)]
+pub struct ServiceRoleTable {
+    bindings: Vec<(String, Vec<ServiceRpc>)>,
+}
+
+/// The one way building a [`ServiceRoleTable`] from a profile's raw `BTreeMap<String,
+/// Vec<String>>` can fail: an rpc name [`ServiceRpc::parse`] does not recognize.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ServiceRoleConfigError {
+    #[error(
+        "authority.service_roles role {role:?} lists unknown rpc {rpc:?}: expected one of \
+         \"dispatch\", \"ack\", \"expire\", \"fail\""
+    )]
+    UnknownRpc { role: String, rpc: String },
+}
+
+impl ServiceRoleTable {
+    /// Builds a table from the profile's raw `role -> [rpc name, ...]` map (the shape
+    /// [`ProfileAuthzConfig::service_roles`] already deserializes into) -- `BTreeMap`, never
+    /// `HashMap` (ADR-004), so iteration below is deterministic; the resulting `Vec` itself is
+    /// consulted only by [`Self::role_grants`]'s linear `find`, which never depends on order
+    /// for correctness (every entry's own `role` is compared, not "the first match by
+    /// insertion order"), so the two are equivalent here to any deterministic order.
+    pub fn from_config(service_roles: &BTreeMap<String, Vec<String>>) -> Result<Self, ServiceRoleConfigError> {
+        let mut bindings = Vec::with_capacity(service_roles.len());
+        for (role, rpcs) in service_roles {
+            let mut parsed = Vec::with_capacity(rpcs.len());
+            for rpc in rpcs {
+                parsed.push(ServiceRpc::parse(rpc).ok_or_else(|| ServiceRoleConfigError::UnknownRpc { role: role.clone(), rpc: rpc.clone() })?);
+            }
+            bindings.push((role.clone(), parsed));
+        }
+        Ok(Self { bindings })
+    }
+
+    /// `true` only if `role` is present in this table *and* its granted rpc list contains
+    /// `rpc` -- no wildcard here (unlike [`RoleTable::role_grants`]'s [`WILDCARD`]): R3.1's
+    /// brief lists exactly four grantable RPCs and a role either lists the one being called
+    /// or it does not; there is no "every RPC" shorthand to get wrong.
+    fn role_grants(&self, role: &str, rpc: ServiceRpc) -> bool {
+        self.bindings.iter().find(|(r, _)| r == role).is_some_and(|(_, rpcs)| rpcs.contains(&rpc))
+    }
+
+    /// The first of `groups` (claim order, per [`RoleTable::granting_role`]'s identical
+    /// convention) that [`Self::role_grants`] `rpc`, if any.
+    pub fn granting_role<'a>(&self, groups: &'a [String], rpc: ServiceRpc) -> Option<&'a str> {
+        groups.iter().map(String::as_str).find(|g| self.role_grants(g, rpc))
+    }
+}
+
+/// R3.1's own required check, run once at [`load_profile_authz_config`] time: **the keys of
+/// `authority.service_roles` and `authority.roles` must never overlap.** Without this, a
+/// human authorizer's own group (a role granting, say, `"mode"` under `authority.roles`)
+/// could silently double as a `Dispatch`/`Ack`/`Expire`/`Fail` credential the moment the same
+/// role name also appeared under `authority.service_roles` -- and a token minted for a person
+/// (carrying that group because they hold a human command-authorization role) would then be
+/// able to drive the simulated asset directly, a privilege escalation this crate has no other
+/// structural way to prevent (there is no human-vs-service claim to check instead -- see this
+/// module's own R3.1 section header comment). Checked with a typed error naming every
+/// overlapping role, not merely the first, so a profile author sees the whole problem in one
+/// error rather than fixing one name at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OverlappingServiceRoleError {
+    #[error(
+        "authority.service_roles and authority.roles must be disjoint, but role(s) {overlapping:?} \
+         appear in both -- a human authorizer's group must never silently double as a \
+         dispatch/ack/expire/fail credential, and a token minted for a person must never be \
+         able to drive the asset"
+    )]
+    Overlap { overlapping: Vec<String> },
+}
+
+fn check_service_roles_disjoint(roles: &BTreeMap<String, Vec<String>>, service_roles: &BTreeMap<String, Vec<String>>) -> Result<(), OverlappingServiceRoleError> {
+    let overlapping: Vec<String> = service_roles.keys().filter(|k| roles.contains_key(*k)).cloned().collect();
+    if overlapping.is_empty() {
+        Ok(())
+    } else {
+        Err(OverlappingServiceRoleError::Overlap { overlapping })
+    }
+}
+
+/// Every way [`authorize_service_call`] can refuse -- today, exactly one way, but its own
+/// typed enum (not a bare `Result<_, String>`) matching this crate's rule against a generic
+/// refusal, and so it implements [`Counted`] uniformly with every other refusal family here.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ServiceAuthzError {
+    /// No group in `principal.groups` is a service role granting `rpc` -- this is the single
+    /// refusal both "an unrecognized/unlisted service role" and "a purely human token" (whose
+    /// groups are never a `service_roles` key at all, by [`check_service_roles_disjoint`]'s
+    /// own construction) produce; see this module's own R3.1 section header comment for why
+    /// that single refusal is exactly what "service principal" is defined to mean here.
+    #[error(
+        "service role gate refused -- none of groups {groups:?} is a service role granting rpc {rpc} \
+         (crate::authz, deny-by-default: an unlisted role, a role that does not list this rpc, or a \
+         purely human role -- disjoint from service_roles by construction -- is refused)"
+    )]
+    ServiceRoleNotGranted { groups: Vec<String>, rpc: ServiceRpc },
+}
+
+impl Counted for ServiceAuthzError {
+    fn code(&self) -> &'static str {
+        match self {
+            ServiceAuthzError::ServiceRoleNotGranted { .. } => "service_role_not_granted",
+        }
+    }
+}
+
+/// The one entry point: does `principal` (already verified, exactly the same
+/// [`crate::oidc::verify`] path `Authorize`'s own `principal_token` takes) hold a service role
+/// granting `rpc`? Returns the granting role's own name on success (folded into
+/// `CommandTransition.reason`, mirroring [`format_authz_reason`]'s own "name which role
+/// granted it" convention) or the one typed [`ServiceAuthzError`] on refusal.
+pub fn authorize_service_call(principal: &Principal, rpc: ServiceRpc, table: &ServiceRoleTable) -> Result<String, ServiceAuthzError> {
+    table
+        .granting_role(&principal.groups, rpc)
+        .map(str::to_string)
+        .ok_or_else(|| ServiceAuthzError::ServiceRoleNotGranted { groups: principal.groups.clone(), rpc })
+}
+
 /// The `authority:` block's A2.2 additions (`profiles/execution.yaml`, `profiles/README.md`)
 /// -- parsed from the *same* YAML block `crate::policy::load_profile_authority_config` reads
 /// its own A1.2 fields from (a second, independent `serde_yaml::from_str` over the identical
@@ -284,6 +477,13 @@ pub struct ProfileAuthzConfig {
     /// error).
     #[serde(default)]
     pub delegations_path: String,
+    /// R3.1: role -> the [`ServiceRpc`] names it grants (`"dispatch"`/`"ack"`/`"expire"`/
+    /// `"fail"`), see [`ServiceRoleTable::from_config`]. Deny by default: a role absent here
+    /// grants nothing. Checked disjoint from [`Self::roles`] above at
+    /// [`load_profile_authz_config`] time -- see [`check_service_roles_disjoint`]'s own doc
+    /// for why.
+    #[serde(default)]
+    pub service_roles: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -291,12 +491,37 @@ struct ProfileDocument {
     authority: ProfileAuthzConfig,
 }
 
-/// Reads just the A2.2 fields of the `authority:` block out of a full profile YAML document's
+/// Every way [`load_profile_authz_config`] can fail: the YAML itself does not parse, its
+/// `service_roles` block names an unrecognized rpc, or `service_roles`/`roles` are not
+/// disjoint (R3.1). Distinct from the plain `serde_yaml::Error` this function returned before
+/// R3.1 added the two new checks -- both are load-time refusals a profile author needs to see
+/// named, not folded into one generic parse failure.
+#[derive(Debug, Error)]
+pub enum LoadProfileAuthzConfigError {
+    #[error("parsing authority: block: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+    #[error(transparent)]
+    OverlappingServiceRole(#[from] OverlappingServiceRoleError),
+    #[error(transparent)]
+    ServiceRoleConfig(#[from] ServiceRoleConfigError),
+}
+
+/// Reads the A2.2/R3.1 fields of the `authority:` block out of a full profile YAML document's
 /// text -- see [`ProfileAuthzConfig`]'s own doc for why this is a second, independent parse of
 /// the same text `crate::policy::load_profile_authority_config` already reads, not a change
-/// to that function's own return type.
-pub fn load_profile_authz_config(yaml: &str) -> Result<ProfileAuthzConfig, serde_yaml::Error> {
-    Ok(serde_yaml::from_str::<ProfileDocument>(yaml)?.authority)
+/// to that function's own return type. R3.1 additions, both checked here so a bad profile is
+/// refused at load time rather than at the first `Dispatch`/`Ack`/`Expire`/`Fail` call that
+/// happens to exercise it: `service_roles` and `roles` must be disjoint
+/// ([`check_service_roles_disjoint`]), and every rpc name `service_roles` lists must parse
+/// ([`ServiceRoleTable::from_config`], whose only job here is validation -- the caller builds
+/// its own runtime [`ServiceRoleTable`] separately, exactly the existing convention
+/// `crate::policy::load_profile_authority_config`'s own sibling loaders already follow of
+/// validating shape here and constructing the "real" runtime value at the call site).
+pub fn load_profile_authz_config(yaml: &str) -> Result<ProfileAuthzConfig, LoadProfileAuthzConfigError> {
+    let config = serde_yaml::from_str::<ProfileDocument>(yaml)?.authority;
+    check_service_roles_disjoint(&config.roles, &config.service_roles)?;
+    ServiceRoleTable::from_config(&config.service_roles)?;
+    Ok(config)
 }
 
 /// Which of `authority.delegations_path`'s two states applied: relative paths are resolved
@@ -363,6 +588,25 @@ pub enum AuthzError {
          or acr {required_acr:?}; principal amr was {actual_amr:?} and acr was {actual_acr:?}"
     )]
     MfaRequired { command_class: String, required_amr: Vec<String>, required_acr: String, actual_amr: Vec<String>, actual_acr: String },
+}
+
+/// R3.1: `Authorize`'s role/MFA/delegation refusals now count too, since [`crate::counters::
+/// Counters`] is available to this crate and ADR-004's "everything rejected is counted" rule
+/// is unconditional -- not merely something the four service RPCs this round adds happen to
+/// need.
+impl Counted for AuthzError {
+    fn code(&self) -> &'static str {
+        match self {
+            AuthzError::RoleNotGranted { .. } => "authz_role_not_granted",
+            AuthzError::DelegationNotFound { .. } => "authz_delegation_not_found",
+            AuthzError::DelegationSubjectMismatch { .. } => "authz_delegation_subject_mismatch",
+            AuthzError::DelegationClassNotCovered { .. } => "authz_delegation_class_not_covered",
+            AuthzError::DelegationEntityNotCovered { .. } => "authz_delegation_entity_not_covered",
+            AuthzError::DelegationNotYetValid { .. } => "authz_delegation_not_yet_valid",
+            AuthzError::DelegationExpired { .. } => "authz_delegation_expired",
+            AuthzError::MfaRequired { .. } => "authz_mfa_required",
+        }
+    }
 }
 
 /// How [`authorize_command`] granted its decision -- carried into `CommandTransition.reason`
@@ -795,5 +1039,178 @@ delegations:
 
         let decision = AuthzDecision { via: AuthorizedVia::Delegation { delegation_id: "delegation-1".to_string() }, mfa: MfaOutcome::VerifiedAmr("otp".to_string()) };
         assert_eq!(format_authz_reason("burn", &decision), "authorize: command_class=\"burn\" via=delegation=\"delegation-1\" mfa=amr=\"otp\" (crate::authz)");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // R3.1: ServiceRoleTable, the disjointness check, and authorize_service_call.
+    // ---------------------------------------------------------------------------------------
+
+    fn service_roles() -> BTreeMap<String, Vec<String>> {
+        let mut m = BTreeMap::new();
+        m.insert("dispatchers".to_string(), vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]);
+        m.insert("ackers-only".to_string(), vec!["ack".to_string()]);
+        m
+    }
+
+    #[test]
+    fn service_role_table_grants_only_the_rpcs_it_lists() {
+        let table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        let groups = vec!["ackers-only".to_string()];
+        assert_eq!(table.granting_role(&groups, ServiceRpc::Ack), Some("ackers-only"));
+        assert_eq!(table.granting_role(&groups, ServiceRpc::Dispatch), None, "ackers-only lists only ack");
+        assert_eq!(table.granting_role(&groups, ServiceRpc::Expire), None);
+        assert_eq!(table.granting_role(&groups, ServiceRpc::Fail), None);
+    }
+
+    #[test]
+    fn service_role_table_grants_every_rpc_it_lists() {
+        let table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        let groups = vec!["dispatchers".to_string()];
+        for rpc in [ServiceRpc::Dispatch, ServiceRpc::Ack, ServiceRpc::Expire, ServiceRpc::Fail] {
+            assert_eq!(table.granting_role(&groups, rpc), Some("dispatchers"), "{rpc}");
+        }
+    }
+
+    /// Deny by default: an empty table (no `service_roles:` block at all) grants nothing to
+    /// any group, for any rpc -- there is no third state that means "allow".
+    #[test]
+    fn an_empty_service_role_table_grants_nothing() {
+        let table = ServiceRoleTable::default();
+        let groups = vec!["dispatchers".to_string(), "anything".to_string()];
+        for rpc in [ServiceRpc::Dispatch, ServiceRpc::Ack, ServiceRpc::Expire, ServiceRpc::Fail] {
+            assert_eq!(table.granting_role(&groups, rpc), None, "{rpc}");
+        }
+    }
+
+    /// A role present in the table but not listing the rpc being asked about grants nothing
+    /// for that rpc -- "role known, rpc unlisted" is never a third state that means "allow".
+    #[test]
+    fn a_service_role_present_but_not_listing_the_rpc_grants_nothing_for_it() {
+        let table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        assert_eq!(table.granting_role(&["ackers-only".to_string()], ServiceRpc::Dispatch), None);
+    }
+
+    #[test]
+    fn service_role_table_from_config_refuses_an_unknown_rpc_name() {
+        let mut roles = BTreeMap::new();
+        roles.insert("dispatchers".to_string(), vec!["dispatch".to_string(), "reboot".to_string()]);
+        let err = ServiceRoleTable::from_config(&roles).unwrap_err();
+        assert_eq!(err, ServiceRoleConfigError::UnknownRpc { role: "dispatchers".to_string(), rpc: "reboot".to_string() });
+    }
+
+    #[test]
+    fn authorize_service_call_grants_the_role_that_lists_the_rpc() {
+        let table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        let p = principal("kernel-binding-1", &["dispatchers"], &[], "");
+        let role = authorize_service_call(&p, ServiceRpc::Dispatch, &table).expect("dispatchers grants dispatch");
+        assert_eq!(role, "dispatchers");
+    }
+
+    /// **This is the test that proves "service principal" means something**: a verified
+    /// token whose groups grant a *human* command class (via `authority.roles`, exercised
+    /// here through the exact same `role_table()` fixture this file's A2.2 tests already use)
+    /// but no service role at all is refused on every one of the four service RPCs -- the
+    /// identical [`ServiceAuthzError::ServiceRoleNotGranted`] refusal an unrecognized role
+    /// gets, which is the point (see this module's own R3.1 section header comment).
+    #[test]
+    fn a_human_token_with_no_service_role_is_refused_on_every_service_rpc() {
+        let service_table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        // "operators" is a real, granting HUMAN role (role_table(), this file's own A2.2
+        // fixture) but is not a key of service_roles() at all.
+        let human = principal("operator-1", &["operators"], &[], "");
+        for rpc in [ServiceRpc::Dispatch, ServiceRpc::Ack, ServiceRpc::Expire, ServiceRpc::Fail] {
+            let err = authorize_service_call(&human, rpc, &service_table).unwrap_err();
+            assert_eq!(err, ServiceAuthzError::ServiceRoleNotGranted { groups: vec!["operators".to_string()], rpc }, "{rpc}");
+        }
+    }
+
+    #[test]
+    fn authorize_service_call_refuses_a_role_that_does_not_list_this_rpc() {
+        let table = ServiceRoleTable::from_config(&service_roles()).unwrap();
+        let p = principal("kernel-binding-1", &["ackers-only"], &[], "");
+        let err = authorize_service_call(&p, ServiceRpc::Dispatch, &table).unwrap_err();
+        assert_eq!(err, ServiceAuthzError::ServiceRoleNotGranted { groups: vec!["ackers-only".to_string()], rpc: ServiceRpc::Dispatch });
+    }
+
+    #[test]
+    fn service_authz_error_counted_codes_are_stable_snake_case() {
+        let err = ServiceAuthzError::ServiceRoleNotGranted { groups: vec![], rpc: ServiceRpc::Dispatch };
+        assert_eq!(err.code(), "service_role_not_granted");
+    }
+
+    #[test]
+    fn authz_error_counted_codes_are_stable_snake_case_and_distinct() {
+        let codes: Vec<&'static str> = vec![
+            AuthzError::RoleNotGranted { groups: vec![], command_class: "x".to_string() }.code(),
+            AuthzError::DelegationNotFound { delegation_id: "x".to_string() }.code(),
+            AuthzError::DelegationSubjectMismatch { delegation_id: "x".to_string(), expected_subject: "a".to_string(), actual_subject: "b".to_string() }.code(),
+            AuthzError::DelegationClassNotCovered { delegation_id: "x".to_string(), command_class: "x".to_string(), covered: vec![] }.code(),
+            AuthzError::DelegationEntityNotCovered { delegation_id: "x".to_string(), entity_id: "x".to_string(), covered: vec![] }.code(),
+            AuthzError::DelegationNotYetValid { delegation_id: "x".to_string(), not_before_tai_ns: 0, now_tai_ns: 0 }.code(),
+            AuthzError::DelegationExpired { delegation_id: "x".to_string(), expires_tai_ns: 0, now_tai_ns: 0 }.code(),
+            AuthzError::MfaRequired { command_class: "x".to_string(), required_amr: vec![], required_acr: "x".to_string(), actual_amr: vec![], actual_acr: "x".to_string() }.code(),
+        ];
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "every AuthzError variant must have its own distinct code: {codes:?}");
+        for code in &codes {
+            assert_eq!(*code, code.to_lowercase(), "codes must be snake_case: {code}");
+        }
+    }
+
+    /// **The disjointness check itself**, at `load_profile_authz_config` time: a
+    /// `service_roles` key that also appears in `roles` is refused, naming the overlapping
+    /// role, before any RPC ever gets a chance to consult either table.
+    #[test]
+    fn load_profile_authz_config_refuses_an_overlapping_role_name() {
+        let yaml = r#"
+authority:
+  roles:
+    operators: ["mode"]
+  service_roles:
+    operators: ["dispatch"]
+"#;
+        let err = load_profile_authz_config(yaml).unwrap_err();
+        match err {
+            LoadProfileAuthzConfigError::OverlappingServiceRole(OverlappingServiceRoleError::Overlap { overlapping }) => {
+                assert_eq!(overlapping, vec!["operators".to_string()]);
+            }
+            other => panic!("expected OverlappingServiceRole, got {other:?}"),
+        }
+    }
+
+    /// Disjoint role tables (no key shared) load cleanly, and `service_roles` is read
+    /// correctly alongside every A2.2 field already covered by this file's own
+    /// `load_profile_authz_config_reads_the_authority_blocks_a2_2_fields` test.
+    #[test]
+    fn load_profile_authz_config_accepts_disjoint_role_tables_and_reads_service_roles() {
+        let yaml = r#"
+authority:
+  roles:
+    operators: ["mode"]
+  service_roles:
+    dispatchers: ["dispatch", "ack", "expire", "fail"]
+"#;
+        let config = load_profile_authz_config(yaml).unwrap();
+        assert_eq!(config.roles.get("operators"), Some(&vec!["mode".to_string()]));
+        assert_eq!(config.service_roles.get("dispatchers"), Some(&vec!["dispatch".to_string(), "ack".to_string(), "expire".to_string(), "fail".to_string()]));
+    }
+
+    /// A missing `service_roles:` key parses as an empty table (deny by default), never an
+    /// error and never a wildcard-grants-everything shape -- mirrors this file's own
+    /// `load_delegations_file_parses_a_real_document_and_an_empty_one`'s identical convention
+    /// for `delegations:`.
+    #[test]
+    fn load_profile_authz_config_with_no_service_roles_key_is_an_empty_table() {
+        let config = load_profile_authz_config("authority:\n  roles: {}\n").unwrap();
+        assert!(config.service_roles.is_empty());
+    }
+
+    #[test]
+    fn load_profile_authz_config_refuses_an_unknown_service_rpc_name() {
+        let yaml = "authority:\n  service_roles:\n    dispatchers: [\"reboot\"]\n";
+        let err = load_profile_authz_config(yaml).unwrap_err();
+        assert!(matches!(err, LoadProfileAuthzConfigError::ServiceRoleConfig(ServiceRoleConfigError::UnknownRpc { .. })), "{err:?}");
     }
 }

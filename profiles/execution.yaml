@@ -68,6 +68,22 @@ dynamics_backend:
 #     file configured", an empty delegation table, never an error). Delegations are static,
 #     reviewed, profile-declared configuration -- like the `.rego` bundle above -- not a
 #     runtime-mutable store; there is no delegation-issuing RPC.
+#
+# R3.1 addition (docs/aiplane-plan.md round 2's declared gap; docs/open-questions.md question
+# 206's open item: "Dispatch, Ack, Expire and Fail require a service principal"): read by the
+# identical crates/av-command/src/authz.rs::load_profile_authz_config loader above, not a
+# third parse.
+#   - `service_roles`: role name -> the service RPCs it may call ("dispatch"/"ack"/"expire"/
+#     "fail" only -- never "authorize", which stays the human roles table's own job above).
+#     Deny by default, identically to `roles`: a role absent here, or present but not listing
+#     an rpc, grants nothing for that rpc. **Must be disjoint from `roles` above** -- checked
+#     at load time (crates/av-command/src/authz.rs::check_service_roles_disjoint) with a typed
+#     error naming any overlapping role name, refusing this whole profile rather than starting
+#     with a human authorizer's own group silently able to drive the asset. A verified OIDC
+#     token is treated as a service principal exactly when at least one of its groups grants,
+#     via this table, the specific RPC being called -- see crates/av-command/src/service.rs's
+#     module doc, "R3.1: a service principal, verified like a human token", for the full
+#     contract this table is checked against.
 authority:
   policy_dir: profiles/policies/authority
   allow_entrypoint: data.altavista.authority.allow
@@ -79,6 +95,8 @@ authority:
     safety-officers: ["*"]
   mfa_amr_methods: ["otp", "webauthn"]
   mfa_acr: ""
+  service_roles:
+    ground-segment: ["dispatch", "ack", "expire", "fail"]
   delegations_path: profiles/policies/authority/delegations.yaml
 
 # A2.2 (docs/aiplane-plan.md milestone A2's second half; ADR-004's "Evidence, verbatim from

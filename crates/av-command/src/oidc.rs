@@ -205,6 +205,34 @@ pub enum TokenError {
     MissingIssuedAt,
 }
 
+/// R3.1: every one of this enum's sixteen typed refusals now counts through
+/// [`crate::counters::Counters`] (ADR-004's "everything rejected is counted") -- a token
+/// refused on `Authorize` OR on any of `Dispatch`/`Ack`/`Expire`/`Fail`'s new `service_token`
+/// verification takes this identical path, so one `code()` implementation covers every RPC
+/// that calls [`verify`], never a second copy per call site.
+impl crate::counters::Counted for TokenError {
+    fn code(&self) -> &'static str {
+        match self {
+            TokenError::WrongSegmentCount(_) => "token_wrong_segment_count",
+            TokenError::HeaderBase64Invalid(_) => "token_header_base64_invalid",
+            TokenError::PayloadBase64Invalid(_) => "token_payload_base64_invalid",
+            TokenError::SignatureBase64Invalid(_) => "token_signature_base64_invalid",
+            TokenError::HeaderJsonInvalid(_) => "token_header_json_invalid",
+            TokenError::PayloadJsonInvalid(_) => "token_payload_json_invalid",
+            TokenError::AlgorithmNotAllowed { .. } => "token_algorithm_not_allowed",
+            TokenError::SignatureInvalid => "token_signature_invalid",
+            TokenError::CryptoBackend(_) => "token_crypto_backend_error",
+            TokenError::IssuerMismatch { .. } => "token_issuer_mismatch",
+            TokenError::AudienceMismatch { .. } => "token_audience_mismatch",
+            TokenError::MissingExpiry => "token_missing_expiry",
+            TokenError::Expired { .. } => "token_expired",
+            TokenError::NotYetValid { .. } => "token_not_yet_valid",
+            TokenError::MissingSubject => "token_missing_subject",
+            TokenError::MissingIssuedAt => "token_missing_issued_at",
+        }
+    }
+}
+
 /// The JWS header this module reads. Only `alg` matters to [`verify`]; any other header
 /// member (`typ`, `kid`, ...) is accepted and ignored by `serde_json`'s default "unknown
 /// fields are ignored" behaviour -- there is deliberately no `dead_code`-inviting field for
@@ -684,6 +712,46 @@ mod tests {
 
         let err = verify(&token, &cfg, unix_seconds_to_tai_ns(NOW_UNIX_S)).unwrap_err();
         assert!(matches!(err, TokenError::MissingSubject), "{err:?}");
+    }
+
+    /// R3.1: every one of `TokenError`'s sixteen variants has its own stable, distinct,
+    /// `snake_case` counter code -- never keyed on `Display` text (this module's own module
+    /// doc already forbids that: `Display` can carry caller-supplied detail). Every variant
+    /// is built from a *real* underlying error where one is needed (a genuine base64/JSON
+    /// decode failure, a genuine empty `openssl::error::ErrorStack`), never guessed at a
+    /// particular constructor shape this test does not otherwise depend on.
+    #[test]
+    fn token_error_counted_codes_are_distinct_and_snake_case_for_all_sixteen_variants() {
+        use crate::counters::Counted;
+        let bad_base64 = URL_SAFE_NO_PAD.decode("not valid base64!!").unwrap_err();
+        let bad_json = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let codes: Vec<&'static str> = vec![
+            TokenError::WrongSegmentCount(0).code(),
+            TokenError::HeaderBase64Invalid(bad_base64.clone()).code(),
+            TokenError::PayloadBase64Invalid(bad_base64.clone()).code(),
+            TokenError::SignatureBase64Invalid(bad_base64).code(),
+            TokenError::HeaderJsonInvalid(serde_json::from_str::<serde_json::Value>("not json").unwrap_err()).code(),
+            TokenError::PayloadJsonInvalid(bad_json).code(),
+            TokenError::AlgorithmNotAllowed { alg: "none".to_string(), allowed: vec![Alg::Rs256] }.code(),
+            TokenError::SignatureInvalid.code(),
+            TokenError::CryptoBackend(openssl::error::ErrorStack::get()).code(),
+            TokenError::IssuerMismatch { actual: "a".to_string(), expected: "b".to_string() }.code(),
+            TokenError::AudienceMismatch { actual: vec![], expected: "b".to_string() }.code(),
+            TokenError::MissingExpiry.code(),
+            TokenError::Expired { exp_tai_ns: 0, now_tai_ns: 0 }.code(),
+            TokenError::NotYetValid { nbf_tai_ns: 0, now_tai_ns: 0 }.code(),
+            TokenError::MissingSubject.code(),
+            TokenError::MissingIssuedAt.code(),
+        ];
+        assert_eq!(codes.len(), 16, "sanity: every one of the sixteen typed refusals this module's own doc claims");
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "every variant must have its own distinct code: {codes:?}");
+        for code in &codes {
+            assert_eq!(*code, code.to_lowercase(), "codes must be snake_case: {code}");
+            assert!(code.starts_with("token_"), "codes must be namespaced: {code}");
+        }
     }
 
     /// Two verifications of the same token against the same config and clock reading return

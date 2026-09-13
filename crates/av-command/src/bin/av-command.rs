@@ -60,8 +60,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use av_command::audit::AuditWriter;
-use av_command::authz::{load_delegations, load_profile_authz_config, RoleTable};
+use av_command::authz::{load_delegations, load_profile_authz_config, RoleTable, ServiceRoleTable};
 use av_command::clock::SystemClock;
+use av_command::counters::Counters;
 use av_command::evidence::AdminState;
 use av_command::ledger::Ledger;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
@@ -218,19 +219,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let audit_config = av_command::audit::load_profile_audit_config(&profile_text).map_err(|e| format!("parsing audit: block of {:?}: {e}", args.profile_path))?;
 
     let role_table = Arc::new(RoleTable::from_config(&authz_config.roles));
+    // R3.1: `load_profile_authz_config` already validated this table (every rpc name parses,
+    // and it is disjoint from `authz_config.roles` above) -- this second, independent
+    // construction builds the actual runtime table this process serves from, the same
+    // "validate at load, build again at the call site" convention `--policy-dir`'s own
+    // sibling loaders already follow (`crate::authz::load_profile_authz_config`'s own doc).
+    let service_role_table = Arc::new(
+        ServiceRoleTable::from_config(&authz_config.service_roles)
+            .expect("load_profile_authz_config already validated every service_roles rpc name"),
+    );
     let delegations = Arc::new(
         load_delegations(&repo_root(), &authz_config.delegations_path)
             .map_err(|e| format!("loading delegations_path {:?}: {e}", authz_config.delegations_path))?,
     );
     let audit = Arc::new(AuditWriter::open(&audit_config)?);
     eprintln!(
-        "av-command: {} role(s), {} delegation(s), audit sink {:?}",
+        "av-command: {} role(s), {} service role(s), {} delegation(s), audit sink {:?}",
         authz_config.roles.len(),
+        authz_config.service_roles.len(),
         delegations.all().count(),
         audit_config
     );
 
-    let admin_state = Arc::new(AdminState { ledger: ledger.clone(), run_id: run_id.clone(), version: env!("CARGO_PKG_VERSION").to_string() });
+    // R3.1: ADR-004's "everything rejected is counted" primitive -- one instance, shared by
+    // the gRPC servicer below and the admin HTTP server, so /admin/api/evidence reports
+    // exactly what the servicer itself has counted, never a second, independent count.
+    let counters = Arc::new(Counters::new());
+
+    let admin_state = Arc::new(AdminState { ledger: ledger.clone(), run_id: run_id.clone(), version: env!("CARGO_PKG_VERSION").to_string(), counters: counters.clone() });
     eprintln!("av-command: admin API on {admin_addr} (GET /admin/api/evidence, /admin/api/evidence/verify)");
     tokio::spawn(async move {
         if let Err(e) = av_command::admin::serve(admin_addr, admin_state).await {
@@ -248,6 +264,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mfa_amr_methods: Arc::new(authz_config.mfa_amr_methods),
         mfa_acr: Arc::new(authz_config.mfa_acr),
         audit,
+        service_role_table,
+        counters,
     };
     // Rebuilds the duplicate-dispatch guard from the ledger before serving a single RPC --
     // see crate::service's module doc, "Idempotency ... a guarantee that survives a restart".

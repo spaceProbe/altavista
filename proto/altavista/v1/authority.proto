@@ -392,23 +392,63 @@ message AuthorizeRequest {
 }
 
 // `Dispatch` request: identifies an `AUTHORIZED` command to hand to the `DispatchSink`
-// (`crates/av-command/src/service.rs`; A3 supplies the real kernel binding behind it). No
-// other field -- the dispatching principal is this service itself, not a caller-supplied
-// identity (matching `crates/av-command/src/state.rs`'s own test convention, e.g.
-// `dispatch(c, "ground-segment", ...)`).
+// (`crates/av-command/src/service.rs`; A3 supplies the real kernel binding behind it).
+//
+// R3.1 (`docs/aiplane-plan.md` round 2's declared gap; `docs/open-questions.md` question
+// 206): `service_token` is now REQUIRED and verified through the identical code path a human
+// `AuthorizeRequest.principal_token` takes (`crates/av-command/src/oidc.rs::verify`, the same
+// `IssuerConfig`, RS256 only, the same clock-boundary expiry) -- see that field's own doc
+// comment below. The dispatching principal is no longer a fixed, unauthenticated string
+// (`"ground-segment"`, this comment's own previous text); it is the **verified service
+// subject** the token names, gated additionally by `crates/av-command/src/authz.rs::
+// ServiceRoleTable` (a profile-declared `authority.service_roles` block, disjoint from the
+// human `authority.roles` table by construction) requiring a granting role that lists
+// `"dispatch"`.
 message DispatchRequest {
   string command_id = 1;
+  // R3.1: a compact-serialization JWS (an OIDC access token for a **service** subject),
+  // verified through the exact same `crates/av-command/src/oidc.rs::verify` path
+  // `AuthorizeRequest.principal_token` uses -- same `IssuerConfig`, same RS256-only rule, same
+  // boundary-nanosecond expiry against the injected clock. There is no second verifier and no
+  // relaxed check for this field. On success, the verified `Principal.sub` is recorded as
+  // `CommandTransition.principal` (never a fixed string); the verified `Principal.groups` is
+  // then checked against the profile's `authority.service_roles` table for a role granting
+  // this RPC (`"dispatch"`) -- deny by default: an unverified token, or a verified token
+  // naming no granting service role (this includes every purely-human token, since
+  // `service_roles` and `roles` are disjoint by construction), is refused before any state
+  // transition is attempted or any ledger record is appended, exactly like `Authorize`'s own
+  // `principal_token` refusal path. An empty `service_token` is refused the same way a
+  // malformed one is (`crates/av-command/src/oidc.rs::TokenError::WrongSegmentCount`) -- there
+  // is no "no token supplied" default that means "allow".
+  string service_token = 2;
 }
 
 // `Ack` request: reports how far the dispatched command got, per `AckLevel` (`command.proto`)
-// -- "the ack level is a request field" (this task's own brief). `principal`/`reason` are
-// caller-supplied (the edge node, the asset link, or flight software reporting back), unlike
-// `Authorize`'s `principal_token`: an ack report is not itself a human-authorization gate.
+// -- "the ack level is a request field" (this task's own brief).
+//
+// R3.1: `service_token` is now REQUIRED, verified identically to `DispatchRequest.
+// service_token` above, gated on a service role granting `"ack"`. `principal`/`reason` predate
+// R3.1 and are unchanged in their own field numbers, but `principal`'s MEANING is now precisely
+// this (see `ExpireRequest.principal`'s doc comment below for the identical rule stated once,
+// and `FailRequest.principal` for the third copy): it is a caller-DECLARED label, never trusted
+// as identity and never itself recorded as `CommandTransition.principal` -- the verified
+// `service_token` subject is authoritative for that field. When `principal` is non-empty and
+// disagrees with the verified subject, the request is refused (`crates/av-command/src/
+// service.rs::ServiceError::PrincipalMismatch`, `INVALID_ARGUMENT`) rather than one of the two
+// being silently preferred over the other -- an ack report whose declared reporter and whose
+// verified caller disagree is exactly the kind of discrepancy ADR-004's "everything rejected is
+// counted" exists to surface, not paper over. An empty `principal` is never a disagreement (it
+// declares nothing) and is accepted; when present and equal to the verified subject, it is
+// carried into `CommandTransition.reason` as the caller's own declared label, alongside which
+// service role granted this call.
 message AckRequest {
   string command_id = 1;
   AckLevel ack_level = 2;
   string principal = 3;
   string reason = 4;
+  // R3.1: see `DispatchRequest.service_token`'s doc comment for the full verification
+  // contract; identical here, gated on a service role granting `"ack"`.
+  string service_token = 5;
 }
 
 // `Expire` request (A3.2, D2): moves a `DISPATCHED` (or `AUTHORIZED`) command to `EXPIRED`,
@@ -419,9 +459,30 @@ message AckRequest {
 // deadline and the kernel epoch it evaluated the expiry at, so the ledger's own reason text
 // carries the same detail the kernel's own typed `CommandOutcome::Expired` did, not merely
 // "expired".
+//
+// R3.1 (`docs/aiplane-plan.md` round 2's declared gap, closed this round): `service_token` is
+// now REQUIRED (see `DispatchRequest.service_token`'s doc comment for the full verification
+// contract; gated here on a service role granting `"expire"`), and `principal` is now ADDITIVE
+// -- matching `AckRequest.principal`'s existing semantics exactly, not a second, divergent
+// convention: a caller-DECLARED label, never itself trusted as identity and never what lands on
+// `CommandTransition.principal` (the verified `service_token` subject is authoritative for
+// that field, always). When non-empty, `principal` must agree with the verified subject or the
+// request is refused `INVALID_ARGUMENT` (`ServiceError::PrincipalMismatch`) -- a typed refusal,
+// never a silent preference of one value over the other (round 2 left this asymmetric with
+// `Ack`, which already carried a `principal` field while `Expire`/`Fail` carried none at all;
+// this round closes exactly that gap, symmetrically, on both `Expire` and `Fail`). An empty
+// `principal` declares nothing and is always accepted; a non-empty, agreeing one is carried
+// into `CommandTransition.reason` as the caller's own declared label.
 message ExpireRequest {
   string command_id = 1;
   string reason = 2;
+  // R3.1: a caller-declared label naming who/what observed this expiry (e.g. the kernel
+  // binding's own identity string) -- see this message's own doc comment above for the full
+  // disagreement rule. Never trusted as identity on its own.
+  string principal = 3;
+  // R3.1: see `DispatchRequest.service_token`'s doc comment for the full verification
+  // contract; identical here, gated on a service role granting `"expire"`.
+  string service_token = 4;
 }
 
 // `Fail` request (A3.2, D2): moves a `DISPATCHED` command to `FAILED`. Exists so every kernel
@@ -432,9 +493,21 @@ message ExpireRequest {
 // happened to it once the kernel decided against it (`docs/aiplane-plan.md`'s own "a failure
 // that leaves no trace" is exactly the defect shape round 1 found six times). `reason` is
 // caller-supplied free text naming the kernel's own typed refusal.
+//
+// R3.1: `service_token`/`principal` are additive exactly as `ExpireRequest`'s own doc comment
+// above describes -- the identical contract, gated here on a service role granting `"fail"`.
+// See that message's doc comment for the full disagreement rule (never repeated a third time
+// in full; `AckRequest.principal`'s doc comment is the first copy, `ExpireRequest.principal`'s
+// the second, this the third -- one rule, stated once and cross-referenced, not three that
+// could drift apart).
 message FailRequest {
   string command_id = 1;
   string reason = 2;
+  // R3.1: see `ExpireRequest.principal`'s doc comment for the full disagreement rule.
+  string principal = 3;
+  // R3.1: see `DispatchRequest.service_token`'s doc comment for the full verification
+  // contract; identical here, gated on a service role granting `"fail"`.
+  string service_token = 4;
 }
 
 // The response every one of `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack`/`Expire`/`Fail`
