@@ -4,10 +4,12 @@
 //! `SystemDefinition.packet_codecs` and hashed with it, says how one CCSDS Space Packet
 //! (CCSDS 133.0-B-2) maps to and from a port's user data. This module is the single place
 //! that packs/unpacks the primary header and the declared `PacketField`s -- both
-//! `crate::drm::schema` (load-time validation, question 149's "typed load error" rule) and any
-//! future FRAMED-port runtime call into it, so there is exactly one implementation of the
+//! `av_kernel::drm::schema` (load-time validation, question 149's "typed load error" rule) and
+//! any future FRAMED-port runtime call into it, so there is exactly one implementation of the
 //! header layout and the field bit arithmetic to get right, not two that could silently
-//! disagree.
+//! disagree. Extracted into its own crate (question 205) so a caller that needs only the wire
+//! format -- `av-edge`'s plugin decoder among them -- never pulls GMAT or transport in with it;
+//! `av_kernel::codec` re-exports this crate's items so no existing `av-kernel` caller changes.
 //!
 //! ## Primary header (CCSDS 133.0-B-2 section 4.1.3), 6 bytes, big-endian
 //!
@@ -85,7 +87,7 @@ const SEQUENCE_FLAGS_UNSEGMENTED: u8 = 0b11;
 /// `apid -> PacketCodec`, ordered (question 149's "an ordered APID map"). **Always a
 /// `BTreeMap`, never a `HashMap`** -- this is an output-shaping path (iteration order of the
 /// codec set matters for anything that ever enumerates it, e.g. a future hash or log), and
-/// `spoore` ADR-004 / this crate's own `lib.rs` module doc comment both fix `BTreeMap` as the
+/// `spoore` ADR-004 / `av_kernel`'s own `lib.rs` module doc comment both fix `BTreeMap` as the
 /// determinism convention for exactly this kind of map.
 pub type ApidMap = BTreeMap<u32, pb::PacketCodec>;
 
@@ -113,9 +115,9 @@ pub struct DecodedPacket {
 
 /// Every way a `PacketCodec`/packet can be malformed, typed rather than silently dropped or
 /// panicking (question 149). Load-time variants ([`validate_codec`]/
-/// [`validate_system_packet_codecs`], called from `crate::drm::schema`) and runtime
+/// [`validate_system_packet_codecs`], called from `av_kernel::drm::schema`) and runtime
 /// ([`encode_packet`]/[`decode_packet`]) variants share this one enum, the same way
-/// `crate::router::RouterError` covers both its own load-time and (today, none) runtime
+/// `av_kernel::router::RouterError` covers both its own load-time and (today, none) runtime
 /// checks.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodecError {
@@ -237,7 +239,7 @@ impl std::fmt::Display for CodecError {
 impl std::error::Error for CodecError {}
 
 // --------------------------------------------------------------------------------------
-// Load-time validation (question 149, called from `crate::drm::schema`)
+// Load-time validation (question 149, called from `av_kernel::drm::schema`)
 // --------------------------------------------------------------------------------------
 
 /// Validate one `PacketCodec` against the checks question 149 asks for at load time: a field
@@ -313,8 +315,8 @@ pub fn validate_codec(codec: &pb::PacketCodec) -> Result<(), CodecError> {
 }
 
 /// Validate every codec in a `SystemDefinition.packet_codecs` list and fold them into the
-/// ordered [`ApidMap`] question 149 asks for -- the single source of truth `crate::drm::schema`
-/// calls at load time and any future runtime decode path reuses, so the two can never
+/// ordered [`ApidMap`] question 149 asks for -- the single source of truth `av_kernel::drm::
+/// schema` calls at load time and any future runtime decode path reuses, so the two can never
 /// disagree about what counts as a valid codec set.
 pub fn validate_system_packet_codecs(codecs: &[pb::PacketCodec]) -> Result<ApidMap, CodecError> {
     let mut map: ApidMap = BTreeMap::new();
@@ -408,7 +410,7 @@ fn numeric_value(value: &FieldValue, codec_id: &str, field: &str) -> Result<f64,
 /// the same arithmetic [`validate_codec`] already ran at load time, repeated here so this
 /// module never indexes out of bounds even when handed a codec that skipped that load-time
 /// call (this module's own unit tests build `pb::PacketCodec` values directly, without going
-/// through `crate::drm::schema`).
+/// through `av_kernel::drm::schema`).
 fn check_field_extent(field: &pb::PacketField, user_data_bytes: u32, codec_id: &str) -> Result<(), CodecError> {
     let bit_end = (field.bit_offset as u64) + (field.bit_width as u64);
     if bit_end > (user_data_bytes as u64) * 8 {
@@ -639,10 +641,10 @@ pub fn peek_sequence_count(data: &[u8]) -> Option<u16> {
 
 /// Build one [`av_dynamics::DecodeErrorOccurrence`] from a frame that failed [`decode_packet`]
 /// (`docs/open-questions.md` question 188, R5.2) -- the one place every FRAMED-consuming native
-/// model in this crate builds this record, so the `port`/`tai_ns`/`sequence_count`/`error` shape
-/// can never drift between `crate::drm::controller::AttitudeControllerModel`/`CommandedAttitude`,
-/// `crate::drm::ground::GroundStationModel`, `crate::drm::gmat_command::GmatFramedCommandModel`
-/// and `crate::drm::binding::ConstantAccelModel` (question 188's own "every FRAMED consumer"
+/// model in `av_kernel` builds this record, so the `port`/`tai_ns`/`sequence_count`/`error` shape
+/// can never drift between `av_kernel::drm::controller::AttitudeControllerModel`/`CommandedAttitude`,
+/// `av_kernel::drm::ground::GroundStationModel`, `av_kernel::drm::gmat_command::GmatFramedCommandModel`
+/// and `av_kernel::drm::binding::ConstantAccelModel` (question 188's own "every FRAMED consumer"
 /// scope). `msg` is the received [`av_dynamics::PortMessage`] whose `payload` failed to decode --
 /// `tai_ns` is its own delivery epoch (the router's own stamp, unaffected by a decode failure:
 /// see this module's own `sequence_count`, `av_dynamics::DecodeErrorOccurrence`'s own doc
@@ -660,7 +662,7 @@ pub fn decode_error_occurrence(port: &str, msg: &av_dynamics::PortMessage, error
 /// Build every CDM `Measurement` (`av_cdm::pb::Measurement`) one FRAMED **telemetry** packet's
 /// declared field values map to, per `packet.proto`'s own `PacketField.target` doc comment:
 /// `"<measurement_id>/<label>"` for a mapped field, empty ("recorded but not mapped") for one
-/// that is not. This is `PacketField.target`'s first telemetry consumer -- `crate::drm::
+/// that is not. This is `PacketField.target`'s first telemetry consumer -- `av_kernel::drm::
 /// gmat_command::resolve_gmat_command_port` (M25.2b) was its first consumer at all, for a
 /// **command**'s single writable-parameter target; this is the same field, read the same way,
 /// for telemetry's many-components-per-packet shape.
@@ -835,7 +837,7 @@ mod tests {
 
     /// A payload too short to carry even the 6-byte primary header has no sequence count to
     /// report -- `None`, never a fabricated value (question 188's own "never a fabricated value"
-    /// convention, mirroring `crate::router`'s corrupt-fault doc comment). Fails against an
+    /// convention, mirroring `av_kernel::router`'s corrupt-fault doc comment). Fails against an
     /// implementation that panics (out-of-bounds indexing) or that returns `Some(0)` for a
     /// too-short buffer instead of honestly reporting nothing.
     #[test]

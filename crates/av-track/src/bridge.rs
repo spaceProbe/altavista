@@ -57,6 +57,10 @@ pub enum BridgeError {
 /// associator and initiator) from `av_edge::pb::Measurement`s, in epoch order.
 pub struct EngineBridge {
     shard: Shard,
+    /// The `pb::FrameDefinition` registry `frame_id` resolves through
+    /// (`TrackConfig::frame_registry`) -- see [`EngineBridge::run`]'s own doc for what this
+    /// replaces.
+    frames: Vec<pb::FrameDefinition>,
 }
 
 impl EngineBridge {
@@ -70,7 +74,7 @@ impl EngineBridge {
         let (tree, initiator): (Arc<ModelTree>, Arc<dyn Initiator>) = config.build_tree_and_initiator()?;
         let associator = config.build_associator();
         let shard = Shard::new(shard_config, tree, associator, initiator);
-        Ok(Self { shard })
+        Ok(Self { shard, frames: config.frame_registry() })
     }
 
     /// The demo ground-segment DRM's own bridge (`crate::config::demo_ground_segment_config`).
@@ -94,28 +98,19 @@ impl EngineBridge {
     pub fn run(&mut self, measurements: &[pb::Measurement]) -> Result<Vec<TrackUpdate>, BridgeError> {
         let mut groups: BTreeMap<i64, Vec<spoore_cdm::Measurement>> = BTreeMap::new();
         for m in measurements {
-            // **A defect found while building this bridge, not assumed away**: the real,
-            // committed E4 fixture's own measurements carry `frame_id =
-            // "earth_fixed_demo_frame"` (`av_edge::plugin::PluginConfig.frame_id`, copied
-            // verbatim from `drms/demo_ground_segment_flight.system.yaml`'s own
-            // `parameters: frame_id` -- a DRM/viewer frame-*registry* id, `altavista.
-            // frames.FrameRegistry`'s namespace). `av_cdm::spoore_v0::frame` recognizes a
-            // fixed, unrelated set of five ids (`spoore_v0::frame`'s own module doc: "a
-            // fixed, well-known frame_id string," never a registry lookup), and
-            // `"earth_fixed_demo_frame"` is not one of them -- feeding the real fixture's
-            // measurements straight into `measurement_from_pb` fails every time with
-            // `Error::UnknownFrameId`. `av-edge`'s pinned fixture cannot change (E4's
-            // committed chain-hash goldens depend on its exact bytes), and this bridge
-            // must not "write a second conversion" for the numeric fields
-            // (`measurement_from_pb` already owns `z`/`r`/`epoch_ns`/shard_key) -- so the
-            // one thing this loop does beyond that call is relabel `frame_id` onto
-            // `av_cdm::spoore_v0::frame::ECEF` before conversion, matching the codec's own
-            // documented physical meaning (that same DRM file: "own Earth-fixed Cartesian
-            // position telemetry"). This is a frame *label* substitution only; every
-            // numeric field converts through `measurement_from_pb` completely unmodified.
-            let mut for_spoore = m.clone();
-            for_spoore.frame_id = av_cdm::spoore_v0::frame::ECEF.to_string();
-            let native = av_cdm::spoore_v0::measurement_from_pb(&for_spoore).map_err(|e| BridgeError::Conversion { measurement_id: m.measurement_id.clone(), detail: e.to_string() })?;
+            // Round 2 built a relabel here (`for_spoore.frame_id =
+            // av_cdm::spoore_v0::frame::ECEF`) because the real fixture's measurements carry
+            // `frame_id = "earth_fixed_demo_frame"` -- a DRM/viewer frame-*registry* id --
+            // and `av_cdm::spoore_v0::frame`'s literal path only recognizes its own fixed
+            // five. Question 205's ruling (`docs/edge-plan.md` round-2 status, open item 5)
+            // replaces that boundary mutation with registry-driven resolution: `self.frames`
+            // (`TrackConfig::frame_registry`, built once in `EngineBridge::new`) declares the
+            // one `pb::FrameDefinition` the DRM's own `frame_id` parameter means (Earth
+            // body-fixed -- `TrackConfig::frame_registry`'s own doc has the full account of
+            // why, quoting the DRM), and `measurement_from_pb_with_frames` resolves through
+            // it directly. No field of `m` is read or mutated before the call.
+            let native = av_cdm::spoore_v0::measurement_from_pb_with_frames(m, &self.frames)
+                .map_err(|e| BridgeError::Conversion { measurement_id: m.measurement_id.clone(), detail: e.to_string() })?;
             groups.entry(native.epoch().as_nanos()).or_default().push(native);
         }
 
@@ -181,5 +176,25 @@ mod tests {
         m.shard_key = "some-other-shard".to_string();
         let err = bridge.run(&[m]).unwrap_err();
         assert!(matches!(err, BridgeError::Engine(spoore_engine::EngineError::WrongShard { .. })), "{err:?}");
+    }
+
+    #[test]
+    fn a_frame_id_in_neither_the_demo_registry_nor_the_fixed_set_is_a_typed_conversion_error() {
+        // The relabel this bridge used to perform (question 205) is gone; a `frame_id` that
+        // is genuinely unresolvable -- neither `TrackConfig::frame_registry`'s one declared
+        // frame nor `av_cdm::spoore_v0::frame`'s fixed five -- must surface as a named,
+        // typed `BridgeError::Conversion`, not panic or silently drop the measurement.
+        let mut bridge = EngineBridge::for_demo().unwrap();
+        let mut m = measurement(0, [0.0, 0.0, 0.0]);
+        m.frame_id = "no_such_frame".to_string();
+        let err = bridge.run(&[m]).unwrap_err();
+        match &err {
+            BridgeError::Conversion { measurement_id, detail } => {
+                assert_eq!(measurement_id, "flight_position");
+                assert!(detail.contains("no_such_frame"), "{detail:?}");
+            }
+            other => panic!("expected BridgeError::Conversion, got {other:?}"),
+        }
+        assert!(err.to_string().contains("no_such_frame"), "{err}");
     }
 }

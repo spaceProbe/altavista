@@ -14,6 +14,12 @@ repository.workspace = true
 # second, independently-generated copy from a build.rs in this crate (question 2's
 # path-dependency convention; the manager's decision for this track).
 av-cdm = { path = "../av-cdm" }
+# `src/plugin/packet.rs` (question 205): the real CCSDS decoder, extracted out of
+# `av-kernel` into its own crate specifically so a GMAT-free, transport-free caller like
+# this one can depend on it for real. `av-codec` depends on neither `gmat-sys` nor `tonic`
+# (`crates/av-codec/Cargo.toml`), so this is not the dependency this crate's own former
+# `[dev-dependencies] av-kernel` entry (removed) had to be kept out of `[dependencies]` for.
+av-codec = { path = "../av-codec" }
 prost.workspace = true
 thiserror.workspace = true
 
@@ -31,15 +37,3 @@ openssl = "0.10"
 # `Deserialize` and calls `serde_json::to_vec` itself.
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-# `tests/plugin_replay.rs` cross-checks `crate::plugin::packet::decode_numeric_fields`
-# against `av_kernel::codec::decode_packet` byte-for-byte, and loads the committed
-# ground-segment fixture's own truth `Trajectory` to measure this plugin's decoded-vs-truth
-# deviation (E5's own precondition). A **test-only** dependency, never a `[dependencies]`
-# entry: `av-kernel` depends on `gmat-sys` (native GMAT FFI) and, transitively through
-# `av-lockstep` -> `av-grpc`, on `tonic` -- exactly the GMAT/transport dependency this
-# crate's own `src/plugin.rs` module doc explains `av-edge` itself must never gain, even
-# indirectly. A test binary is never shipped and never becomes part of any other crate's
-# own dependency tree, so this is safe here in a way it would not be as a real dependency.
-av-kernel = { path = "../av-kernel" }

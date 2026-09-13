@@ -86,6 +86,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-codec"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-dynamics",
+]
+
+[[package]]
 name = "av-command"
 version = "0.1.0"
 dependencies = [
@@ -139,7 +147,7 @@ name = "av-edge"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
- "av-kernel",
+ "av-codec",
  "openssl",
  "prost",
  "serde",
@@ -232,7 +240,9 @@ name = "av-kernel"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-codec",
  "av-dynamics",
+ "av-edge",
  "av-lockstep",
  "av-lockstep-shim",
  "gmat-sys",

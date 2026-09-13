@@ -89,7 +89,15 @@
 //!   [`plugin::BatchBuilder`]) with no network code, no clock reads and no sleeping
 //!   anywhere -- see that module's own doc comment for exactly what this milestone
 //!   replays and why.
+//! - [`buffer`] -- milestone E6: [`buffer::EdgeBuffer`], the edge-side durable, file-
+//!   backed log of already-signed batches (mirroring `crates/av-ingest/src/log.rs`'s own
+//!   record framing on purpose -- see that module's own doc for exactly what is mirrored
+//!   and what deliberately differs) plus its persisted ack watermark, and
+//!   [`buffer::BatchSink`]/[`buffer::UplinkDriver`], the sink trait and pure state machine
+//!   that buffer while disconnected and replay in order on reconnect. No network code, no
+//!   clock reads, no sleeping here either.
 
+pub mod buffer;
 pub mod chain;
 pub mod hash;
 pub mod identity;
