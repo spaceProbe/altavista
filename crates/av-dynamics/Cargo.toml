@@ -10,4 +10,9 @@ repository.workspace = true
 
 [dependencies]
 av-cdm = { path = "../av-cdm" }
-sha2.workspace = true
+# SHA-256 for `settings_hash`, via the `openssl` crate (openssl-sys -> the system/Homebrew
+# libssl/libcrypto) -- question 204 migrated this off `sha2` (banned workspace-wide, see the
+# root `deny.toml`'s `[bans]` list) to close the gap ADR-004's crypto rule always intended:
+# SHA-256 only, through the system OpenSSL only, with no carve-out for a non-security-critical
+# fingerprint like this one.
+openssl = "0.10"

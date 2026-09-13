@@ -8,10 +8,12 @@
 //! `openssl-sys` -> the system/Homebrew `libssl`/`libcrypto`), not `sha2` and not `ring`.
 //! This is deliberate, not an oversight: M6.2's brief is specifically to prove the
 //! OpenSSL-backed hashing path in a second place beyond `crates/av-grpc`'s TLS stack, even
-//! though SHA-256 itself is not a security-sensitive operation here (`av-dynamics`'s own
-//! `settings_hash` already uses pure-Rust `sha2` for the *same kind* of non-cryptographic
-//! fingerprint, and that is equally correct -- ADR-004's rule is about what protects the
-//! platform's real trust boundary, not "ban sha2 everywhere").
+//! though SHA-256 itself is not a security-sensitive operation here. `av-dynamics`'s own
+//! `settings_hash` previously used pure-Rust `sha2` for the *same kind* of non-cryptographic
+//! fingerprint -- question 204 migrated it (and every other `sha2` call site in this
+//! workspace) to `openssl::sha::sha256` and banned `sha2` outright in the root `deny.toml`'s
+//! `[bans]` list, closing the gap ADR-004's crypto rule always intended: SHA-256 only,
+//! through the system OpenSSL only, with no carve-out for a non-security-critical fingerprint.
 //!
 //! # Hash chain (ADR-004 M7.3, `proto/altavista/v1/envelope.proto`'s `SignedBatch` convention)
 //!

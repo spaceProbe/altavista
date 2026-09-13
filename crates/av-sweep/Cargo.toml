@@ -27,5 +27,9 @@ serde_json.workspace = true
 # 87's convention, mirrored here for ParameterSweep/SweepAxis YAML) -- not a workspace
 # dependency, so pinned here with the same explicit version av-kernel already uses.
 serde_yaml = "0.9"
-sha2.workspace = true
+# SHA-256 for src/hash.rs/src/seed.rs, via the `openssl` crate (openssl-sys -> the
+# system/Homebrew libssl/libcrypto). Question 204 migrated this off `sha2` (previously a
+# workspace dependency) -- `sha2` is now banned workspace-wide in the root `deny.toml`'s
+# `[bans]` list, per ADR-004's crypto rule: SHA-256 only, through the system OpenSSL only.
+openssl = "0.10"
 thiserror.workspace = true

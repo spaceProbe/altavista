@@ -49,7 +49,6 @@ use av_kernel::expr::objective::{evaluate_moe, evaluate_objective};
 use av_kernel::expr::ExprRunProducts;
 use gmat_sys::Gmat;
 use serde::Serialize;
-use sha2::Digest;
 
 fn param(name: &str, value: f64) -> Parameter {
     Parameter { name: name.to_string(), value, ..Default::default() }
@@ -356,9 +355,12 @@ fn main() {
         let mut golden = run_case(&gmat, &case, &reason).unwrap_or_else(|e| panic!("case {name:?}: DRM execution failed: {e}"));
         golden.generated = now.clone();
         let body = serde_json::to_string_pretty(&golden).unwrap();
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(body.as_bytes());
-        golden.sha256 = format!("{:x}", hasher.finalize());
+        let digest = openssl::sha::sha256(body.as_bytes());
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        golden.sha256 = hex;
         let out_path = goldens_dir.join(format!("{name}.json"));
         let final_body = serde_json::to_string_pretty(&golden).unwrap();
         std::fs::write(&out_path, final_body + "\n").unwrap_or_else(|e| panic!("writing {out_path:?}: {e}"));

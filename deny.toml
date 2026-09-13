@@ -132,12 +132,19 @@ deny = [
     { name = "ring" },
     # MD5 and SHA-1 are both cryptographically broken for collision resistance; nothing in
     # this platform's evidence/signing/hashing paths should ever reach for either (SHA-256
-    # only -- via `sha2`, pure Rust, for non-security-critical fingerprints, or the
-    # `openssl` crate's OpenSSL-backed SHA-256 for the evidence log -- see
-    # crates/av-dynamics-service/src/evidence.rs).
+    # only -- through the system OpenSSL only, via the `openssl` crate's
+    # `openssl::sha::sha256` -- see crates/av-dynamics-service/src/evidence.rs; `sha2` is
+    # banned below since question 204, which closed the gap this rule always intended: no
+    # exception for non-security-critical fingerprints either).
     { name = "md-5" },
     { name = "md5" },
     { name = "sha1" },
+    # `sha2` (pure Rust, no system OpenSSL underneath) is banned since question 204: every
+    # SHA-256 call site in this workspace (`av-dynamics::settings_hash`,
+    # `av-kernel::drm::hash::sha256_hex`, `av-sweep::hash`/`av-sweep::seed`) was migrated to
+    # `openssl::sha::sha256`, so ADR-004's crypto rule -- the system OpenSSL only -- now has
+    # no carve-out left to police by hand.
+    { name = "sha2" },
     # BLAKE2 is not banned for being weak (it isn't) but for being *a second hash family*
     # this platform has no reason to carry: ADR-004's rule is "SHA-256 only", and a second,
     # unused-by-policy hash algorithm in the dependency tree is exactly the kind of drift
