@@ -267,7 +267,12 @@ pub(crate) fn announce_gate_skip_multi_with(require: bool, test_name: &str, reas
 /// bypassing libtest's output capture (see [`announce_gate_skip`]'s own doc comment). Uses
 /// `std::io::Write::write_all` on the `Stderr` handle directly -- never the `eprintln!`/
 /// `eprint!` macros, which route through `io::_eprint` and ARE captured.
-fn write_real_stderr(text: &str) {
+///
+/// `pub(crate)`: also used by the sibling `docker_test_lock` module to announce a blocked
+/// `lock_docker_tests()` wait (question 207's own follow-up: a lock acquisition that blocks
+/// silently is indistinguishable, to a human watching a plain `cargo test`, from a hang -- the
+/// same visibility concern this function already exists for).
+pub(crate) fn write_real_stderr(text: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(text.as_bytes());

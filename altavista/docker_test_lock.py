@@ -55,6 +55,18 @@ resources are torn down, with zero userspace code involved. That is the one prop
 actually needs, and it is exactly what `fcntl.flock` (a thin wrapper over the same `flock(2)`
 syscall the Rust side's `libc::flock` calls) gives for free.
 
+# A blocked wait is announced, never silent
+
+A follow-up to question 207: `lock_docker_tests()` tries the lock non-blockingly first. Only
+when another process on this host genuinely holds it does blocking on `fcntl.flock(fd, LOCK_EX)`
+become a real, possibly long wait -- with no output at all, that wait is indistinguishable, to a
+human watching a plain `pytest` run, from a hang. So instead: one line to stderr naming the lock
+path and citing question 207 before blocking, and one more reporting the actual elapsed wait
+(measured with `time.monotonic()`, never assumed) after acquiring. Proved cross-language by the
+Rust side's own `docker_test_lock::tests::lock_docker_tests_announces_a_blocked_wait_never_silently`
+test and mirrored between two Python processes by
+`tests/test_docker_test_lock_cross_process.py::test_the_waiting_process_announces_its_own_wait`.
+
 # Usage
 
     from altavista.docker_test_lock import lock_docker_tests
@@ -71,6 +83,8 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -114,7 +128,23 @@ def lock_docker_tests() -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Try non-blocking first: if nothing else holds it, this is the whole acquisition --
+        # silent, exactly as before.
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.stderr.write(
+                f"WAITING for the docker-test lock ({path}): another process on this host "
+                "currently holds it -- blocking until it releases (docs/open-questions.md "
+                "question 207: this lock is host-wide, not per-worktree, so waiting here under "
+                "real contention is expected, not a hang)\n"
+            )
+            sys.stderr.flush()
+            waited_since = time.monotonic()
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            waited_s = time.monotonic() - waited_since
+            sys.stderr.write(f"ACQUIRED the docker-test lock ({path}) after waiting {waited_s:.3f}s\n")
+            sys.stderr.flush()
         yield
     finally:
         # Explicit unlock for clarity in the ordinary (non-killed) case; the actual SIGKILL-safe

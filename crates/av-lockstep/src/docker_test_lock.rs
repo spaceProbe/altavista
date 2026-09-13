@@ -67,6 +67,23 @@
 //! docker-gated test that gets killed mid-run must not leave the NEXT run's lock acquisition
 //! hanging forever), and it is exactly what `flock` gives for free.
 //!
+//! ## A blocked wait is announced, never silent
+//!
+//! [`lock_docker_tests`] tries the lock non-blockingly first. When another process on this host
+//! genuinely holds it, blocking on `flock(LOCK_EX)` with no output would be indistinguishable,
+//! to a human watching a plain `cargo test` run, from a hang -- the same visibility concern
+//! questions 194/148 already exist for elsewhere in this crate. So instead: one line announcing
+//! the wait (naming the lock path, citing question 207) is printed via
+//! [`crate::docker::write_real_stderr`] before blocking, and one more reporting the actual
+//! elapsed wait (measured with `Instant`, never assumed) after acquiring. Proved end to end,
+//! against a genuinely separate process, by `lock_docker_tests_announces_a_blocked_wait_never_silently`
+//! below (a nested `cargo test` subprocess targeting the `probe_process_that_blocks_acquiring_the_docker_test_lock`
+//! test -- the same "spawn a real subprocess and inspect its own captured output" idiom
+//! `crates/av-lockstep/tests/docker_lifecycle.rs::announce_gate_skip_is_actually_visible_in_a_real_cargo_test_subprocess_without_nocapture`
+//! already establishes). The Python side's identical announcement is proved the same way,
+//! between two Python processes, by
+//! `tests/test_docker_test_lock_cross_process.py::test_the_waiting_process_announces_its_own_wait`.
+//!
 //! ## Why [`crate::docker::prune_stale_test_resources`] takes `&DockerTestLock` as a parameter
 //!
 //! See that function's own doc comment for the full "acquire-inside-the-function would
@@ -126,6 +143,17 @@ pub struct DockerTestLock {
 /// own doc comment, and `crate::docker::prune_stale_test_resources`'s own doc comment, for why a
 /// narrower scope already reproduced question 207's own failure once.
 ///
+/// **A blocked wait is announced, never silent.** A follow-up to question 207: blocking on
+/// `flock(LOCK_EX)` with no output is, to a human watching a plain `cargo test` run, genuinely
+/// indistinguishable from a hang -- the same visibility concern questions 194/148 already exist
+/// for elsewhere in this module's own crate. This function therefore tries the lock
+/// non-blockingly first; only if that would actually block does it print one line (via
+/// [`crate::docker::write_real_stderr`] -- a raw stderr write, not `eprintln!`, so it survives
+/// libtest's output capture on an eventually-passing test) naming the lock path and citing
+/// question 207, then blocks for real, then prints a second line reporting how long the wait
+/// actually took (measured with [`std::time::Instant`] around the blocking call itself -- a real
+/// elapsed-time measurement of an OS event, never a sleep).
+///
 /// Panics (rather than returning a `Result`) if `$HOME` is unset, the lock directory cannot be
 /// created, the lock file cannot be opened, or the underlying `flock(2)` call itself fails for a
 /// reason other than blocking (e.g. `ENOLCK`) -- a hard error at the acquire site, never a
@@ -141,15 +169,34 @@ pub fn lock_docker_tests() -> DockerTestLock {
     // benefit, not a correctness requirement either way.
     let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).unwrap_or_else(|e| panic!("could not open/create the docker-test lock file {path:?}: {e}"));
     let fd = file.as_raw_fd();
+
+    // Try non-blocking first. If nothing else holds the lock, this is the entire acquisition --
+    // silent, exactly as before.
     // SAFETY: `fd` is a valid, open file descriptor owned by `file` for the duration of this
-    // call (it is not closed until `file` is dropped, which happens no earlier than the return
-    // value of this function). `libc::flock` with `LOCK_EX` (no `LOCK_NB`) blocks the calling
-    // thread until the lock is free rather than returning EWOULDBLOCK -- exactly the "acquire,
-    // waiting as long as it takes" contract this function's own name promises.
-    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        panic!("flock(LOCK_EX) on {path:?} failed: {err}");
+    // call (not closed until `file` is dropped, no earlier than this function's return).
+    let rc_nb = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if rc_nb != 0 {
+        let nb_err = io::Error::last_os_error();
+        if nb_err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            // Some failure OTHER than "would block" (e.g. ENOLCK) -- a hard error at the
+            // acquire site, same as the blocking call's own failure path below.
+            panic!("flock(LOCK_EX|LOCK_NB) on {path:?} failed for a reason other than blocking: {nb_err}");
+        }
+        crate::docker::write_real_stderr(&format!(
+            "WAITING for the docker-test lock ({}): another process on this host currently holds it -- \
+             blocking until it releases (docs/open-questions.md question 207: this lock is host-wide, \
+             not per-worktree, so waiting here under real contention is expected, not a hang)\n",
+            path.display()
+        ));
+        let waited_since = std::time::Instant::now();
+        // SAFETY: same `fd`, still open, no other code in this function touches it concurrently.
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            panic!("flock(LOCK_EX) on {path:?} failed: {err}");
+        }
+        let waited = waited_since.elapsed();
+        crate::docker::write_real_stderr(&format!("ACQUIRED the docker-test lock ({}) after waiting {waited:?}\n", path.display()));
     }
     DockerTestLock { file }
 }
@@ -332,6 +379,118 @@ finally:
         assert_eq!(
             observed_after_drop, "ACQUIRED",
             "after the Rust guard is dropped (closing its fd releases the flock), the SAME python3 child command must now succeed -- got {observed_after_drop:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // A blocked wait is announced, never silent (question 207's own follow-up). Proved against
+    // a genuinely separate process (not just in-process reasoning about what the code SHOULD
+    // print) via a nested `cargo test` subprocess -- the identical idiom
+    // `crates/av-lockstep/tests/docker_lifecycle.rs::
+    // announce_gate_skip_is_actually_visible_in_a_real_cargo_test_subprocess_without_nocapture`
+    // already establishes for exactly this "does a raw stderr write survive libtest's capture"
+    // question. `Command::output()`'s own pipes capture a child's raw fd writes regardless of
+    // libtest's internal capture state, so no `--nocapture` is needed on the nested invocation.
+    // -------------------------------------------------------------------------------------
+
+    /// Not meaningful on its own -- exists ONLY as the nested-subprocess target for
+    /// `lock_docker_tests_announces_a_blocked_wait_never_silently` below. Acquires the REAL,
+    /// production lock and announces success on stdout so the parent test can tell the child's
+    /// own `flock` call actually returned (as opposed to the child having crashed before
+    /// reaching it). When run as an ordinary part of this crate's own test suite (no
+    /// contention), this passes trivially and silently, the same as any other acquire-then-
+    /// release of an uncontended lock.
+    #[test]
+    fn probe_process_that_blocks_acquiring_the_docker_test_lock() {
+        let _guard = lock_docker_tests();
+        println!("PROBE_ACQUIRED");
+    }
+
+    #[test]
+    fn lock_docker_tests_announces_a_blocked_wait_never_silently() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::Stdio;
+
+        // This process acquires the lock FIRST -- nothing else holds it yet, so this is the
+        // silent, non-blocking path (no announcement expected here).
+        let guard = lock_docker_tests();
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // `--nocapture` on the NESTED invocation: without it, libtest would swallow the probe
+        // test's own `println!("PROBE_ACQUIRED")` on a passing run (the exact question-194
+        // capture behaviour this crate already documents elsewhere) -- this test needs that
+        // line visible in the child's own stdout to confirm the child genuinely reached and
+        // passed through its own `flock` call, not merely that the subprocess exited 0. The
+        // WAITING/ACQUIRED lines themselves need no such flag (`write_real_stderr` already
+        // bypasses libtest's capture on its own), but harmless to request together.
+        let mut child = Command::new("cargo")
+            .args(["test", "-p", "av-lockstep", "--lib", "--", "--exact", "docker_test_lock::tests::probe_process_that_blocks_acquiring_the_docker_test_lock", "--nocapture"])
+            .current_dir(&repo_root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("could not spawn the nested cargo test subprocess: {e}"));
+
+        // Block on a REAL OS event: the child's own stderr line, which `write_real_stderr`
+        // flushes immediately after writing -- never a sleep-and-hope that the child has
+        // "probably" reached its own flock call by now. `cargo test`'s own build-status text
+        // ("Compiling"/"Finished"/"Running...") also lands on this same stderr pipe before the
+        // test binary itself even starts, so this reads (and discards) lines until it finds the
+        // one actually containing "WAITING" -- filtering on content, never on line position. If
+        // the announcement regressed to nothing at all, this loop would instead block forever on
+        // eof-that-never-comes until the child's own process exit closes the pipe -- which
+        // happens only if the child's own `flock` call unblocks, which (with `guard` still held
+        // here) it cannot, so a regression here shows up as this test hanging/timing out, not
+        // silently passing.
+        let mut child_stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let waiting_line = loop {
+            let mut line = String::new();
+            let n = child_stderr.read_line(&mut line).expect("read a line from the child's real stderr pipe");
+            assert_ne!(n, 0, "the child's stderr pipe closed before ever printing a WAITING line -- lines seen so far are lost, but this means the announcement never happened");
+            if line.contains("WAITING") {
+                break line.trim().to_string();
+            }
+        };
+
+        // Release -- the child's own blocked flock(LOCK_EX) can now proceed.
+        drop(guard);
+
+        let acquired_line = loop {
+            let mut line = String::new();
+            let n = child_stderr.read_line(&mut line).expect("read a line from the child's real stderr pipe");
+            assert_ne!(n, 0, "the child's stderr pipe closed before ever printing an ACQUIRED-after-waiting line");
+            if line.contains("ACQUIRED the docker-test lock") {
+                break line.trim().to_string();
+            }
+        };
+
+        let mut remaining_stderr = String::new();
+        std::io::Read::read_to_string(&mut child_stderr, &mut remaining_stderr).ok();
+
+        let output_status = child.wait().expect("the nested cargo test subprocess must exit");
+        let mut child_stdout_buf = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            std::io::Read::read_to_string(&mut out, &mut child_stdout_buf).ok();
+        }
+
+        // Question 148: an exit code is not evidence -- print exactly what the child process
+        // actually wrote, not a paraphrase.
+        std::io::stdout()
+            .write_all(format!("lock_docker_tests waiting-announcement proof (nested subprocess): WAITING line = {waiting_line:?}; ACQUIRED line = {acquired_line:?}; child stdout tail = {child_stdout_buf:?}\n").as_bytes())
+            .ok();
+
+        assert!(
+            output_status.success(),
+            "the nested cargo test subprocess (the actual test of lock_docker_tests()'s blocking path) must itself pass -- stderr tail: {remaining_stderr:?}, stdout: {child_stdout_buf:?}"
+        );
+        assert!(child_stdout_buf.contains("PROBE_ACQUIRED"), "the child must have actually acquired the lock and printed its own confirmation -- got stdout {child_stdout_buf:?}");
+        assert!(
+            waiting_line.contains("WAITING") && waiting_line.contains("docker-test lock") && waiting_line.contains("question 207"),
+            "expected a WAITING line naming the docker-test lock and citing question 207, got {waiting_line:?}"
+        );
+        assert!(
+            acquired_line.starts_with("ACQUIRED the docker-test lock") && acquired_line.contains("after waiting"),
+            "expected an ACQUIRED-after-waiting line reporting the real elapsed wait, got {acquired_line:?}"
         );
     }
 }

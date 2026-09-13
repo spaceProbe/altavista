@@ -45,6 +45,17 @@ with lock_docker_tests():
 print("RELEASED", flush=True)
 """
 
+# Runs inside a THIRD kind of child process: calls the REAL, blocking `lock_docker_tests()` --
+# never the raw LOCK_NB probe below -- so that when contended, THIS process's own call takes
+# the module's genuine "announce, then block, then announce again" path (see
+# altavista/docker_test_lock.py's own "A blocked wait is announced, never silent" doc section).
+_WAITER_SCRIPT = """
+from altavista.docker_test_lock import lock_docker_tests
+
+with lock_docker_tests():
+    print("WAITER_ACQUIRED", flush=True)
+"""
+
 # Runs inside a SEPARATE child process: a single non-blocking attempt on the identical
 # production path (via `lock_path()`, never re-deriving it independently -- this probe is
 # testing mutual exclusion between two Python processes, not path agreement, so it reuses the
@@ -116,3 +127,80 @@ def test_two_python_processes_mutually_exclude_on_the_docker_test_lock():
         f"process's own lock_docker_tests() context manager still holds it -- got {observed_while_held!r}"
     )
     assert observed_after_release == "ACQUIRED", f"once the holder released, the same probe command must now succeed -- got {observed_after_release!r}"
+
+
+def _read_line_containing(pipe, needle: str, *, what: str) -> str:
+    """Blocks on real OS events (the pipe's own `readline`) until a line containing `needle`
+    appears -- never a sleep. Any other lines (there should be none for plain `python -c`, but
+    filtering by content rather than position costs nothing and matches the Rust side's own
+    nested-subprocess test, which DOES see extra lines from cargo's own build-status text)."""
+    while True:
+        line = pipe.readline()
+        assert line, f"{what}: the pipe closed before ever printing a line containing {needle!r}"
+        if needle in line:
+            return line.strip()
+
+
+def test_the_waiting_process_announces_its_own_wait():
+    """Question 207's own follow-up: `lock_docker_tests()` must not block silently when
+    contended -- see altavista/docker_test_lock.py's "A blocked wait is announced, never silent"
+    doc section. Mirrors the Rust side's own
+    `docker_test_lock::tests::lock_docker_tests_announces_a_blocked_wait_never_silently`, between
+    two Python processes instead of a nested `cargo test` subprocess."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT],
+        cwd=REPO_ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        held_line = holder.stdout.readline().strip()
+        assert held_line == "HELD", f"holder child did not report holding the lock (got {held_line!r}); stderr: {holder.stderr.read()}"
+
+        waiter = subprocess.Popen(
+            [sys.executable, "-c", _WAITER_SCRIPT],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            # Block on a real OS event: the waiter's own WAITING line, written (and flushed) by
+            # `lock_docker_tests()` itself only after its own non-blocking attempt has actually
+            # failed with BlockingIOError -- never a sleep-and-hope that the waiter has "probably"
+            # reached that point by now.
+            waiting_line = _read_line_containing(waiter.stderr, "WAITING", what="waiter")
+
+            # Release the holder -- the waiter's own blocked fcntl.flock(LOCK_EX) can now proceed.
+            holder.stdin.write("release\n")
+            holder.stdin.flush()
+            released_line = holder.stdout.readline().strip()
+            assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {holder.stderr.read()}"
+
+            acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what="waiter")
+
+            waiter_stdout, waiter_stderr_rest = waiter.communicate(timeout=10)
+        finally:
+            if waiter.poll() is None:
+                waiter.kill()
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=10)
+
+    # Question 148: an exit code is not evidence -- print exactly what the waiter process wrote.
+    print(
+        f"\n--- Python waiting-announcement proof, observed ---\n"
+        f"WAITING line: {waiting_line!r}\n"
+        f"ACQUIRED line: {acquired_line!r}\n"
+        f"waiter stdout: {waiter_stdout!r}"
+    )
+
+    assert "WAITING" in waiting_line and "docker-test lock" in waiting_line and "question 207" in waiting_line, (
+        f"expected a WAITING line naming the docker-test lock and citing question 207, got {waiting_line!r}"
+    )
+    assert acquired_line.startswith("ACQUIRED the docker-test lock") and "after waiting" in acquired_line, (
+        f"expected an ACQUIRED-after-waiting line reporting the real elapsed wait, got {acquired_line!r}"
+    )
+    assert "WAITER_ACQUIRED" in waiter_stdout, f"the waiter must have actually acquired the lock and printed its own confirmation -- got stdout {waiter_stdout!r} (stderr tail: {waiter_stderr_rest!r})"
