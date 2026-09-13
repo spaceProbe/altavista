@@ -502,7 +502,7 @@ Seven commits on `aiplane`, one per accepted task:
 | `c473385` | Question 206's two open items: the gateway on a command trail, a GMAT-bound `ExternalCommandSource` target |
 | `ac335ce` | A5 persist the proposal, and serve the console's data under `/api/command/` |
 | `3936f0e` | A5 the command console panel, in the execution profile's default layout only |
-| `c52d97a` | A6 the ledger decision trail replayed, the control matrices, one evidence bundle |
+| `19c77a4` | A6 the ledger decision trail replayed, the control matrices, one evidence bundle |
 
 ### Gates, the manager's own runs with no worker active
 
