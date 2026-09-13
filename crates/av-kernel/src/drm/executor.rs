@@ -1636,7 +1636,14 @@ fn run_one_span(
 /// provenance"). M15.2 drops this tuple's old fifth member (every container instance's own held
 /// epochs, M14.4) -- see this function's own doc comment's "Container period vs. the trajectory's
 /// own output grid" section for why that side channel is gone.
-type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, String>, Vec<av_cdm::pb::Measurement>);
+///
+/// A3.3: a sixth member, this run's own whole `crate::router::Router::take_port_traffic()`
+/// drain -- `run_shared_group` must read it once, itself, before it can derive a REPLAYED
+/// target's own ACKED transition from the recorded ack frame (see the applied-commands drain's
+/// own "A3.3" comment further down), and `Router::take_port_traffic` is a genuine drain (a
+/// second call returns nothing) -- so the ONE drain happens here and is threaded back out
+/// through this tuple, rather than `execute()` draining it again itself and getting nothing.
+type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, String>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>);
 
 /// Question 178 (R5.1a): drain `handle`'s own accumulated SENSOR fault effect (if any) and fold
 /// it into `sensor_fault_totals`, attributed to whichever fault id `active_sensor_fault` says is
@@ -1742,6 +1749,44 @@ fn decode_error_episode_events(errors: &[crate::ports::DecodeErrorRecord], succe
         }
     }
     out
+}
+
+/// A3.3 (M25.4b's own follow-on, `docs/open-questions.md` question 187): resolve `plan`'s own
+/// declared ack-telemetry FRAMED OUT port name and codec, generically over every
+/// `consume_framed`-capable [`BindingPlan`] variant -- the identical pairing `run_shared_group`'s
+/// own `leveled_ack_instances` block already resolves for the Controller arm (`binding::
+/// resolve_controller_ports`), read here instead so a REPLAYED target's own ACKED derivation
+/// (further down, in `run_shared_group`'s own applied-commands drain) can find and decode the
+/// SAME ack packet a live run's own `AttitudeControllerModel`/`ConstantAccelModel::step_with_
+/// ports` genuinely sent, never a second, independently-maintained guess at the pairing.
+fn resolve_ack_framed(plan: &BindingPlan, target_sys: &SystemDefinition, instance: &str) -> Option<(String, pb::PacketCodec)> {
+    match plan {
+        BindingPlan::ConstantAccel(spec) => match (&spec.ack_framed_port, &spec.ack_framed_codec) {
+            (Some(port), Some(codec)) => Some((port.clone(), (**codec).clone())),
+            _ => None,
+        },
+        BindingPlan::Gmat(spec) => match (&spec.ack_framed_port, &spec.ack_framed_codec) {
+            (Some(port), Some(codec)) => Some((port.clone(), (**codec).clone())),
+            _ => None,
+        },
+        BindingPlan::Controller(_) => binding::resolve_controller_ports(target_sys, instance).ok().and_then(|ports| ports.ack_codec).map(|codec| (super::controller::CONTROLLER_MODE_ACK_OUT_PORT.to_string(), codec)),
+        _ => None,
+    }
+}
+
+/// The CONSUME-side companion of [`resolve_ack_framed`] -- the FRAMED IN port name a genuinely
+/// applied `av_dynamics::AppliedCommand::port` carries for `plan`, generically over the same
+/// [`BindingPlan`] variants. Needed only to build the synthetic [`crate::ports::
+/// AppliedPortCommand`] a REPLAYED target's own derivation (further down) feeds to [`events::
+/// port_command_event`] -- the identical field name a live, non-replayed run of the same
+/// binding kind already carries on its own real `AppliedCommand`.
+fn resolve_consume_framed_port(plan: &BindingPlan) -> Option<String> {
+    match plan {
+        BindingPlan::ConstantAccel(spec) => spec.consume_framed_port.clone(),
+        BindingPlan::Gmat(spec) => spec.consume_framed_port.clone(),
+        BindingPlan::Controller(_) => Some(super::controller::CONTROLLER_MODE_IN_PORT.to_string()),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2374,6 +2419,13 @@ fn run_shared_group(
         .map(|(name, _)| name.clone())
         .collect();
 
+    // A3.3 (M25.4b's own follow-on): this run's own WHOLE port-traffic drain, taken here --
+    // before the applied-commands drain below, which needs it to find a REPLAYED target's own
+    // recorded ack frame -- and threaded out through `SharedGroupResult`'s own sixth member so
+    // `execute()` never calls `Router::take_port_traffic` a second time and gets nothing (see
+    // that type alias's own doc comment).
+    let port_traffic_records = router.take_port_traffic();
+
     let mut trajectories = BTreeMap::new();
     let mut outputs_by_instance = BTreeMap::new();
     for (name, span) in model_spans {
@@ -2434,6 +2486,80 @@ fn run_shared_group(
                 }
             }
         }
+        // A3.3 (M25.4b's own follow-on, `docs/open-questions.md` question 187): a REPLAYED
+        // target's own `span.applied_commands` is ALWAYS empty (`replay::ReplayModel::
+        // step_with_ports` never computes one -- correct: that module's own doc comment states
+        // plainly that a replay binding genuinely applied nothing), so the loop above never
+        // derives this instance's own ACKED transition (or its companion EVENT_KIND_PORT_COMMAND
+        // event) for any command targeting it. Derived HERE instead, from the recorded
+        // ack-telemetry OUT frame THIS SAME run's own router genuinely carried for `name` --
+        // `ReplayModel` faithfully replays that instance's own recorded OUT frames verbatim
+        // (`replay`'s own module doc comment: "Only OUT frames on FRAMED/BYTE_STREAM ports are
+        // replayed"), so the exact ack packet the flight software really sent during the
+        // ORIGINAL run is present again, byte for byte, in `port_traffic_records` (this run's
+        // own single `Router::take_port_traffic` drain, taken above and threaded through
+        // `SharedGroupResult` -- see that type alias's own doc comment) -- nothing is
+        // fabricated here, only read and correlated by the packet's own CCSDS `cmd_seq` field
+        // (`command::assign_sequence_numbers`'s own numeric correlator, `id_to_seq` above).
+        if replay_targets.contains(&name) {
+            if let Some((ack_port, ack_codec)) = resolve_ack_framed(&span.cur_plan, sys, &name) {
+                let is_levelled = ack_codec.fields.iter().any(|f| f.name == "level");
+                let apid_map: crate::codec::ApidMap = BTreeMap::from([(ack_codec.apid, ack_codec.clone())]);
+                let consume_port = resolve_consume_framed_port(&span.cur_plan);
+                for cmd in commands.iter().filter(|c| c.instance == name) {
+                    let Some(&seq) = id_to_seq.get(&cmd.id) else { continue };
+                    let mut executed_emission_tai_ns: Option<i64> = None;
+                    let mut asset_received = false;
+                    for rec in &port_traffic_records {
+                        if rec.instance != name || rec.direction != pb::PortDirection::Out as i32 || rec.port != ack_port {
+                            continue;
+                        }
+                        let Ok(decoded) = crate::codec::decode_packet(&apid_map, &rec.payload) else { continue };
+                        let Some(crate::codec::FieldValue::Numeric(decoded_seq)) = decoded.fields.get("cmd_seq") else { continue };
+                        if *decoded_seq as u16 != seq {
+                            continue;
+                        }
+                        if is_levelled {
+                            let level = decoded.fields.get("level").and_then(|v| match v {
+                                crate::codec::FieldValue::Numeric(n) => Some(*n),
+                                _ => None,
+                            });
+                            if level == Some(av_cdm::pb::AckLevel::AssetExecuted as i32 as f64) {
+                                executed_emission_tai_ns = Some(rec.tai_ns);
+                            } else if level == Some(av_cdm::pb::AckLevel::AssetReceived as i32 as f64) {
+                                asset_received = true;
+                            }
+                        } else {
+                            executed_emission_tai_ns = Some(rec.tai_ns);
+                        }
+                    }
+                    let Some(emission_tai_ns) = executed_emission_tai_ns else { continue };
+                    // Question 187 (the epoch trap, this project's own second occurrence):
+                    // `Router::deliver` recorded this frame at its own EMISSION epoch --
+                    // `command::ack_emission_epoch(applied, period)`'s own `applied + period`,
+                    // i.e. the applying step's own RESULT (end) epoch, never the START epoch the
+                    // live ACKED transition itself lands on (that function's own doc comment).
+                    // Inverted HERE by calling that SAME helper with a negated period
+                    // (`ack_emission_epoch(emission, -period) == emission - period ==
+                    // applied`) -- never an open-coded `-`, so the relation stays written in the
+                    // one place its own doc comment already spells it out.
+                    let applied_tai_ns = command::ack_emission_epoch(emission_tai_ns, -span.period_ns);
+                    if let Some(port_name) = &consume_port {
+                        let synthetic = crate::ports::AppliedPortCommand { instance: name.clone(), port: port_name.clone(), field: cmd.field.clone(), value: cmd.value, applied_tai_ns, sender: Some(cmd.from.clone()) };
+                        all_events.push(events::port_command_event(&synthetic, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    }
+                    all_events.push(command::acked_event(cmd, applied_tai_ns, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    if let Some(source) = command_source {
+                        if external_ids.contains(&cmd.id) {
+                            if is_levelled && asset_received && leveled_ack_instances.contains(&name) {
+                                source.report(command_source::CommandOutcome::Acked { id: cmd.id.clone(), level: av_cdm::pb::AckLevel::AssetReceived, epoch_tai_ns: applied_tai_ns });
+                            }
+                            source.report(command_source::CommandOutcome::Acked { id: cmd.id.clone(), level: av_cdm::pb::AckLevel::AssetExecuted, epoch_tai_ns: applied_tai_ns });
+                        }
+                    }
+                }
+            }
+        }
         // Question 193 (R6.2): fold this instance's own decode failures/successes, across every
         // span of this shared run, into decode-error EPISODES per port -- one `decode_error_
         // start`/`decode_error_end` event PAIR per episode, never one event per occurrence (the
@@ -2461,7 +2587,7 @@ fn run_shared_group(
         outputs_by_instance.insert(name.clone(), span.all_outputs);
     }
 
-    Ok((trajectories, all_events, outputs_by_instance, container_binding_hashes, all_measurements))
+    Ok((trajectories, all_events, outputs_by_instance, container_binding_hashes, all_measurements, port_traffic_records))
 }
 
 /// Read `instance.initial_covariance` (question 89) and SPD-check it at load, before any
@@ -3630,6 +3756,13 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         return Err(DrmError::InvalidDrmOptions { reason: "DrmOptions.covariance and a declared \"command\" Scenario.events entry are not supported together yet (M25.2's own scope: command dispatch is wired into the shared-kernel/Router path only)".to_string() });
     }
 
+    // A3.3: `Some` only once `run_shared_group` (the `else` arm below) has actually run and
+    // drained `router.take_port_traffic()` itself -- see `SharedGroupResult`'s own doc comment
+    // for why that single drain must happen there, not here. The covariance arm never touches
+    // `router` at all, so it leaves this `None`, and this run's own port traffic (always empty
+    // for a covariance run) is still correctly read the old way, below.
+    let mut shared_port_traffic: Option<Vec<pb::PortTrafficRecord>> = None;
+
     if options.covariance {
         for instance in &cfg.sos.instances {
             let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
@@ -3673,7 +3806,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         }
     } else {
         let instances_by_name: BTreeMap<String, &SystemInstance> = cfg.sos.instances.iter().map(|i| (i.name.clone(), i)).collect();
-        let (shared_trajectories, shared_events, shared_outputs, container_binding_hashes, shared_measurements) = run_shared_group(
+        let (shared_trajectories, shared_events, shared_outputs, container_binding_hashes, shared_measurements, shared_group_port_traffic) = run_shared_group(
             cfg.gmat,
             &plans,
             &container_plans,
@@ -3696,6 +3829,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         )?;
         all_events.extend(shared_events);
         all_measurements.extend(shared_measurements);
+        shared_port_traffic = Some(shared_group_port_traffic);
         for instance in &cfg.sos.instances {
             let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
             let sys_hash = system_hashes.get(&instance.system_id).expect("verified above").clone();
@@ -3799,12 +3933,21 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
 
     all_events.sort_by_key(events::epoch_id_order);
 
-    // Question 175 (M25.4a): every FRAMED/BYTE_STREAM frame this run's `router` carried, taken
-    // once, here, right alongside `pending_count` -- both are read only after every span of the
-    // run has finished (the covariance path never drives `router` at all, so this is always
-    // empty there, honestly, exactly like `dropped_in_flight_messages` above). Written to the
+    // Question 175 (M25.4a): every FRAMED/BYTE_STREAM frame this run's `router` carried -- both
+    // this and `pending_count` above are read only after every span of the run has finished
+    // (the covariance path never drives `router` at all, so this is always empty there,
+    // honestly, exactly like `dropped_in_flight_messages` above). Written to the
     // `PortTrafficLog` sidecar (or not) below, once `provenance` exists to snapshot into it.
-    let port_traffic_records = router.take_port_traffic();
+    //
+    // A3.3: the non-covariance path already drained this exact `Vec` itself, inside
+    // `run_shared_group` (`shared_port_traffic`, `Some` above) -- its own ACKED derivation for a
+    // REPLAYED target needs to read this run's recorded ack frames before `execute()` ever gets
+    // control back, and `Router::take_port_traffic` is a real drain (a second call returns
+    // nothing, `router.rs`'s own `take_port_traffic_drains_and_does_not_repeat_on_a_second_call`
+    // test) -- so calling it again HERE would silently empty the sidecar this run is about to
+    // write. `unwrap_or_else` only ever falls through to a real call for the covariance path
+    // (`shared_port_traffic` still `None` there, and genuinely empty either way).
+    let port_traffic_records = shared_port_traffic.unwrap_or_else(|| router.take_port_traffic());
     // Question 175 (M25.4a): emissions this router could not classify because the port carries
     // no declared `PortKind` -- `crate::router::Router::deliver`'s own doc comment for the real,
     // legitimate case (`sensors::TRUTH_PORT_NAMES`, broadcast every step by

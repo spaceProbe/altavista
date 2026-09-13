@@ -1,0 +1,60 @@
+# SosConfiguration (proto/altavista/v1/system.proto), YAML transcoding -- A3.3
+# (`docs/aiplane-plan.md`'s A3 milestone: "the replay binding reproduces the trail bit for
+# bit"). D8 ("a new fixture family, never a modified one"): reuses `drms/demo_ground_command_
+# ground.system.yaml` and `drms/demo_attitude_command_controller.system.yaml` completely
+# unchanged, but WITHOUT `demo_attitude_command.sos.yaml`'s own `attitude`/`startracker`/`imu`
+# instances -- deliberately, so `controller` (the mode command's own target, and the ONLY
+# instance this task's own acceptance test ever replays) never receives a star-tracker/IMU
+# measurement at all.
+#
+# Why this matters (root-caused, not assumed -- `crates/av-kernel/src/drm/controller.rs`,
+# `AttitudeControllerModel::step_with_ports`, read directly): the reaction-wheel torque
+# command/`AppliedCommand` on `wheel_torque_out` (`tau_mag`) and the `pointing_error_rad`/`seq`
+# outputs are ALL gated on `self.last_star_q`/`.last_imu_omega` actually being `Some` --
+# `if let (Some(q), Some(omega)) = (*self.last_star_q.borrow(), *self.last_imu_omega.borrow())`
+# for the torque command, `if let Some(q) = *self.last_star_q.borrow()` for `pointing_error_rad`
+# -- both stay `None` for this instance's entire life when nothing ever sends on `startracker_
+# in`/`imu_in` (as here). This is precisely the pair of causes `crates/av-kernel/src/drm/
+# replay.rs`'s own module doc comment already ruled OUT `demo_attitude_control`/`demo_attitude_
+# command`'s own `controller` (with the closed loop wired) as a byte-identical replay target
+# for: (1) `pointing_error_rad`/`seq` reported only via `StepResult.outputs`, which a replay
+# binding's own always-empty outputs cannot reconstruct, and which `demo_attitude_command.drm.
+# yaml`'s own declared `measures` entry would then fail to evaluate at all (`DrmError::
+# InvalidExpression`) rather than merely diverge; (2) an unconditional per-firing-step
+# `AppliedCommand` on `wheel_torque_out` a replayed instance's own always-empty `applied_
+# commands` can never reproduce. Dropping the closed loop entirely (no `attitude`/`startracker`/
+# `imu` instances at all) makes BOTH gates permanently closed, on the LIVE run too -- so the
+# live run's own `controller` produces zero of either, and a replayed `controller` produces the
+# identical zero, honestly, not merely by omission from a comparison. `controller`'s own `mode_
+# in`/`mode_ack_out` command-consume path is untouched by any of this (its own `AppliedCommand`
+# fires purely from decoding `mode_in`, never gated on star/IMU data) -- the ONE thing this
+# fixture exists to exercise.
+id: attitude_command_replay_sos
+version: "1"
+name: A ground-issued mode command to the attitude controller, with no closed loop wired (A3.3)
+instances:
+  - name: ground
+    system_id: ground_command_demo_ground_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: ground_command_demo_ground_sys
+  - name: controller
+    system_id: attitude_command_controller_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: attitude_command_controller_sys
+connections:
+  - from_instance: ground
+    from_port: cmd_out
+    to_instance: controller
+    to_port: mode_in
+    link_model: "latency"
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (A3.3)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/demo_attitude_command_replay.sos.yaml
+hash: "d14b383384e71643c6f216e4f6735895e56e91001b492ce894702e3fb17c3d1d"
