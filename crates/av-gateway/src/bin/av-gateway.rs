@@ -25,7 +25,10 @@ use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
 use av_gateway::gateway::{DataGatewayServiceImpl, DataGatewayServiceServer, GatewayCore};
 use av_gateway::labels::ClearanceLadder;
 use av_gateway::mcp::{serve, McpContext, McpHandler};
+use av_gateway::propose_flow::ModelProposeServiceImpl;
 use av_gateway::propose_only::ProposeOnlyAuthority;
+use av_gateway::pb::model_propose_service_server::ModelProposeServiceServer;
+use av_gateway::unknown_route_counter::UnknownRouteCounterLayer;
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
@@ -69,16 +72,30 @@ async fn main() {
     };
 
     let clock: Arc<dyn av_command::clock::Clock> = Arc::new(SystemClock);
+    // D1/A4b: ModelProposeService is served from this SAME `tonic::transport::Server` as
+    // DataGatewayService below -- one process, one port, two `add_service` calls -- never a
+    // second listening socket for the network propose path. Shares the identical `authority`/
+    // `evidence_ledger`/`clock`/`counters` the MCP surface's `propose_command` tool uses, since
+    // both call through the one shared `av_gateway::propose_flow::propose_command`.
+    let model_propose = ModelProposeServiceImpl::new(authority.clone(), evidence_ledger.clone(), clock.clone(), counters.clone());
+    // R3.2 acceptance evidence 1(b): a raw gRPC request naming a service this server does not
+    // serve (e.g. CommandAuthorityService) must be refused AND counted, but tonic answers
+    // Unimplemented for an unmatched path entirely inside its own generated router, before any
+    // of this workspace's code runs -- see crate::unknown_route_counter's own module doc.
+    let known_prefixes = vec!["/altavista.v1.DataGatewayService/".to_string(), "/altavista.v1.ModelProposeService/".to_string()];
+    let unknown_route_layer = UnknownRouteCounterLayer::new(known_prefixes, counters.clone());
     let mcp_ctx = McpContext { gateway: core.clone(), authority, evidence_ledger, clock, counters };
     let mcp_handler = McpHandler::new(mcp_ctx);
 
     let grpc = tonic::transport::Server::builder()
+        .layer(unknown_route_layer)
         .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core)))
+        .add_service(ModelProposeServiceServer::new(model_propose))
         .serve(bind_addr);
 
     let mcp = serve(tokio::io::stdin(), tokio::io::stdout(), mcp_handler);
 
-    eprintln!("av-gateway: DataGatewayService on {bind_addr}, MCP server on stdio");
+    eprintln!("av-gateway: DataGatewayService + ModelProposeService on {bind_addr}, MCP server on stdio");
     tokio::select! {
         r = grpc => { if let Err(e) = r { eprintln!("av-gateway: gRPC server exited: {e}"); } }
         r = mcp => { if let Err(e) = r { eprintln!("av-gateway: MCP server exited: {e}"); } }

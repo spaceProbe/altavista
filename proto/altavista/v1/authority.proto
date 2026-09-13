@@ -55,6 +55,31 @@ syntax = "proto3";
 //     a field there would break `crates/av-command/src/ledger.rs`'s exhaustive struct
 //     literal in a crate this track does not edit -- see `crates/av-gateway/src/
 //     evidence.rs`'s module doc for how the evidence topic is realized instead).
+//   - A4b (additive only -- no field number above moves; `docs/aiplane-plan.md` milestone
+//     A4, `crates/av-proposer`): `ProposeCommandRequest`/`ProposeCommandResponse` and
+//     `ModelProposeService` below. A4a's `propose_command` exists only as an MCP tool over
+//     stdio (`crates/av-gateway/src/mcp.rs`); a containerised proposer that talks to the
+//     gateway over a real network socket (this milestone's whole point -- the proposer runs
+//     isolated, `--network none` plus the gateway endpoint, R2's decision 11) has no propose
+//     path at all without one. This is a SECOND service, deliberately not a new rpc on
+//     `DataGatewayService`: that service's own doc comment states, as a load-bearing
+//     invariant this track relies on elsewhere, that nothing in it can create a `Command` --
+//     adding a propose rpc there would falsify that sentence for every caller of
+//     `DataGatewayService`, not only the proposer. It is also deliberately not a second,
+//     home-rolled MCP-over-TCP transport: this workspace's MCP server is hand-rolled
+//     JSON-RPC 2.0 over stdio precisely because stdio needs no listening socket (round 2's
+//     decision 10; question 154), and a proposer dialing the gateway over a real socket is
+//     exactly the case that guarantee does not cover -- an ordinary additive gRPC service,
+//     on the same transport stack every other service in this workspace already uses, is the
+//     honest fit, not a second bespoke protocol. `ProposeCommandRequest` carries exactly what
+//     `crates/av-gateway/src/mcp.rs::handle_propose_command` already accepts (the command
+//     fields, rationale, evidence ids, the run identity and query ids `ProposalEvidence`
+//     needs, the model identity and version, the proposing principal) and
+//     `ProposeCommandResponse` exactly what it returns; both surfaces call through ONE shared
+//     implementation, `crates/av-gateway/src/propose_flow.rs` -- see that module's own doc.
+//     Served by `av-gateway`, on the same `tonic::transport::Server` (and therefore the same
+//     port) as `DataGatewayService` -- two `add_service` calls on one server, never a second
+//     listening socket.
 package altavista.v1;
 
 import "altavista/v1/command.proto";
@@ -693,4 +718,68 @@ message ProposalEvidence {
   // When this evidence record was written, nanoseconds on TAI, always from the injected
   // Clock (av_command::clock::Clock) -- never the wall clock read directly (ADR-004, D8).
   int64 recorded_tai_ns = 6;
+}
+
+// ---------------------------------------------------------------------------------------
+// A4b: crates/av-proposer -- the network propose path a containerised model sidecar needs.
+// Additive only. See this file's header comment's "A4b" entry for why this is a second
+// service rather than a new rpc on DataGatewayService or a second MCP transport.
+// ---------------------------------------------------------------------------------------
+
+// `ModelProposeService.ProposeCommand` request: carries exactly what `crates/av-gateway/src/
+// mcp.rs::handle_propose_command`'s own JSON schema already accepts, as typed fields instead
+// of a JSON object -- the two surfaces share one implementation
+// (`crates/av-gateway/src/propose_flow.rs`), so this message's fields are that shared
+// function's own input, named identically to the MCP tool's `arguments` keys.
+message ProposeCommandRequest {
+  // `Command.id`. Never state/transitions: like the MCP tool's own JSON schema, there is no
+  // field anywhere on this message that could construct an already-started `Command` --
+  // `AlreadyStarted` is reachable only against a hand-crafted request built by bypassing this
+  // message's own field set (i.e. by a test constructing the underlying `CommandProposal`
+  // directly against `crate::propose_only::ProposeOnlyAuthority`, never through this rpc's own
+  // wire schema).
+  string command_id = 1;
+  string entity_id = 2;
+  string command_class = 3;
+  bool hazardous = 4;
+  // Empty until an envelope policy exists (question 53) -- carried so the real refusal
+  // (`state::propose`'s own `EnvelopeNotAllowed`) is reachable end to end through this rpc,
+  // exactly as it is through the MCP tool.
+  string envelope_id = 5;
+  string idempotency_key = 6;
+  // Why, in the proposer's own words; cited run ids and query ids as evidence
+  // (`CommandProposal.rationale`).
+  string rationale = 7;
+  repeated string evidence_ids = 8;
+  // The model/agent identity proposing this command (`ProposeRequest.principal`) -- also
+  // recorded verbatim as `ProposalEvidence.model_identity` below.
+  string principal = 9;
+  // Recorded verbatim as `ProposalEvidence.model_version` below.
+  string model_version = 10;
+  // The run identity the model read before proposing -- `ProposalEvidence.run` (D5: "what
+  // the model saw").
+  RunIdentity run = 11;
+  // Every `GatewayQueryResponse.query_id` the model's session issued before this proposal, in
+  // the order the gateway served them -- `ProposalEvidence.query_ids`.
+  repeated string query_ids = 12;
+}
+
+// `ModelProposeService.ProposeCommand` response: the resulting `Command`, exactly at
+// `COMMAND_STATE_PROPOSED` with exactly one transition -- the same value
+// `crate::propose_only::ProposeOnlyAuthority::propose` returned to the shared implementation,
+// never a second, independently-assembled value.
+message ProposeCommandResponse {
+  Command command = 1;
+}
+
+// The network propose path (A4b). Exactly one rpc, deliberately: this service exists only so
+// a proposer with no stdio channel to the gateway (a separate container, question 154's
+// "no listening socket" guarantee therefore not available to it the way the MCP transport
+// gives it for free) still has a path to `PROPOSED` and nothing else -- the identical
+// structural guarantee `crate::propose_only::ProposeOnlyAuthority` gives the MCP tool
+// (`crates/av-gateway/src/propose_flow.rs`'s module doc). Never add a second rpc here without
+// also asking whether `DataGatewayService`'s "nothing here can create a Command" sentence
+// still holds -- it is a property of that OTHER service specifically, not of this file.
+service ModelProposeService {
+  rpc ProposeCommand(ProposeCommandRequest) returns (ProposeCommandResponse);
 }

@@ -46,6 +46,18 @@ openssl = "0.10"
 # forbidden by ADR-004's crypto rule; mirrors crates/av-command/Cargo.toml's identical
 # tonic-dependency comment verbatim.
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server", "channel"] }
+# crate::unknown_route_counter's tower Layer/Service, proving this task's acceptance evidence
+# item 1(b) is countable (a raw gRPC request naming CommandAuthorityService against this
+# gateway's own port, which tonic answers Unimplemented for entirely inside its own generated
+# router, before any of this workspace's code runs). Both crates are ALREADY in this
+# workspace's Cargo.lock as tonic 0.12's own non-optional dependencies (tonic's own Cargo.toml:
+# `[dependencies.tower-layer]`/`[dependencies.tower-service]`, no `optional = true`) -- naming
+# them directly adds no new crate to this crate's dependency tree, only makes their traits
+# nameable from this crate's own code. `http` likewise (tonic's own `[dependencies.http]`,
+# version "1", non-optional).
+tower-layer = "0.3"
+tower-service = "0.3"
+http = "1"
 
 # "net"/"io-util" for this crate's own gRPC and MCP-stdio listeners (a plain
 # tokio::net::TcpListener, mirroring crates/av-command/src/admin.rs's hand-rolled precedent,

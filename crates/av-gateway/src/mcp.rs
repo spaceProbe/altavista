@@ -40,7 +40,7 @@
 
 use std::sync::Arc;
 
-use av_cdm::pb::{Command, CommandProposal, GatewayQueryRequest, GatewaySelector, ProposalEvidence, RunIdentity};
+use av_cdm::pb::{GatewayQueryRequest, GatewaySelector, RunIdentity};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -48,9 +48,9 @@ use av_command::clock::Clock;
 use av_command::ledger::Ledger;
 
 use crate::counters::{Counted, Counters};
-use crate::evidence::EvidenceRecorder;
 use crate::gateway::GatewayCore;
-use crate::propose_only::{ProposeOnlyAuthority, ProposeRefusal};
+use crate::propose_flow::{propose_command, ProposeCommandInput, ProposeFlowError};
+use crate::propose_only::ProposeOnlyAuthority;
 
 /// The gateway's deny-by-default MCP tool allow-list -- see the module doc's "one source,
 /// not two lists" section. Adding a tool means adding a variant here AND to [`Self::ALL`];
@@ -314,14 +314,17 @@ impl McpHandler {
         }))
     }
 
-    /// D4/D5/D6: builds a fresh `Command` from `args` -- note this constructor NEVER reads
-    /// a `"state"` or `"transitions"` key even if the caller's JSON supplies one, so this
-    /// tool's own JSON schema cannot itself construct an already-started `Command`; the
-    /// `AlreadyStarted` refusal (D4) is reachable only by calling [`crate::propose_only::
-    /// ProposeOnlyAuthority::propose`] directly with a hand-built `Command`, proven by
-    /// `crates/av-gateway/tests/propose_only.rs`, not through this tool's own JSON surface.
-    /// A non-empty `envelope_id` IS settable here (question 53) precisely so that refusal is
-    /// reachable end to end through this tool, as D4 requires.
+    /// D4/D5/D6/R3.2: builds a [`crate::propose_flow::ProposeCommandInput`] from `args` and
+    /// calls the ONE shared implementation, [`crate::propose_flow::propose_command`] -- the
+    /// same function `crate::propose_flow::ModelProposeServiceImpl` (the gRPC surface) calls
+    /// (see that module's own doc for why there is exactly one implementation, not two).
+    /// Note this constructor NEVER reads a `"state"` or `"transitions"` key even if the
+    /// caller's JSON supplies one, so this tool's own JSON schema cannot itself construct an
+    /// already-started `Command`; the `AlreadyStarted` refusal (D4) is reachable only by
+    /// calling [`crate::propose_only::ProposeOnlyAuthority::propose`] directly with a
+    /// hand-built `Command`, proven by `crates/av-gateway/tests/propose_only.rs`, not through
+    /// this tool's own JSON surface. A non-empty `envelope_id` IS settable here (question 53)
+    /// precisely so that refusal is reachable end to end through this tool, as D4 requires.
     async fn handle_propose_command(&self, args: &Value) -> Result<Value, McpRefusal> {
         if !args.is_object() {
             return Err(self.refuse(McpRefusal::InvalidParams { detail: "arguments must be an object".to_string() }));
@@ -345,48 +348,38 @@ impl McpHandler {
         let query_ids: Vec<String> =
             args.get("query_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
 
-        let command = Command {
-            id: command_id.to_string(),
+        let input = ProposeCommandInput {
+            command_id: command_id.to_string(),
             entity_id: entity_id.to_string(),
             command_class: command_class.to_string(),
             hazardous,
             envelope_id,
             idempotency_key,
-            ..Default::default() // state = COMMAND_STATE_UNSPECIFIED, transitions = [] -- never settable from this tool
+            rationale,
+            evidence_ids,
+            principal: principal.to_string(),
+            model_version,
+            run: Some(RunIdentity { run_id, config_hash }),
+            query_ids,
         };
-        let proposal = CommandProposal { command: Some(command), rationale, evidence_ids };
 
-        match self.ctx.authority.propose(proposal, principal.to_string()).await {
-            Ok(proposed) => {
-                let evidence = ProposalEvidence {
-                    command_id: proposed.id.clone(),
-                    run: Some(RunIdentity { run_id, config_hash }),
-                    query_ids,
-                    model_identity: principal.to_string(),
-                    model_version,
-                    recorded_tai_ns: self.ctx.clock.now_tai_ns(),
-                };
-                let recorder = EvidenceRecorder::new(&self.ctx.evidence_ledger);
-                recorder.record(&evidence, &*self.ctx.clock).map_err(|e| McpRefusal::InvalidParams { detail: format!("evidence recording failed: {e}") })?;
-                Ok(json!({"command_id": proposed.id, "state": "PROPOSED"}))
-            }
-            Err(refusal) => {
-                self.ctx.counters.record(&refusal);
-                Err(propose_refusal_to_mcp(refusal))
-            }
+        match propose_command(&self.ctx.authority, &self.ctx.evidence_ledger, &*self.ctx.clock, &self.ctx.counters, input).await {
+            Ok(output) => Ok(json!({"command_id": output.command.id, "state": "PROPOSED"})),
+            Err(err) => Err(propose_flow_error_to_mcp(err)),
         }
     }
 }
 
-/// `ProposeRefusal` is already `Counted` and is counted at its own call site above (D4);
+/// `ProposeFlowError` is already `Counted` and is counted inside [`propose_command`] itself;
 /// this only reshapes it into an `McpRefusal` so `handle_message` has one error type to
 /// serialize. `InvalidParams` (`-32602`) is the closest JSON-RPC meaning for "the server
-/// refused the request's content", for every `ProposeRefusal` kind -- the real distinction
-/// (envelope vs. already-started vs. transport) survives in the message text
-/// (`ProposeRefusal`'s own `Display`), which is what `crates/av-gateway/tests/propose_only.rs`
-/// actually asserts against, not this code.
-fn propose_refusal_to_mcp(refusal: ProposeRefusal) -> McpRefusal {
-    McpRefusal::InvalidParams { detail: refusal.to_string() }
+/// refused the request's content", for every kind -- the real distinction (envelope vs.
+/// already-started vs. transport vs. evidence-recording failure) survives in the message text
+/// (`ProposeFlowError`'s own `Display`), which is what `crates/av-gateway/tests/propose_only.rs`
+/// and `crates/av-gateway/tests/propose_flow_agreement.rs` actually assert against, not this
+/// code.
+fn propose_flow_error_to_mcp(err: ProposeFlowError) -> McpRefusal {
+    McpRefusal::InvalidParams { detail: err.to_string() }
 }
 
 /// The stdio loop: reads one JSON value per line from `reader`, hands it to
@@ -425,8 +418,22 @@ mod tests {
     use std::collections::BTreeMap;
     use tokio::io::AsyncReadExt as _;
 
+    /// A ledger directory this call alone owns.
+    ///
+    /// The process id alone is NOT enough, and the manager's R3.2 review caught it failing for
+    /// real: every one of the thirteen tests in this module reaches
+    /// [`handler_with_catalogue`], which passed the *constant* name `"handler"`, so all
+    /// thirteen derived the identical path -- and `cargo test` runs them concurrently on
+    /// several threads. Two tests then interleave `remove_dir_all` with the other's
+    /// `Ledger::open`, and the loser fails with `AlreadyExists` (EEXIST) from inside `open`.
+    /// It is intermittent by construction: green on one run, `Os { code: 17 }` on the next,
+    /// with nothing in the failure naming the shared path -- the same shape as question 199's
+    /// intermittent panic, and the reason a monotonic per-call counter is folded in here
+    /// rather than left to every caller to remember to pass a distinct `name`.
     fn temp_ledger_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("av-gateway-mcp-test-{name}-{}", std::process::id()));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("av-gateway-mcp-test-{name}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

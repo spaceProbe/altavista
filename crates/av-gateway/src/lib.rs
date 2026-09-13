@@ -40,6 +40,12 @@
 //!   public method is `propose`; the generated `CommandAuthorityServiceClient` (`check`,
 //!   `authorize`, `dispatch`, `ack`, `expire`, `fail`) is a private field, unreachable from
 //!   the MCP or gRPC surface this crate exposes.
+//! - [`propose_flow`] -- R3.2/A4b: the ONE shared implementation `propose_command` runs
+//!   through, called by both the MCP `propose_command` tool ([`mcp`], stdio) and the new
+//!   `ModelProposeService.ProposeCommand` rpc ([`propose_flow::ModelProposeServiceImpl`],
+//!   gRPC -- served by `av-gateway` on the same port as `DataGatewayService`, additive on
+//!   `authority.proto`) -- a containerised proposer with no stdio channel to this process
+//!   needs a network propose path, and this is it. See that module's own doc.
 //! - [`mcp`] -- [`mcp::McpServer`] (D3): hand-rolled JSON-RPC 2.0 over injected
 //!   `AsyncBufRead`/`AsyncWrite` streams (never the process's real stdin/stdout in a test --
 //!   question 199), `initialize`/`tools/list`/`tools/call`, a deny-by-default allow-list
@@ -68,8 +74,10 @@ pub mod evidence;
 pub mod gateway;
 pub mod labels;
 pub mod mcp;
+pub mod propose_flow;
 pub mod propose_only;
 pub mod query_id;
+pub mod unknown_route_counter;
 
 pub mod pb {
     //! Generated `altavista.v1` plumbing, compiled by `build.rs`: the `DataGatewayService`

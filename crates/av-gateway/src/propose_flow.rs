@@ -1,0 +1,278 @@
+//! D1/A4b: the ONE implementation `propose_command` runs through, shared by the two propose
+//! surfaces this crate exposes -- the MCP `propose_command` tool ([`crate::mcp`], stdio) and
+//! `ModelProposeService.ProposeCommand` ([`ModelProposeServiceImpl`] below, gRPC). Before this
+//! module existed, `crate::mcp::McpHandler::handle_propose_command` was the only place this
+//! logic lived; extracting it here rather than writing a second copy against the gRPC wire
+//! shape is the whole point (this task's own brief): two independently-maintained propose
+//! paths is precisely how a propose-only guarantee gets lost on one of them, silently, the
+//! day one of the two copies is edited and the other is not.
+//!
+//! [`propose_command`] does exactly what the old inline body did: build a fresh `Command`
+//! (never reading a caller-supplied `state`/`transitions` -- see [`ProposeCommandInput`]'s own
+//! doc for why that is structural, not a convention), call the real
+//! [`crate::propose_only::ProposeOnlyAuthority::propose`] (so a non-empty `envelope_id` or an
+//! already-started `Command` is refused by the same `av_command::state::propose` the real
+//! service enforces, never a second, local copy of that check), then record the evidence topic
+//! ([`crate::evidence::EvidenceRecorder`]) for the command it actually got back. Both surfaces
+//! call this one function; each only translates its own wire shape into
+//! [`ProposeCommandInput`] and its own wire shape back out of [`ProposeCommandOutput`] --
+//! see `crates/av-gateway/tests/propose_flow_agreement.rs` for the test that the two
+//! translations can never disagree in outcome.
+//!
+//! ## A defect found and fixed while extracting this module
+//!
+//! The original inline body mapped an [`crate::evidence::EvidenceRecorder::record`] I/O
+//! failure straight to an `McpRefusal` with `.map_err(...)?`, bypassing `self.refuse(...)` --
+//! so a real evidence-ledger write failure (a full disk, a permissions error) was reported to
+//! the caller but never counted, violating ADR-004's "everything rejected is counted" for
+//! exactly the failure shape this whole track's review keeps finding: one that leaves no
+//! trace anywhere a counter could later be read back. [`ProposeFlowError::EvidenceRecording`]
+//! is now `Counted` like every other refusal in this crate, and [`propose_command`] takes the
+//! shared `Counters` explicitly so both surfaces record it identically.
+
+use std::sync::Arc;
+
+use av_cdm::pb::{Command, CommandProposal, ProposalEvidence, ProposeCommandRequest, ProposeCommandResponse, RunIdentity};
+use tonic::{Request, Response, Status};
+
+use av_command::clock::Clock;
+use av_command::ledger::Ledger;
+
+use crate::counters::{Counted, Counters};
+use crate::evidence::EvidenceRecorder;
+use crate::pb::model_propose_service_server::ModelProposeService;
+use crate::propose_only::{ProposeOnlyAuthority, ProposeRefusal};
+
+/// Everything the shared propose flow needs, translated from either wire shape (the MCP
+/// tool's JSON `arguments` object, or [`ProposeCommandRequest`]) into one Rust value. Note
+/// what is deliberately absent: no `state`, no `transitions`. Neither surface's own request
+/// shape has a field that could populate them -- `AlreadyStarted` (D4's "any other shape") is
+/// reachable only by calling [`ProposeOnlyAuthority::propose`] directly with a hand-built
+/// `Command`, as `crates/av-gateway/tests/propose_only.rs`'s own crafted-command test does,
+/// never through either of this crate's own request schemas.
+#[derive(Debug, Clone)]
+pub struct ProposeCommandInput {
+    pub command_id: String,
+    pub entity_id: String,
+    pub command_class: String,
+    pub hazardous: bool,
+    pub envelope_id: String,
+    pub idempotency_key: String,
+    pub rationale: String,
+    pub evidence_ids: Vec<String>,
+    /// The model/agent identity proposing this command -- recorded on the `PROPOSED`
+    /// transition's `principal` (via `ProposeOnlyAuthority::propose`) AND, verbatim, as
+    /// `ProposalEvidence.model_identity`.
+    pub principal: String,
+    pub model_version: String,
+    /// What the model saw: the run identity it read before proposing (D5).
+    pub run: Option<RunIdentity>,
+    /// Every query id the model's session issued before this proposal, in the order the
+    /// gateway served them (D5).
+    pub query_ids: Vec<String>,
+}
+
+/// What [`propose_command`] returns on success: the real `Command` (`PROPOSED`, exactly one
+/// transition) [`ProposeOnlyAuthority::propose`] returned, and the [`ProposalEvidence`] that
+/// was actually written to the evidence ledger for it -- both surfaces render these into
+/// their own wire shape, never reconstructing either value independently.
+#[derive(Debug, Clone)]
+pub struct ProposeCommandOutput {
+    pub command: Command,
+    pub evidence: ProposalEvidence,
+}
+
+/// Every way the shared propose flow can refuse, spanning both the real state-machine
+/// refusal ([`ProposeRefusal`], already `Counted`) and this module's own evidence-recording
+/// failure (see the module doc's "defect found and fixed" section).
+#[derive(Debug)]
+pub enum ProposeFlowError {
+    Propose(ProposeRefusal),
+    /// [`EvidenceRecorder::record`] failed (real ledger I/O) after `propose` had already
+    /// succeeded -- the resulting `Command` IS `PROPOSED` on the real ledger; only the
+    /// evidence-topic record failed to write. Carried as a `String` (`std::io::Error`'s own
+    /// `Display`) rather than the error itself so this type stays `Clone`/`PartialEq`-free of
+    /// `io::Error`'s own lack of those impls, matching this crate's other refusal enums.
+    EvidenceRecording { detail: String },
+}
+
+impl Counted for ProposeFlowError {
+    fn code(&self) -> &'static str {
+        match self {
+            ProposeFlowError::Propose(e) => e.code(),
+            ProposeFlowError::EvidenceRecording { .. } => "propose_flow_evidence_recording_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for ProposeFlowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposeFlowError::Propose(e) => write!(f, "{e}"),
+            ProposeFlowError::EvidenceRecording { detail } => write!(f, "evidence recording failed: {detail}"),
+        }
+    }
+}
+
+/// The one shared implementation (see the module doc). Builds a fresh `Command` from `input`
+/// (never a caller-supplied state/transitions), proposes it through the real
+/// [`ProposeOnlyAuthority`], records the evidence topic for the `Command` it actually got
+/// back, and counts (via `counters`) either the real state-machine refusal or this module's
+/// own evidence-recording failure -- never silently.
+pub async fn propose_command(
+    authority: &ProposeOnlyAuthority,
+    evidence_ledger: &Ledger,
+    clock: &dyn Clock,
+    counters: &Counters,
+    input: ProposeCommandInput,
+) -> Result<ProposeCommandOutput, ProposeFlowError> {
+    let command = Command {
+        id: input.command_id,
+        entity_id: input.entity_id,
+        command_class: input.command_class,
+        hazardous: input.hazardous,
+        envelope_id: input.envelope_id,
+        idempotency_key: input.idempotency_key,
+        ..Default::default() // state = COMMAND_STATE_UNSPECIFIED, transitions = [] -- structural (see ProposeCommandInput's own doc).
+    };
+    let proposal = CommandProposal { command: Some(command), rationale: input.rationale, evidence_ids: input.evidence_ids };
+
+    let proposed = authority.propose(proposal, input.principal.clone()).await.map_err(|refusal| {
+        counters.record(&refusal);
+        ProposeFlowError::Propose(refusal)
+    })?;
+
+    let evidence = ProposalEvidence {
+        command_id: proposed.id.clone(),
+        run: input.run,
+        query_ids: input.query_ids,
+        model_identity: input.principal,
+        model_version: input.model_version,
+        recorded_tai_ns: clock.now_tai_ns(),
+    };
+    let recorder = EvidenceRecorder::new(evidence_ledger);
+    recorder.record(&evidence, clock).map_err(|e| {
+        let err = ProposeFlowError::EvidenceRecording { detail: e.to_string() };
+        counters.record(&err);
+        err
+    })?;
+
+    Ok(ProposeCommandOutput { command: proposed, evidence })
+}
+
+/// Maps a [`ProposeFlowError`] to a [`tonic::Status`] for [`ModelProposeServiceImpl`]. The
+/// underlying [`ProposeRefusal`] already carries the real `av_command::state::propose`
+/// refusal text (question 53's `EnvelopeNotAllowed`, D4's `AlreadyStarted`) as
+/// `INVALID_ARGUMENT` -- mirrored here rather than re-derived, so this rpc's status code for a
+/// given refusal is identical to what a direct `CommandAuthorityService.Propose` call would
+/// have produced. Evidence-recording failure is `INTERNAL`: it is this crate's own I/O, not a
+/// property of the caller's request.
+fn to_status(err: ProposeFlowError) -> Status {
+    let message = err.to_string();
+    match &err {
+        ProposeFlowError::Propose(ProposeRefusal::EnvelopeNotAllowed { .. } | ProposeRefusal::AlreadyStarted { .. } | ProposeRefusal::InvalidArgument { .. }) => {
+            Status::invalid_argument(message)
+        }
+        ProposeFlowError::Propose(ProposeRefusal::Transport { .. }) => Status::unavailable(message),
+        ProposeFlowError::EvidenceRecording { .. } => Status::internal(message),
+    }
+}
+
+fn input_from_wire(req: ProposeCommandRequest) -> ProposeCommandInput {
+    ProposeCommandInput {
+        command_id: req.command_id,
+        entity_id: req.entity_id,
+        command_class: req.command_class,
+        hazardous: req.hazardous,
+        envelope_id: req.envelope_id,
+        idempotency_key: req.idempotency_key,
+        rationale: req.rationale,
+        evidence_ids: req.evidence_ids,
+        principal: req.principal,
+        model_version: req.model_version,
+        run: req.run,
+        query_ids: req.query_ids,
+    }
+}
+
+/// `ModelProposeService`'s gRPC server (A4b) over [`propose_command`] -- the network propose
+/// path a containerised proposer with no stdio channel to the gateway needs. Every field is
+/// exactly what [`crate::mcp::McpContext`] already holds; this type exists only because the
+/// generated `ModelProposeService` server trait needs its own `Self`, not because the
+/// underlying dependencies differ from the MCP surface's.
+pub struct ModelProposeServiceImpl {
+    authority: Arc<ProposeOnlyAuthority>,
+    evidence_ledger: Arc<Ledger>,
+    clock: Arc<dyn Clock>,
+    counters: Arc<Counters>,
+}
+
+impl ModelProposeServiceImpl {
+    pub fn new(authority: Arc<ProposeOnlyAuthority>, evidence_ledger: Arc<Ledger>, clock: Arc<dyn Clock>, counters: Arc<Counters>) -> Self {
+        Self { authority, evidence_ledger, clock, counters }
+    }
+}
+
+#[tonic::async_trait]
+impl ModelProposeService for ModelProposeServiceImpl {
+    async fn propose_command(&self, request: Request<ProposeCommandRequest>) -> Result<Response<ProposeCommandResponse>, Status> {
+        let input = input_from_wire(request.into_inner());
+        let output = propose_command(&self.authority, &self.evidence_ledger, &*self.clock, &self.counters, input).await.map_err(to_status)?;
+        Ok(Response::new(ProposeCommandResponse { command: Some(output.command) }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn propose_flow_error_codes_are_stable_and_distinct_from_the_underlying_refusal() {
+        let propose = ProposeFlowError::Propose(ProposeRefusal::AlreadyStarted { detail: "x".to_string() });
+        let evidence = ProposeFlowError::EvidenceRecording { detail: "disk full".to_string() };
+        assert_eq!(propose.code(), "propose_already_started");
+        assert_eq!(evidence.code(), "propose_flow_evidence_recording_failed");
+        assert_ne!(propose.code(), evidence.code());
+    }
+
+    #[test]
+    fn evidence_recording_failure_displays_the_underlying_detail() {
+        let err = ProposeFlowError::EvidenceRecording { detail: "disk full".to_string() };
+        assert!(err.to_string().contains("disk full"), "{err}");
+    }
+
+    /// Not a call through `propose_command` itself (that needs a real authority/ledger,
+    /// proven in `crates/av-gateway/tests/propose_flow_agreement.rs`) -- just pins that
+    /// `input_from_wire` carries every field through untouched, so a future field added to
+    /// one side and forgotten on the other fails here first.
+    #[test]
+    fn input_from_wire_carries_every_field_through_untouched() {
+        let req = ProposeCommandRequest {
+            command_id: "cmd-1".to_string(),
+            entity_id: "sat-1".to_string(),
+            command_class: "burn".to_string(),
+            hazardous: true,
+            envelope_id: "env-1".to_string(),
+            idempotency_key: "idem-1".to_string(),
+            rationale: "because".to_string(),
+            evidence_ids: vec!["e1".to_string()],
+            principal: "model-x".to_string(),
+            model_version: "1.0.0".to_string(),
+            run: Some(RunIdentity { run_id: "run-1".to_string(), config_hash: "hash-1".to_string() }),
+            query_ids: vec!["q1".to_string()],
+        };
+        let input = input_from_wire(req.clone());
+        assert_eq!(input.command_id, req.command_id);
+        assert_eq!(input.entity_id, req.entity_id);
+        assert_eq!(input.command_class, req.command_class);
+        assert_eq!(input.hazardous, req.hazardous);
+        assert_eq!(input.envelope_id, req.envelope_id);
+        assert_eq!(input.idempotency_key, req.idempotency_key);
+        assert_eq!(input.rationale, req.rationale);
+        assert_eq!(input.evidence_ids, req.evidence_ids);
+        assert_eq!(input.principal, req.principal);
+        assert_eq!(input.model_version, req.model_version);
+        assert_eq!(input.run, req.run);
+        assert_eq!(input.query_ids, req.query_ids);
+    }
+}
