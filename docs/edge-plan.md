@@ -390,3 +390,275 @@ disappearances stop.** Rebuild-on-demand with a visible skip stands either way.
    platform-level gap and should become a real frame mapping.
 6. E6 (capture-only while disconnected) is untouched and is the obvious next round.
 7. `buf` is still not installed on this host, for the second round running.
+
+
+## Status (edge manager, 2026-09-12) — round 3
+
+Round 3. **E6 delivered, which closes every milestone in this plan, and all four of
+question 205's items landed.** Five commits on `edge`, one per accepted task:
+
+- `45ec8ad` **E6** — `crates/av-edge/src/buffer.rs` (`EdgeBuffer`, `BatchSink`,
+  `UplinkDriver`) and `crates/av-ingest/tests/{e6_disconnect,e6_wire_disconnect}.rs`:
+  the edge buffers signed batches in a durable local file log, replays them in order on
+  reconnect, and the ingest's existing (producer, sequence) dedup absorbs the overlap.
+- `7ed75cd` **205 (a) and (b)** — `deny.toml` restored to `wildcards = "deny"`;
+  `crates/av-codec` extracted from `crates/av-kernel/src/codec.rs` with a re-export;
+  `av-edge` is GMAT-free and its duplicated CCSDS decoder is retired.
+- `3ffc3e1` **205 (c)** — `av_cdm::spoore_v0::frame` resolves a v1 frame id from the
+  frame registry by declared origin body and axes kind; `av-track`'s boundary relabel
+  is gone.
+- `1a37949` **205 (d)** — `docs/compliance/av-edge-plugin/control-matrix.md`.
+- `cb8f44c` — the edge track's `README.md` section, and a test closing the one
+  uncovered path in E6's own new code.
+
+### Gates (run by the manager with no worker active)
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-edge -p av-ingest -p av-ingest-client -p av-track -p av-codec -p av-cdm` | 286 passed, 0 failed, 2 ignored |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 642 passed, 0 failed, 2 ignored — one contended failure, re-run clean, see below |
+| `cargo test -p av-kernel --no-fail-fast` | 845 passed, 0 failed, 2 ignored, 4 visible skips |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean; zero warnings, zero errors, no new lint suppression anywhere |
+| `cargo deny check` | **advisories ok, bans FAILED, licenses ok, sources ok** — deliberately, see below |
+| `.venv/bin/python -m pytest -q -rs` | 513 passed, 4 skipped, 301 s |
+| `buf breaking proto --against develop's proto` | clean, exit 0; `buf` is installed on this host at last |
+
+The two `ignored` tests are the same two deliberate manual generators rounds 1 and 2
+recorded (`regenerate_signature_for_reference`, `generate_default_plugin_config_json`).
+
+**The one gate failure, root-caused definitively.**
+`cargo test --workspace` reported 641 passed / 1 failed:
+`av-lockstep`'s `prune_stale_test_resources_removes_orphaned_labeled_containers_and_images`
+failed pushing to its own throwaway registry with `dial tcp 127.0.0.1:34751: connect:
+connection refused`. Re-run alone on a quiet host it passes (3 passed, 0 failed), which
+makes the effective count 642 passed / 0 failed. The cause is not this round's code —
+`git diff --stat f75a272..HEAD -- crates/av-lockstep/` is empty — and it is not flakiness
+either. `prune_stale_test_resources()` deletes **every** resource carrying
+`av.test=1` daemon-wide, and the lock that guards it,
+`docker_lifecycle.rs`'s `DOCKER_TEST_LOCK`, is a process-local `Mutex`. Two `cargo test`
+processes in two different worktrees therefore tear out each other's labelled containers
+mid-test, and the other track's own `cargo test -p av-kernel` (with its
+`docker build --label av.test=1`) was running concurrently with this gate. **This is a
+real gap in question 156's isolation model, exposed by two tracks sharing one Docker
+daemon: prune-by-label is global, its lock is not.** It will recur for any two tracks that
+run docker-gated tests at the same time, and the fix is a daemon-wide lock (a file lock
+under a shared path) rather than a process-local one. Recorded for the lead; not fixed
+here because `crates/av-lockstep` is not this track's file.
+
+### The four pytest skips, each visible under `-rs`
+
+None is this track's and none is new: the edge plugin image not built on this host (the
+round-2 skip question 196(d)'s kubelet image collector explains), and the three
+pre-existing cFS gates (`test_image_digest.py` twice, `test_image_reproducibility.py`
+once, the last opt-in behind `AV_CFS_RUN_REPRO_BUILD` because it builds over the
+network). The kernel suite's own four skips are all the same unbuilt
+`altavista-cfs-lockstep:local` image. Every one prints its own reason and its own
+rebuild command.
+
+### Numbers traceable to artifacts
+
+**E6's byte-identical log, the milestone's own acceptance criterion.** The link is cut for
+a declared two hours of injected TAI time mid-stream and restored; the ingest's partition
+log file is compared byte for byte against the uninterrupted run's. In-process: 2685 bytes,
+both runs hashing to
+`6724d25fe08c88a758217266ba696dd4d862cff8bffa5e3c86d3266a54f759e4`. Over the real gRPC
+loopback wire with the client side cut and the ingest process up: 1516 bytes, both runs
+hashing to `62f47eeaebff50b057dea037d3a2756788125b638bb360c9b77f246feef68cb9`.
+
+**That equality is within a run, not a pinned golden, and the distinction matters.** ECDSA
+P-384 signs with a random nonce, so a batch signed twice yields two different valid DER
+signatures of occasionally different length — which is why the same test's log measured
+2684 bytes on one execution and 2685 on the next. The test therefore signs its batch chain
+**exactly once** and clones it into both runs; the assertion is that a cut-and-replayed
+stream produces the identical bytes to an uninterrupted one, which is what E6 asks, and it
+is not a hash that can be pinned across runs. Any future repin of those two hashes would be
+meaningless.
+
+**E6's counters.** With an interrupted drain replaying two already-accepted batches:
+`accepted` is 9 in both the uninterrupted and the interrupted run, `duplicate_count` is
+exactly 2, and all eight other rejection counters plus `shard_mismatch_count` are asserted
+zero. The duplicate counter, not the accepted counter, absorbed the overlap.
+
+**E6 needed no ingest change.** `av_edge::chain::ChainVerifier` already deduplicated by
+(producer, sequence) through `ProducerState::seen_sequences`, from round 1.
+
+**`av-codec`'s extraction, accounted for by name and not by count.** All thirty of
+`codec.rs`'s unit tests moved with the module and all thirty run in `av-codec`, verified
+by diffing the test-name lists rather than comparing totals. Round 2's kernel figure of
+874 necessarily changes: thirty tests left the kernel and one arrived
+(`edge_plugin_codec_crosscheck.rs`, the moved GMAT cross-check), so the expected kernel
+count is 874 − 30 + 1 = 845, and the thirty are now counted in `av-codec` instead.
+
+**`av-edge` is GMAT-free, measured.** `cargo tree -p av-edge --all-targets | grep -iE
+"gmat|tonic"` is empty; `cargo clean -p gmat-sys` followed by `cargo test -p av-edge`
+never compiles `gmat-sys`; `crates/av-edge/build.rs` no longer exists. E4's pinned chain
+head `d1d80d0b6cc9228aaa7479864b8a89f18be88382fb3772bd3c4cc3d7c2dc2698` is unchanged in
+all four places that assert it, which is what proves the two decoders really did agree
+before one of them was deleted.
+
+**E5's accuracy survives the relabel's removal, and its config hash does not.** Re-running
+the demo with the boundary relabel gone gives 900 matched epochs, 0 unmatched, max 0.002 m
+against the pinned 1.000 m tolerance — unchanged, which is the evidence that the relabel
+was only ever a label substitution. The track config hash does move, because `TrackConfig`
+gained two declared fields:
+`63160880518fab9a2bfe42b801328abd8de794ac1a9c419a6a2f39fa408c3b19` becomes
+`7a2d33df306ae9861161e1c64eb2cf79c67e7657e419b93fa9365105a53bb06b`, read back out of
+`av-edge-latency`'s own JSON report by the manager. **That hash is recorded in this
+document and asserted by no test, which is a gap worth closing** — a number nothing
+guards is a number that will drift silently.
+
+**No latency measurement was taken this round**, deliberately: the host was never quiet
+(the other track ran a full `av-kernel` suite, a `pytest` run and a `docker build` during
+this round), and a contended timing result is not a result. Round 2's p50 ≈ 6.1 ms /
+p99 ≈ 8.3 ms stands unchanged and unretested.
+
+### `cargo deny check` fails on purpose, and this is the escalation
+
+Question 205 ruling (7) asked for `wildcards = "deny"` with `allow-wildcard-paths = true`,
+and said to take it upstream if that did not resolve the spoore warnings. **It does not.**
+Under `"deny"`, `cargo deny check` reports `advisories ok, bans FAILED, licenses ok,
+sources ok` with exactly six `error[wildcard]`s covering fifteen wildcard dependencies:
+`spoore-engine` (5), `spoore-tree` (4), `spoore-ml` (2), `spoore-models` (2),
+`spoore-assoc` (1), `spoore-math` (1). cargo-deny 0.20.2's own wording, verified against
+this host's binary: "allow-wildcard-paths is enabled, but does not apply to public crates
+as crates.io disallows path dependencies."
+
+The root cause is definitive, established by reading the six `Cargo.toml` files under
+`/Users/probe/code/spoore/crates/` directly rather than inferring: none of them declares
+`publish`, and spoore's workspace root sets no `[workspace.package] publish` default, so
+cargo's publishable default applies and cargo-deny correctly refuses the exemption.
+Nothing in `/Users/probe/code/spoore` was modified. **The setting stays `"deny"`, no skip
+or exception was added, and the check is left failing rather than silenced** — which is
+what the ruling asked for. The fix is question 205's fourth `altavista-upstream` proposal:
+`publish = false` on those six files. The named crypto-crate bans are untouched and `ring`
+appears nowhere in the output.
+
+### Decisions taken this round (for the lead to ratify or overturn)
+
+1. **A capture-only producer's `ProducerPolicy.max_age_ns` must exceed its longest
+   planned disconnection, and that is a deployment property, not a code change.** E6's
+   own test proves the interaction rather than assuming it away: a batch buffered for
+   hours and then replayed is genuinely old by `ChainVerifier`'s STALE measure, and a
+   deliberately short 60-second policy is shown rejecting a replay as `STALE`. The fixture
+   declares a six-hour budget against a three-hour test window. Nothing in
+   `av_edge::chain`, `av_edge::policy` or `av_ingest::ingest` changed. The alternative —
+   exempting replayed batches from the staleness check — was rejected because it would
+   make STALE unenforceable for exactly the producer most able to abuse it.
+2. **The edge buffer commits its acknowledgement watermark once per completed drain, so an
+   interrupted drain deliberately re-sends its own already-delivered prefix.** The
+   alternative (a watermark advanced per batch) would need a durable write per batch on the
+   edge and would still not be atomic with the ingest's own append. Re-sending into a
+   duplicate counter that already exists is the cheaper and more honest design, and it is
+   what makes E6's "the duplicate counter absorbs any overlap" a real assertion rather than
+   a vacuous one.
+3. **`av-edge` owns its own buffer record framing rather than sharing `av-ingest`'s.**
+   `av-ingest` depends on `av-edge`, so sharing would cycle. The framing mirrors
+   `PartitionLog`'s shape (length prefix, per-record SHA-256 through `openssl::sha`,
+   `sync_all` per append) and the module doc records what was mirrored and what deviates.
+4. **`pub use av_codec as codec;` in `crates/av-kernel/src/lib.rs`**, so every
+   `crate::codec::X` path in `drm`, `ports` and `registry` resolves unchanged and no kernel
+   caller was touched. Nothing else in the kernel changed.
+5. **`av-edge`'s `plugin/packet.rs` survives as a thin adapter over `av-codec`, not as a
+   deletion.** It keeps this plugin's narrower typed refusals (`ApidMismatch` against the
+   one expected codec, `IsCommand`, numeric-only) and builds a one-entry `ApidMap` to call
+   the real decoder. One behavioural difference is documented rather than hidden: for a
+   codec whose fields are simultaneously extent-invalid and of an unsupported type,
+   `av_codec::decode_packet` reports the extent failure where the old from-scratch pass
+   reported the type failure. No codec this plugin decodes has a `BYTES` field.
+6. **A body-fixed frame about a body other than Earth is a typed refusal, never
+   `Frame::Ecef`.** `spoore_cdm::Frame::Ecef` names Earth specifically; mapping a
+   Mars-fixed measurement onto it would be a wrong answer wearing a right answer's clothes.
+   The same holds for ENU and NED about a non-Earth body. Each has its own test.
+7. **`AXES_KIND_LOCAL_CARTESIAN` resolves to `Frame::LocalCartesian`.** The first
+   implementation refused it, which would have meant a producer that properly *registered*
+   its frameless simulation frame was rejected where one passing the bare
+   `sim.local_cartesian` literal was accepted. `core.proto` calls that axes kind "Frameless
+   cartesian space (simulation and unit tests)", which is exactly what the spoore variant
+   means, and a test now pins that the registry path and the literal path agree.
+8. **`earth_fixed_demo_frame`'s `FrameDefinition` is declared in `av-track`'s
+   `TrackConfig`, not in the DRM.** The DRM names the frame only as a model parameter and
+   never registers it in `scenario.frames`, which is the actual platform gap; but
+   `drms/demo_ground_segment.drm.yaml` carries its own canonical hash
+   `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0`, and that hash is
+   embedded in the committed, GMAT-generated fixture binaries E4's pinned chain head
+   depends on. Registering the frame properly means regenerating those fixtures under GMAT
+   and repinning every downstream golden — a platform change, not this round's. Declaring
+   it in `TrackConfig` is the narrowest thing that removes the relabel without invalidating
+   a pinned hash.
+9. **`measurement_from_pb`'s signature is unchanged**; the registry-aware conversion is a
+   new `measurement_from_pb_with_frames`, and the old function is that call with an empty
+   registry. No existing caller or test was touched.
+10. **The plugin's control matrix marks its own transport authentication Partial and its
+    confidentiality in transit Gap.** The plugin holds real identity code but its binary
+    never calls `verify_identity`, and `connect_plaintext` speaks no TLS at all; the front
+    provides both. E6's buffer stores signed batches unencrypted at rest, so
+    confidentiality at rest is a Gap while integrity at rest is supported by the per-record
+    digest and the chain. Both halves are stated rather than averaged into a Partial.
+
+### Defects found in review this round
+
+1. **The `AXES_KIND_LOCAL_CARTESIAN` inconsistency** (decision 7), found by checking the
+   worker's refusal against `core.proto`'s own doc comment rather than against its
+   reasoning. The same physical frame resolved through one path and was refused through the
+   other. Fixed by the manager; cause definitive.
+2. **`services/edge-plugin/Dockerfile` implements none of ADR-004's stated plugin container
+   hardening** — no rootless podman or Quadlet, no UBI9 FIPS base (it is a digest-pinned
+   `debian:bookworm-slim`), no `USER`, no `--read-only`, no seccomp profile, no
+   `--security-opt=no-new-privileges`. Only the `--network none` and `--internal` half of
+   that design is real and measured. Confirmed by grep. Cause definitive: the container task
+   implemented the network isolation ADR-004 describes and not the process isolation.
+   Recorded as the control matrix's first deficiency; **an ADR-004 conformance gap for the
+   lead**, not a bug in this round's code.
+3. **The plugin binary never calls `av_edge::identity`** — zero references in
+   `crates/av-ingest-client/src/bin/av-edge-plugin.rs`, so the track's own identity
+   verification is unused by the binary that would need it in a real deployment. Cause
+   definitive (the binary was written for the plaintext loopback path). Recorded as a
+   control-matrix deficiency.
+4. **E6's `EdgeBuffer::replay_from` digest-mismatch path had no test.** Found in review of
+   this round's own new code. Investigated rather than patched: the production code was
+   already correct — it recomputes each record's hash before attempting to decode, so a
+   record tampered with mid-file is surfaced as a hard `DigestMismatch` and never silently
+   skipped or truncated into a shorter "good" prefix. Nothing was fixed; the behaviour is
+   now pinned by a test (`cb8f44c`). Cause definitive: a coverage hole, not a bug.
+5. **The cross-track Docker prune collision** described under the gates. Cause definitive.
+6. **Two counting artifacts caught before they became claims**, both worth recording
+   because each would have been invisible: a `grep -c "#\[test\]"` over the codec module
+   reported 31 where only 30 tests exist (the 31st match is the literal text `#[test]`
+   inside a doc comment), and a naive before/after test-name diff reported 30 kernel tests
+   "missing" that had merely lost their `codec::` module prefix. Both were resolved against
+   `cargo test -- --list` as the authority rather than against a grep.
+
+### Open items for the lead
+
+1. **`cargo deny check` exits non-zero on this workspace and is meant to.** Question 205's
+   fourth `altavista-upstream` proposal — `publish = false` on the six spoore crates — is
+   now the only fix, and until it lands every gate on every branch will show
+   `bans FAILED`. If the lead would rather the gate be green in the interim, that is a
+   decision to take explicitly; this round refused to take it silently.
+2. **Question 156's prune-by-label is not safe across worktrees.** Two tracks running
+   docker-gated tests concurrently delete each other's labelled containers, because the
+   guarding mutex is process-local while the prune is daemon-wide. A file lock under a
+   shared path would fix it. Until then, cross-track docker gates must be serialised by
+   hand, and a docker failure in a contended gate should be re-run alone before it is
+   believed.
+3. **ADR-004's plugin container hardening is unimplemented** (defect 2). Either the
+   Dockerfile grows the rootless/UBI9-FIPS/read-only/seccomp posture ADR-004 states, or
+   ADR-004 is amended to say what is actually built. The control matrix currently marks the
+   gap honestly, which is the least the platform should accept.
+4. **The track config hash is recorded in this document and asserted by nothing.** It moved
+   this round for a legitimate reason and nothing would have caught it if it had moved for
+   an illegitimate one. The same is true of E5's accuracy numbers. A test pinning both is a
+   small task.
+5. **`earth_fixed_demo_frame` still is not in any `scenario.frames` registry** (decision
+   8). The proper fix regenerates the GMAT fixtures and repins E4's goldens; it is a
+   platform task with a real cost, and the adapter now works either way.
+6. **The plugin binary's identity path** (defect 3) — the plugin cannot present a
+   seccert-issued identity today because its binary never verifies or presents one. E2 and
+   E3b both work; the binary that would tie them together does not call either.
+7. **Every milestone in this plan is now delivered.** E1 and E2 (round 1), E3a (round 1),
+   E3b, E4 and E5 (round 2), E6 (this round), plus all four of question 205's items. This
+   plan has no remaining milestone, and the track's next round needs a new charter from the
+   lead rather than a continuation of this one.
+8. **No latency number was taken this round** and none should be believed from a shared
+   host. If question 43's budget line is to be tightened, it needs a quiet machine.
+
