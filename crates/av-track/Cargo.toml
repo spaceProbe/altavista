@@ -1,0 +1,65 @@
+[package]
+name = "av-track"
+publish = false
+description = "E5 (docs/edge-plan.md): the engine consumes -- a file-log consumer whose shape mirrors spoore_io::kafka::PartitionConsumer (question 200(d)), an engine bridge driving a real spoore_engine::Shard from the accepted MeasurementBatches in av-ingest's own durable log, track-vs-truth comparison against the run's declared truth Trajectory with a pinned tolerance, and the edge-to-core latency instrument (plugin emit to engine accept)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `altavista.v1::pb::{Measurement, MeasurementBatch, Trajectory, TrajectorySample,
+# RunProducts, ...}` -- the shared prost build, reached through av-edge's own `pub use
+# av_cdm::pb` re-export (this crate's own convention, matching av-ingest/av-ingest-client).
+av-edge = { path = "../av-edge" }
+av-cdm = { path = "../av-cdm" }
+# `crate::consumer::LogPartitionConsumer` reads `av_ingest::log::PartitionLog` directly --
+# this crate's whole reason to exist (E5's own brief: "implement it over crates/
+# av-ingest's partition log"). This is a *library* dependency (`av_ingest::log`/
+# `av_ingest::ingest` add no transport of their own -- see that crate's own lib.rs module
+# doc: the wire (`av_ingest::service`/`server`) is a separate module this crate never
+# touches from its library code, only from `src/bin/av-edge-latency.rs` below).
+av-ingest = { path = "../av-ingest" }
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# SHA-256 for `TrackConfig::config_hash`, against the system OpenSSL (ADR-004's crypto
+# rule, the same boundary `av_edge::plugin::PluginConfig::config_hash` already sits on) --
+# never `sha2`/`ring`.
+openssl = "0.10"
+# `TrackConfig` is authored as TOML (question 11's rule: every tuning knob declared, never
+# a magic constant) -- `spoore-node::config`'s own `NodeConfig::from_toml_str` precedent,
+# applied here with the same crate family (`toml`, not `serde_yaml`, since this track has
+# no existing YAML-config convention to match and `spoore-node` itself uses `toml`).
+toml = "0.8"
+
+# The spoore engine itself (question 12: path dependency, compatible superset). Not
+# `spoore-io`: this crate defines its own consumer trait rather than
+# `spoore_io::kafka::PartitionConsumer` (see `src/consumer.rs`'s module doc for exactly
+# why and what an upstream PR would need), so `spoore-io` -- and its `clickhouse_sink`
+# module in particular -- never appears anywhere in this crate's dependency tree at all
+# (see `tests/no_object_store.rs`).
+spoore-cdm.workspace = true
+spoore-engine = { path = "/Users/probe/code/spoore/crates/spoore-engine" }
+spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }
+spoore-assoc = { path = "/Users/probe/code/spoore/crates/spoore-assoc" }
+spoore-tree = { path = "/Users/probe/code/spoore/crates/spoore-tree" }
+nalgebra.workspace = true
+
+# `src/bin/av-edge-latency.rs` is the one place in this crate that ever touches a
+# transport: it drives the real wire (plugin -> `EdgeIngestServer` -> log -> this crate's
+# own consumer -> the engine bridge) to measure genuine edge-to-core latency, exactly
+# mirroring `crates/av-ingest-client`'s own `src/bin/av-edge-plugin.rs` +
+# `crates/av-ingest/tests/plugin_wire.rs`'s in-process server fixture. A `[[bin]]` target
+# uses this crate's regular `[dependencies]`, never `[dev-dependencies]` (only
+# `tests/*.rs` can reach those) -- so the transport crates below are unavoidably regular
+# dependencies of this crate, unlike `av-edge`'s own (which must stay transport-free; this
+# crate carries no such constraint -- see this crate's own module doc).
+av-ingest-client = { path = "../av-ingest-client" }
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+

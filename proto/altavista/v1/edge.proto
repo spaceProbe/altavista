@@ -198,4 +198,184 @@ message RejectionCounters {
   // been accepted yet -- what a verify/evidence endpoint reports as the head to check the
   // next incoming batch's `prev_hash` against.
   bytes chain_head = 11;
+  // E3b (question 202): `MeasurementBatch.shard_key` disagreeing with one of its own
+  // `measurements[*].shard_key` (`BATCH_REJECTION_SHARD_MISMATCH`), joined onto this
+  // message as an additive field so the evidence surface has exactly one counter shape
+  // instead of `crates/av-ingest` reporting eight of nine counts from here and the ninth
+  // from a side channel. Checked by `crates/av-ingest`'s own pipeline, before
+  // `crates/av-edge::chain::ChainVerifier` ever sees a batch (see
+  // `crates/av-ingest/src/ingest.rs`'s module doc) -- `ChainVerifier` itself still never
+  // produces this rejection kind and never writes this field; `crates/av-ingest`
+  // populates it whenever it hands a `RejectionCounters` value to a caller (in-process or
+  // over `GetEvidence`), from its own internal bookkeeping.
+  uint64 shard_mismatch_count = 12;
+}
+
+// ---------------------------------------------------------------------------------------
+// E3b: the wire (docs/edge-plan.md milestone E3, second half; question 202's charter).
+// `EdgeIngest` is a plaintext gRPC service, loopback-only within one host; whenever a
+// plugin is on another host, a service-owned nginx mTLS front (question 155's rule,
+// applied verbatim: no acceptor crate in `crates/av-ingest`) terminates TLS and forwards
+// the verified client certificate as a gRPC metadata header this service un-escapes and
+// re-verifies in process (`crates/av-ingest/src/forwarded_cert.rs`'s own doc comment names
+// the exact header and escaping contract). See `crates/av-ingest/src/service.rs`'s module
+// doc for the full accept/reject pipeline this wraps -- E1's signing/chaining, E2's
+// identity, and E3a's durable per-partition log are unchanged by any of this.
+// ---------------------------------------------------------------------------------------
+
+// One measurement shape a `PluginManifest` declares it will emit (`PluginManifest.
+// output_schemas`). Informational/declared-only: nothing in `EdgeIngest.Submit`'s own
+// accept/reject pipeline enforces that an accepted batch's measurements actually match a
+// declared schema (E1's nine rejection kinds are unchanged by this message existing) --
+// this is what an operator or a future schema-conformance check reads, not a new tenth
+// rejection kind.
+message MeasurementSchema {
+  string measurement_id = 1;
+  string sensor_id = 2;
+  // Declared length of `Measurement.z` this measurement_id emits (`Measurement.r` is
+  // this length squared, row-major, square). Zero means "not declared".
+  uint32 z_len = 3;
+}
+
+// The plugin manifest handshake (`EdgeIngest.Announce`): what a producer declares about
+// itself before it may open an `EdgeIngest.Submit` stream. `crates/av-ingest` derives an
+// `av_edge::policy::ProducerPolicy` from this declaration plus the deployment's own
+// configured clearance ladder and staleness budget (neither of which travel on the wire --
+// see `crates/av-ingest/src/service.rs`'s module doc for exactly which fields below are
+// enforced at `Announce` time versus merely recorded).
+message PluginManifest {
+  // The producer id this plugin signs every batch under (`MeasurementBatch.producer_id`).
+  string producer_id = 1;
+  // The plugin binary/image's own version string. Informational only -- recorded in
+  // evidence/logs, never itself a basis for accepting or refusing a manifest.
+  string plugin_version = 2;
+  // Every measurement shape this plugin declares it will ever emit.
+  repeated MeasurementSchema output_schemas = 3;
+  // Every `FrameDefinition.id` this plugin declares it emits measurements in.
+  repeated string frame_ids = 4;
+  // The exact label this plugin emits every batch under -- becomes `ProducerPolicy.
+  // emit_marking`/`emit_caveats`. A batch whose own `MeasurementBatch.label` later
+  // disagrees with this is `BATCH_REJECTION_MISLABELED`, exactly as E1 already defines.
+  Label label = 5;
+  // This plugin's own declared clearance: the highest rung of the deployment's clearance
+  // ladder (a deployment-configured value, not carried on this manifest) this producer may
+  // emit under. A clearance not on the deployment's ladder at all, or ranked above what
+  // the deployment permits this plugin, is refused as
+  // `MANIFEST_REFUSAL_CLEARANCE_ABOVE_LADDER` at `Announce` time -- before a single batch
+  // is ever streamed, rather than only being discovered per-batch as `OVER_CLEARANCE`.
+  string clearance = 6;
+  // Every partition (`MeasurementBatch.shard_key`) this plugin declares it will write to.
+  repeated string shard_keys = 7;
+  // Lowercase hex SHA-256 fingerprint of the leaf certificate whose private key signs
+  // every batch this plugin sends (`av_edge::identity::EdgeIdentity::fingerprint_sha256`'s
+  // own convention). When this `Announce` call presented a certificate (forwarded by the nginx
+  // front, or configured directly for a loopback deployment -- `RequireClientCertificate`),
+  // it must equal that certificate's own verified fingerprint or the manifest is refused
+  // as `MANIFEST_REFUSAL_IDENTITY_REFUSED`; when no certificate is in the loop at this
+  // layer, this field is simply recorded and later checked per-batch against
+  // `MeasurementBatch.signer_cert_sha256`, exactly as E1/E2 already do.
+  string leaf_fingerprint_sha256 = 8;
+}
+
+// One reason `Announce` refused a `PluginManifest`, never silent (ADR-004).
+enum ManifestRefusal {
+  MANIFEST_REFUSAL_UNSPECIFIED = 0;
+  // `producer_id` is not on this deployment's configured allow-list of known plugins.
+  MANIFEST_REFUSAL_UNKNOWN_PLUGIN = 1;
+  // `label` is not what this deployment permits this producer to emit under.
+  MANIFEST_REFUSAL_LABEL_NOT_PERMITTED = 2;
+  // `clearance` is not on this deployment's configured clearance ladder at all, or is
+  // ranked above what this deployment permits this specific producer.
+  MANIFEST_REFUSAL_CLEARANCE_ABOVE_LADDER = 3;
+  // A manifest was already accepted for this `producer_id` and this one disagrees with
+  // it -- never silently replaced. "Already accepted" is scoped to the serving process
+  // instance's lifetime, NOT to a TCP connection: `tonic` exposes no per-connection
+  // identity a service method can key on, and an nginx front may multiplex or pool
+  // backend connections, so connection scoping would be unenforceable or silently wrong.
+  // See `crates/av-ingest/src/service.rs`'s module doc for the full argument.
+  MANIFEST_REFUSAL_MANIFEST_MISMATCH = 4;
+  // This `Announce` call's forwarded/verified client identity was refused
+  // (`av_edge::identity::verify_identity`; see `IdentityCounters` for which kind).
+  MANIFEST_REFUSAL_IDENTITY_REFUSED = 5;
+}
+
+// `Announce`'s reply.
+message ManifestAck {
+  bool accepted = 1;
+  // `MANIFEST_REFUSAL_UNSPECIFIED` when `accepted` is true.
+  ManifestRefusal refusal = 2;
+  string detail = 3;
+  // This producer's current chain head (`RejectionCounters.chain_head`'s own convention:
+  // the literal ASCII bytes of "GENESIS" for a producer nothing has ever been accepted
+  // from), so a reconnecting plugin knows what its very next batch's `prev_hash` must link
+  // from -- set whenever `accepted` is true, regardless of whether this is the plugin's
+  // first ever `Announce` or a reconnect.
+  bytes chain_head = 4;
+}
+
+// The aggregate identity-verification counters (`av_edge::identity::IdentityCounters`),
+// carried on the wire (`EvidenceResponse.identity`) exactly as that Rust struct's own
+// fields, one per `av_edge::identity::IdentityRejection` variant plus `accepted`.
+message IdentityCounters {
+  uint64 accepted = 1;
+  uint64 malformed_pem = 2;
+  uint64 not_p384 = 3;
+  uint64 issuer_not_trusted = 4;
+  uint64 expired = 5;
+  uint64 not_yet_valid = 6;
+  uint64 openssl_error = 7;
+}
+
+// One partition's evidence (`EvidenceResponse.partitions`): its current chain head and how
+// many records it holds -- exactly `crates/av-ingest/src/evidence.rs::evidence`'s own
+// per-partition JSON shape, on the wire.
+message PartitionEvidence {
+  bytes chain_head = 1;
+  uint64 record_count = 2;
+}
+
+message EvidenceRequest {}
+
+// `GetEvidence`'s reply: derived field for field from what `crates/av-ingest/src/
+// evidence.rs::evidence` already computes in process (never a second, divergent evidence
+// shape) -- `crates/av-ingest/tests/wire_evidence.rs` asserts the two agree on content.
+message EvidenceResponse {
+  uint64 accepted_total = 1;
+  uint64 rejected_total = 2;
+  IdentityCounters identity = 3;
+  // Keyed by `producer_id`.
+  map<string, RejectionCounters> producers = 4;
+  // Keyed by `shard_key`.
+  map<string, PartitionEvidence> partitions = 5;
+}
+
+message VerifyRequest {}
+
+// `VerifyLedger`'s reply: one `ChainVerification` per partition this ingest currently has
+// open -- exactly `crates/av-ingest/src/evidence.rs::verify_all`'s own map, on the wire.
+message VerifyResponse {
+  // Keyed by `shard_key`.
+  map<string, ChainVerification> partitions = 1;
+}
+
+// The ingest boundary's gRPC service (E3b, question 202). Plaintext on loopback within one
+// host (`crates/av-ingest/src/server.rs` refuses a non-loopback bind address at load with
+// a typed error, mirroring `crates/av-kernel/src/drm/binding.rs::is_loopback_address`'s own
+// refusal for the kernel's lockstep endpoint); a service-owned nginx mTLS front is the
+// only sanctioned way a plugin reaches this service from another host.
+service EdgeIngest {
+  // The plugin manifest handshake -- must succeed for a `producer_id` before `Submit` is
+  // ever accepted for it. "Announced" is scoped to the serving process instance's
+  // lifetime, not to a TCP connection (see `MANIFEST_REFUSAL_MANIFEST_MISMATCH`).
+  rpc Announce(PluginManifest) returns (ManifestAck);
+  // The batch stream: one `BatchVerdict` per `MeasurementBatch`, in order. A batch whose
+  // `producer_id` never successfully called `Announce` on this serving process is refused
+  // (`FAILED_PRECONDITION`) before it is looked at.
+  rpc Submit(stream MeasurementBatch) returns (stream BatchVerdict);
+  // The evidence surface, over the wire, matching `GET /admin/api/evidence`'s content
+  // exactly (`crates/av-ingest/src/admin.rs`).
+  rpc GetEvidence(EvidenceRequest) returns (EvidenceResponse);
+  // Per-partition chain verification, over the wire, matching `GET
+  // /admin/api/evidence/verify`'s content exactly.
+  rpc VerifyLedger(VerifyRequest) returns (VerifyResponse);
 }

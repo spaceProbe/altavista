@@ -83,10 +83,17 @@
 //!   [`identity::verify_batch_signed_by`] is the E1/E2 bridge: it checks a batch's
 //!   declared `signer_cert_sha256` against a verified identity's own fingerprint before
 //!   ever spending a signature verification on it.
+//! - [`plugin`] -- milestone E4: the first plugin, a simulated asset. A reusable,
+//!   pure/testable plugin library ([`plugin::PluginConfig`], [`plugin::MeasurementSource`]/
+//!   [`plugin::PortTrafficSource`], [`plugin::BatchingRule`]/[`plugin::Pacing`],
+//!   [`plugin::BatchBuilder`]) with no network code, no clock reads and no sleeping
+//!   anywhere -- see that module's own doc comment for exactly what this milestone
+//!   replays and why.
 
 pub mod chain;
 pub mod hash;
 pub mod identity;
+pub mod plugin;
 pub mod policy;
 pub mod sign;
 pub mod verify;
