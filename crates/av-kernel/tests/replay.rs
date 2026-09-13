@@ -182,7 +182,7 @@ fn t1b_replaying_a_sensor_that_drives_a_closed_loop_reproduces_the_whole_run_byt
     let dir = scratch_dir("t1b");
     let run_id = "test-replay-t1b".to_string();
 
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
     assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was recorded");
     assert!(!run_real.scores.is_empty(), "sanity: this fixture scores real objectives, so the comparison below covers scoring too");
@@ -192,7 +192,7 @@ fn t1b_replaying_a_sensor_that_drives_a_closed_loop_reproduces_the_whole_run_byt
         expected_hash: run_real.port_traffic_hash.clone(),
         instances: vec!["startracker".to_string()],
     };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg), command_source: None };
     let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
 
     assert_eq!(
@@ -231,7 +231,7 @@ fn t1_replayed_startracker_produces_byte_identical_run_products_with_no_exclusio
     let dir = scratch_dir("t1");
     let run_id = "test-replay-t1".to_string();
 
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
     assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was actually recorded (products_dir was Some)");
     assert!(!run_real.trajectories.contains_key("startracker"), "sanity: StarTrackerModel::state_dim() == 0 excludes it from RunProducts.trajectories entirely -- confirms this module doc comment's own claim");
@@ -240,7 +240,7 @@ fn t1_replayed_startracker_produces_byte_identical_run_products_with_no_exclusio
     let replay_cfg = ReplayConfig { log_path: log_path.clone(), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
     // Same products_dir, same run_id -- see the module doc comment for why this is what lets the
     // comparison below exclude nothing.
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg), command_source: None };
     let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
 
     // Re-checked after the run too: replaying an instance must never rewrite what the loaded
@@ -278,14 +278,14 @@ fn t2_a_replay_log_hash_mismatch_is_refused_before_any_step() {
 
     let dir = scratch_dir("t2");
     let run_id = "test-replay-t2".to_string();
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
 
     let log_path = dir.join("port_traffic.pb");
     let wrong_hash = "0".repeat(64);
     assert_ne!(run_real.port_traffic_hash, wrong_hash, "sanity: the wrong hash must actually differ from the real one");
     let replay_cfg = ReplayConfig { log_path: log_path.clone(), expected_hash: wrong_hash.clone(), instances: vec!["startracker".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg_replay).expect_err("a wrong expected_hash must refuse the run, not silently proceed");
     match err {
         DrmError::ReplayLogHashMismatch { computed, expected, .. } => {
@@ -310,7 +310,7 @@ fn t2_a_corrupted_replay_log_file_is_refused_even_with_the_original_hash_as_expe
 
     let dir = scratch_dir("t2-corrupt");
     let run_id = "test-replay-t2-corrupt".to_string();
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
 
     let log_path = dir.join("port_traffic.pb");
@@ -322,7 +322,7 @@ fn t2_a_corrupted_replay_log_file_is_refused_even_with_the_original_hash_as_expe
     std::fs::write(&log_path, &bytes).expect("writing the corrupted file back");
 
     let replay_cfg = ReplayConfig { log_path: log_path.clone(), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg_replay).expect_err("a corrupted log file must refuse the run even though expected_hash matches the ORIGINAL, un-corrupted content");
     assert!(matches!(err, DrmError::ReplayLogHashMismatch { .. }), "{err:?}");
 
@@ -372,7 +372,7 @@ fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_inst
 
     let dir = scratch_dir("t3");
     let run_id = "test-replay-t3".to_string();
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
 
     let log_path = dir.join("port_traffic.pb");
@@ -440,7 +440,7 @@ fn t3_one_deleted_interior_record_is_a_typed_missing_frame_error_naming_the_inst
     assert_ne!(recomputed_hash, run_real.port_traffic_hash, "sanity: deleting a record must actually change the file's own hash");
 
     let replay_cfg = ReplayConfig { log_path: log_path.clone(), expected_hash: recomputed_hash, instances: vec!["startracker".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg_replay).expect_err("deleting both due epochs of one interior kernel tick must be refused, not silently held or interpolated");
     match &err {
         DrmError::Schedule(detail) => {
@@ -557,7 +557,7 @@ fn t5_replaying_the_emitting_instance_of_a_duplicate_port_fault_reproduces_the_f
     let dir = scratch_dir("t5-duplicate-replay");
     let run_id = "test-replay-t5-duplicate".to_string();
 
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
     assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was recorded");
 
@@ -594,7 +594,7 @@ fn t5_replaying_the_emitting_instance_of_a_duplicate_port_fault_reproduces_the_f
     );
 
     let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg), command_source: None };
     let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
 
     assert_eq!(
@@ -707,7 +707,7 @@ fn t6_replaying_a_different_sensor_from_the_one_a_sensor_fault_targets_reproduce
     let dir = scratch_dir("t6-imu-bias-replay");
     let run_id = "test-replay-t6-imu-bias".to_string();
 
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
     assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was recorded");
     assert!(!run_real.scores.is_empty(), "sanity: this fixture scores real objectives, so the comparison below covers scoring too");
@@ -720,7 +720,7 @@ fn t6_replaying_a_different_sensor_from_the_one_a_sensor_fault_targets_reproduce
     assert!(frames_affected > 1.0, "sanity: the bias fault must have genuinely affected more than one IMU emission over its own 30s window: {frames_affected}");
 
     let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["startracker".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg), command_source: None };
     let run_replayed = execute(cfg_replay).expect("second (replayed) run executes");
 
     assert_eq!(
@@ -786,13 +786,13 @@ fn t6b_replaying_the_same_instance_a_sensor_fault_targets_is_a_typed_load_refusa
     let dir = scratch_dir("t6b-imu-bias-same-instance-replay");
     let run_id = "test-replay-t6b-imu-bias-same-instance".to_string();
 
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real, faulted) run executes");
     let real_fault_events: Vec<_> = run_real.events.iter().filter(|e| e.kind == EventKind::Fault as i32 && e.reference_id == "bias_imu").collect();
     assert_eq!(real_fault_events.len(), 1, "sanity: the real run reports the fault event, exactly once: {real_fault_events:#?}");
 
     let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["imu".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: Some(dir.clone()), replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg_replay).expect_err("replaying the same instance a SENSOR fault targets must be refused at load, not run to a silently divergent result");
     match err {
         DrmError::ReplayInstanceHasSensorFault { instance, fault_id } => {
@@ -817,11 +817,11 @@ fn a_replay_config_naming_an_unknown_instance_is_a_typed_load_refusal() {
 
     let dir = scratch_dir("unknown-instance");
     let run_id = "test-replay-unknown-instance".to_string();
-    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("first (real) run executes");
 
     let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec!["nobody_named_this".to_string()] };
-    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg_replay).expect_err("an unknown replay instance name must be refused");
     match err {
         DrmError::UnknownReplayInstance { instance } => assert_eq!(instance, "nobody_named_this"),
@@ -850,7 +850,7 @@ fn replay_combined_with_covariance_is_a_typed_refusal_not_a_silent_ignore() {
     // No real log is needed: the covariance+replay refusal is checked before the replay log is
     // even read (this test's own `log_path` need not exist).
     let replay_cfg = ReplayConfig { log_path: PathBuf::from("/nonexistent/does-not-matter.pb"), expected_hash: String::new(), instances: vec!["startracker".to_string()] };
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-replay-covariance".to_string(), error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: "test-replay-covariance".to_string(), error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let err = execute(cfg).expect_err("covariance + replay must be refused");
     assert!(matches!(err, DrmError::ReplayWithCovarianceNotSupported), "{err:?}");
 }

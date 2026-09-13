@@ -134,7 +134,7 @@ fn rehash_drm(mut drm: DesignReferenceMission) -> DesignReferenceMission {
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str, products_dir: Option<PathBuf>) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir, replay: None }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir, replay: None, command_source: None }
 }
 
 /// A fresh, unique scratch directory (mirrors `tests/port_traffic_sidecar.rs`'s own

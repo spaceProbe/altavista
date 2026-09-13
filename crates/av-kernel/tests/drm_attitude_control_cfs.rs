@@ -171,7 +171,7 @@ fn container_drm(id: &str, sos_id: &str, duration_s: i64, faults: Vec<Fault>) ->
 }
 
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None }
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None, command_source: None }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -543,7 +543,7 @@ fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_d
 
     // Run 1: the real container. This is the ONLY run in this test that touches Docker at all.
     let gmat_real = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg_real = RunConfig { gmat: &gmat_real, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None };
+    let cfg_real = RunConfig { gmat: &gmat_real, drm: &drm, sos: &sos, systems: &systems, run_id: run_id.clone(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
     let run_real = execute(cfg_real).expect("real container run must execute end to end");
     assert!(!run_real.port_traffic_hash.is_empty(), "sanity: a sidecar was actually recorded");
 
@@ -556,7 +556,7 @@ fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_d
     // dial them for the "controller" instance this run).
     let replay_cfg = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: run_real.port_traffic_hash.clone(), instances: vec![] };
     let gmat_replay = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let cfg_replay = RunConfig { gmat: &gmat_replay, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg) };
+    let cfg_replay = RunConfig { gmat: &gmat_replay, drm: &drm, sos: &sos, systems: &systems, run_id, error_mode: Default::default(), products_dir: None, replay: Some(replay_cfg), command_source: None };
     let run_replayed = execute(cfg_replay).expect("replay run must execute end to end, Docker-free");
 
     // The declared binding kind is unaffected by replay (question 175's own "the binding kind

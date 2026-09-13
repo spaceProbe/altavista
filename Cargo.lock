@@ -185,6 +185,7 @@ dependencies = [
  "av-lockstep-shim",
  "gmat-sys",
  "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "serde_yaml",

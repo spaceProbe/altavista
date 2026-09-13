@@ -62,6 +62,7 @@
 pub mod attitude;
 pub mod binding;
 pub mod command;
+pub mod command_source;
 pub mod controller;
 pub mod events;
 pub mod executor;
@@ -74,6 +75,7 @@ pub mod replay;
 pub mod schema;
 pub mod sensors;
 
+pub use command_source::{CommandOutcome, ExternalCommandSource};
 pub use executor::{execute, RunConfig, RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
 pub use replay::ReplayConfig;
