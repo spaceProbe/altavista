@@ -22,6 +22,18 @@
 //! bytes are exactly what a real `execute()` run wrote to disk, byte for byte, since this
 //! test reads the fixture file's raw bytes directly into a catalogue entry rather than
 //! decoding and re-encoding them.
+//!
+//! ## R3.4: the command-trail gap, closed
+//!
+//! `docs/aiplane-plan.md`'s round-2 declared gap named this fixture's own limit plainly: it is
+//! the measurements demo, so its `events` carry no `EVENT_KIND_COMMAND_TRANSITION` at all --
+//! the gateway was proven against a real run, but not yet against one whose events include a
+//! command trail. `crates/av-gateway/tests/command_trail_run_products.rs` closes that gap: a
+//! second real, git-tracked fixture (`tests/fixtures/demo_command_trail.runproducts.bin`, a
+//! real `CommandAuthorityService` + `av_kernel::drm::execute` run's own command trail) served
+//! through a real `DataGatewayService` over a real loopback socket, with the specific state
+//! sequence and command id named and asserted, sorted order checked, and label enforcement
+//! proven to apply to it exactly like it does to this file's own fixture.
 
 mod common;
 

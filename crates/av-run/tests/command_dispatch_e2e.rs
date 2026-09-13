@@ -25,6 +25,28 @@
 //! grpc_service.rs`'s own module doc, which makes the identical record. No test calls
 //! `std::env::set_var`/`remove_var`; every clock is a `TestClock` this test constructs and
 //! never advances by sleeping.
+//!
+//! # `generate_command_trail_run_products_fixture` (R3.4, `docs/open-questions.md` question 206)
+//!
+//! `#[ignore]`d, mirroring `crates/av-kernel/tests/generate_e4a_ground_segment_fixture.rs`'s own
+//! convention exactly: this file already drives the whole A3.2 path end to end and holds the
+//! resulting `RunProducts` in memory (this test function's own `commanded`, above) -- the
+//! generator below re-runs the identical `safe1` dispatch and `execute()` call (same helpers,
+//! same constants, so it is byte-for-byte the same run, just under its own frozen `run_id`) and
+//! writes the result to `tests/fixtures/demo_command_trail.runproducts.bin`, a REAL `RunProducts`
+//! whose `events` genuinely include a command trail (`docs/aiplane-plan.md`'s round-2 declared
+//! gap: the existing `demo_measurements.runproducts.bin` fixture carries none). See `crates/
+//! av-gateway/tests/command_trail_run_products.rs` for the gateway proof this fixture exists to
+//! support. Regenerate with:
+//! ```text
+//! export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+//! export GMAT_ROOT="/Users/probe/code/AltaVista/GMAT R2026a"
+//! export CFS_MIRROR_DIR=/Users/probe/code/AltaVista/third_party/mirrors
+//! cargo test -p av-run --test command_dispatch_e2e -- --ignored --nocapture generate_command_trail_run_products_fixture
+//! ```
+//! Must only ever be re-run if this file's own `mode_command`/`load_bundle`/`TestService::spawn`
+//! helpers, or `drms/demo_attitude_command.{drm,sos}.yaml` themselves, change -- routine test
+//! runs must never regenerate this file, which is exactly why this test carries `#[ignore]`.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -459,6 +481,70 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
     let queued = service.adapter.poll(0);
     assert_eq!(queued.len(), 1, "the refused second Dispatch must never have reached the DispatchSink at all: {queued:#?}");
     assert_eq!(queued[0].id, "dup1");
+
+    rt.block_on(service.shutdown());
+}
+
+// =================================================================================================
+// R3.4 fixture generator (docs/open-questions.md question 206) -- see this file's own module doc,
+// "generate_command_trail_run_products_fixture", for the full rationale and the exact recipe.
+// =================================================================================================
+
+fn repo_root_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures")
+}
+
+/// This test's own `run_id`, frozen -- the same convention `crates/av-gateway/tests/
+/// real_run_products.rs`'s own `FIXTURE_RUN_ID`/`demo-measurements-frozen` and `crates/
+/// av-proposer/tests/common/mod.rs`'s own `FIXTURE_RUN_ID`/`demo_two_instance_frozen_fixture`
+/// already use for a committed `RunProducts` fixture's own run identity.
+pub const COMMAND_TRAIL_FIXTURE_RUN_ID: &str = "demo-command-trail-frozen";
+
+#[test]
+#[ignore = "writes into tests/fixtures/ -- run manually, see this file's own module doc"]
+fn generate_command_trail_run_products_fixture() {
+    let rt = tokio::runtime::Runtime::new().expect("build a tokio runtime");
+    let mut service = rt.block_on(TestService::spawn("fixture-gen", 1_000));
+
+    let safe_at = START_TAI_NS + 10_000_000_000;
+    rt.block_on(propose_check_authorize_dispatch(&mut service, mode_command("safe1", 0.0, safe_at, 0)));
+
+    let _engine = gmat_sys::engine_lock();
+    let (drm, sos, systems) = load_bundle();
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let products = execute(RunConfig {
+        gmat: &gmat,
+        drm: &drm,
+        sos: &sos,
+        systems: &systems,
+        run_id: COMMAND_TRAIL_FIXTURE_RUN_ID.to_string(),
+        error_mode: Default::default(),
+        products_dir: None,
+        replay: None,
+        command_source: Some(service.adapter.as_ref()),
+    })
+    .expect("commanded run executes");
+
+    // Sanity, before committing anything to disk: the real command trail this fixture exists
+    // to carry is genuinely present -- mirrors `full_command_trail_through_the_real_service_and_
+    // kernel_acks_at_all_three_levels_with_a_physical_effect`'s own identical assertion above
+    // (this generator must never silently drift from what that test already proves this exact
+    // setup produces).
+    let transitions: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::CommandTransition as i32 && e.reference_id == "safe1").collect();
+    let states: Vec<&str> = transitions.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(states, vec!["COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED", "COMMAND_STATE_DISPATCHED", "COMMAND_STATE_ACKED"], "{transitions:#?}");
+
+    let out_dir = repo_root_fixtures_dir();
+    std::fs::create_dir_all(&out_dir).unwrap_or_else(|e| panic!("creating {}: {e}", out_dir.display()));
+    let out_path = out_dir.join("demo_command_trail.runproducts.bin");
+    let bytes = products.to_proto().encode_to_vec();
+    std::fs::write(&out_path, &bytes).unwrap_or_else(|e| panic!("writing {}: {e}", out_path.display()));
+
+    println!("wrote {} ({} bytes)", out_path.display(), bytes.len());
+    println!("run_id = {}", products.provenance.run_id);
+    for e in &transitions {
+        println!("  {} @ tai_ns={} reference_id={}", e.name, e.tai_ns, e.reference_id);
+    }
 
     rt.block_on(service.shutdown());
 }
