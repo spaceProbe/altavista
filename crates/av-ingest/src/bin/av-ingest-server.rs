@@ -55,6 +55,27 @@
 //! before either server starts accepting, so a test driving this binary as a subprocess
 //! can read the two lines back instead of guessing a port or re-implementing this
 //! process's own bind logic a second time.
+//!
+//! # `--verify-key`: the no-certificate-in-the-loop identity path, on the command line
+//!
+//! `EdgeIngestConfig::verify_keys` (`crate::service`) is only ever consulted when
+//! `require_client_certificate` is `false` (E1's own no-certificate-in-the-loop path,
+//! already exercised in-process by `tests/plugin_wire.rs` and `tests/wire_evidence.rs`),
+//! but until E4b nothing populated it for a real *subprocess* of this binary -- every
+//! existing caller either built `EdgeIngestService` directly (those two test files) or ran
+//! with `--require-client-cert` (`tests/test_edge_ingest_mtls.py`, through the nginx mTLS
+//! front). E4b's own container network-posture proof needs a real `av-edge-plugin`
+//! subprocess talking plaintext to a real `av-ingest-server` subprocess with no certificate
+//! anywhere in the loop (the identity/mTLS plane is E2/E3b's already-proven concern, not
+//! what a container network-isolation test is about) -- so this flag closes that one gap.
+//! `--verify-key <producer_id>:<path-to-EC-public-key-PEM>` (repeatable) loads each file
+//! with `av_edge::verify::load_verifying_key` (accepts a bare EC public key PEM or an X.509
+//! certificate, same as every other caller of that function) and inserts it into
+//! `EdgeIngestConfig.verify_keys` keyed by `producer_id`. Meaningless (and refused, not
+//! silently ignored) when `--require-client-cert` is in effect, since that path never
+//! consults `verify_keys` at all -- see `EdgeIngestConfig::require_client_certificate`'s
+//! own doc comment.
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,6 +83,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use av_edge::identity::TrustAnchors;
+use av_edge::verify::load_verifying_key;
 use av_ingest::admin::AdminState;
 use av_ingest::pb::edge_ingest_server::EdgeIngestServer;
 use av_ingest::server::bind_loopback;
@@ -83,6 +105,7 @@ struct Args {
     clearance_ladder: Vec<String>,
     max_batch_age_ns: i64,
     require_client_cert: bool,
+    verify_keys: Vec<(String, PathBuf)>,
     clock: ClockArg,
 }
 
@@ -91,6 +114,7 @@ const USAGE: &str = "usage: av-ingest-server \
     [--trust-anchor PATH]... [--intermediate-chain PATH] \
     --clearance-ladder A,B,C --max-batch-age-ns N \
     [--require-client-cert | --no-require-client-cert] \
+    [--verify-key PRODUCER_ID:PATH]... \
     (--clock-tai-ns N | --real-clock)";
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -104,6 +128,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut clearance_ladder = None;
     let mut max_batch_age_ns = None;
     let mut require_client_cert = None;
+    let mut verify_keys: Vec<(String, PathBuf)> = Vec::new();
     let mut clock: Option<ClockArg> = None;
 
     while let Some(flag) = args.next() {
@@ -114,6 +139,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--log-dir" => log_dir = Some(PathBuf::from(value()?)),
             "--trust-anchor" => trust_anchors.push(PathBuf::from(value()?)),
             "--intermediate-chain" => intermediate_chain = Some(PathBuf::from(value()?)),
+            "--verify-key" => {
+                let raw = value()?;
+                let (producer_id, path) = raw.split_once(':').ok_or_else(|| format!("--verify-key {raw:?} must have the shape PRODUCER_ID:PATH (a literal ':' separates them)"))?;
+                if producer_id.is_empty() {
+                    return Err(format!("--verify-key {raw:?}: PRODUCER_ID must not be empty"));
+                }
+                verify_keys.push((producer_id.to_string(), PathBuf::from(path)));
+            }
             "--clearance-ladder" => {
                 let raw = value()?;
                 clearance_ladder = Some(raw.split(',').map(|s| s.to_string()).filter(|s| !s.is_empty()).collect::<Vec<_>>());
@@ -147,6 +180,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     if require_client_cert && trust_anchors_final.is_empty() {
         return Err("at least one --trust-anchor PATH is required when client certificates are required (pass --no-require-client-cert to run without any -- see EdgeIngestConfig::require_client_certificate's own doc comment on why that is not the default)".to_string());
     }
+    if require_client_cert && !verify_keys.is_empty() {
+        return Err("--verify-key was given but client certificates are required (--require-client-cert, the default) -- EdgeIngestConfig::verify_keys is never consulted on that path, so this is refused rather than silently ignored; pass --no-require-client-cert for the no-certificate-in-the-loop path --verify-key exists for".to_string());
+    }
 
     Ok(Args {
         grpc_bind: grpc_bind.ok_or("--grpc-bind is required")?,
@@ -157,6 +193,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         clearance_ladder: clearance_ladder.ok_or("--clearance-ladder is required (comma-separated, lowest rung first)")?,
         max_batch_age_ns: max_batch_age_ns.ok_or("--max-batch-age-ns is required")?,
         require_client_cert,
+        verify_keys,
         clock: clock.ok_or_else(|| format!("exactly one of --clock-tai-ns or --real-clock is required\n{USAGE}"))?,
     })
 }
@@ -207,6 +244,18 @@ async fn main_inner(args: Args) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("reading --intermediate-chain {path:?}: {e}"))?;
         config.intermediate_chain_pem = Some(bytes);
     }
+
+    // --verify-key PRODUCER_ID:PATH (repeatable) -- see this binary's own module doc,
+    // "The no-certificate-in-the-loop identity path, on the command line". parse_args
+    // already refused this combined with --require-client-cert, so every entry here is
+    // meaningful.
+    let mut verify_keys: HashMap<String, openssl::ec::EcKey<openssl::pkey::Public>> = HashMap::new();
+    for (producer_id, path) in &args.verify_keys {
+        let pem = std::fs::read(path).map_err(|e| format!("reading --verify-key {producer_id}:{path:?}: {e}"))?;
+        let key = load_verifying_key(&pem).map_err(|e| format!("--verify-key {producer_id}:{path:?}: {e}"))?;
+        verify_keys.insert(producer_id.clone(), key);
+    }
+    config.verify_keys = verify_keys;
 
     // Every trust-anchor PEM file is read up front and kept alive for the rest of this
     // function (`TrustAnchors::from_pems` borrows `&[&[u8]]`) -- this binary itself never
@@ -316,5 +365,54 @@ mod tests {
         assert_eq!(args.clearance_ladder, vec!["UNCLASSIFIED".to_string(), "CUI".to_string()]);
         assert!(args.require_client_cert);
         assert!(matches!(args.clock, ClockArg::Fixed(1_800_000_037_000_000_000)));
+    }
+
+    #[test]
+    fn parse_args_accepts_repeated_verify_key_with_no_require_client_cert() {
+        let args = parse_args(
+            [
+                "av-ingest-server", "--grpc-bind", "127.0.0.1:0", "--admin-bind", "127.0.0.1:0", "--log-dir", "/tmp/x",
+                "--clearance-ladder", "UNCLASSIFIED", "--max-batch-age-ns", "1", "--no-require-client-cert",
+                "--verify-key", "producer-a:/tmp/a.pub.pem", "--verify-key", "producer-b:/tmp/b.pub.pem",
+                "--clock-tai-ns", "1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(args.verify_keys, vec![("producer-a".to_string(), PathBuf::from("/tmp/a.pub.pem")), ("producer-b".to_string(), PathBuf::from("/tmp/b.pub.pem"))]);
+    }
+
+    #[test]
+    fn parse_args_refuses_a_verify_key_with_no_colon() {
+        let err = parse_args(
+            [
+                "av-ingest-server", "--grpc-bind", "127.0.0.1:0", "--admin-bind", "127.0.0.1:0", "--log-dir", "/tmp/x",
+                "--clearance-ladder", "UNCLASSIFIED", "--max-batch-age-ns", "1", "--no-require-client-cert",
+                "--verify-key", "no-colon-here",
+                "--clock-tai-ns", "1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err();
+        assert!(err.contains("PRODUCER_ID:PATH"), "{err}");
+    }
+
+    #[test]
+    fn parse_args_refuses_verify_key_combined_with_require_client_cert() {
+        let err = parse_args(
+            [
+                "av-ingest-server", "--grpc-bind", "127.0.0.1:0", "--admin-bind", "127.0.0.1:0", "--log-dir", "/tmp/x",
+                "--trust-anchor", "/tmp/root.pem", "--clearance-ladder", "UNCLASSIFIED", "--max-batch-age-ns", "1",
+                "--verify-key", "producer-a:/tmp/a.pub.pem",
+                "--clock-tai-ns", "1",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err();
+        assert!(err.contains("--verify-key"), "{err}");
+        assert!(err.contains("never consulted"), "{err}");
     }
 }
