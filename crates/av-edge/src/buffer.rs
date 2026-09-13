@@ -763,6 +763,53 @@ mod tests {
     }
 
     #[test]
+    fn a_record_tampered_with_after_append_is_a_digest_mismatch_not_a_silent_skip() {
+        let path = tmp_path("tampered-mid-file");
+        let key = signing_key();
+        {
+            let (buffer, _) = EdgeBuffer::open(&path).unwrap();
+            let b1 = batch(1, hash::GENESIS, &key);
+            let b2 = batch(2, &b1.batch_hash, &key);
+            let b3 = batch(3, &b2.batch_hash, &key);
+            buffer.append(&b1).unwrap();
+            buffer.append(&b2).unwrap();
+            buffer.append(&b3).unwrap();
+            assert_eq!(buffer.record_count(), 3);
+        }
+
+        // Flip one byte inside the FIRST record's own payload -- not the length prefix,
+        // not the digest, and not the last record (which would be indistinguishable from
+        // a torn tail): this is tampering after a successful append, and must be surfaced
+        // as such, never treated like a crash's torn tail.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let first_payload_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        assert!(first_payload_len > 0, "the first record's payload must be non-empty for this test to tamper with it");
+        let tamper_at = HEADER_LEN; // the first byte of record 1's own payload.
+        bytes[tamper_at] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (reopened, report) = EdgeBuffer::open(&path).unwrap();
+        // `open` (via `scan_frames`) only re-validates the content of the LAST record --
+        // exactly like `PartitionLog::open`. A tampered record that is not the trailing
+        // one is not a torn tail and must not be reported or silently discarded as one.
+        assert!(report.is_none(), "tampering with a record that is not the trailing one must not be treated like a torn tail: {report:?}");
+        assert_eq!(reopened.record_count(), 3, "open must not silently drop the tampered record either");
+
+        let err = reopened.replay_from(0).expect_err("a mid-file digest mismatch must fail replay outright, never silently skip the tampered record or return a short/partial list of the good ones");
+        let rendered = err.to_string();
+        match &err {
+            BufferError::DigestMismatch { path: err_path, index, detail } => {
+                assert_eq!(*index, 1, "the FIRST record must be identified as the one that failed, not some other index");
+                assert_eq!(err_path, &path.display().to_string());
+                assert!(!detail.is_empty());
+            }
+            other => panic!("expected BufferError::DigestMismatch, got {other:?}"),
+        }
+        assert!(rendered.contains("record 1"), "the Display string must identify which record failed: {rendered}");
+        assert!(rendered.contains(&path.display().to_string()), "the Display string must identify which file failed: {rendered}");
+    }
+
+    #[test]
     fn a_corrupt_length_ack_file_is_defaulted_to_zero_and_reported() {
         let path = tmp_path("watermark-corrupt");
         let key = signing_key();
