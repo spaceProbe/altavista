@@ -1,0 +1,214 @@
+# nginx-av-ingest-grpc.conf.template -- the TLS+mTLS front for av-ingest's plaintext gRPC
+# (question 202, E3b's charter; ADR-004's crypto rule; the secproxy pattern -- see
+# secrouter/secproxy's README "Why nginx" and nginx-secproxy.conf.example).
+#
+# WHY THIS EXISTS SEPARATELY FROM services/gmat-service/deploy's OWN TEMPLATE
+# -----------------------------------------------------------------------------
+# This is the exact same shape as `services/gmat-service/deploy/nginx-gmat-grpc.conf.
+# template` (server identity, mTLS client-certificate handling, the ECDSA-P-384-only
+# cipher/curve restrictions, the "loopback in front of loopback" topology) -- it is a
+# separate file, not a shared one, for the same reason that template's own header comment
+# gives for not routing through secproxy's shared config: this is a service-owned front,
+# one per plaintext-gRPC backend, and `av-ingest` is a different backend (a different
+# `grpc_pass` target, a different service identity, a different mTLS trust posture -- see
+# below) from `gmat-service`/`av-dynamics-service`. Whether secdeploy should eventually
+# template every such front from one generator, rather than one file per backend, is the
+# same open escalation that template's own header names; this file does not resolve it,
+# it just follows the established convention.
+#
+# WHAT secdeploy WOULD TEMPLATE HERE
+# -------------------------------------
+# Every `__UPPER_SNAKE__` placeholder below is a hook a real secdeploy generator would
+# fill from topology.toml/secsite.toml and the seccert-issued material at deploy time.
+# `tests/test_edge_ingest_mtls.py` fills them itself (this task's own local CA material,
+# ephemeral loopback ports) to prove the shape works end to end, through a real,
+# subprocess-run nginx and a real `av-ingest-server` subprocess; it does not call any
+# secdeploy code (there isn't a Rust/Python secdeploy in this repo to call -- this task's
+# job is the template and the proof, not the generator).
+#
+# This file is a COMPLETE, standalone nginx config, exactly like the secproxy/gmat-service
+# examples:
+#   nginx -c <rendered-from-this-template>.conf -g 'daemon off;'
+# Nothing reads this .template file directly; it is not valid nginx syntax as-is (the
+# placeholders aren't).
+#
+# THE ONE SUBSTANTIVE ADDITION OVER THE gmat-service TEMPLATE: THE FORWARDED CERTIFICATE
+# -----------------------------------------------------------------------------------------
+# `crates/av-ingest/src/forwarded_cert.rs` (this task's own contract) needs the client
+# leaf nginx's mTLS handshake terminated, forwarded to the backend as a plain gRPC
+# metadata header -- so it can be **re-verified in process**
+# (`av_edge::identity::verify_identity`) and a wrong-CA or lapsed identity lands in
+# `IdentityCounters`/`EvidenceResponse`, not only in this file's own access/error log. The
+# header name below, `x-ssl-client-escaped-cert`, is
+# `av_ingest::forwarded_cert::FORWARDED_CLIENT_CERT_HEADER`'s literal value, copied from
+# that module's own source rather than retyped from memory -- a test in this crate
+# (`crates/av-ingest/tests/forwarded_cert_header_name_agreement.rs`) asserts the two
+# crates' own copies of that literal still agree with each other, and
+# `tests/test_edge_ingest_mtls.py` asserts THIS template's own header line still names
+# that exact same string, so all three could never silently drift apart.
+#
+# `grpc_set_header`, not `proxy_set_header`: this location's backend directive is
+# `grpc_pass` (`ngx_http_grpc_module`), and `proxy_set_header` is `ngx_http_proxy_module`'s
+# own directive -- nginx does not cross-apply the two. Measured directly (not assumed) by
+# `tests/test_edge_ingest_mtls.py`: a `location` block using `proxy_set_header` inside a
+# `grpc_pass` server parses and starts without complaint (nginx has no rule forbidding an
+# unused directive from a *different* module inside the same block), but the header it
+# names never reaches the backend at all -- only `grpc_set_header`'s own lines do. See
+# that test's own module docstring for exactly what was observed and how.
+#
+# THE ssl_verify_client DECISION -- optional_no_ca, NOT on (and NOT plain optional either)
+# -----------------------------------------------------------------------------------------
+# `services/gmat-service/deploy`'s own template (and `tests/test_grpc_tls.py`'s own
+# docstring) uses `ssl_verify_client on`: nginx itself is the enforcement point, and a
+# wrong-CA or expired client certificate never completes a TLS handshake at all (an
+# untrusted/expired leaf fails verification inside the handshake itself, before any HTTP
+# request; a MISSING leaf, measured in that same file, completes the handshake but is
+# then refused at the HTTP layer with a plain 400). Either way, the backend never sees
+# the request, and no in-process counter of the backend's own ever moves.
+#
+# That is exactly the wrong shape for THIS front: question 202 requires that a wrong-CA or
+# lapsed identity "land in the counters" (`IdentityCounters.issuer_not_trusted`/`.expired`,
+# read back via `GetEvidence`/`GET /admin/api/evidence`) -- not only in this file's own
+# error log, which `secdeploy evidence` (ADR-004 question 63) never reads. With
+# `ssl_verify_client on`, that would be structurally impossible: nginx refuses the
+# connection/request before av-ingest is ever reached, so the very defect question 202
+# asks this crate to make visible in process never gets there to be counted.
+#
+# An earlier draft of this template used plain `ssl_verify_client optional` -- and
+# `tests/test_edge_ingest_mtls.py` caught, empirically, that this does NOT do what its own
+# name suggests: OpenSSL's underlying `SSL_VERIFY_PEER` (which both `optional` and `on` set)
+# only tolerates a MISSING certificate; once ANY certificate is actually presented, a
+# verification failure (untrusted CA, expired) fails the TLS handshake itself, exactly as
+# hard as `on` does for that same leaf -- `optional` vs `on` only changes what happens when
+# NO certificate is presented at all. Measured directly: with plain `optional`, presenting
+# `foreign.localhost` (a leaf from an entirely unrelated CA) produced nginx's own HTTP 400
+# response before ever reaching `grpc_pass` -- the identical shape `on` produces for a
+# MISSING certificate, just for a different input. `ssl_verify_client optional_no_ca` is
+# the directive nginx actually ships for this: its own docs describe it as "the same as
+# optional, but does not require a client certificate to be signed by a trusted CA
+# certificate... for use when a client certificate needs to be verified by an external
+# service" -- which is precisely this deployment's own shape, with av-ingest as that
+# external (well, downstream) service. `tests/test_edge_ingest_mtls.py` proves this
+# directly: with `optional_no_ca`, a leaf from a different CA AND a lapsed leaf (still
+# presented, still not trusted at verification time) both complete the TLS handshake and
+# reach av-ingest, which is exactly the property question 202 asks for.
+#
+# Whatever certificate was actually presented (trusted, untrusted, expired, or none at all)
+# is forwarded to av-ingest via `$ssl_client_escaped_cert` exactly as
+# `crate::forwarded_cert`'s own module doc documents, and av-ingest's own `Announce` handler
+# is the one and only place that decides accept or refuse -- via `av_edge::identity::
+# verify_identity` against this deployment's OWN trust anchors, which need not even be the
+# same as `__SSL_CLIENT_CERTIFICATE__` below (this template's mTLS trust anchor governs
+# nginx's own, purely informational `$ssl_client_verify` value; av-ingest is configured
+# with its trust anchors separately, on its own command line -- see `crates/av-ingest/src/
+# bin/av-ingest-server.rs`). This is "nginx is the TLS terminator; av-ingest is the identity
+# enforcement point" -- the resolution `crates/av-ingest/src/forwarded_cert.rs`'s own module
+# doc calls for when it says a wrong-CA or lapsed identity must be verified "in process".
+#
+# `$ssl_client_verify` is ALSO forwarded, as `x-ssl-client-verify` below, purely as an
+# observability aid (nginx's own, non-authoritative opinion -- e.g. "FAILED:unable to get
+# local issuer certificate" for the wrong-CA case, useful for correlating this file's access
+# log against av-ingest's own counters when debugging) -- nothing in `crates/av-ingest`
+# reads or trusts that header; the only thing that decides accept or refuse is the
+# certificate itself, re-verified in process.
+#
+# What this buys, case by case (see `tests/test_edge_ingest_mtls.py` for the actual proof):
+#   - a valid, trusted, unexpired leaf: nginx's own $ssl_client_verify is SUCCESS
+#     (informational only); av-ingest's own verify_identity independently accepts it;
+#     IdentityCounters.accepted increments.
+#   - a leaf from an untrusted CA: the TLS handshake still completes (optional_no_ca);
+#     nginx forwards the leaf anyway; av-ingest's verify_identity rejects it as
+#     ISSUER_NOT_TRUSTED; IdentityCounters.issuer_not_trusted increments, IN PROCESS.
+#   - a lapsed (expired) leaf, otherwise from the trusted CA: same shape --
+#     IdentityCounters.expired increments, IN PROCESS.
+#   - no client certificate presented at all: `$ssl_client_escaped_cert` is nginx's own
+#     documented empty string for that case, which `grpc_set_header` (like
+#     `proxy_set_header`) does not forward as a header at all when the value is empty --
+#     av-ingest's own `Announce` handler sees NO forwarded-certificate header and refuses
+#     IDENTITY_REFUSED for that reason, again IN PROCESS, not by nginx tearing down the
+#     connection. See `tests/test_edge_ingest_mtls.py` for what was actually observed here
+#     (this is exactly the kind of nginx behaviour worth measuring rather than assuming).
+
+worker_processes 1;
+pid __PID_FILE__;
+error_log __ERROR_LOG__ info;
+
+events {
+    worker_connections 128;
+}
+
+http {
+    # Keep every writable path inside the deploy-owned state dir (mirrors secproxy's
+    # ProtectSystem=strict note: no default nginx temp/log/pid path is touched). In this
+    # test, the harness points these at tests/test_edge_ingest_mtls.py's tmp_path.
+    access_log __ACCESS_LOG__;
+    client_body_temp_path __CLIENT_BODY_TEMP__;
+
+    server {
+        # av-ingest is never reached from outside the host directly (question 155/202:
+        # `crates/av-ingest/src/server.rs::bind_loopback` refuses a non-loopback plaintext
+        # bind at load). This TLS front keeps that property: it listens on loopback too,
+        # on its own port, in front of av-ingest's own loopback-only plaintext port -- the
+        # boundary this crosses is the crypto rule (a real cross-host plugin needs mTLS,
+        # which this crate's own plaintext gRPC server deliberately does not implement),
+        # not host reachability.
+        listen 127.0.0.1:__LISTEN_PORT__ ssl;
+        http2 on;
+
+        # --- secdeploy hook: server_name ---
+        # A real deployment names the seccert-issued SAN cert's FQDN here (e.g.
+        # "av-ingest.<site-domain>"). There is no DNS in this test environment, so the
+        # harness both dials and issues the server cert for the loopback IP itself.
+        server_name __SERVER_NAME__;
+
+        # --- secdeploy hook: server identity ---
+        # secdeploy issues ONE cert from seccert's CA and installs the fullchain
+        # (leaf + intermediate) + key pair here.
+        ssl_certificate __SSL_CERTIFICATE__;
+        ssl_certificate_key __SSL_CERTIFICATE_KEY__;
+
+        # --- secdeploy hook: mTLS trust anchor (see this file's own header comment on the
+        # ssl_verify_client decision -- "optional_no_ca", not "on" and not plain "optional") ---
+        # This is the CA chain nginx computes its own, purely informational
+        # $ssl_client_verify against; it is NOT what decides whether a batch is accepted --
+        # av-ingest re-verifies the forwarded certificate against its OWN configured trust
+        # anchors (`--trust-anchor` on `av-ingest-server`'s own command line), independent
+        # of this file. A real deployment would normally point both at the same seccert
+        # Root+Intermediate, but nothing about this template requires that.
+        ssl_client_certificate __SSL_CLIENT_CERTIFICATE__;
+        ssl_verify_client optional_no_ca;
+        ssl_verify_depth 2; # leaf -> intermediate -> root, the two-tier CA ADR-004 assumes
+
+        # TLS 1.2 kept alongside 1.3 -- see services/gmat-service/README.md's "TLS front
+        # door" section for the justification this template reuses verbatim (NIST SP
+        # 800-52r2's baseline still names 1.2; both are FIPS-approved through nginx's
+        # linked OpenSSL FIPS provider).
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers on;
+        # ECDSA-only suites: every seccert leaf here is ECDSA P-384 (ADR-004's own signing
+        # algorithm choice for the edge, reused for TLS identity).
+        ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256';
+        ssl_ecdh_curve secp384r1;
+        # ssl_ciphers only governs <=TLSv1.2; TLSv1.3's ciphersuites are a separate OpenSSL
+        # list, reached here via SSL_CONF_cmd (nginx links the host/Homebrew OpenSSL, so
+        # this reaches the same FIPS-approved AEAD suites as the 1.2 list above).
+        ssl_conf_command Ciphersuites TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256;
+
+        location / {
+            # The plaintext av-ingest backend (`crates/av-ingest/src/bin/
+            # av-ingest-server.rs`, `--grpc-bind 127.0.0.1:...`). "grpc://" (not
+            # "grpcs://") because the backend hop is intentionally plaintext-on-loopback,
+            # not a second TLS leg -- the crypto-rule-relevant TLS boundary is this one.
+            grpc_pass grpc://127.0.0.1:__BACKEND_PORT__;
+
+            # The forwarded-client-certificate contract (this file's own header comment;
+            # `crates/av-ingest/src/forwarded_cert.rs`'s module doc is the canonical
+            # definition). MUST be `grpc_set_header`, not `proxy_set_header` -- see this
+            # file's own header comment on what was measured.
+            grpc_set_header x-ssl-client-escaped-cert $ssl_client_escaped_cert;
+            # Observability only (see this file's own header comment) -- never read by
+            # crates/av-ingest.
+            grpc_set_header x-ssl-client-verify $ssl_client_verify;
+        }
+    }
+}

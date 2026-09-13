@@ -1,7 +1,7 @@
 [package]
 name = "av-ingest"
 publish = false
-description = "E3a (docs/edge-plan.md milestone E3, first half): the ingest as a library -- a durable, file-backed, per-partition hash-chained log that is itself the ledger (ADR-004), the accept/reject pipeline wiring av-edge's chain verifier and identity verification to appends, the counters, crash recovery, determinism, and the evidence surface as data. The wire (gRPC, mTLS, the plugin manifest handshake) is E3b, deliberately out of scope this round -- see this crate's module docs."
+description = "E3 (docs/edge-plan.md milestone E3), both halves: E3a, the ingest as a library -- a durable, file-backed, per-partition hash-chained log that is itself the ledger (ADR-004), the accept/reject pipeline wiring av-edge's chain verifier and identity verification to appends, the counters, crash recovery, determinism, and the evidence surface as data; and E3b (question 202), the wire -- a plaintext-on-loopback tonic EdgeIngest server, the plugin manifest handshake, the forwarded-client-certificate header contract, and the hand-rolled GET-only /admin/api/evidence HTTP surface. See this crate's module docs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,16 +10,22 @@ repository.workspace = true
 
 [dependencies]
 # `altavista.v1::pb::{MeasurementBatch, BatchRejection, BatchVerdict, RejectionCounters,
-# ChainVerification, Measurement}` -- the shared prost build, reached through av-edge's own
-# `pub use av_cdm::pb` re-export rather than a second, independent path onto av-cdm.
+# ChainVerification, Measurement, PluginManifest, ManifestAck, ...}` -- the shared prost
+# build, reached through av-edge's own `pub use av_cdm::pb` re-export rather than a second,
+# independent path onto av-cdm.
 av-edge = { path = "../av-edge" }
 av-cdm = { path = "../av-cdm" }
 prost.workspace = true
+# The generated `edge_ingest_server` module (build.rs) names `::prost_types::Any`
+# literally wherever `google.protobuf.Any` appears (`.extern_path(".google.protobuf.Any",
+# "::prost_types::Any")`), so this crate needs a direct dependency on it too, exactly like
+# `av-dynamics-service`'s own build.rs/Cargo.toml.
+prost-types.workspace = true
 thiserror.workspace = true
 # The evidence surface (src/evidence.rs) is built as a `serde_json::Value` with
 # `BTreeMap`-ordered keys (ADR-004's determinism rule, exactly as
-# `av-dynamics-service/src/admin.rs::evidence_body` does it) -- data this round, not an
-# HTTP response; E3b mounts it on `GET /admin/api/evidence`.
+# `av-dynamics-service/src/admin.rs::evidence_body` does it) -- data both for in-process
+# use and for src/admin.rs's `GET /admin/api/evidence`.
 serde_json.workspace = true
 
 # ECDSA P-384 signing/verifying and SHA-256 hashing, against the system/Homebrew
@@ -28,3 +34,46 @@ serde_json.workspace = true
 # in `src/ingest.rs::Signer`'s public API, so it depends on `openssl` itself rather than
 # only reaching those types transitively through `av-edge`.
 openssl = "0.10"
+
+# tonic, default-features off, "server" only (never "channel", never "tls"/"tls-native-
+# roots"/"tls-webpki-roots"): this crate only ever HOSTS altavista.v1.EdgeIngest, never
+# dials out as a client (crates/av-ingest-client owns that half). "server" does not pull
+# tokio-rustls/`ring` -- only the `tls*` features do (see tonic 0.12.3's own Cargo.toml,
+# and crates/av-dynamics-service/Cargo.toml's identical comment, the precedent this
+# mirrors verbatim). A cross-host plugin is fronted by a service-owned nginx mTLS front
+# (services/gmat-service/deploy/'s template; question 155/202) -- never a TLS stack linked
+# into this crate itself.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+# "io-util" (AsyncBufReadExt/AsyncWriteExt) is for src/admin.rs's hand-rolled `GET`-only
+# `/admin/api/evidence` HTTP server -- a plain tokio::net::TcpListener with manual
+# request-line parsing, modelled directly on crates/av-dynamics-service/src/admin.rs's own
+# module doc (which explains why this crate does not depend on axum/hyper directly either).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+# `Submit`'s response is a server-streaming `BatchVerdict` stream (`EdgeIngest::
+# SubmitStream`); `futures_util::stream::iter` is the plain, no-crypto way to turn this
+# crate's own already-collected `Vec<Result<BatchVerdict, Status>>` into the `Stream`
+# `tonic`'s generated trait requires, and `futures_core::Stream` is that trait's own bound
+# -- both are already present, transitively, in this workspace's `Cargo.lock` (`tonic`
+# itself depends on them), so naming them directly here adds no new crate to the tree,
+# only a direct-dependency declaration for two crates already compiled.
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# `src/bin/av-ingest-server.rs` (question 202: the real subprocess `tests/
+# test_edge_ingest_mtls.py` runs behind nginx) binds its own `crate::server::
+# bind_loopback` listener (so it can print back the OS-assigned ephemeral port before
+# `tonic::transport::Server` ever starts accepting) and must then hand that already-bound
+# `tokio::net::TcpListener` to `Server::serve_with_incoming` -- `tokio_stream::wrappers::
+# TcpListenerStream` is the plain adapter for that. Promoted here from `[dev-dependencies]`
+# (where `tests/wire_*.rs` already used the identical pattern) because this binary is a
+# normal build target, not a test -- still no new crate to the tree either way: `tonic`
+# itself already depends on `tokio-stream`, so this is a direct-dependency declaration for
+# a crate already compiled into this workspace's `Cargo.lock`.
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+av-ingest-client = { path = "../av-ingest-client" }

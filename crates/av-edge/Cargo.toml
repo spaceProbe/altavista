@@ -22,3 +22,24 @@ thiserror.workspace = true
 # crypto rule, verbatim; see `crates/av-dynamics-service/src/evidence.rs`'s module doc for
 # the precedent this crate follows and `deny.toml`'s ban list for the mechanical check).
 openssl = "0.10"
+
+# E4 (`src/plugin.rs`): `PluginConfig` is serialisable (so a run can record exactly what
+# it replayed under) and content-hashed (`PluginConfig::config_hash`, over its own
+# canonical JSON bytes -- via `openssl::sha::sha256` above, never `sha2`). Both already
+# workspace dependencies with the `derive` feature already enabled on `serde` at the
+# workspace level; named directly here since `src/plugin.rs` derives `Serialize`/
+# `Deserialize` and calls `serde_json::to_vec` itself.
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `tests/plugin_replay.rs` cross-checks `crate::plugin::packet::decode_numeric_fields`
+# against `av_kernel::codec::decode_packet` byte-for-byte, and loads the committed
+# ground-segment fixture's own truth `Trajectory` to measure this plugin's decoded-vs-truth
+# deviation (E5's own precondition). A **test-only** dependency, never a `[dependencies]`
+# entry: `av-kernel` depends on `gmat-sys` (native GMAT FFI) and, transitively through
+# `av-lockstep` -> `av-grpc`, on `tonic` -- exactly the GMAT/transport dependency this
+# crate's own `src/plugin.rs` module doc explains `av-edge` itself must never gain, even
+# indirectly. A test binary is never shipped and never becomes part of any other crate's
+# own dependency tree, so this is safe here in a way it would not be as a real dependency.
+av-kernel = { path = "../av-kernel" }

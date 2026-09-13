@@ -194,3 +194,199 @@ nginx mTLS template whenever the peer is on another host. Applying that standing
 the ingest is the lead's call, not the manager's, so nothing in `crates/av-ingest`
 opens a socket and no transport crate appears in its dependency tree. Everything E3's
 test list asks for other than "through the wire" is delivered and tested in process.
+
+## Status (edge manager, 2026-09-12) — round 2
+
+Round 2. **E3b, E4 and E5 delivered.** With round 1's E1, E2 and E3a that leaves E6
+(capture-only while disconnected) as the only milestone in this plan not attempted. Six
+commits on `edge`, one per accepted task:
+
+- `e86bd2f` **E3b (the wire)** — `service EdgeIngest` in `edge.proto` (Announce / Submit /
+  GetEvidence / VerifyLedger) with `PluginManifest`, `ManifestAck`, its five typed
+  refusals, `IdentityCounters`, and `RejectionCounters.shard_mismatch_count = 12`;
+  `crates/av-ingest/src/{service,server,admin,forwarded_cert}.rs`; `crates/av-ingest-client`.
+- `4d6c9f8` **E3b (the front)** — `services/av-ingest/deploy/nginx-av-ingest-grpc.conf.
+  template`, `av-ingest-server` and `av-ingest-mtls-client` binaries,
+  `tests/test_edge_ingest_mtls.py` run for real against round 1's seccert CA.
+- `83eeb83` **E4 (the plugin)** — `crates/av-edge/src/plugin/`, the committed
+  ground-segment fixture, `av-edge-plugin`, and the byte-for-byte wire test.
+- `ab59516` **E5 (the engine)** — `crates/av-track`: the consumer, the spoore engine
+  bridge, the truth comparison, the viewer publish and the latency harness.
+- `5b25123` **E4 (the container)** — `services/edge-plugin/{Dockerfile,build-image.sh}`
+  and `tests/test_edge_plugin_container.py`, with both network proofs measured.
+- `e234d9c` **E4b fix** — an image deleted mid-run is a visible skip, not a gate failure;
+  the root cause of the recurring disappearance is recorded below.
+
+### Gates (run by the manager with no worker active)
+
+| Gate | Result |
+|---|---|
+| `cargo test -p av-edge -p av-ingest -p av-ingest-client -p av-track` | 163 passed, 0 failed, 2 ignored |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 449 passed, 0 failed, 2 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean; zero warnings, zero errors, no `#[allow]` added anywhere |
+| `cargo deny check` | advisories ok, bans ok, licenses ok, sources ok; `ring` appears nowhere in the output |
+| `.venv/bin/python -m pytest -q -rs` | 514 passed, 3 skipped, 276 s |
+| `buf breaking --against` develop | not runnable — `buf` is still not installed on this host |
+
+The two `ignored` tests are both deliberate manual generators: E1's
+`regenerate_signature_for_reference` (round 1) and E4b's
+`generate_default_plugin_config_json`. The three pytest skips are the same
+pre-existing cFS image gates round 1 recorded, each printing its own reason under `-rs`;
+none is this track's. `git diff --name-status develop -- proto/` reports exactly one
+entry, `M proto/altavista/v1/edge.proto`, the file this track owns, so `buf breaking`
+would have nothing to find even if it were installed.
+
+### Numbers traceable to artifacts
+
+**E4/E5's pinned chain.** The demo ground-segment replay is 900 batches carrying 900
+measurements, chain head
+`d1d80d0b6cc9228aaa7479864b8a89f18be88382fb3772bd3c4cc3d7c2dc2698`, from a fixture whose
+`port_traffic_hash` is
+`c548a78c80954c2a6a159d2b27df10e9f55213e2bed2a1628332b31a63e93dc7`. That head is asserted
+in four independent places: the pure replay test, the in-process wire test, the plugin
+binary's own output, and — read back out of the ingest's evidence surface from inside a
+container's network namespace — the container test.
+
+**E4's precondition for E5, measured.** The positions decoded from the `PortTrafficLog`
+through the DRM's declared `PacketCodec` match the run's own truth trajectory to a maximum
+deviation of **0 m** over all 900 epochs: FLOAT64 packet fields with unit scale and zero
+offset round-trip bit-exactly.
+
+**E5's tracks against truth.** Over 900 scans with nothing unmatched: **max 0.00187 m, p50
+5.6e-9 m, p99 8.5e-5 m**, against a pinned tolerance of 1.0 m. Track config hash
+`63160880518fab9a2bfe42b801328abd8de794ac1a9c419a6a2f39fa408c3b19`.
+
+**E5's edge-to-core latency (question 43's budget line).** Measured plugin-emit to
+engine-accept — the instant before `Submit` is called to the instant its accepted verdict
+resolves — over all 900 batches, with a **release** build, five consecutive runs:
+
+| Run | min | p50 | p99 | max |
+|---|---|---|---|---|
+| 1 | 4.16 ms | 6.02 ms | 8.20 ms | 12.9 ms |
+| 2 | 4.04 ms | 6.08 ms | 8.21 ms | 13.4 ms |
+| 3 | 4.56 ms | 6.11 ms | 8.30 ms | 11.3 ms |
+| 4 | 4.08 ms | 6.20 ms | 11.8 ms | 91.5 ms |
+| 5 | 4.39 ms | 6.25 ms | 8.60 ms | 10.6 ms |
+
+**Recorded as p50 ≈ 6.1 ms, p99 ≈ 8.3 ms**, from runs 1–3 and 5; run 4 is reported rather
+than discarded but is an outlier, one stall of 91.5 ms dragging its p99 to 11.8 ms.
+
+**The host state these were taken in, stated plainly, because the rule is that a contended
+timing result is not a result.** No `cargo`, `rustc`, `pytest` or `docker build` of this
+track's was running, and no worker was active. This host does not reach idle: the Colima
+VM hosting an unrelated container workload (a `pg_isready` health check every few seconds,
+among others) holds 20–25% of one core continuously, and the one-minute load average sat
+between 4.05 and 5.41 across the five runs and did not fall further over fifteen minutes of
+waiting. These are therefore the quietest numbers this host produces, not numbers from a
+quiet host, and the tight spread of p50 across five runs (6.02–6.25 ms) is the evidence
+that the measurement is not dominated by that noise.
+
+**What the 6 ms is, mechanically.** It is not the network. `PartitionLog::append`
+`sync_all`s every record before returning, so each batch costs one `fsync` on the Colima
+VM's overlay filesystem; the loopback gRPC round trip is a small fraction of it. A broker
+(question 6) or a group commit across batches would move this number by an order of
+magnitude, and the budget line should be read as "fsync-bound durable append", not
+"transport-bound".
+
+### Decisions taken this round (for the lead to ratify or overturn)
+
+1. **`ssl_verify_client optional_no_ca`, not `on`, in the ingest's own nginx front.**
+   Question 202 requires a wrong-CA or lapsed identity to land in the counters; under `on`
+   that is structurally impossible, because nginx refuses before av-ingest is reached. Plain
+   `optional` was tried and measured first: it tolerates only a *missing* certificate, so a
+   presented-but-untrusted leaf fails the handshake exactly as hard as under `on` (observed
+   as nginx's own HTTP 400 for a leaf from an unrelated CA). The consequence, taken
+   deliberately: **nginx is the TLS terminator and av-ingest is the sole identity
+   enforcement point.** `$ssl_client_verify` is forwarded too, but only as an observability
+   aid; nothing in `crates/av-ingest` reads it.
+2. **"Announced" is scoped to the serving process instance, not a TCP connection.** `tonic`
+   exposes no per-connection identity a service method can key on, and an nginx front may
+   pool or multiplex backend connections, so connection scoping would be unenforceable or
+   silently wrong. Identity is verified once per `Announce` (the certificate chain-and-time
+   walk is amortized; the per-batch ECDSA check is not).
+3. **`shard_mismatch_count` is populated as well as, not instead of, the side map.**
+   `Ingest::producer_counters` folds its own bookkeeping into the new proto field on every
+   read, so `av_edge::chain::ChainVerifier` stays untouched and its `ShardMismatch` arm stays
+   deliberately unreachable.
+4. **E4's asset is `demo_ground_segment`'s flight instance, and its measurements come from
+   the `PortTrafficLog` decoded through the DRM's declared codec** — the route E4 allows and
+   the only one available: that codec declares no `PacketField.target`, so
+   `RunProducts.measurements` is empty for this DRM, and `GroundStationModel` produces no
+   CDM measurement by design. It is also the only choice that gives E5 *position*
+   measurements aligned with the truth trajectory; `demo_measurements`' attitude
+   measurements would not have worked.
+5. **`av-edge` reimplements the minimal CCSDS numeric-field decode rather than depending on
+   `av-kernel`**, which would drag `gmat-sys` and, through `av-lockstep`, `tonic` into the
+   track's core library. A test cross-checks all 900 records against
+   `av_kernel::codec::decode_packet` byte for byte, with `av-kernel` a dev-dependency only.
+   Consequence the lead may want to overturn: `cargo test -p av-edge` now builds `gmat-sys`,
+   and `crates/av-edge/build.rs` exists solely to emit that dev-dependency's missing rpath.
+6. **E4's `--network none` plus its allowed endpoints is rendered as `--network none` for the
+   deny-all proof and a labelled `--internal` bridge, with the plugin joining the ingest's
+   network namespace, for the allowed-endpoint proof.** Both `connect_plaintext` and
+   `bind_loopback` refuse a non-loopback address before touching the network, so plugin and
+   ingest must share one namespace; the isolation claims are proven with immediate
+   `ENETUNREACH` failures rather than asserted.
+7. **`deny.toml`'s `wildcards` drops from `"deny"` to `"warn"`.** E5 is the first task to
+   depend on spoore crates beyond `spoore-cdm`, and none of those six declares
+   `publish = false`, so cargo-deny correctly refuses `allow-wildcard-paths`' exemption for
+   their intra-spoore path dependencies. Verified by flipping the field back and confirming
+   every reported wildcard is spoore-internal. The named-crate bans — `ring` and every other
+   crypto-adjacent crate — are untouched and still hard failures. **Open item: either spoore
+   takes a `publish = false` PR and this reverts, or `"warn"` becomes this workspace's
+   posture.**
+8. **The E5 consumer trait lives in AltaVista, not in spoore.** `spoore-io` has no consumer
+   trait to implement — only a concrete, `rdkafka`-bound `PartitionConsumer` — so
+   `av_track::consumer::MeasurementConsumer` mirrors its shape and its module doc records
+   the upstream delta. Nothing in `/Users/probe/code/spoore` was modified.
+9. **A docker-gated test whose image is deleted mid-run skips visibly rather than failing.**
+   The wording is deliberately distinct from "has not been built on this host", so `-rs`
+   output never conflates "never built" with "deleted from under us", and neither is a
+   silent pass.
+10. **E5's tolerance is 1.0 m against a measured maximum of 0.00187 m.** Three orders of
+    headroom, justified from zero measurement noise and zero-acceleration truth, chosen to
+    catch a real regression rather than to make the test pass.
+
+### Question 196(d): the image disappearances have a measured cause
+
+The plugin image vanished **three times** during this round, twice inside a running test.
+The daemon's own event log names the shape precisely: at 19:10:07 CDT, `av-edge-plugin:local`
+and its digest-pinned `debian:bookworm-slim` base were untagged and deleted **between two
+bursts of layer `create` events from another track's own `docker build`**, with nothing in
+any worktree, launch agent or crontab pruning anything (grepped, all five worktrees).
+
+The measured condition that explains it: **the Colima VM's container filesystem is at 92%
+— 4.2 GB free of 58.8 GB — with 41.85 GB reclaimable in an unrelated workload's local
+volumes** (`docker system df`: 813 volumes, 41.98 GB, 99% reclaimable; `colima.yaml` sets
+`disk: 60`). Every symptom question 196(d) records follows from disk-pressure-driven image
+garbage collection: it looks like `docker image prune -a`, it spares images backing running
+containers, no actor in the repository does it, and it fires when a build allocates layers.
+
+This is the leading hypothesis with the evidence above, not yet a proven fact. **The
+confirming experiment is one line and destructive, so it is the user's to run, not this
+track's: reclaim those volumes (or raise `disk:` past 60 GiB) and see whether the
+disappearances stop.** Rebuild-on-demand with a visible skip stands either way.
+
+### Open items for the lead
+
+1. Decision 1's consequence deserves an explicit blessing: with `optional_no_ca` the front
+   no longer drops an unknown client at the TLS layer. The ingest refuses before any batch
+   is looked at and every refusal is counted, and the front still enforces TLS 1.2/1.3,
+   ECDSA-only suites and the server identity — but defence in depth at the front is
+   deliberately traded for the counters question 202 asked for.
+2. Decision 7's `deny.toml` change is platform-wide, not this track's alone.
+3. Decision 5's consequence: `cargo test -p av-edge` now builds `gmat-sys`. If the lead
+   wants that crate's tests GMAT-free, the cross-check moves to `crates/av-kernel/tests/`
+   with `av-edge` as a dev-dependency there, and `crates/av-edge/build.rs` disappears.
+4. An upstream spoore PR is drafted in prose in `av_track::consumer`'s module doc: extract a
+   `poll_measurement`-shaped trait, decide whether partition/offset are concrete or
+   associated types, reconcile batch-versus-message granularity, and put the trait in a
+   dependency-free crate so a file-only consumer need not pull `rdkafka`.
+5. A frame-namespace gap this round exposed: the DRM/viewer frame registry
+   (`earth_fixed_demo_frame`) and `spoore_v0::frame`'s five fixed compatibility ids do not
+   reconcile, so `measurement_from_pb` rejects every measurement a DRM produces until
+   something relabels it. `crates/av-track`'s bridge relabels to `spoore_v0::frame::ECEF`
+   immediately before conversion, touching no numeric field. That is a local patch over a
+   platform-level gap and should become a real frame mapping.
+6. E6 (capture-only while disconnected) is untouched and is the obvious next round.
+7. `buf` is still not installed on this host, for the second round running.

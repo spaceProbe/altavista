@@ -1,0 +1,72 @@
+[package]
+name = "av-ingest-client"
+publish = false
+description = "E3b (docs/edge-plan.md milestone E3, question 202): a tonic client for altavista.v1.EdgeIngest -- the wire contract crates/av-ingest's server speaks (Announce/Submit/GetEvidence/VerifyLedger). Its own small protoc/tonic-build pass, extern_path'd onto av_cdm::pb exactly like crates/av-ingest's own server-side build.rs (see this crate's lib.rs module doc for why this deviates from crates/av-lockstep's 'reuse av-grpc's pb module' precedent: av-grpc's own build.rs does NOT extern the whole altavista.v1 package onto av_cdm::pb, only Port/PortMessage, so reusing it here would hand every call site a second, independently-generated, nominally-distinct MeasurementBatch/PluginManifest type instead of the one av-edge/av-ingest already share). A plaintext loopback connector only, refusing a non-loopback endpoint at connect time; E4's plugin binary and this track's own wire_*.rs tests are its only two callers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `altavista.v1::pb::{MeasurementBatch, BatchVerdict, PluginManifest, ManifestAck,
+# EvidenceRequest/Response, VerifyRequest/Response, ...}` -- the shared prost build,
+# reached through av-edge's own `pub use av_cdm::pb` re-export, exactly like
+# `crates/av-ingest` itself.
+av-edge = { path = "../av-edge" }
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+# This crate's generated `edge_ingest_client` module names `::prost_types::Any` literally
+# wherever `google.protobuf.Any` appears -- see build.rs's `.extern_path`.
+prost-types.workspace = true
+thiserror.workspace = true
+
+# tonic, default features off, "channel" only (never "server", never "tls"/"tls-native-
+# roots"/"tls-webpki-roots" -- those pull `tokio-rustls` -> `ring`, forbidden by ADR-004's
+# crypto rule). This crate is a client only, never a server; plaintext loopback (h2c) needs
+# no TLS stack at all, matching `crates/av-lockstep`'s own `connect_plaintext` precedent.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "channel"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+# `submit_batches` turns an already-collected `Vec<MeasurementBatch>` into the `Stream`
+# tonic's generated streaming-request signature wants -- see crates/av-ingest/Cargo.toml's
+# identical comment; both crates already have this pulled in transitively via `tonic`.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# `src/bin/av-ingest-mtls-client.rs` (question 202's own proof: `tests/
+# test_edge_ingest_mtls.py` needs a real mTLS gRPC client that dials THROUGH a real nginx
+# front, which this crate's own `connect_plaintext` deliberately cannot do -- see this
+# crate's lib.rs module doc, "this client intentionally offers no connect_mtls yet"). Reuses
+# `av-grpc::tls::connect` -- the OpenSSL-backed (never `ring`) `hyper-openssl` connector
+# `crates/av-grpc/src/bin/describe_client.rs` already uses to prove mTLS through
+# `services/gmat-service/deploy`'s own nginx front -- rather than duplicating that ~50-line
+# `SslConnector`/`Endpoint::connect_with_connector` recipe a second time. No dependency
+# cycle: `av-grpc` depends on nothing in this crate's own dependency tree.
+av-grpc = { path = "../av-grpc" }
+# EC P-384 key loading for `--submit-with-key` (signing one `MeasurementBatch` with the
+# same leaf private key presented for mTLS, proving Submit accepts a batch under the
+# identity Announce just cached) -- the same crypto boundary every other crate in this
+# workspace sits on (ADR-004's crypto rule); already present transitively via `av-edge`/
+# `av-grpc`, so this is a direct-dependency declaration, not a new crate.
+openssl = "0.10"
+# This binary's one line of stdout is machine-parsed by `tests/test_edge_ingest_mtls.py`;
+# `serde_json` (already used throughout this workspace, e.g. `crates/av-ingest/src/
+# evidence.rs`) is simpler and less error-prone here than hand-rolling JSON the way
+# `crates/av-edge/src/bin/av-edge-identity.rs` does for its much smaller, flatter output
+# shape -- this binary's output nests an `Announce` result and an optional `Submit` verdict.
+serde_json.workspace = true
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+prost-build.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+# `tests/av_edge_plugin_binary.rs` spins up a real `EdgeIngestService` in-process (exactly
+# `crates/av-ingest/tests/wire_evidence.rs`'s own pattern) and drives the actual built
+# `av-edge-plugin` binary (this crate's own `[[bin]]`, `CARGO_BIN_EXE_av-edge-plugin`) at
+# it as a subprocess -- a **test-only** dependency: `av-ingest`'s own regular
+# dependencies do not depend on this crate, so this dev-dependency edge does not cycle
+# (Cargo permits a dev-dependency cycle that a regular-dependency cycle would refuse).
+av-ingest = { path = "../av-ingest" }
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+tokio-stream = "0.1"
