@@ -7,6 +7,7 @@ why the generated modules' cross-imports are rewritten to relative (M26.1).
 from __future__ import annotations
 
 from .altavista.v1 import (
+    authority_pb2,
     command_pb2,
     core_pb2,
     dynamics_service_pb2,
@@ -24,6 +25,11 @@ from .altavista.v1 import (
 # messages above do not. Importing the package must not require grpcio (question 85), so
 # the stub is exposed as ``None`` when grpcio is absent and callers that need it check.
 try:
+    from .altavista.v1 import authority_pb2_grpc
+except ImportError:  # grpcio not installed
+    authority_pb2_grpc = None  # type: ignore[assignment]
+
+try:
     from .altavista.v1 import dynamics_service_pb2_grpc
 except ImportError:  # grpcio not installed
     dynamics_service_pb2_grpc = None  # type: ignore[assignment]
@@ -39,6 +45,7 @@ except ImportError:  # grpcio not installed
     lockstep_pb2_grpc = None  # type: ignore[assignment]
 
 __all__ = [
+    "authority_pb2",
     "command_pb2",
     "core_pb2",
     "dynamics_service_pb2",
@@ -50,6 +57,7 @@ __all__ = [
     "run_pb2",
     "system_pb2",
     "trajectory_pb2",
+    "authority_pb2_grpc",
     "dynamics_service_pb2_grpc",
     "edge_pb2_grpc",
     "lockstep_pb2_grpc",

@@ -38,6 +38,19 @@ dynamics_backend:
     path: <repo-relative path>
     role: <what it does, free text>
 
+authority:                       # optional -- only profiles that declare a command plane use this
+  policy_dir: <repo-relative directory of .rego files>
+  allow_entrypoint: <dotted OPA-compatible allow rule path>
+  deny_entrypoint: <dotted OPA-compatible deny rule path>
+  rate_window_ns: <trailing rate-limit window width, nanoseconds>
+  roles: { <role name>: [<command class, or "*" for every class>, ...], ... }   # A2.2
+  mfa_amr_methods: [<amr claim value that satisfies the MFA gate>, ...]        # A2.2
+  mfa_acr: <exact acr claim value that satisfies the MFA gate, or "">          # A2.2
+  delegations_path: <repo-relative path to a delegations YAML file, or "">     # A2.2
+
+audit:                           # optional -- omitted or sink_path: "" means no sink configured
+  sink_path: <repo-relative file every transition/refusal is appended to as an RFC 5424 line>  # A2.2
+
 planes:
   ingestion: { per_architecture: <table cell text>, components: [...], status?, note?, not_yet_built? }
   hot_track: { ... }
@@ -62,6 +75,36 @@ planes:
   Rust `DynamicsService` host every plane's numerical work can call, in every profile,
   Execution included by design (that amendment exists precisely so the Python `gmat-service`
   never has to be).
+- **`authority`** (A1.2, `docs/aiplane-plan.md` milestone A1.2 / question 201(a)) declares the
+  command-authority policy bundle `crates/av-command/src/policy.rs::PolicyBundle::load`
+  reads: `policy_dir` (a directory of `.rego` files, loaded in sorted, deterministic order --
+  a directory with none is a typed error, never an empty allow-everything bundle),
+  `allow_entrypoint`/`deny_entrypoint` (the OPA-compatible dotted rule paths, checked against
+  that module's own `ALLOW_ENTRYPOINT`/`DENY_ENTRYPOINT` constants so this can never silently
+  drift from what the evaluator actually queries), and `rate_window_ns` (the trailing window
+  `crates/av-command/src/rate.rs`'s ledger-backed rate source counts recent per-class
+  submissions over). **A2.2 additions** (`docs/aiplane-plan.md` milestone A2's second half;
+  question 54, question 34), read by a second, independent parse of this same block
+  (`crates/av-command/src/authz.rs::load_profile_authz_config` -- see that function's own doc
+  for why it is not folded into the A1.2 loader above): `roles` (role name -> the command
+  classes it may authorize, `"*"` for every class; a role absent here, or present but not
+  listing a class, grants nothing -- deny by default), `mfa_amr_methods`/`mfa_acr` (the `amr`/
+  `acr` claim values that satisfy the MFA gate for a `Command.hazardous` class; `amr`
+  containment is the primary check, `acr` exact-match is supported but not primary -- see
+  `crates/av-command/src/authz.rs`'s module doc, "MFA gate"), and `delegations_path`
+  (repo-relative path to a delegations YAML file, `crates/av-command/src/authz.rs::
+  load_delegations`; empty means no delegations file, an empty table, never an error).
+  Delegations are static, reviewed, profile-declared configuration, loaded once at process
+  construction -- like the `.rego` bundle above -- never a runtime-mutable store.
+  A **top-level `audit` block** (also A2.2, `crates/av-command/src/audit.rs::
+  load_profile_audit_config`) declares `sink_path`: the file every command-authority
+  transition and every refused `Authorize` attempt is appended to as one RFC 5424
+  syslog-format line. Empty (or the whole block absent) means no sink is configured -- an
+  explicit, documented no-op (see that module's own doc), never a silent failure; retention
+  stays the ledger's job (`crates/av-command/src/ledger.rs`), not a second mechanism here.
+  Only `execution.yaml` declares either block today -- the Command plane is `not_yet_built`/
+  `none` in every other profile (`docs/architecture.md` section 5), so there is nothing for
+  `design.yaml`/`feasibility.yaml`/`analysis.yaml` to point `authority`/`audit` at yet.
 - **`planes`** has one entry per architecture.md section 5 row: `ingestion`, `hot_track`,
   `heavy_track`, `viewer`, `ai`, `command`. `per_architecture` is that row's own text for this
   profile's column, copied verbatim, so a reader can check this file against the table

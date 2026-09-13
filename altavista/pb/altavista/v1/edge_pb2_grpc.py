@@ -70,17 +70,18 @@ class EdgeIngestServicer:
     """
 
     def Announce(self, request, context):
-        """The plugin manifest handshake -- must succeed before `Submit` is ever accepted on the
-        same connection.
+        """The plugin manifest handshake -- must succeed for a `producer_id` before `Submit` is
+        ever accepted for it. "Announced" is scoped to the serving process instance's
+        lifetime, not to a TCP connection (see `MANIFEST_REFUSAL_MANIFEST_MISMATCH`).
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def Submit(self, request_iterator, context):
-        """The batch stream: one `BatchVerdict` per `MeasurementBatch`, in order. A stream from a
-        producer that never called `Announce` on this connection is refused
-        (`FAILED_PRECONDITION`) before a single batch is looked at.
+        """The batch stream: one `BatchVerdict` per `MeasurementBatch`, in order. A batch whose
+        `producer_id` never successfully called `Announce` on this serving process is refused
+        (`FAILED_PRECONDITION`) before it is looked at.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

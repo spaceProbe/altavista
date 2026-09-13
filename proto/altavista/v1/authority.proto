@@ -1,0 +1,428 @@
+syntax = "proto3";
+
+// Command authority: the policy input/decision shape evaluated at CHECKED, and one record
+// of the durable, hash-chained command ledger (ADR-004; `docs/open-questions.md` question
+// 201; `docs/aiplane-plan.md` milestone A1). This track owns this file; `command.proto` and
+// every other shared proto stay additive-only under `buf breaking` (this track never edits
+// them).
+//
+// Scope of what this file defines, by milestone -- so the next worker does not invent a
+// second shape for something already planned:
+//   - A1 (this file, as committed by this task): `PolicyInput`, `PolicyDecision`,
+//     `LedgerRecord` below. Nothing about *how* a policy is loaded or *who* a principal is.
+//   - A1.2 will add policy bundle metadata (a bundle id/hash, the `.rego` file(s) in effect,
+//     the evaluator's own version) as its own message(s), referenced from `PolicyDecision`
+//     by id rather than folding new fields into `PolicyDecision`/`PolicyInput` directly.
+//   - A2.1 (this task, additive only -- no field number above moves): `Principal` below,
+//     the secsso claims contract (question 34, question 201(b)): `sub`, `groups`, `amr`,
+//     `acr`, issuer, audience, `jti`, and issued-at/expiry as TAI nanoseconds. Filled only by
+//     a successful `crates/av-command/src/oidc.rs` verification against a configured issuer
+//     and the injected clock -- there is no path that constructs one from an unverified
+//     token. `CommandAuthorityService.Authorize` (`crates/av-command/src/service.rs`) now
+//     verifies `AuthorizeRequest.principal_token` and records the verified `Principal.sub` as
+//     `CommandTransition.principal`.
+//   - A2.2 (this task, additive only -- no field number above moves): `RoleBinding` and
+//     `Delegation` below, plus the role/MFA/delegation gate itself on `Authorize`
+//     (`crates/av-command/src/authz.rs`). A2.1 verifies *who* the caller is; A2.2 decides
+//     *whether* that caller may authorize a given command class. `CommandTransition.
+//     delegation_id` (`command.proto`) is recorded by A2.1 exactly as it was before --
+//     unevaluated by A2.1 itself -- and is now what A2.2 enforces expiry/scope against, at
+//     the injected clock. **No new "authorization decision" message was added**: unlike
+//     `PolicyDecision` (A1.2, a `CHECKED`-time record this crate's own ledger needs to carry
+//     alongside the transition, because a policy decision has structure worth keeping --
+//     reasons, a rule path, the input it saw), A2.2's outcome fits entirely in fields
+//     `command.proto` already has: `CommandTransition.principal` (the verified subject,
+//     A2.1), `CommandTransition.delegation_id` (which delegation, if any) and
+//     `CommandTransition.reason` (`crates/av-command/src/authz.rs`'s `format_authz_reason` --
+//     which role granted it, or which delegation; the MFA outcome). A denial never reaches
+//     the ledger as a `CommandTransition` at all (no state edge is attempted until
+//     authorization succeeds), so there is no denial-carrying counterpart to `PolicyDecision`
+//     needed either -- the audit line (`crates/av-command/src/audit.rs`) is where a denied
+//     attempt is recorded, from the typed refusal directly, not from a new message here.
+//   - A1.3 (additive only -- no field number above moves): `CommandAuthorityService`
+//     and its request/response messages, below `LedgerRecord`. `AuthorizeRequest.
+//     principal_token`/`delegation_id` are the two fields A2 needs on the wire; A2.1's
+//     service implementation (`crates/av-command/src/service.rs`) now verifies
+//     `principal_token` for real (see above) but performs no role/MFA/delegation gate --
+//     that is A2.2's job, not earned by this task.
+package altavista.v1;
+
+import "altavista/v1/command.proto";
+import "altavista/v1/envelope.proto";
+
+// The recent-command-rate section of `PolicyInput`. Carries raw counts and the window's
+// width, not a pre-divided rate: the policy decides which class it rate-limits and what
+// threshold applies, this message only supplies the facts (`docs/aiplane-plan.md` A1: "the
+// rate of recent commands per class").
+message PolicyInputRate {
+  // Recent command count, per `Command.command_class`, in the trailing window ending at
+  // `PolicyDecision.evaluated_tai_ns`. Keys are `command_class` values, e.g. "burn", "mode".
+  map<string, uint64> counts_by_class = 1;
+  // Width of the trailing window, nanoseconds.
+  int64 window_ns = 2;
+}
+
+// The exact input document the Rego policy at CHECKED is evaluated over (ADR-004's "Command
+// authority" section: "OPA policy at CHECKED (label, asset, envelope, rate)"). Shaped so it
+// serializes to the identical JSON document an out-of-process OPA binary would receive --
+// question 201(a): the in-process `regorus` evaluator and a deployed OPA are meant to be
+// interchangeable against the same policy without a second input shape.
+message PolicyInput {
+  // The `Command.id` being evaluated.
+  string command_id = 1;
+  // `Command.entity_id` -- the asset the command targets.
+  string entity_id = 2;
+  // `Command.command_class` -- the unit of authorization policy.
+  string command_class = 3;
+  // `Command.hazardous`.
+  bool hazardous = 4;
+  // `Command.envelope_id`. Empty until an envelope policy exists (question 53: propose-only
+  // stands for this whole track) -- carried here so a policy fixture can exercise "refuse
+  // any envelope" (`docs/aiplane-plan.md` A1's test list) even though nothing ever sets it
+  // to a non-empty value in this track's own code.
+  string envelope_id = 5;
+  Label label = 6;
+  PolicyInputRate rate = 7;
+}
+
+// The result of evaluating a `PolicyInput` against the effective policy. `decision_id` and
+// `policy_hash` are written into the CHECKED `CommandTransition.reason` (`docs/aiplane-
+// plan.md` A1: "the decision id and the policy hash go into the transition's reason"), so a
+// replay can find this exact decision back in the ledger by reason text alone.
+message PolicyDecision {
+  // Deterministic: a content id derived from (policy_hash, the PolicyInput's own canonical
+  // encoding, evaluated_tai_ns) -- never a randomly generated id (this crate generates no
+  // ids at random anywhere; see `crates/av-command/src/ledger.rs`'s module doc for why).
+  string decision_id = 1;
+  bool allow = 2;
+  // SHA-256 hex of the effective policy bundle (the `.rego` source(s) that produced this
+  // decision). A1 reserves this field's meaning; A1.2 wires it from the real bundle loader.
+  string policy_hash = 3;
+  // Human-readable reasons the policy evaluator gave, in the order it gave them.
+  repeated string reasons = 4;
+  // Dotted rule path the decision resolved from, e.g. "data.altavista.command.allow".
+  string matched_rule_path = 5;
+  // When the decision was made, nanoseconds on TAI, always from the injected Clock
+  // (`crates/av-command/src/clock.rs`) -- never the wall clock read directly.
+  int64 evaluated_tai_ns = 6;
+  // The exact `PolicyInput` this decision was evaluated over (A1.2, additive). Carried on
+  // the decision itself -- not just referenced -- so a replay can re-evaluate the recorded
+  // input against a freshly loaded bundle and reproduce `decision_id`/`allow`/`policy_hash`/
+  // `reasons` from the ledger alone, without needing any other source to reconstruct what
+  // was actually evaluated (`crates/av-command/src/policy.rs`'s module doc, "Reproducibility
+  // from the ledger").
+  PolicyInput input = 7;
+}
+
+// One record of the durable, per-partition command ledger (ADR-004, "Evidence, verbatim
+// from P0": "for the engine and command services the durable log itself is the ledger,
+// chained per partition"). `partition` is the entity id: every record belonging to one
+// entity lives in exactly one partition's chain, one file, in strictly increasing `seq`
+// order; a different entity's records never interleave into the same chain.
+//
+// Chaining convention -- mirrors `envelope.proto`'s `SignedBatch.prev_hash`/`hash` exactly
+// (restated here, not reused, since this is a distinct message in a distinct partitioned
+// log rather than `SignedBatch`'s own per-producer batch chain):
+//   - `prev_hash` is the previous record's own `hash` in this same partition, or the literal
+//     ASCII bytes of "GENESIS" for the first record ever written to a partition.
+//   - `hash` is SHA-256 over `(prev_hash || record_body_bytes)`, where `record_body_bytes`
+//     is the canonical (deterministic prost, `.btree_map(["."])`) encoding of this record
+//     with `prev_hash` and `hash` themselves cleared to their zero value first. See
+//     `crates/av-command/src/ledger.rs`'s module doc for the exact on-disk framing and the
+//     byte-level procedure this description summarizes.
+message LedgerRecord {
+  // Position of this record within its partition's chain, 1-based, strictly increasing.
+  uint64 seq = 1;
+  // The entity id this record's Command belongs to -- the partition key.
+  string partition = 2;
+  bytes prev_hash = 3;
+  bytes hash = 4;
+  // When this record was appended, nanoseconds on TAI, always from the injected Clock
+  // (`crates/av-command/src/clock.rs`) -- never the wall clock read directly.
+  int64 tai_ns = 5;
+  // The `Command.id` this record is about.
+  string command_id = 6;
+  // The transition being recorded.
+  CommandTransition transition = 7;
+  // Present for the transition produced by policy evaluation at CHECKED (A1.2): set on
+  // `COMMAND_STATE_CHECKED` when the policy allowed and on `COMMAND_STATE_REJECTED` when it
+  // denied -- a denial must be as reproducible from the ledger as an approval
+  // (`crates/av-command/src/authority.rs`'s module doc). Absent (unset) for every other
+  // transition state, including a `COMMAND_STATE_REJECTED` transition that did not come from
+  // a policy decision (e.g. a structural rejection straight from `PROPOSED`, `state.rs`'s
+  // `reject` edge called for a reason other than a policy denial).
+  PolicyDecision decision = 8;
+  // `Command.command_class` this record's `Command` carried at the time of this transition
+  // (A1.2, additive) -- carried on every record, not only the CHECKED/REJECTED ones, so
+  // `crates/av-command/src/rate.rs`'s ledger-backed rate source can count "a command entered
+  // the machine" (a `COMMAND_STATE_PROPOSED` record) grouped by class without needing a
+  // second index or a join against some other store.
+  string command_class = 9;
+  // `Command.idempotency_key` this record's `Command` carried at the time of this transition
+  // (A1.3, additive), empty when the command declared none. Carried on every record, not
+  // only `COMMAND_STATE_DISPATCHED` ones, for the same reason `command_class` is carried on
+  // every record above: `crates/av-command/src/ledger.rs`'s `scan_dispatched_idempotency_
+  // keys` reads this straight off `COMMAND_STATE_DISPATCHED` records without needing a
+  // second index or a join against some other store, and a caller inspecting any record
+  // never has to ask "which Command's key was this" separately. This is what
+  // `CommandAuthorityServiceImpl` (`crates/av-command/src/service.rs`) rebuilds its
+  // in-process duplicate-dispatch guard from at construction, so that guarantee survives a
+  // process restart -- `command.proto`'s own doc comment on `Command.idempotency_key` ("the
+  // edge never dispatches the same key twice") is unconditional, not "only within one
+  // process lifetime", and this field is what makes that true from the durable ledger, not
+  // from RAM alone.
+  string idempotency_key = 10;
+}
+
+// A verified principal, from an OIDC access token's claims (A2.1, `docs/aiplane-plan.md`
+// milestone A2; question 34's secsso claims contract; question 201(b)). Filled **only** by a
+// successful `crates/av-command/src/oidc.rs` verification -- there is no code path anywhere
+// in this crate that constructs a `Principal` from a token it has not verified the signature,
+// issuer, audience, expiry (`exp`) and not-before (`nbf`) of, against a real issuer key and
+// the injected `Clock`. `CommandAuthorityService.Authorize` records `sub` as the verified
+// `CommandTransition.principal` (`command.proto`); `groups`/`amr`/`acr` are now read by A2.2's
+// role/MFA gate (`crates/av-command/src/authz.rs`) for exactly that decision.
+//
+// TAI conversion (ADR-001 "Time"): a JWT's `exp`/`iat` claims are Unix (UTC) seconds, per
+// RFC 7519's `NumericDate`. The one conversion site is `crates/av-command/src/oidc.rs`'s
+// `unix_seconds_to_tai_ns`, which multiplies by 1_000_000_000 and calls
+// `av_cdm::time::Tai::from_utc_nanos` -- the identical UTC->TAI boundary conversion
+// `crates/av-command/src/clock.rs`'s `SystemClock` itself uses for the wall clock. There is
+// no second, ad hoc UTC/TAI conversion anywhere in this crate.
+//
+// No human-vs-service field: the secsso claims contract this message follows (`sub`,
+// `groups`, `amr`, `acr`, issuer, audience, `jti`, issued-at/expiry) carries no claim that
+// itself declares a subject human or machine. An empty `amr` is a *heuristic* at best (a
+// service-subject token minted by a client-credentials grant typically has no `amr` because
+// no user authentication method ran) -- it is not a declared claim, and a human token issued
+// without an MFA step would also have an empty `amr`. Rather than invent a field the claims
+// contract does not support, this message adds none; A2.2 (which owns the roles/MFA gate) is
+// free to add one additively if a later claims contract does declare a kind, e.g. a `azp`
+// client-id convention or an explicit `account_type` claim.
+message Principal {
+  // The verified `sub` claim. Never empty -- `crates/av-command/src/oidc.rs`'s `verify`
+  // refuses a token with a missing or empty `sub` before this message is ever constructed.
+  string sub = 1;
+  // The `groups` claim (secsso: roles, A2.2's role gate), in the exact order the token's own
+  // JSON array carried them -- `crates/av-command/src/oidc.rs`'s module doc explains why
+  // claim order, not a sorted order, is this crate's deterministic choice for this field.
+  repeated string groups = 2;
+  // The `amr` claim (secsso: authentication methods, A2.2's MFA gate), in claim order, same
+  // reasoning as `groups`. Empty when the token carried no `amr` claim at all.
+  repeated string amr = 3;
+  // The `acr` claim (secsso: authentication context class). Empty when absent.
+  string acr = 4;
+  // The token's own `iss` claim, already verified equal to the configured issuer.
+  string issuer = 5;
+  // The configured audience this principal was verified against (not the full `aud` claim,
+  // which may list more than one audience) -- see `crates/av-command/src/oidc.rs`'s `verify`
+  // for why this field carries the configured value rather than the token's raw `aud`.
+  string audience = 6;
+  // The token's own `jti` claim. Empty when the token carried none (unlike `sub`, `jti` is
+  // never a refusal reason by itself in A2.1).
+  string jti = 7;
+  // The token's own `iat` claim, converted to TAI nanoseconds (see this message's doc).
+  int64 issued_at_tai_ns = 8;
+  // The token's own `exp` claim, converted to TAI nanoseconds (see this message's doc) --
+  // already verified to be strictly after the clock reading `verify` was given.
+  int64 expiry_tai_ns = 9;
+}
+
+// A role's granted command classes (A2.2, `docs/aiplane-plan.md` milestone A2's second half;
+// `crates/av-command/src/authz.rs`). The role table a profile declares is a list of these,
+// read from `Principal.groups` -- a principal may authorize command class C only if at least
+// one of its groups is a role in the table that grants C, directly or through the wildcard.
+// **Deny by default**, at two levels this message's own shape makes explicit rather than
+// leaving to a caller's convention: a role name absent from the table grants nothing (there
+// is no `RoleBinding` for it to consult at all), and a `RoleBinding` present in the table but
+// whose `command_classes` does not list C (and does not list the wildcard either) also grants
+// nothing -- there is no third state where "role known, class unlisted" means "allow".
+message RoleBinding {
+  // The role name, matched against one entry of `Principal.groups`.
+  string role = 1;
+  // Command classes this role may authorize. The literal string `"*"` grants every class --
+  // chosen over, say, an empty list meaning "every class" so that "this role grants nothing"
+  // (an empty list) and "this role grants everything" (`["*"]`) are two different, equally
+  // explicit list contents, never one list shape silently meaning the other depending on
+  // whether it happens to be empty.
+  repeated string command_classes = 2;
+}
+
+// A time-limited grant to `subject` (matched against `Principal.sub`) to authorize
+// `command_classes` against `entity_ids`, on top of whatever its own role grants -- A2.2,
+// `crates/av-command/src/authz.rs`. `command_classes`/`entity_ids` use the identical `"*"`
+// wildcard convention `RoleBinding.command_classes` does, for the same reason.
+//
+// **Expiry boundary convention -- the same one A2.1's token `exp` uses, not a second one**:
+// a delegation is valid only while `not_before_tai_ns <= now_tai_ns < expires_tai_ns` --
+// `now_tai_ns == expires_tai_ns` is already expired (refused), `now_tai_ns == expires_tai_ns -
+// 1` (one nanosecond earlier) is not. This mirrors `crates/av-command/src/oidc.rs::TokenError::
+// Expired`'s own boundary (`now_tai_ns >= exp_tai_ns` is expired) exactly, so this crate has
+// one expiry-boundary rule across both its token and its delegation paths, not two that could
+// silently drift apart. The mirror image holds for `not_before_tai_ns`, matching `oidc.rs`'s
+// `nbf` handling: `now_tai_ns == not_before_tai_ns` is already valid; one nanosecond earlier
+// is not yet valid.
+message Delegation {
+  // Opaque id, matched against `AuthorizeRequest.delegation_id` /
+  // `CommandTransition.delegation_id` (`command.proto`).
+  string id = 1;
+  // The subject this delegation is granted to -- must equal the authorizing principal's own
+  // verified `Principal.sub` (A2.1) for this delegation to apply to that principal's request.
+  string subject = 2;
+  // Command classes this delegation covers. `"*"` grants every class -- see `RoleBinding.
+  // command_classes`'s doc for why an empty list and `["*"]` are kept as two distinct,
+  // explicit contents rather than one shape meaning the other.
+  repeated string command_classes = 3;
+  // Entities (`Command.entity_id`) this delegation covers. Same `"*"` convention.
+  repeated string entity_ids = 4;
+  // Nanoseconds on TAI. See this message's doc for the exact boundary.
+  int64 not_before_tai_ns = 5;
+  // Nanoseconds on TAI. See this message's doc for the exact boundary.
+  int64 expires_tai_ns = 6;
+  // Who granted this delegation, free text (e.g. an operator's own `sub`) -- not itself
+  // verified by this crate; the grant is only as trustworthy as wherever the delegations file
+  // this came from is reviewed and stored (`crates/av-command/src/authz.rs`'s module doc).
+  string granted_by = 7;
+  // Why, free text, e.g. "temporary burn authority for contingency ops".
+  string reason = 8;
+}
+
+// ---------------------------------------------------------------------------------------
+// A1.3: CommandAuthorityService -- propose, check, authorize, dispatch, ack, query, ledger
+// verify, over the same OpenSSL-backed tonic stack `av-grpc`/`av-dynamics-service` use
+// (`crates/av-command/build.rs`, `crates/av-command/src/service.rs`). Plaintext on loopback
+// only (question 155); mTLS across a host boundary is the service-owned nginx front's job
+// (question 84), not this service's own transport.
+// ---------------------------------------------------------------------------------------
+
+// `Propose` request: the only message a model or agent may emit toward the command path
+// (`command.proto`'s own `CommandProposal` doc comment), plus the principal proposing it --
+// `CommandProposal` itself carries no principal field, so this request carries the one
+// `state::propose` needs to record on the resulting `PROPOSED` transition.
+message ProposeRequest {
+  CommandProposal proposal = 1;
+  // The model/agent identity proposing this command, e.g. "model-x". Recorded verbatim as
+  // the `PROPOSED` transition's `CommandTransition.principal` -- not verified against
+  // anything (A2's OIDC principal work does not reach `Propose`; a proposer is not a human
+  // operator).
+  string principal = 2;
+}
+
+// `Check` request: identifies an already-`PROPOSED` command (held in this service's
+// in-memory index, keyed by `Command.id`) to evaluate policy over. Carries no policy input
+// of its own -- the service reconstructs `PolicyInput` from the stored `Command` plus real
+// ledger rate history, exactly like `crates/av-command/src/authority.rs`'s `check_command`.
+message CheckRequest {
+  string command_id = 1;
+}
+
+// `Authorize` request. See this file's header comment and `AuthorizeRequest.
+// principal_token`'s own doc comment above for what A2.1 does and does not do with these
+// two fields.
+message AuthorizeRequest {
+  string command_id = 1;
+  // A compact-serialization JWS bearer token (an OIDC access token). A2.1
+  // (`crates/av-command/src/oidc.rs`, wired in `crates/av-command/src/service.rs`) verifies
+  // this for real: signature (against the configured issuer's public key), `alg` allow-list,
+  // `iss`, `aud`, `exp`/`nbf` against the injected clock, and a non-empty `sub` -- an
+  // unverifiable token is refused `UNAUTHENTICATED` before any state transition is attempted.
+  // On success, the verified `Principal.sub` (`authority.proto`) is recorded as
+  // `CommandTransition.principal`. A2.1 verifies *who* the caller is; A2.2
+  // (`crates/av-command/src/authz.rs`) then decides *whether* that caller may authorize this
+  // command class: a role-gated check against `Principal.groups`, an MFA check against
+  // `Principal.amr`/`acr` for a hazardous command class, and -- when `delegation_id` below is
+  // non-empty -- a `Delegation` lookup instead of the role check (see that field's own doc).
+  string principal_token = 2;
+  // The delegation the principal claims to be acting under, if any. Empty means "authorize
+  // under the principal's own role, not a delegation" -- `crate::authz` then checks
+  // `Principal.groups` against the profile's role table. Non-empty means "authorize under
+  // this `Delegation.id` instead of any role" -- `crate::authz` looks it up, checks `subject`
+  // matches the verified `Principal.sub`, `command_classes`/`entity_ids` cover this command,
+  // and the injected clock falls inside `[not_before_tai_ns, expires_tai_ns)`; a delegation
+  // that fails any of those is its own typed refusal, never silently falls back to the role
+  // check. Recorded on `CommandTransition.delegation_id` exactly as A1.3 carried it, now
+  // evaluated rather than passed through unchecked.
+  string delegation_id = 3;
+}
+
+// `Dispatch` request: identifies an `AUTHORIZED` command to hand to the `DispatchSink`
+// (`crates/av-command/src/service.rs`; A3 supplies the real kernel binding behind it). No
+// other field -- the dispatching principal is this service itself, not a caller-supplied
+// identity (matching `crates/av-command/src/state.rs`'s own test convention, e.g.
+// `dispatch(c, "ground-segment", ...)`).
+message DispatchRequest {
+  string command_id = 1;
+}
+
+// `Ack` request: reports how far the dispatched command got, per `AckLevel` (`command.proto`)
+// -- "the ack level is a request field" (this task's own brief). `principal`/`reason` are
+// caller-supplied (the edge node, the asset link, or flight software reporting back), unlike
+// `Authorize`'s `principal_token`: an ack report is not itself a human-authorization gate.
+message AckRequest {
+  string command_id = 1;
+  AckLevel ack_level = 2;
+  string principal = 3;
+  string reason = 4;
+}
+
+// The response every one of `Propose`/`Check`/`Authorize`/`Dispatch`/`Ack` returns: the
+// `Command` in its new state, plus the `PolicyDecision` that produced it -- present only for
+// `Check`'s response (the only one of the five that runs a policy decision); unset for the
+// other four.
+message CommandResponse {
+  Command command = 1;
+  PolicyDecision decision = 2;
+}
+
+// `Query` selects either one command by id, or every command for one entity with an optional
+// `CommandState` filter (`COMMAND_STATE_UNSPECIFIED` means no filter -- every state).
+message QueryByEntity {
+  string entity_id = 1;
+  CommandState state_filter = 2;
+}
+
+message QueryRequest {
+  oneof selector {
+    string command_id = 1;
+    QueryByEntity entity = 2;
+  }
+}
+
+message QueryResponse {
+  // Sorted by `Command.id` (this service's in-memory index is a `BTreeMap`, ADR-004's
+  // determinism rule: no `HashMap` iteration on any output path) -- deterministic order,
+  // never the order commands happened to be inserted.
+  repeated Command commands = 1;
+}
+
+// `VerifyLedger` request: one partition by name, or every partition this service's ledger
+// currently has a file for when `partition` is empty.
+message VerifyLedgerRequest {
+  string partition = 1;
+}
+
+message VerifyLedgerResponse {
+  // One `ChainVerification` (`envelope.proto`) per partition checked, in the same order
+  // `crate::ledger::Ledger::partitions` reports them (sorted by the partition's sanitized
+  // filename) when `VerifyLedgerRequest.partition` was empty; a single-element list
+  // otherwise.
+  repeated ChainVerification results = 1;
+  // The logical AND of every result's own `ok` -- `true` only when every checked partition's
+  // chain is intact.
+  bool ok = 2;
+}
+
+// The command authority service: propose, check, authorize, dispatch, ack, query, and ledger
+// verify, over the state machine and ledger `crates/av-command`'s library modules already
+// implement (`crates/av-command/src/service.rs`). See each RPC's own request message doc
+// comment above for what it does and does not verify; see that module's own doc comment for
+// the `tonic::Status` code chosen for every refusal.
+service CommandAuthorityService {
+  rpc Propose(ProposeRequest) returns (CommandResponse);
+  rpc Check(CheckRequest) returns (CommandResponse);
+  rpc Authorize(AuthorizeRequest) returns (CommandResponse);
+  rpc Dispatch(DispatchRequest) returns (CommandResponse);
+  rpc Ack(AckRequest) returns (CommandResponse);
+  rpc Query(QueryRequest) returns (QueryResponse);
+  rpc VerifyLedger(VerifyLedgerRequest) returns (VerifyLedgerResponse);
+}
