@@ -334,48 +334,99 @@ pub fn load_profile_audit_config(yaml: &str) -> Result<AuditSinkConfig, serde_ya
     Ok(if doc.audit.sink_path.is_empty() { AuditSinkConfig::Disabled } else { AuditSinkConfig::File(PathBuf::from(doc.audit.sink_path)) })
 }
 
+/// R4.2b (round 4 review defect, F2): the seam behind [`AuditWriter`] that lets a test supply
+/// an arbitrary sink -- in particular, one whose every write deterministically fails -- so the
+/// "the index/dispatch side effect must commit before the audit write, not after" invariant
+/// `crates/av-command/src/service.rs` now documents at its one commit point
+/// (`CommandAuthorityServiceImpl::append_and_commit_index`) can be tested against a *real*
+/// audit-write failure rather than argued about. A `chmod` after [`AuditWriter::open`] cannot
+/// produce that failure on macOS (this writer already holds an open `std::fs::File`, and a
+/// permission change does not retroactively revoke an open file descriptor's own write
+/// access) -- this trait is the alternative.
+///
+/// `pub(crate)`, deliberately: nothing outside this crate needs to implement it (only
+/// [`FileSink`] below, in production, and `crate::test_support::FailingAuditSink`, in a test
+/// build) -- see [`AuditWriter::from_line_sink`]'s own doc for why the constructor that takes
+/// one is `pub(crate)` too, and `crate::test_support`'s own module doc for why the *failing*
+/// implementor still has to live there, gated, rather than here, ungated.
+pub(crate) trait LineSink: Send + Sync {
+    /// Writes one already-[`format_line`]-formatted line (no trailing newline) and flushes
+    /// before returning `Ok`.
+    fn write_line(&self, line: &str) -> io::Result<()>;
+}
+
+/// The production [`LineSink`]: an open, append-mode file, guarded by its own `Mutex` (`write`
+/// takes `&mut std::fs::File`, so this is the interior-mutability seam that lets multiple
+/// concurrent [`AuditWriter::write`] callers share one `Box<dyn LineSink>` behind a shared
+/// `Arc<AuditWriter>` -- matching this crate's other shared, append-only stores,
+/// `crate::ledger::Ledger`). Byte-for-byte the same write sequence [`AuditWriter`] performed
+/// before this seam existed: append the line plus one trailing `\n`, then flush.
+struct FileSink(Mutex<std::fs::File>);
+
+impl LineSink for FileSink {
+    fn write_line(&self, line: &str) -> io::Result<()> {
+        let mut file = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut buf = line.to_string();
+        buf.push('\n');
+        file.write_all(buf.as_bytes())?;
+        file.flush()
+    }
+}
+
 /// Writes [`AuditEvent`]s as RFC 5424 lines to a configured sink. Construct once
-/// ([`Self::open`]) and share (`Arc`) -- every write takes `&self` and serializes through an
-/// internal `Mutex`, matching this crate's other shared, append-only stores
-/// (`crate::ledger::Ledger`).
+/// ([`Self::open`]) and share (`Arc`) -- every write takes `&self`, delegating to whichever
+/// [`LineSink`] this writer holds (its own internal locking, for the `File` case -- see
+/// [`FileSink`]).
 pub struct AuditWriter {
-    file: Mutex<Option<std::fs::File>>,
+    sink: Option<Box<dyn LineSink>>,
 }
 
 impl AuditWriter {
     /// `Ok(Self)` with an open, append-mode file for [`AuditSinkConfig::File`] (creating the
     /// parent directory if needed, mirroring `crate::ledger::Ledger::open`'s own
-    /// `create_dir_all`), or with no file at all for [`AuditSinkConfig::Disabled`] -- see
-    /// [`Self::write`] for what "no file" then does.
+    /// `create_dir_all`), or with no sink at all for [`AuditSinkConfig::Disabled`] -- see
+    /// [`Self::write`] for what "no sink" then does. Behaviourally identical to before the F2
+    /// `LineSink` seam existed: the file is opened the same way, and every byte
+    /// [`Self::write`] produces for it is unchanged.
     pub fn open(sink: &AuditSinkConfig) -> io::Result<Self> {
-        let file = match sink {
+        let sink: Option<Box<dyn LineSink>> = match sink {
             AuditSinkConfig::File(path) => {
                 if let Some(parent) = path.parent() {
                     if !parent.as_os_str().is_empty() {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                Some(OpenOptions::new().create(true).append(true).open(path)?)
+                let file = OpenOptions::new().create(true).append(true).open(path)?;
+                Some(Box::new(FileSink(Mutex::new(file))))
             }
             AuditSinkConfig::Disabled => None,
         };
-        Ok(Self { file: Mutex::new(file) })
+        Ok(Self { sink })
     }
 
-    /// Appends [`format_line`]`(event)` plus one trailing `\n`, flushed before returning. A
-    /// no-op returning `Ok(())` when this writer holds no file (see the module doc's "When no
-    /// `[audit]` sink is configured" section) -- the two cases are two explicit `match` arms,
-    /// never one branch serving both.
+    /// F2's test-only constructor: an [`AuditWriter`] backed by a caller-supplied [`LineSink`]
+    /// instead of a real file -- the only way to make [`Self::write`] fail deterministically
+    /// (see [`LineSink`]'s own doc for why a `chmod`-based approach cannot). `pub(crate)`
+    /// rather than `pub`: an external `tests/*.rs` integration test cannot name `LineSink` at
+    /// all (it is `pub(crate)`), so it reaches this constructor only indirectly, through
+    /// `crate::test_support::failing_audit_writer`/`audit_writer_failing_from` -- both `pub`,
+    /// both gated `#[cfg(any(test, feature = "test-support"))]` on the module itself. Nothing
+    /// about *this* constructor needs that gate (it takes no test-only type as an argument and
+    /// grants no capability `open` does not already have the shape of -- an arbitrary sink is
+    /// no more dangerous than an arbitrary file path), but it is `pub(crate)` anyway, on the
+    /// same reasoning `crate::service`'s own private helpers use: the smallest visibility that
+    /// still lets every real caller reach it.
+    pub(crate) fn from_line_sink(sink: Box<dyn LineSink>) -> Self {
+        Self { sink: Some(sink) }
+    }
+
+    /// Appends [`format_line`]`(event)` (plus one trailing `\n`, flushed before returning) to
+    /// this writer's sink. A no-op returning `Ok(())` when this writer holds no sink (see the
+    /// module doc's "When no `[audit]` sink is configured" section) -- the two cases are two
+    /// explicit `match` arms, never one branch serving both.
     pub fn write(&self, event: &AuditEvent) -> io::Result<()> {
-        let mut guard = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        match guard.as_mut() {
-            Some(file) => {
-                let mut line = format_line(event);
-                line.push('\n');
-                file.write_all(line.as_bytes())?;
-                file.flush()?;
-                Ok(())
-            }
+        match &self.sink {
+            Some(sink) => sink.write_line(&format_line(event)),
             None => Ok(()),
         }
     }

@@ -256,6 +256,20 @@ struct TestServer {
     admin_handle: tokio::task::JoinHandle<()>,
 }
 
+/// R4.2b (F3): the human-role/delegation/MFA/service-role group [`TestServer::
+/// spawn_over_with_audit`] takes -- grouped into one struct (rather than five more bare
+/// parameters) for the identical reason `crate::service::AuthzConfig` groups
+/// `CommandAuthorityServiceImpl::new`'s own equivalent fields: clippy's `too_many_arguments`
+/// (this crate's rule against silencing a lint in place means the fix is grouping the
+/// arguments, never a lint-suppressing attribute).
+struct SpawnAuthz {
+    roles: BTreeMap<String, Vec<String>>,
+    delegations: Vec<Delegation>,
+    mfa_amr_methods: Vec<String>,
+    mfa_acr: String,
+    service_roles: BTreeMap<String, Vec<String>>,
+}
+
 impl TestServer {
     /// Spawns over a **fresh** ledger directory, named `name` (wiped first if it somehow
     /// already exists -- see [`tmp_ledger_dir`]), with the default role table
@@ -307,6 +321,26 @@ impl TestServer {
         mfa_acr: &str,
         service_roles: BTreeMap<String, Vec<String>>,
     ) -> Self {
+        let audit_path = ledger_dir.join("audit.log");
+        let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
+        let authz = SpawnAuthz { roles, delegations, mfa_amr_methods, mfa_acr: mfa_acr.to_string(), service_roles };
+        Self::spawn_over_with_audit(ledger_dir, start_tai_ns, authz, audit, audit_path).await
+    }
+
+    /// R4.2b (round 4 review defect, F3): as [`Self::spawn_over_with_service_roles`], but the
+    /// caller supplies the [`AuditWriter`] directly -- the seam this file's audit-sink-failure
+    /// tests need to inject `av_command::test_support::failing_audit_writer`/
+    /// `audit_writer_failing_from` instead of a real file sink (`av_command::audit::LineSink`
+    /// and `AuditWriter::from_line_sink` are `pub(crate)` inside `av-command` itself and
+    /// invisible to this file, a separate compilation unit -- those two `test_support`
+    /// functions are the only way in). Every other constructor above funnels through this one.
+    /// `audit_path` is still threaded through separately (rather than derived from `audit`,
+    /// which this function cannot inspect) so [`Self::audit_lines`] keeps working for a caller
+    /// that passed a real file sink; a caller that passed an injected non-file sink simply
+    /// never has a file at that path, and [`Self::audit_lines`] already treats a missing file
+    /// as "no lines yet", never an error.
+    async fn spawn_over_with_audit(ledger_dir: PathBuf, start_tai_ns: i64, authz: SpawnAuthz, audit: Arc<AuditWriter>, audit_path: PathBuf) -> Self {
+        let SpawnAuthz { roles, delegations, mfa_amr_methods, mfa_acr, service_roles } = authz;
         let ledger = Arc::new(Ledger::open(&ledger_dir).expect("open ledger"));
         let bundle = Arc::new(PolicyBundle::load(real_policy_dir()).expect("load the shipped policy bundle"));
         let clock = Arc::new(TestClock::new(start_tai_ns));
@@ -317,14 +351,12 @@ impl TestServer {
                 .expect("a freshly-generated test issuer key parses as a valid public key"),
         );
 
-        let audit_path = ledger_dir.join("audit.log");
-        let audit = Arc::new(AuditWriter::open(&AuditSinkConfig::File(audit_path.clone())).expect("open the test audit sink file"));
         let counters = Arc::new(Counters::new());
         let authz = AuthzConfig {
             role_table: Arc::new(RoleTable::from_config(&roles)),
             delegations: Arc::new(DelegationTable::from_delegations(delegations)),
             mfa_amr_methods: Arc::new(mfa_amr_methods),
-            mfa_acr: Arc::new(mfa_acr.to_string()),
+            mfa_acr: Arc::new(mfa_acr),
             audit,
             service_role_table: Arc::new(ServiceRoleTable::from_config(&service_roles).expect("this file's own service-role fixtures always use recognized rpc names")),
             counters: counters.clone(),
@@ -380,6 +412,40 @@ impl TestServer {
         });
 
         Self { client, ledger_dir, clock, dispatch_sink, issuer, audit_path, counters, admin_addr, shutdown_tx, handle, admin_handle }
+    }
+
+    /// R4.2b (F3): [`Self::spawn`]'s own defaults (role table, delegations, service-role
+    /// table), but with an [`AuditWriter`] whose every write fails from its `fail_from`-th
+    /// call onward (1-based; `av_command::test_support::audit_writer_failing_from`) -- lets a
+    /// test isolate exactly one transition's own audit write as the failure on a server that
+    /// must reach that transition through one or more earlier, successfully-audited
+    /// transitions first.
+    async fn spawn_with_audit_failing_from(name: &str, start_tai_ns: i64, fail_from: usize) -> Self {
+        let ledger_dir = tmp_ledger_dir(name);
+        let roles = default_roles();
+        let delegations = vec![wildcard_delegation("delegation-1", "operator-1"), wildcard_delegation("delegation-9", "astronaut-jane")];
+        let audit_path = ledger_dir.join("audit.log");
+        let audit = Arc::new(av_command::test_support::audit_writer_failing_from(fail_from));
+        let authz = SpawnAuthz { roles, delegations, mfa_amr_methods: vec![], mfa_acr: String::new(), service_roles: default_service_roles() };
+        Self::spawn_over_with_audit(ledger_dir, start_tai_ns, authz, audit, audit_path).await
+    }
+
+    /// As [`Self::spawn_with_audit_failing_from`] with `fail_from == 1` (every write fails,
+    /// `av_command::test_support::failing_audit_writer`), but over `ledger_dir` **as it
+    /// already is** (never wiped, never created fresh) -- mirrors [`Self::spawn_over`]'s own
+    /// relationship to [`Self::spawn`]. Lets a test build a command up to some state through
+    /// an ordinary, working-audit `TestServer`, shut it down keeping its ledger directory,
+    /// then reopen that same directory with a *second*, independent server whose audit sink
+    /// always fails -- isolating exactly one later transition's own audit-write failure from
+    /// every earlier transition's (see `dispatch_audit_failure_still_dispatches_once_and_
+    /// refuses_a_retry`, this file's own R4.2b test 2).
+    async fn spawn_over_with_failing_audit(ledger_dir: PathBuf, start_tai_ns: i64) -> Self {
+        let roles = default_roles();
+        let delegations = vec![wildcard_delegation("delegation-1", "operator-1"), wildcard_delegation("delegation-9", "astronaut-jane")];
+        let audit_path = ledger_dir.join("audit.log");
+        let audit = Arc::new(av_command::test_support::failing_audit_writer());
+        let authz = SpawnAuthz { roles, delegations, mfa_amr_methods: vec![], mfa_acr: String::new(), service_roles: default_service_roles() };
+        Self::spawn_over_with_audit(ledger_dir, start_tai_ns, authz, audit, audit_path).await
     }
 
     /// Mints a real RS256-signed token this server's own `Authorize` will verify: `sub`,
@@ -2063,6 +2129,181 @@ async fn check_is_refused_as_already_checked_for_every_post_proposed_state() {
     let err = server.client.check(CheckRequest { command_id: "cmd-already-authorized".to_string() }).await.expect_err("Check on an AUTHORIZED command must be refused");
     assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
     assert!(err.message().contains("Authorized"), "must name the command's actual current state: {}", err.message());
+
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------------
+// R4.2b (round 4 review defect): the in-memory index (and, for `Dispatch`, the idempotency
+// key and the real `DispatchSink` hand-off) must commit the instant the ledger append
+// succeeds -- before the audit write, never after. Before the fix in
+// `crates/av-command/src/service.rs`, every commit point wrote the audit line first and only
+// updated the index (and, for `Dispatch`, its own extra durable-adjacent side effects) once
+// that write had also succeeded -- so an audit-sink failure left the ledger durably ahead of
+// this service's own in-memory state, and a retry was silently accepted as if the earlier
+// transition had never happened at all. The three tests below inject
+// `av_command::test_support`'s deterministic failing audit sink (real writes against a real
+// `AuditWriter`, not a `chmod` -- an already-open `std::fs::File`'s writes do not fail from a
+// permission change made after it was opened, on macOS) to prove the fix for real.
+// ---------------------------------------------------------------------------------------
+
+/// **R4.2b test 1**: `Propose`'s automatic check (D1's `run_check`, shared with the explicit
+/// `Check` RPC) has its own audit write fail -- the `PROPOSED` transition's own audit write,
+/// immediately before it on the same server instance, is left succeeding
+/// (`spawn_with_audit_failing_from(.., 2)`), isolating this test to the CHECKED transition's
+/// own commit point. Asserts: the RPC itself is refused `Internal`, typed and counted; `Query`
+/// already reports `CHECKED` with both transitions (never stuck at `PROPOSED`, the pre-fix
+/// defect); a retried explicit `Check` is now refused as an illegal edge rather than silently
+/// accepted; and exactly one `CHECKED` record exists in the ledger (read back through the raw
+/// on-disk records this file's own [`read_ledger_records`] decodes -- `Ledger`'s own public API
+/// has no "list every record for a partition" method, only aggregate scans
+/// (`scan_commands`/`scan_decisions`/...) and `verify` (pass/fail plus a record *count*, not
+/// per-record state), so counting CHECKED records specifically needs the actual records; this
+/// mirrors every other ledger-content assertion already in this file, e.g.
+/// `propose_of_a_payload_class_command_is_refused_policy_denied_and_the_rejected_record_is_
+/// still_queryable`).
+#[tokio::test]
+async fn propose_automatic_check_audit_failure_still_commits_checked_and_refuses_a_retry() {
+    let mut server = TestServer::spawn_with_audit_failing_from("audit-failure-check", 1_000, 2).await;
+
+    let before = server.counters.get("io_error");
+    let err = server
+        .client
+        .propose(propose_request(base_command("cmd-audit-1", "sat-audit", "mode", ""), "model-x"))
+        .await
+        .expect_err("the automatic check's own audit write must fail and be returned as a typed error");
+    assert_eq!(err.code(), Code::Internal, "{err:?}");
+    assert_eq!(server.counters.get("io_error"), before + 1, "the typed, counted I/O refusal");
+
+    // R4.2b: the index must already agree with the ledger -- CHECKED, with both transitions --
+    // even though the RPC itself returned an error.
+    let queried = server.client.query(QueryRequest { selector: Some(Selector::CommandId("cmd-audit-1".to_string())) }).await.expect("Query").into_inner();
+    assert_eq!(queried.commands.len(), 1, "{queried:?}");
+    let command = &queried.commands[0];
+    assert_eq!(command.state, CommandState::Checked as i32, "R4.2b: the index must reflect what the ledger already made durable, not the pre-audit-write PROPOSED state");
+    assert_eq!(command.transitions.len(), 2, "PROPOSED then CHECKED -- the trail is unchanged");
+    assert!(queried.decisions.contains_key("cmd-audit-1"), "the decisions map must also already be committed");
+
+    // A retry via the explicit Check RPC (D5's documented retry path for D4's own, different
+    // I/O-failure case) must now be refused as an illegal edge -- accepting it would append a
+    // SECOND, contradictory CHECKED record, the defect this test targets.
+    let err = server
+        .client
+        .check(CheckRequest { command_id: "cmd-audit-1".to_string() })
+        .await
+        .expect_err("a Check retry must be refused now that the index already reflects CHECKED");
+    assert_eq!(err.code(), Code::FailedPrecondition, "{err:?}");
+    assert!(err.message().contains("Checked"), "must name the command's actual current state: {}", err.message());
+
+    // Exactly one CHECKED record must exist in the ledger -- see this test's own doc comment
+    // for why `read_ledger_records` (this file's own documented-on-disk-format reader), not a
+    // `Ledger` scan/aggregate API, is what answers this.
+    let records = read_ledger_records(&server.ledger_dir, "sat-audit");
+    let checked_count = records.iter().filter(|r| r.transition.as_ref().map(|t| t.state) == Some(CommandState::Checked as i32)).count();
+    assert_eq!(checked_count, 1, "exactly one CHECKED record must exist in the ledger: {records:?}");
+
+    server.shutdown().await;
+}
+
+/// **R4.2b test 2**: `Dispatch`'s own audit write fails. Isolated from `Propose`'s/
+/// `Authorize`'s own audit-write behaviour (test 1, above, already covers that commit point) by
+/// driving the command to `AUTHORIZED` through a first, ordinary `TestServer` (a working audit
+/// sink), shutting it down keeping its ledger directory, then reopening that same directory
+/// with a *second*, independent server instance whose audit sink always fails
+/// (`spawn_over_with_failing_audit`) -- the identical cross-restart isolation pattern
+/// `dispatch_refuses_a_key_already_dispatched_by_a_prior_process_lifetime` already uses in this
+/// file, for the identical reason (an independent process lifetime, not merely a second
+/// in-process call). Asserts: the RPC is refused `Internal`, typed and counted; the command is
+/// really `DISPATCHED` in the index; the `DispatchSink` really received it, exactly once; the
+/// idempotency key is really recorded (a retried `Dispatch` is refused `AlreadyExists`, not
+/// silently re-accepted -- the "double dispatch" the defect names); and exactly one `DISPATCHED`
+/// record exists in the ledger.
+#[tokio::test]
+async fn dispatch_audit_failure_still_dispatches_once_and_refuses_a_retry() {
+    let mut setup = TestServer::spawn("audit-failure-dispatch-setup", 1_000).await;
+    setup
+        .client
+        .propose(propose_request(base_command("cmd-audit-2", "sat-audit2", "mode", "idem-audit-2"), "model-x"))
+        .await
+        .expect("Propose");
+    let token = setup.mint("operator-1");
+    setup
+        .client
+        .authorize(AuthorizeRequest { command_id: "cmd-audit-2".to_string(), principal_token: token, delegation_id: String::new() })
+        .await
+        .expect("Authorize");
+    let ledger_dir = setup.shutdown_keep_ledger().await;
+
+    let mut server = TestServer::spawn_over_with_failing_audit(ledger_dir.clone(), 2_000).await;
+
+    let before = server.counters.get("io_error");
+    let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let err = server
+        .client
+        .dispatch(DispatchRequest { command_id: "cmd-audit-2".to_string(), service_token: dispatch_token })
+        .await
+        .expect_err("Dispatch's own audit write must fail and be reported as a typed, counted error");
+    assert_eq!(err.code(), Code::Internal, "{err:?}");
+    assert_eq!(server.counters.get("io_error"), before + 1, "the typed, counted I/O refusal");
+
+    // R4.2b: the index, the DispatchSink and the idempotency key must all already reflect the
+    // real dispatch, even though the RPC itself returned an error.
+    let queried = server.client.query(QueryRequest { selector: Some(Selector::CommandId("cmd-audit-2".to_string())) }).await.expect("Query").into_inner();
+    assert_eq!(queried.commands.len(), 1, "{queried:?}");
+    assert_eq!(queried.commands[0].state, CommandState::Dispatched as i32, "R4.2b: the index must reflect what the ledger already made durable, not the pre-audit-write AUTHORIZED state");
+    assert_eq!(server.dispatch_sink.dispatched().len(), 1, "the asset must really have received the dispatch exactly once");
+    assert_eq!(server.dispatch_sink.dispatched()[0].id, "cmd-audit-2");
+
+    // A retry must be refused as a duplicate idempotency key -- accepting it would really
+    // dispatch a SECOND time (the "double dispatch" defect this test targets), defeating
+    // milestone A3's own "an idempotency key the binding never dispatches twice" guarantee.
+    let dispatch_token2 = server.mint_service("ground-segment-1", &["dispatchers"]);
+    let err = server
+        .client
+        .dispatch(DispatchRequest { command_id: "cmd-audit-2".to_string(), service_token: dispatch_token2 })
+        .await
+        .expect_err("a retried Dispatch must be refused as a duplicate, never really re-dispatch");
+    assert_eq!(err.code(), Code::AlreadyExists, "{err:?}");
+    assert!(err.message().contains(&format!("idempotency_key {:?}", "idem-audit-2")), "{}", err.message());
+    assert_eq!(server.dispatch_sink.dispatched().len(), 1, "the retry must not have reached the DispatchSink a second time");
+
+    let records = read_ledger_records(&ledger_dir, "sat-audit2");
+    let dispatched_count = records.iter().filter(|r| r.transition.as_ref().map(|t| t.state) == Some(CommandState::Dispatched as i32)).count();
+    assert_eq!(dispatched_count, 1, "exactly one DISPATCHED record must exist in the ledger: {records:?}");
+
+    server.shutdown().await;
+}
+
+/// **R4.2b control test**: with a working audit sink (the ordinary path, no injected failure),
+/// the full legal path still writes exactly one audit line per transition, and each line's
+/// content is exactly what `av_command::audit::format_line`/`event_for_transition` would
+/// produce from the ledger's own record for that transition -- proving F1's reordering (commit
+/// the index -- and, for Dispatch, its own extra side effects -- before the audit write, not
+/// after) changed nothing about the ordinary, successful path: the audit trail this document's
+/// `audit_line_for_a_successful_authorization_is_exact` (and its sibling tests) already pin is
+/// unchanged.
+#[tokio::test]
+async fn ordinary_path_still_writes_one_exact_audit_line_per_transition() {
+    let mut server = TestServer::spawn("audit-control", 1_000).await;
+
+    server.client.propose(propose_request(base_command("cmd-ctl", "sat-ctl", "mode", ""), "model-x")).await.expect("Propose");
+    let token = server.mint("operator-1");
+    server.client.authorize(AuthorizeRequest { command_id: "cmd-ctl".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
+    let dispatch_token = server.mint_service("ground-segment-1", &["dispatchers"]);
+    server.client.dispatch(DispatchRequest { command_id: "cmd-ctl".to_string(), service_token: dispatch_token }).await.expect("Dispatch");
+
+    let records = read_ledger_records(&server.ledger_dir, "sat-ctl");
+    assert_eq!(records.len(), 4, "PROPOSED, CHECKED, AUTHORIZED, DISPATCHED");
+
+    let lines = server.audit_lines();
+    assert_eq!(lines.len(), 4, "one audit line per transition, unchanged by F1's reordering: {lines:?}");
+
+    for (line, record) in lines.iter().zip(records.iter()) {
+        let command = record.command.clone().expect("every record carries its Command (question 203(a))");
+        let transition = record.transition.clone().expect("every record carries its transition");
+        let expected = av_command::audit::format_line(&av_command::audit::event_for_transition(&command, &transition, record.decision.as_ref()));
+        assert_eq!(*line, expected, "the audit line's own content must be exactly what AuditWriter would produce from the ledger's own record");
+    }
 
     server.shutdown().await;
 }

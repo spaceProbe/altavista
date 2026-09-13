@@ -247,7 +247,7 @@ impl Ledger {
     /// this ledger's hash-chain/rate/idempotency behaviour without a real `Command` to hand
     /// (see [`Self::scan_commands`]'s own doc for how a `None` record is treated on rebuild);
     /// every production call site (`crate::authority::check_command`, `crate::service::
-    /// CommandAuthorityServiceImpl::append_last_transition`) always passes `Some`. Every epoch
+    /// CommandAuthorityServiceImpl::append_and_commit_index`) always passes `Some`. Every epoch
     /// and every id in the returned record -- including every field nested inside `command` --
     /// is exactly what the caller supplied or what `clock` reported at the moment of the call;
     /// this parameter reads no wall clock and generates no id of its own, so it does not
@@ -271,7 +271,7 @@ impl Ledger {
         // so every append the crate's own suite performs -- the gRPC integration tests
         // included, which is what actually exercises the two production call sites
         // (`crate::authority::check_command`, `crate::service::CommandAuthorityServiceImpl::
-        // append_last_transition`) -- proves its caller upheld it.
+        // append_and_commit_index`) -- proves its caller upheld it.
         //
         // R3.5a (manager's review): these were `debug_assert_eq!`, which the compiler REMOVES
         // from a release build -- so the invariant round 2's review installed, and which round
