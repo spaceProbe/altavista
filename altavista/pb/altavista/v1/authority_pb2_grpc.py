@@ -457,3 +457,93 @@ class CommandAuthorityService:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class DataGatewayServiceStub:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Query = channel.unary_unary(
+                '/altavista.v1.DataGatewayService/Query',
+                request_serializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.SerializeToString,
+                response_deserializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.FromString,
+                _registered_method=True)
+
+
+class DataGatewayServiceServicer:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    def Query(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_DataGatewayServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Query': grpc.unary_unary_rpc_method_handler(
+                    servicer.Query,
+                    request_deserializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.FromString,
+                    response_serializer=altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'altavista.v1.DataGatewayService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('altavista.v1.DataGatewayService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class DataGatewayService:
+    """The read-only, label-aware gateway over run products (A4a). Every rpc here is
+    deny-by-default read access: nothing in this service can create, modify or delete a
+    Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+    structurally separate seam that reaches the command authority (over
+    CommandAuthorityService, not this service), and it is not part of this service or its
+    generated client/server.
+    """
+
+    @staticmethod
+    def Query(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/altavista.v1.DataGatewayService/Query',
+            altavista_dot_v1_dot_authority__pb2.GatewayQueryRequest.SerializeToString,
+            altavista_dot_v1_dot_authority__pb2.GatewayQueryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

@@ -45,10 +45,29 @@ syntax = "proto3";
 //     service implementation (`crates/av-command/src/service.rs`) now verifies
 //     `principal_token` for real (see above) but performs no role/MFA/delegation gate --
 //     that is A2.2's job, not earned by this task.
+//   - A4a (additive only -- no field number above moves; `docs/aiplane-plan.md` milestone
+//     A4, `crates/av-gateway`): `RunIdentity`, `GatewaySelector`, `GatewayQueryRequest`/
+//     `GatewayQueryResponse`, `DataGatewayService` and `ProposalEvidence` below. A read-only
+//     surface over run products (trajectories, events, scores, measurements) plus an MCP
+//     `propose_command` tool that can create `PROPOSED` and nothing else
+//     (`crates/av-gateway/src/propose_only.rs`); it neither adds nor changes any command-
+//     authority state edge above, and does not touch `LedgerRecord`'s own field set (adding
+//     a field there would break `crates/av-command/src/ledger.rs`'s exhaustive struct
+//     literal in a crate this track does not edit -- see `crates/av-gateway/src/
+//     evidence.rs`'s module doc for how the evidence topic is realized instead).
 package altavista.v1;
 
 import "altavista/v1/command.proto";
 import "altavista/v1/envelope.proto";
+// A4a only: the run-product types the gateway serves (Trajectory/Event from
+// trajectory.proto, ScoreResult from run.proto, Measurement from core.proto) -- named
+// individually rather than importing a whole `RunProducts` value; see
+// `crates/av-gateway/src/catalogue.rs`'s module doc for why `RunProducts` itself is never
+// the wire shape a query returns (label enforcement: `RunProducts` carries no `Label` of
+// its own to check).
+import "altavista/v1/core.proto";
+import "altavista/v1/run.proto";
+import "altavista/v1/trajectory.proto";
 
 // The recent-command-rate section of `PolicyInput`. Carries raw counts and the window's
 // width, not a pre-divided rate: the policy decides which class it rate-limits and what
@@ -481,4 +500,124 @@ service CommandAuthorityService {
   rpc Fail(FailRequest) returns (CommandResponse);
   rpc Query(QueryRequest) returns (QueryResponse);
   rpc VerifyLedger(VerifyLedgerRequest) returns (VerifyLedgerResponse);
+}
+
+// ---------------------------------------------------------------------------------------
+// A4a: crates/av-gateway -- the read-only, label-aware gateway over run products
+// (docs/aiplane-plan.md milestone A4; ADR-004's "AI plane" section: "The platform's
+// read-only data access is an MCP server on secrouter's deny-by-default tool allow-list").
+// Additive only -- nothing above this line is touched. `RunIdentity`/`GatewayQueryRequest`/
+// `GatewayQueryResponse`/`DataGatewayService` are this gateway's own read surface;
+// `ProposalEvidence` is the "evidence topic" (D6) realized as a ledger record.
+// ---------------------------------------------------------------------------------------
+
+// D1: a caller names a run by IDENTITY, never a path. `run_id` is the gateway's catalogue
+// primary key (RunProducts.run_id, unique per catalogue entry -- crates/av-gateway/src/
+// catalogue.rs). `config_hash`, the plan's "run hash" (there is no field literally named
+// `run_hash` anywhere in this workspace; `Provenance.config_hash`, core.proto, is the
+// closest fit and is what this field means), is an OPTIONAL cross-check: when non-empty, it
+// must equal the catalogue entry's own `RunProducts.provenance.config_hash` exactly, or the
+// query is refused (RefusalReason::ConfigHashMismatch, typed and counted) -- it is never
+// itself a lookup key, so a caller cannot resolve a run by guessing a hash without also
+// naming its real run_id. `run_id` alone (config_hash empty) is a complete, valid identity.
+message RunIdentity {
+  string run_id = 1;
+  string config_hash = 2;
+}
+
+// Which part of a run's products a GatewayQueryRequest asks for. Unspecified is always a
+// malformed request (crate::gateway::RefusalReason::MalformedRequest), never treated as a
+// default selector.
+enum GatewaySelector {
+  GATEWAY_SELECTOR_UNSPECIFIED = 0;
+  GATEWAY_SELECTOR_ALL = 1;
+  GATEWAY_SELECTOR_TRAJECTORIES = 2;
+  GATEWAY_SELECTOR_EVENTS = 3;
+  GATEWAY_SELECTOR_SCORES = 4;
+  GATEWAY_SELECTOR_MEASUREMENTS = 5;
+}
+
+// `DataGatewayService.Query` request.
+message GatewayQueryRequest {
+  RunIdentity run = 1;
+  // The marking the calling principal is cleared to, checked (D2) against this gateway
+  // deployment's own configured, ordered clearance ladder (crates/av-gateway/src/labels.rs,
+  // copied from crates/av-edge/src/policy.rs's ladder convention verbatim -- rank = index,
+  // never a hardcoded enum or a numeric level).
+  string caller_clearance = 2;
+  GatewaySelector selector = 3;
+  // Set ONLY by a crafted/adversarial request attempting D1's caller-supplied-path attack
+  // (mirrors altavista/server.py's POST /api/cdm/sweep/sample and its own
+  // test_caller_supplied_products_uri_is_never_trusted): this field is NEVER read for
+  // resolution -- a caller names a run through `run` (RunIdentity) alone. A non-empty value
+  // here is refused outright (RefusalReason::CallerSuppliedPath) and counted, before any
+  // other validation of this request runs.
+  string caller_supplied_products_uri = 4;
+}
+
+message GatewayQueryResponse {
+  RunIdentity run = 1;
+  // The label this gateway's own catalogue has on file for this run (D2). Not read off
+  // RunProducts itself -- run.proto's RunProducts carries no Label of its own (Trajectory/
+  // Event do; ScoreResult/Measurement do not), so the catalogue entry's own configured
+  // Label is the one label-enforcement point common to every selector -- see
+  // crate::catalogue's module doc.
+  Label product_label = 2;
+  // Populated only for GATEWAY_SELECTOR_ALL or GATEWAY_SELECTOR_TRAJECTORIES.
+  map<string, Trajectory> trajectories = 3;
+  // Populated only for GATEWAY_SELECTOR_ALL or GATEWAY_SELECTOR_EVENTS, sorted (tai_ns, id)
+  // exactly as RunProducts.events already is.
+  repeated Event events = 4;
+  // Populated only for GATEWAY_SELECTOR_ALL or GATEWAY_SELECTOR_SCORES.
+  map<string, ScoreResult> scores = 5;
+  // Populated only for GATEWAY_SELECTOR_ALL or GATEWAY_SELECTOR_MEASUREMENTS, sorted
+  // (epoch_ns, measurement_id) exactly as RunProducts.measurements already is.
+  repeated Measurement measurements = 6;
+  // D5: deterministic, derived from this query's own canonical content
+  // (crate::query_id::compute_query_id, mirroring crates/av-command/src/policy.rs's
+  // compute_decision_id convention byte for byte) -- never a random id, never a counter
+  // that depends on wall-clock arrival order, so a replay resolves it exactly. Recorded in
+  // ProposalEvidence.query_ids (below) so a replay can find exactly which queries a
+  // proposal's rationale is grounded in.
+  string query_id = 7;
+}
+
+// The read-only, label-aware gateway over run products (A4a). Every rpc here is
+// deny-by-default read access: nothing in this service can create, modify or delete a
+// Command or a ledger record. crate::propose_only::ProposeOnlyAuthority (D4) is the one,
+// structurally separate seam that reaches the command authority (over
+// CommandAuthorityService, not this service), and it is not part of this service or its
+// generated client/server.
+service DataGatewayService {
+  rpc Query(GatewayQueryRequest) returns (GatewayQueryResponse);
+}
+
+// D6: "an evidence topic" realized as a ledger partition, not a broker (ADR-004: "for the
+// engine and command services the durable log itself is the ledger, chained per
+// partition"; question 200(d)'s identical call for the edge track's own durable log). No
+// Kafka/Redpanda crate exists in this tree or is added by this message; a future round MAY
+// replace the ledger-partition realization with a real broker without changing this
+// message's own shape (question 200(d)'s "the consumer trait is spoore-io's so the broker
+// can replace the files" reasoning, mirrored here). crates/av-gateway/src/evidence.rs
+// documents the exact partition-naming convention and how this message is packed into an
+// existing, unmodified crates/av-command/src/ledger.rs `Ledger::append` call (via
+// `Command.payload`, a `google.protobuf.Any`) rather than by adding a field to
+// `LedgerRecord` (which would break that crate's own exhaustive struct literal).
+message ProposalEvidence {
+  // The Command.id of the PROPOSED command this evidence record is about.
+  string command_id = 1;
+  // The run identity the model read before proposing (D5: "what the model saw: the run
+  // identity it read").
+  RunIdentity run = 2;
+  // Every GatewayQueryResponse.query_id the model's session issued before this proposal,
+  // in the order the gateway served them (D5: "the ids of the queries it issued").
+  repeated string query_ids = 3;
+  // The model identity and version (D5's attribution requirement) -- reuses core.proto's
+  // Provenance.tool convention ("Tool or service (and version) that produced the
+  // artifact") rather than inventing a second identity shape.
+  string model_identity = 4;
+  string model_version = 5;
+  // When this evidence record was written, nanoseconds on TAI, always from the injected
+  // Clock (av_command::clock::Clock) -- never the wall clock read directly (ADR-004, D8).
+  int64 recorded_tai_ns = 6;
 }
