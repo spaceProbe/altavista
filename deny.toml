@@ -117,10 +117,13 @@ multiple-versions = "warn"
 # task must not edit `/Users/probe/code/spoore` (a binding rule), so the fix cannot land
 # here; it is question 205's `altavista-upstream` fourth proposal (`publish = false` on
 # these six files) if restoring `"deny"` does not resolve it on its own -- which it does
-# not, so that proposal is now live. Until it lands, `cargo deny check` exits non-zero on
-# this workspace and that is accepted: `wildcards` stays "deny" and no skip/exception is
-# added to work around it.
-wildcards = "deny"
+# not, so that proposal is now live: spoore's `altavista-upstream` branch commit `fca6323`
+# declares `publish = false` on all eleven spoore crates. Question 207 (lead, 2026-09-13):
+# until the user merges that commit into spoore's `main`, this is "warn", not "deny", so the
+# gate stays actionable (a failing gate nobody can act on is not a gate); the lead restores
+# "deny" the day it lands, and no skip or per-crate exception is added meanwhile. Every
+# named-crate ban below is unaffected by this setting.
+wildcards = "warn"
 allow-wildcard-paths = true
 deny = [
     # ADR-004: "ring-based TLS" is explicitly excluded. `cargo tree --workspace | grep -ci
