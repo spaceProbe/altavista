@@ -26,21 +26,31 @@ change (their own committed `hash:` fields would need repinning too).
 ## Pinned values
 
 - `RunProducts.port_traffic_hash` (SHA-256 hex of `port_traffic.pb`'s exact bytes):
-  `c548a78c80954c2a6a159d2b27df10e9f55213e2bed2a1628332b31a63e93dc7`
+  `5497083dd47f246803a28ba4cda4c8dcaa4314d60c6129b67674afc2fa2a718b`
 - `RunProducts.provenance.run_id`: `e4a-demo-ground-segment-fixture`
 - `drms/demo_ground_segment.drm.yaml` hash **at the time this fixture was generated**:
-  `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0` -- recorded provenance
-  only (`RunProducts.provenance.config_hash`/`Trajectory.config_hash`), never re-verified
-  against the DRM's own live, committed `hash:` field by any test (question 207 traced every
-  reader of this fixture: only `run_id`/`created_tai_ns` are ever pulled back out of
-  `RunProducts.provenance`). Round 4 (question 207) registered `earth_fixed_demo_frame` in
-  this DRM's own `scenario.frames`, which moved its committed `hash:` field to
-  `c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2` -- that is now a
-  deliberate, harmless mismatch with the value above; regenerate only if something ever
-  starts checking it.
+  `c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2` -- recorded provenance
+  and, since round 5, **asserted** against the DRM's own live, committed `hash:` field by
+  `crates/av-kernel/tests/e4a_fixture_provenance.rs` (which also asserts that
+  `port_traffic.pb` hashes to the `port_traffic_hash` `run_products.pb` records, so a
+  half-regeneration cannot land either). Nothing in the replay path itself reads it -- question
+  207 traced every reader of this fixture and only `run_id`/`created_tai_ns` are ever pulled
+  back out of `RunProducts.provenance` -- which is exactly why it needed a guard rather than a
+  comment. History: round 4 (question 207) registered
+  `earth_fixed_demo_frame` in this DRM's own `scenario.frames`, which moved its committed
+  `hash:` field to the value above -- but this fixture was not regenerated at the time, so its
+  recorded provenance kept naming the DRM's *prior* hash,
+  `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0`, a DRM that no longer
+  existed anywhere in the tree. Question 210 (2026-09-15) ratified round 4's decision 8 in
+  part -- `earth_fixed_demo_frame` stays registered -- and ruled that the fixture be
+  regenerated from the current DRM with the committed generator so its provenance is true
+  again. It has been: the value above is what the regenerated fixture now records, and it is
+  equal to the DRM's own live, committed `hash:` field, verified by decoding
+  `run_products.pb` (see `crates/av-kernel/tests/generate_e4a_ground_segment_fixture.rs`'s
+  module doc for the regeneration command).
 - `drms/demo_ground_segment.sos.yaml` hash: `111ed78f4e7a0a0055bffddc320a142a5ffde3881161649ca9875ee5a8fae4f2`
 - `drms/demo_ground_segment_flight.system.yaml` hash: `0f7f191b664f7f28dc09f0505d8e1505f0f1601952dd32d5f3260addeca5f32e`
-- `run_products.pb`: 61628 bytes
+- `run_products.pb`: 61982 bytes
 - `port_traffic.pb`: 116261 bytes, 900 `PortTrafficRecord`s, every one `instance="flight"`,
   `port="tm_out"`, `direction=PORT_DIRECTION_OUT` (one per second of the 900 s run; `"ground"`
   emits nothing on any FRAMED port in this DRM).

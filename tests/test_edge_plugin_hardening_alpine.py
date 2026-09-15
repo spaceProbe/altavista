@@ -4,26 +4,51 @@ image (docs/open-questions.md question 207, edge round 3's own review defect 2) 
 the claimed values on THIS Docker/Colima host TODAY -- independent of whether that plugin image
 has ever been built here.
 
-# Why this test exists, separately from `test_edge_plugin_container.py`
+# Why this file exists, on this host, today (round 5, question 210)
 
-As of this round's own measurement (see that file's own module doc for the full numbers): the
-Colima VM's container filesystem is at 0 bytes free (58.8 GB total, 56.0 GB used, 100% full),
-and both `av-edge-plugin:local` and even `services/edge-plugin/Dockerfile`'s own base image,
-`debian:bookworm-slim`, are already gone from this host -- `services/edge-plugin/build-image.sh`
-cannot be (re-)run to replace either (a build allocates fresh image layers, and this filesystem
-has none to give). `tests/test_edge_plugin_container.py`'s own docker-gated test therefore SKIPS
-VISIBLY today, correctly (question 194: a test that finds no image and returns is a defect, but
-a test that skips and SAYS why is not).
+`av-edge-plugin:local` builds again and `tests/test_edge_plugin_container.py` now runs for
+real (see that file's own module doc). Round 5 question 210 therefore asked, in so many words,
+whether this file's original reason for existing was gone and it should be retired. The
+decision (round 5, question 210) is to KEEP it, deliberately, as the probe for hosts without the
+plugin image -- for four reasons:
 
-That leaves a real gap: nothing on this host actually PROVES that `--read-only` + `--cap-drop
-ALL` + `--security-opt no-new-privileges` + a named volume at a declared mount really produce
-non-root `.Config.User`, `.HostConfig.ReadonlyRootfs=true`, `.HostConfig.CapDrop` containing
-`ALL`, `.HostConfig.SecurityOpt` containing `no-new-privileges`, `NoNewPrivs: 1`, `Seccomp: 2`,
-a failed write to `/`, and a successful write to the volume -- on THIS Docker version, THIS
+1. `av-edge-plugin:local` has been garbage-collected off this host five separate times
+   (question 196(d)/205: Colima's kubelet image collector). Its presence is not a property
+   anyone can rely on. A test gated on it is a test that can silently stop covering anything.
+2. The two tests do not have the same subject. This file's subject is
+   `altavista/container_hardening.py` -- `HARDENING_RUN_FLAGS`, `assert_inspect_hardening`,
+   `assert_exec_hardening` -- the SHARED implementation of "what the hardening posture must look
+   like from `docker inspect`/`docker exec`". `tests/test_edge_plugin_container.py`'s subject is
+   the plugin image. If the shared module regresses while the plugin image happens to be
+   missing, only this file would catch it.
+3. Together the two tests separate two failures that otherwise look identical: "the hardening
+   posture is broken" and "the plugin image is not on this host".
+4. It costs almost nothing: `alpine:latest` is 13.6 MB and this test runs in seconds.
+
+What this file technically proves, independent of reason 1-4 above: nothing about the plugin
+image itself guarantees that `--read-only` + `--cap-drop ALL` + `--security-opt
+no-new-privileges` + a named volume at a declared mount really produce non-root
+`.Config.User`, `.HostConfig.ReadonlyRootfs=true`, `.HostConfig.CapDrop` containing `ALL`,
+`.HostConfig.SecurityOpt` containing `no-new-privileges`, `NoNewPrivs: 1`, `Seccomp: 2`, a
+failed write to `/`, and a successful write to the volume -- on THIS Docker version, THIS
 Colima kernel, THIS host's own default seccomp profile -- as opposed to merely being plausible
-Docker documentation. `alpine:latest` (a few MB, unrelated to the plugin image, and present
-locally as of this writing -- see `_compute_skip_reason` below for what happens if it too has
-been evicted) lets this run for real, right now, regardless of the plugin image's own fate.
+Docker documentation. `alpine:latest` (a few MB, unrelated to the plugin image -- see
+`_compute_skip_reason` below for what happens if it too has been evicted) lets this run for
+real, right now, regardless of the plugin image's own fate.
+
+# History: a round-4 stand-in that the round-5 decision above chose to keep
+
+This file was written in round 4 as a stand-in, at a moment when `av-edge-plugin:local` could
+not be built at all: the Colima VM's container filesystem was completely full (0 bytes free)
+and `services/edge-plugin/build-image.sh` had no room to allocate the layers a build needs, so
+nothing on this host could prove the hardening flags actually worked. The user has since
+reclaimed that disk (measured 2026-09-15, a snapshot: `overlay 58.8G 15.0G 40.7G 27% /` inside
+the Colima VM -- 40.7 GB available, 27% used) and `av-edge-plugin:local` has been rebuilt
+(`services/edge-plugin/IMAGE_DIGEST.md` records the current image id). Round 5 (question 210)
+considered retiring this file now that its original reason for existing was gone, and chose
+instead to keep it deliberately, for the four reasons above. A reader who finds this file should
+understand both why it was born (round 4, disk exhaustion) and why it survived (round 5,
+question 210: it proves something `test_edge_plugin_container.py` cannot).
 
 # Same flags, same assertions -- literally, not by resemblance
 
@@ -32,10 +57,12 @@ Both `HARDENING_RUN_FLAGS` and the two assertion functions this test calls
 and are imported here UNCHANGED -- `tests/test_edge_plugin_container.py`'s own Part 2 imports
 and calls the identical functions on its own container. There is exactly one implementation of
 "what the hardening posture must look like from `docker inspect`/`docker exec`"; this test and
-that one both call it. When the plugin image becomes buildable again, that other test's own
-assertions are therefore already proven correct by THIS test having exercised the identical code
-path today -- the "known-good the day the image can be built again" property this task asked
-for.
+that one both call it. That is what makes this file a real probe rather than a duplicate: on any
+host where `av-edge-plugin:local` is absent, this test still exercises the whole shared
+implementation, so the other test's assertions are known-good the moment its image exists. (In
+round 4, when the image could not be built at all, that was the only thing keeping those
+assertions honest; in round 5 both tests run here, and the property still holds for the next
+host that has only one of the two images.)
 
 The one thing this test does NOT share with `test_edge_plugin_container.py`: `--user`.
 `services/edge-plugin/Dockerfile` bakes its own non-root `USER edgeplugin` (uid/gid 10001) into
@@ -111,10 +138,11 @@ def _compute_skip_reason() -> "str | None":
         return (
             f"probe image {ALPINE_IMAGE!r} is not present locally, and this test never pulls an "
             f"image itself (question 154: no network at test time) -- it may have been evicted by "
-            f"Colima's own kubelet image garbage collector under the disk pressure `tests/"
-            f"test_edge_plugin_container.py`'s own module doc measures (0 bytes free at last "
-            f"measurement). Run `docker pull {ALPINE_IMAGE}` once, on a host with network access, "
-            f"then re-run this test."
+            f"Colima's own kubelet image garbage collector, which removes every image no "
+            f"container uses once the VM disk passes its high threshold (questions 196(d)/205; "
+            f"that collector took even this image once, mid-round, in round 4). Run "
+            f"`docker pull {ALPINE_IMAGE}` once, on a host with network access, then re-run this "
+            f"test."
         )
     return None
 

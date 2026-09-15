@@ -78,6 +78,7 @@ use std::process::Command;
 use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, EventKind, Fault, FaultTargetKind, Provenance, SosConfiguration, SystemDefinition};
 use av_kernel::drm::replay::ReplayConfig;
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
+use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id, DockerTestLock};
 use gmat_sys::Gmat;
 
 // ------------------------------------------------------------------------------------------
@@ -208,6 +209,36 @@ fn skip_if_cfs_image_unavailable(test_name: &str) -> bool {
     }
 }
 
+/// Question 207/156, ported from `drm_attitude_control_renode.rs`'s own `run_byte_identical_
+/// port_traffic_between_posix_container_and_renode` preamble (`let _lock = lock_docker_tests();
+/// prune_stale_test_resources(&_lock); let run_id = test_run_id();`) -- same three calls, same
+/// order (acquire the host-wide `flock` first, sweep whatever a previous, interrupted run left
+/// behind BEFORE creating anything, then mint this run's own id). Differs from that sibling file
+/// only in being factored into one small helper: that file has exactly one Docker-gated test
+/// body to thread this preamble into, this file has FOUR
+/// ([`run_the_cfs_bound_loop_settles_and_tracks_the_native_run`],
+/// [`run_byte_identical_run_products_across_two_separately_spawned_cfs_containers`],
+/// [`run_byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free`],
+/// [`run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues`]),
+/// and repeating this exact three-line sequence (plus its rationale) four times over would just
+/// be copy-paste, not a different pattern. The lock is still held for each calling test's own
+/// WHOLE body, not just this call: returning `DockerTestLock` (not merely dropping it here) lets
+/// the caller bind it to a `let _lock = ...` that lives until that `run_...` function returns --
+/// `prune_stale_test_resources` deliberately takes `&DockerTestLock` rather than acquiring one
+/// itself (see that function's own doc comment on why: a second, independently-opened `flock` in
+/// the same process would deadlock against a lock the caller already holds) specifically so a
+/// caller can do exactly this. Each of this file's four `#[test]` wrappers calls
+/// `skip_if_cfs_image_unavailable` and returns BEFORE ever calling into its own `run_...`
+/// function, and this helper is only ever called from inside a `run_...` function (never from a
+/// `#[test]` wrapper directly) -- so a skipped test never reaches `lock_docker_tests()` at all,
+/// and never serialises against another track's own Docker-gated gates for no reason.
+fn lock_and_prune_docker_tests() -> (DockerTestLock, String) {
+    let lock = lock_docker_tests();
+    prune_stale_test_resources(&lock);
+    let run_id = test_run_id();
+    (lock, run_id)
+}
+
 fn docker_cmd(args: &[&str]) -> String {
     let output = Command::new("docker").args(args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {args:?}`: {e}"));
     if !output.status.success() {
@@ -230,18 +261,52 @@ impl Drop for DockerImageGuard {
 }
 
 /// Tags and pushes the already-built `altavista-cfs-lockstep:local` to a throwaway local
-/// registry (loopback-only -- `docker run -p 127.0.0.1::5000 registry:2`) and returns
-/// `(image_ref, real_digest, guards)` -- `real_digest` is Docker's own, recovered from
-/// `docker inspect` after the push (never invented/assumed, matching
-/// `av_lockstep::docker`'s own module doc comment's "what pulled by digest means here,
-/// honestly").
-fn push_cfs_image_to_local_registry() -> (String, String, (DockerContainerGuard, DockerImageGuard)) {
-    let registry_id = docker_cmd(&["run", "-d", "-p", "127.0.0.1::5000", "registry:2"]);
+/// registry (loopback-only -- `docker run -p 127.0.0.1::5000 registry:2`), labeled per question
+/// 156 (`test_label_args`) so a killed test's own registry container is swept by
+/// [`prune_stale_test_resources`] on the *next* run even if this run's own `Drop` guards never
+/// get to fire -- ported from `drm_attitude_control_renode.rs`'s own
+/// `push_cfs_image_to_local_registry(run_id: &str)` (same signature, same labeling, same
+/// comment on why `docker tag` cannot label the pushed *tag* itself). Returns `(image_ref,
+/// real_digest, guards)` -- `real_digest` is Docker's own, recovered from `docker inspect` after
+/// the push (never invented/assumed, matching `av_lockstep::docker`'s own module doc comment's
+/// "what pulled by digest means here, honestly").
+///
+/// **Why the pushed `:test` tag itself is not, and must never be, labeled -- proved, not just
+/// asserted (round 5).** `docker tag` has no `--label` flag: it creates an alias (a second
+/// `repository:tag` reference), never a new image object. Confirmed directly on this host:
+/// `docker image inspect altavista-cfs-lockstep:local --format '{{.Id}}'` and
+/// `docker image inspect <the tag this function pushes> --format '{{.Id}}'` print the IDENTICAL
+/// `sha256:...` id (captured in this task's own round-5 report). That id is the same persistent,
+/// host-owned `altavista-cfs-lockstep:local` build artifact [`cfs_image_unavailable_reason`]
+/// requires present before any of this file's tests even attempt to run -- so labeling the
+/// pushed tag would label that SAME image object. [`prune_stale_test_resources`]'s image half
+/// removes a labeled image by reference where it can, but falls back to bare-ID removal for a
+/// dangling image, and (question 194 item 6's own measured finding, `crates/av-lockstep/
+/// R6_3_REPORT.md` section 4) `docker rmi -f <IMAGE ID>` is documented, by-design Docker
+/// behaviour that strips EVERY repository:tag pointing at that id in one call -- so even an
+/// indirect path to that bare-ID fallback would risk deleting `:local` along with the labeled
+/// tag. Labeling the tag is therefore not merely unnecessary but actively dangerous: it would
+/// make the very next test run's own pre-flight prune capable of destroying this host's cFS
+/// build artifact. The registry CONTAINER below is this helper's own actual expensive/stateful
+/// leaked resource (question 156's real four-hour incident was a running container, not a
+/// dangling tag) -- and that one alone is labeled.
+fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerContainerGuard, DockerImageGuard)) {
+    let labels = test_label_args(run_id);
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+
+    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    registry_args.extend(label_refs.iter().copied());
+    registry_args.push("registry:2");
+    let registry_id = docker_cmd(&registry_args);
     let registry_guard = DockerContainerGuard(registry_id.clone());
     let port_line = docker_cmd(&["port", &registry_id, "5000"]);
     let port: u16 = port_line.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("a numeric host port from `docker port`, got {port_line:?}"));
     let image_ref = format!("127.0.0.1:{port}/altavista-cfs-lockstep");
     let tagged = format!("{image_ref}:test");
+    // `docker tag` has no `--label` flag (it creates an alias to an existing image object, not a
+    // new one) -- see this function's own doc comment above for the proof that this tag and
+    // CFS_LOCAL_IMAGE resolve to the same id, and why that makes labeling it dangerous rather
+    // than merely impossible.
     docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
     let image_guard = DockerImageGuard(tagged.clone());
     docker_cmd(&["push", &tagged]);
@@ -319,6 +384,11 @@ fn the_cfs_bound_loop_settles_and_tracks_the_native_run() {
 
 fn run_the_cfs_bound_loop_settles_and_tracks_the_native_run() {
     let _engine = gmat_sys::engine_lock();
+    // Question 207: held for this whole test body (see lock_and_prune_docker_tests's own doc
+    // comment) -- a different worktree's own docker-gated cargo test/pytest process racing this
+    // daemon-wide prune sweep is exactly what round 3's own gate measured failing elsewhere in
+    // this workspace.
+    let (_lock, run_id) = lock_and_prune_docker_tests();
     let (systems, base_sos) = load_systems_and_base_sos();
 
     // --- Native (BINDING_KIND_MODEL) run over the SAME 30 s window, truth-scored the same way,
@@ -350,7 +420,7 @@ fn run_the_cfs_bound_loop_settles_and_tracks_the_native_run() {
 
     // --- Container (BINDING_KIND_CONTAINER) run: the same DRM, the "controller" instance
     //     rebound. Exit criterion 2/3.
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry();
+    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
     let cfs_sos = container_sos("attitude_control_cfs_30s_sos", &base_sos, &image, &digest);
     let cfs_drm = container_drm("attitude_control_cfs_30s_drm", &cfs_sos.id, COMPARISON_DURATION_S, vec![]);
     let gmat_cfs = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
@@ -438,8 +508,11 @@ fn byte_identical_run_products_across_two_separately_spawned_cfs_containers() {
 /// unmodified, byte-identical, below.
 fn run_byte_identical_run_products_across_two_separately_spawned_cfs_containers() {
     let _engine = gmat_sys::engine_lock();
+    // Question 207: held for this whole test body -- see lock_and_prune_docker_tests's own doc
+    // comment.
+    let (_lock, run_id) = lock_and_prune_docker_tests();
     let (systems, base_sos) = load_systems_and_base_sos();
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry();
+    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
     let sos = container_sos("attitude_control_cfs_det_sos", &base_sos, &image, &digest);
     let drm = container_drm("attitude_control_cfs_det_drm", &sos.id, DETERMINISM_DURATION_S, vec![]);
 
@@ -533,8 +606,14 @@ fn byte_identical_products_when_the_container_bound_controller_is_replayed_docke
 /// so their own trajectories, and every `Event`/`Score`, are expected to match exactly.
 fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_docker_free() {
     let _engine = gmat_sys::engine_lock();
+    // Question 207: held for this whole test body -- see lock_and_prune_docker_tests's own doc
+    // comment. Held across BOTH runs below (the real container run and the Docker-free replay),
+    // not just the first -- the replay half touches no Docker at all, but releasing the lock
+    // between the two runs would defeat the point: another track's prune sweep could race the
+    // guards (_registry_guards) that stay alive until this whole function returns.
+    let (_lock, run_id) = lock_and_prune_docker_tests();
     let (systems, base_sos) = load_systems_and_base_sos();
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry();
+    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
     let sos = container_sos("attitude_control_cfs_replay_sos", &base_sos, &image, &digest);
     let drm = container_drm("attitude_control_cfs_replay_drm", &sos.id, REPLAY_DURATION_S, vec![]);
 
@@ -641,8 +720,11 @@ fn a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_an
 
 fn run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepted_and_the_run_continues() {
     let _engine = gmat_sys::engine_lock();
+    // Question 207: held for this whole test body -- see lock_and_prune_docker_tests's own doc
+    // comment.
+    let (_lock, run_id) = lock_and_prune_docker_tests();
     let (systems, base_sos) = load_systems_and_base_sos();
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry();
+    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
     let sos = container_sos("attitude_control_cfs_reset_sos", &base_sos, &image, &digest);
     let scenario_start = schema::parse_drm_yaml(&read("demo_attitude_control.drm.yaml")).expect("native DRM parses").scenario.expect("scenario").start_tai_ns;
     let fault_tai_ns = scenario_start + RESET_FAULT_TAI_OFFSET_S * 1_000_000_000;

@@ -39,6 +39,19 @@ the file is present, and skips VISIBLY (naming the file and pointing at the Dock
 rebuild recipe) when it is not; every other (non-build-artifact) manifest entry is still verified
 strictly and a mismatch or a missing non-build-artifact entry still fails the test outright.
 
+Round 5 (docs/edge-plan.md, question 210) extended that same BUILD_ARTIFACT convention to the
+DIAGNOSTIC half of this file, which had never had it. `compute_current_copy_manifest` used to
+raise `AssertionError("COPY source path does not exist on disk: services/cfs/bin/
+av-lockstep-shim")` for exactly the path `test_manifest_paths_exist_and_hash_match` already knew
+to tolerate -- so on a real digest mismatch, on any checkout that has not run the cross-build,
+the operator saw that assertion INSTEAD of the message naming the digest that moved and what in
+the build context moved it. (The lead's own acceptance gate hit this.) A COPY source the manifest
+marks BUILD_ARTIFACT is now allowed to be absent: it comes back as an absent-build-artifact path,
+is reported on its own explicitly labelled `! absent build artifact:` line, and is deliberately
+kept OUT of the diff's `removed` set so it can never misread as real content loss. Any other
+missing COPY source is still a hard failure with the same message it always had -- the tests at
+the bottom of this file pin both halves, including that negative control.
+
 Per question 164 (a diagnostic that matched the wrong banner substring and silently never
 matched): every assertion here is pinned against a captured real artifact -- the manifest file
 `build-image.sh` actually wrote and the Dockerfile's actual COPY lines -- never against a
@@ -48,6 +61,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -168,56 +182,108 @@ def load_manifest() -> tuple[dict[str, str], set[str]]:
     return parse_manifest(MANIFEST_PATH.read_text())
 
 
-def parse_dockerfile_copy_srcs() -> list[str]:
+def parse_dockerfile_copy_srcs(dockerfile: Path = DOCKERFILE) -> list[str]:
     """Re-derive the Dockerfile's host COPY source paths, mirroring build-image.sh's own
     parser (kept independent on purpose so a bug in one is unlikely to be masked by the same
     bug in the other -- see question 164's captured-artifact rule)."""
     srcs: list[str] = []
-    for line in DOCKERFILE.read_text().splitlines():
+    for line in dockerfile.read_text().splitlines():
         if not line.startswith("COPY "):
             continue
         rest = line[len("COPY "):].strip()
         tokens = rest.split()
-        assert len(tokens) >= 2, f"unparsable COPY line in {DOCKERFILE}: {line!r}"
+        assert len(tokens) >= 2, f"unparsable COPY line in {dockerfile}: {line!r}"
         first = tokens[0]
         if first.startswith("--from="):
             continue
         assert not first.startswith("--"), (
-            f"unrecognized COPY flag {first!r} in {DOCKERFILE}: {line!r} -- extend this parser"
+            f"unrecognized COPY flag {first!r} in {dockerfile}: {line!r} -- extend this parser"
         )
-        assert len(tokens) == 2, f"unexpected COPY line shape in {DOCKERFILE}: {line!r}"
+        assert len(tokens) == 2, f"unexpected COPY line shape in {dockerfile}: {line!r}"
         srcs.append(first)
-    assert srcs, f"parsed zero host COPY paths out of {DOCKERFILE}"
+    assert srcs, f"parsed zero host COPY paths out of {dockerfile}"
     return srcs
 
 
-def compute_current_copy_manifest() -> dict[str, str]:
-    """path -> sha256 for every file the Dockerfile's COPY steps currently read from (directories
-    expanded recursively), computed fresh from the working tree right now."""
+def compute_current_copy_manifest(
+    *,
+    repo_root: Path = REPO_ROOT,
+    dockerfile: Path = DOCKERFILE,
+    build_artifacts: frozenset[str] = frozenset(),
+) -> tuple[dict[str, str], list[str]]:
+    """(path -> sha256, sorted list of absent build-artifact paths) for the Dockerfile's COPY
+    steps, computed fresh from the working tree right now (directories expanded recursively).
+
+    Mirrors test_manifest_paths_exist_and_hash_match's own convention (question 179's
+    amendment): a COPY source path that `build_artifacts` marks as a compiled, git-ignored
+    cross-build artifact is allowed to be absent -- reported back in the second element rather
+    than raising, since it is expected on a checkout that has not run the cross-build step. Any
+    OTHER missing COPY source is still a hard failure, unchanged from before.
+
+    `repo_root` / `dockerfile` default to this module's real paths; they're parameters (rather
+    than always reading the globals) purely so tests can point this at a synthetic tmp_path tree
+    without touching the real checkout.
+    """
     current: dict[str, str] = {}
-    for src in parse_dockerfile_copy_srcs():
-        abs_path = REPO_ROOT / src
+    absent_build_artifacts: list[str] = []
+    for src in parse_dockerfile_copy_srcs(dockerfile=dockerfile):
+        abs_path = repo_root / src
         if abs_path.is_file():
             current[src] = sha256_file(abs_path)
         elif abs_path.is_dir():
             for file in sorted(abs_path.rglob("*")):
                 if file.is_file():
-                    rel = file.relative_to(REPO_ROOT).as_posix()
+                    rel = file.relative_to(repo_root).as_posix()
                     current[rel] = sha256_file(file)
+        elif src in build_artifacts:
+            absent_build_artifacts.append(src)
         else:
             raise AssertionError(f"COPY source path does not exist on disk: {src}")
-    return current
+    return current, sorted(absent_build_artifacts)
 
 
-def _diff_manifests(recorded: dict[str, str], current: dict[str, str]) -> str:
+def _absent_build_artifact_lines(absent_build_artifacts: list[str]) -> list[str]:
+    return [
+        f"  ! absent build artifact: {p}  (compiled, git-ignored cross-build output -- expected "
+        "on a checkout that has not run the cross-build step; not a build-context change -- see "
+        "services/cfs/Dockerfile's own header comment for the exact rebuild recipe)"
+        for p in absent_build_artifacts
+    ]
+
+
+def _diff_manifests(
+    recorded: dict[str, str],
+    current: dict[str, str],
+    absent_build_artifacts: Sequence[str] = (),
+) -> str:
     added = sorted(set(current) - set(recorded))
-    removed = sorted(set(recorded) - set(current))
+    removed = sorted(set(recorded) - set(current) - set(absent_build_artifacts))
     changed = sorted(p for p in set(recorded) & set(current) if recorded[p] != current[p])
 
     if not added and not removed and not changed:
-        return (
-            "manifest and current build context agree EXACTLY (no path added, removed, or "
-            "changed) -- whatever moved the digest is NOT in the COPYed build context.\n"
+        if not absent_build_artifacts:
+            return (
+                "manifest and current build context agree EXACTLY (no path added, removed, or "
+                "changed) -- whatever moved the digest is NOT in the COPYed build context.\n"
+                "  The known cause, measured for M25.4a and written up in services/cfs/"
+                "IMAGE_DIGEST.md's 'Re-pinned 2026-09-08' section: this image is not reproducible "
+                "by construction. third_party/cfs/cfe/cmake/generate_build_env.cmake bakes `date "
+                "+%Y%m%d%H%M` into cFE's CONFIGDATA as BUILDDATE unless $BUILDDATE is set, and "
+                "services/cfs/Dockerfile sets neither it nor BUILDUSER/BUILDHOST -- so any build "
+                "that genuinely re-executes the builder stage (rather than being served whole from "
+                "Docker's layer cache) produces a different image ID from identical inputs.\n"
+                "  If that is what happened, this is expected drift, not a defect: re-pin. Other "
+                "candidates worth excluding first: base image tag resolution (`FROM ubuntu:22.04` "
+                "is a floating tag), unpinned apt package versions in the Dockerfile's `apt-get "
+                "install` lines, third_party/fetch-cfs.sh's pinned clone, Docker/BuildKit version."
+            )
+        lines = [
+            "manifest and current build context agree EXACTLY on every path present on this "
+            "host (no path added, removed, or changed) -- whatever moved the digest is NOT in "
+            "the part of the COPYed build context that is present here.",
+        ]
+        lines.extend(_absent_build_artifact_lines(absent_build_artifacts))
+        lines.append(
             "  The known cause, measured for M25.4a and written up in services/cfs/"
             "IMAGE_DIGEST.md's 'Re-pinned 2026-09-08' section: this image is not reproducible "
             "by construction. third_party/cfs/cfe/cmake/generate_build_env.cmake bakes `date "
@@ -230,8 +296,10 @@ def _diff_manifests(recorded: dict[str, str], current: dict[str, str]) -> str:
             "is a floating tag), unpinned apt package versions in the Dockerfile's `apt-get "
             "install` lines, third_party/fetch-cfs.sh's pinned clone, Docker/BuildKit version."
         )
+        return "\n".join(lines)
 
     lines = ["manifest vs. current build context diff:"]
+    lines.extend(_absent_build_artifact_lines(absent_build_artifacts))
     for p in added:
         lines.append(f"  + added:   {p}  (sha256:{current[p]})")
     for p in removed:
@@ -316,9 +384,11 @@ def _run_image_digest_matches_recorded_value() -> None:
     if actual == expected:
         return
 
-    recorded_manifest, _build_artifacts = load_manifest()
-    current_manifest = compute_current_copy_manifest()
-    diff = _diff_manifests(recorded_manifest, current_manifest)
+    recorded_manifest, build_artifacts = load_manifest()
+    current_manifest, absent_build_artifacts = compute_current_copy_manifest(
+        build_artifacts=frozenset(build_artifacts)
+    )
+    diff = _diff_manifests(recorded_manifest, current_manifest, absent_build_artifacts)
 
     pytest.fail(
         f"built image digest {actual!r} does not match {DIGEST_DOC}'s recorded {expected!r}.\n"
@@ -326,3 +396,85 @@ def _run_image_digest_matches_recorded_value() -> None:
         f"If this is an intentional change: re-run `{BUILD_SCRIPT}`, then update the recorded "
         f"digest and manifest in {DIGEST_DOC} and {MANIFEST_PATH}."
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Test 3: the question-179 convention applied to compute_current_copy_manifest / _diff_manifests
+# themselves. Pure file/string functions, no Docker involved -- must run everywhere, and must
+# pass whether or not services/cfs/bin/av-lockstep-shim actually exists on this host, so it
+# drives the real functions against a synthetic tmp_path tree rather than the real checkout.
+# ---------------------------------------------------------------------------------------------
+def test_missing_build_artifact_reported_in_diff_not_raised(tmp_path: Path) -> None:
+    """A COPY source path the manifest marks BUILD_ARTIFACT is allowed to be absent -- it must
+    come back from compute_current_copy_manifest() as an absent build artifact, not raise, and
+    _diff_manifests() must name it and label it as a build artifact rather than folding it into
+    `removed` (which would misread as real content loss) or silently vanishing from an
+    'agree EXACTLY' verdict (which would misreport the comparison as covering everything)."""
+    repo_root = tmp_path / "repo"
+    (repo_root / "bin").mkdir(parents=True)
+    dockerfile = repo_root / "Dockerfile"
+    dockerfile.write_text(
+        "FROM ubuntu:22.04\nCOPY bin/av-lockstep-shim /opt/bin/av-lockstep-shim\n"
+    )
+    # bin/av-lockstep-shim is intentionally never created under repo_root -- the dir exists
+    # (mirroring a real git checkout, where services/cfs/bin/ itself is not git-ignored, only
+    # the compiled binary inside it is) but the file the COPY line names does not.
+
+    fake_sha = "0" * 64
+    manifest_text = f"# header\n{fake_sha}  bin/av-lockstep-shim  BUILD_ARTIFACT\n"
+    recorded, build_artifacts = parse_manifest(manifest_text)
+    assert build_artifacts == {"bin/av-lockstep-shim"}
+
+    current, absent = compute_current_copy_manifest(
+        repo_root=repo_root, dockerfile=dockerfile, build_artifacts=frozenset(build_artifacts)
+    )
+    assert current == {}
+    assert absent == ["bin/av-lockstep-shim"]
+
+    diff = _diff_manifests(recorded, current, absent)
+    assert "bin/av-lockstep-shim" in diff
+    assert "build artifact" in diff.lower()
+    # It must still say the context otherwise agrees (nothing present changed) -- not claim a
+    # content change that did not happen.
+    assert "agree EXACTLY" in diff
+    # It must NOT read as a `removed` (content-loss) diff entry -- "removed" still legitimately
+    # appears in the prose ("no path added, removed, or changed"), so check the entry marker.
+    assert "- removed:" not in diff
+
+
+def test_missing_non_build_artifact_copy_source_still_raises(tmp_path: Path) -> None:
+    """Negative control: a missing COPY source path that the manifest does NOT mark
+    BUILD_ARTIFACT must still be a hard failure, with the pre-existing message -- the fix must
+    not weaken that."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+    dockerfile = repo_root / "Dockerfile"
+    dockerfile.write_text(
+        "FROM ubuntu:22.04\nCOPY some/tracked-file.txt /opt/some/tracked-file.txt\n"
+    )
+    # some/tracked-file.txt is never created, and build_artifacts is empty -- nothing marks
+    # this path as a build artifact.
+
+    with pytest.raises(
+        AssertionError,
+        match=re.escape("COPY source path does not exist on disk: some/tracked-file.txt"),
+    ):
+        compute_current_copy_manifest(
+            repo_root=repo_root, dockerfile=dockerfile, build_artifacts=frozenset()
+        )
+
+
+def test_missing_build_artifact_alongside_real_change_still_shown(tmp_path: Path) -> None:
+    """When an absent build artifact coincides with an actual content change elsewhere, the
+    diff must fall into the real 'manifest vs. current build context diff' branch (not the
+    'agree EXACTLY' one) and must show both: the absent build artifact labelled as such, and the
+    real change."""
+    recorded = {"bin/av-lockstep-shim": "0" * 64, "src/app.c": "1" * 64}
+    current = {"src/app.c": "2" * 64}  # app.c's hash changed; the build artifact is absent
+
+    diff = _diff_manifests(recorded, current, ["bin/av-lockstep-shim"])
+    assert "manifest vs. current build context diff:" in diff
+    assert "bin/av-lockstep-shim" in diff
+    assert "build artifact" in diff.lower()
+    assert "~ changed: src/app.c" in diff
+    assert "agree EXACTLY" not in diff
