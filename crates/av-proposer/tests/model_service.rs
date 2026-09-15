@@ -109,8 +109,11 @@ async fn predict_over_a_real_loopback_channel_genuinely_propagates_the_belief() 
 async fn model_infos_identity_is_exactly_what_a_real_proposals_evidence_carries() {
     let identity = ModelIdentity { node_id: "av-proposer.station-keeping".to_string(), version: "7.7.7".to_string() };
     let (model_client, model_shutdown_tx, model_handle) = spawn_real_model_service(identity.clone()).await;
-    let served_node_id = model_client.info().node_id.clone();
     let served_version = model_client.info().version.clone();
+    // Sanity: the ModelService really did serve the identity this test declared (D2's own
+    // "one declaration" line still holds for `ModelInfo` itself) -- `model_identity` is no
+    // longer compared against this below (see the R5.1 comment further down).
+    assert_eq!(model_client.info().node_id, identity.node_id);
 
     let (entries, ladder) = common::catalogue_over_real_fixture("CUI");
     let harness = common::GatewayHarness::spawn("model-info-matches-evidence", 1_000, entries, ladder).await;
@@ -130,6 +133,7 @@ async fn model_infos_identity_is_exactly_what_a_real_proposals_evidence_carries(
         // from the identical --model-node-id/--model-version CLI arguments.
         model: identity.clone(),
         rationale_prefix: "model-info-matches-evidence test".to_string(),
+        service_token: harness.mint_service_token(),
     };
 
     let outcome = run(&mut gateway_client, &config, &counters).await.expect("real fixture proposes");
@@ -139,9 +143,17 @@ async fn model_infos_identity_is_exactly_what_a_real_proposals_evidence_carries(
     };
 
     let evidence = av_gateway::evidence::EvidenceRecorder::new(&harness.evidence_ledger).read_back(&command_id).expect("read_back").expect("evidence present");
-    assert_eq!(evidence.model_identity, served_node_id, "ProposalEvidence.model_identity must equal the served ModelInfo.node_id exactly");
+    // R5.1/question 208(b), invariant D (a deliberate, documented behaviour change from this
+    // test's own pre-R5.1 acceptance line): `ProposalEvidence.model_identity` now records the
+    // VERIFIED service token subject, never a caller-declared identity string --
+    // `av_proposer::proposer::run` sends `principal: String::new()` precisely because
+    // `ModelIdentity.node_id` (a model-version identifier, e.g. a Kalman-filter variant) has
+    // no reason to equal the service account authenticating the call, and invariant D forbids
+    // trusting a declared value that disagrees with the verified one. `model_version` is
+    // UNCHANGED by R5.1 (it is not a proposal-identity field) and still equals `ModelInfo.
+    // version` exactly, preserving the rest of D2's "one declaration, two consumers" line.
+    assert_eq!(evidence.model_identity, common::SERVICE_TOKEN_SUBJECT, "ProposalEvidence.model_identity must equal the verified service token subject (R5.1 invariant D), not the declared model node_id");
     assert_eq!(evidence.model_version, served_version, "ProposalEvidence.model_version must equal the served ModelInfo.version exactly");
-    assert_eq!(evidence.model_identity, config.model.node_id);
     assert_eq!(evidence.model_version, config.model.version);
 
     let _ = model_shutdown_tx.send(());

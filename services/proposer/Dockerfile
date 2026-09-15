@@ -196,6 +196,19 @@ COPY tests/fixtures/demo_two_instance.runproducts.bin /opt/proposer/fixtures/dem
 # every one of `av-proposer`'s own required flags (`--gateway-endpoint`, `--run-id`,
 # `--caller-clearance`, `--entity-id`, `--command-class`, `--score-name`,
 # `--reference-radius-m`, `--threshold-m`, `--gain-per-s`, `--max-burn-mps`,
-# `--model-node-id`, `--model-version`) is a `docker run <image> ...` trailing argument,
-# exec-form ENTRYPOINT appending them after this list verbatim (question 199).
+# `--model-node-id`, `--model-version`, and -- R5.1/question 208(b), new this round --
+# `--service-token-file <PATH>`) is a `docker run <image> ...` trailing argument, exec-form
+# ENTRYPOINT appending them after this list verbatim (question 199).
+#
+# `--service-token-file <PATH>` (REQUIRED, R5.1): this proposer's own service-subject OIDC
+# token, read from a FILE inside the container -- never `--service-token <VALUE>`, since a
+# flag VALUE is visible in `ps` (even inside a container's own pid namespace) and in
+# `docker inspect <container>`'s own recorded `Config.Cmd`/`Args`. A real deployment supplies
+# it with a bind mount or a secret mount, e.g.:
+#   docker run -v /path/to/service-token:/run/secrets/av-proposer-token:ro <image> \
+#     --service-token-file /run/secrets/av-proposer-token ...
+# An absent or empty token file makes this binary refuse to start with a typed error --
+# invariant B's fail-closed guarantee: there is no "no token supplied" default that means
+# "proceed unauthenticated." `tests/test_proposer_container.py` mounts one this same way,
+# under `.av-test-tmp/` (Colima mounts only `$HOME`, never `/tmp`).
 ENTRYPOINT ["/usr/local/bin/av-proposer"]

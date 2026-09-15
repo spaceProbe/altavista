@@ -122,19 +122,20 @@ mod harness {
     }
 
     /// Spawns `ModelProposeServiceImpl` over its own real loopback socket, wired to
-    /// `authority`/`evidence_ledger`/`clock`/`counters` -- the gRPC half of the agreement
-    /// this file proves.
+    /// `authority`/`evidence_ledger`/`clock`/`counters`/`auth` -- the gRPC half of the
+    /// agreement this file proves.
     pub async fn spawn_model_propose_service(
         authority: Arc<ProposeOnlyAuthority>,
         evidence_ledger: Arc<Ledger>,
         clock: Arc<dyn av_command::clock::Clock>,
         counters: Arc<av_command::counters::Counters>,
+        auth: Arc<av_gateway::auth::AuthContext>,
     ) -> (av_gateway::pb::model_propose_service_client::ModelProposeServiceClient<tonic::transport::Channel>, oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
         use av_gateway::pb::model_propose_service_client::ModelProposeServiceClient;
         use av_gateway::pb::model_propose_service_server::ModelProposeServiceServer;
         use av_gateway::propose_flow::ModelProposeServiceImpl;
 
-        let servicer = ModelProposeServiceImpl::new(authority, evidence_ledger, clock, counters);
+        let servicer = ModelProposeServiceImpl::new(authority, evidence_ledger, clock, counters, auth);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind an ephemeral loopback port");
         let addr = listener.local_addr().expect("local_addr");
         let incoming = TcpListenerStream::new(listener);
@@ -154,25 +155,28 @@ mod harness {
 }
 
 mod common;
+mod auth_common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use av_cdm::pb::{Label, ProposalEvidence, ProposeCommandRequest, Provenance, RunIdentity, RunProducts};
 use av_command::clock::Clock;
+use av_gateway::auth::AuthContext;
 use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
 use av_gateway::counters::Counters;
 use av_gateway::evidence::EvidenceRecorder;
 use av_gateway::gateway::GatewayCore;
 use av_gateway::labels::ClearanceLadder;
 use av_gateway::mcp::{McpContext, McpHandler};
+use auth_common::GROUP_PROPOSER;
 use harness::CommandAuthorityHarness;
 use serde_json::Value;
 
-/// An `McpHandler` wired to the SAME `authority`/`evidence_ledger`/`clock`/`counters` a test
-/// hands it -- so its half of the agreement runs against the identical real
+/// An `McpHandler` wired to the SAME `authority`/`evidence_ledger`/`clock`/`counters`/`auth` a
+/// test hands it -- so its half of the agreement runs against the identical real
 /// `CommandAuthorityServiceImpl` and evidence ledger the gRPC half does.
-fn mcp_handler(authority: Arc<av_gateway::propose_only::ProposeOnlyAuthority>, evidence_ledger: Arc<av_command::ledger::Ledger>, clock: Arc<dyn Clock>, counters: Arc<Counters>) -> McpHandler {
+fn mcp_handler(authority: Arc<av_gateway::propose_only::ProposeOnlyAuthority>, evidence_ledger: Arc<av_command::ledger::Ledger>, clock: Arc<dyn Clock>, counters: Arc<Counters>, auth: Arc<AuthContext>) -> McpHandler {
     let mut entries = BTreeMap::new();
     entries.insert(
         "run-a".to_string(),
@@ -183,10 +187,14 @@ fn mcp_handler(authority: Arc<av_gateway::propose_only::ProposeOnlyAuthority>, e
     );
     let ladder = ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]);
     let gateway = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, Arc::new(Counters::new())));
-    McpHandler::new(McpContext { gateway, authority, evidence_ledger, clock, counters })
+    McpHandler::new(McpContext { gateway, authority, evidence_ledger, clock, counters, auth })
 }
 
-fn mcp_propose_args(command_id: &str) -> Value {
+/// R5.1: this file's `principal` field ("model-x") is now a caller-DECLARED label that must
+/// agree with the verified token subject or be refused (invariant D) -- every caller of this
+/// helper mints its own token with `sub == "model-x"` (`common::mint_token`) so the pre-
+/// existing "model-x" assertions/comparisons below keep meaning what they always meant.
+fn mcp_propose_args(command_id: &str, caller_token: &str) -> Value {
     serde_json::json!({
         "command_id": command_id,
         "entity_id": "sat-1",
@@ -198,10 +206,11 @@ fn mcp_propose_args(command_id: &str) -> Value {
         "run_id": "run-fixture",
         "config_hash": "hash-fixture",
         "query_ids": ["q1", "q2"],
+        "caller_token": caller_token,
     })
 }
 
-fn grpc_propose_request(command_id: &str) -> ProposeCommandRequest {
+fn grpc_propose_request(command_id: &str, caller_token: &str) -> ProposeCommandRequest {
     ProposeCommandRequest {
         command_id: command_id.to_string(),
         entity_id: "sat-1".to_string(),
@@ -215,6 +224,7 @@ fn grpc_propose_request(command_id: &str) -> ProposeCommandRequest {
         model_version: "1.0.0".to_string(),
         run: Some(RunIdentity { run_id: "run-fixture".to_string(), config_hash: "hash-fixture".to_string() }),
         query_ids: vec!["q1".to_string(), "q2".to_string()],
+        caller_token: caller_token.to_string(),
     }
 }
 
@@ -226,10 +236,15 @@ async fn two_propose_surfaces_agree_on_the_same_outcome_for_equivalent_input() {
     let clock: Arc<dyn Clock> = cmd_auth.clock.clone();
     let mcp_counters = Arc::new(Counters::new());
     let grpc_counters = Arc::new(Counters::new());
+    let issuer = av_command::test_support::TestIssuer::new();
+    let auth = auth_common::test_auth_context(&issuer, auth_common::test_clock());
+    // R5.1: `sub == "model-x"` so this file's own pre-existing "model-x" assertions keep
+    // meaning what they always meant -- see `mcp_propose_args`'s own doc comment.
+    let token = auth_common::mint_token(&issuer, "model-x", &[GROUP_PROPOSER], auth_common::TEST_NOW_UNIX_S, 3_600);
 
     // MCP surface.
-    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters);
-    let mcp_args = mcp_propose_args("agree-mcp-1");
+    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters, auth.clone());
+    let mcp_args = mcp_propose_args("agree-mcp-1", &token);
     let raw = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments": mcp_args}}).to_string();
     let mcp_resp = handler.handle_message(&raw).await.expect("a request with an id always gets a response");
     // Question 209(a): Propose now checks automatically -- "burn" is admitted (well under the
@@ -239,8 +254,8 @@ async fn two_propose_surfaces_agree_on_the_same_outcome_for_equivalent_input() {
     assert_eq!(mcp_resp["result"]["command_id"], "agree-mcp-1");
 
     // gRPC surface, over a real loopback socket.
-    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters).await;
-    let grpc_resp = grpc_client.propose_command(grpc_propose_request("agree-grpc-1")).await.expect("ProposeCommand rpc succeeds").into_inner();
+    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters, auth).await;
+    let grpc_resp = grpc_client.propose_command(grpc_propose_request("agree-grpc-1", &token)).await.expect("ProposeCommand rpc succeeds").into_inner();
     let grpc_command = grpc_resp.command.expect("a successful ProposeCommandResponse always carries the command");
     assert_eq!(grpc_command.state, av_cdm::pb::CommandState::Checked as i32);
     assert_eq!(grpc_command.id, "agree-grpc-1");
@@ -286,9 +301,12 @@ async fn two_propose_surfaces_agree_on_the_same_refusal_for_the_same_crafted_inp
     let clock: Arc<dyn Clock> = cmd_auth.clock.clone();
     let mcp_counters = Arc::new(Counters::new());
     let grpc_counters = Arc::new(Counters::new());
+    let issuer = av_command::test_support::TestIssuer::new();
+    let auth = auth_common::test_auth_context(&issuer, auth_common::test_clock());
+    let token = auth_common::mint_token(&issuer, "model-x", &[GROUP_PROPOSER], auth_common::TEST_NOW_UNIX_S, 3_600);
 
-    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters);
-    let mut mcp_args = mcp_propose_args("refuse-mcp-1");
+    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters, auth.clone());
+    let mut mcp_args = mcp_propose_args("refuse-mcp-1", &token);
     mcp_args["envelope_id"] = Value::String("env-station-keeping".to_string());
     let raw = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments": mcp_args}}).to_string();
     let mcp_resp = handler.handle_message(&raw).await.expect("a request with an id always gets a response");
@@ -296,8 +314,8 @@ async fn two_propose_surfaces_agree_on_the_same_refusal_for_the_same_crafted_inp
     assert_eq!(mcp_resp["error"]["code"], -32602);
     assert!(mcp_message.contains("propose refuses a non-empty envelope_id"), "{mcp_message}");
 
-    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters).await;
-    let mut grpc_req = grpc_propose_request("refuse-grpc-1");
+    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters, auth).await;
+    let mut grpc_req = grpc_propose_request("refuse-grpc-1", &token);
     grpc_req.envelope_id = "env-station-keeping".to_string();
     let status = grpc_client.propose_command(grpc_req).await.expect_err("a non-empty envelope_id must be refused");
     assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
@@ -331,9 +349,12 @@ async fn two_propose_surfaces_agree_on_a_policy_denial() {
     let clock: Arc<dyn Clock> = cmd_auth.clock.clone();
     let mcp_counters = Arc::new(Counters::new());
     let grpc_counters = Arc::new(Counters::new());
+    let issuer = av_command::test_support::TestIssuer::new();
+    let auth = auth_common::test_auth_context(&issuer, auth_common::test_clock());
+    let token = auth_common::mint_token(&issuer, "model-x", &[GROUP_PROPOSER], auth_common::TEST_NOW_UNIX_S, 3_600);
 
-    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters.clone());
-    let mut mcp_args = mcp_propose_args("deny-mcp-1");
+    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters.clone(), auth.clone());
+    let mut mcp_args = mcp_propose_args("deny-mcp-1", &token);
     mcp_args["command_class"] = Value::String("payload".to_string());
     let raw = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments": mcp_args}}).to_string();
     let mcp_resp = handler.handle_message(&raw).await.expect("a request with an id always gets a response");
@@ -342,8 +363,8 @@ async fn two_propose_surfaces_agree_on_a_policy_denial() {
     assert!(mcp_message.contains("command_class payload is not admitted by policy"), "{mcp_message}");
     assert_eq!(mcp_counters.get("propose_policy_denied"), 1, "the MCP surface must count the identical refusal code");
 
-    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters.clone()).await;
-    let mut grpc_req = grpc_propose_request("deny-grpc-1");
+    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters.clone(), auth).await;
+    let mut grpc_req = grpc_propose_request("deny-grpc-1", &token);
     grpc_req.command_class = "payload".to_string();
     let status = grpc_client.propose_command(grpc_req).await.expect_err("a payload-class command must be refused by policy");
     assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");

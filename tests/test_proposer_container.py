@@ -152,6 +152,18 @@ COMMAND_ADMIN_ADDR = "127.0.0.1:50111"  # explicit: av-command's OWN default adm
 GATEWAY_INTERNAL_BIND = "0.0.0.0:50170"
 GATEWAY_PORT = 50170
 
+# R5.1/question 208(b): the throwaway issuer both av-command's (pre-existing, unrelated to this
+# round -- Propose performs no token verification at all) and av-gateway's (new this round,
+# REAL verification against a real token) `--oidc-issuer` flags use. Two distinct AUDIENCEs
+# (one per service, matching each binary's own `--oidc-audience`) even though the same
+# throwaway keypair signs tokens for both, since `av_command::oidc::verify` checks `aud`
+# against exactly the configured service's own audience string.
+OIDC_ISSUER = "https://sso.test.example/"
+GATEWAY_OIDC_AUDIENCE = "av-gateway-container-it"
+# The group name av-gateway's own `--auth-config-path` YAML (`_write_gateway_auth_config`)
+# grants "query"+"propose" -- the proposer's own service token carries this group.
+GATEWAY_SERVICE_GROUP = "proposer-service"
+
 # crates/av-lockstep/src/docker.rs's own established convention (`TEST_LABEL_KEY`/
 # `TEST_LABEL_VALUE`), reused verbatim -- tests/test_edge_plugin_container.py's own precedent.
 TEST_LABEL_KEY = "av.test"
@@ -359,7 +371,7 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
     return dest_command, dest_gateway
 
 
-def _generate_throwaway_oidc_keypair(dest_dir: Path) -> Path:
+def _generate_throwaway_oidc_keypair(dest_dir: Path) -> tuple[Path, Path]:
     """A throwaway RSA keypair, entirely local (`openssl genrsa`/`rsa -pubout` touch no
     network -- question 154 is not violated despite running at test time, the identical
     reasoning `tests/test_edge_plugin_container.py::_run_local_openssl_self_signed_ca` already
@@ -367,14 +379,62 @@ def _generate_throwaway_oidc_keypair(dest_dir: Path) -> Path:
     `--oidc-public-key-path` at startup (A2.1, no default) but this test's own propose flow
     never calls `Authorize` (only `Propose`, which performs no token verification at all --
     `crates/av-command/src/service.rs::propose`) -- so the public key's own content is never
-    actually checked against anything; only its PEM shape (`PKey::public_key_from_pem`) matters
-    for `av-command` to start at all. Returns the public key's own path."""
+    actually checked against anything for av-command's OWN startup; only its PEM shape
+    (`PKey::public_key_from_pem`) matters for it to start at all. R5.1/question 208(b):
+    `av-gateway` now ALSO requires the identical three flags, and DOES verify real tokens
+    signed against this keypair's own PRIVATE half (`_mint_rs256_jwt` below, for the proposer's
+    own service token) -- so this function now returns BOTH halves, not the public key alone."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     key_path = dest_dir / "oidc_private.pem"
     pub_path = dest_dir / "oidc_public.pem"
     subprocess.run([OPENSSL, "genrsa", "-out", str(key_path), "2048"], capture_output=True, timeout=15, check=True)
     subprocess.run([OPENSSL, "rsa", "-in", str(key_path), "-pubout", "-out", str(pub_path)], capture_output=True, timeout=15, check=True)
-    return pub_path
+    return key_path, pub_path
+
+
+def _b64url(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _mint_rs256_jwt(private_key_path: Path, *, issuer: str, audience: str, subject: str, groups: list[str], ttl_s: int = 3600) -> str:
+    """R5.1/question 208(b): mints a real, RS256-signed compact JWS entirely locally (`openssl
+    dgst -sha256 -sign` touches no network -- question 154, the identical reasoning
+    `_generate_throwaway_oidc_keypair`'s own doc gives), for `av-gateway`'s own `crate::auth::
+    AuthContext` (`crates/av-command/src/oidc.rs::verify`) to actually verify -- mirrors that
+    module's own `TestIssuer::mint` byte for byte (header `{"alg":"RS256","typ":"JWT"}`, the
+    signing input `header_b64.payload_b64`, RS256 = SHA-256 digest signed with the RSA private
+    key), but as a subprocess pipeline rather than an in-process `openssl` crate call, since
+    this file is Python, not Rust."""
+    now = int(time.time())
+    header = {"alg": "RS256", "typ": "JWT"}
+    payload = {"iss": issuer, "aud": audience, "sub": subject, "iat": now, "exp": now + ttl_s, "groups": groups}
+    header_b64 = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    sig = subprocess.run(
+        [OPENSSL, "dgst", "-sha256", "-sign", str(private_key_path)],
+        input=signing_input, capture_output=True, timeout=15, check=True,
+    ).stdout
+    return f"{header_b64}.{payload_b64}.{_b64url(sig)}"
+
+
+def _write_gateway_auth_config(dest_dir: Path, *, service_group: str, clearance: str) -> Path:
+    """R5.1: `av-gateway`'s own `--auth-config-path` YAML (`crates/av-gateway/src/auth.rs::
+    load_gateway_auth_config`) -- grants `service_group` both `"query"` (the proposer reads
+    scores before it ever proposes) and `"propose"`, at `clearance` (`crate::auth::
+    GroupClearanceMap`). No human `roles` block needed: this test's own flow is service-only."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    path = dest_dir / "gateway-authority.yaml"
+    path.write_text(
+        "roles: {}\n"
+        "service_roles:\n"
+        f"  {service_group}: [\"query\", \"propose\"]\n"
+        "group_clearance:\n"
+        f"  {service_group}: {clearance}\n"
+    )
+    return path
 
 
 def _write_minimal_execution_profile(dest_dir: Path) -> Path:
@@ -500,6 +560,23 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
 
     try:
         # -----------------------------------------------------------------------------------
+        # Part 0 -- R5.1/question 208(b): the throwaway OIDC keypair and the proposer's own
+        # real, signed service token, generated FIRST (moved ahead of Part 1, not only Part 2)
+        # because av-proposer's own CLI now REQUIRES --service-token-file to start at all
+        # (invariant B: an absent token must make the proposer fail with a typed error, never
+        # proceed unauthenticated) -- even Part 1's deny-all run needs a token FILE bind-mounted
+        # to get far enough to attempt (and fail) the network connection Part 1 actually
+        # measures. Colima mounts only $HOME (see this module's own doc, "Why every bind-mount
+        # source lives under .av-test-tmp/") -- the token file lives under run_scratch, never
+        # under /tmp, and is passed to the container as --service-token-file <PATH>, never
+        # --service-token <VALUE> (a flag value is visible in `ps`/`docker inspect`).
+        # -----------------------------------------------------------------------------------
+        oidc_private_key, oidc_public_key = _generate_throwaway_oidc_keypair(run_scratch / "oidc")
+        service_token = _mint_rs256_jwt(oidc_private_key, issuer=OIDC_ISSUER, audience=GATEWAY_OIDC_AUDIENCE, subject="av-proposer-it", groups=[GATEWAY_SERVICE_GROUP])
+        service_token_path = run_scratch / "service_token"
+        service_token_path.write_text(service_token)
+
+        # -----------------------------------------------------------------------------------
         # Part 1 -- the deny-all proof, the SAME image as the real run below (this task's own
         # requirement: "a --network none run and an internal-network run of the SAME image, so
         # the two measurements differ only in the network"). A real, unreachable TEST-NET-2
@@ -511,6 +588,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         deny_all = subprocess.run(
             [
                 "docker", "run", "--rm", "--network", "none", "--name", deny_all_container, *guard.label_args(),
+                "-v", f"{service_token_path}:/etc/av/service_token:ro",
                 IMAGE_TAG,
                 "--gateway-endpoint", "http://198.51.100.1:50170",
                 "--run-id", FIXTURE_RUN_ID, "--caller-clearance", CALLER_CLEARANCE, "--entity-id", ENTITY_ID,
@@ -518,6 +596,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
                 "--reference-radius-m", REFERENCE_RADIUS_M, "--threshold-m", THRESHOLD_M,
                 "--gain-per-s", GAIN_PER_S, "--max-burn-mps", MAX_BURN_MPS,
                 "--model-node-id", MODEL_NODE_ID, "--model-version", MODEL_VERSION,
+                "--service-token-file", "/etc/av/service_token",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -529,13 +608,14 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         print(f"\n--- deny-all proof (--network none), observed ---\nav-proposer exit={deny_all.returncode} after {elapsed_s:.3f}s; stderr: {deny_all.stderr.strip()[:300]}")
 
         # -----------------------------------------------------------------------------------
-        # Part 2 -- build Container G's own two real binaries and its own two secrets/configs
-        # (a throwaway OIDC keypair, a minimal execution profile), all under $HOME (see this
+        # Part 2 -- build Container G's own two real binaries and its own remaining
+        # secrets/configs (the minimal execution profile, and R5.1's own gateway-authority.yaml
+        # granting the proposer's service group "query"+"propose"), all under $HOME (see this
         # module's own doc).
         # -----------------------------------------------------------------------------------
         command_bin, gateway_bin = _cross_build_command_and_gateway_binaries(run_scratch / "bin")
-        oidc_public_key = _generate_throwaway_oidc_keypair(run_scratch / "oidc")
         profile_path = _write_minimal_execution_profile(run_scratch / "profile")
+        gateway_auth_config_path = _write_gateway_auth_config(run_scratch / "gateway-auth", service_group=GATEWAY_SERVICE_GROUP, clearance=CALLER_CLEARANCE)
         policy_dir = REPO_ROOT / "profiles" / "policies" / "authority"
         assert policy_dir.is_dir(), f"real policy bundle directory missing at {policy_dir}"
 
@@ -564,10 +644,12 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         command_line = (
             f"/usr/local/bin/av-command --bind {COMMAND_GRPC_ADDR} --admin-bind {COMMAND_ADMIN_ADDR} "
             f"--ledger-dir /data/command-ledger --policy-dir /etc/av/policy "
-            f"--profile-path /etc/av/execution.yaml --oidc-issuer https://sso.test.example/ "
+            f"--profile-path /etc/av/execution.yaml --oidc-issuer {OIDC_ISSUER} "
             f"--oidc-audience av-proposer-container-it --oidc-public-key-path /etc/av/oidc_public.pem & "
             f"exec /usr/local/bin/av-gateway --internal-network-bind {GATEWAY_INTERNAL_BIND} "
-            f"--run-products /data/fixture.runproducts.bin:{CALLER_CLEARANCE}"
+            f"--run-products /data/fixture.runproducts.bin:{CALLER_CLEARANCE} "
+            f"--oidc-issuer {OIDC_ISSUER} --oidc-audience {GATEWAY_OIDC_AUDIENCE} "
+            f"--oidc-public-key-path /etc/av/oidc_public.pem --auth-config-path /etc/av/gateway-authority.yaml"
         )
         _docker(
             "run", "-d", "-i", "--name", gateway_container, "--network", network_name, *guard.label_args(),
@@ -579,6 +661,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
             "-v", f"{policy_dir}:/etc/av/policy:ro",
             "-v", f"{profile_path}:/etc/av/execution.yaml:ro",
             "-v", f"{oidc_public_key}:/etc/av/oidc_public.pem:ro",
+            "-v", f"{gateway_auth_config_path}:/etc/av/gateway-authority.yaml:ro",
             "-v", f"{FIXTURE_PATH}:/data/fixture.runproducts.bin:ro",
             "--entrypoint", "/bin/bash",
             IMAGE_TAG,  # reuses the proposer's own already-built, already-pulled runtime base (libssl3 + debian bookworm-slim) -- never a second image pull at test time (question 154).
@@ -601,6 +684,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         proposer_run = subprocess.run(
             [
                 "docker", "run", "--rm", "--name", proposer_container, "--network", network_name, *guard.label_args(),
+                "-v", f"{service_token_path}:/etc/av/service_token:ro",
                 IMAGE_TAG,
                 "--gateway-endpoint", f"http://{gateway_container}:{GATEWAY_PORT}",
                 "--run-id", FIXTURE_RUN_ID, "--caller-clearance", CALLER_CLEARANCE, "--entity-id", ENTITY_ID,
@@ -608,6 +692,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
                 "--reference-radius-m", REFERENCE_RADIUS_M, "--threshold-m", THRESHOLD_M,
                 "--gain-per-s", GAIN_PER_S, "--max-burn-mps", MAX_BURN_MPS,
                 "--model-node-id", MODEL_NODE_ID, "--model-version", MODEL_VERSION,
+                "--service-token-file", "/etc/av/service_token",
             ],
             capture_output=True, text=True, timeout=60,
         )
@@ -627,7 +712,11 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
 
         evidence = _find_proposal_evidence(evidence_ledger_dir, command_id)
         assert evidence is not None, f"no ProposalEvidence for command_id={command_id!r} found on the real evidence ledger at {evidence_ledger_dir}"
-        assert evidence.model_identity == MODEL_NODE_ID, evidence.model_identity
+        # R5.1/invariant D (a deliberate, documented behaviour change -- see crates/av-proposer/
+        # src/proposer.rs's own comment): model_identity now records the VERIFIED service token
+        # subject ("av-proposer-it", this file's own _mint_rs256_jwt subject above), never
+        # MODEL_NODE_ID -- av-proposer itself now sends an empty declared `principal`.
+        assert evidence.model_identity == "av-proposer-it", evidence.model_identity
         assert evidence.model_version == MODEL_VERSION, evidence.model_version
         assert evidence.run.run_id == FIXTURE_RUN_ID, evidence.run.run_id
         assert evidence.query_ids, "ProposalEvidence.query_ids must be non-empty (D5: what the model saw)"

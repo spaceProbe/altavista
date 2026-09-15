@@ -168,6 +168,7 @@ dependencies = [
  "prost-types",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror",
  "tokio",
  "tokio-stream",

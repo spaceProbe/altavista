@@ -22,7 +22,8 @@ use av_command::oidc::IssuerConfig;
 use av_command::pb::command_authority_service_server::CommandAuthorityServiceServer;
 use av_command::policy::PolicyBundle;
 use av_command::service::{AuthzConfig, CommandAuthorityServiceImpl, RecordingDispatchSink};
-use av_command::test_support::TestIssuer;
+use av_command::test_support::{valid_claims, TestIssuer};
+use av_gateway::auth::{AuthContext, GroupClearanceMap};
 use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
 use av_gateway::gateway::{DataGatewayServiceImpl, DataGatewayServiceServer, GatewayCore};
 use av_gateway::labels::ClearanceLadder;
@@ -34,6 +35,22 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Endpoint, Server};
+
+/// R5.1/question 208(b): this crate's tests exercise `av-proposer` as a real SERVICE caller of
+/// a real `av-gateway` -- one service role, `"proposer-service"`, granting both `"query"` and
+/// `"propose"` (this crate's own real proposer run always issues one of each) at clearance
+/// `"CUI"` (every test in this crate's own `catalogue_over_real_fixture` call uses `"CUI"` --
+/// grep confirms no other marking is used anywhere in this crate's test suite).
+const GATEWAY_AUTH_ISSUER: &str = "https://sso.test.example/";
+const GATEWAY_AUTH_AUDIENCE: &str = "av-gateway";
+const GATEWAY_AUTH_SERVICE_GROUP: &str = "proposer-service";
+/// The verified `sub` [`GatewayHarness::mint_service_token`] mints -- since R5.1/invariant D
+/// makes the verified token subject authoritative for `ProposalEvidence.model_identity`
+/// (never the caller-declared `principal`, which `av_proposer::proposer::run` now sends
+/// empty), a test asserting against a real proposal's own recorded `model_identity` compares
+/// against THIS constant, not against `ProposerConfig.model.node_id` (a model-version
+/// identifier with no reason to equal the service token's own subject).
+pub const SERVICE_TOKEN_SUBJECT: &str = "av-proposer-it";
 
 /// The real, committed, git-tracked `RunProducts` fixture this task names: `run_id`
 /// `demo_two_instance_frozen_fixture`. The two named real scores this fixture carries
@@ -85,6 +102,9 @@ pub struct GatewayHarness {
     /// everything this gateway process refused.
     pub counters: Arc<Counters>,
     pub clock: Arc<TestClock>,
+    /// R5.1: the issuer [`GatewayHarness::mint_service_token`] mints against -- the same one
+    /// this gateway's own `AuthContext` verifies with.
+    pub issuer: TestIssuer,
     cmd_shutdown: Option<oneshot::Sender<()>>,
     cmd_handle: Option<tokio::task::JoinHandle<()>>,
     gw_shutdown: Option<oneshot::Sender<()>>,
@@ -142,7 +162,16 @@ impl GatewayHarness {
         let evidence_ledger = Arc::new(Ledger::open(tmp_dir(&format!("{name}-evidence"))).expect("open evidence ledger"));
         let counters = Arc::new(Counters::new());
         let core = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, counters.clone()));
-        let model_propose = ModelProposeServiceImpl::new(authority, evidence_ledger.clone(), clock.clone() as Arc<dyn Clock>, counters.clone());
+
+        // R5.1/question 208(b): this gateway's own AuthContext -- see this module's own doc
+        // comment for the one service role/clearance every test in this crate needs.
+        let gateway_auth_issuer = TestIssuer::new();
+        let gateway_issuer_config = Arc::new(IssuerConfig::from_public_key_pem(GATEWAY_AUTH_ISSUER, GATEWAY_AUTH_AUDIENCE, gateway_auth_issuer.public_key_pem()).expect("a freshly generated test issuer key parses"));
+        let gateway_service_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([(GATEWAY_AUTH_SERVICE_GROUP.to_string(), vec!["query".to_string(), "propose".to_string()])])));
+        let gateway_group_clearance = Arc::new(GroupClearanceMap::new(BTreeMap::from([(GATEWAY_AUTH_SERVICE_GROUP.to_string(), "CUI".to_string())])));
+        let gateway_auth = Arc::new(AuthContext::new(gateway_issuer_config, Arc::new(RoleTable::default()), gateway_service_roles, gateway_group_clearance, clock.clone() as Arc<dyn Clock>));
+
+        let model_propose = ModelProposeServiceImpl::new(authority, evidence_ledger.clone(), clock.clone() as Arc<dyn Clock>, counters.clone(), gateway_auth.clone());
 
         let gw_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind an ephemeral loopback port for the gateway");
         let gw_addr = gw_listener.local_addr().expect("local_addr");
@@ -152,7 +181,7 @@ impl GatewayHarness {
         let gw_handle = tokio::spawn(async move {
             Server::builder()
                 .layer(unknown_route_layer)
-                .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core)))
+                .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core, gateway_auth)))
                 .add_service(ModelProposeServiceServer::new(model_propose))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(gw_listener), async {
                     let _ = gw_shutdown_rx.await;
@@ -168,11 +197,24 @@ impl GatewayHarness {
             evidence_ledger,
             counters,
             clock,
+            issuer: gateway_auth_issuer,
             cmd_shutdown: Some(cmd_shutdown_tx),
             cmd_handle: Some(cmd_handle),
             gw_shutdown: Some(gw_shutdown_tx),
             gw_handle: Some(gw_handle),
         }
+    }
+
+    /// R5.1: a real, signed service token this gateway's own `AuthContext` accepts for both
+    /// `"query"` and `"propose"` at clearance `"CUI"` -- `now_unix_s = 0`/`ttl_s = 3_600`
+    /// (converted, not compared, against this crate's own tiny `TestClock` readings like
+    /// `1_000`/`5_000`; `crate::oidc::verify` never compares `iat` to `now`, only `exp`/`nbf`,
+    /// so the resulting `exp_tai_ns` -- on the order of `3_600 * 1e9` -- is always far past any
+    /// `start_tai_ns` this crate's own harnesses use).
+    pub fn mint_service_token(&self) -> String {
+        let mut claims = valid_claims(GATEWAY_AUTH_ISSUER, GATEWAY_AUTH_AUDIENCE, SERVICE_TOKEN_SUBJECT, 0, 3_600);
+        claims["groups"] = serde_json::json!([GATEWAY_AUTH_SERVICE_GROUP]);
+        self.issuer.mint(&claims)
     }
 
     pub async fn shutdown(mut self) {
@@ -207,6 +249,7 @@ pub fn assert_harness_is_wired(harness: &GatewayHarness) {
     let _ = harness.counters.snapshot();
     let _ = &harness.evidence_ledger;
     let _ = &harness.command_ledger;
+    assert!(!harness.mint_service_token().is_empty(), "R5.1: the harness's own AuthContext must mint a real, non-empty service token");
 }
 
 /// A catalogue with exactly one entry, `run_id` [`FIXTURE_RUN_ID`], loaded from the real,

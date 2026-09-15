@@ -1,0 +1,40 @@
+# R5.1 (docs/open-questions.md question 208(b), the lead's ruling): av-gateway's own
+# roles/service_roles/group_clearance block -- read by crates/av-gateway/src/auth.rs::
+# load_gateway_auth_config, once at startup (crates/av-gateway/src/bin/av-gateway.rs's own
+# --auth-config-path flag, defaulted to this file). Mirrors profiles/execution.yaml's
+# authority.roles/authority.service_roles convention verbatim, but for THIS crate's own
+# surface names ("query"/"propose"/"admin_bundle") rather than command classes or the four
+# fixed service RPCs av-command's ServiceRoleTable knows -- see crates/av-gateway/src/auth.rs's
+# own module doc for exactly why this is a second FILE, not a second verifier or a second
+# RoleTable implementation.
+#
+# Deny by default: an absent or empty block below still parses fine (crates/av-gateway/src/
+# auth.rs::load_gateway_auth_config's own doc) and denies every surface to every caller --
+# there is no "unconfigured means allow" state this file can express. `roles` and
+# `service_roles` must never share a role name (checked at load time,
+# crate::auth::check_role_tables_disjoint) -- a human operator's own group must never silently
+# double as the proposer's own "propose" credential.
+
+# Human roles: console/operator groups, granting "query" (DataGatewayService.Query / the MCP
+# `query` tool) and/or "admin_bundle" (GET /admin/api/evidence/bundle). Never "propose" --
+# that surface is service-only, see service_roles below.
+roles:
+  operators: ["query"]
+  safety-officers: ["query", "admin_bundle"]
+
+# Service roles: the containerised proposer's own group, granting "propose"
+# (ModelProposeService.ProposeCommand / the MCP `propose_command` tool) and "query" (the
+# proposer reads scores via DataGatewayService.Query before it ever proposes -- D5's own "what
+# the model saw" evidence needs a real, authenticated query first).
+service_roles:
+  proposer-service: ["query", "propose"]
+
+# Group -> the clearance marking that group's own token asserts (crate::auth::
+# GroupClearanceMap) -- checked against crate::labels::ClearanceLadder's own
+# AV_GATEWAY_CLEARANCE_LADDER-configured ranking exactly as before; this table only says WHICH
+# marking a verified group maps to, never ranks markings against each other. A group absent
+# here asserts no clearance and is refused (NoClearanceForSubject), deny by default.
+group_clearance:
+  operators: CUI
+  safety-officers: SECRET
+  proposer-service: CUI

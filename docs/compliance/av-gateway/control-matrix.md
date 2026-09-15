@@ -11,17 +11,20 @@ uses.
 ```{admonition} Not a certification
 This is engineering documentation, not a C3PAO assessment or an attestation — see
 `docs/compliance/av-command/control-matrix.md`'s identical admonition for what that means.
-**Most rows below are Partial or Gap — that is the honest state of A4/A4a/A4b/R3.2/R3.3/A6, not
-a defect in this document.** This crate implements real, structural controls this document
-credits fully (D4's `ProposeOnlyAuthority`, D1/D2's ordered label-aware refusal chain, D3's
-deny-by-default MCP tool allow-list, ADR-004's "everything rejected is counted" via the shared
-`Counters` primitive, and now the A6 evidence bundle) — but **this crate authenticates no
-caller of its own, anywhere.** `DataGatewayService.query`'s `caller_clearance` and
-`ModelProposeService.propose_command`'s `principal` are both caller-supplied strings with no
-credential behind either; the MCP stdio surface trusts whatever process holds the pipe. This is
-not an oversight this document is papering over — see IA 3.5.1/3.5.2's row for exactly what is
-and is not claimed, and Deficiency 1 below for why closing it is a decision for the lead, not
-this crate's own scope through this round.
+**R5.1 (`docs/open-questions.md` question 208(b), the lead's ruling): this crate now
+authenticates every caller of every surface it exposes.** `DataGatewayService.Query`,
+`ModelProposeService.ProposeCommand`, the MCP `query`/`propose_command` tools, and `GET
+/admin/api/evidence/bundle` each verify a real OIDC token through `av-command`'s existing
+verifier (`av_command::oidc::verify` — the identical path `AuthorizeRequest.principal_token`/
+`DispatchRequest.service_token` already use; no second verifier of any kind exists in this
+crate) before doing any work — see `crates/av-gateway/src/auth.rs`'s own module doc for the
+full contract: a human role table and a service role table (disjoint by construction), a
+deployment-configured group→clearance mapping the request's own `caller_clearance` is checked
+against (never trusted directly), and the verified subject — never a caller-declared one — is
+what lands on `ProposalEvidence.model_identity`. Several rows below move from Gap to Met this
+round; TLS ("encrypt in transit") is still Gap — this task did not add a TLS stack — and the
+console (`altavista/server.py`) has no route of its own that reaches this gateway at all (a
+survey finding, not an oversight: see AC 3.1.1/3.1.2's row).
 ```
 
 ## Legend
@@ -70,20 +73,35 @@ stdio MCP server) plus, new this round, a third, hand-rolled HTTP admin surface:
   canonical content, mirroring `av-command`'s `compute_decision_id` preimage convention.
 - `src/counters.rs` — re-exports `av_command::counters::{Counted, Counters}` (moved there R3.1
   so both crates share one counting primitive; see that module's own doc).
-- `src/admin.rs` + `src/evidence_bundle.rs` (**R3.6/A6, Part 3, new this round**) — `GET
+- `src/admin.rs` + `src/evidence_bundle.rs` (**R3.6/A6, Part 3**) — `GET
   /admin/api/evidence/bundle`: this process's own real evidence (its evidence-topic ledger's
   partitions, its own `Counters::snapshot`) plus a real HTTP fetch of the configured
   `av-command` service's own `/admin/api/evidence`, into one `BTreeMap`-keyed document. An
   unreachable or unconfigured `av-command` side is a named `{"reachable": false, "error": ...}`
-  entry, never an omitted key. See that module's own doc.
+  entry, never an omitted key. **R5.1, new this round**: the route now authenticates
+  (`Authorization: Bearer <token>`) before ever calling `bundle_body` — see that module's own
+  doc.
+- `src/auth.rs` (**R5.1/question 208(b), new this round**) — `AuthContext`: the ONE place every
+  surface this crate exposes authenticates a caller, over the real `av_command::oidc::verify`
+  path. Two `av_command::authz::RoleTable`s (human/service, disjoint by construction) gate
+  `"query"`/`"propose"`/`"admin_bundle"`; a `GroupClearanceMap` derives the caller's effective
+  clearance from the verified token, never from the request's own claimed field. See that
+  module's own doc for the full contract and every design decision.
 - `src/bin/av-gateway.rs` — the service binary: `DataGatewayService` + `ModelProposeService` on
   one loopback gRPC port (D7 — reuses `av_command::service::resolve_loopback_bind_address`
   directly rather than a second copy), the MCP server on the real process stdio, and (new this
   round) the admin bundle server on a second loopback port.
 
-Not yet: any credential check on any surface this crate itself exposes (see the admonition and
-IA's rows below); this crate's own control matrix was not written before this round (A4/A4a
-landed without one — this is the first version).
+- `src/bin/av-gateway.rs` (**R5.1**) — `--oidc-issuer`/`--oidc-audience`/`--oidc-public-key-path`
+  are now REQUIRED (no default of any kind): this binary refuses to start without a real issuer
+  configured, mirroring `av-command`'s own binary's identical three flags. `--auth-config-path`
+  (defaulted to `profiles/gateway-authority.yaml`) is this process's own
+  `roles`/`service_roles`/`group_clearance` YAML — an absent or empty file is a SAFE,
+  deny-by-default state (every surface refuses every caller), never "unconfigured means allow."
+
+Not yet: TLS/"encrypt in transit" (SC 3.13.8, unchanged Gap) and a SIEM-forwarding audit sink of
+this crate's own (AU 3.3.1's SIEM-export row, unchanged Gap) — see the Deficiencies below for
+both.
 
 ## 3.1 Access Control (AC)
 
@@ -91,7 +109,7 @@ landed without one — this is the first version).
 |---|---|---|---|---|
 | 3.1.3 | Control the flow of CUI | Met | `crates/av-gateway/src/labels.rs:ClearanceLadder::classify`, called from `crates/av-gateway/src/gateway.rs:GatewayCore::query` before any product data is ever returned — a marking absent from the deployment's configured ladder (either the caller's claimed clearance or the product's own label) is refused outright, never defaulted to a rank, and mislabeling is checked before over-clearance | `cargo test -p av-gateway --lib labels::tests::classify_refuses_over_clearance labels::tests::classify_refuses_a_product_marking_absent_from_the_ladder_even_though_caller_is_cleared labels::tests::classify_refuses_a_caller_clearance_absent_from_the_ladder labels::tests::classify_checks_caller_marking_before_product_marking` and `cargo test -p av-gateway --test command_trail_run_products a_caller_below_the_fixtures_own_clearance_is_refused_over_the_real_socket_and_counted` |
 | 3.1.5 | Least privilege | Met | `crates/av-gateway/src/propose_only.rs:ProposeOnlyAuthority` — its ONLY public method is `propose`; the generated client carrying `check`/`authorize`/`dispatch`/`ack`/`expire`/`fail` is a private field with no accessor, `Deref` or `AsRef` impl of any kind, so a crafted call reaching for any other RPC has no path to it at the Rust type level — proven against a `tools/call` naming `"authorize"`, a raw JSON-RPC method named `"authorize"`, and a hand-built `Command` that is already `AUTHORIZED` | `cargo test -p av-gateway --lib mcp::tests::tools_call_naming_authorize_is_refused_and_counted mcp::tests::a_raw_json_rpc_method_named_authorize_is_refused_as_method_not_found_and_counted mcp::tests::tools_call_naming_check_dispatch_ack_expire_fail_are_all_refused_and_counted` and `cargo test -p av-gateway --test propose_only a_crafted_command_that_is_already_started_is_refused_and_counted` |
-| 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Gap | This crate authenticates no caller of its own on any surface: `DataGatewayService.query`'s `caller_clearance` (D2) and `ModelProposeService.propose_command`'s `principal` (`crates/av-gateway/src/propose_flow.rs`) are both caller-supplied strings this crate never verifies against any identity provider; `crate::mcp`'s stdio surface trusts whatever local process holds the pipe. `ProposeOnlyAuthority` (3.1.5 above) limits *what* an unauthenticated caller may reach, never *who* may reach it | N/A — see Deficiency 1 |
+| 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Met | **R5.1/question 208(b)**: every one of this crate's four surfaces (gRPC `Query`, gRPC `ProposeCommand`, MCP `query`, MCP `propose_command`, `GET /admin/api/evidence/bundle`) now authenticates a real OIDC token (`crates/av-gateway/src/auth.rs::AuthContext`, over the real `av_command::oidc::verify` path) and role-gates it before doing any work — deny by default (an absent/empty role table grants nothing). `ProposeOnlyAuthority` (3.1.5) still limits *what* the proposer may reach; this row is now about *who*. **Two declared, honest exceptions, not silent gaps**: (1) `tools/list`/`initialize` on the MCP surface do NOT authenticate — a deliberate decision (`crates/av-gateway/src/mcp.rs`'s own module doc, "which methods authenticate, and why"): `initialize` is the handshake itself and carries no field a token could occupy yet, and `tools/list` renders only this crate's own already-public tool names/descriptions, nothing a caller could not already read from this repository's own source. (2) The console (`altavista/server.py`) has no route that reads from `av-gateway` at all — surveyed directly (`grep -n gateway altavista/server.py` returns nothing) — so there is no console-side token-forwarding path to build or to leave unbuilt; `/api/command/*`'s own existing token contract with `av-command` is unchanged | `cargo test -p av-gateway --lib gateway::tests::authenticated::an_unauthenticated_caller_is_refused_before_gatewaycore_query_runs_and_the_auth_counter_moves propose_flow::tests::authenticated::an_unauthenticated_proposer_is_refused_before_propose_is_ever_called mcp::tests::query_tool_without_a_caller_token_is_refused_unauthenticated_and_the_counter_moves mcp::tests::propose_command_tool_without_a_caller_token_is_refused_unauthenticated_and_the_counter_moves admin::tests::bundle_route_without_a_token_is_401_and_the_counter_moves` |
 | 3.1.12 / 3.1.13 | Control & encrypt remote access | Partial | `crates/av-gateway/src/lib.rs`'s own `bind_address_reuse` tests prove this crate's gRPC/admin listeners are refused at a non-loopback bind address through the identical `av_command::service::resolve_loopback_bind_address` boundary `av-command` uses (D7 — no second copy of that check). "Encrypt" is Gap: this crate links no TLS stack (`tonic`'s `"server"`/`"channel"` features only; `cargo tree -p av-gateway` shows no `rustls`/`ring`), and no nginx mTLS front has been built or proven for it | `cargo test -p av-gateway --lib bind_address_reuse::a_non_loopback_bind_address_is_refused_naming_question_155 bind_address_reuse::a_bare_localhost_with_no_port_is_a_typed_missing_port_never_a_panic` |
 | 3.1.20 | Control connections to external systems | Partial | `av_command::service::resolve_internal_network_bind_address` (R3.3, `docs/open-questions.md` question 206 decision 11(a)) restricts this binary's `--internal-network-bind` flag to the unspecified address or an RFC-1918 literal, refusing any global-scope address — realizing "a `docker network create --internal` segment holding only the gateway and the proposer" (ADR-004's egress control for the AI plane). **Never proven end to end on this host**: the proposer's own container image cannot be built here (disk pressure — see `docs/compliance/av-command/control-matrix.md` Deficiency 13), so `tests/test_proposer_container.py::test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority` exists and skips visibly, naming the missing image, rather than having ever run | `grep -n GlobalScope crates/av-command/src/service.rs` and (skips visibly) `.venv/bin/python -m pytest tests/test_proposer_container.py -q -rs` |
 | 3.1.22 | Control publicly-posted content | Inherited | This crate posts nothing publicly | N/A |
@@ -105,9 +123,9 @@ landed without one — this is the first version).
 | 3.3.1 | Create and retain audit records | Partial | `crates/av-gateway/src/evidence.rs:EvidenceRecorder` appends one record per proposal to a dedicated, durable `av_command::ledger::Ledger` (D6 — "an evidence topic" realized as a ledger partition, never a broker), read back by `EvidenceRecorder::read_back` and (new this round) collected by the admin bundle below. **Partial, not Met**: this crate writes NO audit line of its own (no `crate::audit` module exists here) — only the evidence-topic ledger and `Counters`; every refusal `crate::gateway`/`crate::catalogue`/`crate::labels`/`crate::mcp`/`crate::propose_only`/`crate::propose_flow` produce is counted (AU's own "everything rejected is counted" row below) but not written to any retained log of its own beyond the ledger records that do get appended | `cargo test -p av-gateway --lib evidence::tests::record_then_read_back_reproduces_the_exact_evidence evidence::tests::evidence_partitions_are_verifiable_and_independent_per_command` |
 | 3.3.1 (everything rejected is counted) | ADR-004's own audit line: "Everything rejected is counted" | Met | Every refusal enum in this crate (`crate::catalogue::ResolveError`, `crate::labels::LabelRefusal`, `crate::gateway::RefusalReason`, `crate::mcp::McpRefusal`, `crate::propose_only::ProposeRefusal`, `crate::propose_flow::ProposeFlowError`, `crate::unknown_route_counter::UnknownRoute`) implements `Counted` and is recorded through the ONE shared `av_command::counters::Counters` primitive at the exact point the refusal is decided — including a raw gRPC request naming a service this gateway does not serve, counted by a `tower::Layer` before `tonic`'s own router would otherwise refuse it with nothing left to observe | `cargo test -p av-gateway --lib unknown_route_counter::tests::a_path_naming_no_known_service_is_counted_and_still_forwarded gateway::tests::query_refuses_and_counts_over_clearance mcp::tests::tools_call_naming_authorize_is_refused_and_counted` |
 | 3.3.1 (SIEM export) | SIEM export of the decision trail (question 54) | Gap | This crate has no audit sink of its own (unlike `av-command`'s `crates/av-command/src/audit.rs`, RFC 5424 file); its own evidence collects only through the R3.6/A6 admin bundle below, which is a pull-based query surface, not a forwarding mechanism | N/A |
-| 3.3.2 | Trace actions to individual users/processes | Partial | `ProposalEvidence.model_identity` (`crates/av-gateway/src/propose_flow.rs`) records the caller-supplied `principal` verbatim — real, but never verified against any identity provider (see AC 3.1.1/3.1.2's Gap row); D5's `query_ids` trace which specific queries a model session saw before proposing, matched against what a real `GatewayCore::query` call actually served (not a caller-supplied guess) | `cargo test -p av-gateway --test propose_only evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actually_served` |
+| 3.3.2 | Trace actions to individual users/processes | Met | **R5.1**: `ProposalEvidence.model_identity` (`crates/av-gateway/src/propose_flow.rs::authenticated_propose_command`) now records the VERIFIED service-token subject — never the caller-declared `principal`, which is refused outright if non-empty and disagreeing (`crate::auth::AuthRefusal::PrincipalMismatch`, mirroring `av-command`'s own `AckRequest.principal` convention) — so this field traces to a real, cryptographically-verified identity, not a caller-supplied string. D5's `query_ids` still trace which specific queries a model session saw before proposing, matched against what a real `GatewayCore::query` call actually served | `cargo test -p av-gateway --lib auth::tests::a_service_token_proposes_and_the_verified_subject_is_returned propose_flow::tests::authenticated::a_disagreeing_declared_principal_is_refused_and_counted` and `cargo test -p av-gateway --test propose_flow_agreement two_propose_surfaces_agree_on_the_same_outcome_for_equivalent_input` (both surfaces' evidence records the identical verified subject) and `cargo test -p av-gateway --test propose_only evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actually_served` |
 | 3.3.5 / 3.3.6 | Correlate and report audit review | Met | **New this round (R3.6/A6, Part 3)**: `GET /admin/api/evidence/bundle` (`crates/av-gateway/src/admin.rs`/`evidence_bundle.rs`) collects this process's own real evidence AND a real fetch of `av-command`'s own `/admin/api/evidence` into one deterministic, `BTreeMap`-keyed document — the first correlation this codebase has across the two command-authority services, closing (for this one report) what round 2's own control matrix listed as "no correlation tooling... no query/aggregation layer over any of them" | `cargo test -p av-gateway --test evidence_bundle one_call_collects_both_services_real_evidence two_independently_built_but_identical_deployments_produce_byte_identical_bundles` |
-| 3.3.9 | Limit audit management to a subset of privileged users | Gap | `/admin/api/evidence/bundle` has no access control of its own beyond the loopback bind — any local process can read the full bundle (both services' evidence), matching `av-command`'s own identical Gap for `/admin/api/evidence*` | N/A |
+| 3.3.9 | Limit audit management to a subset of privileged users | Met | **R5.1**: `GET /admin/api/evidence/bundle` now requires `Authorization: Bearer <token>`, verified (`crate::auth::AuthContext::authenticate_admin_bundle`) and role-gated on the human table's `"admin_bundle"` grant before `bundle_body` ever runs — an absent/invalid token is `401`, a verified token naming no granting role is `403`. `av-command`'s own `/admin/api/evidence*` is unchanged by this task (out of this crate's own scope) and remains its own Gap, noted honestly, not silently inherited as Met here | `cargo test -p av-gateway --lib admin::tests::bundle_route_without_a_token_is_401_and_the_counter_moves admin::tests::bundle_route_with_a_token_naming_no_granting_role_is_403 admin::tests::bundle_route_returns_200_with_the_expected_shape_for_an_authenticated_admin` |
 | 3.3.7 | Authoritative, time-synced timestamps | Inherited | Every epoch this crate emits (`ProposalEvidence.recorded_tai_ns`, D5's query id has none) comes from the caller-injected `av_command::clock::Clock`; NTP synchronization of `SystemClock` is the environment's responsibility | N/A |
 
 ## 3.4 Configuration Management (CM)
@@ -122,8 +140,8 @@ landed without one — this is the first version).
 
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
-| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Gap | **Nothing in this crate authenticates any caller.** `DataGatewayService.query`'s `caller_clearance` is a bare claimed string (D2 checks it against a ladder, never against an identity); `ModelProposeService.propose_command`'s `principal` and the MCP `propose_command` tool's `principal` argument are likewise caller-supplied and unverified — `crates/av-gateway/src/propose_flow.rs::propose_command` takes `principal: String` with no token field anywhere on its input. This is a real, load-bearing difference from `av-command`'s `Authorize` (RS256-verified `principal_token`) and from `Dispatch`/`Ack`/`Expire`/`Fail`'s new R3.1 service-principal gate — neither exists at this crate's own boundary | N/A — see Deficiency 1 |
-| 3.5.3 | MFA for privileged/remote access | Gap | This crate never authorizes a human at all (only `av-command`'s `Authorize` does, downstream of `ProposeOnlyAuthority`'s own boundary, which this crate cannot reach) | N/A |
+| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Met | **R5.1/question 208(b): every caller of every surface this crate exposes is now authenticated.** `GatewayQueryRequest.caller_token`/`ProposeCommandRequest.caller_token` (`proto/altavista/v1/authority.proto`, additive fields) and the MCP tools' own `caller_token` argument all carry a compact-serialization JWS, verified through the EXACT SAME `av_command::oidc::verify` path `AuthorizeRequest.principal_token`/`DispatchRequest.service_token` already use — no second verifier of any kind exists in this crate (`crates/av-gateway/src/auth.rs::AuthContext::verify_token` calls `av_command::oidc::verify` directly, its own only call; `grep -n "jsonwebtoken\|josekit\|jwt" crates/av-gateway/Cargo.toml` is empty — no JWT-specific crate is even in this crate's own dependency list). Fail-closed structurally: `crates/av-gateway/src/bin/av-gateway.rs` requires `--oidc-issuer`/`--oidc-audience`/`--oidc-public-key-path` and refuses to start without all three (no default of any kind); an absent/empty `caller_token` is `crate::auth::AuthRefusal::MissingToken`, counted and refused before any product data, ledger record, or downstream RPC is touched | `cargo test -p av-gateway --lib auth::tests::an_empty_query_token_is_refused_missing_token_and_counted_never_served auth::tests::an_empty_propose_token_is_refused_missing_token_and_counted_never_served auth::tests::a_present_but_unverifiable_token_is_refused_never_served` and `cargo test -p av-gateway --bin av-gateway parse_cli_args_refuses_when_any_oidc_flag_is_missing` |
+| 3.5.3 | MFA for privileged/remote access | Gap | This crate still never runs an MFA check of its own (`av-command`'s `authz::authorize_command` MFA gate is downstream of `ProposeOnlyAuthority`'s own boundary, which this crate cannot reach, unchanged this round) — R5.1's own role gate is identification/authorization, not a second-factor check | N/A |
 | 3.5.10 | Cryptographically-protected passwords/secrets | Inherited / N/A | This crate holds no passwords or long-lived secrets of its own | N/A |
 
 ## 3.13 System and Communications Protection (SC)
@@ -134,7 +152,7 @@ landed without one — this is the first version).
 | 3.13.1 / 3.13.5 | Boundary protection / subnetwork separation | Partial | `resolve_loopback_bind_address` (D7) for the ordinary case; `resolve_internal_network_bind_address` (R3.3) for the proposer's isolated `--internal` Docker network. **Never proven end to end on this host** — see AC 3.1.20's identical row above; the egress/isolation test exists and skips visibly rather than being silently omitted | Same as AC 3.1.20 |
 | 3.13.8 | Encrypt CUI in transit | Gap | No TLS stack of any kind is linked (`tonic`'s `"tls"`/`"tls-*"` features never enabled — `cargo tree -p av-gateway` shows no `rustls`/`ring`), and no nginx mTLS front has been built or proven for this crate | N/A |
 | 3.13.11 | Use FIPS-validated cryptography | Gap | This crate has no FIPS-posture detection of its own (unlike `av-command`'s `crates/av-command/src/fips.rs`) — the R3.6/A6 evidence bundle's `av_command` section carries `av-command`'s own real FIPS posture when that service is reachable, but this crate reports none about itself | `cargo test -p av-gateway --test evidence_bundle one_call_collects_both_services_real_evidence` (asserts the `fips` object arrives from the `av_command` side, not from this crate) |
-| 3.13.15 | Protect authenticity of comms sessions | Gap | Same reasoning as IA 3.5.1/3.5.2: no session this crate serves carries a verified credential of any kind | N/A |
+| 3.13.15 | Protect authenticity of comms sessions | Partial | **R5.1**: every session this crate serves now carries a verified credential (see IA 3.5.1/3.5.2) — the AUTHENTICITY half of this control is Met. Still Partial, not Met: the credential's own confidentiality/integrity IN TRANSIT is unchanged (SC 3.13.8 below is still Gap — no TLS), so a verified token is still carried in plaintext on the wire between caller and this crate | Same as IA 3.5.1/3.5.2 |
 
 ## 3.14 System and Information Integrity (SI)
 
@@ -166,34 +184,43 @@ Matching `docs/compliance/av-command/control-matrix.md`'s identical table:
 
 Ranked by what a reviewer would flag first:
 
-1. **This crate authenticates no caller on any surface it exposes** (AC 3.1.1/3.1.2, IA
-   3.5.1/3.5.2/3.13.15). `DataGatewayService.query`'s `caller_clearance`, `ModelProposeService.
-   propose_command`'s `principal`, and the MCP surface's identical `principal` argument are
-   every one of them a bare, caller-supplied string this crate never checks against any OIDC
-   token or other credential — `crates/av-gateway/src/propose_flow.rs::ProposeCommandInput` has
-   no token field at all. `ProposeOnlyAuthority` (AC 3.1.5, Met) limits *what* such a caller may
-   reach — structurally, to `Propose` only — but says nothing about *who* is calling. This
-   mirrors `av-command`'s own still-open `Propose`/`Check` gap (that crate's control matrix,
-   Deficiency 1) rather than closing it: a caller that reaches this gateway's MCP stdio pipe or
-   its gRPC port can propose and query as any identity string it likes. Closing this is a
-   decision for the lead (which credential, whose IdP, whether the MCP stdio channel's own
-   process-spawn boundary is judged sufficient for that surface specifically) — not something
-   this round's brief named, and not claimed here.
+1. **CLOSED, R5.1 (`docs/open-questions.md` question 208(b), the lead's ruling).** ~~This crate
+   authenticates no caller on any surface it exposes~~ — every one of `DataGatewayService.
+   Query`, `ModelProposeService.ProposeCommand`, the MCP `query`/`propose_command` tools, and
+   `GET /admin/api/evidence/bundle` now verifies a real OIDC token (`crates/av-gateway/src/
+   auth.rs::AuthContext`) before doing any work, over the exact same `av_command::oidc::verify`
+   path `av-command`'s own `Authorize`/`Dispatch`/`Ack`/`Expire`/`Fail` use — see AC 3.1.1/3.1.2
+   and IA 3.5.1/3.5.2's own rows for the full evidence. `ProposeOnlyAuthority` (AC 3.1.5, still
+   Met) continues to limit *what* the proposer may reach; this closes *who* may reach it.
+   `av-command`'s own still-open `Propose`/`Check` gap (that crate's control matrix, its own
+   Deficiency 1) is UNCHANGED by this task — `av-command`'s `Propose`/`Check` RPCs still perform
+   no token verification of their own; this deficiency closed only THIS crate's boundary, the
+   one this round's brief named. Three things this task did NOT do, named honestly: it did not
+   add MFA (IA 3.5.3, unchanged Gap), it did not add TLS (SC 3.13.8, unchanged Gap — a verified
+   token still crosses the wire in plaintext), and it did not invent a console-facing route for
+   `av-gateway` where none existed (a direct survey of `altavista/server.py` found none reaching
+   this crate at all — recorded here rather than silently assumed).
 2. **No audit sink of this crate's own** (AU 3.3.1's SIEM-export row). `av-command`'s RFC 5424
    `AuditWriter` has no analogue here; this crate's only durable record of a refusal is the
    in-memory `Counters` (visible only through the new admin bundle while the process is up) and
    the evidence-topic ledger (proposals only, not refusals).
-3. **`/admin/api/evidence/bundle` has no access control of its own** (AU 3.3.9), identical in
-   shape to `av-command`'s own `/admin/api/evidence*` Gap — loopback-only binding is the entire
-   boundary.
+3. **CLOSED, R5.1.** ~~`/admin/api/evidence/bundle` has no access control of its own~~ — see AU
+   3.3.9's own row. `av-command`'s own `/admin/api/evidence*` is out of this task's scope and
+   remains its own, separate Gap.
 4. **The proposer's isolated-network egress/boundary claim has never been exercised on this
-   host** (SC 3.13.1/3.13.5, AC 3.1.20). The image cannot be built (disk pressure, measured this
-   round — see `docs/compliance/av-command/control-matrix.md` Deficiency 13 for the exact
-   numbers) so `tests/test_proposer_container.py`'s own gated test skips visibly, naming the
-   missing image and its build script, rather than silently standing in as "passing." The
-   `resolve_internal_network_bind_address` code path itself is unit-tested
-   (`crates/av-command/src/service.rs`'s own adversarial table) — what is untested is the real
-   container boundary that code exists to serve.
+   host** (SC 3.13.1/3.13.5, AC 3.1.20) — UNCHANGED this round. The image still cannot be built
+   here (disk pressure, measured in an earlier round — see `docs/compliance/av-command/
+   control-matrix.md` Deficiency 13 for the exact numbers) so `tests/test_proposer_container.py`
+   's own gated test still skips visibly, naming the missing image and its build script, rather
+   than silently standing in as "passing." **R5.1 update**: this file's own test now also mints
+   a real, locally-signed service token (`_mint_rs256_jwt`, local `openssl dgst -sign` — no
+   network, question 154) and bind-mounts it into both containers via `--service-token-file`
+   (never `--service-token <VALUE>` — a flag value is visible in `docker inspect`), plus a
+   `gateway-authority.yaml` granting the proposer's service group `"query"`+`"propose"`; this is
+   untested end to end for the identical reason as before (the image cannot be built), not a new
+   gap this round introduced. The `resolve_internal_network_bind_address` code path itself is
+   unit-tested (`crates/av-command/src/service.rs`'s own adversarial table) — what is untested
+   is the real container boundary that code exists to serve.
 5. **No TLS anywhere in this crate's own stack** (SC 3.13.8), identical in shape and reasoning
    to `av-command`'s own Gap for the same control.
 6. **No FIPS-posture detection of this crate's own** (SC 3.13.11) — the evidence bundle borrows

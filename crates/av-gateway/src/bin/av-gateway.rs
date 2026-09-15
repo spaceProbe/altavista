@@ -63,15 +63,36 @@
 //!   `crates/av-command/src/bin/av-command.rs::DEFAULT_ADMIN_BIND`, `"127.0.0.1:50170"`) --
 //!   when absent, the bundle still serves, with the `av-command` side of the bundle honestly
 //!   `{"reachable": false, ...}` rather than this binary refusing to start.
+//!
+//! # R5.1/question 208(b): every caller of this binary's four surfaces now authenticates
+//!
+//! - `--oidc-issuer`, `--oidc-audience`, `--oidc-public-key-path` (all three REQUIRED -- no
+//!   default of any kind, mirroring `crates/av-command/src/bin/av-command.rs`'s identical
+//!   three flags): `parse_cli_args` refuses to return `Ok` without every one of them, so this
+//!   binary cannot reach a server-startup line with no issuer configured -- invariant B's
+//!   fail-closed guarantee, realized as "refuse to start."
+//! - `--auth-config-path <PATH>` (default `<repo>/profiles/gateway-authority.yaml`): this
+//!   process's own `roles`/`service_roles`/`group_clearance` YAML
+//!   ([`av_gateway::auth::load_gateway_auth_config`]) -- see [`CliArgs::auth_config_path`]'s
+//!   own doc for why this one IS defaulted (an absent/empty file is itself a safe,
+//!   deny-by-default state, invariant B's OTHER acceptable fail-closed shape).
+//!
+//! Every one of `DataGatewayService.Query`, `ModelProposeService.ProposeCommand`, the MCP
+//! `query`/`propose_command` tools, and `GET /admin/api/evidence/bundle` now authenticates
+//! through the one shared [`av_gateway::auth::AuthContext`] this binary builds here and hands
+//! to each -- see that module's own doc for the full contract.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use av_cdm::pb::{Label, RunProducts};
+use av_command::authz::RoleTable;
 use av_command::clock::SystemClock;
 use av_command::ledger::Ledger;
+use av_command::oidc::IssuerConfig;
 use av_command::service::{resolve_internal_network_bind_address, resolve_loopback_bind_address};
+use av_gateway::auth::{load_gateway_auth_config, AuthContext, GroupClearanceMap};
 use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
 use av_gateway::gateway::{DataGatewayServiceImpl, DataGatewayServiceServer, GatewayCore};
 use av_gateway::labels::ClearanceLadder;
@@ -87,29 +108,72 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-const USAGE: &str = "usage: av-gateway [--internal-network-bind ADDR] [--run-products PATH:MARKING]...";
+fn default_auth_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/gateway-authority.yaml")
+}
+
+const USAGE: &str = "usage: av-gateway --oidc-issuer ISS --oidc-audience AUD --oidc-public-key-path PATH \
+                      [--auth-config-path PATH] [--internal-network-bind ADDR] [--run-products PATH:MARKING]...";
 
 /// This binary's own additive CLI surface (see the module doc's "R3.3" section) -- parsed
 /// once, from `std::env::args()` (question 199: never an environment variable for either of
 /// these two flags). Everything else this binary configures still comes from the
 /// pre-existing environment-variable defaults, untouched by this struct.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct CliArgs {
     internal_network_bind: Option<String>,
     run_products: Vec<String>,
+    /// R5.1/question 208(b), all three REQUIRED -- no default of any kind, mirroring
+    /// `crates/av-command/src/bin/av-command.rs`'s identical, never-defaulted three flags: a
+    /// default issuer/key would either be a real secret baked into this binary or a
+    /// placeholder that would silently accept tokens signed by a key nobody controls in
+    /// production. `parse_cli_args` refuses to return `Ok` without every one of them --
+    /// invariant B's fail-closed guarantee is therefore structural: there is no code path in
+    /// this binary that reaches `main`'s own server-startup lines without a real issuer
+    /// configured.
+    oidc_issuer: Option<String>,
+    oidc_audience: Option<String>,
+    oidc_public_key_path: Option<PathBuf>,
+    /// R5.1: this process's own `roles`/`service_roles`/`group_clearance` YAML
+    /// (`av_gateway::auth::load_gateway_auth_config`) -- defaulted (unlike the three OIDC
+    /// flags above), because an ABSENT or EMPTY file is itself a safe, deny-by-default state
+    /// (every `RoleTable::granting_role` lookup returns `None`, refusing every surface to
+    /// every caller) rather than an "unconfigured means allow" hole -- invariant B's OTHER
+    /// acceptable fail-closed shape ("every surface refuses every call"), realized here for
+    /// the role/clearance half of this binary's configuration specifically (the issuer half
+    /// above uses the OTHER acceptable shape, "refuse to start").
+    auth_config_path: PathBuf,
 }
 
 fn parse_cli_args(mut args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
     let _argv0 = args.next();
-    let mut out = CliArgs::default();
+    let mut out = CliArgs {
+        internal_network_bind: None,
+        run_products: Vec::new(),
+        oidc_issuer: None,
+        oidc_audience: None,
+        oidc_public_key_path: None,
+        auth_config_path: default_auth_config_path(),
+    };
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} requires a value"));
         match flag.as_str() {
             "--internal-network-bind" => out.internal_network_bind = Some(value()?),
             "--run-products" => out.run_products.push(value()?),
+            "--oidc-issuer" => out.oidc_issuer = Some(value()?),
+            "--oidc-audience" => out.oidc_audience = Some(value()?),
+            "--oidc-public-key-path" => out.oidc_public_key_path = Some(PathBuf::from(value()?)),
+            "--auth-config-path" => out.auth_config_path = PathBuf::from(value()?),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}\n{USAGE}")),
         }
+    }
+    if out.oidc_issuer.is_none() || out.oidc_audience.is_none() || out.oidc_public_key_path.is_none() {
+        return Err(format!(
+            "--oidc-issuer, --oidc-audience and --oidc-public-key-path are all required (R5.1/question \
+             208(b): every surface authenticates every caller; there is no default issuer to fall back \
+             to). {USAGE}"
+        ));
     }
     Ok(out)
 }
@@ -200,6 +264,40 @@ async fn main() {
     let counters = Arc::new(av_gateway::counters::Counters::new());
     let core = Arc::new(GatewayCore::new(catalogue, ladder, counters.clone()));
 
+    // R5.1/question 208(b): parsed once, at startup -- av_command::oidc::verify itself does no
+    // I/O of any kind (that module's own doc, "Purity"); this is the caller "being handed a
+    // key" that doc describes. Required by parse_cli_args (invariant B: fail closed by
+    // refusing to start, mirroring av-command's own binary).
+    let oidc_issuer = cli.oidc_issuer.clone().expect("parse_cli_args refuses to return Ok without --oidc-issuer");
+    let oidc_audience = cli.oidc_audience.clone().expect("parse_cli_args refuses to return Ok without --oidc-audience");
+    let oidc_public_key_path = cli.oidc_public_key_path.clone().expect("parse_cli_args refuses to return Ok without --oidc-public-key-path");
+    let oidc_public_key_pem = std::fs::read(&oidc_public_key_path).unwrap_or_else(|e| {
+        eprintln!("av-gateway: reading --oidc-public-key-path {oidc_public_key_path:?}: {e}");
+        std::process::exit(1);
+    });
+    let issuer_config = Arc::new(IssuerConfig::from_public_key_pem(&oidc_issuer, &oidc_audience, &oidc_public_key_pem).unwrap_or_else(|e| {
+        eprintln!("av-gateway: --oidc-public-key-path {oidc_public_key_path:?}: {e}");
+        std::process::exit(1);
+    }));
+    eprintln!("av-gateway: OIDC issuer {oidc_issuer:?}, audience {oidc_audience:?} (RS256)");
+
+    // R5.1: this process's own role/clearance configuration -- an absent or empty file is a
+    // safe, deny-by-default state (see CliArgs::auth_config_path's own doc), never an error.
+    let auth_config_text = std::fs::read_to_string(&cli.auth_config_path).unwrap_or_else(|e| {
+        eprintln!("av-gateway: reading --auth-config-path {:?}: {e}", cli.auth_config_path);
+        std::process::exit(1);
+    });
+    let auth_config = load_gateway_auth_config(&auth_config_text).unwrap_or_else(|e| {
+        eprintln!("av-gateway: parsing --auth-config-path {:?}: {e}", cli.auth_config_path);
+        std::process::exit(1);
+    });
+    eprintln!("av-gateway: {} human role(s), {} service role(s), {} group_clearance entr(y/ies)", auth_config.roles.len(), auth_config.service_roles.len(), auth_config.group_clearance.len());
+    let human_roles = Arc::new(RoleTable::from_config(&auth_config.roles));
+    let service_roles = Arc::new(RoleTable::from_config(&auth_config.service_roles));
+    let group_clearance = Arc::new(GroupClearanceMap::new(auth_config.group_clearance));
+    let clock: Arc<dyn av_command::clock::Clock> = Arc::new(SystemClock);
+    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, clock.clone()));
+
     let evidence_dir = env_or("AV_GATEWAY_EVIDENCE_LEDGER_DIR", "/tmp/av-gateway-evidence-ledger");
     let evidence_ledger = Arc::new(Ledger::open(&evidence_dir).unwrap_or_else(|e| {
         eprintln!("av-gateway: cannot open evidence ledger at {evidence_dir:?}: {e}");
@@ -226,13 +324,13 @@ async fn main() {
         }
     };
 
-    let clock: Arc<dyn av_command::clock::Clock> = Arc::new(SystemClock);
     // D1/A4b: ModelProposeService is served from this SAME `tonic::transport::Server` as
     // DataGatewayService below -- one process, one port, two `add_service` calls -- never a
     // second listening socket for the network propose path. Shares the identical `authority`/
-    // `evidence_ledger`/`clock`/`counters` the MCP surface's `propose_command` tool uses, since
-    // both call through the one shared `av_gateway::propose_flow::propose_command`.
-    let model_propose = ModelProposeServiceImpl::new(authority.clone(), evidence_ledger.clone(), clock.clone(), counters.clone());
+    // `evidence_ledger`/`clock`/`counters`/`auth` the MCP surface's `propose_command` tool
+    // uses, since both call through the one shared `av_gateway::propose_flow::
+    // authenticated_propose_command`.
+    let model_propose = ModelProposeServiceImpl::new(authority.clone(), evidence_ledger.clone(), clock.clone(), counters.clone(), auth.clone());
     // R3.2 acceptance evidence 1(b): a raw gRPC request naming a service this server does not
     // serve (e.g. CommandAuthorityService) must be refused AND counted, but tonic answers
     // Unimplemented for an unmatched path entirely inside its own generated router, before any
@@ -266,6 +364,7 @@ async fn main() {
         run_id: "av-gateway".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         command_admin_addr,
+        auth: auth.clone(),
     });
     let admin_task = tokio::spawn(async move {
         if let Err(e) = av_gateway::admin::serve(admin_addr, bundle_state).await {
@@ -273,12 +372,12 @@ async fn main() {
         }
     });
 
-    let mcp_ctx = McpContext { gateway: core.clone(), authority, evidence_ledger, clock, counters };
+    let mcp_ctx = McpContext { gateway: core.clone(), authority, evidence_ledger, clock, counters, auth: auth.clone() };
     let mcp_handler = McpHandler::new(mcp_ctx);
 
     let grpc = tonic::transport::Server::builder()
         .layer(unknown_route_layer)
-        .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core)))
+        .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core, auth)))
         .add_service(ModelProposeServiceServer::new(model_propose))
         .serve(bind_addr);
 
@@ -325,20 +424,41 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/demo_two_instance.runproducts.bin")
     }
 
+    /// The three R5.1 flags every real invocation of this binary needs -- prepended by every
+    /// test below that expects `parse_cli_args` to succeed.
+    const REQUIRED_OIDC_ARGS: &[&str] = &["--oidc-issuer", "https://sso.test.example/", "--oidc-audience", "av-gateway", "--oidc-public-key-path", "/dev/null"];
+
     #[test]
-    fn parse_cli_args_reads_both_flags_repeatable_run_products_included() {
-        let args = ["av-gateway", "--internal-network-bind", "0.0.0.0:50170", "--run-products", "a.bin:CUI", "--run-products", "b.bin:SECRET"]
-            .into_iter()
+    fn parse_cli_args_reads_both_r33_flags_repeatable_run_products_included() {
+        let args = REQUIRED_OIDC_ARGS
+            .iter()
+            .copied()
+            .chain(["--internal-network-bind", "0.0.0.0:50170", "--run-products", "a.bin:CUI", "--run-products", "b.bin:SECRET"])
             .map(str::to_string);
-        let cli = parse_cli_args(args).unwrap();
+        let cli = parse_cli_args(std::iter::once("av-gateway".to_string()).chain(args)).unwrap();
         assert_eq!(cli.internal_network_bind, Some("0.0.0.0:50170".to_string()));
         assert_eq!(cli.run_products, vec!["a.bin:CUI".to_string(), "b.bin:SECRET".to_string()]);
     }
 
     #[test]
-    fn parse_cli_args_defaults_to_neither_flag_present() {
-        let cli = parse_cli_args(["av-gateway"].into_iter().map(str::to_string)).unwrap();
-        assert_eq!(cli, CliArgs::default());
+    fn parse_cli_args_defaults_run_products_and_internal_network_bind_to_absent_when_only_the_required_oidc_flags_are_given() {
+        let args = std::iter::once("av-gateway".to_string()).chain(REQUIRED_OIDC_ARGS.iter().map(|s| s.to_string()));
+        let cli = parse_cli_args(args).unwrap();
+        assert_eq!(cli.internal_network_bind, None);
+        assert!(cli.run_products.is_empty());
+        assert_eq!(cli.auth_config_path, default_auth_config_path(), "auth_config_path defaults, never required (deny-by-default is a safe unconfigured state)");
+    }
+
+    /// **R5.1/invariant B acceptance evidence**: `parse_cli_args` refuses to return `Ok` at
+    /// all when any of the three OIDC flags is missing -- this binary can never reach a server-
+    /// startup line without a real issuer configured (fail closed by refusing to start).
+    #[test]
+    fn parse_cli_args_refuses_when_any_oidc_flag_is_missing() {
+        let err = parse_cli_args(["av-gateway"].into_iter().map(str::to_string)).unwrap_err();
+        assert!(err.contains("--oidc-issuer"), "{err}");
+
+        let partial = ["av-gateway", "--oidc-issuer", "https://sso.test.example/"].into_iter().map(str::to_string);
+        assert!(parse_cli_args(partial).is_err(), "issuer alone, without audience/key path, must still be refused");
     }
 
     #[test]
@@ -397,6 +517,7 @@ mod tests {
                 caller_clearance: "CUI".to_string(),
                 selector: GatewaySelector::All as i32,
                 caller_supplied_products_uri: String::new(),
+                caller_token: String::new(), // GatewayCore::query itself is auth-agnostic.
             })
             .expect("a real query against the real, flag-loaded catalogue");
         assert!(!resp.trajectories.is_empty(), "the real fixture has trajectories");

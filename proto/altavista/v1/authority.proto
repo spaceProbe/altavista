@@ -705,6 +705,23 @@ message GatewayQueryRequest {
   // here is refused outright (RefusalReason::CallerSuppliedPath) and counted, before any
   // other validation of this request runs.
   string caller_supplied_products_uri = 4;
+  // R5.1 (`docs/open-questions.md` question 208(b)): a compact-serialization JWS (an OIDC
+  // access token), verified through the exact same `crates/av-command/src/oidc.rs::verify`
+  // path `AuthorizeRequest.principal_token` uses -- same `IssuerConfig`, same RS256-only
+  // rule, same boundary-nanosecond expiry against the injected clock. There is no second
+  // verifier and no relaxed check for this field. On success, the verified `Principal.
+  // groups` is checked against this deployment's own configured role table for a role
+  // granting the `"query"` surface (`crates/av-gateway/src/auth.rs::Surface::Query`) --
+  // deny by default, exactly `RoleTable::granting_role`'s own reasoning: an unverified
+  // token, or a verified token naming no granting role, is refused before any product data
+  // is ever touched. The verified `Principal.groups` is ALSO mapped, through a second
+  // deployment-configured table, to the caller's effective clearance marking -- `caller_
+  // clearance` above is never itself trusted as identity or as clearance: when it is
+  // non-empty it must agree with the token-derived clearance or the request is refused
+  // (never silently preferring the higher or the lower of the two); when empty, the
+  // token-derived clearance is used. An empty `caller_token` is refused the same way a
+  // malformed one is -- there is no "no token supplied" default that means "allow".
+  string caller_token = 5;
 }
 
 message GatewayQueryResponse {
@@ -816,6 +833,24 @@ message ProposeCommandRequest {
   // Every `GatewayQueryResponse.query_id` the model's session issued before this proposal, in
   // the order the gateway served them -- `ProposalEvidence.query_ids`.
   repeated string query_ids = 12;
+  // R5.1 (`docs/open-questions.md` question 208(b)): a compact-serialization JWS (an OIDC
+  // access token for a **service** subject -- the proposer), verified through the exact same
+  // `crates/av-command/src/oidc.rs::verify` path `DispatchRequest.service_token` uses --
+  // same `IssuerConfig`, same RS256-only rule, same boundary-nanosecond expiry against the
+  // injected clock. On success, the verified `Principal.groups` is checked against this
+  // deployment's own configured SERVICE role table for a role granting the `"propose"`
+  // surface (`crates/av-gateway/src/auth.rs::Surface::Propose`) -- deny by default: an
+  // unverified token, or a verified token naming no granting service role (this includes
+  // every purely-human token, since the human and service role tables are disjoint by
+  // construction -- see `crates/av-gateway/src/auth.rs`'s own module doc), is refused before
+  // any command is proposed. `principal` above is never itself trusted as identity: the
+  // verified `Principal.sub` is what is recorded, always, as `ProposalEvidence.model_
+  // identity`; when `principal` is non-empty it must agree with the verified subject or the
+  // request is refused (mirrors `AckRequest.principal`'s own disagreement rule verbatim --
+  // see that field's doc comment for the full contract). An empty `caller_token` is refused
+  // the same way a malformed one is -- there is no "no token supplied" default that means
+  // "allow".
+  string caller_token = 13;
 }
 
 // `ModelProposeService.ProposeCommand` response: the resulting `Command`, exactly at

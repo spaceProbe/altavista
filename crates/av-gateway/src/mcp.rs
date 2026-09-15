@@ -37,6 +37,30 @@
 //! `tools/call` naming `"authorize"`) each carry the correct JSON-RPC error code and
 //! increment [`crate::counters::Counters`] before this module returns a response -- never a
 //! silent drop, never a panic.
+//!
+//! ## R5.1/question 208(b): which methods authenticate, and why (a written, declared decision)
+//!
+//! `tools/call` naming `"query"` or `"propose_command"` authenticates every caller --
+//! [`McpHandler::handle_query`]/[`McpHandler::handle_propose_command`] call through the exact
+//! same [`crate::auth::AuthContext`] gate the gRPC surfaces use, via [`authenticated_query`]/
+//! [`authenticated_propose_command`], never a second copy. **`initialize` and `tools/list` do
+//! NOT authenticate, by deliberate decision, not omission:**
+//!
+//! - `initialize` is the MCP handshake itself. This hand-rolled server's own wire shape has no
+//!   field on the `initialize` request an MCP client could even carry a token in before it has
+//!   completed the handshake that tells it how to -- refusing it for a missing credential the
+//!   protocol gives no way to present yet would make every MCP client unable to ever get far
+//!   enough to learn this server's own `capabilities`. Its response body
+//!   ([`McpHandler::handle_initialize`]) carries only `protocolVersion`/`serverInfo`/
+//!   `capabilities` -- no product data, no clearance, no ledger content.
+//! - `tools/list` renders exactly [`GatewayTool::ALL`]'s own `name()`/`description()` --
+//!   values already present, verbatim, in this crate's own committed source code (this file).
+//!   There is nothing in that response a caller could not already read directly from this
+//!   repository; authenticating it would add a check with no confidentiality boundary behind
+//!   it to protect.
+//!
+//! Both are recorded, with this exact reasoning, in `docs/compliance/av-gateway/control-
+//! matrix.md`'s own IA rows -- a declared decision, never a silent gap.
 
 use std::sync::Arc;
 
@@ -47,9 +71,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use av_command::clock::Clock;
 use av_command::ledger::Ledger;
 
+use crate::auth::{AuthContext, AuthRefusal};
 use crate::counters::{Counted, Counters};
-use crate::gateway::GatewayCore;
-use crate::propose_flow::{propose_command, ProposeCommandInput, ProposeFlowError};
+use crate::gateway::{authenticated_query, AuthenticatedQueryError, GatewayCore};
+use crate::propose_flow::{authenticated_propose_command, AuthenticatedProposeError, ProposeCommandInput, ProposeFlowError};
 use crate::propose_only::ProposeOnlyAuthority;
 
 /// The gateway's deny-by-default MCP tool allow-list -- see the module doc's "one source,
@@ -114,6 +139,16 @@ pub enum McpRefusal {
     /// `tools/call`'s own `params.arguments` do not match the named tool's expected shape.
     /// Code `-32602`.
     InvalidParams { detail: String },
+    /// R5.1: `arguments.caller_token` was absent/empty, or failed verification --
+    /// [`crate::auth::AuthRefusal::MissingToken`]/[`crate::auth::AuthRefusal::TokenInvalid`].
+    /// A server-defined code distinct from every refusal above, so a client can tell "who are
+    /// you" apart from "your request was malformed" or "you may not" by CODE alone (invariant
+    /// F), never by parsing this variant's own message text.
+    Unauthenticated { detail: String },
+    /// R5.1: the verified token names no role granting this surface, or a declared
+    /// `caller_clearance`/`principal` disagreed with the verified one --
+    /// [`crate::auth::AuthRefusal`]'s remaining variants.
+    PermissionDenied { detail: String },
 }
 
 impl McpRefusal {
@@ -124,6 +159,8 @@ impl McpRefusal {
             McpRefusal::MethodNotFound { .. } => -32601,
             McpRefusal::ToolNotAllowed { .. } => -32001,
             McpRefusal::InvalidParams { .. } => -32602,
+            McpRefusal::Unauthenticated { .. } => -32002,
+            McpRefusal::PermissionDenied { .. } => -32003,
         }
     }
 }
@@ -136,6 +173,15 @@ impl Counted for McpRefusal {
             McpRefusal::MethodNotFound { .. } => "mcp_method_not_found",
             McpRefusal::ToolNotAllowed { .. } => "mcp_tool_not_allowed",
             McpRefusal::InvalidParams { .. } => "mcp_invalid_params",
+            // R5.1: these two variants are never routed through `Self::refuse` (the
+            // underlying `crate::auth::AuthRefusal` has already recorded its own, more
+            // specific `gateway_auth_*` counter by the time either is constructed -- see
+            // `auth_refusal_to_mcp`'s own doc comment) -- these codes exist only so
+            // `Counted` is total; mirrors `crate::gateway`/`crate::mcp`'s own existing
+            // convention of never double-counting a wrapped refusal (e.g. `query`'s
+            // pre-existing `RefusalReason` mapping to `InvalidParams` below).
+            McpRefusal::Unauthenticated { .. } => "mcp_unauthenticated",
+            McpRefusal::PermissionDenied { .. } => "mcp_permission_denied",
         }
     }
 }
@@ -148,6 +194,26 @@ impl std::fmt::Display for McpRefusal {
             McpRefusal::MethodNotFound { method } => write!(f, "method not found: {method:?} -- only initialize, tools/list, tools/call are recognized"),
             McpRefusal::ToolNotAllowed { tool } => write!(f, "tool not allowed: {tool:?} is not on this gateway's deny-by-default allow-list"),
             McpRefusal::InvalidParams { detail } => write!(f, "invalid params: {detail}"),
+            McpRefusal::Unauthenticated { detail } => write!(f, "unauthenticated: {detail}"),
+            McpRefusal::PermissionDenied { detail } => write!(f, "permission denied: {detail}"),
+        }
+    }
+}
+
+/// R5.1: classifies a [`crate::auth::AuthRefusal`] into the two new [`McpRefusal`] variants
+/// above by CODE, not by re-deriving it from message prose -- `MissingToken`/`TokenInvalid`
+/// ("who are you") become [`McpRefusal::Unauthenticated`]; every other variant ("you may not")
+/// becomes [`McpRefusal::PermissionDenied`]. Deliberately does NOT call `McpHandler::refuse`
+/// (so does not double-count): the underlying `AuthRefusal` has already recorded its own,
+/// specific `gateway_auth_*` counter inside `crate::auth::AuthContext` itself, the identical
+/// "the underlying refusal's own counter is what moved, not a second wrapper counter"
+/// convention this module's own pre-existing `query`/`propose_command` error paths already
+/// follow for `RefusalReason`/`ProposeFlowError`.
+fn auth_refusal_to_mcp(e: AuthRefusal) -> McpRefusal {
+    match &e {
+        AuthRefusal::MissingToken { .. } | AuthRefusal::TokenInvalid { .. } => McpRefusal::Unauthenticated { detail: e.to_string() },
+        AuthRefusal::RoleNotGranted { .. } | AuthRefusal::NoClearanceForSubject { .. } | AuthRefusal::ClearanceMismatch { .. } | AuthRefusal::PrincipalMismatch { .. } => {
+            McpRefusal::PermissionDenied { detail: e.to_string() }
         }
     }
 }
@@ -161,6 +227,9 @@ pub struct McpContext {
     pub evidence_ledger: Arc<Ledger>,
     pub clock: Arc<dyn Clock>,
     pub counters: Arc<Counters>,
+    /// R5.1/question 208(b): the same [`crate::auth::AuthContext`] the gRPC surfaces use --
+    /// `query`/`propose_command` authenticate through this, never a second copy.
+    pub auth: Arc<AuthContext>,
 }
 
 /// Handles one JSON-RPC 2.0 message at a time -- no I/O of its own (see [`serve`] for the
@@ -294,18 +363,21 @@ impl McpHandler {
         // attack and be refused -- see crate::gateway's own ordered chain, which checks
         // this field first, regardless of what else is well-formed above.
         let caller_supplied_products_uri = get_str(args, "caller_supplied_products_uri").unwrap_or("");
+        // R5.1/question 208(b): absent means empty, refused by crate::auth::AuthContext's own
+        // MissingToken check -- there is no "no token supplied" default that means "allow".
+        let caller_token = get_str(args, "caller_token").unwrap_or("");
 
         let request = GatewayQueryRequest {
             run: Some(RunIdentity { run_id: run_id.to_string(), config_hash: config_hash.to_string() }),
             caller_clearance: caller_clearance.to_string(),
             selector: selector as i32,
             caller_supplied_products_uri: caller_supplied_products_uri.to_string(),
+            caller_token: caller_token.to_string(),
         };
-        let response = self
-            .ctx
-            .gateway
-            .query(&request)
-            .map_err(|refusal| McpRefusal::InvalidParams { detail: refusal.to_string() })?;
+        let response = authenticated_query(&self.ctx.gateway, &self.ctx.auth, &self.ctx.counters, caller_token, request).map_err(|e| match e {
+            AuthenticatedQueryError::Auth(a) => auth_refusal_to_mcp(a),
+            AuthenticatedQueryError::Refusal(r) => McpRefusal::InvalidParams { detail: r.to_string() },
+        })?;
         Ok(json!({
             "run_id": response.run.as_ref().map(|r| r.run_id.clone()).unwrap_or_default(),
             "config_hash": response.run.as_ref().map(|r| r.config_hash.clone()).unwrap_or_default(),
@@ -351,6 +423,9 @@ impl McpHandler {
         let config_hash = get_str(args, "config_hash").unwrap_or("").to_string();
         let query_ids: Vec<String> =
             args.get("query_ids").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        // R5.1/question 208(b): absent means empty, refused by crate::auth::AuthContext's own
+        // MissingToken check -- there is no "no token supplied" default that means "allow".
+        let caller_token = get_str(args, "caller_token").unwrap_or("").to_string();
 
         let input = ProposeCommandInput {
             command_id: command_id.to_string(),
@@ -367,7 +442,7 @@ impl McpHandler {
             query_ids,
         };
 
-        match propose_command(&self.ctx.authority, &self.ctx.evidence_ledger, &*self.ctx.clock, &self.ctx.counters, input).await {
+        match authenticated_propose_command(&self.ctx.authority, &self.ctx.evidence_ledger, &*self.ctx.clock, &self.ctx.counters, &self.ctx.auth, &caller_token, input).await {
             // Question 209(a): reads the REAL `Command.state` this call actually produced
             // (normally CHECKED now, never hard-coded as "PROPOSED") -- the same discipline
             // D9's console route (`altavista/command_client.py`) applies, never inferred.
@@ -375,7 +450,8 @@ impl McpHandler {
                 let state_name = av_cdm::pb::CommandState::try_from(output.command.state).unwrap_or(av_cdm::pb::CommandState::Unspecified).as_str_name();
                 Ok(json!({"command_id": output.command.id, "state": state_name}))
             }
-            Err(err) => Err(propose_flow_error_to_mcp(err)),
+            Err(AuthenticatedProposeError::Auth(a)) => Err(auth_refusal_to_mcp(a)),
+            Err(AuthenticatedProposeError::Flow(err)) => Err(propose_flow_error_to_mcp(err)),
         }
     }
 }
@@ -421,12 +497,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthContext, GroupClearanceMap};
     use crate::catalogue::{CatalogueEntry, RunCatalogue};
     use crate::labels::ClearanceLadder;
     use av_cdm::pb::{Label, Provenance, RunProducts};
+    use av_command::authz::RoleTable;
     use av_command::clock::TestClock;
+    use av_command::oidc::IssuerConfig;
+    use av_command::test_support::{valid_claims, TestIssuer};
     use std::collections::BTreeMap;
     use tokio::io::AsyncReadExt as _;
+
+    const ISSUER: &str = "https://sso.test.example/";
+    const AUDIENCE: &str = "av-gateway";
+    const NOW_UNIX_S: i64 = 1_760_000_000;
+
+    /// Mints a real, signed token against `issuer` -- the same [`TestIssuer`] `handler_with_
+    /// catalogue`'s own [`AuthContext`] was built from -- carrying `groups`.
+    fn mint(issuer: &TestIssuer, groups: &[&str]) -> String {
+        let mut claims = valid_claims(ISSUER, AUDIENCE, "operator-1", NOW_UNIX_S, 3_600);
+        claims["groups"] = serde_json::json!(groups);
+        issuer.mint(&claims)
+    }
 
     /// A ledger directory this call alone owns.
     ///
@@ -455,7 +547,12 @@ mod tests {
     /// test helper: the channel is lazily built from an endpoint nothing will ever dial for
     /// the refusal-shape tests below (`tools/call` naming `"authorize"`, `MethodNotFound`,
     /// malformed frames) -- none of those reach `self.ctx.authority` at all.
-    fn handler_with_catalogue() -> (McpHandler, std::path::PathBuf) {
+    /// R5.1: `"operators"` grants `"query"` (human table) at clearance `"CUI"`;
+    /// `"guests"` grants `"query"` at clearance `"UNCLASSIFIED"` (so a test can exercise D2's
+    /// own over-clearance refusal with a genuinely lower, real, verified clearance rather than
+    /// a caller-claimed one); `"proposer-service"` grants `"propose"` (service table, disjoint
+    /// from the human one by construction).
+    fn handler_with_catalogue() -> (McpHandler, TestIssuer, std::path::PathBuf) {
         let mut entries = BTreeMap::new();
         entries.insert(
             "run-a".to_string(),
@@ -469,19 +566,27 @@ mod tests {
         let gateway = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, counters.clone()));
         let dir = temp_ledger_dir("handler");
         let evidence_ledger = Arc::new(Ledger::open(&dir).unwrap());
-        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000));
         // A channel to an address nothing is listening on -- lazy-connect (tonic's
         // `Endpoint::connect_lazy`) never actually dials until the first RPC, and no test
-        // in this module issues a `propose_command` call that reaches it.
+        // in this module issues a successful `propose_command` call that reaches it.
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let authority = Arc::new(ProposeOnlyAuthority::from_channel(channel));
-        let ctx = McpContext { gateway, authority, evidence_ledger, clock, counters };
-        (McpHandler::new(ctx), dir)
+
+        let issuer = TestIssuer::new();
+        let issuer_config = Arc::new(IssuerConfig::from_public_key_pem(ISSUER, AUDIENCE, issuer.public_key_pem()).unwrap());
+        let human_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("operators".to_string(), vec!["query".to_string()]), ("guests".to_string(), vec!["query".to_string()])])));
+        let service_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("proposer-service".to_string(), vec!["propose".to_string()])])));
+        let group_clearance = Arc::new(GroupClearanceMap::new(BTreeMap::from([("operators".to_string(), "CUI".to_string()), ("guests".to_string(), "UNCLASSIFIED".to_string())])));
+        let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, clock.clone()));
+
+        let ctx = McpContext { gateway, authority, evidence_ledger, clock, counters, auth };
+        (McpHandler::new(ctx), issuer, dir)
     }
 
     #[tokio::test]
     async fn tools_list_returns_exactly_the_allow_list() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -495,7 +600,7 @@ mod tests {
     /// derived from the same slice both times, never a second hand-typed list.
     #[tokio::test]
     async fn tools_list_and_the_dispatch_table_can_never_disagree() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await.unwrap();
         let listed: Vec<String> = resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         let dispatchable: Vec<String> = GatewayTool::ALL.iter().map(|t| t.name().to_string()).collect();
@@ -508,7 +613,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_naming_authorize_is_refused_and_counted() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"authorize","arguments":{}}}"#).await.unwrap();
         assert_eq!(resp["error"]["code"], -32001);
         assert!(resp["error"]["message"].as_str().unwrap().contains("authorize"));
@@ -518,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_raw_json_rpc_method_named_authorize_is_refused_as_method_not_found_and_counted() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"2.0","id":1,"method":"authorize","params":{}}"#).await.unwrap();
         assert_eq!(resp["error"]["code"], -32601);
         assert_eq!(handler.ctx.counters.get("mcp_method_not_found"), 1);
@@ -527,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_call_naming_check_dispatch_ack_expire_fail_are_all_refused_and_counted() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         for name in ["check", "dispatch", "ack", "expire", "fail", "verify_ledger", "not-a-real-tool"] {
             let raw = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#);
             let resp = handler.handle_message(&raw).await.unwrap();
@@ -539,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_json_frame_is_refused_with_parse_error_and_counted_never_a_panic() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message("{not valid json at all").await.unwrap();
         assert_eq!(resp["error"]["code"], -32700);
         assert_eq!(resp["id"], Value::Null);
@@ -549,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_frame_with_the_wrong_jsonrpc_version_is_invalid_request_and_counted() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#).await.unwrap();
         assert_eq!(resp["error"]["code"], -32600);
         assert_eq!(handler.ctx.counters.get("mcp_invalid_request"), 1);
@@ -558,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_notification_with_no_id_gets_no_response_even_when_it_would_refuse() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         let resp = handler.handle_message(r#"{"jsonrpc":"2.0","method":"authorize"}"#).await;
         assert!(resp.is_none());
         // Still counted -- a notification's side effects (including a refusal count) still
@@ -569,20 +674,53 @@ mod tests {
 
     #[tokio::test]
     async fn query_tool_end_to_end_returns_the_catalogued_run() {
-        let (handler, dir) = handler_with_catalogue();
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL"}}}"#;
-        let resp = handler.handle_message(raw).await.unwrap();
+        let (handler, issuer, dir) = handler_with_catalogue();
+        let token = mint(&issuer, &["operators"]);
+        let raw = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"query","arguments":{{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL","caller_token":"{token}"}}}}}}"#);
+        let resp = handler.handle_message(&raw).await.unwrap();
         assert_eq!(resp["result"]["run_id"], "run-a");
         assert_eq!(resp["result"]["product_label"]["marking"], "CUI");
         assert!(!resp["result"]["query_id"].as_str().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **R5.1 acceptance evidence: MCP `query` unauthenticated caller.** No `caller_token` at
+    /// all -- refused `Unauthenticated` (code `-32002`), and the COUNTER (not merely the
+    /// error) is what this test asserts moved.
+    #[tokio::test]
+    async fn query_tool_without_a_caller_token_is_refused_unauthenticated_and_the_counter_moves() {
+        let (handler, _issuer, dir) = handler_with_catalogue();
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL"}}}"#;
+        let resp = handler.handle_message(raw).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32002);
+        assert_eq!(handler.ctx.counters.get("gateway_auth_missing_token"), 1, "the auth counter, not a RefusalReason counter, must have moved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A verified token whose groups grant no role at all (e.g. a name absent from the
+    /// deployment's own role table) is refused `PermissionDenied` (code `-32003`), distinct
+    /// from `Unauthenticated` -- "who are you" vs. "you may not".
+    #[tokio::test]
+    async fn query_tool_with_a_token_naming_no_granting_role_is_refused_permission_denied() {
+        let (handler, issuer, dir) = handler_with_catalogue();
+        let token = mint(&issuer, &["nobody"]);
+        let raw = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"query","arguments":{{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL","caller_token":"{token}"}}}}}}"#);
+        let resp = handler.handle_message(&raw).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32003);
+        assert_eq!(handler.ctx.counters.get("gateway_auth_role_not_granted"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The over-clearance product read (D2) is still reachable, exactly as before, once a
+    /// caller authenticates at a genuinely lower, verified clearance (`"guests"` maps to
+    /// `"UNCLASSIFIED"`) -- authentication is additive, never a replacement for D1/D2's own
+    /// ordered refusal chain.
     #[tokio::test]
     async fn query_tool_over_clearance_is_refused_as_invalid_params_and_the_underlying_label_counter_still_increments() {
-        let (handler, dir) = handler_with_catalogue();
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"run_id":"run-a","caller_clearance":"UNCLASSIFIED","selector":"GATEWAY_SELECTOR_ALL"}}}"#;
-        let resp = handler.handle_message(raw).await.unwrap();
+        let (handler, issuer, dir) = handler_with_catalogue();
+        let token = mint(&issuer, &["guests"]);
+        let raw = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"query","arguments":{{"run_id":"run-a","caller_clearance":"UNCLASSIFIED","selector":"GATEWAY_SELECTOR_ALL","caller_token":"{token}"}}}}}}"#);
+        let resp = handler.handle_message(&raw).await.unwrap();
         assert_eq!(resp["error"]["code"], -32602);
         assert_eq!(handler.ctx.gateway.counters().get("label_over_clearance"), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -590,17 +728,48 @@ mod tests {
 
     #[tokio::test]
     async fn query_tool_caller_supplied_products_uri_is_refused_and_counted() {
-        let (handler, dir) = handler_with_catalogue();
-        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL","caller_supplied_products_uri":"/etc/passwd"}}}"#;
-        let resp = handler.handle_message(raw).await.unwrap();
+        let (handler, issuer, dir) = handler_with_catalogue();
+        let token = mint(&issuer, &["operators"]);
+        let raw = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"query","arguments":{{"run_id":"run-a","caller_clearance":"CUI","selector":"GATEWAY_SELECTOR_ALL","caller_supplied_products_uri":"/etc/passwd","caller_token":"{token}"}}}}}}"#
+        );
+        let resp = handler.handle_message(&raw).await.unwrap();
         assert_eq!(resp["error"]["code"], -32602);
         assert_eq!(handler.ctx.gateway.counters().get("gateway_caller_supplied_path"), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **R5.1 acceptance evidence: MCP `propose_command` unauthenticated caller.** No
+    /// `caller_token` -- refused `Unauthenticated`, and (unlike the pre-existing propose_only
+    /// success tests, which need a real `CommandAuthorityService`) this never dials the lazily-
+    /// connected, nothing-listening `authority` channel this handler was built with at all.
+    #[tokio::test]
+    async fn propose_command_tool_without_a_caller_token_is_refused_unauthenticated_and_the_counter_moves() {
+        let (handler, _issuer, dir) = handler_with_catalogue();
+        let raw = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments":{"command_id":"cmd-1","entity_id":"sat-1","principal":"model-x"}}}"#;
+        let resp = handler.handle_message(raw).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32002);
+        assert_eq!(handler.ctx.counters.get("gateway_auth_missing_token"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A verified but purely-human token (only on the human role table, never the service one)
+    /// cannot propose -- the disjointness guarantee invariant E requires, exercised through
+    /// the MCP surface specifically.
+    #[tokio::test]
+    async fn propose_command_tool_with_a_human_only_token_is_refused_permission_denied() {
+        let (handler, issuer, dir) = handler_with_catalogue();
+        let token = mint(&issuer, &["operators"]); // "operators" grants "query", never "propose".
+        let raw = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"propose_command","arguments":{{"command_id":"cmd-1","entity_id":"sat-1","principal":"model-x","caller_token":"{token}"}}}}}}"#);
+        let resp = handler.handle_message(&raw).await.unwrap();
+        assert_eq!(resp["error"]["code"], -32003);
+        assert_eq!(handler.ctx.counters.get("gateway_auth_role_not_granted"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn stdio_transport_roundtrips_a_real_request_over_an_in_memory_duplex_pipe() {
-        let (handler, dir) = handler_with_catalogue();
+        let (handler, _issuer, dir) = handler_with_catalogue();
         // `client` stays ONE unsplit `DuplexStream` end (both `AsyncRead`/`AsyncWrite` take
         // `&mut self`, so one mutable handle suffices) so dropping it at the end of this
         // test closes the whole endpoint and the server sees a real EOF -- `tokio::io::

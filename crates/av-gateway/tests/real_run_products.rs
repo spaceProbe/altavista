@@ -70,6 +70,7 @@ fn all_request() -> GatewayQueryRequest {
         caller_clearance: "CUI".to_string(),
         selector: GatewaySelector::All as i32,
         caller_supplied_products_uri: String::new(),
+        caller_token: String::new(), // GatewayCore::query itself is auth-agnostic (crate::gateway::authenticated_query is the authenticated layer).
     }
 }
 
