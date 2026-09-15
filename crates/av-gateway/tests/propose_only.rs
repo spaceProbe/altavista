@@ -294,6 +294,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
         query_ids: real_query_ids.clone(),
         model_identity: "model-x".to_string(),
         model_version: "1.0.0".to_string(),
+        model_node_id: "model-x-node".to_string(),
         recorded_tai_ns: 1_000,
     };
     recorder.record(&evidence, &*harness.clock).expect("record evidence");

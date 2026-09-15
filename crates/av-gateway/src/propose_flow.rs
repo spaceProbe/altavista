@@ -66,6 +66,13 @@ pub struct ProposeCommandInput {
     /// `ProposalEvidence.model_identity`.
     pub principal: String,
     pub model_version: String,
+    /// R5.1b, defect 2: the caller-DECLARED model node id -- recorded verbatim as
+    /// `ProposalEvidence.model_node_id`, exactly like `model_version` above. Explicitly
+    /// UNVERIFIED, in contrast to `principal` (which [`authenticated_propose_command`]
+    /// overwrites with the verified token subject before this struct ever reaches
+    /// [`propose_command`]) -- see `ProposalEvidence.model_node_id`'s own proto doc for the
+    /// full contrast.
+    pub model_node_id: String,
     /// What the model saw: the run identity it read before proposing (D5).
     pub run: Option<RunIdentity>,
     /// Every query id the model's session issued before this proposal, in the order the
@@ -153,6 +160,7 @@ pub async fn propose_command(
         query_ids: input.query_ids,
         model_identity: input.principal,
         model_version: input.model_version,
+        model_node_id: input.model_node_id,
         recorded_tai_ns: clock.now_tai_ns(),
     };
     let recorder = EvidenceRecorder::new(evidence_ledger);
@@ -251,6 +259,7 @@ fn input_from_wire(req: ProposeCommandRequest) -> ProposeCommandInput {
         evidence_ids: req.evidence_ids,
         principal: req.principal,
         model_version: req.model_version,
+        model_node_id: req.model_node_id,
         run: req.run,
         query_ids: req.query_ids,
     }
@@ -326,6 +335,7 @@ mod tests {
             evidence_ids: vec!["e1".to_string()],
             principal: "model-x".to_string(),
             model_version: "1.0.0".to_string(),
+            model_node_id: "kalman-v3".to_string(),
             run: Some(RunIdentity { run_id: "run-1".to_string(), config_hash: "hash-1".to_string() }),
             query_ids: vec!["q1".to_string()],
             caller_token: "irrelevant-to-this-conversion".to_string(),
@@ -341,6 +351,7 @@ mod tests {
         assert_eq!(input.evidence_ids, req.evidence_ids);
         assert_eq!(input.principal, req.principal);
         assert_eq!(input.model_version, req.model_version);
+        assert_eq!(input.model_node_id, req.model_node_id);
         assert_eq!(input.run, req.run);
         assert_eq!(input.query_ids, req.query_ids);
     }
@@ -398,6 +409,7 @@ mod tests {
                 evidence_ids: vec![],
                 principal: principal.to_string(),
                 model_version: "1.0.0".to_string(),
+                model_node_id: "test-model-node".to_string(),
                 run: None,
                 query_ids: vec![],
             }

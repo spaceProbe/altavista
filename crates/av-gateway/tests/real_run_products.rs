@@ -141,6 +141,7 @@ fn two_fresh_evidence_ledgers_given_the_same_input_produce_byte_identical_files(
         query_ids: vec!["q1".to_string(), "q2".to_string()],
         model_identity: "model-x".to_string(),
         model_version: "1.0.0".to_string(),
+        model_node_id: "model-x-node".to_string(),
         recorded_tai_ns: 5_000,
     };
 

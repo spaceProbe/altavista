@@ -147,6 +147,10 @@ pub async fn run(client: &mut GatewayClient, config: &ProposerConfig, counters: 
         // below, which invariant D leaves untouched.
         principal: String::new(),
         model_version: config.model.version.clone(),
+        // R5.1b, defect 2: restores WHICH model produced this proposal to the evidence record
+        // (`ProposalEvidence.model_node_id`), additively -- caller-declared and UNVERIFIED,
+        // exactly like `model_version` above, never checked against the verified `principal`.
+        model_node_id: config.model.node_id.clone(),
         run: Some(RunIdentity { run_id: config.run_id.clone(), config_hash: resolved_config_hash }),
         query_ids: vec![query_id],
         caller_token: config.service_token.clone(),

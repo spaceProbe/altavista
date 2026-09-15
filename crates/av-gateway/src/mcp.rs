@@ -415,6 +415,10 @@ impl McpHandler {
         let principal = get_str(args, "principal")
             .ok_or_else(|| self.refuse(McpRefusal::InvalidParams { detail: "arguments.principal (the model identity) must be a string".to_string() }))?;
         let model_version = get_str(args, "model_version").unwrap_or("").to_string();
+        // R5.1b, defect 2: caller-declared and UNVERIFIED, exactly like model_version above --
+        // see ProposalEvidence.model_node_id's own proto doc for the full contrast with
+        // `principal`/the verified subject.
+        let model_node_id = get_str(args, "model_node_id").unwrap_or("").to_string();
         let hazardous = args.get("hazardous").and_then(Value::as_bool).unwrap_or(false);
         let envelope_id = get_str(args, "envelope_id").unwrap_or("").to_string();
         let idempotency_key = get_str(args, "idempotency_key").unwrap_or("").to_string();
@@ -440,6 +444,7 @@ impl McpHandler {
             evidence_ids,
             principal: principal.to_string(),
             model_version,
+            model_node_id,
             run: Some(RunIdentity { run_id, config_hash }),
             query_ids,
         };

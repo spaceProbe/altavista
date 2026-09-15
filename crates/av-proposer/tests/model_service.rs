@@ -111,8 +111,9 @@ async fn model_infos_identity_is_exactly_what_a_real_proposals_evidence_carries(
     let (model_client, model_shutdown_tx, model_handle) = spawn_real_model_service(identity.clone()).await;
     let served_version = model_client.info().version.clone();
     // Sanity: the ModelService really did serve the identity this test declared (D2's own
-    // "one declaration" line still holds for `ModelInfo` itself) -- `model_identity` is no
-    // longer compared against this below (see the R5.1 comment further down).
+    // "one declaration" line still holds for `ModelInfo` itself) -- `ProposalEvidence.
+    // model_identity` is never compared against this below (see the R5.1 comment further
+    // down); `ProposalEvidence.model_node_id` IS (R5.1b, defect 2's own fix, below).
     assert_eq!(model_client.info().node_id, identity.node_id);
 
     let (entries, ladder) = common::catalogue_over_real_fixture("CUI");
@@ -152,7 +153,19 @@ async fn model_infos_identity_is_exactly_what_a_real_proposals_evidence_carries(
     // trusting a declared value that disagrees with the verified one. `model_version` is
     // UNCHANGED by R5.1 (it is not a proposal-identity field) and still equals `ModelInfo.
     // version` exactly, preserving the rest of D2's "one declaration, two consumers" line.
+    //
+    // R5.1b, defect 2 resolves the tension the paragraph above left open: R5.1 made
+    // `model_identity` the verified subject but, in doing so, dropped `ModelIdentity.node_id`
+    // (WHICH model produced this proposal) from the evidence record entirely -- nothing failed
+    // on it, because nothing asserted it either way. `ProposalEvidence.model_node_id` is the
+    // additive fix (`docs/aiplane-plan.md` milestone A4 / ADR-004's AI-plane section: the
+    // evidence topic must attribute a proposal to "the model identity and version"): a real
+    // proposal's evidence now carries the verified subject (WHO submitted it), the
+    // caller-declared model node id (WHICH model produced it), and the model version, all
+    // three read back off the real ledger below -- never a constructed `ProposalEvidence`
+    // literal standing in for what the gateway actually wrote.
     assert_eq!(evidence.model_identity, common::SERVICE_TOKEN_SUBJECT, "ProposalEvidence.model_identity must equal the verified service token subject (R5.1 invariant D), not the declared model node_id");
+    assert_eq!(evidence.model_node_id, identity.node_id, "ProposalEvidence.model_node_id must equal the caller-declared ModelIdentity.node_id (R5.1b defect 2) -- unverified, unlike model_identity above");
     assert_eq!(evidence.model_version, served_version, "ProposalEvidence.model_version must equal the served ModelInfo.version exactly");
     assert_eq!(evidence.model_version, config.model.version);
 

@@ -290,6 +290,7 @@ async fn ledger_decision_trail_and_proposal_reproduce_after_the_process_is_gone(
         evidence_ids: evidence_ids.clone(),
         principal: "model-x".to_string(),
         model_version: "2.1.0".to_string(),
+        model_node_id: "model-x-node".to_string(),
         run: Some(RunIdentity { run_id: "run-alpha".to_string(), config_hash: "hash-alpha".to_string() }),
         query_ids: vec!["q-1".to_string(), "q-2".to_string()],
     };

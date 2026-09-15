@@ -784,11 +784,35 @@ message ProposalEvidence {
   // The model identity and version (D5's attribution requirement) -- reuses core.proto's
   // Provenance.tool convention ("Tool or service (and version) that produced the
   // artifact") rather than inventing a second identity shape.
+  //
+  // R5.1 made this field the VERIFIED token subject (`crates/av-gateway/src/auth.rs::
+  // AuthContext::authenticate_propose`'s own `Principal.sub`) rather than a caller-supplied
+  // string -- correct and stronger (invariant D), but the consequence nothing failed on: this
+  // record no longer named WHICH MODEL produced the proposal, only WHO (which service
+  // credential) submitted it. `model_node_id` below (R5.1b, defect 2) restores that -- see its
+  // own doc for the contrast between the two.
   string model_identity = 4;
   string model_version = 5;
   // When this evidence record was written, nanoseconds on TAI, always from the injected
   // Clock (av_command::clock::Clock) -- never the wall clock read directly (ADR-004, D8).
   int64 recorded_tai_ns = 6;
+  // R5.1b, defect 2: the proposer's own caller-DECLARED model node id (`ProposerConfig::model::
+  // ModelIdentity.node_id`, e.g. a Kalman-filter version string) -- `docs/aiplane-plan.md`
+  // milestone A4 and ADR-004's AI-plane section both require the evidence topic to attribute a
+  // proposal to "the model identity and version"; `model_version` above already survived R5.1
+  // unchanged, but the model IDENTITY half was lost the moment `model_identity` became the
+  // verified subject. `model_node_id` is that missing half, restored ADDITIVELY rather than by
+  // reusing `model_identity` for two purposes.
+  //
+  // Explicitly caller-declared and UNVERIFIED -- in sharp contrast to `model_identity` above,
+  // which is the VERIFIED subject `av_command::oidc::verify` produced. This field carries
+  // exactly what `ProposeCommandRequest.model_node_id` on the wire declared, unchecked against
+  // any token claim (there is no natural claim to check it against -- a service token's
+  // verified `sub` identifies the CREDENTIAL, e.g. "proposer-service", not which model
+  // implementation is running behind it). A reader of this evidence record must treat
+  // `model_identity` as authoritative for "who submitted this" and `model_node_id` as
+  // authoritative for "which model, self-reported" -- never conflate the two.
+  string model_node_id = 7;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -822,8 +846,14 @@ message ProposeCommandRequest {
   // (`CommandProposal.rationale`).
   string rationale = 7;
   repeated string evidence_ids = 8;
-  // The model/agent identity proposing this command (`ProposeRequest.principal`) -- also
-  // recorded verbatim as `ProposalEvidence.model_identity` below.
+  // A caller-DECLARED label for the model/agent proposing this command -- NEVER itself
+  // recorded as `ProposalEvidence.model_identity` (see the R5.1/invariant D paragraph below
+  // this message's own field list for why: that field is now the VERIFIED token subject).
+  // When non-empty it must agree with the verified subject or the request is refused
+  // (mirrors `AckRequest.principal`'s own disagreement rule verbatim); left empty by
+  // `crates/av-proposer/src/proposer.rs` today, since `config.model.node_id` has no reason to
+  // equal the service token's own `sub` -- see `model_node_id` below for where that value
+  // actually goes instead.
   string principal = 9;
   // Recorded verbatim as `ProposalEvidence.model_version` below.
   string model_version = 10;
@@ -851,6 +881,14 @@ message ProposeCommandRequest {
   // the same way a malformed one is -- there is no "no token supplied" default that means
   // "allow".
   string caller_token = 13;
+  // R5.1b, defect 2: the proposer's own caller-DECLARED model node id -- recorded verbatim as
+  // `ProposalEvidence.model_node_id` (see that field's own doc for the full contrast with
+  // `model_identity`/`principal` above). Explicitly caller-declared and UNVERIFIED, exactly
+  // like `model_version` above: unlike `principal`, there is no verified claim this is ever
+  // checked against and no way for it to be refused on disagreement -- it names WHICH model
+  // implementation produced this proposal, while `principal`/the verified subject names WHO
+  // (which service credential) submitted it.
+  string model_node_id = 14;
 }
 
 // `ModelProposeService.ProposeCommand` response: the resulting `Command`, exactly at

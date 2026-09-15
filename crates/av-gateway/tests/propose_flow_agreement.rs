@@ -222,6 +222,10 @@ fn grpc_propose_request(command_id: &str, caller_token: &str) -> ProposeCommandR
         evidence_ids: vec![],
         principal: "model-x".to_string(),
         model_version: "1.0.0".to_string(),
+        // Absent from `mcp_propose_request`'s own JSON above too -- both surfaces default an
+        // unsupplied model_node_id to empty, so this stays consistent with the MCP side for
+        // this file's own "equivalent input" comparison.
+        model_node_id: String::new(),
         run: Some(RunIdentity { run_id: "run-fixture".to_string(), config_hash: "hash-fixture".to_string() }),
         query_ids: vec!["q1".to_string(), "q2".to_string()],
         caller_token: caller_token.to_string(),
