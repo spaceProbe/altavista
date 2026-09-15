@@ -42,9 +42,9 @@ A full kit -- every gated step, real bytes for everything this round can collect
         --copy-pack data-time --copy-pack gmat --max-pack-bytes 900000000
 
 (`--max-pack-bytes` must exceed the GMAT pack's own ~738 MB, or that step refuses rather than
-silently skipping it.) `--with-wheels` and (only if `cargo vendor --offline` genuinely fails)
-`--with-vendor` are the only steps that ever touch the network, and only at kit-build time
-(question 154) -- see "The one place this ever uses the network" below.
+silently skipping it.) `--with-wheels`, `--with-binaries` and (only if `cargo vendor --offline`
+genuinely fails) `--with-vendor` are the steps that touch the network, and only at kit-build time
+(question 154) -- see "Where this uses the network" below.
 
 Flags:
 
@@ -79,14 +79,17 @@ Flags:
   installed, for **linux/aarch64/cp313** (task 3b's own proof platform -- a `python:3.13-slim`
   container, NOT this macOS host's own platform), into `<kit>/wheels/`, plus a wheel of this
   repository's own `altavista` package (`pip wheel .`, since the viewer server is `python -m
-  altavista`). **This is the one step that always uses the network**, at kit-build time only
+  altavista`). **This step always uses the network**, at kit-build time only
   (question 154) -- never triggered by any test without its own opt-in.
 - `--with-binaries` -- **round 2**, gated. Cross-builds `av-ingest-server` (crate `av-ingest`)
   and `av-command` (crate `av-command`) for Linux, the identical bind-mounted `docker run` idiom
   `tests/test_edge_plugin_container.py::_cross_build_ingest_server_binary` establishes, into
-  `<kit>/binaries/`. Built at most ONCE PER COMMIT into a persistent cache
-  (`.av-test-tmp/kit-binaries-cache/<commit>/`, `.gitignore`d) and reused by every kit built at
-  that commit -- see "Reproducibility and a cross-built binary" below for why. A binary that does
+  `<kit>/binaries/`. Built at most ONCE PER SOURCE STATE into a persistent cache
+  (`.av-test-tmp/kit-binaries-cache/<commit>-<short hash of the working tree>/`, `.gitignore`d)
+  and reused by every kit built from that same source state -- see "Reproducibility and a
+  cross-built binary" below for why, and `build_kit.binary_cache_key` for why the key is not the
+  commit alone. **This step uses the network** (the cross-build container installs its build
+  dependencies with apt before compiling); `KIT_MANIFEST`'s `binaries.network_used` records it. A binary that does
   not cross-build (this round: `av-command`, pinned toolchain `rust:1.85-bookworm` is older than
   `regorus` 0.12.0's own const-generics requirement -- see the real error in a built kit's own
   `gaps` list) is never silently dropped: it becomes a named gap carrying the real compiler
@@ -147,8 +150,10 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
 - `vendor` -- **new in round 2**: `{collected, network_used, offline_error}`, always present.
 - `wheels` -- **new in round 2**: `{collected, network_used, fetched}`, `fetched` a list of
   `{name, version, filename, sha256}`.
-- `binaries` -- **new in round 2**: `{collected, results}`, `results` keyed by binary name,
-  `{included, reason}`.
+- `binaries` -- **new in round 2**: `{collected, network_used, source_state, results}`, `results`
+  keyed by binary name, `{included, reason}`. `source_state` is the cache key the bytes came from
+  (`<commit>-<short hash of git status --porcelain + git diff HEAD>`), so a kit built from a tree
+  with uncommitted changes cannot silently carry a binary compiled from a different one.
 - `runs` -- **new in round 2**: keyed by each recorded run fixture's own stem,
   `{config_hash, data_pack_hash, decoded}` -- see "The recorded kernel run", below.
 - `gaps` -- what this kit does not carry and why -- see "What's still a declared gap", below.
@@ -239,10 +244,18 @@ The same argument does not, by itself, cover `--with-binaries` either: round 1 m
 three independent links of identical Rust source produce three DIFFERENT binary hashes on this
 host (Mach-O's per-link `LC_UUID`, among other build-environment detail). A `--with-binaries` kit
 built twice, each time cross-building fresh, would therefore never be reproducible -- so
-`build_kit._cross_build_binaries` builds each target binary AT MOST ONCE PER COMMIT, into a
-persistent cache (`.av-test-tmp/kit-binaries-cache/<git_commit>/`, `.gitignore`d, kept across
-separate `build_kit.py` invocations, not just within one process), and every kit built at that
-commit copies the SAME already-built bytes rather than re-linking. Measured directly while
+`build_kit._cross_build_binaries` builds each target binary AT MOST ONCE PER SOURCE STATE, into a
+persistent cache (`.av-test-tmp/kit-binaries-cache/<binary_cache_key(...)>/`, `.gitignore`d, kept
+across separate `build_kit.py` invocations, not just within one process), and every kit built from
+that same source state copies the SAME already-built bytes rather than re-linking.
+
+**Why the cache key is not the commit alone** (review finding, round 2): a cache keyed on
+`git_commit` reuses one binary for every kit built at that commit, *including* kits built from a
+tree carrying uncommitted changes to the very sources that binary was compiled from -- the kit
+would carry bytes from a different tree state than the one it records, and nothing would say so.
+`build_kit.binary_cache_key` therefore folds `git status --porcelain` and `git diff HEAD` in
+beside the commit, and `KIT_MANIFEST`'s `binaries.source_state` records the resulting key. What it
+does not cover is stated in that function's own doc comment rather than left implied. Measured directly while
 building this task: a second `--with-binaries` build at the same commit reused the cache and
 finished in well under a second, instead of the ~2 minutes the first (real) cross-build took --
 see this task's own report for the exact two-build comparison. This is choice (a) of this task's
@@ -250,7 +263,7 @@ own two options ("build it once and reuse it across the two comparison builds") 
 excluding the field from the reproducibility claim -- the binary's own SHA-256 stays in
 `KIT_MANIFEST`'s `files` list either way, since it is the same bytes in both kits.
 
-## The one place this ever uses the network
+## Where this uses the network
 
 Question 154: "a kit is built with network once and installed with none." Every step in this
 kit builder is offline EXCEPT:
@@ -265,10 +278,15 @@ kit builder is offline EXCEPT:
   does it retry WITHOUT `--offline`, exactly once, and `vendor.network_used` records that this
   happened and why (`vendor.offline_error`).
 
-Nothing else -- `--with-images` only inspects/saves an already-built local image;
-`--with-binaries` only cross-builds inside a container from this worktree's own already-vendored/
-mirrored sources, bind-mounting `/Users/probe/code/spoore` read-only for the path dependency, no
-network of its own.
+- `--with-binaries` -- uses the network, at kit-build time only: the cross-build container runs
+  `apt-get update` and installs `protobuf-compiler`/`libprotobuf-dev`/`libssl-dev`/`pkg-config`
+  before `cargo build` (the crate sources themselves come from this worktree, bind-mounted, with
+  `/Users/probe/code/spoore` read-only for the path dependency). `KIT_MANIFEST`'s
+  `binaries.network_used` records it. An earlier revision of this README claimed this step had
+  "no network of its own", which was simply wrong -- corrected by review rather than left standing.
+
+Nothing else -- `--with-images` only inspects/saves an already-built local image, and every
+remaining step reads files already in this worktree.
 
 ## What's still a declared gap
 

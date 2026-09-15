@@ -571,7 +571,7 @@ def _write_minimal_manifest(kit_root: Path) -> dict:
         kit_root=kit_root, git_commit="0" * 40, git_dirty=False, git_status=[],
         images={}, sboms={}, packs={}, vendor={"collected": False, "network_used": False, "offline_error": None},
         wheels={"collected": False, "network_used": False, "fetched": []},
-        binaries={"collected": False, "results": {}}, runs={},
+        binaries={"collected": False, "network_used": False, "source_state": None, "results": {}}, runs={},
         gaps=kmanifest.build_gaps(vendor_collected=False, wheels_collected=False),
     )
     kmanifest.write_manifest(doc, kit_root)
@@ -906,7 +906,69 @@ def test_with_binaries_runs_the_real_cross_build_path(tmp_path):
     findings = kmanifest.verify_manifest(kit_root)
     assert findings == [], findings
 
-    print(f"\n--- --with-binaries, observed ---\n" + "\n".join(
+    # The binaries step's own honesty fields: the cross-build container installs its build
+    # dependencies with apt before compiling, so this step DOES reach the network at kit-build
+    # time (question 154 permits exactly that, once, when a kit is built) -- a kit must say so
+    # rather than let a reader infer it. `source_state` names the commit AND the working tree the
+    # bytes were compiled from, so a kit built from a dirty tree cannot silently carry a binary
+    # compiled from a different one.
+    assert doc["binaries"]["network_used"] is True
+    assert doc["binaries"]["source_state"] == build_kit.binary_cache_key(
+        doc["git_commit"], *build_kit._git_worktree_state_texts(REPO_ROOT)
+    )
+
+    print(f"\n--- --with-binaries, observed ---\n"
+          f"network_used={doc['binaries']['network_used']} "
+          f"source_state={doc['binaries']['source_state']}\n" + "\n".join(
         f"{name}: included={info['included']} reason={info.get('reason')!r}"
         for name, info in doc["binaries"]["results"].items()
     ))
+
+
+# =================================================================================================
+# 20b. The cross-built binary cache is keyed on the SOURCE STATE, never the commit alone
+# =================================================================================================
+
+def test_binary_cache_key_changes_with_any_working_tree_change():
+    """Review finding (P5 round 2): keying the cross-build cache on `git_commit` alone meant a kit
+    built from a tree with uncommitted changes reused a binary compiled from a DIFFERENT tree
+    state, with nothing in the kit saying so. `binary_cache_key` is a pure function of (commit,
+    `git status --porcelain`, `git diff HEAD`), so this drives it directly with fabricated inputs
+    -- no git repository, no cross-build, no Docker needed.
+
+    Both directions are asserted: the same three inputs always give the same key (or two kits at
+    one source state would never share a binary, and the "two kits from the same commit have the
+    same manifest hash" claim would fail), and changing ANY of the three gives a different one."""
+    commit = "a" * 40
+    status = "?? third_party/mirrors\n"
+    diff = "diff --git a/crates/av-ingest/src/lib.rs b/crates/av-ingest/src/lib.rs\n"
+
+    base = build_kit.binary_cache_key(commit, status, diff)
+    assert base == build_kit.binary_cache_key(commit, status, diff), (
+        "the key must be a pure function of its inputs -- two kits built from one source state "
+        "must reuse the same cached binary, or the manifest hash cannot be reproducible"
+    )
+    assert base.startswith(commit + "-"), (
+        f"the key must still name the commit it belongs to, for a human reading the cache "
+        f"directory -- got {base!r}"
+    )
+
+    changed_commit = build_kit.binary_cache_key("b" * 40, status, diff)
+    changed_status = build_kit.binary_cache_key(commit, status + "?? crates/av-new/\n", diff)
+    changed_diff = build_kit.binary_cache_key(commit, status, diff + "+// an uncommitted edit\n")
+
+    print(f"\n--- binary cache key, observed ---\n"
+          f"base            = {base}\n"
+          f"other commit    = {changed_commit}\n"
+          f"other status    = {changed_status}\n"
+          f"other diff      = {changed_diff}")
+
+    for label, other in (
+        ("a different commit", changed_commit),
+        ("a new untracked path in git status", changed_status),
+        ("an uncommitted tracked change in git diff HEAD", changed_diff),
+    ):
+        assert other != base, (
+            f"{label} must produce a different cache key -- otherwise a kit would carry a binary "
+            f"compiled from a source state it does not record"
+        )

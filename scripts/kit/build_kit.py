@@ -8,10 +8,11 @@ format): this module never invokes a fresh `cargo build`/`docker build` PER KIT.
 `deploy/secdeploy/merge.py`'s own `merge()` over already-committed TOML, copies already-committed
 SBOM/digest/run files byte-for-byte, and -- only when the corresponding flag is passed --
 downloads/vendors/cross-builds exactly once, reusing the result across repeated kit builds at the
-same commit (`collect_binaries`'s own per-commit cache is the one place this matters: a fresh
-cross-build genuinely differs from a previous one, measured, so the SAME already-built bytes are
-copied into every kit at a given commit rather than re-linked per kit -- see `manifest.py`'s own
-top doc, "Decision I", for the full argument).
+same source state (`collect_binaries`'s own per-source-state cache is the one place this matters:
+a fresh cross-build genuinely differs from a previous one, measured, so the SAME already-built
+bytes are copied into every kit built from a given source state rather than re-linked per kit --
+see `manifest.py`'s own top doc, "Decision I", for the full argument, and `binary_cache_key` for
+why "source state" is the commit AND the working tree on top of it, never the commit alone).
 
 # What this half assembles (round 2)
 
@@ -53,6 +54,7 @@ why this was necessary, measured, not assumed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata as importlib_metadata
 import importlib.util
 import json
@@ -644,14 +646,65 @@ def _cross_build_one_binary(repo_root: Path, pkg: str, bin_name: str, run_id: st
     return True, built, None
 
 
+def binary_cache_key(git_commit: str, git_status_text: str, git_diff_text: str) -> str:
+    """The cache directory name `_cross_build_binaries` builds into: the commit, plus a short
+    hash of the WORKING-TREE state on top of it. A pure function of its three string arguments,
+    so it can be tested directly without a git repository or a cross-build.
+
+    Review finding (P5 round 2, manager): an earlier cut keyed this cache on `git_commit` ALONE.
+    A cross-built binary is then reused for every kit built at that commit -- including kits built
+    from a tree carrying uncommitted changes to the very sources that binary was compiled from.
+    The kit would carry bytes compiled from a DIFFERENT tree state than the one it records, and
+    nothing anywhere would say so: exactly the class of failure that leaves no trace. `git_status`
+    and `git diff HEAD` are both folded in, so any tracked modification (content) or any new
+    untracked path (name) produces a different cache directory and forces a real rebuild.
+
+    What this deliberately does NOT cover, stated rather than implied: the CONTENT of an untracked
+    file. `git status --porcelain` names it, so creating or deleting one changes this key, but
+    editing one already named does not. An untracked file can only reach a `cargo build` through a
+    tracked file that references it, and that reference is itself a tracked change -- so the
+    remaining exposure is editing an untracked file that an already-tracked `include!`/`mod` line
+    already points at. A kit built from such a tree records that untracked path in its own
+    `git_status`, which is where a reader would see it.
+    """
+    h = hashlib.sha256()
+    h.update(git_commit.encode("utf-8"))
+    h.update(b"\0")
+    h.update(git_status_text.encode("utf-8"))
+    h.update(b"\0")
+    h.update(git_diff_text.encode("utf-8"))
+    return f"{git_commit}-{h.hexdigest()[:12]}"
+
+
+def _git_worktree_state_texts(repo_root: Path) -> tuple[str, str]:
+    """`(git status --porcelain, git diff HEAD)` as raw text -- the two inputs
+    `binary_cache_key` folds in beside the commit. Read here rather than inside
+    `binary_cache_key` so that function stays pure and directly testable."""
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout
+    diff = subprocess.run(
+        ["git", "diff", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout
+    return status, diff
+
+
 def _cross_build_binaries(repo_root: Path, cache_dir: Path) -> dict:
-    """Cross-builds every `BINARY_TARGETS` binary for Linux, ONCE PER COMMIT, into `cache_dir`
-    (`<repo_root>/.av-test-tmp/kit-binaries-cache/<git_commit>/`, `.gitignore`d, persisted across
-    separate `build_kit.py` invocations, not just within one process) -- reused by every kit built
-    at that commit. This is what keeps `--with-binaries` compatible with "two kits built from the
-    same commit have the same manifest hash" despite a cross-built binary's hash being
-    measured (round 1) to differ across independent links of identical source: build once, copy
-    the SAME bytes into every kit, never re-link per kit.
+    """Cross-builds every `BINARY_TARGETS` binary for Linux, ONCE PER SOURCE STATE, into
+    `cache_dir` (`<repo_root>/.av-test-tmp/kit-binaries-cache/<binary_cache_key(...)>/`,
+    `.gitignore`d, persisted across separate `build_kit.py` invocations, not just within one
+    process) -- reused by every kit built from that same source state. This is what keeps
+    `--with-binaries` compatible with "two kits built from the same commit have the same manifest
+    hash" despite a cross-built binary's hash being measured (round 1) to differ across
+    independent links of identical source: build once, copy the SAME bytes into every kit, never
+    re-link per kit. See `binary_cache_key` for why the key is not the commit alone.
+
+    **This step uses the network**, at kit-build time only (question 154: a kit is built with
+    network once and installed with none): the cross-build container runs `apt-get update` and
+    installs `protobuf-compiler`/`libprotobuf-dev`/`libssl-dev`/`pkg-config` before `cargo build`.
+    `collect_binaries` records that in the manifest's `binaries.network_used`, the same way
+    `collect_wheels` records its own -- a kit must never be able to claim it was assembled with no
+    network when a step of it reached out.
 
     Held under the host-wide docker lock for its whole body; both cross-builds' containers carry
     `av.test`/`av.test.run_id`, pruned by label first (questions 156/207)."""
@@ -698,7 +751,9 @@ def collect_binaries(repo_root: Path, kit_root: Path, git_commit: str) -> tuple[
     cleanly) is never silently omitted -- it becomes a named gap carrying the REAL compiler
     error, and the build continues (this task's own rule: "record it as a named gap ... do not
     retry forever, and move on")."""
-    cache_dir = repo_root / ".av-test-tmp" / "kit-binaries-cache" / git_commit
+    status_text, diff_text = _git_worktree_state_texts(repo_root)
+    cache_key = binary_cache_key(git_commit, status_text, diff_text)
+    cache_dir = repo_root / ".av-test-tmp" / "kit-binaries-cache" / cache_key
     results = _cross_build_binaries(repo_root, cache_dir)
 
     bin_dir = kit_root / "binaries"
@@ -716,7 +771,19 @@ def collect_binaries(repo_root: Path, kit_root: Path, git_commit: str) -> tuple[
                 "name": f"{bin_name}-binary",
                 "reason": f"cross-build for linux failed: {info['error']}",
             })
-    return {"collected": True, "results": manifest_results}, sorted(gaps, key=lambda g: g["name"])
+    return (
+        {
+            "collected": True,
+            # The cross-build container installs its build dependencies with apt before compiling
+            # (see `_cross_build_one_binary`), so this step reaches the network at kit-build time
+            # -- recorded here rather than left for a reader to infer, exactly as `collect_wheels`
+            # records its own `network_used`.
+            "network_used": True,
+            "source_state": cache_key,
+            "results": manifest_results,
+        },
+        sorted(gaps, key=lambda g: g["name"]),
+    )
 
 
 # =================================================================================================
@@ -808,7 +875,9 @@ def build(
         binaries, binary_gaps = collect_binaries(repo_root, kit_root, git_commit)
         extra_gaps.extend(binary_gaps)
     else:
-        binaries = {"collected": False, "results": {}}
+        # Same shape as the collected case (explicit `False`/`None` rather than absent fields),
+        # so a reader never has to distinguish "field omitted" from "field known false".
+        binaries = {"collected": False, "network_used": False, "source_state": None, "results": {}}
 
     gaps = kit_manifest.build_gaps(
         vendor_collected=vendor["collected"],
