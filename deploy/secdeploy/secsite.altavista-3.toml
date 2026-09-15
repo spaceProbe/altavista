@@ -1,0 +1,48 @@
+# AltaVista D5 three-resource site placement — a STANDALONE secdeploy site file (Decision B:
+# never merged with the user's own secsite.toml; see secsite.altavista-eval.toml's header for
+# why). This round it only has to VALIDATE — D5 is the one that actually deploys with it.
+#
+# Three resources, all `target = "macos"`: this is three CONTAINERS on one physical host
+# (question 213(d)), not three machines — distinct addresses stand in for what will be
+# distinct container IPs on a shared docker network once D5 deploys for real. 127.0.0.1/.2/.3
+# are all valid loopback addresses on macOS (the whole 127.0.0.0/8 block is loopback), so this
+# validates today without any container network actually existing yet.
+#
+# Placement: the inference group (our engine-tier av-ingest, mapped by [tier_compat] — see
+# deploy/secdeploy/suite.altavista.toml — plus secdeploy's own secllm) is the one tier
+# secdeploy lets span several resources (src/secdeploy/topology.py's Topology.validate: a tier
+# on several `resources = [...]` is legal for every tier; only `instances = N` per resource is
+# inference-only). It lists all three. Every other tier lands on the first resource.
+
+domain = "altavista.internal"
+upstream_dns = []
+
+[resources.edge-a]
+target = "macos"
+address = "127.0.0.1"
+capabilities = ["gpu"]
+
+[resources.edge-b]
+target = "macos"
+address = "127.0.0.2"
+capabilities = ["gpu"]
+
+[resources.edge-c]
+target = "macos"
+address = "127.0.0.3"
+capabilities = ["gpu"]
+
+[groups.identity]
+resource = "edge-a"
+
+[groups.gateway]
+resource = "edge-a"
+
+[groups.collab]
+resource = "edge-a"
+
+[groups.edge]
+resource = "edge-a"
+
+[groups.inference]
+resources = ["edge-a", "edge-b", "edge-c"]

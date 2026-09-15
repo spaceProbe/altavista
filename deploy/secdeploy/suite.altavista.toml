@@ -1,0 +1,188 @@
+# AltaVista fragment for the user's secdeploy — NOT a secdeploy input by itself.
+#
+# secdeploy is RUN, never vendored or edited (question 213(a)): we do not fork
+# /Users/probe/code/secdeploy, we do not carry a patched copy of its suite.toml, and this file
+# is never handed to `secdeploy` directly. Instead, `deploy/secdeploy/merge.py` reads this
+# fragment plus the user's own `suite.toml` (unmodified, byte-for-byte) and renders a
+# `suite.merged.toml` that secdeploy's own `Manifest.load` validates unchanged.
+#
+# Tier situation (Decision A, docs/secdeploy-upstream.md): secdeploy's manifest.py hard-codes
+#     TIERS = {"identity", "inference", "gateway", "collab", "edge"}
+# and rejects anything else. ADR-003's AltaVista tier list (log, analytics, store, catalog,
+# engine, kernel, design, edge, training) cannot be expressed in that vocabulary today. Rather
+# than rewrite ADR-003 to secdeploy's tiers (or fork secdeploy to accept ours), every component
+# below is declared in ADR-003's tier vocabulary PLUS one addition of our own: `gateway`, used
+# by av-command/av-gateway/av-proposer, which ADR-003's own tier list above does not name (see
+# docs/secdeploy-upstream.md, which states this the same way). `[tier_compat]` is the one
+# declared, reversible place that maps all of it onto secdeploy's five for the merge.
+# `merge.py --map-tiers` (the default) applies it when rendering; `--no-map-tiers` renders the
+# raw ADR-003 (plus `gateway`) tier names
+# instead, which is exactly what proves secdeploy rejects them today (see
+# tests/test_suite_declarations.py::test_adr003_tiers_are_still_rejected_upstream and
+# docs/secdeploy-upstream.md). Delete this table the day secdeploy accepts manifest-declared
+# tiers (docs/secdeploy-upstream.md's first proposal).
+
+[tier_compat]
+# ADR-003's compute/estimation tier (av-ingest, av-dynamics-service's peers) is the one that
+# wants GPU-class compute in secdeploy's own vocabulary — "inference" is the closest existing
+# fit, and it is also the only tier secdeploy lets span several resources or replicate.
+engine = "inference"
+# ADR-003's design-time tooling (the viewer, the optional Python GMAT service) is operator-
+# facing collaboration/tooling, not a production compute tier — "collab" already holds
+# secdeploy's own operator-facing tools (secagent, secchat, secrecorder).
+design = "collab"
+# Not an ADR-003 tier at all — `gateway` is this fragment's own addition (av-command/
+# av-gateway/av-proposer; see the header above and docs/secdeploy-upstream.md). It happens to
+# share its name with one of secdeploy's own five, but that coincidence is not why it is
+# mapped here — every AltaVista tier gets an explicit entry so none can fall through to an
+# implicit identity mapping (render_components raises FragmentRenderError if one ever would).
+gateway = "gateway"
+# Identical name and identical meaning in both vocabularies — av-edge-plugin (a client, never
+# a listener) sits in the same "edge" placement secproxy already occupies.
+edge = "edge"
+
+# ── Components (ADR-003 tier names, plus `gateway` — see [tier_compat] above for both the
+# addition and how everything maps at merge time) ──
+# repo/ref: the AltaVista git remote is git@github.com:spaceProbe/altavista.git, so
+# repo = "spaceProbe/altavista" for every component here. ref = "develop" for all of them;
+# D3's kit manifest is what pins each to an exact commit — this fragment tracks the branch.
+
+[components.av-ingest]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "engine"
+# GAP, not a real 0: crates/av-ingest/src/bin/av-ingest-server.rs has no default bind at all —
+# --grpc-bind/--admin-bind are required flags (question 208(c), the other track's port map).
+# See [ports.av-ingest] below; ports.py's gap check fails the day this becomes a real default.
+port = 0
+runtime = "rust"
+role = "edge telemetry ingest — signed, chained MeasurementBatch gRPC intake + admin HTTP"
+
+[components.av-command]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "gateway"
+port = 50070
+runtime = "rust"
+role = "command authority service"
+
+[components.av-gateway]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "gateway"
+port = 50071
+runtime = "rust"
+role = "AltaVista gateway — DataGatewayService + ModelProposeService"
+
+[components.av-proposer]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "gateway"
+# GAP, not a real 0: crates/av-proposer/src/bin/av-proposer.rs has no default bind — the
+# propose-only mode never listens at all, and the serve mode's address comes entirely from
+# --serve-model-service HOST:PORT (question 208(c)). See [ports.av-proposer] below.
+port = 0
+runtime = "rust"
+role = "model proposer — propose-only by default; --serve-model-service serves spoore's ModelService (D2)"
+
+[components.av-dynamics-service]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "design"
+port = 50062
+runtime = "rust"
+role = "dynamics service — GMAT-backed orbit propagation"
+
+[components.gmat-service]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "design"
+port = 50061
+optional = true  # ADR-003's 2026-09-02 amendment: a design-time tool, not part of a production profile
+runtime = "python>=3.13"
+role = "design-time GMAT service (Python) — av-dynamics-service's GMAT-backed peer"
+
+[components.av-edge-plugin]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "edge"
+# Legitimately 0, not a gap: av-edge-plugin is a CLIENT (replays a kernel run's telemetry to a
+# real EdgeIngest server via --endpoint) — it dials out, it never binds a listener. See
+# [ports.av-edge-plugin] below (kind = "no-listener").
+port = 0
+runtime = "rust"
+role = "edge plugin — replays a kernel run's simulated-asset telemetry to EdgeIngest"
+
+[components.av-viewer]
+repo = "spaceProbe/altavista"
+ref = "develop"  # D3's kit manifest pins the exact commit
+kind = "service"
+tier = "design"
+port = 8765
+fronted = true  # question 65: the viewer sits behind secproxy, not addressed on its own port directly
+runtime = "python>=3.13"
+role = "Three.js viewer — python -m altavista serve"
+
+# ── Port provenance (checked by deploy/secdeploy/ports.py; tests/test_suite_declarations.py) ──
+# kind:
+#   "const"       the file declares a real default-bind constant; `pattern` is a Python regex
+#                 with ONE capturing group that extracts the port number, and it must match the
+#                 file exactly once.
+#   "gap"         the service listens but owns no default yet (question 208(c), the other
+#                 track's port map) — declared port must be 0, and `flag` must be the literal
+#                 substring proving the address is required from the command line, not defaulted.
+#   "no-listener" the component never listens at all — declared port must be 0.
+
+[ports.av-ingest]
+kind = "gap"
+file = "crates/av-ingest/src/bin/av-ingest-server.rs"
+flag = '--grpc-bind is required'
+note = "question 208(c) — the other track's port map. The day av-ingest lands a default bind, ports.py's gap check goes stale (fails) and forces this row to be updated to kind = \"const\" with a real port."
+
+[ports.av-command]
+kind = "const"
+file = "crates/av-command/src/bin/av-command.rs"
+pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
+
+[ports.av-gateway]
+kind = "const"
+file = "crates/av-gateway/src/bin/av-gateway.rs"
+pattern = '"AV_GATEWAY_BIND",\s*"[\d.]+:(\d+)"'
+
+[ports.av-proposer]
+kind = "gap"
+file = "crates/av-proposer/src/bin/av-proposer.rs"
+flag = '--serve-model-service'
+note = "question 208(c) — the other track's port map. The day av-proposer's serve mode grows a default bind, ports.py's gap check goes stale (fails) and forces this row to be updated to kind = \"const\" with a real port."
+
+[ports.av-dynamics-service]
+kind = "const"
+file = "crates/av-dynamics-service/src/config.rs"
+pattern = 'DEFAULT_PORT:\s*u16\s*=\s*(\d+)'
+
+[ports.gmat-service]
+kind = "const"
+file = "services/gmat-service/gmat_service/config.py"
+pattern = '^DEFAULT_PORT\s*=\s*(\d+)'
+
+[ports.av-edge-plugin]
+kind = "no-listener"
+# Corrected from the brief's implied path: there is no crates/av-edge-plugin crate. The binary
+# lives at crates/av-ingest-client/src/bin/av-edge-plugin.rs — see that file's own module
+# doc-comment for why (crates/av-edge must not grow a transport dependency, and a brand-new
+# crate would gain nothing dependency-wise over one more [[bin]] on av-ingest-client, which
+# already depends on both av-edge and av-grpc). Verified: the file contains no `bind(`/
+# `TcpListener`/`Server` — only an `--endpoint` flag it dials out to.
+file = "crates/av-ingest-client/src/bin/av-edge-plugin.rs"
+
+[ports.av-viewer]
+kind = "const"
+file = "altavista/__main__.py"
+pattern = '"--port".*?default=(\d+)'
