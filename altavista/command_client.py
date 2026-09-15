@@ -217,31 +217,55 @@ def _decision_to_dict(d: Any) -> Dict[str, Any]:
     }
 
 
-def list_proposed_commands(config: CommandServiceConfig, entity_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """The `PROPOSED` commands, with their rationale and evidence ids, for `entity_id` -- or,
-    when `entity_id` is `None`, for every entity `config.entities` names (A5: "proposals with
-    their rationale and evidence"). Real `Query(QueryByEntity{state_filter=PROPOSED})` calls,
-    one per entity swept -- never a client-side re-filter of an unfiltered query, so the real
-    service's own filter is what decides "proposed", not a second copy of that rule here.
+def list_pending_commands(config: CommandServiceConfig, entity_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The commands awaiting a human at the console -- both `PROPOSED` and `CHECKED` (question
+    209(a): `Check` now runs automatically inside `Propose`, so the human step is normally
+    authorizing a `CHECKED` command, not `Check`ing a `PROPOSED` one; a `PROPOSED` command is
+    now the rare case -- an automatic-check I/O failure left it there, awaiting a retried
+    `Check` -- but it still belongs on this list too, since it is still awaiting *something*
+    from an operator's view of the queue). For `entity_id`, or, when `entity_id` is `None`,
+    for every entity `config.entities` names (A5: "proposals with their rationale and
+    evidence").
+
+    TWO real `Query(QueryByEntity{state_filter=...})` calls per entity swept -- one for
+    `COMMAND_STATE_PROPOSED`, one for `COMMAND_STATE_CHECKED` -- never a client-side re-filter
+    of an unfiltered query, so the real service's own filter is what decides each state, not a
+    second copy of that rule here (this function's own rule, unchanged since before this
+    round: `authority.proto`'s `QueryByEntity` takes exactly one `CommandState`, so listing two
+    states means two real calls, not a proto change).
+
+    Each row's `"state"` key is the REAL `CommandState` enum name (`"COMMAND_STATE_PROPOSED"`/
+    `"COMMAND_STATE_CHECKED"`) read directly off the `Command` the matching `Query` call
+    actually returned (`command.state`) -- never inferred from which of the two `Query` calls
+    produced the row, so a future bug that ever mismatched the two could never hide behind an
+    assumed label.
+
+    Output ordering is deterministic: entities are swept in the order `entity_id`/
+    `config.entities` gives (unchanged), and rows are then sorted by `(entityId, commandId)` --
+    so the PROPOSED-then-CHECKED sweep order per entity never itself becomes part of the
+    output's own ordering.
     """
     entity_ids = [entity_id] if entity_id else list(config.entities)
     out: List[Dict[str, Any]] = []
     for eid in entity_ids:
-        request = authority_pb2.QueryRequest(entity=authority_pb2.QueryByEntity(entity_id=eid, state_filter=command_pb2.COMMAND_STATE_PROPOSED))
-        response = _call(config, "Query", request)
-        for command in response.commands:
-            proposal = response.proposals[command.id] if command.id in response.proposals else None
-            out.append(
-                {
-                    "commandId": command.id,
-                    "entityId": command.entity_id,
-                    "commandClass": command.command_class,
-                    "hazardous": command.hazardous,
-                    "idempotencyKey": command.idempotency_key,
-                    "rationale": proposal.rationale if proposal is not None else "",
-                    "evidenceIds": list(proposal.evidence_ids) if proposal is not None else [],
-                }
-            )
+        for state_filter in (command_pb2.COMMAND_STATE_PROPOSED, command_pb2.COMMAND_STATE_CHECKED):
+            request = authority_pb2.QueryRequest(entity=authority_pb2.QueryByEntity(entity_id=eid, state_filter=state_filter))
+            response = _call(config, "Query", request)
+            for command in response.commands:
+                proposal = response.proposals[command.id] if command.id in response.proposals else None
+                out.append(
+                    {
+                        "commandId": command.id,
+                        "entityId": command.entity_id,
+                        "commandClass": command.command_class,
+                        "hazardous": command.hazardous,
+                        "idempotencyKey": command.idempotency_key,
+                        "state": command_pb2.CommandState.Name(command.state),
+                        "rationale": proposal.rationale if proposal is not None else "",
+                        "evidenceIds": list(proposal.evidence_ids) if proposal is not None else [],
+                    }
+                )
+    out.sort(key=lambda row: (row["entityId"], row["commandId"]))
     return out
 
 

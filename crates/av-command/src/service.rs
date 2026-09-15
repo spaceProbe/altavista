@@ -5,7 +5,56 @@
 //! contains state-machine or policy logic of its own, only request validation, a call into
 //! [`crate::state`]/[`crate::authority`]/[`crate::ledger`], a ledger append (when the state
 //! module itself did not already do one -- [`crate::authority::check_command`] appends for
-//! `Check`; every other RPC appends here), and a [`tonic::Status`] mapping for the result.
+//! `Check` and for `Propose`'s own automatic check below; every other RPC appends here), and
+//! a [`tonic::Status`] mapping for the result.
+//!
+//! # A1.2 / the check edge, and question 209(a): `Propose` now runs it automatically
+//!
+//! A1.2 gave this crate exactly one place that decides *what happens* with a policy
+//! decision: [`crate::authority::check_command`], which drives [`crate::state::check`]/
+//! [`crate::state::reject`] and the matching ledger append together. Question 209(a) (the
+//! lead's real-browser drive of the console found the human step could never complete: the
+//! console only ever listed `PROPOSED` commands, nothing called `Check` on a human's behalf,
+//! and `Authorize` on a still-`PROPOSED` command is by design an illegal edge) is decided as:
+//! **`Check` runs automatically inside `Propose`**, policy being automatic by ADR-004 -- the
+//! transition stays separate and logged, so the trail is unchanged.
+//!
+//! [`CommandAuthorityServiceImpl::run_check`] (D1) is the **one** implementation of the check
+//! step this crate has: it calls [`crate::authority::check_command`], keeps [`Self::commands`]/
+//! [`Self::decisions`] live, then writes the audit line (R4.2b: in that order -- see [`Self::
+//! append_and_commit_index`]'s own doc for why the index commit can never wait on the audit
+//! write). **Both** [`Self::propose`] and [`Self::check`] call this one helper -- two copies of
+//! this logic is exactly how the two surfaces would drift apart. [`Self::propose`]'s own
+//! ordering is deliberate and unchanged in its first half: `state::propose`, [`Self::
+//! append_and_commit_index`] (with the `CommandProposal` attached, committing [`Self::
+//! commands`] the instant the ledger append succeeds), the `proposals` index, then the audit
+//! write -- so the `PROPOSED` record is durable *first* -- and only **then** does it call
+//! [`Self::run_check`],
+//! a second, independent ledger append with its own principal (`"policy"`) and its own
+//! reason (the decision id and policy hash, `crate::authority::format_reason`). A successful
+//! `Propose` therefore returns a `CHECKED` (or `REJECTED`) `Command` with **two** transitions
+//! on it, `decision: Some(...)`, never a bare `PROPOSED` one -- exactly the two ledger records
+//! a `Propose` followed by an explicit `Check` used to produce, just no longer two RPCs.
+//!
+//! A policy **denial** (D3) is a typed, counted refusal on `Propose` itself
+//! ([`ServiceError::PolicyDenied`], `PERMISSION_DENIED`, counter code `"policy_denied"`) --
+//! the `REJECTED` transition and its `PolicyDecision` are still durable on the ledger (`run_
+//! check` already wrote them, audit line included) and the command stays queryable at
+//! `REJECTED`; the refusal is on the RPC's *return value*, never on the record.
+//!
+//! An automatic-check **I/O failure** (D4 -- a ledger/rate read or append fault, never a
+//! policy denial) leaves the command exactly as `Propose`'s first half left it: `PROPOSED`,
+//! durable on the ledger and in [`Self::commands`] (`run_check` never calls [`Self::
+//! put_command`] on its own `Err` path). `Propose` returns the existing typed
+//! [`ServiceError::Check`] (`CheckCommandError::Io`, counter code `"check_io_error"`), whose
+//! message says in words that the command remains `PROPOSED` and that an explicit `Check` is
+//! the retry path.
+//!
+//! The explicit `Check` RPC (D5) therefore stays callable -- it is D4's retry path -- but a
+//! command this crate is holding is normally `CHECKED`/`REJECTED` the instant `Propose`
+//! returns, so calling `Check` again (or on anything past `PROPOSED`) hits the same
+//! [`state::CommandError::IllegalTransition`] refusal any other out-of-order edge in this
+//! file already gets, naming the command's actual current state.
 //!
 //! # In-memory index -- rebuilt from the ledger, not durable on its own (question 203(a))
 //!
@@ -224,11 +273,53 @@
 //! moved from Gap/Partial and what is still open.
 //!
 //! Every RPC that reaches a real state transition -- not only `Authorize` -- writes an
-//! [`crate::audit`] line too: `CommandAuthorityServiceImpl::append_last_transition` (shared
-//! by `Propose`, `Authorize`'s success path, `Dispatch`, `Ack`, `Expire` and `Fail`) and
-//! `Check`'s own body (which does not go through that helper -- see its own doc comment)
-//! each call [`crate::audit::AuditWriter::write`] once the ledger append itself has already
-//! succeeded.
+//! [`crate::audit`] line too: `CommandAuthorityServiceImpl::commit_transition` (shared by
+//! `Authorize`'s success path, `Ack`, `Expire` and `Fail`), `Propose`'s own body and `Self::
+//! run_check` (D1, shared by `Propose`'s automatic check and the `Check` RPC) each call
+//! [`crate::audit::AuditWriter::write`] once the ledger append -- and, R4.2b, this service's
+//! own in-memory index commit for that same transition -- have already succeeded; see the
+//! next section for why that second half of the ordering (index before audit, not after)
+//! matters just as much as "audit only after the ledger append" always has.
+//!
+//! # R4.2b: the in-memory index commits with the ledger append, never after the audit write
+//!
+//! The rule this crate has always documented -- "the audit write happens only after the
+//! ledger append has already succeeded, so an audit line is never written for a transition
+//! this crate cannot also prove it retained" -- is correct and unchanged. What round 4's
+//! review found is a second ordering question that rule alone does not answer: **once the
+//! ledger append has succeeded, what must happen before the (still fallible) audit write is
+//! attempted?** Before this fix, the answer was "nothing" -- every commit point in this file
+//! wrote the audit line immediately after the ledger append and updated [`Self::commands`]
+//! (and, for `Dispatch`, the idempotency-key set and the real `DispatchSink` hand-off) only
+//! *after* that audit write had also succeeded. An audit-sink failure (a full disk, revoked
+//! permissions, a sink filesystem gone read-only -- a real, reachable I/O fault) therefore
+//! left the ledger durably one transition ahead of this service's own in-memory state, in a
+//! process that keeps running and keeps serving RPCs against that now-stale index -- making a
+//! non-durable, best-effort export log the gate on committing state the ledger had already
+//! made durable. Two concrete, demonstrable consequences: a retried `Check` after an
+//! audited-but-index-stale automatic check was *accepted* (the index still said `PROPOSED`),
+//! appending a second, contradictory `CHECKED` record for one command; a retried `Dispatch`
+//! after an audited-but-index-stale first attempt was *accepted* too (the idempotency key was
+//! never recorded and the `DispatchSink` was never actually reached, since both sat after the
+//! failed audit write), so a retry both recorded the key *and* really dispatched -- a double
+//! dispatch defeating milestone A3's own idempotency guarantee with nothing but a failing log
+//! sink.
+//!
+//! The fix: [`Self::append_and_commit_index`] is now the one place a ledger append happens
+//! and the **only** thing that may run between that append succeeding and the matching
+//! [`Self::write_transition_audit`] call is another durable-adjacent commit this service owns
+//! (today: [`Self::dispatch`]'s idempotency-key insert and its real `DispatchSink.dispatch`
+//! call) -- never a best-effort one. [`Self::commit_transition`] chains the two halves
+//! directly for every caller that has no such extra side effect (`Propose`'s own `PROPOSED`
+//! transition, `Authorize`, `Ack`, `Expire`, `Fail`); [`Self::run_check`] (D1) applies the
+//! identical reordering inline, since `crate::authority::check_command` already performs its
+//! own ledger append internally. The audit write is still a real, typed, counted
+//! [`ServiceError::Io`] on failure -- it must never be swallowed -- it simply can no longer
+//! rewind a transition the ledger has already made durable. Tests:
+//! `crates/av-command/tests/grpc_service.rs::propose_automatic_check_audit_failure_still_
+//! commits_checked_and_refuses_a_retry`, `dispatch_audit_failure_still_dispatches_once_and_
+//! refuses_a_retry`, `ordinary_path_still_writes_one_exact_audit_line_per_transition` (the
+//! control: a working sink still writes one exact line per transition, unchanged).
 //!
 //! # `Expire`/`Fail` -- A3.2 (D2), closing the kernel-refusal-visibility gap
 //!
@@ -243,7 +334,7 @@
 //! `DISPATCHED -> EXPIRED`) and `Fail` (`CommandOutcome::DuplicateIdempotencyKey`/`Refused`/
 //! `NotDispatchedRunEnded` -> [`state::fail`], `DISPATCHED -> FAILED`). Both are thin wire
 //! adapters exactly like `Dispatch`/`Ack` above: no state-machine logic of their own,
-//! [`Self::append_last_transition`] for the ledger append and audit line, and a
+//! [`Self::commit_transition`] for the ledger append, index commit and audit line, and a
 //! [`tonic::Status`] mapping through [`to_status`] identical to every other
 //! [`state::CommandError`] this module already handles. **R3.1 update**: the principal
 //! recorded on either edge is no longer a fixed, unauthenticated service-identity string --
@@ -389,6 +480,19 @@ pub enum ServiceError {
     /// A ledger append or ledger/rate-source read failed.
     #[error("ledger/rate I/O: {0}")]
     Io(#[from] std::io::Error),
+    /// Question 209(a): `Propose` now runs the check edge automatically
+    /// ([`CommandAuthorityServiceImpl::run_check`]) as a separate, logged transition right
+    /// after the `PROPOSED` record lands. When policy denies, `Propose` itself must refuse --
+    /// the caller (a proposer, model or human) needs a typed signal it can act on, not a
+    /// `200 OK` carrying a `REJECTED` command it has to notice on its own. The `REJECTED`
+    /// transition and its `PolicyDecision` are already durable on the ledger by the time this
+    /// variant is ever constructed (`run_check` wrote them, exactly as an explicit `Check`
+    /// would have) -- this is a refusal on the RPC's *return value*, never on the record: the
+    /// command stays queryable at `REJECTED` either way. `decision_id`/`reasons` are copied
+    /// from that same `PolicyDecision`, not re-derived, so the caller sees exactly what the
+    /// ledger already recorded.
+    #[error("propose: policy denied (decision_id={decision_id:?}): {reasons:?}")]
+    PolicyDenied { decision_id: String, reasons: Vec<String> },
     /// A2.1: `Authorize`'s `principal_token` failed OIDC verification. See
     /// [`crate::oidc::TokenError`] for the full refusal vocabulary and the module doc's
     /// status-code section for why this maps to `UNAUTHENTICATED`.
@@ -438,6 +542,7 @@ impl Counted for ServiceError {
             ServiceError::Check(CheckCommandError::Io(_)) => "check_io_error",
             ServiceError::DuplicateIdempotencyKey(_) => "duplicate_idempotency_key",
             ServiceError::Io(_) => "io_error",
+            ServiceError::PolicyDenied { .. } => "policy_denied",
             ServiceError::TokenInvalid(e) => e.code(),
             ServiceError::Authz(e) => e.code(),
             ServiceError::ServiceAuthz(e) => e.code(),
@@ -485,6 +590,7 @@ fn to_status(err: ServiceError) -> Status {
         ServiceError::Check(CheckCommandError::Io(_)) => Status::new(Code::Internal, err.to_string()),
         ServiceError::DuplicateIdempotencyKey(_) => Status::new(Code::AlreadyExists, err.to_string()),
         ServiceError::Io(_) => Status::new(Code::Internal, err.to_string()),
+        ServiceError::PolicyDenied { .. } => Status::new(Code::PermissionDenied, err.to_string()),
         ServiceError::TokenInvalid(_) => Status::new(Code::Unauthenticated, err.to_string()),
         ServiceError::Authz(_) => Status::new(Code::PermissionDenied, err.to_string()),
         ServiceError::ServiceAuthz(_) => Status::new(Code::PermissionDenied, err.to_string()),
@@ -626,14 +732,48 @@ impl CommandAuthorityServiceImpl {
         self.commands.lock().unwrap_or_else(|p| p.into_inner()).insert(command.id.clone(), command);
     }
 
-    /// Appends one ledger record for `command`'s own last transition, with no attached
-    /// `PolicyDecision` (the `Check` RPC is the only caller that attaches one, and it goes
-    /// through `crate::authority::check_command` instead of this helper -- see that
-    /// function's own `Ledger::append` call), then writes the matching [`crate::audit`] line
-    /// (A2.2: "every transition -- not only `Authorize` -- is written as one ... audit
-    /// line"). The audit write happens only after the ledger append has already succeeded --
-    /// an audit line is never written for a transition this crate cannot also prove it
-    /// retained.
+    /// R4.2b (round 4 review defect): appends one ledger record for `command`'s own last
+    /// transition, with no attached `PolicyDecision` (the `Check` RPC is the only caller that
+    /// attaches one, and it goes through `crate::authority::check_command` instead of this
+    /// helper -- see that function's own `Ledger::append` call; [`Self::run_check`] is what
+    /// `Propose`'s automatic check and the `Check` RPC both drive), then -- **the instant the
+    /// append above has succeeded, before anything else runs** -- commits this service's own
+    /// `commands` index to agree with it ([`Self::put_command`]).
+    ///
+    /// This is the one commit point every transition path in this file funnels through
+    /// (directly, via [`Self::commit_transition`] below, or -- for [`Self::dispatch`] alone --
+    /// with its own extra durable-adjacent side effects, the idempotency-key insert and the
+    /// real `DispatchSink` hand-off, interleaved between this call and the audit write; see
+    /// that method's own body). **Why the index commits here, before the caller's own audit
+    /// write, and not after it (the defect this reordering fixes, R4.2b)**: the ledger append
+    /// just above is this service's durable record -- once it returns `Ok`, the transition it
+    /// recorded is retained forever, chained and hash-verifiable
+    /// ([`crate::ledger::Ledger::verify`]), regardless of anything that happens next in this
+    /// process. The RFC 5424 audit line [`Self::write_transition_audit`] writes afterward is a
+    /// **best-effort export copy** for an external SIEM (`crates/av-command/src/audit.rs`'s
+    /// own module doc: "a file sink is not a SIEM"), not a second store of record, and its
+    /// failure (a full disk, revoked permissions, a sink filesystem gone read-only -- a real,
+    /// reachable I/O fault, not a hypothetical) must still be reported to the caller as a
+    /// typed, counted `ServiceError::Io` -- **but it must never rewind a transition the ledger
+    /// has already made durable.** The bug this fixes: every commit point in this file used to
+    /// write the audit line *before* updating `Self::commands` (and, for `Dispatch`, before
+    /// recording the idempotency key or actually handing the command to the `DispatchSink`),
+    /// so an audit-sink failure left the ledger durably one transition ahead of this service's
+    /// own in-memory state, in a process that keeps running and keeps serving RPCs against
+    /// that now-stale index. Two concrete, demonstrable consequences that reordering closes:
+    /// (1) a retried `Check` after an audited-but-index-stale `Propose` used to be *accepted*
+    /// (the index still said `PROPOSED`), appending a **second**, contradictory `CHECKED`
+    /// record for one command -- the chain still verified (the hashes were fine), but the
+    /// decision trail A6's replay reproduces was wrong; (2) a retried `Dispatch` after an
+    /// audited-but-index-stale first attempt used to be *accepted* too (the idempotency key
+    /// was never recorded, and the real `DispatchSink` hand-off never happened, since both sat
+    /// after the failed audit write), so the ledger said `DISPATCHED` once while the asset had
+    /// never actually received it, and the retry both recorded the key *and* really dispatched
+    /// -- defeating milestone A3's "an idempotency key the binding never dispatches twice"
+    /// with nothing but a failing log sink. Tests:
+    /// `crates/av-command/tests/grpc_service.rs::propose_automatic_check_audit_failure_still_
+    /// commits_checked_and_refuses_a_retry`/`dispatch_audit_failure_still_dispatches_once_and_
+    /// refuses_a_retry`.
     ///
     /// `proposal` (R3.5a) is `Some` only from [`Self::propose`]'s own call, carrying the
     /// `CommandProposal` (rationale, evidence ids) `Ledger::append` records self-evidently on
@@ -641,7 +781,12 @@ impl CommandAuthorityServiceImpl {
     /// `Dispatch`, `Ack`, `Expire`, `Fail`) passes `None`, since `Ledger::append` itself
     /// refuses a `proposal` attached to any transition other than `PROPOSED` (see that
     /// method's own doc).
-    fn append_last_transition(&self, command: &Command, proposal: Option<CommandProposal>) -> Result<(), ServiceError> {
+    ///
+    /// Returns the transition just appended (not `()`) so a caller with an extra
+    /// durable-adjacent side effect of its own -- today, only [`Self::dispatch`] -- can
+    /// perform it before calling [`Self::write_transition_audit`] itself, rather than this
+    /// function hard-coding "commit index, write audit, nothing in between" for every caller.
+    fn append_and_commit_index(&self, command: &Command, proposal: Option<CommandProposal>) -> Result<av_cdm::pb::CommandTransition, ServiceError> {
         let transition = command
             .transitions
             .last()
@@ -657,8 +802,83 @@ impl CommandAuthorityServiceImpl {
                 &*self.clock,
             )
             .map_err(ServiceError::Io)?;
-        self.audit.write(&audit::event_for_transition(command, &transition, None)).map_err(ServiceError::Io)?;
-        Ok(())
+        // The ledger append above has already succeeded: `command`'s new state is durable.
+        // Commit the in-memory index to agree with it right now -- see this function's own
+        // doc for why this must happen before the audit write, never after.
+        self.put_command(command.clone());
+        Ok(transition)
+    }
+
+    /// Writes the matching [`crate::audit`] line for a transition [`Self::
+    /// append_and_commit_index`] has already appended to the ledger and already committed to
+    /// [`Self::commands`] -- split out from that function (rather than folded into it, as it
+    /// was before R4.2b) solely so [`Self::dispatch`] can interleave its own extra
+    /// durable-adjacent side effects (the idempotency-key insert, the real `DispatchSink`
+    /// hand-off) between the two. Every other caller reaches this only through
+    /// [`Self::commit_transition`], never directly.
+    fn write_transition_audit(&self, command: &Command, transition: &av_cdm::pb::CommandTransition) -> Result<(), ServiceError> {
+        self.audit.write(&audit::event_for_transition(command, transition, None)).map_err(ServiceError::Io)
+    }
+
+    /// The one commit point (R4.2b) for every transition path that has no additional
+    /// durable-adjacent side effect of its own beyond the ledger append and the index commit:
+    /// [`Self::append_and_commit_index`] (ledger append, then index commit, in that order),
+    /// immediately followed by [`Self::write_transition_audit`] -- append, commit, audit,
+    /// always in that order, never the reverse. Used by `Propose`'s own `PROPOSED` transition,
+    /// `Authorize`, `Ack`, `Expire` and `Fail`. [`Self::dispatch`] is the one caller that
+    /// cannot use this directly, because it has its own extra durable-adjacent side effects to
+    /// interleave between the two halves -- see that method's own body, and [`Self::
+    /// append_and_commit_index`]'s doc for the full reasoning behind the ordering itself.
+    fn commit_transition(&self, command: &Command, proposal: Option<CommandProposal>) -> Result<(), ServiceError> {
+        let transition = self.append_and_commit_index(command, proposal)?;
+        self.write_transition_audit(command, &transition)
+    }
+
+    /// D1 (question 209(a)): the **one** implementation of the check step -- evaluates policy
+    /// over `command` (which must be `PROPOSED`) via [`crate::authority::check_command`],
+    /// writes the matching [`crate::audit`] line, and keeps [`Self::commands`]/[`Self::
+    /// decisions`] live, exactly as the old, single-copy `Check` RPC body used to inline.
+    /// **Both** the `Check` RPC and `Propose`'s new automatic check (question 209(a)) call
+    /// this one helper -- see the module doc's "A1.2 / the check edge" section for why two
+    /// copies of this logic is exactly how the two surfaces would drift apart.
+    ///
+    /// Returns `Ok` for **both** a policy allow and a policy deny (mirroring `crate::
+    /// authority::check_command`'s own contract: a deny is not a `CheckCommandError`, it is a
+    /// successful evaluation whose `PolicyDecision.allow` is `false`) -- only a real I/O
+    /// failure (ledger/rate read, ledger append, or the audit write) is `Err`. It is each
+    /// caller's own job to decide what a deny *means* for its own RPC: `Check` returns it to
+    /// the caller as a normal `CommandResponse` (unchanged since A1.2); `Propose` (D3) turns
+    /// it into a typed [`ServiceError::PolicyDenied`] refusal instead -- this helper itself
+    /// stays neutral between those two policies, exactly as `crate::authority::check_command`
+    /// stays neutral about what an allow/deny even means to the RPC layer.
+    fn run_check(&self, command: Command) -> Result<authority::CheckCommandResult, ServiceError> {
+        let rate_source = LedgerRateSource::new(&self.ledger);
+        let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)?;
+        let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
+        // R4.2b: `check_command` above has already appended the CHECKED/REJECTED record to the
+        // ledger (see that function's own doc -- its `Ledger::append` call is the last thing
+        // it does before returning `Ok`). Commit `Self::commands`/`Self::decisions` to agree
+        // with that durable record right now, before the audit write below -- the identical
+        // "the ledger append is durable; the index commits to match it immediately; the
+        // best-effort audit line comes last and may fail without rewinding either" ordering
+        // [`Self::append_and_commit_index`]'s own doc explains in full (this function cannot
+        // reuse that helper directly, since `check_command` already did its own ledger append
+        // internally -- reordering here is the equivalent fix for this function's own,
+        // separate commit point). Without this reordering, an audit-sink failure right here
+        // left the index at `PROPOSED` even though the ledger already held a `CHECKED` (or
+        // `REJECTED`) record -- exactly the defect a subsequent explicit `Check` retry (D5's
+        // own documented retry path) could then exploit into a second, contradictory `CHECKED`
+        // record for the same command.
+        self.put_command(result.command.clone());
+        // R3.5a: kept live -- `Query`'s `decisions` map (`authority.proto`) answers from this
+        // the instant `check_command`'s own ledger append has already succeeded, for the
+        // identical reason `Self::commands` above is committed here rather than after the
+        // audit write.
+        self.decisions.lock().unwrap_or_else(|p| p.into_inner()).insert(result.command.id.clone(), result.decision.clone());
+        self.audit
+            .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
+            .map_err(ServiceError::Io)?;
+        Ok(result)
     }
 
     /// Writes a `Warning`-severity, `REFUSED` [`crate::audit`] event for a denied `Authorize`
@@ -772,7 +992,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let req = request.into_inner();
         let proposal = req.proposal.ok_or_else(|| self.to_status_counted(ServiceError::MalformedRequest { field: "proposal is required" }))?;
         // R3.5a: `proposal.command` is cloned out here, not moved, so `proposal` itself (its
-        // `rationale`/`evidence_ids` included) survives whole to the `append_last_transition`
+        // `rationale`/`evidence_ids` included) survives whole to the `append_and_commit_index`
         // call below -- `Ledger::append` records it self-evidently on this exact `PROPOSED`
         // record (see that method's own doc), closing the defect that `rationale`/
         // `evidence_ids` were accepted on the wire and never persisted anywhere.
@@ -785,33 +1005,47 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         }
 
         let proposed = state::propose(command, &req.principal, "proposed via CommandAuthorityService.Propose", &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&proposed, Some(proposal.clone())).map_err(|e| self.to_status_counted(e))?;
-        self.put_command(proposed.clone());
-        // R3.5a: kept live the instant the append above has already succeeded -- mirrors
-        // `Self::put_command`'s own "only after the ledger append succeeded" ordering.
+        let transition = self.append_and_commit_index(&proposed, Some(proposal.clone())).map_err(|e| self.to_status_counted(e))?;
+        // R3.5a: kept live the instant the ledger append + index commit above have already
+        // succeeded -- the identical "durable state commits before the best-effort audit
+        // write" ordering `Self::append_and_commit_index`'s own doc explains (R4.2b), applied
+        // here to this RPC's other in-memory index.
         self.proposals.lock().unwrap_or_else(|p| p.into_inner()).insert(proposed.id.clone(), proposal);
-        Ok(Response::new(CommandResponse { command: Some(proposed), decision: None }))
+        self.write_transition_audit(&proposed, &transition).map_err(|e| self.to_status_counted(e))?;
+
+        // Question 209(a), D2: the check edge now runs automatically, right here, as a
+        // *separate* logged transition -- never folded into the `PROPOSED` append above. The
+        // ledger therefore still gets two records for a legal path (a `PROPOSED` one, just
+        // appended, and a `CHECKED`/`REJECTED` one below), each with its own principal and
+        // reason, exactly as it did when a human/model had to call `Check` itself -- "the
+        // trail is unchanged" (the ruling's own words). `self.run_check` (D1) is the *same*
+        // helper the `Check` RPC below calls -- there is exactly one implementation of the
+        // check step, not two that could drift apart.
+        let result = self.run_check(proposed).map_err(|e| self.to_status_counted(e))?;
+        if !result.decision.allow {
+            // D3: a policy denial is a typed, counted refusal on `Propose` itself -- the
+            // `REJECTED` transition and its `PolicyDecision` are already durable (`run_check`
+            // just wrote them, audit line included: do not write it a second time here), so
+            // this is a refusal on the RPC's *return value* only, not on the record.
+            return Err(self.to_status_counted(ServiceError::PolicyDenied { decision_id: result.decision.decision_id.clone(), reasons: result.decision.reasons.clone() }));
+        }
+        Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 
-    /// Does not go through [`Self::append_last_transition`] (`crate::authority::check_command`
-    /// already appends its own ledger record, with the `PolicyDecision` attached) -- so this
-    /// method writes its own [`crate::audit`] line directly, once `check_command` has
-    /// already succeeded, carrying that same `PolicyDecision` (`decisionId`/`policyHash` in
-    /// the structured data -- see `crate::audit`'s module doc).
+    /// Question 209(a): `Propose` now runs this exact check automatically (D1's shared
+    /// [`Self::run_check`] helper) as a separate, logged transition the instant the
+    /// `PROPOSED` record lands -- see [`Self::propose`]'s own doc comment. A command this
+    /// service is holding normally reaches `CHECKED`/`REJECTED` before `Propose` even
+    /// returns, so this RPC exists for exactly one legal case going forward: D4's automatic
+    /// check failed with I/O (a ledger/rate read or append fault, never a policy denial) and
+    /// left the command `PROPOSED` -- this is that retry path. Calling it against a command
+    /// already `CHECKED`/`REJECTED`/anything past `PROPOSED` is refused
+    /// `FAILED_PRECONDITION` by [`state::CommandError::IllegalTransition`], exactly like any
+    /// other out-of-order edge in this file (D5).
     async fn check(&self, request: Request<CheckRequest>) -> Result<Response<CommandResponse>, Status> {
         let req = request.into_inner();
         let command = self.get_command(&req.command_id).map_err(|e| self.to_status_counted(e))?;
-        let rate_source = LedgerRateSource::new(&self.ledger);
-        let result = authority::check_command(command, &self.bundle, self.rate_window_ns, &rate_source, &self.ledger, &*self.clock)
-            .map_err(|e| self.to_status_counted(e.into()))?;
-        let transition = result.command.transitions.last().expect("check_command always appends exactly one transition").clone();
-        self.audit
-            .write(&audit::event_for_transition(&result.command, &transition, Some(&result.decision)))
-            .map_err(|e| self.to_status_counted(ServiceError::Io(e)))?;
-        self.put_command(result.command.clone());
-        // R3.5a: kept live -- `Query`'s new `decisions` map (`authority.proto`) answers from
-        // this the instant `check_command`'s own ledger append has already succeeded.
-        self.decisions.lock().unwrap_or_else(|p| p.into_inner()).insert(result.command.id.clone(), result.decision.clone());
+        let result = self.run_check(command).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(result.command), decision: Some(result.decision) }))
     }
 
@@ -853,8 +1087,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = authz::format_authz_reason(&command.command_class, &decision);
         let authorized = state::authorize(command, &principal.sub, &reason, &req.delegation_id, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&authorized, None).map_err(|e| self.to_status_counted(e))?;
-        self.put_command(authorized.clone());
+        self.commit_transition(&authorized, None).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(authorized), decision: None }))
     }
 
@@ -889,14 +1122,23 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(DISPATCH_REASON, &role, "");
         let dispatched = state::dispatch(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&dispatched, None).map_err(|e| self.to_status_counted(e))?;
+        // R4.2b: the ledger append and the `Self::commands` index commit happen first
+        // ([`Self::append_and_commit_index`]); the idempotency-key insert and the real
+        // `DispatchSink` hand-off follow immediately after -- still under this same `seen`
+        // lock guard, still before the audit write -- so by the time this method can fail on
+        // the audit write alone, the key is already really recorded and the asset has already
+        // really received the command. Only the audit line may still be missing when this
+        // method returns `Internal`; see [`Self::append_and_commit_index`]'s own doc for the
+        // full reasoning (this is the concrete "double dispatch" consequence that doc names).
+        let transition = self.append_and_commit_index(&dispatched, None).map_err(|e| self.to_status_counted(e))?;
         if !dispatched.idempotency_key.is_empty() {
             seen.insert(dispatched.idempotency_key.clone());
         }
         drop(seen);
 
         self.dispatch_sink.dispatch(&dispatched);
-        self.put_command(dispatched.clone());
+
+        self.write_transition_audit(&dispatched, &transition).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(dispatched), decision: None }))
     }
 
@@ -917,8 +1159,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let ack_level = AckLevel::try_from(req.ack_level).unwrap_or(AckLevel::Unspecified);
         let acked = state::ack(command, &principal.sub, &reason, ack_level, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&acked, None).map_err(|e| self.to_status_counted(e))?;
-        self.put_command(acked.clone());
+        self.commit_transition(&acked, None).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(acked), decision: None }))
     }
 
@@ -938,8 +1179,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let expired = state::expire(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&expired, None).map_err(|e| self.to_status_counted(e))?;
-        self.put_command(expired.clone());
+        self.commit_transition(&expired, None).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(expired), decision: None }))
     }
 
@@ -957,8 +1197,7 @@ impl CommandAuthorityServiceTrait for CommandAuthorityServiceImpl {
 
         let reason = format_service_reason(&req.reason, &role, &req.principal);
         let failed = state::fail(command, &principal.sub, &reason, &*self.clock).map_err(|e| self.to_status_counted(e.into()))?;
-        self.append_last_transition(&failed, None).map_err(|e| self.to_status_counted(e))?;
-        self.put_command(failed.clone());
+        self.commit_transition(&failed, None).map_err(|e| self.to_status_counted(e))?;
         Ok(Response::new(CommandResponse { command: Some(failed), decision: None }))
     }
 

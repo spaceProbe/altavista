@@ -324,7 +324,11 @@ export class Viewer {
     this.scenario = sc;
     this._buildFrameGraph(sc);
     const rootObj = this._entitiesGroup;
-    for (const b of sc.bodies) {
+    // `|| []`: question 209(c) -- an empty `{"name", "spacecraft": []}` publish has no
+    // `bodies` key at all (the server stores the raw published dict verbatim, no
+    // default-filling -- `altavista/server.py`'s `Hub.put`), so this must degrade to
+    // "render nothing", never throw.
+    for (const b of sc.bodies || []) {
       const mesh = makeBodyMesh(b, this.textureLoader);
       // a screen-space dot so distant bodies stay visible when their disc is sub-pixel
       const dot = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8),
@@ -335,7 +339,7 @@ export class Viewer {
       this.bodies.set(b.name, { mesh, dot, interp: new BodyInterp(b), data: b, label, visible: true });
     }
     const w = this.canvas.clientWidth || 1, h = this.canvas.clientHeight || 1;
-    for (const s of sc.spacecraft) {
+    for (const s of sc.spacecraft || []) {
       const interp = new TrajectoryInterp(s);
       // `poly.points` is f64 (km, absolute) -- see interp.js's polyline() docstring.
       // trajectoryRenderPositions() (below) does the scale + origin-subtract + single
@@ -480,33 +484,16 @@ export class Viewer {
    * in the "Frames" UI.
    */
   _buildFrameGraph(sc) {
-    this._originFrameId = sc.frame.name;
-    const defs = (sc.frames || []).map(fd => ({
-      id: fd.id,
-      parentId: fd.parentFrameId || null,
-      originTrack: fd.originTrack || null,
-      description: fd.description || fd.id,
-      axesKind: AXES_KIND_MAP[fd.axes] || null,
-      fixedRotationQ: fd.fixedRotationQ || null,
-      // M20.2 (question 134/E-27): the wire FrameDefinition's own origin body (e.g.
-      // "Earth" for EarthICRF/EarthBodyFixed/EarthMJ2000Eq -- M18.1's mandatory
-      // central-body frame set, always offered for a CDM-ingested run), when it names
-      // one -- null for an entity-relative RIC/VNB/VVLH frame or the synthesized root
-      // fallback below. Additive: consumed only by setViewFrame()'s
-      // defaultFrameViewRadius() so a focus-less view of a body-axes frame can be
-      // scaled to that body's own radius instead of the fixed RPO-scale default meant
-      // for a spacecraft-relative frame.
-      body: fd.body || null,
-    }));
-    if (!defs.some(d => d.id === this._originFrameId)) {
-      console.warn(
-        `altavista: scenario frame '${this._originFrameId}' has no matching entry in ` +
-        `'frames' (its axes likely have no altavista.v1.AxesKind -- see ` +
-        `altavista/cdm.py's frame_definition_for); synthesizing a root frame node so ` +
-        `the scene still renders.`
-      );
-      defs.unshift({ id: this._originFrameId, parentId: null, originTrack: null, description: this._originFrameId, axesKind: null });
-    }
+    // Question 209(c): the origin-frame-id resolution and "declared frame absent /
+    // unmapped" synthesis both now live in `resolveFrameGraphInput` (this module,
+    // WebGL-free and pure) -- this method calls that exact function and only warns
+    // (the one DOM/console-touching step the pure function cannot do itself) when it
+    // reports one. See that function's own doc comment for both synthesized-root cases
+    // it covers, including the one this question's own empty `{"name", "spacecraft":
+    // []}` publish hits (`sc.frame` absent entirely, not merely unmapped).
+    const { originFrameId, defs, warning } = resolveFrameGraphInput(sc);
+    this._originFrameId = originFrameId;
+    if (warning) console.warn(warning);
     for (const d of orderFrameDefsByParent(defs)) {
       const node = this.frameGraph.addFrame(d);
       if (d.originTrack && d.originTrack.t && d.originTrack.t.length) node.setOriginTrack(d.originTrack);
@@ -566,6 +553,19 @@ export class Viewer {
    */
   get viewFrameId() {
     return this._cameraFrameId;
+  }
+
+  /**
+   * The scenario's own resolved ENTITIES frame id -- `sc.frame.name` when the
+   * scenario declared one, or `_buildFrameGraph`'s synthesized id (question 209(c):
+   * `'root'` for a scenario with no `frame` at all) when it didn't. `web/js/app.js`'s
+   * `buildLists()` reads this instead of `sc.frame.name` directly so it never throws
+   * on the same shape `_buildFrameGraph` was fixed to tolerate -- this getter and
+   * `this._originFrameId` are the exact same value `setScenario()` just resolved,
+   * never a second, independent guess at it.
+   */
+  get originFrameId() {
+    return this._originFrameId;
   }
 
   frameList() {
@@ -1906,6 +1906,71 @@ export function footprintRenderPositions(ringFlat, floatingOrigin, frameId) {
  */
 export function eventHasRenderedInstance(ev, spacecraftNames) {
   return !!(ev && ev.spacecraft && spacecraftNames.includes(ev.spacecraft));
+}
+
+/**
+ * The pure half of `_buildFrameGraph` (question 209(c)): resolves a scenario's origin
+ * frame id and its (un-topologically-ordered) frame definition list, WITHOUT touching
+ * `THREE`/`console`/any DOM -- so a plain `node` check can exercise it directly,
+ * without constructing a `THREE.WebGLRenderer` (same split as `trajectoryRenderPositions`
+ * above; see that function's own doc comment and `scene_jitter_harness.mjs`'s module
+ * doc for why this file keeps a WebGL-free half at all). `_buildFrameGraph` calls this
+ * exact function and this one only -- never a second, reimplemented copy of this logic.
+ *
+ * Two "no silent fallback" cases, both returning a non-null `warning` naming exactly
+ * what was missing (the caller -- `_buildFrameGraph` -- is the one that actually calls
+ * `console.warn(warning)`, since this function itself must stay pure to stay
+ * `node`-testable):
+ *
+ *  - `sc.frame` itself is absent (question 209(c)'s own trigger: an empty
+ *    `{"name": ..., "spacecraft": []}` publish has no `frame` key at all, not merely
+ *    an unmapped one) -- synthesizes a bare `'root'` frame id with a single root node
+ *    and drops any `sc.frames` entries (there is no declared frame for them to relate
+ *    to), so the scene still renders: nothing, but honestly nothing, never a throw.
+ *  - `sc.frame` names a real frame id, but it has no matching entry in `sc.frames`
+ *    (e.g. `"BodyInertial"`, GMAT's Topocentric -- no `altavista.v1.AxesKind` covers
+ *    them, see `altavista/cdm.py`'s `frame_definition_for` docstring) -- unchanged
+ *    from the pre-209(c) behaviour, just relocated here verbatim.
+ *
+ * Every other case (a real, matched declared frame) returns `warning: null` and the
+ * `defs` list normalized straight off `sc.frames`, exactly as `_buildFrameGraph`
+ * always built it.
+ * @param {{frame?:{name:string}, frames?:Array<object>}|null|undefined} sc
+ * @returns {{originFrameId:string, defs:Array<object>, warning:string|null}}
+ */
+export function resolveFrameGraphInput(sc) {
+  const normalize = (fd) => ({
+    id: fd.id,
+    parentId: fd.parentFrameId || null,
+    originTrack: fd.originTrack || null,
+    description: fd.description || fd.id,
+    axesKind: AXES_KIND_MAP[fd.axes] || null,
+    fixedRotationQ: fd.fixedRotationQ || null,
+    body: fd.body || null,
+  });
+  const declaredFrameId = sc && sc.frame && sc.frame.name;
+  if (!declaredFrameId) {
+    return {
+      originFrameId: 'root',
+      defs: [{ id: 'root', parentId: null, originTrack: null, description: 'root', axesKind: null, fixedRotationQ: null, body: null }],
+      warning:
+        "altavista: scenario has no declared frame ('frame' is absent) and no bodies/frames " +
+        "of its own; synthesizing a bare root frame node so the scene still renders (nothing).",
+    };
+  }
+  const defs = ((sc && sc.frames) || []).map(normalize);
+  if (!defs.some((d) => d.id === declaredFrameId)) {
+    return {
+      originFrameId: declaredFrameId,
+      defs: [{ id: declaredFrameId, parentId: null, originTrack: null, description: declaredFrameId, axesKind: null, fixedRotationQ: null, body: null }, ...defs],
+      warning:
+        `altavista: scenario frame '${declaredFrameId}' has no matching entry in ` +
+        `'frames' (its axes likely have no altavista.v1.AxesKind -- see ` +
+        `altavista/cdm.py's frame_definition_for); synthesizing a root frame node so ` +
+        `the scene still renders.`,
+    };
+  }
+  return { originFrameId: declaredFrameId, defs, warning: null };
 }
 
 function makeBodyMesh(b, loader) {

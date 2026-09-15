@@ -38,7 +38,9 @@ below is a thin adapter over a REAL, already-running av-command gRPC service
 request parameter (see that module's own docstring, "identity, never a path"'s sibling rule
 for a service endpoint). Answers a typed 503 -- never an import-time or startup failure --
 when grpcio is absent, no endpoint is configured, or the configured endpoint is unreachable.
-GET  /api/command/proposals                     PROPOSED commands (rationale, evidence ids)
+GET  /api/command/proposals                     commands awaiting a human -- PROPOSED and
+                                                  CHECKED (question 209(a)), each with its
+                                                  rationale, evidence ids, and real state --
                                                   for ?entity_id=, or every configured entity
 GET  /api/command/commands/{id}/decision         the PolicyDecision for one command
 GET  /api/command/commands/{id}/trail            every CommandTransition, in order
@@ -739,19 +741,26 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
 
     @app.get("/api/command/proposals")
     async def command_proposals(entity_id: Optional[str] = None):
-        """The `PROPOSED` commands for `entity_id` (or, when omitted, for every entity this
-        server was started with via `--command-entity`), each with its rationale and
-        evidence ids -- a real `altavista.v1.CommandAuthorityService.Query` call
-        (`altavista.command_client.list_proposed_commands`), never a Python-side
+        """The commands awaiting a human at the console for `entity_id` (or, when omitted,
+        for every entity this server was started with via `--command-entity`) -- both
+        `PROPOSED` and `CHECKED` (question 209(a): `Check` now runs automatically inside
+        `Propose`, so the human step is normally authorizing a `CHECKED` command; a
+        `PROPOSED` command is the rare case, an automatic-check I/O failure awaiting a
+        retried `Check`, but still belongs on this queue). Each row carries its rationale,
+        evidence ids, and a `"state"` key naming the real `CommandState` it is actually in --
+        a real `altavista.v1.CommandAuthorityService.Query` call
+        (`altavista.command_client.list_pending_commands`), never a Python-side
         re-implementation of the state machine or a reader of the service's own ledger
         files. `entity_id` is an ordinary lookup key the real service itself already accepts
         on `Query`, not a path -- the service ENDPOINT, not this parameter, is what R3.5a's
         design rule keeps out of the request (see `altavista/command_client.py`'s module
-        doc). Answers a typed 503 when no command service is configured or reachable, or
-        when `grpcio` is not installed -- this route never fails the app's own startup.
+        doc). The route path itself is unchanged (`/api/command/proposals`) even though the
+        function behind it was renamed -- the browser panel and its own tests depend on this
+        exact path. Answers a typed 503 when no command service is configured or reachable,
+        or when `grpcio` is not installed -- this route never fails the app's own startup.
         """
         try:
-            proposals = command_client.list_proposed_commands(command_config, entity_id=entity_id)
+            proposals = command_client.list_pending_commands(command_config, entity_id=entity_id)
         except command_client.CommandServiceError as exc:
             _raise_command_service_error(exc)
         return {"proposals": proposals}

@@ -68,8 +68,13 @@ pub enum CheckCommandError {
     /// `check`/`reject` edges this function drives).
     #[error("check_command: {0}")]
     State(#[from] CommandError),
-    /// Reading the recent-rate window, or appending the resulting record, failed.
-    #[error("check_command: ledger/rate I/O: {0}")]
+    /// Reading the recent-rate window, or appending the resulting record, failed. Question
+    /// 209(a)/D4: this is also the error `Propose`'s own automatic check can fail with -- the
+    /// message says in words that the command this call was given is untouched by the
+    /// failure (still `PROPOSED`, still durable on the ledger and in the caller's own index,
+    /// since this function never reaches `Ledger::append` -- or the state edge's own
+    /// in-memory result -- successfully) and that an explicit `Check` is the retry path.
+    #[error("check_command: ledger/rate I/O: {0} -- the command this call was given remains PROPOSED (untouched by this failed attempt); retry with an explicit Check")]
     Io(#[from] io::Error),
 }
 

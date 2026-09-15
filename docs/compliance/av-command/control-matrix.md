@@ -162,9 +162,9 @@ been run end to end on this host (a Colima disk-pressure measurement, not a code
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
 | 3.3.1 | Create and retain audit records | Met | `crates/av-command/src/ledger.rs:Ledger::append` appends one length-prefixed `LedgerRecord` per transition, forever (no rotation/expiry policy — see Deficiencies); retention is unbounded local-file. This is the whole retention mechanism (question 54's "retention" half) — `crates/av-command/src/audit.rs` builds no second retention policy of its own; see the SIEM-export row below for the export half | `cargo test -p av-command --lib ledger::tests::later_records_chain_prev_hash_to_the_previous_records_hash` |
-| 3.3.1 (SIEM export) | **SIEM export of the decision trail** (question 54) | Partial | **New this task (A2.2)**: `crates/av-command/src/audit.rs`'s `AuditWriter` appends one RFC 5424 syslog-format line (`crates/av-command/src/audit.rs`'s own module doc gives the exact grammar, field by field, with RFC 5424 section citations) for every transition and every refused `Authorize` attempt, to a profile-declared sink (`profiles/execution.yaml`'s top-level `audit.sink_path`). **This is Partial, deliberately, not Met: a file sink is not a SIEM.** No forwarding protocol (syslog UDP/TLS, a SIEM's own ingestion API) is implemented — the brief for this task allows a UDP/Unix-socket sink only "if it costs nothing and is tested," and neither was; see that module's own doc, "A UDP/Unix-socket sink was not added". An unconfigured sink is an explicit, documented no-op (`AuditSinkConfig::Disabled`), never a silent failure to write | `cargo test -p av-command --lib audit::` and `cargo test -p av-command --test grpc_service audit_line_for_a_successful_authorization_is_exact audit_line_for_a_wrong_role_refusal_is_exact audit_line_for_a_missing_mfa_refusal_is_exact audit_line_for_an_expired_delegation_refusal_is_exact` |
+| 3.3.1 (SIEM export) | **SIEM export of the decision trail** (question 54) | Partial | **New this task (A2.2)**: `crates/av-command/src/audit.rs`'s `AuditWriter` appends one RFC 5424 syslog-format line (`crates/av-command/src/audit.rs`'s own module doc gives the exact grammar, field by field, with RFC 5424 section citations) for every transition and every refused `Authorize` attempt, to a profile-declared sink (`profiles/execution.yaml`'s top-level `audit.sink_path`). **This is Partial, deliberately, not Met: a file sink is not a SIEM.** No forwarding protocol (syslog UDP/TLS, a SIEM's own ingestion API) is implemented — the brief for this task allows a UDP/Unix-socket sink only "if it costs nothing and is tested," and neither was; see that module's own doc, "A UDP/Unix-socket sink was not added". An unconfigured sink is an explicit, documented no-op (`AuditSinkConfig::Disabled`), never a silent failure to write. **R4.2b (this task)**: this export line is written strictly *after* `crates/av-command/src/service.rs`'s own in-memory index (and, for `Dispatch`, the idempotency-key record and the real `DispatchSink` hand-off) has already been committed to agree with the ledger append that already succeeded — a failure of this best-effort export line is still a real, typed, counted `INTERNAL` refusal to the caller, but it can no longer leave this service's own state disagreeing with what the ledger already durably recorded (see Deficiency 11 below for the defect this closes) | `cargo test -p av-command --lib audit::` and `cargo test -p av-command --test grpc_service audit_line_for_a_successful_authorization_is_exact audit_line_for_a_wrong_role_refusal_is_exact audit_line_for_a_missing_mfa_refusal_is_exact audit_line_for_an_expired_delegation_refusal_is_exact ordinary_path_still_writes_one_exact_audit_line_per_transition` |
 | 3.3.2 | Trace actions to individual users/processes | Partial | Every `CommandTransition` carries a `principal` string (`crates/av-command/src/state.rs`'s `propose`/`check`/.../`fail`, all take `principal: &str`). On `Authorize`, that string is the OIDC-verified `sub` claim (A2.1, `crates/av-command/src/oidc.rs::verify`), not a caller-supplied token, and (**A2.2**) the transition's `reason` (`crate::authz::format_authz_reason`) additionally names *which* role or delegation granted it and how MFA was satisfied — traceable not just to a subject but to the specific grant that authorized the action. **R3.1 (new this round)** extends exactly that property to `Dispatch`/`Ack`/`Expire`/`Fail`: their transitions now record the OIDC-verified service `sub` from `service_token` (`CommandAuthorityServiceImpl::authenticate_service_principal`), never the fixed strings `"ground-segment"`/`"kernel-clock"`/`"kernel"` they recorded before (those three constants are deleted), and `format_service_reason` names the granting service role in the transition's `reason` the way `format_authz_reason` does for a human. A caller-declared `principal` that disagrees with the verified subject is refused (`INVALID_ARGUMENT`), never silently preferred. Still Partial: `Propose`'s own `principal` is still a caller-supplied model/agent id with no credential behind it, by design (`authority.proto`'s own doc comment: a proposer is not a human OIDC principal) | `cargo test -p av-command --test grpc_service authorize_with_a_verified_token_records_the_verified_sub_not_the_raw_token authorize_with_the_right_role_authorizes_over_the_wire_with_the_ledger_asserted dispatch_service_principal_acceptance_and_refusals every_service_principal_refusal_writes_one_audit_line_naming_the_command_and_the_reason` |
-| 3.3.4 | Alert on audit logging failure | Partial | `Ledger::append`/`Ledger::verify` return `std::io::Result`, so a write/read failure is a real, propagated `Err`, never silently swallowed — but this is fail-loud to the caller (a `tonic::Status` with code `INTERNAL` at the gRPC boundary, `crates/av-command/src/service.rs`'s `to_status`), not an *alert* to an operator/SIEM. **A2.2**: `crate::audit::AuditWriter::write`'s own I/O failures are handled identically — propagated, never `.ok()`-ed away (`crates/av-command/src/service.rs`'s `append_last_transition`/`audit_authorize_refusal`) | N/A (verified by code inspection: every fallible I/O call in `crates/av-command/src/ledger.rs` and `crates/av-command/src/audit.rs` uses `?`, never `.ok()`/`.unwrap_or_default()`) |
+| 3.3.4 | Alert on audit logging failure | Partial | `Ledger::append`/`Ledger::verify` return `std::io::Result`, so a write/read failure is a real, propagated `Err`, never silently swallowed — but this is fail-loud to the caller (a `tonic::Status` with code `INTERNAL` at the gRPC boundary, `crates/av-command/src/service.rs`'s `to_status`), not an *alert* to an operator/SIEM. **A2.2**: `crate::audit::AuditWriter::write`'s own I/O failures are handled identically — propagated, never `.ok()`-ed away (`crates/av-command/src/service.rs`'s `commit_transition`/`run_check`/`audit_authorize_refusal`). **R4.2b (this task)**: that propagated failure is now guaranteed to be *only* a missing audit line, never also a rewound transition — see the SIEM-export row's own R4.2b note and Deficiency 11 below for the full defect and fix | N/A (verified by code inspection: every fallible I/O call in `crates/av-command/src/ledger.rs` and `crates/av-command/src/audit.rs` uses `?`, never `.ok()`/`.unwrap_or_default()`) and `cargo test -p av-command --test grpc_service propose_automatic_check_audit_failure_still_commits_checked_and_refuses_a_retry dispatch_audit_failure_still_dispatches_once_and_refuses_a_retry` |
 | 3.3.5 / 3.3.6 | Correlate and report audit review | Gap | No correlation tooling beyond the raw per-partition ledger files, `/admin/api/evidence/verify`'s pass/fail result, the `VerifyLedger` RPC, and (A2.2) the audit sink file — no query/aggregation layer over any of them | N/A |
 | 3.3.7 | Authoritative, time-synced timestamps | Inherited | Every `LedgerRecord.tai_ns` comes from the caller's injected `Clock` (`crates/av-command/src/clock.rs`); NTP synchronization of whatever `SystemClock` reads is the environment's responsibility. **A2.2**: every audit line's `TIMESTAMP` comes from the identical injected clock reading, never a second wall-clock read (`crates/av-command/src/audit.rs`'s module doc) | N/A |
 | 3.3.8 | **Protect audit information from unauthorized access/modification** | Met | SHA-256 hash chain (`prev_hash`/`hash`, `"GENESIS"` convention, `authority.proto`'s `LedgerRecord`) — `crates/av-command/src/ledger.rs:Ledger::verify` recomputes and detects any single-record tamper (content or `prev_hash` link), reporting the exact `seq` it broke at, read straight from disk independent of in-memory state; now also reachable over the wire via `CommandAuthorityService.VerifyLedger`, which reports the identical result. This row is scored against the ledger only — the audit sink file has no chaining/integrity protection of its own (plain appended lines; see Deficiencies) | `cargo test -p av-command --lib ledger::tests::verify_detects_a_tampered_record_body_and_reports_its_sequence_number -- --nocapture` and `cargo test -p av-command --test grpc_service verify_ledger_reports_a_tampered_partition_as_broken_at_the_right_sequence` |
@@ -369,3 +369,74 @@ Ranked by what a reviewer would flag first:
     cannot_reach_the_authority`) that **skips visibly**, naming the missing image and its
     build script (`services/proposer/build-image.sh`) in the skip reason — not a silent
     omission, but also not evidence the isolation claim has ever been exercised on this host.
+14. **Resolved this round (question 209(a)): `Check` now runs automatically inside `Propose`,
+    closing the defect the lead's real-browser drive of the console found ("the console lists
+    only PROPOSED commands, nothing calls `Check` on a human's behalf, and `Authorize` on a
+    PROPOSED command is by design an illegal edge, so the operator can never authorize
+    anything from the console"). `CommandAuthorityServiceImpl::propose` (`crates/av-command/
+    src/service.rs`) still appends the `PROPOSED` record first (durable before anything else
+    runs), then calls the identical, single-implementation check helper
+    (`CommandAuthorityServiceImpl::run_check`, D1 — the SAME helper the `Check` RPC itself
+    calls, so the two surfaces cannot drift apart) as a **separate, logged transition** — the
+    trail is unchanged: a legal path still produces `PROPOSED` then `CHECKED` as two distinct
+    ledger records, each with its own principal (`model-x`/`"policy"`) and its own reason, not
+    a merge. A policy **denial** is now a typed, counted `PERMISSION_DENIED` refusal
+    (`ServiceError::PolicyDenied`, counter code `policy_denied`) on `Propose` itself, naming
+    the decision id and deny reasons — the `REJECTED` record and its `PolicyDecision` are
+    still durable and queryable (`Query`), the refusal is on the RPC's return value only, never
+    on the record (this does not change either of this document's own "`Propose`/`Check` still
+    carry no credential of their own" notes above, AC 3.1.1/3.1.2's and IA 3.5.1/3.5.2's rows:
+    the automatic check's own principal is still the fixed string `"policy"`, not a human
+    identity). An automatic-check **I/O failure** (never a policy denial) leaves the command
+    exactly `PROPOSED`, still durable, with the existing typed `check_io_error` refusal
+    (`ServiceError::Check`) whose message now says in words that an explicit `Check` is the
+    retry path — `Check` therefore stays callable for exactly that one case, refused
+    `FAILED_PRECONDITION` (naming the actual current state) for anything already past
+    `PROPOSED`. Test: `cargo test -p av-command --test grpc_service
+    full_legal_path_propose_check_authorize_dispatch_ack_end_to_end
+    propose_of_a_payload_class_command_is_refused_policy_denied_and_the_rejected_record_is_
+    still_queryable proposes_automatic_check_io_failure_leaves_the_command_proposed_and_check_
+    then_retries_it check_is_refused_as_already_checked_for_every_post_proposed_state` (the
+    first also pins the full five-state trail, `PROPOSED, CHECKED, AUTHORIZED, DISPATCHED,
+    ACKED`, produced by four RPCs instead of five).
+15. **Resolved this task (R4.2b, a defect the manager found in review, not a new feature): an
+    audit-sink failure could leave this service's own in-memory state disagreeing with what
+    the ledger had already durably recorded, in a process that kept running** (was: every
+    commit point in `crates/av-command/src/service.rs` wrote the RFC 5424 audit line *before*
+    updating `Self::commands` and, for `Dispatch`, before recording the idempotency key or
+    actually handing the command to the `DispatchSink` — so a real, reachable audit-sink I/O
+    failure (a full disk, revoked permissions, a sink filesystem gone read-only) left the
+    ledger one transition ahead of the index it should have already matched). Two concrete,
+    demonstrable consequences this closes: (1) a retried explicit `Check` after an
+    audited-but-index-stale automatic `Propose` check used to be *accepted* (the index still
+    said `PROPOSED`), appending a **second**, contradictory `CHECKED` record for one command —
+    the ledger's own hash chain still verified, but the decision trail A6's replay reproduces
+    was wrong; (2) a retried `Dispatch` after an audited-but-index-stale first attempt used to
+    be *accepted* too (the idempotency key was never recorded and the real `DispatchSink` was
+    never actually reached, since both sat after the failed audit write), so the retry both
+    recorded the key *and* really dispatched — a double dispatch defeating milestone A3's own
+    "an idempotency key the binding never dispatches twice" guarantee with nothing but a
+    failing log sink. The rule this crate has always documented — the audit write happens only
+    *after* the ledger append has already succeeded — is correct and unchanged; what changed is
+    the second half of the ordering: the in-memory index (and, for `Dispatch`, the
+    idempotency-key record and the real `DispatchSink` hand-off) now commits **the instant the
+    ledger append succeeds, strictly before the audit write is even attempted**
+    (`CommandAuthorityServiceImpl::append_and_commit_index`/`commit_transition`/`run_check`,
+    `crates/av-command/src/service.rs` — see that module's own "R4.2b" doc section for the full
+    reasoning). The audit write is still a real, typed, counted `ServiceError::Io` refusal on
+    failure — it is never swallowed — it simply can no longer rewind a transition the ledger
+    has already made durable. Proving this needed a way to make an audit write fail
+    deterministically and selectively (a `chmod` after `AuditWriter::open` does not fail a
+    write on macOS, since the writer already holds an open `std::fs::File`):
+    `crates/av-command/src/audit.rs` gained a `LineSink` seam (`pub(crate)`, production
+    behaviour byte-for-byte unchanged) and `crates/av-command/src/test_support.rs` (already
+    gated `#[cfg(any(test, feature = "test-support"))]` — see that module's own doc for why an
+    ungated test-fixture item is itself a defect this crate has already recorded once) gained
+    `FailingAuditSink`, absent from a default build like every other item in that module. Test:
+    `cargo test -p av-command --test grpc_service
+    propose_automatic_check_audit_failure_still_commits_checked_and_refuses_a_retry
+    dispatch_audit_failure_still_dispatches_once_and_refuses_a_retry
+    ordinary_path_still_writes_one_exact_audit_line_per_transition` (the first two inject a
+    real failing audit sink and assert the index/ledger/dispatch-sink/idempotency-key state
+    each demonstrated consequence above depended on; the third is the control, proving a
+    working sink's output is unchanged).

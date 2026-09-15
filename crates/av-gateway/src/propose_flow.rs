@@ -72,10 +72,14 @@ pub struct ProposeCommandInput {
     pub query_ids: Vec<String>,
 }
 
-/// What [`propose_command`] returns on success: the real `Command` (`PROPOSED`, exactly one
-/// transition) [`ProposeOnlyAuthority::propose`] returned, and the [`ProposalEvidence`] that
-/// was actually written to the evidence ledger for it -- both surfaces render these into
-/// their own wire shape, never reconstructing either value independently.
+/// What [`propose_command`] returns on success: the real `Command` [`ProposeOnlyAuthority::
+/// propose`] returned, and the [`ProposalEvidence`] that was actually written to the evidence
+/// ledger for it -- both surfaces render these into their own wire shape, never
+/// reconstructing either value independently. Question 209(a)/D6: since the real `Propose`
+/// RPC now runs the check edge automatically, this `Command` is `CHECKED` (two transitions,
+/// `PROPOSED` then `CHECKED`) on success, never a bare `PROPOSED` one with a single
+/// transition -- a policy denial never reaches here at all (it is
+/// [`ProposeRefusal::PolicyDenied`], a refusal `propose_command` returns instead, below).
 #[derive(Debug, Clone)]
 pub struct ProposeCommandOutput {
     pub command: Command,
@@ -165,14 +169,18 @@ pub async fn propose_command(
 /// refusal text (question 53's `EnvelopeNotAllowed`, D4's `AlreadyStarted`) as
 /// `INVALID_ARGUMENT` -- mirrored here rather than re-derived, so this rpc's status code for a
 /// given refusal is identical to what a direct `CommandAuthorityService.Propose` call would
-/// have produced. Evidence-recording failure is `INTERNAL`: it is this crate's own I/O, not a
-/// property of the caller's request.
+/// have produced. Question 209(a)/D6/D7: [`ProposeRefusal::PolicyDenied`] is mirrored the
+/// identical way, as `PERMISSION_DENIED` -- the real `Propose` RPC's own automatic-check
+/// denial, typed and counted (`propose_policy_denied`) all the way out to this gRPC surface,
+/// not merely to the gateway's internal `ProposeRefusal`. Evidence-recording failure is
+/// `INTERNAL`: it is this crate's own I/O, not a property of the caller's request.
 fn to_status(err: ProposeFlowError) -> Status {
     let message = err.to_string();
     match &err {
         ProposeFlowError::Propose(ProposeRefusal::EnvelopeNotAllowed { .. } | ProposeRefusal::AlreadyStarted { .. } | ProposeRefusal::InvalidArgument { .. }) => {
             Status::invalid_argument(message)
         }
+        ProposeFlowError::Propose(ProposeRefusal::PolicyDenied { .. }) => Status::permission_denied(message),
         ProposeFlowError::Propose(ProposeRefusal::Transport { .. }) => Status::unavailable(message),
         ProposeFlowError::EvidenceRecording { .. } => Status::internal(message),
     }

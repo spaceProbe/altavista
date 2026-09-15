@@ -1,9 +1,11 @@
 //! D4/D5/D6 acceptance evidence, against a REAL `CommandAuthorityServiceImpl` over a real
 //! loopback socket (`tests/common/mod.rs`).
 //!
-//! - `propose_command_creates_proposed_and_nothing_else`: after `ProposeOnlyAuthority::
-//!   propose`, the real ledger shows exactly one `COMMAND_STATE_PROPOSED` record for that
-//!   command id -- nothing past it.
+//! - `propose_command_creates_checked_via_the_automatic_check_and_nothing_else`: after
+//!   `ProposeOnlyAuthority::propose`, the real ledger shows exactly two records for that
+//!   command id -- `COMMAND_STATE_PROPOSED` then `COMMAND_STATE_CHECKED` (question 209(a):
+//!   `Propose` now runs the check edge automatically) -- nothing past it, and this seam still
+//!   never itself called `Check`.
 //! - `a_proposal_carrying_a_non_empty_envelope_id_is_refused_end_to_end`: question 53,
 //!   through this crate's own seam, against the real `state::propose`.
 //! - `a_crafted_command_that_is_already_started_is_refused_and_counted`: D4's "any other
@@ -152,24 +154,32 @@ fn fresh_proposal(id: &str, entity_id: &str) -> CommandProposal {
 }
 
 /// D4's primary acceptance line, "the other end": after `propose_command`, the ledger shows
-/// exactly `PROPOSED` for that command, and nothing past it.
+/// `CHECKED` for that command (question 209(a): the real `Propose` RPC now runs the check
+/// edge automatically, as a separate logged transition), and nothing past it -- the
+/// propose-only structural guarantee (D4) is untouched: `ProposeOnlyAuthority` still exposes
+/// only `propose`, and this test proves the gateway itself never calls `Check`, `Authorize`,
+/// or anything else on its own -- the SECOND transition it sees here came from `Propose`'s
+/// own automatic check, server-side, not from a second RPC this seam made.
 #[tokio::test]
-async fn propose_command_creates_proposed_and_nothing_else() {
+async fn propose_command_creates_checked_via_the_automatic_check_and_nothing_else() {
     let harness = CommandAuthorityHarness::spawn("propose-only-basic", 1_000).await;
 
     let command = harness.authority.propose(fresh_proposal("cmd-1", "sat-1"), "model-x".to_string()).await.expect("propose succeeds");
-    assert_eq!(command.state, CommandState::Proposed as i32);
-    assert_eq!(command.transitions.len(), 1);
+    assert_eq!(command.state, CommandState::Checked as i32);
+    assert_eq!(command.transitions.len(), 2, "PROPOSED then CHECKED -- ProposeOnlyAuthority made exactly one RPC call, Propose, yet the trail already has two transitions");
     assert_eq!(command.transitions[0].state, CommandState::Proposed as i32);
+    assert_eq!(command.transitions[1].state, CommandState::Checked as i32);
+    assert_eq!(command.transitions[1].principal, "policy", "the automatic check's own principal, distinct from the PROPOSED record's model-x");
 
     // Read straight off the real ledger's own scan -- not the in-memory Command this call
     // happened to return -- so this is a durable-record assertion, not merely "the RPC
     // response looked right".
     let commands = harness.ledger.scan_commands().expect("scan_commands");
     let stored = commands.get("cmd-1").expect("command must be on the ledger");
-    assert_eq!(stored.state, CommandState::Proposed as i32);
-    assert_eq!(stored.transitions.len(), 1, "nothing past PROPOSED: exactly one transition");
+    assert_eq!(stored.state, CommandState::Checked as i32);
+    assert_eq!(stored.transitions.len(), 2, "nothing past CHECKED: exactly two transitions, PROPOSED then CHECKED");
     assert_eq!(stored.transitions[0].state, CommandState::Proposed as i32);
+    assert_eq!(stored.transitions[1].state, CommandState::Checked as i32);
 
     harness.shutdown_keep_ledger().await;
 }

@@ -58,7 +58,9 @@ async fn a_proposal_carries_the_evidence_the_gateway_actually_served_and_it_read
 
     let commands = harness.command_ledger.scan_commands().expect("scan_commands");
     let stored = commands.get(&command_id).expect("the proposed command must be on the real ledger");
-    assert_eq!(stored.state, av_cdm::pb::CommandState::Proposed as i32);
+    // Question 209(a): Propose now checks automatically, so the real ledger shows CHECKED,
+    // not a bare PROPOSED, the instant this run's own ProposeCommand call returns.
+    assert_eq!(stored.state, av_cdm::pb::CommandState::Checked as i32);
 
     harness.shutdown().await;
 }

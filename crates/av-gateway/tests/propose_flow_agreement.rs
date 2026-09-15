@@ -232,19 +232,22 @@ async fn two_propose_surfaces_agree_on_the_same_outcome_for_equivalent_input() {
     let mcp_args = mcp_propose_args("agree-mcp-1");
     let raw = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments": mcp_args}}).to_string();
     let mcp_resp = handler.handle_message(&raw).await.expect("a request with an id always gets a response");
-    assert_eq!(mcp_resp["result"]["state"], "PROPOSED", "{mcp_resp}");
+    // Question 209(a): Propose now checks automatically -- "burn" is admitted (well under the
+    // rate limit at a single recent submission), so both surfaces land at CHECKED, not
+    // PROPOSED.
+    assert_eq!(mcp_resp["result"]["state"], "COMMAND_STATE_CHECKED", "{mcp_resp}");
     assert_eq!(mcp_resp["result"]["command_id"], "agree-mcp-1");
 
     // gRPC surface, over a real loopback socket.
     let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters).await;
     let grpc_resp = grpc_client.propose_command(grpc_propose_request("agree-grpc-1")).await.expect("ProposeCommand rpc succeeds").into_inner();
     let grpc_command = grpc_resp.command.expect("a successful ProposeCommandResponse always carries the command");
-    assert_eq!(grpc_command.state, av_cdm::pb::CommandState::Proposed as i32);
+    assert_eq!(grpc_command.state, av_cdm::pb::CommandState::Checked as i32);
     assert_eq!(grpc_command.id, "agree-grpc-1");
     let _ = shutdown_tx.send(());
     let _ = handle.await;
 
-    // Both landed on the SAME real ledger as PROPOSED, with identical field values (aside
+    // Both landed on the SAME real ledger as CHECKED, with identical field values (aside
     // from the id each surface was given) -- the actual "same outcome" assertion.
     let commands = cmd_auth.ledger.scan_commands().expect("scan_commands");
     let mcp_command = commands.get("agree-mcp-1").expect("mcp-proposed command on the ledger");
@@ -306,6 +309,58 @@ async fn two_propose_surfaces_agree_on_the_same_refusal_for_the_same_crafted_inp
     let commands = cmd_auth.ledger.scan_commands().expect("scan_commands");
     assert!(!commands.contains_key("refuse-mcp-1"));
     assert!(!commands.contains_key("refuse-grpc-1"));
+
+    let _ = std::fs::remove_dir_all(&evidence_dir);
+    cmd_auth.shutdown_keep_ledger().await;
+}
+
+/// **Question 209(a)/D6**: a policy denial, through BOTH surfaces, from the identical
+/// `"payload"`-class proposal (unconditionally denied by the shipped policy) -- both must be
+/// refused, typed and counted, with the same real `av_command::service::ServiceError::
+/// PolicyDenied` message text (naming the decision id and deny reasons) neither surface
+/// re-derives independently. The gRPC surface's own refusal is `PERMISSION_DENIED`
+/// (`ModelProposeServiceImpl`'s `to_status`, mirroring the real `Propose` RPC's own mapping);
+/// the MCP surface reshapes the identical underlying `ProposeFlowError` into its own
+/// `InvalidParams` JSON-RPC shape (as it does for every propose refusal), but the message
+/// text -- the actual thing this test pins -- is the same.
+#[tokio::test]
+async fn two_propose_surfaces_agree_on_a_policy_denial() {
+    let cmd_auth = CommandAuthorityHarness::spawn("agreement-policy-denial", 1_000).await;
+    let evidence_dir = common::tmp_dir("agreement-policy-denial-evidence");
+    let evidence_ledger = Arc::new(av_command::ledger::Ledger::open(&evidence_dir).expect("open evidence ledger"));
+    let clock: Arc<dyn Clock> = cmd_auth.clock.clone();
+    let mcp_counters = Arc::new(Counters::new());
+    let grpc_counters = Arc::new(Counters::new());
+
+    let handler = mcp_handler(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), mcp_counters.clone());
+    let mut mcp_args = mcp_propose_args("deny-mcp-1");
+    mcp_args["command_class"] = Value::String("payload".to_string());
+    let raw = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"propose_command","arguments": mcp_args}}).to_string();
+    let mcp_resp = handler.handle_message(&raw).await.expect("a request with an id always gets a response");
+    let mcp_message = mcp_resp["error"]["message"].as_str().expect("a refused proposal carries an error message").to_string();
+    assert!(mcp_message.contains("policy denied"), "{mcp_message}");
+    assert!(mcp_message.contains("command_class payload is not admitted by policy"), "{mcp_message}");
+    assert_eq!(mcp_counters.get("propose_policy_denied"), 1, "the MCP surface must count the identical refusal code");
+
+    let (mut grpc_client, shutdown_tx, handle) = harness::spawn_model_propose_service(cmd_auth.authority.clone(), evidence_ledger.clone(), clock.clone(), grpc_counters.clone()).await;
+    let mut grpc_req = grpc_propose_request("deny-grpc-1");
+    grpc_req.command_class = "payload".to_string();
+    let status = grpc_client.propose_command(grpc_req).await.expect_err("a payload-class command must be refused by policy");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");
+    assert!(status.message().contains("policy denied"), "{status}");
+    assert!(status.message().contains("command_class payload is not admitted by policy"), "{status}");
+    assert_eq!(grpc_counters.get("propose_policy_denied"), 1, "the gRPC surface must count the identical refusal code");
+    let _ = shutdown_tx.send(());
+    let _ = handle.await;
+
+    // Neither surface's refusal erased the REJECTED record: it is still durable and queryable
+    // on the real CommandAuthorityService ledger (D3), proven directly here rather than
+    // assumed.
+    let commands = cmd_auth.ledger.scan_commands().expect("scan_commands");
+    let mcp_command = commands.get("deny-mcp-1").expect("the REJECTED record for the mcp surface's attempt must still be on the ledger");
+    let grpc_command = commands.get("deny-grpc-1").expect("the REJECTED record for the grpc surface's attempt must still be on the ledger");
+    assert_eq!(mcp_command.state, av_cdm::pb::CommandState::Rejected as i32);
+    assert_eq!(grpc_command.state, av_cdm::pb::CommandState::Rejected as i32);
 
     let _ = std::fs::remove_dir_all(&evidence_dir);
     cmd_auth.shutdown_keep_ledger().await;

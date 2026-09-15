@@ -303,6 +303,16 @@ async function authorizeCommand(commandId, token) {
     ? { ok: true, state: result.data.state }
     : { ok: false, status: result.status, message: result.message };
   renderCommandPanelNow();
+  // Question 209(b): counters and the pending-commands list refresh after EVERY
+  // authorize outcome, success AND refusal -- not only on success as before this
+  // round. A refusal is exactly what increments a refusal counter (a console that
+  // only refreshed on success showed the operator a stale counter set precisely when
+  // it mattered), and a refused command STAYS on the pending list (an authorized one
+  // LEAVES it) -- both facts only a re-fetch, not the authorize response itself,
+  // reveals. Fire-and-forget, same convention as `selectCommand`'s own
+  // `refreshCommandDecisionAndTrail` call below.
+  refreshCommandProposals();
+  refreshCommandCounters();
   if (result.ok) refreshCommandDecisionAndTrail(commandId); // the trail just grew by one transition
 }
 
@@ -443,7 +453,15 @@ function buildLists(sc) {
   const addFocus = (value, text) => {
     const o = document.createElement('option'); o.value = value; o.textContent = text; els.focusSelect.appendChild(o);
   };
-  addFocus('', `${sc.frame.origin} (frame origin)`);
+  // Question 209(c): `sc.frame` is absent entirely for an empty `{"name",
+  // "spacecraft": []}` publish (the server stores the raw published dict verbatim --
+  // `altavista/server.py`'s `Hub.put` never fills in a default), so both reads below
+  // degrade honestly instead of throwing: `sc.frame.origin` has no honest substitute
+  // (there is no origin body to name), so the label says so explicitly; the frame id
+  // to mark `selected` below falls back to `viewer.originFrameId` -- the exact id
+  // `_buildFrameGraph()` just resolved for this same scenario (scene.js's own
+  // `resolveFrameGraphInput`), never a second, independent guess.
+  addFocus('', sc.frame ? `${sc.frame.origin} (frame origin)` : '(no declared frame origin)');
   // Frame graph (M4.1, extended M5.2 with per-entity body frames): the single source
   // of truth is viewer.frameList() (web/js/scene.js), built by the viewer.
   // setScenario(sc) call above -- not re-derived from sc.frames here. This used to
@@ -461,7 +479,7 @@ function buildLists(sc) {
     const label = frameOptionLabel(fd);
     const o = document.createElement('option');
     o.value = fd.id; o.textContent = label.text; o.title = label.title;
-    if (fd.id === sc.frame.name) o.selected = true;
+    if (fd.id === (sc.frame ? sc.frame.name : viewer.originFrameId)) o.selected = true;
     els.frameSelect.appendChild(o);
 
     const li = document.createElement('li');
@@ -487,11 +505,11 @@ function buildLists(sc) {
     li.append(cb, sw, nm, go);
     return li;
   };
-  for (const s of sc.spacecraft) {
+  for (const s of sc.spacecraft || []) {
     els.scList.appendChild(item('sc', s, s.color || '#fff', `${s.label || s.name} (${s.t.length} pts)`));
     addFocus(s.name, s.label || s.name);
   }
-  for (const b of sc.bodies) {
+  for (const b of sc.bodies || []) {
     els.bodyList.appendChild(item('body', b, b.color || '#888', b.name));
     addFocus(b.name, b.name);
   }

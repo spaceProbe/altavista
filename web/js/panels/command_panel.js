@@ -8,7 +8,10 @@
 // under `/api/command/*` (R3.5a, already shipped at commit ac335ce; this file makes NO
 // change to any of them, per this task's own scope fence):
 //   GET  /api/command/proposals                     -> {proposals: [{commandId, entityId,
-//        commandClass, hazardous, idempotencyKey, rationale, evidenceIds}]}
+//        commandClass, hazardous, idempotencyKey, state, rationale, evidenceIds}]} --
+//        despite the route's own name, `state` (question 209(a)/(b)) means these rows are
+//        commands AWAITING A HUMAN, both COMMAND_STATE_PROPOSED and COMMAND_STATE_CHECKED,
+//        not proposals alone.
 //   GET  /api/command/commands/{id}/decision         -> {decisionId, allow, policyHash,
 //        reasons, matchedRulePath, evaluatedTaiNs, input} (404 when not yet Checked)
 //   GET  /api/command/commands/{id}/trail            -> {commandId, transitions:
@@ -52,9 +55,22 @@
  * carrying its rationale and evidence ids verbatim, sorted by `commandId` (this
  * module's own explicit, re-derived order -- never trusting the wire's own array order
  * silently, mirroring feasibility_panel.js's `scoreNames`/`gridAxes` doc comments).
+ *
+ * Question 209(b): despite the route's own name (`/api/command/proposals`, unchanged
+ * for the browser panel's/tests' sake), the server now lists commands AWAITING A
+ * HUMAN -- both `COMMAND_STATE_PROPOSED` and `COMMAND_STATE_CHECKED` (question 209(a):
+ * `Check` runs automatically inside `Propose`, so CHECKED is the normal case a human
+ * actually needs to act on) -- and each row carries the REAL `CommandState` enum name
+ * verbatim under `"state"` (`altavista/command_client.py::list_pending_commands`,
+ * `command_pb2.CommandState.Name(...)`). `row.state` is carried through EXACTLY as
+ * received, never re-mapped/guessed here (this module's own standing rule -- see
+ * `trailRows`'s identical rule for `.state`); a row with no `state` key at all (a
+ * payload from before this round, or a malformed one) degrades to `''`, never an
+ * invented `'COMMAND_STATE_PROPOSED'` guess.
  * @param {{proposals?: Array<object>}|null|undefined} payload
  * @returns {Array<{commandId:string, entityId:string, commandClass:string,
- *   hazardous:boolean, idempotencyKey:string, rationale:string, evidenceIds:string[]}>}
+ *   hazardous:boolean, idempotencyKey:string, state:string, rationale:string,
+ *   evidenceIds:string[]}>}
  */
 export function proposalRows(payload) {
   if (!payload || !Array.isArray(payload.proposals)) return [];
@@ -65,10 +81,28 @@ export function proposalRows(payload) {
       commandClass: (p && p.commandClass) || '',
       hazardous: !!(p && p.hazardous),
       idempotencyKey: (p && p.idempotencyKey) || '',
+      state: (p && p.state) || '',
       rationale: (p && p.rationale) || '',
       evidenceIds: Array.isArray(p && p.evidenceIds) ? [...p.evidenceIds] : [],
     }))
     .sort((a, b) => a.commandId.localeCompare(b.commandId));
+}
+
+/**
+ * `row.state`'s real `CommandState` enum name, shortened for display by stripping the
+ * `COMMAND_STATE_` prefix common to every value (`command_pb2.CommandState.Name(...)`,
+ * e.g. `"COMMAND_STATE_CHECKED"` -> `"CHECKED"`) -- readability only, never a re-guess:
+ * a value that doesn't carry that prefix (or is empty/unrecognized) is returned
+ * unchanged, so this never invents a label the server didn't send. The RAW value stays
+ * reachable regardless (`buildProposalsSection` below puts it verbatim in the cell's
+ * `title`), so a caller that needs the exact wire string never loses it to this
+ * shortening.
+ * @param {string} state
+ * @returns {string}
+ */
+export function shortCommandState(state) {
+  const prefix = 'COMMAND_STATE_';
+  return typeof state === 'string' && state.startsWith(prefix) ? state.slice(prefix.length) : (state || '');
 }
 
 // -------------------------------------------------------------------------- decision
@@ -195,17 +229,21 @@ function noticeEl(text) {
 function buildProposalsSection(rows, error, selectedCommandId, onSelectCommand) {
   const section = document.createElement('div');
   section.className = 'av-panel-section';
-  section.appendChild(el('h4', null, 'Proposals'));
+  // Question 209(b): this list is no longer PROPOSED-only (question 209(a): `Check`
+  // runs automatically inside `Propose`, so a CHECKED command awaiting authorization
+  // is now the normal case) -- the heading says what these rows actually are, never
+  // "Proposals" alone, which would be dishonest about the CHECKED rows mixed in.
+  section.appendChild(el('h4', null, 'Commands awaiting a human'));
 
   const line = errorLine(error);
   if (line) {
-    const notice = noticeEl(`Cannot load proposals: ${line}`);
+    const notice = noticeEl(`Cannot load commands awaiting a human: ${line}`);
     notice.className += ' av-command-error';
     section.appendChild(notice);
     return section;
   }
   if (rows.length === 0) {
-    section.appendChild(noticeEl('No proposed commands.'));
+    section.appendChild(noticeEl('No commands awaiting a human.'));
     return section;
   }
 
@@ -217,6 +255,14 @@ function buildProposalsSection(rows, error, selectedCommandId, onSelectCommand) 
 
     const idTd = el('td', null, row.commandId);
     const classTd = el('td', null, row.commandClass + (row.hazardous ? ' (hazardous)' : ''));
+    // State column (question 209(b)): the shortened label is readable
+    // ("CHECKED" rather than "COMMAND_STATE_CHECKED"), but the cell's `title` carries
+    // the REAL, raw `CommandState` enum name verbatim -- never lost, only shortened
+    // for display -- so a check (or an operator hovering) can verify the exact wire
+    // value this row actually carries. A row with no state (`''`, `shortCommandState`
+    // above) shows an honest placeholder rather than an empty cell.
+    const stateTd = el('td', null, shortCommandState(row.state) || '(unknown)');
+    stateTd.title = row.state;
     const rationaleTd = el('td', null, row.rationale);
     const evidenceTd = el('td', null, row.evidenceIds.join(', '));
 
@@ -228,7 +274,7 @@ function buildProposalsSection(rows, error, selectedCommandId, onSelectCommand) 
     btn.addEventListener('click', () => onSelectCommand && onSelectCommand(row.commandId));
     openTd.appendChild(btn);
 
-    tr.append(idTd, classTd, rationaleTd, evidenceTd, openTd);
+    tr.append(idTd, classTd, stateTd, rationaleTd, evidenceTd, openTd);
     table.appendChild(tr);
   }
   section.appendChild(table);

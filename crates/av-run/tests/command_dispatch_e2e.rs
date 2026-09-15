@@ -268,14 +268,15 @@ fn propose_request(command: Command, principal: &str) -> av_cdm::pb::ProposeRequ
     av_cdm::pb::ProposeRequest { proposal: Some(CommandProposal { command: Some(command), rationale: "av-run e2e test".to_string(), evidence_ids: vec![] }), principal: principal.to_string() }
 }
 
-/// Drives one command through `Propose`/`Check`/`Authorize`/`Dispatch` over the real gRPC
-/// client, exactly the literal `Command` this test built -- returns its id (the caller
-/// already knows it, but returning it keeps every call site symmetrical).
+/// Drives one command through `Propose` (which now checks automatically -- question 209(a) --
+/// as a separate logged transition, so there is no more explicit `Check` call here)/
+/// `Authorize`/`Dispatch` over the real gRPC client, exactly the literal `Command` this test
+/// built -- returns its id (the caller already knows it, but returning it keeps every call
+/// site symmetrical).
 async fn propose_check_authorize_dispatch(service: &mut TestService, command: Command) {
     let id = command.id.clone();
-    service.client.propose(propose_request(command, "model-x")).await.expect("Propose");
-    let checked = service.client.check(av_cdm::pb::CheckRequest { command_id: id.clone() }).await.expect("Check").into_inner();
-    assert_eq!(checked.command.expect("command present").state, CommandState::Checked as i32, "the shipped policy admits the \"mode\" class");
+    let proposed = service.client.propose(propose_request(command, "model-x")).await.expect("Propose").into_inner();
+    assert_eq!(proposed.command.expect("command present").state, CommandState::Checked as i32, "the shipped policy admits the \"mode\" class");
     let token = service.mint("operator-1");
     service
         .client
@@ -456,19 +457,17 @@ fn a_duplicate_idempotency_key_is_refused_by_the_service_on_a_second_dispatch_rp
 
     let command = mode_command("dup1", 0.0, START_TAI_NS + 1_000_000_000, 0);
     rt.block_on(async {
-        service.client.propose(propose_request(command.clone(), "model-x")).await.expect("Propose");
-        service.client.check(av_cdm::pb::CheckRequest { command_id: "dup1".to_string() }).await.expect("Check");
+        service.client.propose(propose_request(command.clone(), "model-x")).await.expect("Propose"); // now checks automatically (question 209(a))
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup1".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
         let dispatch_token1 = service.mint_service("ground-segment-1", &["ground-segment"]);
         service.client.dispatch(av_cdm::pb::DispatchRequest { command_id: "dup1".to_string(), service_token: dispatch_token1 }).await.expect("first Dispatch must succeed");
 
-        // A second Propose/Check/Authorize for a fresh command id, but the identical
+        // A second Propose (auto-checked) for a fresh command id, but the identical
         // idempotency_key -- the second Dispatch must be refused ALREADY_EXISTS.
         let mut second = mode_command("dup2", 0.0, START_TAI_NS + 2_000_000_000, 0);
         second.idempotency_key = command.idempotency_key.clone();
         service.client.propose(propose_request(second, "model-x")).await.expect("Propose");
-        service.client.check(av_cdm::pb::CheckRequest { command_id: "dup2".to_string() }).await.expect("Check");
         let token = service.mint("operator-1");
         service.client.authorize(av_cdm::pb::AuthorizeRequest { command_id: "dup2".to_string(), principal_token: token, delegation_id: String::new() }).await.expect("Authorize");
         let dispatch_token2 = service.mint_service("ground-segment-1", &["ground-segment"]);

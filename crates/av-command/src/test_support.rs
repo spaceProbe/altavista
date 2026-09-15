@@ -38,6 +38,9 @@
 //! literal PEM checked into a test file), and exactly why this module is the *only* place in
 //! this crate that generates a key of any kind -- `crate::oidc` never does.
 
+use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use openssl::hash::MessageDigest;
 use openssl::pkey::{PKey, Private};
 use openssl::rsa::Rsa;
@@ -158,4 +161,67 @@ pub fn claims_with_roles_and_mfa(issuer: &str, audience: &str, subject: &str, no
     claims["amr"] = json!(overrides.amr);
     claims["acr"] = json!(overrides.acr);
     claims
+}
+
+/// R4.2b (round 4 review defect, F2): a `crate::audit::LineSink` that fails every write from
+/// its `fail_from`-th call onward (1-based), succeeding every call before that. Never
+/// constructed or referenced by this crate's non-test code path -- see the module doc.
+///
+/// The ordinal, not an unconditional "always fail", is deliberate: a test that needs to
+/// isolate *one specific* transition's own audit write as the failure (e.g. `Propose`'s
+/// automatic-check `CHECKED` write, on a server whose immediately-preceding `PROPOSED` write,
+/// on the very same instance, must still succeed so the command reaches the check step at
+/// all) needs the earlier write(s) on that same [`crate::audit::AuditWriter`] to keep
+/// succeeding. [`Self::always`] (`fail_from == 1`) is the simple "every write fails" case for
+/// a test that only ever attempts one write against this sink (e.g. a fresh server spawned
+/// purely to `Dispatch` one already-`AUTHORIZED` command).
+pub struct FailingAuditSink {
+    calls: AtomicUsize,
+    fail_from: usize,
+}
+
+impl FailingAuditSink {
+    /// Fails every write, starting with the first.
+    pub fn always() -> Self {
+        Self::from_call(1)
+    }
+
+    /// Succeeds calls `1..fail_from`, fails every call from `fail_from` onward (1-based).
+    /// `fail_from == 1` behaves exactly like [`Self::always`].
+    pub fn from_call(fail_from: usize) -> Self {
+        Self { calls: AtomicUsize::new(0), fail_from }
+    }
+}
+
+impl crate::audit::LineSink for FailingAuditSink {
+    fn write_line(&self, _line: &str) -> io::Result<()> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call >= self.fail_from {
+            Err(io::Error::other(format!(
+                "test_support::FailingAuditSink: deterministic audit write failure (write #{call}, configured to fail from #{})",
+                self.fail_from
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// An [`crate::audit::AuditWriter`] whose every write fails, from the very first one --
+/// [`FailingAuditSink::always`] behind [`crate::audit::AuditWriter::from_line_sink`]. The only
+/// way an external `tests/*.rs` integration test can reach that constructor at all (it is
+/// `pub(crate)`, and `crate::audit::LineSink` itself is `pub(crate)`, both invisible to a
+/// separate compilation unit) -- see this module's own top doc comment for why that
+/// invisibility is deliberate everywhere except through a `pub` function in this
+/// already-gated module.
+pub fn failing_audit_writer() -> crate::audit::AuditWriter {
+    crate::audit::AuditWriter::from_line_sink(Box::new(FailingAuditSink::always()))
+}
+
+/// As [`failing_audit_writer`], but succeeding the first `fail_from - 1` writes before failing
+/// every write from the `fail_from`-th one onward -- for a test that needs to isolate one
+/// specific transition's own audit write as the failure on a server that must reach that
+/// transition through one or more earlier, successfully-audited ones first.
+pub fn audit_writer_failing_from(fail_from: usize) -> crate::audit::AuditWriter {
+    crate::audit::AuditWriter::from_line_sink(Box::new(FailingAuditSink::from_call(fail_from)))
 }

@@ -11,7 +11,8 @@
 //
 // Section map (named here so tests/test_viewer_command_panel.py's own docstrings can
 // point back at it, matching this codebase's own standing review-documentation rule):
-//   1. proposalRows        -- real proposal (rationale/evidenceIds), empty list, null
+//   1. proposalRows        -- real proposal (rationale/evidenceIds/state), empty list,
+//                              null; shortCommandState's own display-shortening
 //   2. decisionView        -- real decision id/policy hash/allow, null
 //   3. trailRows           -- real transition sequence, WIRE ORDER preserved (never
 //                              re-sorted -- the one field in this panel where order IS
@@ -30,7 +31,15 @@
 //                              cleared SYNCHRONOUSLY, and the token never reappears in
 //                              any later render's text -- plus a grep of this module's
 //                              OWN on-disk source for browser storage/cookie APIs
-//   9. layout               -- COMMAND_PANEL_ID registered/chooser-reachable in every
+//   9. the authorize proof  -- question 209(b), Part 4: renders a REAL CHECKED command,
+//                              types a REAL right-role token and a REAL wrong-role
+//                              token into the real input, clicks the real Authorize
+//                              button, and captures the exact (commandId, token) pairs
+//                              into this script's own JSON output
+//                              (`capturedAuthorizeCalls`) for
+//                              tests/test_viewer_command_panel.py to replay through the
+//                              real HTTP authorize route
+//  10. layout               -- COMMAND_PANEL_ID registered/chooser-reachable in every
 //                              profile; isExecutionProfile; defaultLayoutTreeForScenario
 //                              adds the panel exactly once, at the documented share, for
 //                              an execution-profile scenario in every shape (ordinary/
@@ -41,7 +50,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import {
-  proposalRows, decisionView, trailRows, counterRows, counterMeta, errorLine, render,
+  proposalRows, decisionView, trailRows, counterRows, counterMeta, errorLine, render, shortCommandState,
 } from './panels/command_panel.js';
 import {
   COMMAND_PANEL_ID, REGISTERED_PANEL_TYPES, availablePanelChoices, isExecutionProfile,
@@ -65,10 +74,22 @@ function check(name, pass, detail) { checks.push({ name, pass: !!pass, detail: d
   check('proposalRows: real proposal\'s rationale reaches the panel verbatim', !!row && row.rationale === exp.rationale, { row });
   check('proposalRows: real proposal\'s evidence ids reach the panel verbatim', !!row && JSON.stringify(row.evidenceIds) === JSON.stringify(exp.evidenceIds));
   check('proposalRows: real proposal\'s entityId/commandClass reach the panel verbatim', !!row && row.entityId === exp.entityId && row.commandClass === exp.commandClass);
+  // Question 209(b): the real CommandState enum name reaches the row VERBATIM (the
+  // panel never re-guesses it) -- checked against the real value the pytest driver's
+  // own live server call actually returned (`exp.state`, captured off the real route).
+  check('proposalRows: real proposal\'s state (the real CommandState enum name) reaches the panel verbatim',
+    !!row && row.state === exp.state, { rowState: row && row.state, expectedState: exp.state });
+  check('proposalRows: a row with no state key at all degrades to \'\', never an invented COMMAND_STATE_PROPOSED guess',
+    proposalRows({ proposals: [{ commandId: 'x' }] })[0].state === '');
   check('proposalRows: empty proposal list (real server payload for an entity with none) yields [], not a throw',
     Array.isArray(proposalRows(input.emptyProposals)) && proposalRows(input.emptyProposals).length === 0);
   check('proposalRows: null/malformed payload yields [], never a throw',
     proposalRows(null).length === 0 && proposalRows(undefined).length === 0 && proposalRows({}).length === 0);
+
+  check('shortCommandState: strips the COMMAND_STATE_ prefix for display, e.g. CHECKED',
+    shortCommandState('COMMAND_STATE_CHECKED') === 'CHECKED');
+  check('shortCommandState: a value with no such prefix (or empty) is returned unchanged, never guessed',
+    shortCommandState('') === '' && shortCommandState('SOMETHING_ELSE') === 'SOMETHING_ELSE');
 }
 
 // ============================================================================== 2. decisionView
@@ -204,6 +225,14 @@ function findAll(node, predicate, out = []) {
 }
 function hasClass(node, cls) { return typeof node.className === 'string' && node.className.split(/\s+/).includes(cls); }
 
+// Question 209(b)'s end-to-end authorize proof (Part 4): the EXACT (commandId, token)
+// pairs the real panel's own Authorize button hands to `onAuthorize`, for a real
+// right-role token and a real wrong-role token -- captured inside the fake-document
+// closure below, but declared out here so they can be written into this script's own
+// JSON output for tests/test_viewer_command_panel.py to replay through the real HTTP
+// route.
+const capturedAuthorizeCalls = [];
+
 withFakeDocument(() => {
   const exp = input.expectedProposal;
 
@@ -222,8 +251,19 @@ withFakeDocument(() => {
   {
     const container = makeEl('div');
     render(container, { proposals: input.emptyProposals, selectedCommandId: null });
-    check('render: an empty proposal list shows an honest "no proposed commands" notice, never a blank section',
-      container.textContent.includes('No proposed commands'));
+    check('render: an empty proposal list shows an honest "no commands awaiting a human" notice, never a blank section',
+      container.textContent.includes('No commands awaiting a human'));
+  }
+
+  // ---- 209(b). the section says what these rows actually are (PROPOSED and CHECKED),
+  // never "Proposals" alone -- checked against the real, shipped heading text, not a
+  // substring that would also match some other unrelated word.
+  {
+    const container = makeEl('div');
+    render(container, { proposals: input.proposals, selectedCommandId: null });
+    const headings = findAll(container, (n) => n.tagName === 'H4').map((n) => n.textContent);
+    check('render: the proposals section heading says "Commands awaiting a human", never "Proposals" alone (question 209(b))',
+      headings.includes('Commands awaiting a human') && !headings.includes('Proposals'), { headings });
   }
 
   // ---- 6/7b. degraded cases: REAL captured server refusal text, never a generic message
@@ -258,6 +298,17 @@ withFakeDocument(() => {
     const text = container.textContent;
     check('render: the real rationale text appears in the rendered proposals table', text.includes(exp.rationale));
     check('render: every real evidence id appears in the rendered proposals table', exp.evidenceIds.every((id) => text.includes(id)));
+    // Question 209(b): the State column shows a readable, shortened label in the
+    // cell's own visible text, AND the RAW, full `CommandState` enum name stays
+    // reachable verbatim via the cell's `title` -- both checked against the real
+    // value the pytest driver's own live server call returned (`exp.state`), never a
+    // hardcoded guess.
+    const proposalsTable = findAll(container, (n) => n.tagName === 'TABLE' && hasClass(n, 'av-command-proposals'))[0];
+    const expRow = proposalsTable ? proposalsTable._children.find((tr) => tr.textContent.includes(exp.commandId)) : null;
+    const stateTd = expRow ? expRow._children.find((td) => td.title === exp.state) : null;
+    check('render: the proposals table\'s State column shows a readable label and the cell\'s title carries the real, raw CommandState value verbatim',
+      !!stateTd && stateTd.textContent === shortCommandState(exp.state) && stateTd.title === exp.state,
+      { stateCellText: stateTd && stateTd.textContent, stateCellTitle: stateTd && stateTd.title, expectedState: exp.state });
     check('render: the real decision id and policy hash appear in the rendered decision section', text.includes(input.expectedDecisionId) && text.includes(input.decision.policyHash));
     const trailRowsBuilt = findAll(container, (n) => n.tagName === 'TABLE' && hasClass(n, 'av-command-trail'));
     const trailTrs = trailRowsBuilt.length ? trailRowsBuilt[0]._children : [];
@@ -333,9 +384,52 @@ withFakeDocument(() => {
     check('command_panel.js source: contains no `fetch(` call anywhere -- every network request lives in web/js/app.js, never here',
       !src.includes('fetch('));
   }
+
+  // ---- 9. the authorize proof (question 209(b), Part 4): an operator can authorize a
+  // REAL CHECKED command from the panel with the right token, and is refused with the
+  // wrong one -- proven honestly, without a browser, by driving the panel's OWN
+  // real button and capturing the EXACT arguments it hands to `onAuthorize`, for two
+  // REAL tokens the pytest driver minted (`input.rightRoleToken`/`wrongRoleToken`) and
+  // a REAL still-CHECKED command it proposed (`input.authorizeProofCommandId`) and
+  // never itself authorized -- see that fixture's own doc comment
+  // (tests/test_viewer_command_panel.py's `command_panel_check_input_path`) for why it
+  // stays CHECKED until the replay. tests/test_viewer_command_panel.py reads
+  // `capturedAuthorizeCalls` back out of this script's JSON output and replays each
+  // pair through the real `/api/command/commands/{id}/authorize` HTTP route -- this
+  // section's own job is only to prove the panel's real click handler produces the
+  // right arguments, never to call the route itself (this module never fetches, see
+  // its own top-of-file rule, re-checked structurally just above).
+  {
+    const proofId = input.authorizeProofCommandId;
+    check('authorize proof: the CHECKED authorize-proof command is listed among the commands awaiting a human, with its state visible',
+      proposalRows(input.proposals).some((r) => r.commandId === proofId && r.state === 'COMMAND_STATE_CHECKED'),
+      { rows: proposalRows(input.proposals).map((r) => ({ commandId: r.commandId, state: r.state })) });
+
+    const captureOneAuthorizeClick = (label, token) => {
+      const container = makeEl('div');
+      let captured = null;
+      const onAuthorize = (commandId, tok) => {
+        captured = { commandId, token: tok };
+        return new Promise(() => {}); // never settles -- this section only needs the synchronous call args
+      };
+      render(container, { proposals: input.proposals, selectedCommandId: proofId, onAuthorize });
+      const tokenInput = findAll(container, (n) => hasClass(n, 'av-command-token-input'))[0];
+      const authBtn = findAll(container, (n) => hasClass(n, 'av-command-authorize-btn'))[0];
+      tokenInput.value = token;
+      authBtn.click();
+      check(`authorize proof: the real Authorize button (${label} token) hands onAuthorize the exact (commandId, token) the operator typed`,
+        !!captured && captured.commandId === proofId && captured.token === token,
+        { captured, expectedCommandId: proofId });
+      if (captured) capturedAuthorizeCalls.push({ label, commandId: captured.commandId, token: captured.token });
+    };
+    captureOneAuthorizeClick('wrong-role', input.wrongRoleToken);
+    captureOneAuthorizeClick('right-role', input.rightRoleToken);
+    check('authorize proof: both the right-role and wrong-role clicks were captured, ready to replay against the real HTTP route',
+      capturedAuthorizeCalls.length === 2, { capturedAuthorizeCalls });
+  }
 });
 
-// ==================================================================================== 9. layout
+// =================================================================================== 10. layout
 {
   check('layout: COMMAND_PANEL_ID is a registered panel type (chooser-reachable in every profile)',
     REGISTERED_PANEL_TYPES.some((t) => t.panelId === COMMAND_PANEL_ID));
@@ -390,5 +484,9 @@ withFakeDocument(() => {
 }
 
 const allPass = checks.every((c) => c.pass);
-process.stdout.write(JSON.stringify({ allPass, checks }));
+// `capturedAuthorizeCalls` (question 209(b), Part 4, section 9 above): the REAL
+// (commandId, token) pairs the real panel's own Authorize button produced for the
+// real right-role/wrong-role tokens -- tests/test_viewer_command_panel.py replays
+// these through the real HTTP authorize route; never regenerated/re-derived there.
+process.stdout.write(JSON.stringify({ allPass, checks, capturedAuthorizeCalls }));
 process.exit(allPass ? 0 : 1);

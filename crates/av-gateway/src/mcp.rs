@@ -59,8 +59,12 @@ use crate::propose_only::ProposeOnlyAuthority;
 pub enum GatewayTool {
     /// The read-only, label-aware query (D1/D2), over [`crate::gateway::GatewayCore`].
     Query,
-    /// D4: creates `PROPOSED` and nothing else, over [`crate::propose_only::
-    /// ProposeOnlyAuthority`].
+    /// D4: proposes over [`crate::propose_only::ProposeOnlyAuthority`], never anything past
+    /// what a real `Propose` RPC itself produces. Question 209(a): that real RPC now runs
+    /// the check edge automatically, so a successful call here lands at `CHECKED` (or is
+    /// refused outright by a policy denial) -- this tool still can never itself authorize,
+    /// dispatch, ack, expire or fail a command; the propose-only structural guarantee (D4)
+    /// is about which RPCs this tool can reach, not which state one of them ends at.
     ProposeCommand,
 }
 
@@ -79,7 +83,7 @@ impl GatewayTool {
     pub fn description(&self) -> &'static str {
         match self {
             GatewayTool::Query => "Read-only, label-aware query over one run's products (trajectories, events, scores, measurements), by run identity.",
-            GatewayTool::ProposeCommand => "Propose a command. Creates the command in state PROPOSED and nothing else -- this tool can never authorize, dispatch, ack, expire or fail a command.",
+            GatewayTool::ProposeCommand => "Propose a command -- the check edge now runs automatically (question 209(a)), so a successful call lands the command at CHECKED, or it is refused outright by a policy denial. This tool can never authorize, dispatch, ack, expire or fail a command.",
         }
     }
 
@@ -364,7 +368,13 @@ impl McpHandler {
         };
 
         match propose_command(&self.ctx.authority, &self.ctx.evidence_ledger, &*self.ctx.clock, &self.ctx.counters, input).await {
-            Ok(output) => Ok(json!({"command_id": output.command.id, "state": "PROPOSED"})),
+            // Question 209(a): reads the REAL `Command.state` this call actually produced
+            // (normally CHECKED now, never hard-coded as "PROPOSED") -- the same discipline
+            // D9's console route (`altavista/command_client.py`) applies, never inferred.
+            Ok(output) => {
+                let state_name = av_cdm::pb::CommandState::try_from(output.command.state).unwrap_or(av_cdm::pb::CommandState::Unspecified).as_str_name();
+                Ok(json!({"command_id": output.command.id, "state": state_name}))
+            }
             Err(err) => Err(propose_flow_error_to_mcp(err)),
         }
     }

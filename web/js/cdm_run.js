@@ -16,7 +16,13 @@
 // pre-M16.3 info line -- this is purely additive, never a shape change for an existing
 // scenario.
 export function formatScenarioInfo(sc, durationText) {
-  const base = `${sc.frame.name} · ${durationText} · ${sc.spacecraft.length} spacecraft`;
+  // Question 209(c): `sc.frame`/`sc.spacecraft` are both absent for an empty
+  // `{"name", "spacecraft": []}`-shaped publish that omits them (the server stores
+  // the raw published dict verbatim -- `altavista/server.py`'s `Hub.put` never fills
+  // in a default) -- degrade honestly rather than throw, same discipline as every
+  // other fix this question made.
+  const frameName = sc.frame ? sc.frame.name : '(no frame)';
+  const base = `${frameName} · ${durationText} · ${(sc.spacecraft || []).length} spacecraft`;
   const hash = sc.meta && sc.meta.configHash;
   return hash ? `${base} · config ${hash}` : base;
 }
