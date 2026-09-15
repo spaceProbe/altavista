@@ -160,7 +160,20 @@ pub struct DockerTestLock {
 /// silent no-lock fallback (this task's own binding rule, restated from
 /// `docs/open-questions.md` question 207's ruling).
 pub fn lock_docker_tests() -> DockerTestLock {
-    let path = lock_file_path();
+    lock_docker_tests_at(lock_file_path())
+}
+
+/// The actual implementation behind [`lock_docker_tests`], taking the lock path as a parameter
+/// rather than always computing it from `$HOME` via [`lock_file_path`]. [`lock_docker_tests`]
+/// itself is `lock_docker_tests_at(lock_file_path())` and nothing else -- every production
+/// caller keeps calling `lock_docker_tests()` with no signature change at all. This split
+/// exists solely so this module's own tests can prove real mutual exclusion (blocked while
+/// held, acquired after release, the WAITING/ACQUIRED announcement) against a PRIVATE lock file
+/// under a test's own scratch directory, instead of the real host-wide path -- see
+/// `tests::flock_lock_is_visible_across_processes_and_languages`'s own doc comment
+/// (`docs/open-questions.md` question 212(b): a test must never depend on the real, shared lock
+/// being free).
+pub(crate) fn lock_docker_tests_at(path: PathBuf) -> DockerTestLock {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|e| panic!("could not create {parent:?} for the docker-test lock: {e}"));
     }
@@ -323,15 +336,14 @@ mod tests {
     // silently.
     // -------------------------------------------------------------------------------------
 
-    /// Deliberately re-derives the lock path inline from `$HOME`, rather than importing
-    /// `altavista.docker_test_lock` -- this is the plain system `python3` a fresh checkout has
-    /// on `PATH`, not necessarily this repository's own `.venv`, and the whole point of this
-    /// test is to prove the two independent implementations agree on the path BY CONSTRUCTION,
-    /// not by one importing the other's constant.
+    /// Takes the lock path as its first (and only) `argv` element, rather than deriving it from
+    /// `$HOME` itself -- see `flock_lock_is_visible_across_processes_and_languages`'s own doc
+    /// comment for why: that test now runs against a PRIVATE lock file under its own scratch
+    /// directory, never the real host-wide path, so the path has to come from the Rust side,
+    /// the one place that already knows it.
     const PYTHON_FLOCK_PROBE: &str = r#"
-import fcntl, os
-home = os.environ["HOME"]
-path = os.path.join(home, ".altavista", "locks", "docker-tests.lock")
+import fcntl, os, sys
+path = sys.argv[1]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
 try:
@@ -344,12 +356,34 @@ finally:
     os.close(fd)
 "#;
 
-    fn run_python_probe() -> String {
-        let output = Command::new("python3").args(["-c", PYTHON_FLOCK_PROBE]).output().expect("python3 was already confirmed present by this test's own gate");
+    fn run_python_probe(path: &std::path::Path) -> String {
+        let output = Command::new("python3")
+            .args(["-c", PYTHON_FLOCK_PROBE])
+            .arg(path)
+            .output()
+            .expect("python3 was already confirmed present by this test's own gate");
         assert!(output.status.success(), "the python3 probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// Proves real mutual exclusion between a Rust `DockerTestLock` guard and a `python3`
+    /// child using stdlib `fcntl.flock` on the SAME path -- but a PRIVATE one, under this
+    /// test's own scratch directory (`repo_scratch_dir`, this module's established
+    /// convention), never the real `$HOME/.altavista/locks/docker-tests.lock` every other
+    /// Docker-gated test on this host also locks.
+    ///
+    /// `docs/open-questions.md` question 212(b): the old version of this test locked the REAL
+    /// shared path, then asserted a python3 child observed `"ACQUIRED"` once the Rust guard
+    /// dropped -- an assertion that is simply false whenever a *different* process on this host
+    /// (a different track's `cargo test`/`pytest`, in this worktree or any other) genuinely
+    /// holds that lock at the same moment, for a reason that has nothing to do with whether
+    /// `lock_docker_tests`/`DockerTestLock` are correct. This test now proves only that ITS OWN
+    /// two processes (this Rust test, and its own python3 child) serialise on the SAME
+    /// mechanism (`lock_docker_tests_at`, the exact code `lock_docker_tests` calls, just
+    /// pointed at a path this test owns) -- never that the real shared lock is free. The
+    /// separate cross-language path-AGREEMENT claim the old test also proved by construction
+    /// (Rust and Python compute the identical `$HOME`-relative path) is kept, but as its own
+    /// non-locking test: `rust_and_python_compute_the_identical_lock_path` below.
     #[test]
     fn flock_lock_is_visible_across_processes_and_languages() {
         // This test needs no Docker at all (question 194's own distinction: gate on the ONE
@@ -363,22 +397,67 @@ finally:
             return;
         }
 
-        let guard = lock_docker_tests();
-        let observed_while_held = run_python_probe();
+        let scratch = repo_scratch_dir("flock-cross-language-probe");
+        let private_lock_path = scratch.join("docker-tests.lock");
+
+        let guard = lock_docker_tests_at(private_lock_path.clone());
+        let observed_while_held = run_python_probe(&private_lock_path);
         drop(guard);
-        let observed_after_drop = run_python_probe();
+        let observed_after_drop = run_python_probe(&private_lock_path);
+
+        fs::remove_dir_all(&scratch).ok();
 
         // Question 148: an exit code is not evidence -- print exactly what was observed
         // (visible with `--nocapture`; also asserted on directly below, not merely eyeballed).
-        println!("flock cross-process/cross-language proof: while the Rust guard held the lock, the python3 child observed {observed_while_held:?}; after the guard was dropped, the identical python3 child observed {observed_after_drop:?}");
+        println!("flock cross-process/cross-language proof (private path {private_lock_path:?}, this test's own two processes only): while the Rust guard held the lock, the python3 child observed {observed_while_held:?}; after the guard was dropped, the identical python3 child observed {observed_after_drop:?}");
 
         assert_eq!(
             observed_while_held, "BLOCKED",
-            "a python3 child using fcntl.flock(LOCK_EX|LOCK_NB) on the IDENTICAL path this Rust module computes from $HOME must fail to acquire while this process's own DockerTestLock guard holds it -- got {observed_while_held:?} (either the paths disagree, or the lock is not actually exclusive)"
+            "a python3 child using fcntl.flock(LOCK_EX|LOCK_NB) on the IDENTICAL private path this Rust guard just locked must fail to acquire while the guard holds it -- got {observed_while_held:?}"
         );
         assert_eq!(
             observed_after_drop, "ACQUIRED",
             "after the Rust guard is dropped (closing its fd releases the flock), the SAME python3 child command must now succeed -- got {observed_after_drop:?}"
+        );
+    }
+
+    /// The cross-language PATH-agreement claim the old version of
+    /// `flock_lock_is_visible_across_processes_and_languages` used to prove as a side effect of
+    /// locking the real shared path -- kept as its own assertion, but doing NO locking
+    /// whatsoever, against the real `lock_file_path()` (this module's actual production path
+    /// function): a bare `python3 -c` re-derives the identical path inline from `$HOME` (never
+    /// importing `altavista.docker_test_lock` -- proving agreement BY CONSTRUCTION, not by one
+    /// side importing the other's constant), and this test asserts the two strings are equal.
+    /// Nothing here ever touches the real lock file, so this can never be affected by whether
+    /// some other process on this host holds it. Skips visibly (question 194's precedent) if
+    /// python3 is absent, exactly as `flock_lock_is_visible_across_processes_and_languages`
+    /// does. The Python-side equivalent is
+    /// `tests/test_docker_test_lock_cross_process.py::test_lock_path_matches_the_documented_home_relative_convention`.
+    #[test]
+    fn rust_and_python_compute_the_identical_lock_path() {
+        let python3_present = Command::new("python3").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if !python3_present {
+            let reason = crate::docker::DockerGateReason::PrerequisiteUnavailable { what: "python3".to_string(), hint: "install python3 and put it on PATH".to_string() };
+            let line = crate::docker::announce_gate_skip("rust_and_python_compute_the_identical_lock_path", &reason);
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        const PYTHON_PATH_PROBE: &str = r#"
+import os
+print(os.path.join(os.environ["HOME"], ".altavista", "locks", "docker-tests.lock"))
+"#;
+        let output = Command::new("python3").args(["-c", PYTHON_PATH_PROBE]).output().expect("python3 was already confirmed present by this test's own gate");
+        assert!(output.status.success(), "the python3 path probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let python_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let rust_path = lock_file_path();
+
+        println!("lock path agreement proof: Rust lock_file_path() = {rust_path:?}, python3's own inline computation = {python_path:?}");
+
+        assert_eq!(
+            rust_path.to_string_lossy(),
+            python_path,
+            "Rust's lock_file_path() and a bare python3's own inline $HOME-relative computation must name the IDENTICAL path -- got Rust={rust_path:?}, python3={python_path:?}"
         );
     }
 

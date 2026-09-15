@@ -234,17 +234,35 @@ def test_pack_descriptor_refuses_a_pack_over_max_pack_bytes(tmp_path):
         kmanifest.pack_descriptor("big", pack_dir, repo_root=tmp_path, max_pack_bytes=100)
 
 
-def test_pack_descriptor_records_a_symlinked_out_of_worktree_pack_honestly():
-    """`third_party/cspice` is a real, small (~1.2 MB) symlink out of this worktree into another
-    one entirely -- Decision K: recorded as such, never silently followed as if it were ours, and
-    never as an absolute path even though it genuinely resolves outside this checkout."""
-    desc = kmanifest.pack_descriptor("cspice", REPO_ROOT / "third_party" / "cspice", repo_root=REPO_ROOT)
+def test_pack_descriptor_records_a_symlinked_out_of_worktree_pack_honestly(tmp_path):
+    """This worktree happens to have `third_party/cspice` as a real symlink out into another
+    worktree entirely, but that layout is an artefact of THIS checkout, not something a plain
+    clone can rely on (a fresh clone has `third_party/cspice` absent or fetched as a real
+    directory) -- so this test no longer reads this worktree's own `third_party/cspice` at all.
+    Instead it builds an equivalent symlinked pack entirely under `tmp_path`: a fabricated
+    `outside/` directory (with a file at its top level and one in a subdirectory, standing in for
+    a small real pack) and a fabricated `worktree/third_party/cspice` symlink pointing at it,
+    then proves `pack_descriptor` records that shape honestly -- Decision K: a symlinked pack is
+    recorded as such, never silently followed as if it were ours, and never as an absolute path
+    even though it genuinely resolves outside the (fabricated) checkout."""
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "a.txt").write_text("hello\n", encoding="utf-8")
+    (outside / "sub" / "b.txt").write_text("world\n", encoding="utf-8")
+    planted_file_count = 2
+
+    worktree = tmp_path / "worktree"
+    (worktree / "third_party").mkdir(parents=True)
+    (worktree / "third_party" / "cspice").symlink_to(outside, target_is_directory=True)
+
+    desc = kmanifest.pack_descriptor("cspice", worktree / "third_party" / "cspice", repo_root=worktree)
     assert desc["via_symlink"] is True
     assert desc["in_worktree"] is False
     assert desc["source_path"] == "third_party/cspice"
+    assert desc["resolved_real_path"] == "../outside"
     assert not Path(desc["resolved_real_path"]).is_absolute()
     assert not Path(desc["source_path"]).is_absolute()
-    assert desc["file_count"] > 0
+    assert desc["file_count"] == planted_file_count
 
 
 # =================================================================================================
