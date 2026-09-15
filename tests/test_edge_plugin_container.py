@@ -565,6 +565,14 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
         guard.track_container(ingest_container)
         _docker(
             "run", "-d", "--name", ingest_container, "--network", network_name, *guard.label_args(),
+            # The ingest is this test's harness, not the thing under test: it reuses the plugin
+            # image only for its runtime base, and since round 4 that image bakes a non-root
+            # USER (the hardening asserted on the PLUGIN container below), under which
+            # `--log-dir /data/ingest-log` on the container's own root filesystem cannot be
+            # created ("Permission denied", found by the lead's first gate with the image
+            # present, 2026-09-15). Root here keeps the harness writable without touching the
+            # posture the plugin container is measured against.
+            "--user", "0:0",
             "-v", f"{ingest_bin}:/usr/local/bin/av-ingest-server:ro",
             "-v", f"{VERIFY_PUB_PEM}:/keys/verify.pub.pem:ro",
             "--entrypoint", "/usr/local/bin/av-ingest-server",
