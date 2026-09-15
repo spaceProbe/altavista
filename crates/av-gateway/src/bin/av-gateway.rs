@@ -55,7 +55,9 @@
 //! not flags -- matching every OTHER address this binary already configures this way, e.g.
 //! `AV_GATEWAY_BIND`/`AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT` above)
 //!
-//! - `AV_GATEWAY_ADMIN_BIND` (default `"127.0.0.1:50171"`): where THIS process's own
+//! - `AV_GATEWAY_ADMIN_BIND` (default `DEFAULT_ADMIN_BIND`, `"127.0.0.1:50171"` --
+//!   `docs/architecture.md` section 4, "Default ports", is the owned map this and every other
+//!   default bind in the workspace cites): where THIS process's own
 //!   `GET /admin/api/evidence/bundle` route listens ([`av_gateway::admin::serve`]), refused at
 //!   startup if non-loopback (question 155, [`resolve_loopback_bind_address`]).
 //! - `AV_GATEWAY_COMMAND_ADMIN_BIND` (default empty = not configured): the running
@@ -107,6 +109,17 @@ use prost::Message as _;
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
+
+/// Question 208(c): the owned port map is `docs/architecture.md` section 4, "Default ports"
+/// -- every default bind in this workspace cites it, this one included. `av-command`'s own
+/// `DEFAULT_BIND`/`DEFAULT_ADMIN_BIND` (`crates/av-command/src/bin/av-command.rs`) is the
+/// house shape these two follow: a named constant an `env_or` default reads, not an inline
+/// string literal repeated at each call site.
+const DEFAULT_BIND: &str = "127.0.0.1:50071";
+/// `av-command`'s own +100-from-gRPC-port convention, one step further along: av-command is
+/// 50070/50170, av-gateway is 50071/50171. See `docs/architecture.md` section 4, "Default
+/// ports".
+const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:50171";
 
 fn default_auth_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/gateway-authority.yaml")
@@ -242,10 +255,11 @@ async fn main() {
         // R3.6 (manager's review): this default was `127.0.0.1:50170`, which is
         // `crates/av-command/src/bin/av-command.rs::DEFAULT_ADMIN_BIND` -- so two services of
         // this same track, each started with nothing but its own defaults, fought over one
-        // port and whichever lost failed to bind. `50071` restores the convention both
+        // port and whichever lost failed to bind. `DEFAULT_BIND` restores the convention both
         // binaries already follow (`av-command` gRPC `50070`, admin `50070 + 100`), giving one
-        // coherent map: av-command 50070/50170, av-gateway 50071/50171.
-        let bind_raw = env_or("AV_GATEWAY_BIND", "127.0.0.1:50071");
+        // coherent map: av-command 50070/50170, av-gateway 50071/50171 -- the owned copy of
+        // that map is `docs/architecture.md` section 4, "Default ports".
+        let bind_raw = env_or("AV_GATEWAY_BIND", DEFAULT_BIND);
         resolve_loopback_bind_address(&bind_raw).unwrap_or_else(|e| {
             eprintln!("av-gateway: refusing to start: {e}");
             std::process::exit(1);
@@ -347,7 +361,7 @@ async fn main() {
     // `"127.0.0.1:50170"`) -- absent (the empty-string default below) is a real, honest
     // configuration state this process starts in fine; the bundle route just names the
     // `av-command` side unreachable rather than refusing to serve at all.
-    let admin_bind_raw = env_or("AV_GATEWAY_ADMIN_BIND", "127.0.0.1:50171");
+    let admin_bind_raw = env_or("AV_GATEWAY_ADMIN_BIND", DEFAULT_ADMIN_BIND);
     let admin_addr = resolve_loopback_bind_address(&admin_bind_raw).unwrap_or_else(|e| {
         eprintln!("av-gateway: refusing to start: {e}");
         std::process::exit(1);

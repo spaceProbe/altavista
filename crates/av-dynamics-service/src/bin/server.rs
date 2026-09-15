@@ -20,7 +20,8 @@ use av_dynamics_service::{DynamicsServiceImpl, EvidenceLog, WorkerHandle};
 /// `gmat_service.config.DEFAULT_ADMIN_PORT`'s own +100 offset from ITS `DEFAULT_PORT`
 /// (50061 -> 50161) -- both services' admin ports are +100 from their own gRPC port, so the
 /// pairing is easy to remember without the two languages needing to agree on one shared
-/// number range.
+/// number range. Question 208(c): `docs/architecture.md` section 4, "Default ports", is the
+/// one owned port map this constant cites.
 const DEFAULT_ADMIN_PORT: u16 = av_dynamics_service::config::DEFAULT_PORT + 100;
 
 struct Args {

@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 /// Localhost-only default port (ADR-004/ADR-003 amendment: plaintext on loopback, mTLS
 /// terminated by a service-owned nginx front for any cross-host hop). Distinct from
 /// `gmat_service.config.DEFAULT_PORT` (50061) so both services can run side by side on one
-/// host during the transition described in `services/gmat-service/README.md`.
+/// host during the transition described in `services/gmat-service/README.md`. Question
+/// 208(c): `docs/architecture.md` section 4, "Default ports", is the one owned port map this
+/// constant (and `bin/server.rs`'s `DEFAULT_ADMIN_PORT`) cites.
 pub const DEFAULT_PORT: u16 = 50062;
 
 /// Matches `gmat_service.config.MODEL_ID` and the golden's own force model exactly: the
