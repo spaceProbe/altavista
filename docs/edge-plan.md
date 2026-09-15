@@ -6,6 +6,75 @@ in `architecture.md` ("edge boundary: seccert certificates, per-batch signatures
 ingest; spoore engine consuming simulated measurements; p99 latency budget") and the edge
 half of ADR-004.
 
+## Delivered
+
+**Every milestone in this plan (E1–E6) is delivered, tested and accepted**, across rounds 1–3,
+with rounds 4 and 5 spent consolidating rather than adding. This section is the state of the
+track for a reader who has only this file; the dated `## Status` sections below are the
+chronological record and are not maintained after the fact.
+
+### What exists
+
+| Thing | Where it lives | Where its tests are |
+|---|---|---|
+| Signed, chained, labelled `MeasurementBatch`; eight typed rejections; per-producer counters; live and pure chain verifiers | `proto/altavista/v1/edge.proto`, `crates/av-edge/src/{hash,sign,verify,chain,policy}.rs` | `crates/av-edge/tests/{golden,roundtrip,rejections,chain_1000}.rs` |
+| Machine identity from a locally run seccert CA (ECDSA P-384, lego-issued leaves, injected clock) | `crates/av-edge/src/identity.rs`, `scripts/edge_local_ca.py` | `crates/av-edge/tests/identity.rs`, `tests/test_edge_identity_seccert.py` |
+| The ingest: durable per-partition chained log that is itself the ledger, accept/reject pipeline, crash recovery, determinism, evidence surface, counters | `crates/av-ingest/src/{log,ingest,evidence,admin}.rs` | `crates/av-ingest/tests/{partitioning,crash_recovery,determinism,evidence,rejections,tamper,path_traversal}.rs` |
+| The wire: `service EdgeIngest` (Announce / Submit / GetEvidence / VerifyLedger), plugin manifest handshake, forwarded-certificate identity enforcement, nginx mTLS front | `crates/av-ingest/src/{service,server,forwarded_cert}.rs`, `crates/av-ingest-client`, `services/av-ingest/deploy/` | `crates/av-ingest/tests/wire_*.rs`, `identity_refusal.rs`, `forwarded_cert_header_name_agreement.rs`, `tests/test_edge_ingest_mtls.py` |
+| Plugin library and the two plugins: the simulated-asset replay (`demo_ground_segment` port traffic) and the ADS-B CSV replay | `crates/av-edge/src/plugin/{mod,packet,adsb}.rs`, `crates/av-ingest-client/src/bin/av-edge-plugin.rs` | `crates/av-edge/tests/{plugin_replay,plugin_replay_adsb}.rs`, `crates/av-ingest/tests/plugin_wire.rs`, `crates/av-ingest-client/tests/av_edge_plugin_*.rs` |
+| The plugin as a hardened, labelled container (`--network none` and an `--internal` bridge, non-root, read-only root, `--cap-drop ALL`, `no-new-privileges`, default seccomp) | `services/edge-plugin/{Dockerfile,build-image.sh,IMAGE_DIGEST.md}`, `altavista/container_hardening.py` | `tests/test_edge_plugin_container.py`, `tests/test_edge_plugin_hardening_alpine.py` |
+| The engine consuming: spoore bridge, truth comparison, viewer publish, latency harness | `crates/av-track/src/{consumer,bridge,compare,latency,config}.rs` | `crates/av-track/tests/{engine_accuracy,no_object_store}.rs` |
+| Capture-only while disconnected: durable edge buffer, ordered replay, dedup by (producer, sequence) | `crates/av-edge/src/buffer.rs` | `crates/av-ingest/tests/{e6_disconnect,e6_wire_disconnect}.rs` |
+| The CCSDS decoder extracted so `av-edge` stays GMAT-free | `crates/av-codec` (re-exported as `av_kernel::codec`) | `crates/av-codec`'s own unit tests; `crates/av-kernel/tests/edge_plugin_codec_crosscheck.rs` |
+| The host-wide docker-test lock (question 207) | `crates/av-lockstep/src/docker_test_lock.rs`, `altavista/docker_test_lock.py` | `crates/av-lockstep/tests/docker_lifecycle.rs`, `tests/test_docker_test_lock_cross_process.py` |
+| Control matrices | `docs/compliance/av-ingest/`, `docs/compliance/av-edge-plugin/` | — |
+
+### The numbers this track stands behind
+
+- **E4's demo replay**: 900 batches, 900 measurements, chain head
+  `d1d80d0b6cc9228aaa7479864b8a89f18be88382fb3772bd3c4cc3d7c2dc2698`, asserted in four
+  independent places. The fixture's recorded provenance names the committed DRM
+  (`c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2`) and that is now a test,
+  not a comment (`crates/av-kernel/tests/e4a_fixture_provenance.rs`).
+- **E5's tracks against truth**: 900 matched, 0 unmatched, max 0.00187 m against a pinned 1.0 m
+  tolerance; pinned as bands with both bounds, with a negative control.
+- **E5's latency**: p50 ≈ 6.1 ms, p99 ≈ 8.3 ms, measured in round 2 and **fsync-bound, not
+  transport-bound** (`PartitionLog::append` `sync_all`s every record). Not re-measured since,
+  because this host has not been quiet since; see the open items.
+- **ADS-B**: 45 measurements in 15 batches, chain head
+  `8f6bd8ce345cf4155b60f0126727c2e0ff2c4a8c8c198c3545d9eafa58158668`.
+
+### Open items carried into the next charter
+
+Everything below is outside this plan's own milestones, which are all closed. The charter after
+this one is the user's choice (question 207).
+
+1. **`deny.toml` carries `wildcards = "warn"`**, not `"deny"`, and `cargo deny check` is green
+   with exactly six accepted spoore wildcard warnings. The only real fix is upstream:
+   `publish = false` on spoore's six path-dependency crates, drafted on spoore's
+   `altavista-upstream` branch (`fca6323`) and waiting on the user to merge it into spoore's
+   `main`. The lead restores `"deny"` the day it lands.
+2. **Neither `services/cfs/build-image.sh` nor `services/edge-plugin/build-image.sh` takes the
+   host-wide docker lock.** Every AltaVista *test suite* now does; these two scripts still do
+   not, so a build run by hand while another track's docker gate is running is still exposed.
+3. **ADS-B has a source and a batch path but no binary and no container image.** The first
+   plugin has both; the second is a follow-on if the lead wants it to run the same way.
+4. **The upstream spoore consumer trait.** `spoore-io` has no consumer trait, only a concrete
+   `rdkafka`-bound `PartitionConsumer`, so `av_track::consumer::MeasurementConsumer` mirrors its
+   shape locally. The PR is drafted in prose in that module's doc comment.
+5. **ADR-004's rootless podman and UBI9 FIPS base are unimplemented**, deliberately: question 207
+   ruled them the production substrate's concern (ADR-003, secdeploy) and ADR-004 carries that
+   clarification. Everything Docker on Colima can express is implemented and asserted from the
+   kernel's own view.
+6. **E5's latency needs a quiet machine.** Two tracks and a lead share this host; a contended
+   timing result is not a result, and this number has not been re-taken since round 2.
+7. **Colima's Kubernetes is still enabled** and its kubelet image collector still removes unused
+   images above its disk threshold (question 196(d)/205). The user reclaimed the disk on
+   2026-09-15 and every image-gated test now runs for real, but rebuild-on-demand with a visible
+   skip remains the standing posture.
+8. **Three crates carry their own six-line `hex_encode` helper** since question 204 banned
+   `sha2`; a shared one is a small, separate cleanup.
+
 ## Goal
 
 A signed, chained, labelled measurement stream from a simulated asset, carried over mTLS
@@ -962,3 +1031,210 @@ on. Consequences, all recorded rather than worked around:
    separate cleanup.
 6. **The disk is full** (question 196(d)) and no image on this host can be rebuilt until the
    user acts. Every image-gated test on every track is skipping.
+
+
+## Status (edge manager, 2026-09-15) — round 5 (consolidation, closing)
+
+Round 5 is the last consolidation round before this track gets a new charter. Question 210 set
+its list. **Every item on that list is closed except the latency retake, which was never
+eligible.** Five commits on `edge`, each reviewed by the manager from the artifacts in the tree
+rather than from a worker's claims, with workspace clippy re-run after each:
+
+- `d8ab89a` **Question 210, decision 8's ratified half** — the E4a fixtures regenerated from the
+  current demo DRM with the committed generator, every derived value re-pinned from the
+  regeneration's own printed output, the plugin image rebuilt because it bakes them, and a new
+  test that makes the provenance relationship permanent.
+- `7a05ba3` **Question 210's second item** — `crates/av-kernel/tests/drm_attitude_control_cfs.rs`
+  labels its containers, prunes by label under question 207's host-wide lock before creating, and
+  all four of its docker-gated tests run for real against the rebuilt cFS image.
+- `042085b` **The cFS digest-mismatch diff** — a missing COPY source the manifest marks
+  `BUILD_ARTIFACT` no longer raises an assertion that hides the real message.
+- `c90b64b` **The alpine hardening probe kept, and two stale module docs corrected.**
+- this commit — the plan's `## Delivered` section and this status.
+
+### Gates (run by the manager with no worker active)
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **834 passed, 0 failed, 3 ignored** |
+| `cargo test -p av-kernel --no-fail-fast` | **876 passed, 0 failed, 2 ignored, 0 visible skips** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, exit 0, zero warnings; no lint suppression added anywhere this round |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, with exactly the six spoore wildcard warnings question 207 accepts; `ring` appears nowhere in the output |
+| `.venv/bin/python -m pytest -q -rs` | **553 passed, 2 failed, 2 skipped** — one failure is cross-track contention and passes alone, the other is another track's test, un-gated today by another track's image; both root-caused below |
+| `buf breaking proto --against` develop's proto | clean, exit 0. No proto file changed this round: `git diff --name-status 5c327d1..HEAD -- proto/` is empty |
+
+**The kernel figure reconciles by name**, not by arithmetic: 874 at the round's start plus the
+two tests in the new `crates/av-kernel/tests/e4a_fixture_provenance.rs`. Its two `ignored` are
+the same two manual generators as before (`regenerate_the_ground_segment_fixture_for_av_edges_
+plugin_tests`, `byte_identical_port_traffic_between_posix_container_and_renode`). The workspace
+figure is unchanged at 834 because this round added no fast-crate test; its three `ignored` are
+`generate_default_plugin_config_json`, `regenerate_signature_for_reference` and
+`generate_command_trail_run_products_fixture`, all deliberate manual generators.
+
+**Python reconciles to 554 passed / 1 failed / 2 skipped once the contended failure is re-run
+alone**: 551 at the round's start, plus the three tests `042085b` adds. The skip count fell from
+three to two because `tests/test_proposer_container.py` stopped skipping — which is precisely
+why it failed; see the defects below.
+
+### Old and new fixture values (question 210)
+
+| Value | Round 4 | Round 5 |
+|---|---|---|
+| `RunProducts.provenance.config_hash` and every `Trajectory.config_hash` | `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0` | `c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2` |
+| `RunProducts.port_traffic_hash` | `c548a78c80954c2a6a159d2b27df10e9f55213e2bed2a1628332b31a63e93dc7` | `5497083dd47f246803a28ba4cda4c8dcaa4314d60c6129b67674afc2fa2a718b` |
+| `run_products.pb` | 61628 bytes | 61982 bytes |
+| `port_traffic.pb` | 116261 bytes | 116261 bytes (same length, different content) |
+| E4 chain head | `d1d80d0b6cc9228aaa7479864b8a89f18be88382fb3772bd3c4cc3d7c2dc2698` | **unchanged** |
+| Batch count | 900 | **unchanged** |
+| `av-edge-plugin:local` image id | `sha256:b5a44f1048a39a0d40015519609db1ec690a1c5d7bbc74f2e716c1b1ddbb8519` | `sha256:38062a487a4346dc5a23eb26dcf00fe7d06e3fec9d6813e003fe612fcaef234e` |
+
+The new `config_hash` equals `drms/demo_ground_segment.drm.yaml`'s own committed `hash:` field,
+verified by the manager by decoding `run_products.pb` with the committed Python bindings, and
+`5497083d…` is the SHA-256 the manager computed over `port_traffic.pb`'s own bytes with the
+system `shasum`. Provenance is true again.
+
+**Why the chain head did not move, measured rather than assumed.** The fixture's
+`Provenance.created_tai_ns` is **0** — the only field of the run's provenance that feeds
+`PluginConfig::batch_provenance`, and therefore the only route by which a regeneration could have
+perturbed a batch body. With it zero and the GMAT dynamics deterministic, the 900 batches are
+byte-identical and the four places that pin the head are untouched. That is a fact worth stating
+plainly because it also means **the chain head could not have caught a stale plugin image**: the
+container test would have passed against the old baked fixture. The manager therefore hashed the
+two files from inside a running container and compared them to the tree —
+`5497083d…`/`0ce69c32…`, identical — rather than trusting the green test.
+
+**E5's accuracy bands re-measured against the regenerated fixture and still hold**, which is what
+question 210 asked: 900 matched, 0 unmatched, `max 0.0018749988892797183 m` (band 1e-4 to 1e-2),
+`p50 5.587935447692871e-9 m` (band 1e-10 to 1e-7), `p99 8.517093334593117e-5 m` (band 1e-6 to
+1e-3). `TrackConfig::config_hash()` is unchanged at
+`7a2d33df306ae9861161e1c64eb2cf79c67e7657e419b93fa9365105a53bb06b`, as expected — it is not
+derived from the fixture.
+
+### Task 5: the host was never quiet, so no latency number was taken
+
+The condition was measured, not assumed. Two five-minute probes, sampling the load average and
+`ps` every thirty seconds, are recorded in the manager's scratchpad:
+
+- **15:51–15:56 UTC**: another worktree (`/Users/probe/code/AltaVista-aiplane`, confirmed by
+  `lsof -d cwd` on the running `cargo` process) ran `cargo test --workspace --exclude av-kernel`
+  and then `cargo test -p av-command -p av-gateway -p av-proposer` through nine of the eleven
+  samples.
+- **16:30–16:38 UTC**: quiet from 16:32:07 to 16:35:07 — **three consecutive minutes, never
+  five** — and then the same worktree started a `pytest` run.
+
+One-minute load averages ranged 3.13–8.76 against twelve cores, so the load-average half of the
+condition was satisfiable; the "no other cargo, docker or pytest process" half never was.
+**Round 2's `p50 ≈ 6.1 ms / p99 ≈ 8.3 ms` therefore stands, unretested for the third round
+running.** It should still be read as "fsync-bound durable append", not "transport-bound".
+
+### Decisions taken this round (for the lead to ratify or overturn)
+
+1. **The regeneration got a permanent guard, not just a re-pin**
+   (`crates/av-kernel/tests/e4a_fixture_provenance.rs`). Question 210 asked for the fixture to be
+   regenerated; it did not ask for a test. But round 4's drift was invisible for a whole round
+   precisely because the relationship lived in a README paragraph, and round 3's own open item 4
+   already states the principle ("a number nothing guards is a number that will drift silently").
+   The test asserts the fixture's recorded provenance equals the DRM's *verified* canonical hash
+   — `verify_drm_hash`, not the bare declared field, so a DRM the kernel would refuse to run
+   cannot satisfy it — and that `port_traffic.pb` hashes to the value `run_products.pb` records,
+   so a half-regeneration cannot land either. Negative control run and recorded: restoring round
+   4's fixture makes both tests fail naming both values. It lives in `crates/av-kernel` because
+   computing a DRM hash needs `av_kernel::drm::{schema,hash}` and question 205 forbids `av-edge`
+   building `gmat-sys`.
+2. **The plugin image was rebuilt as part of the fixture task, not left for the lead.** The
+   Dockerfile `COPY`s both fixture files, so the image on this host would otherwise have carried
+   a fixture that no longer exists in the tree. `services/edge-plugin/IMAGE_DIGEST.md` was
+   rewritten by `build-image.sh` itself, never by hand.
+3. **`crates/av-kernel/tests/drm_attitude_control_cfs.rs` labels its registry container but
+   deliberately does NOT label the image tag it pushes**, and the reason is now proved in the code
+   rather than asserted: `docker image inspect` reports `altavista-cfs-lockstep:local` and the
+   pushed `127.0.0.1:<port>/altavista-cfs-lockstep:test` as the **same image id**
+   (`sha256:dea163a1…cded2`), and `docker rmi -f <ID>` strips every tag on that id. Labelling the
+   tag would let the next run's own pre-flight prune destroy this host's cFS build artifact.
+   `docker tag` has no `--label` flag in any case. This extends the sibling renode file's own
+   comment, which states the `docker tag` half but not the same-id half.
+4. **The lock is taken inside those tests' `run_…` bodies, never in the `#[test]` wrapper**, so a
+   test that skips for a missing image does not serialise another track's gates.
+5. **`tests/test_edge_plugin_hardening_alpine.py` is kept, not retired**, as the probe for hosts
+   without the plugin image. Its subject is `altavista/container_hardening.py` — the single shared
+   implementation of the posture assertions — not the plugin image, so a regression in that module
+   while the image happens to be missing is caught only there; the image has been
+   garbage-collected off this host five times, so its presence is not a property anything can
+   rely on; and the two tests together separate "the hardening posture is broken" from "the plugin
+   image is not on this host". It costs 13.6 MB and a few seconds. The module doc now says all of
+   this as the file's own reason to exist.
+6. **Both container tests' module docs were rewritten, because they asserted a full disk as
+   present-tense measured fact.** A doc stating a measurement that has stopped being true is worse
+   than no doc. Today's snapshot (`overlay 58.8G 15.0G 40.7G 27% /`) is dated and labelled a
+   snapshot; round 4's 0-bytes-free account is preserved under its own date rather than deleted.
+7. **`compute_current_copy_manifest` grew defaulted keyword parameters** (`repo_root`,
+   `dockerfile`, `build_artifacts`) so the new tests drive the real functions against a synthetic
+   tree instead of a copy of their logic. Every existing call site behaves identically.
+8. **An absent build artifact is reported on its own `! absent build artifact:` line and kept out
+   of the diff's `removed` set.** Folding it into `removed` would have read as real content loss;
+   omitting it silently would have let the "agree EXACTLY" verdict claim coverage it does not
+   have. The verdict is reworded to say it covers every path present on this host.
+
+### Defects found in review this round, with their root causes
+
+1. **`tests/test_proposer_container.py` fails on this branch, and it is not this track's.**
+   Root cause definitive, established by reading the tree rather than inferring: the AI-plane
+   track built `av-proposer:local` on this host at 11:16 CDT today, which un-gated a test that had
+   skipped on every gate since it was written. That test invokes `av-proposer` without
+   `--service-token-file`; the binary inside the image requires it ("R5.1"). The string
+   `--service-token-file` **does not exist anywhere in `crates/av-proposer/` on this branch**, so
+   the image is built from that track's own newer, unmerged source. The general gap, which is the
+   part worth the lead's attention: `services/proposer/` has **no `IMAGE_DIGEST.md` at all** and
+   the test performs no digest or provenance check — it is gated purely on the tag existing, so
+   any image with that tag, from any branch, un-gates it. `services/cfs` and
+   `services/edge-plugin` both pin their image id and both would have caught this. Not fixed here:
+   the file and the binary are the AI-plane track's, and their round is running concurrently.
+2. **`tests/test_docker_test_lock_cross_process.py` failed under cross-track contention and passes
+   alone** (2 passed, 1.23 s). Root cause definitive: the test's probe child asserts it can
+   acquire the host-wide lock once the test's own holder child releases it, but the lock is
+   host-wide by design and the AI-plane track's own docker gate held it at that moment. The test
+   is correct about `flock` and wrong to assume the lock is otherwise free. Recorded rather than
+   changed, because the honest fix — have the probe distinguish "our holder still has it" from
+   "somebody else has it" — is a change to question 207's own test and belongs with whoever next
+   touches that file.
+3. **One `cargo test --workspace` run during task 1 reported a failure in
+   `av-lockstep-shim::end_to_end_kernel_path`** ("never created its Unix socket", after 10.02 s).
+   Re-run alone: passed in 7.95 s. Root cause definitive: a concurrent `cargo test` in the AI-plane
+   worktree starved the shim's subprocess spawn past its ten-second budget. This is question 207's
+   contended-docker rule applied to a CPU-contended timeout, and the third round running in which
+   two tracks sharing one host have produced a failure that is not a defect.
+4. **The chain head's failure to move was very nearly an untested claim.** The regeneration left
+   the pinned head unchanged, which means the container test — whose only fixture-sensitive
+   assertion is that head — would have passed against a stale image. Caught in review by asking
+   what the green test could *not* have seen, and closed by hashing the baked files from inside a
+   running container. Cause definitive: a pinned value that happens not to move is not a
+   regression detector for the thing that produced it.
+5. **A worker's first aggregate test count was wrong**, having double-counted a `test result:`
+   line printed inside another test's captured child-process stdout. The worker caught it before
+   reporting. Recorded because it is the third round in which a count derived from a grep rather
+   than from the test harness has been wrong, and the manager's own counts here are taken the same
+   way — summed from `^test result` lines — so the same trap applies to this document's numbers.
+   They were cross-checked against the unchanged baseline, which is why the 834 and 876 above are
+   reconciled by name rather than by total.
+
+### Open items for the lead
+
+1. **`tests/test_proposer_container.py` is failing on `develop`'s content the moment
+   `av-proposer:local` exists** (defect 1). It needs either the AI-plane track's fix to the test's
+   arguments, or an image-provenance gate like the one `services/cfs` and `services/edge-plugin`
+   already have. Until then the lead's clone gate will show it failing or skipping depending only
+   on whether somebody has built that image.
+2. **Question 207's docker-lock test asserts the lock is free** (defect 2), which cannot be true
+   on a host where two tracks run concurrently by design.
+3. **No latency number for the third round running.** Question 43's budget line cannot be
+   tightened from this host while two tracks share it.
+4. **`deny.toml` still carries `wildcards = "warn"`** pending the spoore `publish = false` commit
+   landing on spoore's `main`. Unchanged this round; `cargo deny check` is green with exactly the
+   six accepted warnings.
+5. **The two image build scripts still take no docker lock** (question 156's amendment says so
+   explicitly). `services/edge-plugin/build-image.sh` was run this round while the AI-plane track
+   was active; it happened to be uncontended, which is luck rather than design.
+6. **This plan is closed.** `## Delivered` at the top of this file states what exists, where its
+   tests are, and the eight items carried forward. Every milestone E1–E6 is delivered and every
+   item question 207 and question 210 set for the two consolidation rounds is done except the
+   latency retake. The track's next round needs a new charter from the lead or the user.
