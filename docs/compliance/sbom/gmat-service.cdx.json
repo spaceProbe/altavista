@@ -1,0 +1,438 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "PyYAML",
+      "type": "library",
+      "version": "6.0.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "name": "Pygments",
+      "type": "library",
+      "version": "2.21.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "altavista",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "annotated-doc",
+      "type": "library",
+      "version": "0.0.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "annotated-types",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "anyio",
+      "type": "library",
+      "version": "4.15.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "certifi",
+      "type": "library",
+      "version": "2026.7.22"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "click",
+      "type": "library",
+      "version": "8.5.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "fastapi",
+      "type": "library",
+      "version": "0.141.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "grpcio",
+      "type": "library",
+      "version": "1.83.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "grpcio-tools",
+      "type": "library",
+      "version": "1.83.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "h11",
+      "type": "library",
+      "version": "0.16.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "httpcore",
+      "type": "library",
+      "version": "1.0.9"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "httptools",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "httpx",
+      "type": "library",
+      "version": "0.28.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "idna",
+      "type": "library",
+      "version": "3.19"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "iniconfig",
+      "type": "library",
+      "version": "2.3.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+        }
+      ],
+      "name": "numpy",
+      "type": "library",
+      "version": "2.5.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR BSD-2-Clause"
+        }
+      ],
+      "name": "packaging",
+      "type": "library",
+      "version": "26.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pip",
+      "type": "library",
+      "version": "26.1.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pluggy",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "protobuf",
+      "properties": [
+        {
+          "name": "altavista:sbom:licence-raw",
+          "value": "3-Clause BSD License"
+        }
+      ],
+      "type": "library",
+      "version": "7.36.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pydantic",
+      "type": "library",
+      "version": "2.13.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pydantic_core",
+      "type": "library",
+      "version": "2.46.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pytest",
+      "type": "library",
+      "version": "9.1.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "python-dotenv",
+      "type": "library",
+      "version": "1.2.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "setuptools",
+      "type": "library",
+      "version": "84.0.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "starlette",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "typing-inspection",
+      "type": "library",
+      "version": "0.4.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "PSF-2.0"
+          }
+        }
+      ],
+      "name": "typing_extensions",
+      "type": "library",
+      "version": "4.16.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "uvicorn",
+      "type": "library",
+      "version": "0.52.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "uvloop",
+      "properties": [
+        {
+          "name": "altavista:sbom:licence-raw",
+          "value": "MIT License"
+        }
+      ],
+      "type": "library",
+      "version": "0.22.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "watchfiles",
+      "type": "library",
+      "version": "1.2.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "websockets",
+      "type": "library",
+      "version": "17.1"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "name": "gmat-service",
+      "properties": [
+        {
+          "name": "altavista:sbom:python-packages-source",
+          "value": "this component's package list is importlib.metadata over the one shared worktree .venv -- there is no per-component venv in this repository, so every Python component's SBOM enumerates the identical installed-distribution set; it is not resolved independently per component"
+        }
+      ],
+      "type": "application",
+      "version": "0.1.0"
+    },
+    "timestamp": "2026-09-15T18:47:11Z"
+  },
+  "serialNumber": "urn:uuid:4743319a-7e61-5024-8b86-dc64acc75118",
+  "specVersion": "1.5",
+  "version": 1
+}
