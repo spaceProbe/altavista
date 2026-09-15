@@ -161,7 +161,7 @@ impl GatewayHarness {
 
         let evidence_ledger = Arc::new(Ledger::open(tmp_dir(&format!("{name}-evidence"))).expect("open evidence ledger"));
         let counters = Arc::new(Counters::new());
-        let core = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, counters.clone()));
+        let core = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder.clone(), counters.clone()));
 
         // R5.1/question 208(b): this gateway's own AuthContext -- see this module's own doc
         // comment for the one service role/clearance every test in this crate needs.
@@ -169,7 +169,8 @@ impl GatewayHarness {
         let gateway_issuer_config = Arc::new(IssuerConfig::from_public_key_pem(GATEWAY_AUTH_ISSUER, GATEWAY_AUTH_AUDIENCE, gateway_auth_issuer.public_key_pem()).expect("a freshly generated test issuer key parses"));
         let gateway_service_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([(GATEWAY_AUTH_SERVICE_GROUP.to_string(), vec!["query".to_string(), "propose".to_string()])])));
         let gateway_group_clearance = Arc::new(GroupClearanceMap::new(BTreeMap::from([(GATEWAY_AUTH_SERVICE_GROUP.to_string(), "CUI".to_string())])));
-        let gateway_auth = Arc::new(AuthContext::new(gateway_issuer_config, Arc::new(RoleTable::default()), gateway_service_roles, gateway_group_clearance, clock.clone() as Arc<dyn Clock>));
+        let gateway_auth =
+            Arc::new(AuthContext::new(gateway_issuer_config, Arc::new(RoleTable::default()), gateway_service_roles, gateway_group_clearance, Arc::new(ladder), clock.clone() as Arc<dyn Clock>));
 
         let model_propose = ModelProposeServiceImpl::new(authority, evidence_ledger.clone(), clock.clone() as Arc<dyn Clock>, counters.clone(), gateway_auth.clone());
 

@@ -370,6 +370,7 @@ mod tests {
                 Arc::new(RoleTable::default()),
                 Arc::new(RoleTable::from_config(&m)),
                 Arc::new(GroupClearanceMap::default()),
+                Arc::new(crate::labels::ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()])),
                 Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)),
             )
         }

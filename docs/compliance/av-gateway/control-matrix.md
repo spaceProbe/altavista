@@ -85,8 +85,11 @@ stdio MCP server) plus, new this round, a third, hand-rolled HTTP admin surface:
   surface this crate exposes authenticates a caller, over the real `av_command::oidc::verify`
   path. Two `av_command::authz::RoleTable`s (human/service, disjoint by construction) gate
   `"query"`/`"propose"`/`"admin_bundle"`; a `GroupClearanceMap` derives the caller's effective
-  clearance from the verified token, never from the request's own claimed field. See that
-  module's own doc for the full contract and every design decision.
+  clearance from the verified token, never from the request's own claimed field, as the
+  HIGHEST-ranked (this deployment's own `ClearanceLadder`) marking among every one of the
+  token's mapped groups — never the first one in claim order (**R5.1b, defect 1 fix**: a
+  `["safety-officers","operators"]` and an `["operators","safety-officers"]` token now clear
+  identically). See that module's own doc for the full contract and every design decision.
 - `src/bin/av-gateway.rs` — the service binary: `DataGatewayService` + `ModelProposeService` on
   one loopback gRPC port (D7 — reuses `av_command::service::resolve_loopback_bind_address`
   directly rather than a second copy), the MCP server on the real process stdio, and (new this

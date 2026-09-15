@@ -419,6 +419,7 @@ mod tests {
                 Arc::new(RoleTable::from_config(&roles)),
                 Arc::new(RoleTable::default()),
                 Arc::new(GroupClearanceMap::new(clearance)),
+                Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()])),
                 Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)),
             )
         }
@@ -479,6 +480,28 @@ mod tests {
             // (CUI) is what GatewayCore::query actually sees, per authenticated_query's own doc.
             let resp = authenticated_query(&core, &auth, &counters, &token, req("run-cui", "", GatewaySelector::All)).unwrap();
             assert_eq!(resp.product_label.unwrap().marking, "CUI");
+        }
+
+        /// **R5.1b, defect 1's own required test, at this crate's real, catalogued layer.** A
+        /// caller whose `groups` map to TWO clearances (`operators -> CUI`, `safety-officers ->
+        /// SECRET`) is served a REAL SECRET-labelled product, not merely "not refused" -- the
+        /// gateway's own `run-secret` fixture, with its own real `run_id` and `product_label`
+        /// coming back. Proves the highest-ranked mapped marking is what actually reaches
+        /// `GatewayCore::query`, not just what `AuthContext::authenticate_query` returns in
+        /// isolation (`crate::auth`'s own unit tests already cover that half).
+        #[test]
+        fn a_caller_whose_highest_mapped_clearance_is_secret_is_served_a_real_secret_product() {
+            let core = core_with_two_runs();
+            let issuer = TestIssuer::new();
+            let auth = auth_ctx(&issuer, &[("operators", &["query"]), ("safety-officers", &["query"])], &[("operators", "CUI"), ("safety-officers", "SECRET")]);
+            let counters = Counters::new();
+            let token = mint(&issuer, &["operators", "safety-officers"]);
+
+            let resp = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "", GatewaySelector::All))
+                .expect("a caller whose highest mapped clearance is SECRET must be served the SECRET-labelled run");
+            assert_eq!(resp.run.unwrap().run_id, "run-secret");
+            assert_eq!(resp.product_label.unwrap().marking, "SECRET");
+            assert!(!resp.query_id.is_empty());
         }
     }
 }

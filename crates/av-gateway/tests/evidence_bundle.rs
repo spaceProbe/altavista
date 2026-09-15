@@ -17,6 +17,7 @@ use av_command::oidc::IssuerConfig;
 use av_command::test_support::{valid_claims, TestIssuer};
 use av_gateway::auth::{AuthContext, GroupClearanceMap};
 use av_gateway::evidence_bundle::BundleState;
+use av_gateway::labels::ClearanceLadder;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -89,7 +90,8 @@ async fn spawn_real_gateway_admin(name: &str, command_admin_addr: Option<std::ne
     let issuer = TestIssuer::new();
     let issuer_config = Arc::new(IssuerConfig::from_public_key_pem(ISSUER, AUDIENCE, issuer.public_key_pem()).unwrap());
     let human_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("test-admin".to_string(), vec![WILDCARD.to_string()])])));
-    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, Arc::new(RoleTable::default()), Arc::new(GroupClearanceMap::default()), Arc::new(TestClock::new(1_700_000_000_000_000_000))));
+    let ladder = Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]));
+    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, Arc::new(RoleTable::default()), Arc::new(GroupClearanceMap::default()), ladder, Arc::new(TestClock::new(1_700_000_000_000_000_000))));
 
     let state = Arc::new(BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-gateway-real".to_string(), version: "0.1.0".to_string(), command_admin_addr, auth });
 

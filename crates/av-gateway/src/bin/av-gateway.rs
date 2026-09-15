@@ -262,7 +262,7 @@ async fn main() {
         std::process::exit(1);
     }));
     let counters = Arc::new(av_gateway::counters::Counters::new());
-    let core = Arc::new(GatewayCore::new(catalogue, ladder, counters.clone()));
+    let core = Arc::new(GatewayCore::new(catalogue, ladder.clone(), counters.clone()));
 
     // R5.1/question 208(b): parsed once, at startup -- av_command::oidc::verify itself does no
     // I/O of any kind (that module's own doc, "Purity"); this is the caller "being handed a
@@ -296,7 +296,10 @@ async fn main() {
     let service_roles = Arc::new(RoleTable::from_config(&auth_config.service_roles));
     let group_clearance = Arc::new(GroupClearanceMap::new(auth_config.group_clearance));
     let clock: Arc<dyn av_command::clock::Clock> = Arc::new(SystemClock);
-    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, clock.clone()));
+    // R5.1b (defect 1): the SAME ladder instance just handed to GatewayCore above -- AuthContext
+    // ranks a verified token's mapped group_clearance markings against it via
+    // GroupClearanceMap::clearance_for, never a second, independently configured ladder.
+    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, Arc::new(ladder), clock.clone()));
 
     let evidence_dir = env_or("AV_GATEWAY_EVIDENCE_LEDGER_DIR", "/tmp/av-gateway-evidence-ledger");
     let evidence_ledger = Arc::new(Ledger::open(&evidence_dir).unwrap_or_else(|e| {

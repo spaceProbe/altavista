@@ -91,7 +91,11 @@ async fn read_request_line_and_headers(stream: &mut BufReader<TcpStream>) -> std
 fn auth_refusal_status_line(e: &AuthRefusal) -> &'static str {
     match e {
         AuthRefusal::MissingToken { .. } | AuthRefusal::TokenInvalid { .. } => "401 Unauthorized",
-        AuthRefusal::RoleNotGranted { .. } | AuthRefusal::NoClearanceForSubject { .. } | AuthRefusal::ClearanceMismatch { .. } | AuthRefusal::PrincipalMismatch { .. } => "403 Forbidden",
+        AuthRefusal::RoleNotGranted { .. }
+        | AuthRefusal::NoClearanceForSubject { .. }
+        | AuthRefusal::ClearanceMarkingNotOnLadder { .. }
+        | AuthRefusal::ClearanceMismatch { .. }
+        | AuthRefusal::PrincipalMismatch { .. } => "403 Forbidden",
     }
 }
 
@@ -205,6 +209,7 @@ mod tests {
             Arc::new(RoleTable::from_config(&roles)),
             Arc::new(RoleTable::default()),
             Arc::new(GroupClearanceMap::default()),
+            Arc::new(crate::labels::ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()])),
             Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)),
         ));
         Arc::new(BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-admin-test".to_string(), version: "0.1.0".to_string(), command_admin_addr: None, auth })

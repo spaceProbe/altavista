@@ -212,9 +212,11 @@ impl std::fmt::Display for McpRefusal {
 fn auth_refusal_to_mcp(e: AuthRefusal) -> McpRefusal {
     match &e {
         AuthRefusal::MissingToken { .. } | AuthRefusal::TokenInvalid { .. } => McpRefusal::Unauthenticated { detail: e.to_string() },
-        AuthRefusal::RoleNotGranted { .. } | AuthRefusal::NoClearanceForSubject { .. } | AuthRefusal::ClearanceMismatch { .. } | AuthRefusal::PrincipalMismatch { .. } => {
-            McpRefusal::PermissionDenied { detail: e.to_string() }
-        }
+        AuthRefusal::RoleNotGranted { .. }
+        | AuthRefusal::NoClearanceForSubject { .. }
+        | AuthRefusal::ClearanceMarkingNotOnLadder { .. }
+        | AuthRefusal::ClearanceMismatch { .. }
+        | AuthRefusal::PrincipalMismatch { .. } => McpRefusal::PermissionDenied { detail: e.to_string() },
     }
 }
 
@@ -563,7 +565,7 @@ mod tests {
         );
         let ladder = ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]);
         let counters = Arc::new(Counters::new());
-        let gateway = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, counters.clone()));
+        let gateway = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder.clone(), counters.clone()));
         let dir = temp_ledger_dir("handler");
         let evidence_ledger = Arc::new(Ledger::open(&dir).unwrap());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000));
@@ -578,7 +580,7 @@ mod tests {
         let human_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("operators".to_string(), vec!["query".to_string()]), ("guests".to_string(), vec!["query".to_string()])])));
         let service_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("proposer-service".to_string(), vec!["propose".to_string()])])));
         let group_clearance = Arc::new(GroupClearanceMap::new(BTreeMap::from([("operators".to_string(), "CUI".to_string()), ("guests".to_string(), "UNCLASSIFIED".to_string())])));
-        let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, clock.clone()));
+        let auth = Arc::new(AuthContext::new(issuer_config, human_roles, service_roles, group_clearance, Arc::new(ladder), clock.clone()));
 
         let ctx = McpContext { gateway, authority, evidence_ledger, clock, counters, auth };
         (McpHandler::new(ctx), issuer, dir)

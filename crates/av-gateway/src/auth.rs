@@ -47,10 +47,20 @@
 //! [`GroupClearanceMap`] is a second, independent, deployment-configured table -- `group ->
 //! marking`, `BTreeMap` (ADR-004's determinism rule) -- mirroring [`crate::labels::
 //! ClearanceLadder`]'s own "explicit, ordered/configured, never a hardcoded enum or numeric
-//! level" convention. [`GroupClearanceMap::clearance_for`] returns the marking for the FIRST
-//! of the principal's groups (claim order, `av_command::oidc`'s own convention -- this module
-//! never re-sorts it) that the map lists; a principal none of whose groups appear in the map
-//! is refused [`AuthRefusal::NoClearanceForSubject`], deny by default. The caller-supplied
+//! level" convention. [`GroupClearanceMap::clearance_for`] ranks EVERY one of the principal's
+//! groups that the map lists against THIS deployment's own [`crate::labels::ClearanceLadder`]
+//! (the identical instance [`crate::gateway::GatewayCore`] itself ranks products against --
+//! reused via [`crate::labels::ClearanceLadder::rank`], never a second ranking function) and
+//! returns the HIGHEST-ranked one: a token's effective clearance can never depend on the order
+//! an identity provider happened to serialize its `groups` claim in (R5.1b, defect 1 -- this
+//! crate's own [`crate::lib`]-level "Determinism (D8)" doc: every output of this crate is a
+//! pure function of its inputs, and a set-valued claim's serialization order is not one of
+//! them). A principal none of whose groups appear in the map at all is refused
+//! [`AuthRefusal::NoClearanceForSubject`], deny by default; a principal with at least one
+//! mapped group whose marking is NOT on this deployment's ladder is refused the distinct,
+//! typed, counted [`AuthRefusal::ClearanceMarkingNotOnLadder`] -- a misconfigured
+//! `group_clearance` entry is never silently ranked as 0, and never silently skipped over in
+//! favor of a lower mapped marking that does happen to be on the ladder. The caller-supplied
 //! `GatewayQueryRequest.caller_clearance` is NEVER itself trusted: when non-empty it is
 //! checked for exact equality against the token-derived marking and refused
 //! [`AuthRefusal::ClearanceMismatch`] on any disagreement (never silently taking the higher
@@ -80,6 +90,7 @@ use av_command::clock::Clock;
 use av_command::oidc::{verify, IssuerConfig, TokenError};
 
 use crate::counters::{Counted, Counters};
+use crate::labels::ClearanceLadder;
 
 /// This crate's own authenticated surfaces -- the "granted name" [`RoleTable::granting_role`]
 /// looks up, exactly where `av-command`'s own `roles`/`service_roles` blocks list a command
@@ -186,13 +197,28 @@ pub enum GatewayAuthConfigLoadError {
 
 /// `group -> clearance marking`, deployment-configured (see the module doc's "Clearance is
 /// derived from the verified token" section). A thin `BTreeMap` wrapper, not a second
-/// `ClearanceLadder` -- this map does not rank markings against each other (that is still
-/// entirely [`crate::labels::ClearanceLadder`]'s own job, run afterward, unchanged); it only
-/// answers "what does this verified token assert its clearance to be," the fact [`crate::
-/// labels::ClearanceLadder::classify`] then ranks against the product's own label.
+/// `ClearanceLadder` -- this map does not itself rank markings against a product's own label
+/// (that is still entirely [`crate::labels::ClearanceLadder::classify`]'s own job, run
+/// afterward, unchanged); [`Self::clearance_for`] ranks a token's OWN mapped markings against
+/// each other only far enough to pick the single highest one, reusing [`crate::labels::
+/// ClearanceLadder::rank`] to do it -- never a second, independent ranking implementation.
 #[derive(Debug, Clone, Default)]
 pub struct GroupClearanceMap {
     by_group: BTreeMap<String, String>,
+}
+
+/// The result of [`GroupClearanceMap::clearance_for`] -- see that method's own doc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupClearanceOutcome {
+    /// The highest-ranked (on this deployment's [`ClearanceLadder`]) marking among every one
+    /// of the principal's groups this map lists.
+    Marking(String),
+    /// None of the principal's groups appear in this map at all.
+    NoneMapped,
+    /// At least one of the principal's mapped groups names a marking absent from this
+    /// deployment's ladder -- a misconfiguration, never silently ranked as 0 and never
+    /// silently skipped over in favor of a lower mapped marking that IS on the ladder.
+    NotOnLadder(String),
 }
 
 impl GroupClearanceMap {
@@ -200,10 +226,31 @@ impl GroupClearanceMap {
         Self { by_group }
     }
 
-    /// The clearance marking for the FIRST of `groups` (claim order) present in this map, or
-    /// `None` if none of them are -- deny by default, never a rank-0/default marking.
-    pub fn clearance_for<'a>(&'a self, groups: &[String]) -> Option<&'a str> {
-        groups.iter().find_map(|g| self.by_group.get(g)).map(String::as_str)
+    /// Ranks every one of `groups` that this map lists against `ladder` (the SAME ladder
+    /// instance this deployment's [`crate::gateway::GatewayCore`] itself ranks products
+    /// against) and returns the highest-ranked marking -- order-independent: the same set of
+    /// mapped markings always yields the same [`GroupClearanceOutcome::Marking`] regardless of
+    /// the order `groups` lists them in (R5.1b, defect 1). A group absent from this map is
+    /// simply skipped (it asserts no clearance); a group whose mapped marking is absent from
+    /// `ladder` short-circuits the whole call to [`GroupClearanceOutcome::NotOnLadder`]
+    /// immediately -- never silently dropped in favor of a lower, on-ladder marking found
+    /// elsewhere in `groups`. [`GroupClearanceOutcome::NoneMapped`] only when no group in
+    /// `groups` is in this map at all.
+    pub fn clearance_for(&self, groups: &[String], ladder: &ClearanceLadder) -> GroupClearanceOutcome {
+        let mut best: Option<(usize, &str)> = None;
+        for g in groups {
+            let Some(marking) = self.by_group.get(g) else { continue };
+            let Some(rank) = ladder.rank(marking) else {
+                return GroupClearanceOutcome::NotOnLadder(marking.clone());
+            };
+            if best.map(|(best_rank, _)| rank > best_rank).unwrap_or(true) {
+                best = Some((rank, marking.as_str()));
+            }
+        }
+        match best {
+            Some((_, marking)) => GroupClearanceOutcome::Marking(marking.to_string()),
+            None => GroupClearanceOutcome::NoneMapped,
+        }
     }
 }
 
@@ -236,6 +283,13 @@ pub enum AuthRefusal {
     /// clearance this deployment recognizes, refused before ranking against any product label.
     #[error("no configured clearance for groups {groups:?} -- this deployment's group_clearance table names none of them")]
     NoClearanceForSubject { groups: Vec<String> },
+    /// [`Surface::Query`] only: at least one of the verified token's groups IS in this
+    /// deployment's [`GatewayAuthConfig::group_clearance`] table, but the marking it maps to
+    /// is absent from this deployment's [`crate::labels::ClearanceLadder`] -- a misconfigured
+    /// `group_clearance` entry, refused outright (R5.1b, defect 1) rather than silently
+    /// ranked as 0 or skipped in favor of a lower, on-ladder mapped marking.
+    #[error("group_clearance marking {marking:?} (from groups {groups:?}) is not on this deployment's clearance ladder -- refused, never defaulted to a rank")]
+    ClearanceMarkingNotOnLadder { groups: Vec<String>, marking: String },
     /// [`Surface::Query`] only: `GatewayQueryRequest.caller_clearance` was non-empty and
     /// disagreed with the token-derived clearance. Never resolved by silently preferring
     /// either value (invariant C) -- always this typed, counted refusal instead.
@@ -256,6 +310,7 @@ impl Counted for AuthRefusal {
             AuthRefusal::TokenInvalid { .. } => "gateway_auth_token_invalid",
             AuthRefusal::RoleNotGranted { .. } => "gateway_auth_role_not_granted",
             AuthRefusal::NoClearanceForSubject { .. } => "gateway_auth_no_clearance_for_subject",
+            AuthRefusal::ClearanceMarkingNotOnLadder { .. } => "gateway_auth_clearance_marking_not_on_ladder",
             AuthRefusal::ClearanceMismatch { .. } => "gateway_auth_clearance_mismatch",
             AuthRefusal::PrincipalMismatch { .. } => "gateway_auth_principal_mismatch",
         }
@@ -271,12 +326,24 @@ pub struct AuthContext {
     human_roles: Arc<RoleTable>,
     service_roles: Arc<RoleTable>,
     group_clearance: Arc<GroupClearanceMap>,
+    /// R5.1b (defect 1): the SAME ladder instance this deployment's own [`crate::gateway::
+    /// GatewayCore`] ranks products against -- [`GroupClearanceMap::clearance_for`] reuses it
+    /// to rank a verified token's mapped clearance markings, never a second, independently
+    /// configured ladder.
+    ladder: Arc<ClearanceLadder>,
     clock: Arc<dyn Clock>,
 }
 
 impl AuthContext {
-    pub fn new(issuer_config: Arc<IssuerConfig>, human_roles: Arc<RoleTable>, service_roles: Arc<RoleTable>, group_clearance: Arc<GroupClearanceMap>, clock: Arc<dyn Clock>) -> Self {
-        Self { issuer_config, human_roles, service_roles, group_clearance, clock }
+    pub fn new(
+        issuer_config: Arc<IssuerConfig>,
+        human_roles: Arc<RoleTable>,
+        service_roles: Arc<RoleTable>,
+        group_clearance: Arc<GroupClearanceMap>,
+        ladder: Arc<ClearanceLadder>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self { issuer_config, human_roles, service_roles, group_clearance, ladder, clock }
     }
 
     /// Verifies `token` for `surface`. Empty is [`AuthRefusal::MissingToken`]; otherwise
@@ -325,9 +392,12 @@ impl AuthContext {
             return Err(self.refuse(AuthRefusal::RoleNotGranted { groups: principal.groups.clone(), surface: Surface::Query }, counters));
         }
 
-        let verified_clearance = match self.group_clearance.clearance_for(&principal.groups) {
-            Some(m) => m.to_string(),
-            None => return Err(self.refuse(AuthRefusal::NoClearanceForSubject { groups: principal.groups.clone() }, counters)),
+        let verified_clearance = match self.group_clearance.clearance_for(&principal.groups, &self.ladder) {
+            GroupClearanceOutcome::Marking(m) => m,
+            GroupClearanceOutcome::NoneMapped => return Err(self.refuse(AuthRefusal::NoClearanceForSubject { groups: principal.groups.clone() }, counters)),
+            GroupClearanceOutcome::NotOnLadder(marking) => {
+                return Err(self.refuse(AuthRefusal::ClearanceMarkingNotOnLadder { groups: principal.groups.clone(), marking }, counters))
+            }
         };
 
         if !declared_clearance.is_empty() && declared_clearance != verified_clearance {
@@ -378,9 +448,11 @@ pub fn to_status(refusal: AuthRefusal) -> tonic::Status {
     let message = refusal.to_string();
     match &refusal {
         AuthRefusal::MissingToken { .. } | AuthRefusal::TokenInvalid { .. } => tonic::Status::unauthenticated(message),
-        AuthRefusal::RoleNotGranted { .. } | AuthRefusal::NoClearanceForSubject { .. } | AuthRefusal::ClearanceMismatch { .. } | AuthRefusal::PrincipalMismatch { .. } => {
-            tonic::Status::permission_denied(message)
-        }
+        AuthRefusal::RoleNotGranted { .. }
+        | AuthRefusal::NoClearanceForSubject { .. }
+        | AuthRefusal::ClearanceMarkingNotOnLadder { .. }
+        | AuthRefusal::ClearanceMismatch { .. }
+        | AuthRefusal::PrincipalMismatch { .. } => tonic::Status::permission_denied(message),
     }
 }
 
@@ -416,8 +488,15 @@ mod tests {
         Arc::new(GroupClearanceMap::new(m))
     }
 
+    /// This module's own fixture ladder -- `UNCLASSIFIED < CUI < SECRET` -- matching
+    /// `crate::labels::ClearanceLadder`'s own tests and `crate::gateway`'s `core_with_two_runs`
+    /// fixture, so a token minted at any of the three markings ranks consistently across both.
+    fn ladder() -> Arc<ClearanceLadder> {
+        Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]))
+    }
+
     fn ctx(issuer: &TestIssuer, human: &[(&str, &[&str])], service: &[(&str, &[&str])], group_clearance: &[(&str, &str)]) -> AuthContext {
-        AuthContext::new(issuer_config(issuer), roles(human), roles(service), clearance(group_clearance), Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)))
+        AuthContext::new(issuer_config(issuer), roles(human), roles(service), clearance(group_clearance), ladder(), Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)))
     }
 
     fn mint(issuer: &TestIssuer, groups: &[&str]) -> String {
@@ -575,6 +654,78 @@ mod tests {
         assert_eq!(counters.get("gateway_auth_no_clearance_for_subject"), 1);
     }
 
+    /// **R5.1b, defect 1's own required test.** A token whose `groups` claim maps to TWO
+    /// clearances (`operators -> CUI`, `safety-officers -> SECRET`) is cleared to the SAME,
+    /// HIGHER marking regardless of which order `groups` lists the two in -- the manager's
+    /// exact finding was that `["operators","safety-officers"]` and
+    /// `["safety-officers","operators"]` used to disagree (CUI vs. SECRET) because the old
+    /// implementation took the FIRST match, not the highest. Watched failing against the
+    /// unfixed `find_map`-based `clearance_for` before the fix landed (see this task's own
+    /// report for the exact failing output): the low-order case failed with `ClearanceMismatch`
+    /// (a CUI-derived clearance disagreeing with the `"SECRET"` this test declares), not with
+    /// the `SECRET` this assertion expects.
+    #[test]
+    fn the_same_two_groups_in_either_claim_order_yield_the_same_higher_marking() {
+        let issuer = TestIssuer::new();
+        let ctx = ctx(&issuer, &[("operators", &["query"]), ("safety-officers", &["query"])], &[], &[("operators", "CUI"), ("safety-officers", "SECRET")]);
+        let counters = Counters::new();
+
+        let high_first = mint(&issuer, &["safety-officers", "operators"]);
+        let (_, clearance_high_first) = ctx.authenticate_query(&high_first, "SECRET", &counters).expect("high-order token must clear to SECRET");
+        assert_eq!(clearance_high_first, "SECRET");
+
+        let low_first = mint(&issuer, &["operators", "safety-officers"]);
+        let (_, clearance_low_first) = ctx.authenticate_query(&low_first, "SECRET", &counters).expect("low-order token must ALSO clear to SECRET, not CUI");
+        assert_eq!(clearance_low_first, "SECRET");
+
+        assert_eq!(clearance_high_first, clearance_low_first, "claim order must never change the effective clearance");
+    }
+
+    /// **R5.1b, defect 1's own required test.** A caller whose highest mapped marking is
+    /// SECRET actually gets served a SECRET-labelled product -- not merely "not refused" at
+    /// the auth layer, but a real answer at this crate's real, catalogued layer
+    /// (`crate::gateway`'s own `authenticated` test module carries the full, product-returning
+    /// version of this same scenario: `a_caller_whose_highest_mapped_clearance_is_secret_is_
+    /// served_a_real_secret_product`).
+    #[test]
+    fn a_caller_whose_highest_mapped_clearance_is_secret_authenticates_at_secret() {
+        let issuer = TestIssuer::new();
+        let ctx = ctx(&issuer, &[("operators", &["query"]), ("safety-officers", &["query"])], &[], &[("operators", "CUI"), ("safety-officers", "SECRET")]);
+        let counters = Counters::new();
+        let token = mint(&issuer, &["operators", "safety-officers"]);
+        let (principal, clearance) = ctx.authenticate_query(&token, "", &counters).expect("must authenticate at the higher, SECRET clearance");
+        assert_eq!(principal.sub, "operator-1");
+        assert_eq!(clearance, "SECRET");
+    }
+
+    /// **R5.1b, defect 1's own required test.** A `group_clearance` entry naming a marking
+    /// absent from this deployment's ladder is a distinct, typed, counted refusal
+    /// ([`AuthRefusal::ClearanceMarkingNotOnLadder`]) -- never silently ranked as 0, and never
+    /// silently skipped in favor of a lower, on-ladder marking the caller's other groups map
+    /// to (this test's own `operators -> CUI` entry exists specifically to prove that: a buggy
+    /// "skip anything unrankable" implementation would wrongly return `CUI` here instead of
+    /// refusing).
+    #[test]
+    fn a_group_clearance_marking_absent_from_the_ladder_is_refused_and_counted() {
+        let issuer = TestIssuer::new();
+        let ctx = ctx(
+            &issuer,
+            &[("operators", &["query"]), ("misconfigured-group", &["query"])],
+            &[],
+            &[("operators", "CUI"), ("misconfigured-group", "TOP-SECRET")],
+        );
+        let counters = Counters::new();
+        let token = mint(&issuer, &["operators", "misconfigured-group"]);
+
+        assert_eq!(counters.get("gateway_auth_clearance_marking_not_on_ladder"), 0);
+        let err = ctx.authenticate_query(&token, "", &counters).unwrap_err();
+        assert!(
+            matches!(&err, AuthRefusal::ClearanceMarkingNotOnLadder { marking, .. } if marking == "TOP-SECRET"),
+            "a misconfigured off-ladder marking must be refused, never silently skipped in favor of the lower on-ladder CUI: {err:?}"
+        );
+        assert_eq!(counters.get("gateway_auth_clearance_marking_not_on_ladder"), 1, "the counter for this exact refusal must have moved");
+    }
+
     // ---- Propose surface: service role + declared-principal agreement ----
 
     #[test]
@@ -695,6 +846,7 @@ mod tests {
         assert_eq!(to_status(AuthRefusal::TokenInvalid { surface: Surface::Query, source: token_err }).code(), tonic::Code::Unauthenticated);
         assert_eq!(to_status(AuthRefusal::RoleNotGranted { groups: vec![], surface: Surface::Query }).code(), tonic::Code::PermissionDenied);
         assert_eq!(to_status(AuthRefusal::NoClearanceForSubject { groups: vec![] }).code(), tonic::Code::PermissionDenied);
+        assert_eq!(to_status(AuthRefusal::ClearanceMarkingNotOnLadder { groups: vec![], marking: "x".to_string() }).code(), tonic::Code::PermissionDenied);
         assert_eq!(to_status(AuthRefusal::ClearanceMismatch { declared: "a".to_string(), verified: "b".to_string() }).code(), tonic::Code::PermissionDenied);
         assert_eq!(to_status(AuthRefusal::PrincipalMismatch { declared: "a".to_string(), verified: "b".to_string() }).code(), tonic::Code::PermissionDenied);
     }

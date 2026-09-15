@@ -26,6 +26,7 @@ use av_command::clock::{Clock, TestClock};
 use av_command::oidc::IssuerConfig;
 use av_command::test_support::{valid_claims, TestIssuer};
 use av_gateway::auth::{AuthContext, GroupClearanceMap};
+use av_gateway::labels::ClearanceLadder;
 
 pub const TEST_OIDC_ISSUER: &str = "https://sso.test.example/";
 pub const TEST_OIDC_AUDIENCE: &str = "av-gateway";
@@ -66,11 +67,14 @@ pub fn test_auth_context(issuer: &TestIssuer, clock: Arc<dyn Clock>) -> Arc<Auth
     group_clearance.insert(GROUP_CUI.to_string(), "CUI".to_string());
     group_clearance.insert(GROUP_SECRET.to_string(), "SECRET".to_string());
 
+    let ladder = Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]));
+
     Arc::new(AuthContext::new(
         test_issuer_config(issuer),
         Arc::new(RoleTable::from_config(&roles)),
         Arc::new(RoleTable::from_config(&service_roles)),
         Arc::new(GroupClearanceMap::new(group_clearance)),
+        ladder,
         clock,
     ))
 }
