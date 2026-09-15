@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -475,4 +476,437 @@ def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_
     print(f"\n--- docker save reproducibility, observed ---\n" + "\n".join(
         f"{c}: tarball_sha256={doc_a['images'][c]['tarball_sha256']} (identical across both builds)"
         for c in sbom.IMAGE_COMPONENTS
+    ))
+
+
+# =================================================================================================
+# 13. Round 2 (P5 track round 2 task 3a, lead ruling 214(b)): kit_format is bumped
+# =================================================================================================
+
+def test_kit_format_is_bumped_for_round_2(tmp_path):
+    _kit_root, manifest_path, _digest = _build_kit(tmp_path)
+    doc = json.loads(manifest_path.read_text())
+    assert doc["kit_format"] == 2
+    assert kmanifest.KIT_FORMAT == 2
+
+
+# =================================================================================================
+# 14. A copied pack verifies; a tampered byte inside it is caught
+# =================================================================================================
+
+def test_a_copied_pack_verifies_clean_and_its_files_land_in_the_manifest(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path, copy_pack_names=["data-time"])
+    doc = json.loads(manifest_path.read_text())
+
+    assert doc["packs"]["data-time"]["copied"] is True
+    copy = doc["packs"]["data-time"]["copy"]
+    assert copy["kit_path"] == "packs/data-time"
+    assert copy["copied_file_count"] > 0
+    assert copy["copied_symlink_count"] == 0  # data/time carries no symlinks of its own
+
+    pack_files = [f for f in doc["files"] if f["path"].startswith("packs/data-time/")]
+    assert len(pack_files) == copy["copied_file_count"]
+    assert all(f["role"] == "pack-file" for f in pack_files)
+    assert (kit_root / "packs" / "data-time").is_dir()
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+
+def test_a_tampered_byte_inside_a_copied_pack_is_caught(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path, copy_pack_names=["data-time"])
+    doc = json.loads(manifest_path.read_text())
+    pack_files = [f for f in doc["files"] if f["path"].startswith("packs/data-time/")]
+    assert pack_files, "expected at least one copied pack file to tamper"
+    victim_rel = pack_files[0]["path"]
+
+    victim = kit_root / victim_rel
+    original = victim.read_bytes()
+    tampered = bytearray(original)
+    tampered[0] ^= 0xFF
+    victim.write_bytes(bytes(tampered))
+
+    findings = kmanifest.verify_manifest(kit_root)
+    hash_findings = [f for f in findings if f.kind == "hash_mismatch" and f.path == victim_rel]
+    assert len(hash_findings) == 1, findings
+
+
+def test_copy_pack_bytes_refuses_a_pack_over_max_pack_bytes_via_the_descriptor_gate(tmp_path):
+    """--max-pack-bytes still gates a --copy-pack request -- the descriptor's own cheap,
+    stat-only size check (Decision K) runs before any content is read OR copied."""
+    with pytest.raises(kmanifest.PackTooLargeError):
+        _build_kit(
+            tmp_path, copy_pack_names=["data-time"],
+            max_pack_bytes=1,  # data/time is far larger than 1 byte
+        )
+
+
+# =================================================================================================
+# 15. A pack's own symlinks: carried verbatim when safe, refused at build time when not,
+#     and every on-disk shape verify_manifest must catch -- all fabricated under tmp_path,
+#     never depending on this worktree's own symlink layout (the pattern
+#     test_pack_descriptor_records_a_symlinked_out_of_worktree_pack_honestly established).
+# =================================================================================================
+
+def _fabricate_pack_with_symlink(tmp_path: Path, *, target: str, link_name: str = "link") -> Path:
+    pack_dir = tmp_path / "fabricated_symlink_pack"
+    pack_dir.mkdir()
+    (pack_dir / "real.txt").write_text("hello\n", encoding="utf-8")
+    (pack_dir / link_name).symlink_to(target)
+    return pack_dir
+
+
+def _minimal_kit(tmp_path: Path, name: str = "kit") -> Path:
+    """A bare kit_root with none of the usual suite/sbom/image content -- just enough for
+    `manifest.copy_pack_bytes`/`build_manifest`/`verify_manifest` to operate on, so these
+    symlink-focused tests never need the real `build_kit.build` pipeline (and therefore never
+    touch this worktree's own git state, secdeploy files, or committed SBOMs)."""
+    kit_root = tmp_path / name
+    kit_root.mkdir()
+    return kit_root
+
+
+def _write_minimal_manifest(kit_root: Path) -> dict:
+    doc = kmanifest.build_manifest(
+        kit_root=kit_root, git_commit="0" * 40, git_dirty=False, git_status=[],
+        images={}, sboms={}, packs={}, vendor={"collected": False, "network_used": False, "offline_error": None},
+        wheels={"collected": False, "network_used": False, "fetched": []},
+        binaries={"collected": False, "results": {}}, runs={},
+        gaps=kmanifest.build_gaps(vendor_collected=False, wheels_collected=False),
+    )
+    kmanifest.write_manifest(doc, kit_root)
+    return doc
+
+
+def test_a_pack_symlink_with_a_relative_same_directory_target_is_copied_verbatim(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="real.txt")
+    kit_root = _minimal_kit(tmp_path)
+
+    result = kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    assert result["copied_symlink_count"] == 1
+    assert result["copied_file_count"] == 1
+    link = kit_root / "packs" / "fabricated" / "link"
+    assert link.is_symlink()
+    assert os.readlink(link) == "real.txt"
+
+    _write_minimal_manifest(kit_root)
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+
+def test_a_pack_symlink_with_an_absolute_target_is_refused_at_build_time(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="/etc/passwd")
+    kit_root = _minimal_kit(tmp_path)
+
+    with pytest.raises(kmanifest.UnsafePackSymlinkError):
+        kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    # A hard refusal, never a partial copy: nothing should have been written for this pack.
+    assert not (kit_root / "packs" / "fabricated" / "real.txt").exists()
+
+
+def test_a_pack_symlink_that_escapes_the_pack_via_dotdot_is_refused_at_build_time(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="../outside_the_pack.txt")
+    kit_root = _minimal_kit(tmp_path)
+
+    with pytest.raises(kmanifest.UnsafePackSymlinkError):
+        kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+
+
+def test_a_pack_symlink_whose_target_is_changed_on_disk_is_caught(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="real.txt")
+    (pack_dir / "other.txt").write_text("world\n", encoding="utf-8")
+    kit_root = _minimal_kit(tmp_path)
+    kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    _write_minimal_manifest(kit_root)
+    assert kmanifest.verify_manifest(kit_root) == []
+
+    link = kit_root / "packs" / "fabricated" / "link"
+    link.unlink()
+    link.symlink_to("other.txt")
+
+    findings = kmanifest.verify_manifest(kit_root)
+    matches = [f for f in findings if f.path == "packs/fabricated/link"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "symlink_target_mismatch"
+    assert matches[0].link_target == "other.txt"
+    assert matches[0].expected_link_target == "real.txt"
+
+
+def test_an_unlisted_symlink_planted_in_a_pack_is_caught(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="real.txt")
+    kit_root = _minimal_kit(tmp_path)
+    kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    _write_minimal_manifest(kit_root)
+    assert kmanifest.verify_manifest(kit_root) == []
+
+    # Planted AFTER the manifest was written -- exactly the shape review finding D3-1 first
+    # found for a stray kit-root symlink, now checked for the in-pack case too.
+    (kit_root / "packs" / "fabricated" / "second_link").symlink_to("real.txt")
+
+    findings = kmanifest.verify_manifest(kit_root)
+    matches = [f for f in findings if f.path == "packs/fabricated/second_link"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "unexpected_symlink"
+
+
+def test_a_pack_symlink_that_becomes_unsafe_after_being_declared_is_still_caught(tmp_path):
+    """Defence in depth: even a symlink `pack_symlinks` already declares is re-classified for
+    safety on every `verify_manifest` call, never merely looked up and trusted."""
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="real.txt")
+    kit_root = _minimal_kit(tmp_path)
+    kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    _write_minimal_manifest(kit_root)
+    assert kmanifest.verify_manifest(kit_root) == []
+
+    link = kit_root / "packs" / "fabricated" / "link"
+    link.unlink()
+    link.symlink_to("/etc/passwd")
+
+    findings = kmanifest.verify_manifest(kit_root)
+    matches = [f for f in findings if f.path == "packs/fabricated/link"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "unsafe_symlink_target"
+
+
+def test_a_missing_pack_symlink_is_caught(tmp_path):
+    pack_dir = _fabricate_pack_with_symlink(tmp_path, target="real.txt")
+    kit_root = _minimal_kit(tmp_path)
+    kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+    _write_minimal_manifest(kit_root)
+    assert kmanifest.verify_manifest(kit_root) == []
+
+    (kit_root / "packs" / "fabricated" / "link").unlink()
+
+    findings = kmanifest.verify_manifest(kit_root)
+    matches = [f for f in findings if f.path == "packs/fabricated/link"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "missing_symlink"
+
+
+def test_a_symlinked_directory_inside_a_pack_is_never_descended_into(tmp_path):
+    """`_walk_kit_entries`'s own rule (reused for pack source trees): a symlinked directory is
+    reported as its own symlink entry and never traversed -- content on the far side of it is
+    never part of the copy, matching the assembled-kit rule this same walker already enforces."""
+    pack_dir = tmp_path / "pack_with_symlinked_dir"
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    (outside / "should_never_be_copied.txt").write_text("nope\n", encoding="utf-8")
+    pack_dir.mkdir()
+    (pack_dir / "real.txt").write_text("hello\n", encoding="utf-8")
+    (pack_dir / "linked_dir").symlink_to("../outside_dir", target_is_directory=True)
+
+    kit_root = _minimal_kit(tmp_path)
+    with pytest.raises(kmanifest.UnsafePackSymlinkError):
+        # "../outside_dir" is a RELATIVE target that escapes this pack's own root -- refused
+        # exactly like a file symlink with the same shape would be (the directory case of the
+        # same rule; `_walk_kit_entries` reports a symlinked directory as its own entry and never
+        # descends into it, so this is caught without ever touching `outside/`'s own content).
+        kmanifest.copy_pack_bytes("fabricated", pack_dir, kit_root)
+
+
+# =================================================================================================
+# 16. build_gaps: a collected step stops being reported as a gap
+# =================================================================================================
+
+def test_build_gaps_omits_a_collected_step_and_keeps_the_unconditional_three():
+    all_gapped = kmanifest.build_gaps(vendor_collected=False, wheels_collected=False)
+    names = {g["name"] for g in all_gapped}
+    assert names == {"cargo-vendor", "python-wheels", "seccert-root", "install-path", "secdeploy-deploy-assets"}
+
+    vendor_done = kmanifest.build_gaps(vendor_collected=True, wheels_collected=False)
+    assert "cargo-vendor" not in {g["name"] for g in vendor_done}
+    assert "python-wheels" in {g["name"] for g in vendor_done}
+
+    both_done = kmanifest.build_gaps(vendor_collected=True, wheels_collected=True)
+    assert {g["name"] for g in both_done} == {"seccert-root", "install-path", "secdeploy-deploy-assets"}
+
+    with_extra = kmanifest.build_gaps(
+        vendor_collected=True, wheels_collected=True,
+        extra=[{"name": "av-command-binary", "reason": "cross-build failed: <error>"}],
+    )
+    assert {g["name"] for g in with_extra} == {"seccert-root", "install-path", "secdeploy-deploy-assets", "av-command-binary"}
+
+
+def test_the_manifest_declares_its_gaps_unconditionally_include_seccert_root(tmp_path):
+    """Unlike round 1's fixed five, round 2's gap list membership varies with which flags a kit
+    build used -- but seccert-root, install-path, and secdeploy-deploy-assets never go away,
+    since nothing this task adds collects any of them."""
+    _kit_root, manifest_path, _digest = _build_kit(tmp_path)
+    doc = json.loads(manifest_path.read_text())
+    names = {g["name"] for g in doc["gaps"]}
+    assert {"seccert-root", "install-path", "secdeploy-deploy-assets"} <= names
+    for gap in doc["gaps"]:
+        assert gap["reason"].strip(), f"gap {gap['name']!r} has an empty reason"
+
+
+# =================================================================================================
+# 17. The recorded kernel run (tests/fixtures/*.runproducts.bin), carried unconditionally
+# =================================================================================================
+
+def test_the_recorded_kernel_runs_are_carried_with_their_provenance(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path)
+    doc = json.loads(manifest_path.read_text())
+
+    fixtures_dir = REPO_ROOT / "tests" / "fixtures"
+    expected_stems = {p.name[: -len(".runproducts.bin")] for p in fixtures_dir.glob("*.runproducts.bin")}
+    assert expected_stems, "expected at least one committed *.runproducts.bin fixture"
+    assert set(doc["runs"]) == expected_stems
+
+    for stem in expected_stems:
+        entry = doc["runs"][stem]
+        assert entry["decoded"] is True, f"{stem}: expected the provenance config_hash to be cheaply readable"
+        assert entry["config_hash"], f"{stem}: config_hash must be non-empty when decoded"
+        assert len(entry["config_hash"]) == 64  # a SHA-256 hex string
+
+        run_files = [f for f in doc["files"] if f["path"] == f"runs/{stem}.runproducts.bin"]
+        assert len(run_files) == 1, doc["files"]
+        assert run_files[0]["role"] == "run-fixture"
+        on_disk = kit_root / "runs" / f"{stem}.runproducts.bin"
+        assert sbom.sha256_file(on_disk) == run_files[0]["sha256"]
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+
+# =================================================================================================
+# 18. --with-vendor (gated: real cargo vendor, network only if offline genuinely fails)
+# =================================================================================================
+
+VENDOR_OPT_IN_VAR = "AV_KIT_WITH_VENDOR"
+
+
+def _vendor_opted_in() -> bool:
+    return os.environ.get(VENDOR_OPT_IN_VAR, "").strip().lower() in ("1", "true", "yes")
+
+
+def _compute_vendor_skip_reason() -> "str | None":
+    if not _vendor_opted_in():
+        return (
+            f"{VENDOR_OPT_IN_VAR} is not set -- this test runs the real `cargo vendor --offline` "
+            f"path (falling back to the network once if that genuinely fails). The default suite "
+            f"skips it; set AV_KIT_WITH_VENDOR=1 on the command line to opt in."
+        )
+    if shutil.which("cargo") is None:
+        return "cargo is not on PATH (export PATH=\"/opt/homebrew/opt/rustup/bin:$PATH\" first)"
+    return None
+
+
+_VENDOR_SKIP_REASON = _compute_vendor_skip_reason()
+
+
+@pytest.mark.skipif(_VENDOR_SKIP_REASON is not None, reason=_VENDOR_SKIP_REASON or "")
+def test_with_vendor_runs_the_real_cargo_vendor_path(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path, with_vendor=True)
+    doc = json.loads(manifest_path.read_text())
+
+    assert doc["vendor"]["collected"] is True
+    assert "cargo-vendor" not in {g["name"] for g in doc["gaps"]}
+    assert (kit_root / "vendor" / ".cargo-config.toml").is_file()
+    vendored_crates = list((kit_root / "vendor").iterdir())
+    assert len(vendored_crates) > 1, "expected cargo vendor to have populated <kit>/vendor/"
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+    print(f"\n--- --with-vendor, observed ---\nnetwork_used={doc['vendor']['network_used']} "
+          f"offline_error={doc['vendor']['offline_error']!r} crates={len(vendored_crates)}")
+
+
+# =================================================================================================
+# 19. --with-wheels (gated: real network use, question 154's one permitted exception)
+# =================================================================================================
+
+WHEELS_OPT_IN_VAR = "AV_KIT_WITH_WHEELS"
+
+
+def _wheels_opted_in() -> bool:
+    return os.environ.get(WHEELS_OPT_IN_VAR, "").strip().lower() in ("1", "true", "yes")
+
+
+def _compute_wheels_skip_reason() -> "str | None":
+    if not _wheels_opted_in():
+        return (
+            f"{WHEELS_OPT_IN_VAR} is not set -- this test uses the network for real (pip "
+            f"download against PyPI, question 154's one permitted exception at kit-build time). "
+            f"The default suite skips it; set AV_KIT_WITH_WHEELS=1 on the command line to opt in."
+        )
+    return None
+
+
+_WHEELS_SKIP_REASON = _compute_wheels_skip_reason()
+
+
+@pytest.mark.skipif(_WHEELS_SKIP_REASON is not None, reason=_WHEELS_SKIP_REASON or "")
+def test_with_wheels_runs_the_real_pip_download_path(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path, with_wheels=True)
+    doc = json.loads(manifest_path.read_text())
+
+    assert doc["wheels"]["collected"] is True
+    assert doc["wheels"]["network_used"] is True
+    assert "python-wheels" not in {g["name"] for g in doc["gaps"]}
+    fetched_names = {f["name"] for f in doc["wheels"]["fetched"]}
+    assert "altavista" in fetched_names
+    for entry in doc["wheels"]["fetched"]:
+        whl = kit_root / "wheels" / entry["filename"]
+        assert whl.is_file(), entry
+        assert sbom.sha256_file(whl) == entry["sha256"]
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+    wheel_gaps = [g for g in doc["gaps"] if g["name"].startswith("wheel:")]
+    print(f"\n--- --with-wheels, observed ---\nfetched={sorted(fetched_names)}\n"
+          f"named gaps={[g['name'] for g in wheel_gaps]}")
+
+
+# =================================================================================================
+# 20. --with-binaries (gated: real docker cross-build, host-wide lock, av.test labelled)
+# =================================================================================================
+
+BINARIES_OPT_IN_VAR = "AV_KIT_WITH_BINARIES"
+
+
+def _binaries_opted_in() -> bool:
+    return os.environ.get(BINARIES_OPT_IN_VAR, "").strip().lower() in ("1", "true", "yes")
+
+
+def _compute_binaries_skip_reason() -> "str | None":
+    if not _binaries_opted_in():
+        return (
+            f"{BINARIES_OPT_IN_VAR} is not set -- this test cross-builds real Linux binaries "
+            f"inside a container (av-ingest-server, av-command), which can take several minutes. "
+            f"The default suite skips it; set AV_KIT_WITH_BINARIES=1 on the command line to opt in."
+        )
+    if not _docker_available():
+        return "Docker is not available on this host (`docker info` failed)."
+    return None
+
+
+_BINARIES_SKIP_REASON = _compute_binaries_skip_reason()
+
+
+@pytest.mark.skipif(_BINARIES_SKIP_REASON is not None, reason=_BINARIES_SKIP_REASON or "")
+def test_with_binaries_runs_the_real_cross_build_path(tmp_path):
+    kit_root, manifest_path, _digest = _build_kit(tmp_path, with_binaries=True)
+    doc = json.loads(manifest_path.read_text())
+
+    assert doc["binaries"]["collected"] is True
+    assert "av-ingest-server" in doc["binaries"]["results"]
+    ingest_result = doc["binaries"]["results"]["av-ingest-server"]
+    assert ingest_result["included"] is True, ingest_result
+    ingest_bin = kit_root / "binaries" / "av-ingest-server"
+    assert ingest_bin.is_file()
+    assert os.access(ingest_bin, os.X_OK)
+
+    command_result = doc["binaries"]["results"]["av-command"]
+    if not command_result["included"]:
+        assert command_result["reason"], "a failed cross-build must carry the real compiler error"
+        assert any(g["name"] == "av-command-binary" for g in doc["gaps"])
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+    print(f"\n--- --with-binaries, observed ---\n" + "\n".join(
+        f"{name}: included={info['included']} reason={info.get('reason')!r}"
+        for name, info in doc["binaries"]["results"].items()
     ))
