@@ -89,7 +89,7 @@ unchecked — see the worker report for the exact command and printed output.
   container test reading it back from the ingest's own evidence surface
   (`tests/test_edge_plugin_container.py`).
 - **The fixture's `port_traffic_hash`**:
-  `c548a78c80954c2a6a159d2b27df10e9f55213e2bed2a1628332b31a63e93dc7` — what
+  `5497083dd47f246803a28ba4cda4c8dcaa4314d60c6129b67674afc2fa2a718b` — what
   `verify_port_traffic_log` (`crates/av-edge/src/plugin/mod.rs`) checks
   `port_traffic.pb`'s bytes against before decoding a single record
   (`crates/av-edge/tests/fixtures/ground_segment/README.md`).

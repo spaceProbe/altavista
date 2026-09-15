@@ -29,43 +29,48 @@ Dockerfile`'s own "Container hardening" header section and `docs/adr/
 004-security-boundary-and-evidence.md`'s clarification beside its "Plugins are untrusted code"
 bullet.
 
-# Why this test is skipped on this host today, and the disk state behind it
+# Image availability on this host, and how this file is gated
 
-As of this round's own measurement (2026-09-13, immediately before writing this test):
-`docker system df` reports 21 images (12.42 GB, 0% reclaimable), 31 containers (15 active,
-230.7 MB, 96% reclaimable), 899 local volumes (46.92 GB, 99% reclaimable -- an unrelated
-Supabase/Kubernetes workload's, exactly what question 196(d)/205 already escalated), and 0
-build-cache entries. `docker run --rm --entrypoint df alpine:latest -h /` reports the Colima
-VM's container filesystem itself: `overlay 58.8G 56.0G 0 100% /` -- 58.8 GB total, 56.0 GB used,
-**0 bytes available**. `av-edge-plugin:local` and even this Dockerfile's own base image,
-`debian:bookworm-slim`, are BOTH already absent from this host (`docker image inspect` on
-either returns "No such image") -- consistent with `_skip_if_image_vanished_mid_run`'s own
-docstring below: Colima's kubelet image garbage collector deletes unused images under this
-exact disk pressure, and `services/edge-plugin/build-image.sh` cannot be re-run to replace them
-(a build allocates fresh layers on a filesystem already at 0 bytes free). The remedy is the
-user's, already on record at question 196(d)/205: reclaim the 899 dangling volumes, disable
-Colima's Kubernetes, or raise `disk:` in `~/.colima/default/colima.yaml`. Until one of those
-happens, this test (and `build-image.sh`) stay unusable on this host, and
-`tests/test_edge_plugin_hardening_alpine.py` is what actually runs today.
+**Measured 2026-09-15, a snapshot, taken by the manager immediately before this round's work:**
+`av-edge-plugin:local` is present on this host and was rebuilt this round (round 5 task 1
+regenerated the E4a fixture the image bakes) -- `services/edge-plugin/IMAGE_DIGEST.md` records
+image id `sha256:38062a487a4346dc5a23eb26dcf00fe7d06e3fec9d6813e003fe612fcaef234e`. `docker run
+--rm --entrypoint df alpine:latest -h /` inside the Colima VM reports `overlay 58.8G 15.0G
+40.7G 27% /` -- 40.7 GB available, 27% used. `docker system df` reports 24 images (12.72 GB),
+16 containers, 89 local volumes (2.899 GB). The test below (guarded by `_SKIP_REASON`) therefore
+RUNS FOR REAL on this host today, not merely parses.
 
-A follow-up re-measurement, same day, after implementing and running the hardening work above:
-`docker system df` moved to 22 images (12.46 GB), 31 containers, 904 local volumes (47.21 GB,
-99% reclaimable -- the same unrelated workload, slightly larger), still 0 build-cache entries;
-`docker run --rm --entrypoint df alpine:latest -h /` still reported `overlay 58.8G ~56.1-56.2G 0
-100% /` throughout -- genuinely 0 bytes available, not a rounding artifact. Direct confirmation:
-`tests/test_edge_plugin_hardening_alpine.py`'s own real run against `alpine:latest` (present at
-that moment) got through every hardening check -- non-root uid, `NoNewPrivs: 1`, `Seccomp: 2`,
-the read-only-root write correctly failing -- and then hit `sh: write error: No space left on
-device` on the ONE-declared-writable-volume write probe, i.e. this filesystem is now so full
-that even a fresh named Docker volume (not the image layer store) cannot absorb a few bytes.
-That specific, narrower failure is distinguished from a hardening defect by
-`altavista.container_hardening.VolumeWriteDiskExhausted` (see that module's own docstring) --
-caught here and in the alpine test, both of which then skip visibly rather than reporting a
-false failure. Also observed directly during this same work: `alpine:latest` itself was evicted
-from this host BETWEEN two successive `docker image inspect` checks a few minutes apart with no
-`docker rmi`/prune run by this test suite in between -- Colima's kubelet image GC reclaiming
-even a several-MB image under this pressure, in real time, exactly as `_skip_if_image_vanished_
-mid_run` already documents for the larger plugin/prebuild images.
+That is not a property this file can assume holds on every host, or even holds here
+permanently. `av-edge-plugin:local` has been garbage-collected off this host five separate
+times by Colima's own kubelet image garbage collector (question 196(d)/205) -- most recently
+under the disk pressure recorded below. On a host where the image is genuinely absent, this
+test still skips visibly, naming `services/edge-plugin/build-image.sh` as the remedy
+(`_compute_skip_reason` below), exactly as question 194 requires (a test that finds no image
+and returns is a defect; a test that skips and SAYS why is not). `tests/
+test_edge_plugin_hardening_alpine.py` exists precisely for that possibility -- see that file's
+own module doc ("round 5, question 210") for why it is kept as the independent probe rather
+than retired now that this test runs for real again.
+
+**History, dated 2026-09-13 (round 4):** at the point this test was first written, the Colima
+VM's container filesystem was measured at 0 bytes free (58.8 GB total, 56.0 GB used, 100%
+full; `docker system df` showed 899 local volumes at 46.92 GB, 99% reclaimable, from an
+unrelated Supabase/Kubernetes workload -- the same one question 196(d)/205 escalated), and both
+`av-edge-plugin:local` and this Dockerfile's own base image, `debian:bookworm-slim`, were
+absent from the host as a direct result -- `services/edge-plugin/build-image.sh` could not be
+(re-)run to replace either, since a build allocates fresh layers and the filesystem had none to
+give. A same-day re-measurement, after implementing and running the hardening work, still found
+0 bytes available; a real run of `tests/test_edge_plugin_hardening_alpine.py` against
+`alpine:latest` got through every hardening check and then hit `sh: write error: No space left
+on device` on the one declared-writable-volume write probe -- the exact condition
+`altavista.container_hardening.VolumeWriteDiskExhausted` (see that module's own docstring)
+exists to distinguish from a hardening defect. `alpine:latest` itself was observed evicted
+between two successive `docker image inspect` checks a few minutes apart, with no
+`docker rmi`/prune run by this suite in between -- Colima's kubelet GC reclaiming even a
+several-MB image under that pressure, in real time, exactly as `_skip_if_image_vanished_
+mid_run` below documents for the larger plugin/prebuild images. The remedy then was the same
+one already on record at question 196(d)/205 (reclaim the dangling volumes, disable Colima's
+Kubernetes, or raise `disk:` in `~/.colima/default/colima.yaml`); the user has since reclaimed
+the disk (see the 2026-09-15 snapshot above).
 
 Docker-gated, and gated the way `services/cfs/tests/test_image_digest.py` already does it
 for a *Python* test (question 194): a module-level `_compute_skip_reason()` runs once at
@@ -311,11 +316,13 @@ def _skip_if_image_vanished_mid_run(stage: str, result: subprocess.CompletedProc
     pressure, not an actor running `docker image prune`: the Colima VM's container filesystem
     sat at 92% (4.2 GB free of 58.8 GB, with 41.85 GB reclaimable in an unrelated workload's
     volumes) when this was first measured, and the deletions land inside another process's
-    `docker build` layer-allocation window. This module's own top-of-file doc has this round's
-    fresher re-measurement (2026-09-13): the same filesystem is now at 0 bytes free (58.8 GB
-    total, 56.0 GB used, 100% full), 899 of that unrelated workload's volumes now account for
-    46.92 GB (99% reclaimable), and both `av-edge-plugin:local` and this Dockerfile's own base
-    image are already gone -- the same phenomenon, worse. Question 194's rule is "run for real
+    `docker build` layer-allocation window. A same-day re-measurement (2026-09-13, recorded in
+    this module's own top-of-file doc under "History, dated 2026-09-13") found the same
+    filesystem at 0 bytes free (58.8 GB total, 56.0 GB used, 100% full), 899 of that unrelated
+    workload's volumes accounting for 46.92 GB (99% reclaimable), and both `av-edge-plugin:local`
+    and this Dockerfile's own base image gone -- the same phenomenon, worse, as of that date. The
+    disk has since been reclaimed and the image rebuilt (that same doc's 2026-09-15 snapshot).
+    Question 194's rule is "run for real
     or skip visibly, never pass silently", and a skip whose reason says the image was deleted
     mid-run is exactly that -- distinct, in wording and in meaning, from `_SKIP_REASON`'s "has
     not been built on this host", so `-rs` output never conflates the two. Rebuild with
@@ -668,8 +675,9 @@ def _run_network_none_denies_everything_and_the_internal_network_delivers_batche
         except VolumeWriteDiskExhausted as e:
             # See `altavista.container_hardening.VolumeWriteDiskExhausted`'s own docstring and
             # `tests/test_edge_plugin_hardening_alpine.py`'s identical handling: a real,
-            # host-wide disk condition (this module's own "Why this test is skipped" section
-            # above has the numbers), not a hardening defect -- every OTHER fact already passed.
+            # host-wide disk condition (this module's own "Image availability on this host, and
+            # how this file is gated" section above has the historical numbers), not a
+            # hardening defect -- every OTHER fact already passed.
             print(f"\n--- plugin container hardening, from docker exec of the RUNNING container "
                   f"(question 148) -- PARTIAL, before the disk-exhausted volume write ---\n"
                   f"{json.dumps(e.partial_facts)}")
