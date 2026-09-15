@@ -43,6 +43,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::process::Command;
 
+/// Re-exported from the sibling `docker_test_lock` module (question 207) so every Docker
+/// caller in this workspace spells the lock the same way it spells everything else in this
+/// module: `av_lockstep::docker::lock_docker_tests()` /
+/// `av_lockstep::docker::DockerTestLock`. See that module's own doc comment for the full
+/// account -- the defect, the lock path, and why `prune_stale_test_resources` below now
+/// requires proof (a `&DockerTestLock` parameter) that the caller already holds it.
+pub use crate::docker_test_lock::{lock_docker_tests, DockerTestLock};
+
 /// Everything that can go wrong pulling, running, or tearing down a Docker-managed
 /// `BINDING_KIND_CONTAINER` instance. Every variant carries the `docker` CLI's own stderr
 /// (trimmed) as `detail` -- never swallowed, matching this workspace's "refuse, typed, never
@@ -259,7 +267,12 @@ pub(crate) fn announce_gate_skip_multi_with(require: bool, test_name: &str, reas
 /// bypassing libtest's output capture (see [`announce_gate_skip`]'s own doc comment). Uses
 /// `std::io::Write::write_all` on the `Stderr` handle directly -- never the `eprintln!`/
 /// `eprint!` macros, which route through `io::_eprint` and ARE captured.
-fn write_real_stderr(text: &str) {
+///
+/// `pub(crate)`: also used by the sibling `docker_test_lock` module to announce a blocked
+/// `lock_docker_tests()` wait (question 207's own follow-up: a lock acquisition that blocks
+/// silently is indistinguishable, to a human watching a plain `cargo test`, from a hang -- the
+/// same visibility concern this function already exists for).
+pub(crate) fn write_real_stderr(text: &str) {
     use std::io::Write;
     let mut stderr = std::io::stderr();
     let _ = stderr.write_all(text.as_bytes());
@@ -334,7 +347,25 @@ pub fn test_label_args(run_id: &str) -> Vec<String> {
 /// hazard the manager's own probe demonstrated, not a claim about the cause of this host's
 /// separately-investigated vanished images (question 194's own record: that cause was a
 /// bulk host-level image prune, unrelated to this function).
-pub fn prune_stale_test_resources() {
+///
+/// **Question 207: this daemon-wide sweep now requires proof, at compile time, that the caller
+/// already holds [`DockerTestLock`].** The pre-207 shape had no lock parameter at all -- the
+/// only guard was `crates/av-lockstep/tests/docker_lifecycle.rs`'s own process-local
+/// `DOCKER_TEST_LOCK: Mutex<()>`, which a *different* worktree's *different* process could not
+/// see, so two worktrees running Docker-gated tests concurrently could (and, in round 3's own
+/// gate, did) race this exact sweep against each other's live containers/images. The fix is
+/// [`lock_docker_tests`] -- a host-wide `flock` -- but this function deliberately does **not**
+/// acquire it internally. `flock` on a second, independently-opened file descriptor in the SAME
+/// process blocks against the first (measured directly by `docker_test_lock`'s own
+/// `flock_serializes_two_threads_of_the_same_process_on_separate_open_file_descriptions` test):
+/// a `prune_stale_test_resources` that opened and locked the file itself would therefore
+/// **deadlock** any test that (correctly, per this crate's own convention) already holds the
+/// lock across its whole body before ever reaching the prune call -- exactly the shape every
+/// Docker-gated test in this workspace now has. Taking `&DockerTestLock` instead makes "the
+/// caller already holds the lock" a fact the compiler enforces, not a convention a future
+/// caller could simply forget (as the pre-207 shape's own bare `Mutex` convention was
+/// forgettable, and was in fact never even reachable outside one test binary).
+pub fn prune_stale_test_resources(_lock: &DockerTestLock) {
     let filter = format!("label={TEST_LABEL_KEY}");
     if let Ok(out) = Command::new("docker").args(["ps", "-aq", "--filter", &filter]).output() {
         for id in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()) {

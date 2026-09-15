@@ -33,6 +33,7 @@ SERVICE_DIR = REPO_ROOT / "services" / "lockstep-ref"
 if str(SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(SERVICE_DIR))
 from altavista.pb.altavista.v1 import lockstep_pb2, lockstep_pb2_grpc, system_pb2  # noqa: E402
+from altavista.docker_test_lock import lock_docker_tests  # noqa: E402
 
 READY_TIMEOUT_S = 30.0
 
@@ -318,6 +319,18 @@ def test_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
     if reason is not None:
         pytest.skip(f"Docker not available: {reason}")
 
+    # Question 207: this test's own build/tag/push uses fixed names (`lockstep-ref:pytest-
+    # docker-lifecycle`, the throwaway `registry:2` container) that a concurrent Rust `cargo
+    # test`/Python `pytest` process in ANY worktree on this host running the identical test
+    # could collide with -- and `av_lockstep::docker::prune_stale_test_resources`'s own
+    # daemon-wide label sweep, run by any such concurrent Rust test, has nothing to do with
+    # *this* test's own resources but shares the same host-wide lock this test now also takes,
+    # for its whole body, before creating anything.
+    with lock_docker_tests():
+        _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove()
+
+
+def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
     local_tag = "lockstep-ref:pytest-docker-lifecycle"
     registry_id = None
     pushed_ref = None

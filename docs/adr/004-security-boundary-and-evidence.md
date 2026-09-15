@@ -163,6 +163,32 @@ cannot grant (which would move it to a hardened unit or a microVM); or an eviden
 that `secdeploy evidence` cannot assemble because a component's endpoint diverged from the
 suite's contract.
 
+## Clarification 2026-09-13: the plugin container bullet, split by substrate
+
+Question 207 (edge round 3's review defect 2: `services/edge-plugin/Dockerfile` implemented
+none of this ADR's plugin-container hardening). The "Plugins are untrusted code" bullet above
+names rootless podman (Quadlet-managed), a UBI9 FIPS base image, `--network none` plus an
+allow-list, read-only root, a dedicated user, seccomp and no-new-privileges together, as if
+they were one substrate. Question 207 ruled they are not:
+
+- **Rootless podman, Quadlet unit management, and the UBI9 FIPS base image are the
+  production substrate's** (ADR-003; `secdeploy` on fedora-fips). Docker on Colima, the
+  development host, has no podman, no Quadlet, and no UBI9 FIPS entitlement, and does not
+  attempt to imitate any of the three.
+- **What Docker on Colima can express is implemented and asserted on the development
+  substrate today:** a dedicated non-root user (`services/edge-plugin/Dockerfile`'s `USER`),
+  a read-only root with exactly one declared writable volume (`/var/lib/edge-plugin`),
+  `--cap-drop ALL`, `--security-opt no-new-privileges`, and Docker's own default seccomp
+  profile (never `--security-opt seccomp=unconfined`). `--network none` plus the endpoint
+  allow-list was already real and measured as of round 3; the rest is new this round.
+  `tests/test_edge_plugin_container.py` asserts all of it from `docker inspect` and `docker
+  exec` of the running plugin container itself; `tests/test_edge_plugin_hardening_alpine.py`
+  proves the identical flags and assertions produce the identical values on this host today,
+  independent of whether the plugin image has been built (see that file's own module doc).
+
+The bullet above is left as written -- it still describes the production target -- and this
+clarification records which half of it the development substrate stands behind.
+
 ## References
 
 - `github.com/secrouter/secrouter` `docs/compliance/cmmc-control-matrix.md` and `deployment-hardening.md`; `secagent/docs/cmmc.md` (legend, deficiency list) and `fips.md` (crypto rules, UBI9, `--enable-fips`); `seccert/docs/security.md` (key handling, hash-chained ledger, control mapping); `secsso` README (OIDC, groups, MFA, service subjects); `secdeploy/docs/compliance.md` (deploy-audit chain, `secdeploy evidence`).

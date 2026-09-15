@@ -52,19 +52,31 @@ pub use stm::{propagate_covariance, StmAugmented};
 /// (ADR-002: "SHA-256 of the model's settings [...]"). Encodes each entry as `"key=value\n"`
 /// and hashes them in `BTreeMap` (i.e. key-sorted) order, so the digest is a pure function of
 /// the settings themselves and never depends on the order the caller happened to insert them
-/// in (ADR-002 / ADR-004 determinism: no `HashMap` on an output path). `sha2` is pure Rust
-/// with no bundled C crypto, matching ADR-004's crypto rule; used only for this
-/// non-security-critical settings fingerprint, never for the platform's signing path.
+/// in (ADR-002 / ADR-004 determinism: no `HashMap` on an output path). Hashed with the
+/// `openssl` crate's `openssl::sha::sha256` -- the system OpenSSL, never `sha2` (question 204
+/// banned `sha2` workspace-wide: ADR-004's crypto rule is SHA-256 only, through the system
+/// OpenSSL only, with no exception for a non-security-critical fingerprint like this one).
 pub fn settings_hash(settings: &BTreeMap<String, String>) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
+    let mut buf = Vec::new();
     for (k, v) in settings {
-        hasher.update(k.as_bytes());
-        hasher.update(b"=");
-        hasher.update(v.as_bytes());
-        hasher.update(b"\n");
+        buf.extend_from_slice(k.as_bytes());
+        buf.push(b'=');
+        buf.extend_from_slice(v.as_bytes());
+        buf.push(b'\n');
     }
-    format!("{:x}", hasher.finalize())
+    hex_encode(&openssl::sha::sha256(&buf))
+}
+
+/// Lowercase-hex encode, matching every other SHA-256 call site in this workspace
+/// (`crates/av-command/src/ledger.rs`, `crates/av-dynamics-service/src/evidence.rs`): `[u8; 32]`
+/// (what `openssl::sha::sha256` returns) has no `{:x}` `Formatter` impl the way `sha2`'s
+/// `GenericArray` did, so this is the local replacement for the old `format!("{:x}", ...)`.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// One message on one port, exactly [`altavista.v1.PortMessage`]
@@ -713,6 +725,24 @@ mod tests {
         let mut c = a.clone();
         c.insert("b".to_string(), "3".to_string());
         assert_ne!(settings_hash(&a), settings_hash(&c));
+    }
+
+    /// Pins `settings_hash` (question 204: `openssl::sha::sha256` + this module's own
+    /// `hex_encode`) against a genuine external oracle: `{"a": "1", "b": "2"}` encodes to the
+    /// exact 8 bytes `b"a=1\nb=2\n"` (key-sorted order, `"key=value\n"` per entry), and the
+    /// system `shasum -a 256` binary -- not this crate's own code -- was run over exactly those
+    /// bytes:
+    ///   printf 'a=1\nb=2\n' > vector.bin
+    ///   shasum -a 256 vector.bin
+    ///   -> 4a73850fde34aad40ff8649b93a66523a5fe744357a3931caea0f10609d0d930
+    /// `python3 -c "import hashlib; print(hashlib.sha256(b'a=1\nb=2\n').hexdigest())"` was run
+    /// independently and printed the identical digest, confirming the oracle itself.
+    #[test]
+    fn settings_hash_matches_an_independently_computed_sha256() {
+        let mut settings = BTreeMap::new();
+        settings.insert("a".to_string(), "1".to_string());
+        settings.insert("b".to_string(), "2".to_string());
+        assert_eq!(settings_hash(&settings), "4a73850fde34aad40ff8649b93a66523a5fe744357a3931caea0f10609d0d930");
     }
 
     // -- Ports (docs/open-questions.md question 108) --------------------------------------

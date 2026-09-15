@@ -32,6 +32,11 @@
 //! - [`packet`] -- a thin adapter over `av_codec::decode_packet` (question 205; that module's
 //!   own doc comment has the detail, including the one narrow, documented ordering
 //!   difference from the from-scratch decoder it replaced).
+//! - [`adsb`] -- the second plugin (question 200(a)): an ADS-B replay from a small,
+//!   committed, synthetic CSV sample, through this exact same `PluginConfig`/
+//!   `MeasurementSource`/`BatchBuilder` path -- see that module's own doc comment for
+//!   what it replays, the WGS-84 geodetic-to-ECEF conversion, and the frame/label/noise/
+//!   time choices it makes.
 //! - [`PluginConfig`] -- every declared knob this plugin's behaviour depends on, in one
 //!   serialisable, hashable value (see [`PluginConfig::config_hash`]) -- nothing here is a
 //!   hard-coded constant.
@@ -52,6 +57,7 @@
 //! comment. This is what lets `crates/av-edge/tests/plugin_replay.rs` exercise this module
 //! with no wire, no wall-clock dependency, and byte-identical results run to run.
 
+pub mod adsb;
 pub mod packet;
 
 use std::collections::BTreeMap;
@@ -98,6 +104,27 @@ pub enum PluginError {
     /// type just to satisfy a caller two modules away.
     #[error("signing failed: {0}")]
     Signing(String),
+
+    // ---------------------------------------------------------------------------------
+    // crate::plugin::adsb -- the second plugin (question 200(a)). One variant per parser
+    // failure mode `AdsbCsvSource::from_csv` can hit, each with its own test
+    // (`crate::plugin::adsb`'s own `#[cfg(test)] mod tests`) -- typed refusals, never a
+    // silently skipped row, per this crate's standing convention.
+    // ---------------------------------------------------------------------------------
+    #[error("adsb csv line {line}: expected {expected} comma-separated column(s), found {actual}")]
+    AdsbColumnCount { line: usize, expected: usize, actual: usize },
+    #[error("adsb csv line {line}: {value:?} is not a 6-hex-digit ICAO 24-bit address")]
+    AdsbInvalidIcao24 { line: usize, value: String },
+    #[error("adsb csv line {line}: field {field:?} value {value:?} did not parse as the expected number")]
+    AdsbInvalidField { line: usize, field: &'static str, value: String },
+    #[error("adsb csv line {line}: latitude {lat_deg} degrees is out of the valid [-90, 90] range")]
+    AdsbLatitudeOutOfRange { line: usize, lat_deg: f64 },
+    #[error("adsb csv line {line}: longitude {lon_deg} degrees is out of the valid [-180, 180] range")]
+    AdsbLongitudeOutOfRange { line: usize, lon_deg: f64 },
+    #[error("adsb csv bytes are not valid UTF-8: {message}")]
+    AdsbInvalidUtf8 { message: String },
+    #[error("AdsbCsvSource requires PluginConfig.component_fields == [\"x\", \"y\", \"z\"] (ECEF Cartesian); got {actual:?}")]
+    AdsbComponentFieldsMismatch { actual: Vec<String> },
 }
 
 impl From<SigningError> for PluginError {

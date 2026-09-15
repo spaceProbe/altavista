@@ -41,11 +41,12 @@ tonic = { version = "0.12", default-features = false, features = ["codegen", "pr
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
 
 # SHA-256 for the evidence log, via the `openssl` crate (openssl-sys -> the system/Homebrew
-# libssl/libcrypto) -- deliberately NOT `sha2` (which av-dynamics already uses for the
-# non-security-critical settings_hash, per ADR-004's rule that a settings fingerprint may
-# use pure-Rust sha2 while the platform's evidence/signing path proves the OpenSSL-backed
-# hashing path -- crates/av-grpc's own TLS stack is the same rule applied to the transport
-# side). See src/evidence.rs's module doc for exactly what this does and does not claim.
+# libssl/libcrypto) -- deliberately NOT `sha2`, which is now banned workspace-wide (question
+# 204 migrated every `sha2` call site, including av-dynamics's own settings_hash, to
+# `openssl::sha::sha256`, closing the gap ADR-004's rule always intended: SHA-256 only,
+# through the system OpenSSL only -- crates/av-grpc's own TLS stack is the same rule applied
+# to the transport side). See src/evidence.rs's module doc for exactly what this does and
+# does not claim.
 openssl = "0.10"
 
 [build-dependencies]

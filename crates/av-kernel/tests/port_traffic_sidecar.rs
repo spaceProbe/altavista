@@ -260,14 +260,16 @@ fn port_traffic_hash_matches_an_independently_computed_sha256_of_the_file_and_ur
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
     // This crate's own canonical SHA-256 helper is `hash::sha256_hex` (pub(crate) only) -- this
     // is a separate `tests/*.rs` crate, so it cannot call that private function even though it
-    // lives in the same workspace; `sha2` is already a direct, real dependency of `av-kernel`
-    // (this crate's own `hash.rs` module doc comment) for exactly this hash, so computing it a
-    // second, independent time here (not by calling into `av_kernel::drm::hash` at all) is the
-    // actual independent check, not a restatement of the same call.
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let independently_computed = format!("{:x}", hasher.finalize());
+    // lives in the same workspace; `openssl` is already a direct, real dependency of `av-kernel`
+    // (this crate's own `hash.rs` module doc comment; question 204 migrated it off `sha2`) for
+    // exactly this hash, so computing it a second, independent time here (not by calling into
+    // `av_kernel::drm::hash` at all) is the actual independent check, not a restatement of the
+    // same call.
+    let digest = openssl::sha::sha256(&bytes);
+    let mut independently_computed = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        independently_computed.push_str(&format!("{b:02x}"));
+    }
     assert_eq!(products.port_traffic_hash, independently_computed, "RunProducts.port_traffic_hash must equal a fresh SHA-256 of the exact bytes on disk");
 
     let _ = std::fs::remove_dir_all(&dir);

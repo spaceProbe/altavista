@@ -31,11 +31,12 @@ serde_json.workspace = true
 # see src/drm/schema.rs's module doc comment. Not already a workspace dependency, so pinned
 # here with an explicit version per this task's own dependency rule.
 serde_yaml = "0.9"
-# Already a workspace dependency (crates/av-dynamics/src/lib.rs::settings_hash) -- reused here
-# for the DRM/SosConfiguration/SystemDefinition canonical hash (src/drm/hash.rs) rather than
-# pulling in openssl for a second, unrelated hashing need. Pure Rust, no bundled C crypto
-# (ADR-004's crypto rule).
-sha2.workspace = true
+# SHA-256 for the DRM/SosConfiguration/SystemDefinition canonical hash (src/drm/hash.rs), via
+# the `openssl` crate (openssl-sys -> the system/Homebrew libssl/libcrypto). Question 204
+# migrated this off `sha2` (previously reused from `crates/av-dynamics` as an already-present
+# workspace dependency) -- `sha2` is now banned workspace-wide in the root `deny.toml`'s
+# `[bans]` list, per ADR-004's crypto rule: SHA-256 only, through the system OpenSSL only.
+openssl = "0.10"
 # Canonical protobuf encoding for hashing (src/drm/hash.rs): prost::Message::encode_to_vec.
 # Already a transitive dependency via av-cdm/av-dynamics; named directly here since drm/hash.rs
 # calls it explicitly.

@@ -4,12 +4,19 @@
 # 900 s run at 1 Hz, no faults, no maneuvers, no covariance (a GroundStationModel/
 # ConstantAccelModel pair -- neither declares STM capability; see
 # drms/demo_ground_segment_ground.system.yaml's own header comment, "Fault / maneuver /
-# covariance"). `scenario.frames` declares the ground station's own topocentric ENU frame
-# (question 10's day-one mandatory frame, `AXES_KIND_ENU`) via `origin_geodetic` -- the CDM/
-# viewer's own frame graph entry for the identical site the `ground` instance's own
+# covariance"). `scenario.frames` declares two frames: the ground station's own topocentric
+# ENU frame (question 10's day-one mandatory frame, `AXES_KIND_ENU`) via `origin_geodetic` --
+# the CDM/viewer's own frame graph entry for the identical site the `ground` instance's own
 # `station.*` parameters declare (see crate::drm::ground's own module doc comment for why the
 # same four numbers are declared in both places rather than the model reading the frame
-# registry live).
+# registry live) -- and `earth_fixed_demo_frame`, the Earth body-fixed (`AXES_KIND_BODY_FIXED`)
+# frame the `flight` instance's own FRAMED `tm_out` telemetry (`drms/
+# demo_ground_segment_flight.system.yaml`'s `parameters: frame_id`) is encoded in. Registered
+# here (round 4, question 207) closing the gap round 2/3 (question 205) recorded: this id is
+# still declared a second time, independently, in `av_track::config::TrackConfig::
+# frame_registry` -- see that method's own doc comment for why registering it here does not
+# make that declaration redundant (av-track has no code path that reads `Scenario.frames` or
+# `RunProducts.frames` at all; `EngineBridge` resolves frames purely from its own `TrackConfig`).
 #
 # Expected result (stated before running, per this task's own "state the exact expected count"
 # rule -- crates/av-kernel/tests/drm_ground_segment.rs checks it): one rise-and-set pass, AOS
@@ -33,6 +40,13 @@ scenario:
         longitude_rad: -1.4067353771074296
         height_m: 0.0
       description: "Cape-Canaveral-like ground station site, topocentric ENU (question 10)"
+    - id: earth_fixed_demo_frame
+      body: Earth
+      axes: AXES_KIND_BODY_FIXED
+      description: "Earth body-fixed Cartesian position frame the demo ground-segment flight \
+        DRM's own packet_codecs[0] telemetry is encoded in (drms/demo_ground_segment_flight.\
+        system.yaml: \"own Earth-fixed Cartesian position telemetry\"); named by that DRM's \
+        parameters: frame_id and, as of round 4 (question 207), registered here too."
 options:
   covariance: false
   default_step_rate_hz: 1.0
@@ -46,4 +60,4 @@ provenance:
 # SHA-256 of this message's own canonical protobuf encoding with this field cleared
 # (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
 #   cargo run -p av-kernel --example drm_hash -- drm drms/demo_ground_segment.drm.yaml
-hash: "7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0"
+hash: "c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2"
