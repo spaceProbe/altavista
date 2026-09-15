@@ -8,6 +8,71 @@ lint:
   except:
     # Field names like `r`, `z`, `nu`, `s` are the estimation literature's; kept from spoore.v0.
     - FIELD_LOWER_SNAKE_CASE
+  # Question 211 (the lead, 2026-09-15): buf lint's 34 findings are all name checks, and
+  # fixing any of them means renaming a message, an rpc or a service already on the wire.
+  # This track never renames a message, field or RPC (breaking-change discipline verified by
+  # `buf breaking proto --against .../AltaVista/proto`), so every finding below is a
+  # documented exception, scoped with `ignore_only` to exactly the file(s) it belongs to --
+  # not a module-wide `except`, which would silence the rule for every future proto file in
+  # this repository, this one included.
+  ignore_only:
+    # authority.proto (this track's own file): CommandAuthorityService's seven
+    # state-machine RPCs -- Propose, Check, Authorize, Dispatch, Ack, Expire, Fail --
+    # deliberately return one shared CommandResponse. Every edge of the command state
+    # machine (crates/av-command/src/service.rs) reports back the same Command plus its
+    # current status; one response shape is the design, not an omission not yet split out,
+    # and question 211 ruled it intentional. Renaming any of the seven to a per-RPC
+    # *Response would be a wire rename for zero behavioral gain.
+    # Trade-off: file-scoped, so this also exempts RPC_REQUEST_RESPONSE_UNIQUE for any
+    # *new* rpc later added to this file that happens to reuse a response type -- weigh a
+    # standard, RPC-specific name for anything new before reaching for reuse; today's
+    # exception covers today's seven, not a blanket license.
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - altavista/v1/authority.proto
+    # Two, unrelated reasons land on this rule:
+    #  - authority.proto: the same seven CommandAuthorityService responses above, plus
+    #    DataGatewayService's GatewayQueryResponse, which cannot take the standard name
+    #    QueryResponse because that name is already CommandAuthorityService's own Query
+    #    response in this same file/package -- the standard name is unavailable here, not
+    #    merely unchosen.
+    #  - dynamics_service.proto, edge.proto, lockstep.proto: every flagged name here
+    #    predates both tracks and is already on the wire -- dynamics_service.proto's
+    #    ModelInfo is ADR-002's dynamics contract (`describe() -> ModelInfo`, this file's
+    #    own header comment), shared verbatim across the gRPC, C ABI and FMU faces of the
+    #    same contract, not just this rpc; edge.proto's names are the E3b ingest protocol
+    #    (question 202); lockstep.proto's are the kernel's lockstep boundary. A rename is
+    #    breaking for no gain, and this track's standing rule is that no message, field or
+    #    RPC already on the wire is ever renamed.
+    # Trade-off: file-scoped, so it also covers any RPC response added to these four files
+    # later -- new work in any of them should still reach for a standard *Response name
+    # first, and fall back to this exception only for names that already ship.
+    RPC_RESPONSE_STANDARD_NAME:
+      - altavista/v1/authority.proto
+      - altavista/v1/dynamics_service.proto
+      - altavista/v1/edge.proto
+      - altavista/v1/lockstep.proto
+    # Same two reasons as RPC_RESPONSE_STANDARD_NAME above, on the request side:
+    # authority.proto's DataGatewayService.Query takes GatewayQueryRequest because
+    # QueryRequest is already CommandAuthorityService's own Query request in this file;
+    # edge.proto's PluginManifest/MeasurementBatch/EvidenceRequest/VerifyRequest are the
+    # E3b ingest protocol (question 202) and lockstep.proto's Lockstep*Request family is
+    # the kernel's lockstep boundary -- both predate both tracks and are already on the
+    # wire.
+    # Trade-off: file-scoped, same as above -- weigh a standard name for anything new
+    # before falling back to this exception.
+    RPC_REQUEST_STANDARD_NAME:
+      - altavista/v1/authority.proto
+      - altavista/v1/edge.proto
+      - altavista/v1/lockstep.proto
+    # edge.proto: EdgeIngest predates both tracks (E3b, question 202), is already on the
+    # wire, and is already the generated client/server type name in
+    # crates/av-ingest -- renaming to EdgeIngestService for a lint suffix is breaking for
+    # no gain.
+    # Trade-off: file-scoped, so a second service later added to edge.proto would also be
+    # exempt from this rule; give any new service in this file the standard suffix rather
+    # than relying on this line.
+    SERVICE_SUFFIX:
+      - altavista/v1/edge.proto
 breaking:
   use:
     - FILE

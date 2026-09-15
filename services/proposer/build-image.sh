@@ -20,7 +20,7 @@
 #      any, is about to be replaced by step 5 regardless).
 #   4. Prebuilds `av-proposer`, stripped, via a real `docker run` bind-mounting BOTH this
 #      repository and /Users/probe/code/spoore (read-only) into a pinned `rust:1.90-bookworm`
-#      container (NEWER than services/edge-plugin/build-image.sh's own `rust:1.85-bookworm` --
+#      container (the same digest services/edge-plugin/build-image.sh now pins --
 #      see services/proposer/Dockerfile's own header comment, "Why this Dockerfile has no Rust
 #      builder stage", for the measured regorus/const_vec_string_slice reason a floor of 1.85
 #      does not compile this crate's own dependency graph) -- see that Dockerfile's own header
@@ -73,12 +73,17 @@ EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 SPOORE_HOST_PATH="/Users/probe/code/spoore"
 FIXTURE_PATH="${REPO_ROOT}/tests/fixtures/demo_two_instance.runproducts.bin"
 # Pinned prebuild base -- NEWER than services/edge-plugin/build-image.sh's own
-# `rust:1.85-bookworm` pin. See the Dockerfile's own header comment ("Why this Dockerfile has
-# no Rust builder stage") for the measured reason: av-proposer's dependency graph reaches
-# av-command -> regorus 0.12.0, which needs `const_vec_string_slice` (Vec::len/is_empty/
-# as_slice as const fn), not yet stable at Rust 1.85 -- confirmed by a real build failure
-# against the 1.85 pin, root-caused, not guessed. rustc 1.90.0 (confirmed:
-# `docker run --rm <image> rustc --version`) compiles it cleanly.
+# `rust:1.85-bookworm` pin (R5.3 moved that script to this same 1.90 digest, because the
+# corrected floor makes a 1.85 container refuse to build any crate here), and still newer
+# than this workspace's own corrected
+# `rust-version = "1.87"` (question 208(a) -- the root `Cargo.toml` used to say "1.85", which
+# was never actually true; measured, not guessed). See the Dockerfile's own header comment
+# ("Why this Dockerfile has no Rust builder stage") for the measured reason: av-proposer's
+# dependency graph reaches av-command -> regorus 0.12.0, which needs `const_vec_string_slice`
+# (Vec::len/is_empty/as_slice as const fn) -- confirmed by binary search on this host:
+# 1.86.0 fails with the same error a real 1.85 build hit, 1.87.0 passes. rustc 1.90.0
+# (confirmed: `docker run --rm <image> rustc --version`) compiles it cleanly, comfortably
+# above either floor.
 PREBUILD_BASE_IMAGE="rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 SCRATCH_TARGET_DIR="${REPO_ROOT}/target-docker-linux"
 
@@ -188,25 +193,20 @@ docker run --rm \
     -w /workspace \
     "${PREBUILD_BASE_IMAGE}" \
     bash -c 'set -euo pipefail
-        # KNOWN, UNRESOLVED HOST DEFECT, root-caused as far as this task got (see this
-        # scripts own report / services/proposer/Dockerfile for the full writeup): on this
-        # host, `apt-get update` against deb.debian.org fails deterministically with "GPG
-        # error: ... At least one invalid signature was encountered", reproduced against BOTH
-        # rust:1.85-bookworm and rust:1.90-bookworm, over BOTH http:// and https:// (this sed
-        # was believed to fix it after one isolated success, then failed 4/4 times immediately
-        # after -- kept anyway since https is strictly no worse, but it is NOT a confirmed
-        # fix). `apt -o Debug::Acquire::gpgv=1 update` shows apt invoking the DEPRECATED
-        # `apt-key ... verify` wrapper, which exits 1 with an entirely empty Good/Bad/Valid
-        # summary (gpg itself producing no usable status), while a DIRECT
-        # `gpgv --keyring /usr/share/keyrings/debian-archive-keyring.gpg` against the
-        # identical, freshly-curled InRelease file reports "Good signature" for all three
-        # signers. The keyring is not expired (checked directly, `apt-key list`: every
-        # debian-archive-*-automatic key expires 2029-2031) and the file itself is not
-        # corrupt (sha256 stable across fetches) -- this looks like a broken apt-key/gpgv
-        # invocation inside this image on THIS host, not a network or trust-store problem this
-        # task caused or could fix from inside a Dockerfile. If this still fails when you run
-        # this script, that is why -- see the reports own "stopping point" section.
-        sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+        # SUPERSEDED (question 211, the lead, 2026-09-15): this comment used to claim a
+        # KNOWN, UNRESOLVED HOST DEFECT (a GPG-signature story) and carried an unconfirmed
+        # sed rewriting apt sources to https. Re-tested on this host before this fix was
+        # written, not carried forward on faith: this PREBUILD base
+        # (rust:1.90-bookworm@sha256:3914072ca...) already ships ca-certificates (measured:
+        # docker run --rm IMAGE dpkg -l | grep ca-certificates -> installed;
+        # ls /etc/ssl/certs | wc -l -> 285 real certificates), so an http-vs-https rewrite
+        # changes nothing here -- apt trusts the archive via the GPG-signed Release file
+        # (debian-archive-keyring), never via TLS server certificates. No GPG/apt-key/gpgv
+        # failure was reproduced against this base image on this host; that old claim is
+        # deleted as superseded, not re-asserted. The sed itself is dropped -- see
+        # services/proposer/Dockerfile own header comment for the fuller writeup, including
+        # the ONE place the failure actually was: the RUNTIME stage own debian:bookworm-slim
+        # base, which is a different image with no ca-certificates at all, not this one.
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null
         cargo build --release -p av-proposer --bin av-proposer --target-dir /workspace/target-docker-linux

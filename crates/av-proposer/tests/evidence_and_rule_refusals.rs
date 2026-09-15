@@ -16,7 +16,7 @@ use common::GatewayHarness;
 const FLT_SCORE_NAME: &str = "demo_flt_rmag_at_end";
 const FLT_SCORE_VALUE: f64 = 6_870_517.488_675_741_5;
 
-fn base_config(score_name: &str) -> ProposerConfig {
+fn base_config(score_name: &str, harness: &GatewayHarness) -> ProposerConfig {
     ProposerConfig {
         run_id: common::FIXTURE_RUN_ID.to_string(),
         config_hash: String::new(),
@@ -26,6 +26,7 @@ fn base_config(score_name: &str) -> ProposerConfig {
         rule: RuleConfig { score_name: score_name.to_string(), reference_radius_m: 6_871_000.0, threshold_m: 100.0, gain_per_s: 0.001, max_burn_mps: 5.0 },
         model: ModelIdentity { node_id: "av-proposer.station-keeping".to_string(), version: "1.0.0".to_string() },
         rationale_prefix: "test".to_string(),
+        service_token: harness.mint_service_token(),
     }
 }
 
@@ -40,7 +41,7 @@ async fn a_proposal_carries_the_evidence_the_gateway_actually_served_and_it_read
 
     let mut client = GatewayClient::connect(harness.endpoint.clone()).await.expect("connect to the real gateway");
     let counters = Counters::new();
-    let config = base_config(FLT_SCORE_NAME);
+    let config = base_config(FLT_SCORE_NAME, &harness);
 
     let outcome = run(&mut client, &config, &counters).await.expect("a real drift past the threshold proposes");
     let (command_id, drift_m, burn_mps) = match outcome {
@@ -53,7 +54,10 @@ async fn a_proposal_carries_the_evidence_the_gateway_actually_served_and_it_read
     let evidence = av_gateway::evidence::EvidenceRecorder::new(&harness.evidence_ledger).read_back(&command_id).expect("read_back").expect("evidence must be present for a real proposal");
     assert_eq!(evidence.run.as_ref().map(|r| r.run_id.as_str()), Some(common::FIXTURE_RUN_ID));
     assert!(!evidence.query_ids.is_empty(), "the evidence must name at least the one query this run issued");
-    assert_eq!(evidence.model_identity, config.model.node_id);
+    // R5.1/invariant D: the recorded model_identity is the VERIFIED service token subject,
+    // never the caller-declared `principal` (`av_proposer::proposer::run` now sends that
+    // empty) -- see `common::SERVICE_TOKEN_SUBJECT`'s own doc comment.
+    assert_eq!(evidence.model_identity, common::SERVICE_TOKEN_SUBJECT);
     assert_eq!(evidence.model_version, config.model.version);
 
     let commands = harness.command_ledger.scan_commands().expect("scan_commands");
@@ -73,7 +77,7 @@ async fn a_score_absent_from_the_real_run_is_refused_typed_and_counted() {
     common::assert_harness_is_wired(&harness);
     let mut client = GatewayClient::connect(harness.endpoint.clone()).await.expect("connect");
     let counters = Counters::new();
-    let config = base_config("no_such_score_in_this_run");
+    let config = base_config("no_such_score_in_this_run", &harness);
 
     let err = run(&mut client, &config, &counters).await.unwrap_err();
     assert!(matches!(err, RunRefusal::Rule(RuleRefusal::ScoreAbsent { .. })), "{err:?}");
@@ -93,7 +97,7 @@ async fn a_real_score_in_the_wrong_unit_is_refused_typed_and_counted() {
     common::assert_harness_is_wired(&harness);
     let mut client = GatewayClient::connect(harness.endpoint.clone()).await.expect("connect");
     let counters = Counters::new();
-    let config = base_config("demo_flt_cd_at_end");
+    let config = base_config("demo_flt_cd_at_end", &harness);
 
     let err = run(&mut client, &config, &counters).await.unwrap_err();
     match &err {
@@ -132,7 +136,7 @@ async fn a_non_finite_score_is_refused_typed_and_counted() {
 
     let mut client = GatewayClient::connect(harness.endpoint.clone()).await.expect("connect");
     let counters = Counters::new();
-    let mut config = base_config("nan_score");
+    let mut config = base_config("nan_score", &harness);
     config.run_id = "run-with-a-nan-score".to_string();
 
     let err = run(&mut client, &config, &counters).await.unwrap_err();
@@ -152,7 +156,7 @@ async fn a_drift_within_threshold_over_the_real_fixture_reports_no_proposal_need
     common::assert_harness_is_wired(&harness);
     let mut client = GatewayClient::connect(harness.endpoint.clone()).await.expect("connect");
     let counters = Counters::new();
-    let mut config = base_config(FLT_SCORE_NAME);
+    let mut config = base_config(FLT_SCORE_NAME, &harness);
     // A reference so close to the real value that the drift falls inside a generous
     // threshold -- still the REAL scored value, just configured (D3's own knob) not to
     // trigger.

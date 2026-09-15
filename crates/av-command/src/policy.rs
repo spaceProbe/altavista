@@ -375,6 +375,58 @@ fn compute_decision_id(policy_hash: &str, canonical_input_json: &str, evaluated_
 /// evaluation failure instead -- loud, not silent, so a version bump that changes this text
 /// would be caught by [`tests::a_policy_with_no_allow_rule_denies`] (its reason would stop
 /// containing `"default-deny"`), not silently miscategorized.
+///
+/// # R5.5 item A: checked for a structural replacement, found none
+///
+/// Round 5's capacity item asked whether `regorus = "=0.12.0"` (this crate's pin, see
+/// `Cargo.toml`) exposes a *structural* way to answer "is this rule path defined at all,"
+/// so this prose match could be retired. It was read from the pinned source under
+/// `~/.cargo/registry/src/.../regorus-0.12.0/`, not from memory or upstream docs, and it does
+/// not:
+///
+/// - **No typed error variant.** `Engine::eval_rule` (`src/engine.rs`) is a thin wrapper
+///   around `Interpreter::eval_rule_in_path` (`src/interpreter.rs`), and both return plain
+///   `anyhow::Result<Value>`. The not-defined case is produced by `bail!("not a valid rule
+///   path")` -- an `anyhow::Error` built from a formatted string, with no wrapped
+///   `std::error::Error` type to `downcast_ref` on and no error enum anywhere in the crate for
+///   this condition. There is nothing to match on except the text.
+/// - **No pre-evaluation, rule-level membership check either.** `Engine::get_packages()` (used
+///   by nothing else here) returns only package paths (`"data.foo.bar"`), not rule paths
+///   inside them, so it cannot answer "is `data.altavista.authority.allow` defined" on its
+///   own. `Engine::compile_with_entrypoint(&rule)` (`src/engine.rs`) looked promising --
+///   "compile before evaluating" -- but its own body calls `Interpreter::compile`
+///   (`src/interpreter.rs`), which runs the *exact same* `if
+///   !compiled_policy.rule_paths.contains(rule.as_ref()) { bail!("not a valid rule path") }`
+///   check with the *exact same* prose; it is the same test one call earlier, not a different
+///   one. `CompiledPolicy::get_rules()` (`src/compiled_policy.rs`) does return a
+///   `&Map<String, Vec<Ref<Rule>>>` that would answer this structurally, but the only way to
+///   obtain a `CompiledPolicy` without already knowing a valid entrypoint is
+///   `Engine::compile_for_target()`, which is `#[cfg(feature = "azure_policy")]` --
+///   a feature this crate does not and should not enable (per `regorus`'s own `Cargo.toml`,
+///   `azure_policy` pulls in `dep:jsonschema`, `dep:chrono`, `dep:ipnet`, `dep:icu_casemap`,
+///   `dep:hashbrown`, `dashmap` and `rvm`, none of which this module needs, and its own doc
+///   comment says it expects modules to declare `__target__`, a mechanism unrelated to the
+///   plain `allow`/`deny` entrypoints `command.rego` uses).
+/// - **The one remaining path -- `Engine::get_modules()` -- is deliberately not public API.**
+///   It exists (`#[doc(hidden)] pub fn get_modules(&mut self) -> &Vec<Ref<Module>>`,
+///   `src/engine.rs`) and would expose the raw parsed AST, from which a rule path could in
+///   principle be reconstructed by walking `Module`/`Rule` nodes. But `#[doc(hidden)]` is
+///   regorus telling callers this is not a stable surface, and the reconstruction is not
+///   trivial: the `rule_paths` set this module actually wants to query is built by
+///   `Interpreter::record_rule` and `record_default_rule` (`src/interpreter.rs`), private
+///   functions that walk `Parser::get_path_ref_components` output (also private) and handle
+///   default rules, multi-value rules and `contains`-sugar specially. Reimplementing that
+///   normalization in `av-command` to consume `get_modules()`'s AST would mean maintaining a
+///   second, independent copy of regorus's own path-computation logic against an explicitly
+///   unstable API -- strictly *more* fragile than matching one pinned string, not less, since
+///   it could silently diverge from what `eval_rule_in_path` itself considers a valid path
+///   while looking authoritative.
+///
+/// Verdict: neither structural shape exists within this crate's feature set. The prose match
+/// and its tripwire test
+/// ([`tests::is_rule_not_defined_matches_regorus_own_error_text_for_a_path_never_referenced_in_the_bundle`])
+/// stay exactly as they were; this comment exists so the next person does not repeat the
+/// search.
 fn is_rule_not_defined(err: &impl std::fmt::Display) -> bool {
     err.to_string().contains("not a valid rule path")
 }

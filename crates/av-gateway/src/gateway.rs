@@ -31,6 +31,7 @@ use tonic::{Request, Response, Status};
 use crate::pb::data_gateway_service_server::DataGatewayService;
 pub use crate::pb::data_gateway_service_server::DataGatewayServiceServer;
 
+use crate::auth::{to_status as auth_to_status, AuthContext, AuthRefusal};
 use crate::catalogue::{ResolveError, ResolvedRun, RunCatalogue};
 use crate::counters::{Counted, Counters};
 use crate::labels::{ClearanceLadder, LabelRefusal};
@@ -177,6 +178,51 @@ impl GatewayCore {
     }
 }
 
+/// R5.1: the combined error [`authenticated_query`] can return -- either [`AuthRefusal`]
+/// (question 208(b)'s own authentication gate) or the pre-existing [`RefusalReason`] (D1/D2's
+/// ordered chain, unchanged). Both surfaces this function serves (the gRPC `Query` rpc below
+/// and `crate::mcp::McpHandler::handle_query`) map each side to their own wire shape via
+/// [`to_status`]/[`crate::auth::to_status`] or their own MCP equivalent -- never by re-deriving
+/// which is which from message prose (both variants stay distinguishable by type).
+#[derive(Debug)]
+pub enum AuthenticatedQueryError {
+    Auth(AuthRefusal),
+    Refusal(RefusalReason),
+}
+
+impl std::fmt::Display for AuthenticatedQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthenticatedQueryError::Auth(e) => write!(f, "{e}"),
+            AuthenticatedQueryError::Refusal(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// R5.1/question 208(b): the ONE authenticated entry point both the gRPC `Query` rpc below and
+/// the MCP `query` tool (`crate::mcp::McpHandler::handle_query`) call through -- never a second
+/// copy of the auth-then-query sequence. Authenticates `token` for [`crate::auth::Surface::
+/// Query`] (verify -> human role check -> clearance derivation -> clearance-agreement check
+/// against `req.caller_clearance`, invariant C), then runs the existing, UNMODIFIED
+/// [`GatewayCore::query`] with `req.caller_clearance` overwritten to the verified, token-
+/// derived marking -- so D1/D2's own ordered refusal chain still sees exactly one clearance
+/// value, the authoritative one, never the caller-supplied field directly.
+pub fn authenticated_query(core: &GatewayCore, auth: &AuthContext, counters: &Counters, token: &str, mut req: GatewayQueryRequest) -> Result<GatewayQueryResponse, AuthenticatedQueryError> {
+    let (_principal, verified_clearance) = auth.authenticate_query(token, &req.caller_clearance, counters).map_err(AuthenticatedQueryError::Auth)?;
+    req.caller_clearance = verified_clearance;
+    core.query(&req).map_err(AuthenticatedQueryError::Refusal)
+}
+
+/// Maps an [`AuthenticatedQueryError`] to a [`tonic::Status`] for [`DataGatewayServiceImpl`] --
+/// the [`AuthRefusal`] half through [`crate::auth::to_status`] (UNAUTHENTICATED/
+/// PERMISSION_DENIED), the [`RefusalReason`] half through [`to_status`] below, unchanged.
+fn authenticated_query_to_status(err: AuthenticatedQueryError) -> Status {
+    match err {
+        AuthenticatedQueryError::Auth(e) => auth_to_status(e),
+        AuthenticatedQueryError::Refusal(e) => to_status(e),
+    }
+}
+
 /// Maps a [`RefusalReason`] to a [`tonic::Status`], deliberately chosen per kind (mirrors
 /// `crates/av-command/src/service.rs`'s own `to_status` doc convention: the typed error's
 /// `Display` text is always preserved verbatim as the status message).
@@ -198,19 +244,23 @@ fn to_status(reason: RefusalReason) -> Status {
 /// own module doc states for `CommandAuthorityServiceImpl`).
 pub struct DataGatewayServiceImpl {
     core: Arc<GatewayCore>,
+    auth: Arc<AuthContext>,
 }
 
 impl DataGatewayServiceImpl {
-    pub fn new(core: Arc<GatewayCore>) -> Self {
-        Self { core }
+    pub fn new(core: Arc<GatewayCore>, auth: Arc<AuthContext>) -> Self {
+        Self { core, auth }
     }
 }
 
 #[tonic::async_trait]
 impl DataGatewayService for DataGatewayServiceImpl {
+    /// R5.1/question 208(b): authenticates every caller before touching any product data --
+    /// see [`authenticated_query`]'s own doc for the full sequence.
     async fn query(&self, request: Request<GatewayQueryRequest>) -> Result<Response<GatewayQueryResponse>, Status> {
         let req = request.into_inner();
-        self.core.query(&req).map(Response::new).map_err(to_status)
+        let token = req.caller_token.clone();
+        authenticated_query(&self.core, &self.auth, self.core.counters(), &token, req).map(Response::new).map_err(authenticated_query_to_status)
     }
 }
 
@@ -256,6 +306,7 @@ mod tests {
             caller_clearance: clearance.to_string(),
             selector: selector as i32,
             caller_supplied_products_uri: String::new(),
+            caller_token: String::new(),
         }
     }
 
@@ -337,5 +388,120 @@ mod tests {
         // own success/failure.
         let c = core.query(&req("run-cui", "SECRET", GatewaySelector::All)).unwrap();
         assert_ne!(a.query_id, c.query_id);
+    }
+
+    // ---- R5.1/question 208(b): authenticated_query, end to end over a real catalogue ----
+
+    mod authenticated {
+        use super::*;
+        use crate::auth::{AuthContext, GroupClearanceMap};
+        use av_command::authz::RoleTable;
+        use av_command::clock::TestClock;
+        use av_command::oidc::IssuerConfig;
+        use av_command::test_support::{valid_claims, TestIssuer};
+        use std::collections::BTreeMap;
+
+        const ISSUER: &str = "https://sso.test.example/";
+        const AUDIENCE: &str = "av-gateway";
+        const NOW_UNIX_S: i64 = 1_760_000_000;
+
+        fn auth_ctx(issuer: &TestIssuer, human_roles: &[(&str, &[&str])], group_clearance: &[(&str, &str)]) -> AuthContext {
+            let mut roles = BTreeMap::new();
+            for (role, surfaces) in human_roles {
+                roles.insert(role.to_string(), surfaces.iter().map(|s| s.to_string()).collect());
+            }
+            let mut clearance = BTreeMap::new();
+            for (group, marking) in group_clearance {
+                clearance.insert(group.to_string(), marking.to_string());
+            }
+            AuthContext::new(
+                Arc::new(IssuerConfig::from_public_key_pem(ISSUER, AUDIENCE, issuer.public_key_pem()).unwrap()),
+                Arc::new(RoleTable::from_config(&roles)),
+                Arc::new(RoleTable::default()),
+                Arc::new(GroupClearanceMap::new(clearance)),
+                Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()])),
+                Arc::new(TestClock::new(NOW_UNIX_S * 1_000_000_000)),
+            )
+        }
+
+        fn mint(issuer: &TestIssuer, groups: &[&str]) -> String {
+            let mut claims = valid_claims(ISSUER, AUDIENCE, "operator-1", NOW_UNIX_S, 3_600);
+            claims["groups"] = serde_json::json!(groups);
+            issuer.mint(&claims)
+        }
+
+        /// An unauthenticated (empty-token) caller is refused before D1/D2's own chain ever
+        /// runs, and the auth counter -- not any `RefusalReason` counter -- is what moved.
+        #[test]
+        fn an_unauthenticated_caller_is_refused_before_gatewaycore_query_runs_and_the_auth_counter_moves() {
+            let core = core_with_two_runs();
+            let auth = auth_ctx(&TestIssuer::new(), &[("operators", &["query"])], &[("operators", "CUI")]);
+            let counters = Counters::new();
+            let err = authenticated_query(&core, &auth, &counters, "", req("run-cui", "", GatewaySelector::All)).unwrap_err();
+            assert!(matches!(err, AuthenticatedQueryError::Auth(crate::auth::AuthRefusal::MissingToken { .. })), "{err:?}");
+            assert_eq!(counters.get("gateway_auth_missing_token"), 1);
+            // D1/D2's own chain never ran -- no RefusalReason counter incremented.
+            assert_eq!(core.counters().get("gateway_malformed_request"), 0);
+        }
+
+        /// **Invariant C's own required test, at this crate's real, catalogued layer.** A
+        /// token whose group maps to CUI (a genuinely low clearance) sends `caller_clearance =
+        /// "SECRET"` against `run-secret`, a run this fixture's own catalogue labels SECRET --
+        /// refused, and the counter for the exact refusal moved. Proves the request field can
+        /// never buy read access to a SECRET-labelled product a CUI-cleared token does not
+        /// actually have.
+        #[test]
+        fn a_low_clearance_token_declaring_secret_for_a_secret_labelled_run_is_refused_and_the_counter_moves() {
+            let core = core_with_two_runs(); // run-secret is labelled SECRET, per this module's own fixture above.
+            let issuer = TestIssuer::new();
+            let auth = auth_ctx(&issuer, &[("operators", &["query"])], &[("operators", "CUI")]);
+            let counters = Counters::new();
+            let token = mint(&issuer, &["operators"]);
+
+            assert_eq!(counters.get("gateway_auth_clearance_mismatch"), 0);
+            let err = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "SECRET", GatewaySelector::All)).unwrap_err();
+            assert!(matches!(err, AuthenticatedQueryError::Auth(crate::auth::AuthRefusal::ClearanceMismatch { .. })), "{err:?}");
+            assert_eq!(counters.get("gateway_auth_clearance_mismatch"), 1, "the counter for this exact refusal must have moved");
+            // The over-clearance product read never happened either -- D2's own counter is untouched.
+            assert_eq!(core.counters().get("label_over_clearance"), 0);
+        }
+
+        /// A properly-authenticated, correctly-cleared caller still gets a real answer --
+        /// authentication is additive, not a second way to be refused when everything else is
+        /// in order.
+        #[test]
+        fn a_correctly_authenticated_and_cleared_caller_still_gets_a_real_answer() {
+            let core = core_with_two_runs();
+            let issuer = TestIssuer::new();
+            let auth = auth_ctx(&issuer, &[("operators", &["query"])], &[("operators", "CUI")]);
+            let counters = Counters::new();
+            let token = mint(&issuer, &["operators"]);
+            // The request's own caller_clearance is left empty -- the token-derived marking
+            // (CUI) is what GatewayCore::query actually sees, per authenticated_query's own doc.
+            let resp = authenticated_query(&core, &auth, &counters, &token, req("run-cui", "", GatewaySelector::All)).unwrap();
+            assert_eq!(resp.product_label.unwrap().marking, "CUI");
+        }
+
+        /// **R5.1b, defect 1's own required test, at this crate's real, catalogued layer.** A
+        /// caller whose `groups` map to TWO clearances (`operators -> CUI`, `safety-officers ->
+        /// SECRET`) is served a REAL SECRET-labelled product, not merely "not refused" -- the
+        /// gateway's own `run-secret` fixture, with its own real `run_id` and `product_label`
+        /// coming back. Proves the highest-ranked mapped marking is what actually reaches
+        /// `GatewayCore::query`, not just what `AuthContext::authenticate_query` returns in
+        /// isolation (`crate::auth`'s own unit tests already cover that half).
+        #[test]
+        fn a_caller_whose_highest_mapped_clearance_is_secret_is_served_a_real_secret_product() {
+            let core = core_with_two_runs();
+            let issuer = TestIssuer::new();
+            let auth = auth_ctx(&issuer, &[("operators", &["query"]), ("safety-officers", &["query"])], &[("operators", "CUI"), ("safety-officers", "SECRET")]);
+            let counters = Counters::new();
+            let token = mint(&issuer, &["operators", "safety-officers"]);
+
+            let resp = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "", GatewaySelector::All))
+                .expect("a caller whose highest mapped clearance is SECRET must be served the SECRET-labelled run");
+            assert_eq!(resp.run.unwrap().run_id, "run-secret");
+            assert_eq!(resp.product_label.unwrap().marking, "SECRET");
+            assert!(!resp.query_id.is_empty());
+        }
     }
 }

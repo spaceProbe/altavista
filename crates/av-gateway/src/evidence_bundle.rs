@@ -57,6 +57,7 @@ use tokio::net::TcpStream;
 
 use av_command::ledger::Ledger;
 
+use crate::auth::AuthContext;
 use crate::counters::Counters;
 
 /// Everything [`bundle_body`] needs: this process's OWN real evidence (ledger + counters),
@@ -74,6 +75,10 @@ pub struct BundleState {
     /// time (question 155: this crate never dials an arbitrary caller-supplied address here
     /// either).
     pub command_admin_addr: Option<SocketAddr>,
+    /// R5.1/question 208(b): `crate::admin::handle_connection` authenticates every caller of
+    /// `GET /admin/api/evidence/bundle` through this, before [`bundle_body`] ever runs -- see
+    /// `crate::admin`'s own module doc for the full contract (AU 3.3.9).
+    pub auth: Arc<AuthContext>,
 }
 
 /// A real `GET /admin/api/evidence` against `addr` over a real loopback socket (this is a
@@ -152,9 +157,28 @@ pub async fn bundle_body(state: &BundleState) -> std::io::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::GroupClearanceMap;
+    use av_command::authz::RoleTable;
     use av_command::clock::TestClock;
     use av_command::ledger::CommandMeta;
+    use av_command::oidc::IssuerConfig;
+    use av_command::test_support::TestIssuer;
     use av_cdm::pb::{AckLevel, CommandState, CommandTransition};
+
+    /// A minimal, real [`AuthContext`] for tests in this module that construct a
+    /// [`BundleState`] directly (this module's own focus is `bundle_body`'s content, not
+    /// authentication -- `crate::admin`'s own test module is where the admin route's auth gate
+    /// itself is exercised end to end).
+    fn test_auth_context() -> Arc<AuthContext> {
+        Arc::new(AuthContext::new(
+            Arc::new(IssuerConfig::from_public_key_pem("https://sso.test.example/", "av-gateway", TestIssuer::new().public_key_pem()).unwrap()),
+            Arc::new(RoleTable::default()),
+            Arc::new(RoleTable::default()),
+            Arc::new(GroupClearanceMap::default()),
+            Arc::new(crate::labels::ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()])),
+            Arc::new(TestClock::new(1_000)),
+        ))
+    }
 
     fn ledger_with_one_partition(dir: &std::path::Path) -> Ledger {
         let ledger = Ledger::open(dir).unwrap();
@@ -178,7 +202,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("av-gateway-bundle-test-unconfigured-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ledger = ledger_with_one_partition(&dir);
-        let state = BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-1".to_string(), version: "0.1.0".to_string(), command_admin_addr: None };
+        let state = BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-1".to_string(), version: "0.1.0".to_string(), command_admin_addr: None, auth: test_auth_context() };
 
         let body = bundle_body(&state).await.unwrap();
         assert_eq!(body["av_command"]["reachable"], false);
@@ -205,7 +229,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let state = BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-1".to_string(), version: "0.1.0".to_string(), command_admin_addr: Some(addr) };
+        let state = BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-1".to_string(), version: "0.1.0".to_string(), command_admin_addr: Some(addr), auth: test_auth_context() };
         let body = bundle_body(&state).await.unwrap();
         assert_eq!(body["av_command"]["reachable"], false);
         assert!(body["av_command"]["error"].as_str().unwrap().contains(&addr.to_string()), "{}", body["av_command"]["error"]);

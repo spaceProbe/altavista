@@ -8,13 +8,31 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use av_cdm::pb::{AckLevel, CommandState, CommandTransition};
+use av_command::authz::{RoleTable, WILDCARD};
 use av_command::clock::TestClock;
 use av_command::counters::Counters;
 use av_command::evidence::AdminState;
 use av_command::ledger::{CommandMeta, Ledger};
+use av_command::oidc::IssuerConfig;
+use av_command::test_support::{valid_claims, TestIssuer};
+use av_gateway::auth::{AuthContext, GroupClearanceMap};
 use av_gateway::evidence_bundle::BundleState;
+use av_gateway::labels::ClearanceLadder;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+
+const ISSUER: &str = "https://sso.test.example/";
+const AUDIENCE: &str = "av-gateway";
+
+/// R5.1: mints a token, against `issuer`, whose group holds a WILDCARD-granting role -- every
+/// test in this file exercises the bundle's own CONTENT (D6/A6's own acceptance evidence), not
+/// the auth gate itself (`crates/av-gateway/src/admin.rs`'s own module tests cover that), so
+/// one maximally-permissive token per spawned server is the right fixture here.
+fn mint_admin_token(issuer: &TestIssuer) -> String {
+    let mut claims = valid_claims(ISSUER, AUDIENCE, "admin-it", 1_700_000_000, 3_600);
+    claims["groups"] = serde_json::json!(["test-admin"]);
+    issuer.mint(&claims)
+}
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("av-gateway-evidence-bundle-it-{name}-{}", std::process::id()));
@@ -53,8 +71,9 @@ async fn spawn_real_command_admin(name: &str) -> std::net::SocketAddr {
 
 /// This crate's own new admin server, over a real evidence ledger with one real record,
 /// configured to reach `command_admin_addr` (or `None`) for the `av_command` half of the
-/// bundle -- returns its address.
-async fn spawn_real_gateway_admin(name: &str, command_admin_addr: Option<std::net::SocketAddr>) -> std::net::SocketAddr {
+/// bundle -- returns its address and the [`TestIssuer`] its own [`AuthContext`] verifies
+/// against (R5.1: [`mint_admin_token`] mints a real, accepted bearer token from it).
+async fn spawn_real_gateway_admin(name: &str, command_admin_addr: Option<std::net::SocketAddr>) -> (std::net::SocketAddr, TestIssuer) {
     let dir = tmp_dir(&format!("{name}-gateway-evidence-ledger"));
     let ledger = Ledger::open(&dir).expect("open evidence ledger");
     let clock = TestClock::new(6_000);
@@ -67,13 +86,20 @@ async fn spawn_real_gateway_admin(name: &str, command_admin_addr: Option<std::ne
         delegation_id: String::new(),
     };
     ledger.append(CommandMeta::new("gateway-evidence:cmd-2", "cmd-2", "proposal-evidence", ""), t, None, None, None, &clock).expect("append");
-    let state = Arc::new(BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-gateway-real".to_string(), version: "0.1.0".to_string(), command_admin_addr });
+
+    let issuer = TestIssuer::new();
+    let issuer_config = Arc::new(IssuerConfig::from_public_key_pem(ISSUER, AUDIENCE, issuer.public_key_pem()).unwrap());
+    let human_roles = Arc::new(RoleTable::from_config(&BTreeMap::from([("test-admin".to_string(), vec![WILDCARD.to_string()])])));
+    let ladder = Arc::new(ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]));
+    let auth = Arc::new(AuthContext::new(issuer_config, human_roles, Arc::new(RoleTable::default()), Arc::new(GroupClearanceMap::default()), ladder, Arc::new(TestClock::new(1_700_000_000_000_000_000))));
+
+    let state = Arc::new(BundleState { evidence_ledger: Arc::new(ledger), counters: Arc::new(Counters::new()), run_id: "run-gateway-real".to_string(), version: "0.1.0".to_string(), command_admin_addr, auth });
 
     let addr: std::net::SocketAddr = TcpListener::bind("127.0.0.1:0").await.expect("bind an ephemeral loopback port").local_addr().expect("local_addr");
     tokio::spawn(async move {
         let _ = av_gateway::admin::serve(addr, state).await;
     });
-    addr
+    (addr, issuer)
 }
 
 /// Connects to `addr`, retrying (cooperatively yielding between attempts, never sleeping --
@@ -91,9 +117,9 @@ async fn connect_retrying(addr: std::net::SocketAddr) -> TcpStream {
     panic!("could not connect to {addr} after 200 cooperative retries");
 }
 
-async fn get_raw(addr: std::net::SocketAddr, path: &str) -> String {
+async fn get_raw(addr: std::net::SocketAddr, path: &str, token: &str) -> String {
     let mut stream = connect_retrying(addr).await;
-    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).await.unwrap();
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n").as_bytes()).await.unwrap();
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
     String::from_utf8(buf).unwrap()
@@ -109,9 +135,10 @@ fn body_of(raw: &str) -> String {
 #[tokio::test]
 async fn one_call_collects_both_services_real_evidence() {
     let command_addr = spawn_real_command_admin("both-real").await;
-    let gateway_addr = spawn_real_gateway_admin("both-real", Some(command_addr)).await;
+    let (gateway_addr, issuer) = spawn_real_gateway_admin("both-real", Some(command_addr)).await;
+    let token = mint_admin_token(&issuer);
 
-    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle").await;
+    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle", &token).await;
     assert!(raw.starts_with("HTTP/1.1 200 OK"), "{raw}");
     let body = body_of(&raw);
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON body");
@@ -137,7 +164,7 @@ async fn one_call_collects_both_services_real_evidence() {
     // change in between, must reproduce byte-identical JSON text -- BTreeMap end to end,
     // never HashMap iteration order.
     // ============================================================================
-    let raw2 = get_raw(gateway_addr, "/admin/api/evidence/bundle").await;
+    let raw2 = get_raw(gateway_addr, "/admin/api/evidence/bundle", &token).await;
     assert_eq!(body_of(&raw2), body, "the bundle must be byte-identical run to run with no state change in between");
 
     // ============================================================================
@@ -149,6 +176,9 @@ async fn one_call_collects_both_services_real_evidence() {
     assert!(!body.contains("BEGIN "), "a PEM block must never appear in an evidence bundle: {body}");
     assert!(!body.to_lowercase().contains("principal_token"), "{body}");
     assert!(!body.to_lowercase().contains("service_token"), "{body}");
+    // R5.1/invariant G: the bearer token this very request was authenticated with must never
+    // appear anywhere in the response body either.
+    assert!(!body.contains(&token), "the real caller_token must never appear in the evidence bundle body: {body}");
 }
 
 /// The `av_command` side, unreachable (nothing bound at all), is a NAMED entry -- never an
@@ -162,8 +192,8 @@ async fn an_unreachable_av_command_is_named_not_omitted() {
     let dead_addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let gateway_addr = spawn_real_gateway_admin("unreachable", Some(dead_addr)).await;
-    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle").await;
+    let (gateway_addr, issuer) = spawn_real_gateway_admin("unreachable", Some(dead_addr)).await;
+    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle", &mint_admin_token(&issuer)).await;
     assert!(raw.starts_with("HTTP/1.1 200 OK"), "an unreachable av-command side must not fail the whole bundle call: {raw}");
     let body = body_of(&raw);
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON body");
@@ -180,8 +210,8 @@ async fn an_unreachable_av_command_is_named_not_omitted() {
 /// deployed with one" case, not only the "deployed but down right now" case.
 #[tokio::test]
 async fn an_unconfigured_command_admin_address_is_named_not_omitted() {
-    let gateway_addr = spawn_real_gateway_admin("unconfigured", None).await;
-    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle").await;
+    let (gateway_addr, issuer) = spawn_real_gateway_admin("unconfigured", None).await;
+    let raw = get_raw(gateway_addr, "/admin/api/evidence/bundle", &mint_admin_token(&issuer)).await;
     let body = body_of(&raw);
     let json: serde_json::Value = serde_json::from_str(&body).expect("valid JSON body");
 
@@ -196,12 +226,12 @@ async fn an_unconfigured_command_admin_address_is_named_not_omitted() {
 #[tokio::test]
 async fn two_independently_built_but_identical_deployments_produce_byte_identical_bundles() {
     let command_addr_a = spawn_real_command_admin("determinism-a").await;
-    let gateway_addr_a = spawn_real_gateway_admin("determinism-a", Some(command_addr_a)).await;
+    let (gateway_addr_a, issuer_a) = spawn_real_gateway_admin("determinism-a", Some(command_addr_a)).await;
     let command_addr_b = spawn_real_command_admin("determinism-b").await;
-    let gateway_addr_b = spawn_real_gateway_admin("determinism-b", Some(command_addr_b)).await;
+    let (gateway_addr_b, issuer_b) = spawn_real_gateway_admin("determinism-b", Some(command_addr_b)).await;
 
-    let body_a = body_of(&get_raw(gateway_addr_a, "/admin/api/evidence/bundle").await);
-    let body_b = body_of(&get_raw(gateway_addr_b, "/admin/api/evidence/bundle").await);
+    let body_a = body_of(&get_raw(gateway_addr_a, "/admin/api/evidence/bundle", &mint_admin_token(&issuer_a)).await);
+    let body_b = body_of(&get_raw(gateway_addr_b, "/admin/api/evidence/bundle", &mint_admin_token(&issuer_b)).await);
 
     // run_id differs by construction ("run-command-real"/"run-gateway-real" are identical
     // strings in both -- the only difference between deployments here is which ephemeral

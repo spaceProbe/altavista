@@ -1751,11 +1751,28 @@ pub struct ContainerSpec {
     /// codegen for this field, ADR-004 determinism), so no conversion is needed here.
     pub port_endpoints: BTreeMap<String, String>,
     /// `"container.control_port"` (default `50070`, matching `services/lockstep-ref`'s own
-    /// `Dockerfile EXPOSE`) -- the container-internal TCP port the `LockstepService` gRPC server
-    /// listens on; `docker run -p 127.0.0.1::<control_port>` publishes it, and the host port
-    /// Docker actually picked (`docker port`) is what this instance's `LockstepClient` connects
-    /// to. Only meaningful when `image` is set; ignored (and irrelevant) for the
-    /// `container.address` path, where the caller already names a full `host:port`.
+    /// `Dockerfile EXPOSE` and `services/cfs/container-entrypoint.sh`'s own fixed
+    /// `--grpc-addr 0.0.0.0:50070`) -- the container-internal TCP port the `LockstepService`
+    /// gRPC server listens on; `docker run -p 127.0.0.1::<control_port>` publishes it, and the
+    /// host port Docker actually picked (`docker port`) is what this instance's
+    /// `LockstepClient` connects to. Only meaningful when `image` is set; ignored (and
+    /// irrelevant) for the `container.address` path, where the caller already names a full
+    /// `host:port`.
+    ///
+    /// Question 208(c): this numeral is the same as `av-command`'s own gRPC `DEFAULT_BIND`
+    /// port (`crates/av-command/src/bin/av-command.rs`) -- a coincidence recorded, not fixed,
+    /// in `docs/architecture.md` section 4, "Default ports". They never actually collide on
+    /// one host: this is a container-INTERNAL port Docker republishes to an OS-chosen
+    /// ephemeral host port (the `::` in `-p 127.0.0.1::<control_port>` above), never bound on
+    /// the host directly the way `av-command`'s own default is. Left unchanged deliberately:
+    /// it is pinned to match two real, unowned-by-this-crate artifacts (`services/lockstep-ref`'s
+    /// `Dockerfile` and `services/cfs/container-entrypoint.sh`, both out of this task's
+    /// scope), and `drms/demo_attitude_control_controller_cfs.system.yaml` sets
+    /// `container.control_port` explicitly to this same value for the identical reason --
+    /// changing the default here would not change that DRM's own pinned config hash (it
+    /// overrides the field), but would silently desync this doc comment's own worked example
+    /// from the real, fixed container port the moment anyone relied on the default instead of
+    /// the override.
     pub control_port: u16,
     /// M23.4: `"container.sysctl.<name>"` (e.g. `"container.sysctl.fs.mqueue.msg_max"` ->
     /// `"256"`) -- extra `docker run --sysctl <name>=<value>` flags for the Docker

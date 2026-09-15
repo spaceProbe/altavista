@@ -263,6 +263,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
             caller_clearance: "CUI".to_string(),
             selector: GatewaySelector::All as i32,
             caller_supplied_products_uri: String::new(),
+            caller_token: String::new(), // GatewayCore::query itself is auth-agnostic; auth is crate::gateway::authenticated_query's own layer.
         })
         .expect("first real query succeeds");
     // A second, real, SUCCEEDING query -- differs from q1 by config_hash ("" vs "hash-a"),
@@ -274,6 +275,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
             caller_clearance: "CUI".to_string(),
             selector: GatewaySelector::All as i32,
             caller_supplied_products_uri: String::new(),
+            caller_token: String::new(),
         })
         .expect("second real query succeeds");
 
@@ -292,6 +294,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
         query_ids: real_query_ids.clone(),
         model_identity: "model-x".to_string(),
         model_version: "1.0.0".to_string(),
+        model_node_id: "model-x-node".to_string(),
         recorded_tai_ns: 1_000,
     };
     recorder.record(&evidence, &*harness.clock).expect("record evidence");

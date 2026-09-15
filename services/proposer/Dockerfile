@@ -41,50 +41,63 @@
 #     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
 #     -w /workspace \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
-#     bash -c 'sed -i "s|http://deb.debian.org|https://deb.debian.org|g" \
-#         /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
-#       apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+#     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-proposer --bin av-proposer \
 #         --target-dir /workspace/target-docker-linux && \
 #       strip /workspace/target-docker-linux/release/av-proposer'
 #
-# The `sed` above is an UNCONFIRMED workaround for a KNOWN, UNRESOLVED host defect (measured
-# on this host, this task -- see services/proposer/build-image.sh's own comment at its
-# identical line for the full writeup): `apt-get update` against deb.debian.org fails
-# deterministically with "GPG error: ... At least one invalid signature was encountered", for
-# every rust:*-bookworm image tried (1.85 and 1.90), over BOTH http:// and https:// (this sed
-# appeared to fix it once, then failed 4/4 times immediately after -- kept anyway since https
-# is strictly no worse, but it is NOT a confirmed fix). `apt -o Debug::Acquire::gpgv=1 update`
-# shows the DEPRECATED `apt-key ... verify` wrapper exiting 1 with an entirely empty
-# Good/Bad/Valid summary, while a DIRECT `gpgv --keyring debian-archive-keyring.gpg` against
-# the identical, freshly-curled `InRelease` file reports "Good signature" for all three
-# signers -- the keyring is not expired (`apt-key list`: every debian-archive-*-automatic key
-# expires 2029-2031) and the file is not corrupt (stable sha256 across fetches). This looks
-# like a broken `apt-key`/`gpgv` invocation inside this image on THIS host, not a network or
-# trust-store problem this Dockerfile caused or can fix from inside a `RUN` line.
+# ------------------------------------------------------------------------------------------
+# SUPERSEDED: this section used to claim a "KNOWN, UNRESOLVED host defect" (a GPG-signature
+# story) and carried an "UNCONFIRMED" `sed` workaround rewriting apt's sources to `https://`.
+# Question 211 (the lead, 2026-09-15) root-caused the real failure from a real build log, and
+# this task re-tested every claim on this host (2026-09-15) rather than carrying the old story
+# forward. What is actually true, measured:
 #
-# Why `rust:1.90-bookworm`, not the workspace's own `rust:1.85-bookworm` pin (measured, not
-# guessed -- a real build failure this task's own R3.3 gate hit and root-caused): unlike
-# `av-edge-plugin`, `av-proposer` depends on `av-command` (for `av_command::clock::Clock`/
+# - `rust:1.90-bookworm@sha256:3914072ca...` (this prebuild base) ALREADY ships
+#   `ca-certificates` (measured directly: `docker run --rm <image> dpkg -l | grep
+#   ca-certificates` -> `ii ca-certificates 20230311+deb12u1`; `ls /etc/ssl/certs | wc -l` ->
+#   285 real certificate files). A `sed` rewriting its sources to `https://` therefore bought
+#   nothing (apt's archive trust comes from the GPG-signed `Release`/`InRelease` file via
+#   `debian-archive-keyring`, `Signed-By` in `/etc/apt/sources.list.d/debian.sources` --
+#   entirely independent of whether the TRANSPORT is http or https) and was never the actual
+#   fix for anything in THIS stage -- it is simply dropped, deleting an unconfirmed workaround
+#   for a defect that, on re-test, this image does not have.
+# - No GPG/`apt-key`/`gpgv` failure of any kind was reproduced here, against either the http or
+#   https default, for this prebuild base -- the previous paragraph's claim was not
+#   re-confirmed and is deleted as superseded rather than carried forward unverified.
+# - The REAL, reproduced failure (see "Network posture" below and this file's own runtime-stage
+#   comment) was entirely in the RUNTIME stage's `FROM debian:bookworm-slim`, which is a
+#   different image with a different (empty) certificate store -- not this prebuild stage,
+#   which has never been observed to fail this way.
+#
+# Why `rust:1.90-bookworm`, still newer than the workspace's own `rust-version` floor even
+# now that question 208(a) has corrected that floor (measured, not guessed -- a real build
+# failure this task's own R3.3 gate hit and root-caused): unlike `av-edge-plugin`,
+# `av-proposer` depends on `av-command` (for `av_command::clock::Clock`/
 # `av_command::counters::Counters` -- `crates/av-proposer/Cargo.toml`'s own comment), and
 # `av-command` depends on `regorus` (`crates/av-command/src/policy.rs`'s Rego evaluator).
 # `regorus 0.12.0` (this workspace's own pinned `Cargo.lock` version, unrelated to this task's
 # own changes -- confirmed with `git diff Cargo.lock` before reaching for a version bump)
 # calls `Vec::len`/`Vec::is_empty`/`Vec::as_slice` from a `const fn` context
 # (`regorus-0.12.0/src/lookup.rs`, `.../value/array/mod.rs`), which needs the
-# `const_vec_string_slice` stabilization -- NOT YET STABLE at Rust 1.85 (the exact compiler
-# error, reproduced against `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`
-# while building THIS image for the first time: "`alloc::vec::Vec::<T, A>::len` is not yet
-# stable as a const fn ... help: add `#![feature(const_vec_string_slice)]`"). `rust:1.90-
-# bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f` (rustc
-# 1.90.0, confirmed directly: `docker run --rm <image> rustc --version`) compiles `regorus`
-# cleanly. This is a narrower fix than bumping the WORKSPACE's own `rust-version = "1.85"`
-# (which many other Dockerfiles/CI assumptions key off): only THIS script's own cross-compile
-# toolchain moves, and moving it newer is always safe for a crate whose own `rust-version` says
-# "at least 1.85" (Rust's own backward-compatibility guarantee) -- `av-edge-plugin`'s own
-# cross-build never hit this wall only because its dependency graph never reaches `av-command`
-# (and therefore never reaches `regorus`) at all.
+# `const_vec_string_slice` stabilization. Question 208(a) binary-searched exactly where that
+# stabilizes, on this host, with `cargo +<version> check -p av-command`: 1.86.0 FAILS with the
+# same error `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`
+# hit building THIS image the first time ("`alloc::vec::Vec::<T, A>::len` is not yet stable as
+# a const fn ... help: add `#![feature(const_vec_string_slice)]`"); 1.87.0 PASSES cleanly. The
+# root workspace `Cargo.toml`'s `rust-version` is now `"1.87"` (measured, adjacent
+# fail/pass pair), not the stale, never-actually-buildable `"1.85"` this comment used to cite.
+# `rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`
+# (rustc 1.90.0, confirmed directly: `docker run --rm <image> rustc --version`) is still
+# comfortably newer than that corrected 1.87 floor and still compiles `regorus` cleanly, so
+# this prebuild pin needs no change -- only the reasoning above it does. This remains a
+# narrower fix than the workspace `rust-version` bump alone would have been for THIS image:
+# only THIS script's own cross-compile toolchain choice matters here, and moving it newer than
+# whatever the workspace floor truthfully is stays always safe (Rust's own backward-
+# compatibility guarantee) -- `av-edge-plugin`'s own cross-build never hit this wall only
+# because its dependency graph never reaches `av-command` (and therefore never reaches
+# `regorus`) at all.
 #
 # (`protobuf-compiler`+`libprotobuf-dev`: this crate's OWN `build.rs` runs two independent
 # `protoc` passes -- spoore's `model_service.proto` server, and this workspace's own
@@ -114,11 +127,11 @@
 # against THIS binary specifically rather than assuming the edge plugin's own measurement
 # transfers unchanged). The prebuild base,
 # `rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`
-# (workspace `rust-version = "1.85"`, edition 2021, but THIS crate's own dependency graph needs
-# a newer cross-compile toolchain than that floor -- see "Why this Dockerfile has no Rust
-# builder stage" above for the measured `regorus`/`const_vec_string_slice` reason), is used
-# only by build-image.sh's own `docker run` above, never referenced by this file -- recorded
-# here anyway so both digests this image's bytes ultimately depend on are pinned in one place.
+# (workspace `rust-version = "1.87"`, measured by question 208(a) -- see "Why this Dockerfile
+# has no Rust builder stage" above -- edition 2021; 1.90 stays newer than that corrected floor,
+# so this pin needs no change), is used only by build-image.sh's own `docker run` above, never
+# referenced by this file -- recorded here anyway so both digests this image's bytes ultimately
+# depend on are pinned in one place.
 #
 # ------------------------------------------------------------------------------------------
 # Labels (question 156: label every image; prune by label before creating)
@@ -171,12 +184,32 @@ LABEL org.altavista.component="proposer"
 # that the prebuilt binary's own `ldd` output names (services/proposer/build-image.sh checks
 # this directly against THIS binary rather than assuming services/edge-plugin/Dockerfile's own
 # measurement transfers unchanged). This is the one network use this Dockerfile itself makes
-# (question 154's one permitted window); nothing else in this stage touches it. The `sed`
-# below is the identical https:// workaround this file's own header comment documents for the
-# prebuild step -- this base image's default http:// sources hit the identical measured GPG
-# failure on this host.
-RUN sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
-    && apt-get update -qq \
+# (question 154's one permitted window); nothing else in this stage touches it.
+#
+# Question 211 (the lead's ruling, 2026-09-15), root-caused from the lead's own build log and
+# independently re-measured here on this host before this fix was written: a PREVIOUS version
+# of this line rewrote this base image's default `http://deb.debian.org` sources to
+# `https://deb.debian.org` (`sed ... 2>/dev/null || true`) before `ca-certificates` existed in
+# `debian:bookworm-slim` -- measured directly: `docker run --rm debian:bookworm-slim@sha256:...
+# dpkg -l | grep ca-certificates` returns NOTHING (not installed) and `ls /etc/ssl/certs | wc
+# -l` returns `1` (an empty placeholder directory, no real certificates). Forcing `https://`
+# with no certificate store made `apt-get update` print "No system certificates available" --
+# a WARNING apt does not treat as fatal, so it still exited 0 -- while (measured on this host)
+# leaving the package index unusable, so the very next step, `apt-get install libssl3`, failed
+# with "Unable to locate package". Apt's own archive trust comes entirely from the GPG-signed
+# `Release`/`InRelease` file (`debian-archive-keyring`, named by `Signed-By:` in this image's
+# own `/etc/apt/sources.list.d/debian.sources`) -- completely independent of whether the
+# TRANSPORT is http or https -- so the rewrite bought nothing and only added a failure mode.
+# Fix: drop the rewrite outright (the lead's stated preference) and stay on this image's
+# default `http://` sources, which need no certificate store at all. Both silent-failure
+# shapes the previous line had are gone, not merely patched: `2>/dev/null || true` no longer
+# exists to hide anything (there is no `sed` left to fail), and with no forced-https warning to
+# swallow, `apt-get update`'s own exit code is now a true signal -- `&&` still stops this whole
+# `RUN` (and therefore `docker build`) the instant either `apt-get update` or `apt-get install`
+# returns non-zero, so a package index that cannot be fetched, or `libssl3` that cannot be
+# located/installed, fails this build loudly, at this exact line, every time -- never a
+# "successful" image silently missing its one required runtime library.
+RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -196,6 +229,19 @@ COPY tests/fixtures/demo_two_instance.runproducts.bin /opt/proposer/fixtures/dem
 # every one of `av-proposer`'s own required flags (`--gateway-endpoint`, `--run-id`,
 # `--caller-clearance`, `--entity-id`, `--command-class`, `--score-name`,
 # `--reference-radius-m`, `--threshold-m`, `--gain-per-s`, `--max-burn-mps`,
-# `--model-node-id`, `--model-version`) is a `docker run <image> ...` trailing argument,
-# exec-form ENTRYPOINT appending them after this list verbatim (question 199).
+# `--model-node-id`, `--model-version`, and -- R5.1/question 208(b), new this round --
+# `--service-token-file <PATH>`) is a `docker run <image> ...` trailing argument, exec-form
+# ENTRYPOINT appending them after this list verbatim (question 199).
+#
+# `--service-token-file <PATH>` (REQUIRED, R5.1): this proposer's own service-subject OIDC
+# token, read from a FILE inside the container -- never `--service-token <VALUE>`, since a
+# flag VALUE is visible in `ps` (even inside a container's own pid namespace) and in
+# `docker inspect <container>`'s own recorded `Config.Cmd`/`Args`. A real deployment supplies
+# it with a bind mount or a secret mount, e.g.:
+#   docker run -v /path/to/service-token:/run/secrets/av-proposer-token:ro <image> \
+#     --service-token-file /run/secrets/av-proposer-token ...
+# An absent or empty token file makes this binary refuse to start with a typed error --
+# invariant B's fail-closed guarantee: there is no "no token supplied" default that means
+# "proceed unauthenticated." `tests/test_proposer_container.py` mounts one this same way,
+# under `.av-test-tmp/` (Colima mounts only `$HOME`, never `/tmp`).
 ENTRYPOINT ["/usr/local/bin/av-proposer"]

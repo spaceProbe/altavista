@@ -25,6 +25,10 @@ fn config() -> ProposerConfig {
         rule: RuleConfig { score_name: "demo_flt_rmag_at_end".to_string(), reference_radius_m: 6_871_000.0, threshold_m: 100.0, gain_per_s: 0.001, max_burn_mps: 5.0 },
         model: ModelIdentity { node_id: "av-proposer.station-keeping".to_string(), version: "1.0.0".to_string() },
         rationale_prefix: "determinism test".to_string(),
+        // R5.1: a placeholder -- each harness below has its OWN issuer key, so the real token
+        // is minted per-harness (`harness.mint_service_token()`) and substituted in via struct
+        // update syntax, never shared between two independently-keyed gateways.
+        service_token: String::new(),
     }
 }
 
@@ -47,10 +51,11 @@ async fn two_independent_runs_over_the_same_real_fixture_yield_the_same_proposal
     let mut client_b = GatewayClient::connect(harness_b.endpoint.clone()).await.expect("connect b");
     let counters_a = Counters::new();
     let counters_b = Counters::new();
-    let cfg = config();
+    let cfg_a = ProposerConfig { service_token: harness_a.mint_service_token(), ..config() };
+    let cfg_b = ProposerConfig { service_token: harness_b.mint_service_token(), ..config() };
 
-    let outcome_a = run(&mut client_a, &cfg, &counters_a).await.expect("run a proposes");
-    let outcome_b = run(&mut client_b, &cfg, &counters_b).await.expect("run b proposes");
+    let outcome_a = run(&mut client_a, &cfg_a, &counters_a).await.expect("run a proposes");
+    let outcome_b = run(&mut client_b, &cfg_b, &counters_b).await.expect("run b proposes");
 
     let (id_a, idem_a, drift_a, burn_a) = match outcome_a {
         RunOutcome::Proposed { command_id, idempotency_key, drift_m, burn_mps } => (command_id, idempotency_key, drift_m, burn_mps),
@@ -116,6 +121,7 @@ async fn reissuing_the_identical_query_reproduces_the_identical_query_id() {
         caller_clearance: "CUI".to_string(),
         selector: av_cdm::pb::GatewaySelector::Scores as i32,
         caller_supplied_products_uri: String::new(),
+        caller_token: harness.mint_service_token(),
     };
     let first = client.query(request.clone()).await.expect("first query").query_id;
     let second = client.query(request).await.expect("second query").query_id;

@@ -13,10 +13,16 @@ from pathlib import Path
 from altavista.cdm import DEFAULT_STATE_SPACE_ID
 
 # --------------------------------------------------------------------------- server
+# Question 208(c): docs/architecture.md section 4, "Default ports", is the one owned port map
+# for every service's default bind in this workspace -- DEFAULT_PORT and DEFAULT_ADMIN_PORT
+# below are its entry for gmat-service.
 DEFAULT_PORT = 50061
 # +100 from DEFAULT_PORT, mirroring `crates/av-dynamics-service/src/bin/server.rs`'s own
 # +100 offset from ITS DEFAULT_PORT (50062 -> 50162) -- localhost-only `/admin/api/evidence`
-# (ADR-004 question 63), never the same port as the gRPC service.
+# (ADR-004 question 63), never the same port as the gRPC service. tests/test_gmat_service.py's
+# own `server` fixture does NOT use this default -- it picks a free admin port the same way it
+# already picks a free gRPC port, so two instances on one host never collide (question 208(c)
+# fixed a live collision here: the fixture used to hard-code this default).
 DEFAULT_ADMIN_PORT = 50161
 SERVICE_DIR = Path(__file__).resolve().parent.parent  # services/gmat-service
 DEFAULT_EVIDENCE_PATH = SERVICE_DIR / "evidence.jsonl"

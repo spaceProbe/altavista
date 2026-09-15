@@ -19,13 +19,19 @@ use av_lockstep_shim::service::ShimService;
 use av_lockstep_shim::PeerLink;
 use tokio::net::UnixListener;
 
+/// Question 208(c): `docs/architecture.md` section 4, "Default ports", is the one owned port
+/// map for every service's default bind in this workspace -- this crate has no separate
+/// admin HTTP surface (unlike `av-command`/`av-gateway`/`av-dynamics-service`), so there is
+/// no `+100` admin port to pair it with.
+const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:50080";
+
 struct Args {
     grpc_addr: String,
     socket_path: PathBuf,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut grpc_addr = "127.0.0.1:50080".to_string();
+    let mut grpc_addr = DEFAULT_GRPC_ADDR.to_string();
     let mut socket_path = None;
 
     let mut it = std::env::args().skip(1);

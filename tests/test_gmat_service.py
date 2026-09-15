@@ -56,10 +56,17 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def server(tmp_path_factory):
     port = _free_port()
+    # Question 208(c): the admin HTTP port used to be the hard-coded default
+    # (gmat_service.config.DEFAULT_ADMIN_PORT, 50161), unlike the gRPC port just above --
+    # two gmat-service instances on one host (this suite running twice concurrently, e.g. in
+    # two worktrees) collided on it with `OSError: [Errno 48] Address already in use`. Picked
+    # the same way the gRPC port already is, so two instances never collide on either port.
+    admin_port = _free_port()
     evidence_path = tmp_path_factory.mktemp("gmat_service") / "evidence.jsonl"
     run_id = "test_gmat_service"
     proc = subprocess.Popen(
         [sys.executable, "-m", "gmat_service", "--port", str(port),
+         "--admin-port", str(admin_port),
          "--evidence-path", str(evidence_path), "--run-id", run_id],
         cwd=str(SERVICE_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     channel = grpc.insecure_channel(f"127.0.0.1:{port}")
@@ -78,7 +85,7 @@ def server(tmp_path_factory):
             pytest.fail(
                 f"gmat-service subprocess did not become ready within {READY_TIMEOUT_S}s "
                 f"(returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
-        yield SimpleNamespace(channel=channel, port=port, evidence_path=evidence_path, run_id=run_id, proc=proc)
+        yield SimpleNamespace(channel=channel, port=port, admin_port=admin_port, evidence_path=evidence_path, run_id=run_id, proc=proc)
         channel.close()
     finally:
         proc.terminate()
