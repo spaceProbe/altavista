@@ -123,6 +123,8 @@ from pathlib import Path
 
 import pytest
 
+from altavista.docker_test_lock import lock_docker_tests
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROPOSER_DIR = REPO_ROOT / "services" / "proposer"
 DOCKERFILE = PROPOSER_DIR / "Dockerfile"
@@ -147,7 +149,7 @@ MAX_BURN_MPS = "5.0"
 MODEL_NODE_ID = "av-proposer.station-keeping"
 MODEL_VERSION = "1.0.0"
 
-COMMAND_GRPC_ADDR = "127.0.0.1:50110"  # matches av-gateway's own AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT default (http://127.0.0.1:50110) -- no override needed.
+COMMAND_GRPC_ADDR = "127.0.0.1:50070"  # matches av-gateway's own AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT default (http://127.0.0.1:50070, crates/av-gateway/src/bin/av-gateway.rs's own R3.6 comment) -- no override needed. This file previously named 50110 here, stale since R3.6 retargeted the default from a since-superseded 50170; the mismatch was never caught because this test has never actually run (this task's own repair) -- with the wrong port, Container G's own av-gateway would eagerly try to dial 50070, find nothing (av-command was told to bind elsewhere), fall back to a lazily-connecting channel, and every real ProposeCommand call in Part 5 below would then fail to reach av-command at all.
 COMMAND_ADMIN_ADDR = "127.0.0.1:50111"  # explicit: av-command's OWN default admin port (50170) would collide with av-gateway's gRPC bind on this same container.
 GATEWAY_INTERNAL_BIND = "0.0.0.0:50170"
 GATEWAY_PORT = 50170
@@ -160,8 +162,9 @@ GATEWAY_PORT = 50170
 # against exactly the configured service's own audience string.
 OIDC_ISSUER = "https://sso.test.example/"
 GATEWAY_OIDC_AUDIENCE = "av-gateway-container-it"
-# The group name av-gateway's own `--auth-config-path` YAML (`_write_gateway_auth_config`)
-# grants "query"+"propose" -- the proposer's own service token carries this group.
+# The group name the REAL, committed `profiles/gateway-authority.yaml` (bind-mounted below as
+# this run's own `--auth-config-path`) grants "query"+"propose" -- the proposer's own service
+# token carries this group.
 GATEWAY_SERVICE_GROUP = "proposer-service"
 
 # crates/av-lockstep/src/docker.rs's own established convention (`TEST_LABEL_KEY`/
@@ -337,13 +340,13 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
             "-w", "/workspace",
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
-            # The sed is an UNCONFIRMED workaround for a KNOWN, UNRESOLVED host defect (see
-            # services/proposer/build-image.sh's own comment at its identical line for the
-            # full writeup): apt-get update against deb.debian.org fails with a GPG signature
-            # error on this host, over both http:// and https://, root-caused only as far as
-            # "the deprecated apt-key verify wrapper fails while a direct gpgv against the
-            # same file succeeds" -- kept anyway since https is strictly no worse.
-            'sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && '
+            # SUPERSEDED (question 211, the lead, 2026-09-15): this comment used to claim a
+            # GPG-signature host defect and carried an unconfirmed https-rewriting `sed`,
+            # copied from services/proposer/build-image.sh's own prebuild step -- see that
+            # script's own comment at its identical line for the full re-measurement. Dropped
+            # here too, for the same measured reason: PREBUILD_BASE_IMAGE already ships
+            # ca-certificates, so the rewrite changed nothing, and no GPG/apt-key failure was
+            # reproduced against it on this host.
             "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
             "protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && "
             "cargo build --release -p av-command --bin av-command -p av-gateway --bin av-gateway "
@@ -418,23 +421,6 @@ def _mint_rs256_jwt(private_key_path: Path, *, issuer: str, audience: str, subje
         input=signing_input, capture_output=True, timeout=15, check=True,
     ).stdout
     return f"{header_b64}.{payload_b64}.{_b64url(sig)}"
-
-
-def _write_gateway_auth_config(dest_dir: Path, *, service_group: str, clearance: str) -> Path:
-    """R5.1: `av-gateway`'s own `--auth-config-path` YAML (`crates/av-gateway/src/auth.rs::
-    load_gateway_auth_config`) -- grants `service_group` both `"query"` (the proposer reads
-    scores before it ever proposes) and `"propose"`, at `clearance` (`crate::auth::
-    GroupClearanceMap`). No human `roles` block needed: this test's own flow is service-only."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    path = dest_dir / "gateway-authority.yaml"
-    path.write_text(
-        "roles: {}\n"
-        "service_roles:\n"
-        f"  {service_group}: [\"query\", \"propose\"]\n"
-        "group_clearance:\n"
-        f"  {service_group}: {clearance}\n"
-    )
-    return path
 
 
 def _write_minimal_execution_profile(dest_dir: Path) -> Path:
@@ -553,6 +539,22 @@ def _find_proposal_evidence(evidence_ledger_dir: Path, command_id: str):
 
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority():
+    # Question 207/156: every container/network this test creates carries `av.test`/
+    # `av.test.run_id` (`ResourceGuard.label_args()` above) -- exactly the label
+    # `av_lockstep::docker::prune_stale_test_resources` sweeps DAEMON-WIDE, and this test also
+    # cross-builds (docker run) and builds (docker build via services/proposer/build-image.sh's
+    # own image, reused read-only here) against the SAME shared daemon. A concurrent Rust
+    # `cargo test` or another worktree's own Docker-gated test (e.g. AltaVista-edge, running
+    # concurrently with this task) could tear this test's own containers out from under it, or
+    # this test could tear out theirs -- the identical exposure question 207 found and fixed.
+    # Held for this whole test body (not just around any one docker command), via the SAME
+    # `$HOME`-rooted lock file the Rust side uses -- `tests/test_edge_plugin_container.py`'s own
+    # precedent, verbatim.
+    with lock_docker_tests():
+        _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority()
+
+
+def _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority():
     run_id = uuid.uuid4().hex[:12]
     run_scratch = SCRATCH_ROOT / run_id
     run_scratch.mkdir(parents=True, exist_ok=True)
@@ -615,7 +617,16 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         # -----------------------------------------------------------------------------------
         command_bin, gateway_bin = _cross_build_command_and_gateway_binaries(run_scratch / "bin")
         profile_path = _write_minimal_execution_profile(run_scratch / "profile")
-        gateway_auth_config_path = _write_gateway_auth_config(run_scratch / "gateway-auth", service_group=GATEWAY_SERVICE_GROUP, clearance=CALLER_CLEARANCE)
+        # R5.1/this task's own repair: bind-mount the REAL, committed profiles/
+        # gateway-authority.yaml (not a hand-written duplicate this file used to synthesize)
+        # -- it already grants GATEWAY_SERVICE_GROUP ("proposer-service") both "query" and
+        # "propose" at CALLER_CLEARANCE ("CUI"), the identical shape the old
+        # `_write_gateway_auth_config` helper wrote by hand. Exercising the real shipped
+        # config is more faithful (this task's own acceptance point) and removes a
+        # hand-maintained duplicate that could silently drift from the file that actually
+        # ships.
+        gateway_auth_config_path = REPO_ROOT / "profiles" / "gateway-authority.yaml"
+        assert gateway_auth_config_path.is_file(), f"real gateway auth config missing at {gateway_auth_config_path}"
         policy_dir = REPO_ROOT / "profiles" / "policies" / "authority"
         assert policy_dir.is_dir(), f"real policy bundle directory missing at {policy_dir}"
 
@@ -704,11 +715,23 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
 
         # Question 148: an exit code (and even the JSON summary above) is not evidence on its
         # own -- read the REAL ledgers back off disk, independently.
+        #
+        # This task's own repair: question 209(a) (a later, unrelated round) made av-command's
+        # own `Propose` RPC run the check step automatically, as a second logged transition,
+        # the instant the `PROPOSED` record lands (`crates/av-command/src/service.rs::propose`'s
+        # own doc: "the check edge now runs automatically, right here, as a *separate* logged
+        # transition"). A legally proposed command therefore normally reaches
+        # `COMMAND_STATE_CHECKED` (2), with an `allow=true` policy decision, before `Propose`
+        # even returns -- `COMMAND_STATE_PROPOSED` (1) alone is no longer the terminal state of
+        # a successful propose-only run. This file asserted `state == 1` since before that
+        # change landed and was never re-run against it (this task's whole reason for existing)
+        # -- confirmed by measurement here (a real container run, `state == 2`, transitions[-1]
+        # rationale containing `allow=true`), not guessed.
         proposed_command = _find_proposed_command(command_ledger_dir, ENTITY_ID)
-        assert proposed_command.state == 1, f"expected COMMAND_STATE_PROPOSED (1), got {proposed_command.state}"  # altavista.v1.CommandState.COMMAND_STATE_PROPOSED
+        assert proposed_command.state == 2, f"expected COMMAND_STATE_CHECKED (2, question 209(a): Propose auto-checks), got {proposed_command.state}"  # altavista.v1.CommandState.COMMAND_STATE_CHECKED
         assert proposed_command.id == command_id, (proposed_command.id, command_id)
         assert proposed_command.command_class == COMMAND_CLASS
-        assert proposed_command.transitions, "the real Command on disk must carry at least one transition"
+        assert len(proposed_command.transitions) >= 2, f"expected at least the PROPOSED and CHECKED transitions question 209(a) describes, got {len(proposed_command.transitions)}"
 
         evidence = _find_proposal_evidence(evidence_ledger_dir, command_id)
         assert evidence is not None, f"no ProposalEvidence for command_id={command_id!r} found on the real evidence ledger at {evidence_ledger_dir}"

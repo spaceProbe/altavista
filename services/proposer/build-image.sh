@@ -188,25 +188,20 @@ docker run --rm \
     -w /workspace \
     "${PREBUILD_BASE_IMAGE}" \
     bash -c 'set -euo pipefail
-        # KNOWN, UNRESOLVED HOST DEFECT, root-caused as far as this task got (see this
-        # scripts own report / services/proposer/Dockerfile for the full writeup): on this
-        # host, `apt-get update` against deb.debian.org fails deterministically with "GPG
-        # error: ... At least one invalid signature was encountered", reproduced against BOTH
-        # rust:1.85-bookworm and rust:1.90-bookworm, over BOTH http:// and https:// (this sed
-        # was believed to fix it after one isolated success, then failed 4/4 times immediately
-        # after -- kept anyway since https is strictly no worse, but it is NOT a confirmed
-        # fix). `apt -o Debug::Acquire::gpgv=1 update` shows apt invoking the DEPRECATED
-        # `apt-key ... verify` wrapper, which exits 1 with an entirely empty Good/Bad/Valid
-        # summary (gpg itself producing no usable status), while a DIRECT
-        # `gpgv --keyring /usr/share/keyrings/debian-archive-keyring.gpg` against the
-        # identical, freshly-curled InRelease file reports "Good signature" for all three
-        # signers. The keyring is not expired (checked directly, `apt-key list`: every
-        # debian-archive-*-automatic key expires 2029-2031) and the file itself is not
-        # corrupt (sha256 stable across fetches) -- this looks like a broken apt-key/gpgv
-        # invocation inside this image on THIS host, not a network or trust-store problem this
-        # task caused or could fix from inside a Dockerfile. If this still fails when you run
-        # this script, that is why -- see the reports own "stopping point" section.
-        sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+        # SUPERSEDED (question 211, the lead, 2026-09-15): this comment used to claim a
+        # KNOWN, UNRESOLVED HOST DEFECT (a GPG-signature story) and carried an unconfirmed
+        # sed rewriting apt sources to https. Re-tested on this host before this fix was
+        # written, not carried forward on faith: this PREBUILD base
+        # (rust:1.90-bookworm@sha256:3914072ca...) already ships ca-certificates (measured:
+        # docker run --rm IMAGE dpkg -l | grep ca-certificates -> installed;
+        # ls /etc/ssl/certs | wc -l -> 285 real certificates), so an http-vs-https rewrite
+        # changes nothing here -- apt trusts the archive via the GPG-signed Release file
+        # (debian-archive-keyring), never via TLS server certificates. No GPG/apt-key/gpgv
+        # failure was reproduced against this base image on this host; that old claim is
+        # deleted as superseded, not re-asserted. The sed itself is dropped -- see
+        # services/proposer/Dockerfile own header comment for the fuller writeup, including
+        # the ONE place the failure actually was: the RUNTIME stage own debian:bookworm-slim
+        # base, which is a different image with no ca-certificates at all, not this one.
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null
         cargo build --release -p av-proposer --bin av-proposer --target-dir /workspace/target-docker-linux

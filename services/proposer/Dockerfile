@@ -41,28 +41,35 @@
 #     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
 #     -w /workspace \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
-#     bash -c 'sed -i "s|http://deb.debian.org|https://deb.debian.org|g" \
-#         /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
-#       apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+#     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-proposer --bin av-proposer \
 #         --target-dir /workspace/target-docker-linux && \
 #       strip /workspace/target-docker-linux/release/av-proposer'
 #
-# The `sed` above is an UNCONFIRMED workaround for a KNOWN, UNRESOLVED host defect (measured
-# on this host, this task -- see services/proposer/build-image.sh's own comment at its
-# identical line for the full writeup): `apt-get update` against deb.debian.org fails
-# deterministically with "GPG error: ... At least one invalid signature was encountered", for
-# every rust:*-bookworm image tried (1.85 and 1.90), over BOTH http:// and https:// (this sed
-# appeared to fix it once, then failed 4/4 times immediately after -- kept anyway since https
-# is strictly no worse, but it is NOT a confirmed fix). `apt -o Debug::Acquire::gpgv=1 update`
-# shows the DEPRECATED `apt-key ... verify` wrapper exiting 1 with an entirely empty
-# Good/Bad/Valid summary, while a DIRECT `gpgv --keyring debian-archive-keyring.gpg` against
-# the identical, freshly-curled `InRelease` file reports "Good signature" for all three
-# signers -- the keyring is not expired (`apt-key list`: every debian-archive-*-automatic key
-# expires 2029-2031) and the file is not corrupt (stable sha256 across fetches). This looks
-# like a broken `apt-key`/`gpgv` invocation inside this image on THIS host, not a network or
-# trust-store problem this Dockerfile caused or can fix from inside a `RUN` line.
+# ------------------------------------------------------------------------------------------
+# SUPERSEDED: this section used to claim a "KNOWN, UNRESOLVED host defect" (a GPG-signature
+# story) and carried an "UNCONFIRMED" `sed` workaround rewriting apt's sources to `https://`.
+# Question 211 (the lead, 2026-09-15) root-caused the real failure from a real build log, and
+# this task re-tested every claim on this host (2026-09-15) rather than carrying the old story
+# forward. What is actually true, measured:
+#
+# - `rust:1.90-bookworm@sha256:3914072ca...` (this prebuild base) ALREADY ships
+#   `ca-certificates` (measured directly: `docker run --rm <image> dpkg -l | grep
+#   ca-certificates` -> `ii ca-certificates 20230311+deb12u1`; `ls /etc/ssl/certs | wc -l` ->
+#   285 real certificate files). A `sed` rewriting its sources to `https://` therefore bought
+#   nothing (apt's archive trust comes from the GPG-signed `Release`/`InRelease` file via
+#   `debian-archive-keyring`, `Signed-By` in `/etc/apt/sources.list.d/debian.sources` --
+#   entirely independent of whether the TRANSPORT is http or https) and was never the actual
+#   fix for anything in THIS stage -- it is simply dropped, deleting an unconfirmed workaround
+#   for a defect that, on re-test, this image does not have.
+# - No GPG/`apt-key`/`gpgv` failure of any kind was reproduced here, against either the http or
+#   https default, for this prebuild base -- the previous paragraph's claim was not
+#   re-confirmed and is deleted as superseded rather than carried forward unverified.
+# - The REAL, reproduced failure (see "Network posture" below and this file's own runtime-stage
+#   comment) was entirely in the RUNTIME stage's `FROM debian:bookworm-slim`, which is a
+#   different image with a different (empty) certificate store -- not this prebuild stage,
+#   which has never been observed to fail this way.
 #
 # Why `rust:1.90-bookworm`, not the workspace's own `rust:1.85-bookworm` pin (measured, not
 # guessed -- a real build failure this task's own R3.3 gate hit and root-caused): unlike
@@ -171,12 +178,32 @@ LABEL org.altavista.component="proposer"
 # that the prebuilt binary's own `ldd` output names (services/proposer/build-image.sh checks
 # this directly against THIS binary rather than assuming services/edge-plugin/Dockerfile's own
 # measurement transfers unchanged). This is the one network use this Dockerfile itself makes
-# (question 154's one permitted window); nothing else in this stage touches it. The `sed`
-# below is the identical https:// workaround this file's own header comment documents for the
-# prebuild step -- this base image's default http:// sources hit the identical measured GPG
-# failure on this host.
-RUN sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
-    && apt-get update -qq \
+# (question 154's one permitted window); nothing else in this stage touches it.
+#
+# Question 211 (the lead's ruling, 2026-09-15), root-caused from the lead's own build log and
+# independently re-measured here on this host before this fix was written: a PREVIOUS version
+# of this line rewrote this base image's default `http://deb.debian.org` sources to
+# `https://deb.debian.org` (`sed ... 2>/dev/null || true`) before `ca-certificates` existed in
+# `debian:bookworm-slim` -- measured directly: `docker run --rm debian:bookworm-slim@sha256:...
+# dpkg -l | grep ca-certificates` returns NOTHING (not installed) and `ls /etc/ssl/certs | wc
+# -l` returns `1` (an empty placeholder directory, no real certificates). Forcing `https://`
+# with no certificate store made `apt-get update` print "No system certificates available" --
+# a WARNING apt does not treat as fatal, so it still exited 0 -- while (measured on this host)
+# leaving the package index unusable, so the very next step, `apt-get install libssl3`, failed
+# with "Unable to locate package". Apt's own archive trust comes entirely from the GPG-signed
+# `Release`/`InRelease` file (`debian-archive-keyring`, named by `Signed-By:` in this image's
+# own `/etc/apt/sources.list.d/debian.sources`) -- completely independent of whether the
+# TRANSPORT is http or https -- so the rewrite bought nothing and only added a failure mode.
+# Fix: drop the rewrite outright (the lead's stated preference) and stay on this image's
+# default `http://` sources, which need no certificate store at all. Both silent-failure
+# shapes the previous line had are gone, not merely patched: `2>/dev/null || true` no longer
+# exists to hide anything (there is no `sed` left to fail), and with no forced-https warning to
+# swallow, `apt-get update`'s own exit code is now a true signal -- `&&` still stops this whole
+# `RUN` (and therefore `docker build`) the instant either `apt-get update` or `apt-get install`
+# returns non-zero, so a package index that cannot be fetched, or `libssl3` that cannot be
+# located/installed, fails this build loudly, at this exact line, every time -- never a
+# "successful" image silently missing its one required runtime library.
+RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
