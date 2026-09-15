@@ -184,7 +184,15 @@ def command_service(command_bin, issuer, tmp_path_factory):
                 pass
             pytest.fail(f"av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
         channel.close()
-        yield SimpleNamespace(grpc_endpoint=grpc_endpoint, admin_endpoint=admin_endpoint, proc=proc, ledger_dir=ledger_dir)
+        # `profile_path`/`policy_dir` are exposed alongside the endpoints so a second,
+        # independent `av-command` process can be started later against the exact same
+        # on-disk configuration (see `test_console_authorized_trail_replays_identically_
+        # from_a_second_process_over_the_same_ledger` below) -- never a second, divergently
+        # constructed profile file.
+        yield SimpleNamespace(
+            grpc_endpoint=grpc_endpoint, admin_endpoint=admin_endpoint, proc=proc, ledger_dir=ledger_dir,
+            profile_path=profile_path, policy_dir=policy_dir,
+        )
     finally:
         proc.terminate()
         try:
@@ -368,6 +376,158 @@ def test_trail_route_returns_the_real_transition_sequence_in_order(client: TestC
     assert [t["state"] for t in transitions] == ["COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED"]
     assert transitions[-1]["principal"] == "operator-trail"
     assert transitions[-1]["ackLevel"] == "ACK_LEVEL_UNSPECIFIED"
+
+
+# --------------------------------------------------------------------------- A6: the console's replay
+class _ReplayServiceStartupError(RuntimeError):
+    pass
+
+
+def _start_replay_service(command_bin: Path, command_service, issuer, run_id: str):
+    """Starts a genuine SECOND `av-command` OS process pointed at the SAME `--ledger-dir`
+    `command_service` already wrote to, with the identical `--policy-dir`/`--profile-path`/
+    OIDC configuration (`command_service.profile_path`/`command_service.policy_dir`, exposed
+    by the `command_service` fixture precisely so a second process need not diverge from the
+    first). Its own constructor (`crate::service::CommandAuthorityServiceImpl::new`) rebuilds
+    every in-memory index -- `commands` included -- from `Ledger::scan_commands` before this
+    process serves a single RPC: this is the real production replay path, exercised the same
+    way an operator restart would exercise it, never a Python-side re-reader of the ledger
+    files. Returns `(endpoint, proc)`; the caller is responsible for terminating `proc`.
+    Mirrors the `command_service` fixture's own Popen-then-poll-for-readiness shape, but is
+    not itself a fixture (only one test needs a replay process, and it must not start until
+    the live trail it will be compared against already exists on disk)."""
+    grpc_port = _free_port()
+    admin_port = _free_port()
+    proc = subprocess.Popen(
+        [
+            str(command_bin),
+            "--bind", f"127.0.0.1:{grpc_port}",
+            "--admin-bind", f"127.0.0.1:{admin_port}",
+            "--ledger-dir", str(command_service.ledger_dir),
+            "--policy-dir", str(command_service.policy_dir),
+            "--profile-path", str(command_service.profile_path),
+            "--oidc-issuer", TEST_ISSUER,
+            "--oidc-audience", TEST_AUDIENCE,
+            "--oidc-public-key-path", str(issuer.public_key_path),
+            "--run-id", run_id,
+        ],
+        cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    endpoint = f"127.0.0.1:{grpc_port}"
+    channel = grpc.insecure_channel(endpoint)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=READY_TIMEOUT_S)
+    except Exception as e:
+        returncode = proc.poll()
+        output = ""
+        try:
+            if proc.stdout is not None:
+                output = proc.stdout.read()
+        except Exception:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+        raise _ReplayServiceStartupError(
+            f"replay av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n"
+            f"--- subprocess output ---\n{output}"
+        ) from e
+    finally:
+        channel.close()
+    return endpoint, proc
+
+
+def test_console_authorized_trail_replays_identically_from_a_second_process_over_the_same_ledger(
+    client: TestClient, command_service, command_bin, issuer
+):
+    """Milestone A6's remaining gap (`docs/aiplane-plan.md`): `crates/av-gateway/tests/
+    ledger_decision_trail_replay.rs` already proves "a replayed run reproduces every
+    transition, decision id and proposal from the ledger" for a trail built programmatically
+    through the gateway's own propose path. It never drove the CONSOLE's own path -- the only
+    place a human's token turns into a transition (`POST /api/command/commands/{id}/
+    authorize`, proven end to end by `test_authorize_route_end_to_end_with_a_real_minted_
+    token` above). This test closes that gap: a command is driven to `AUTHORIZED` through the
+    console's own HTTP route, exactly like a real operator would, then the SAME command's
+    trail is read back from a genuinely independent second process and the two trails are
+    compared transition for transition -- not just the final state, which would be "a
+    guarantee that leaves no trace" if the middle of the sequence silently diverged.
+
+    # Which replay path this reuses, and why
+
+    "Replay" here is `crate::service::CommandAuthorityServiceImpl::new`
+    (`crates/av-command/src/service.rs`) rebuilding its `commands` index from `Ledger::
+    scan_commands` at construction time -- the exact mechanism that module's own doc comment
+    describes ("a second `CommandAuthorityServiceImpl` constructed over the *same* ledger
+    directory refuses the same key `Dispatch::dispatch` would have refused in the first
+    process, before this process has ever handled a single RPC of its own") and the same
+    mechanism `ledger_decision_trail_replay.rs` exercises via a second, independent `Ledger::
+    open` in-process. This test exercises it through a genuine second OS process instead (see
+    `_start_replay_service`), because that is the only way to reach it without a Rust
+    test harness: `av-command`'s own binary is what real operators restart, so starting a
+    second one against the same `--ledger-dir` is not a simulation of the replay path, it IS
+    the replay path. The replayed trail is then read back through `command_client.get_trail`
+    -- the identical function `altavista/server.py`'s own `/trail` route already calls --
+    pointed at the replay process's endpoint instead of the live one, so this test adds no
+    second implementation of "how to ask for a trail" either.
+
+    `command_client.get_trail`'s live path (against `command_service`, the module's one
+    already-running process) answers from `CommandAuthorityServiceImpl.commands`, an
+    in-memory `BTreeMap` kept live by every RPC as it happens -- NOT re-read from disk on
+    every call (`crate::service`'s own module doc, "In-memory index" section). Calling it a
+    second time against the SAME process would therefore only prove the in-memory map matches
+    itself, not that the ledger records were enough to reconstruct the trail -- which is why
+    this test's replay must be, and is, a second process.
+    """
+    command_id = "cmd-console-replay"
+    _propose(command_service, command_id, CONSOLE_ENTITY, "mode", "reason", [])
+    token = issuer.mint(_valid_claims("operator-replay", ["operators"]))
+    auth_resp = client.post(f"/api/command/commands/{command_id}/authorize", json={"principalToken": token})
+    assert auth_resp.status_code == 200, auth_resp.text
+    assert auth_resp.json()["state"] == "COMMAND_STATE_AUTHORIZED"
+
+    # The LIVE trail, through the console's own route -- exactly what an operator's browser
+    # would see right after authorizing.
+    live_trail = client.get(f"/api/command/commands/{command_id}/trail").json()["transitions"]
+    assert [t["state"] for t in live_trail] == [
+        "COMMAND_STATE_PROPOSED",
+        "COMMAND_STATE_CHECKED",
+        "COMMAND_STATE_AUTHORIZED",
+    ], live_trail
+    assert live_trail[-1]["principal"] == "operator-replay"
+    # The CHECKED transition's `reason` carries the decision id (`authority.proto`'s
+    # `CommandTransition.reason` doc: "Policy decision id, authorization reason, failure
+    # text.", built by `crate::authority::format_reason` as `decision_id=... policy_hash=...
+    # allow=...`) -- there is no separate `decisionId` field on a transition, so comparing
+    # `reason` verbatim (done below, for the whole trail) is what proves the decision id
+    # itself replays, not just the state.
+    checked = next(t for t in live_trail if t["state"] == "COMMAND_STATE_CHECKED")
+    assert checked["reason"].startswith("decision_id="), checked
+
+    # Only NOW -- after the console has finished authorizing, so the ledger already holds the
+    # full three-transition history -- start the second, independent process that will
+    # rebuild its own view of this command purely from what is on disk.
+    replay_endpoint, replay_proc = _start_replay_service(command_bin, command_service, issuer, "test_command_console_routes_replay")
+    try:
+        replay_config = command_client.CommandServiceConfig(grpc_endpoint=replay_endpoint)
+        replayed_trail = command_client.get_trail(replay_config, command_id)
+    finally:
+        replay_proc.terminate()
+        try:
+            replay_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            replay_proc.kill()
+            replay_proc.wait(timeout=10)
+
+    assert replayed_trail == live_trail, (
+        "a command authorized through the console's own /authorize route must replay "
+        "IDENTICALLY from the ledger alone -- every transition, in order, with its state, "
+        "principal, reason (which carries the decision id for the CHECKED transition) and "
+        f"ack level/delegation id -- not just its final state:\nlive:     {live_trail}\n"
+        f"replayed: {replayed_trail}"
+    )
 
 
 # --------------------------------------------------------------------------- authorize
