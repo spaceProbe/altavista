@@ -20,7 +20,7 @@
 #      any, is about to be replaced by step 5 regardless).
 #   4. Prebuilds `av-proposer`, stripped, via a real `docker run` bind-mounting BOTH this
 #      repository and /Users/probe/code/spoore (read-only) into a pinned `rust:1.90-bookworm`
-#      container (NEWER than services/edge-plugin/build-image.sh's own `rust:1.85-bookworm` --
+#      container (the same digest services/edge-plugin/build-image.sh now pins --
 #      see services/proposer/Dockerfile's own header comment, "Why this Dockerfile has no Rust
 #      builder stage", for the measured regorus/const_vec_string_slice reason a floor of 1.85
 #      does not compile this crate's own dependency graph) -- see that Dockerfile's own header
@@ -73,7 +73,9 @@ EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 SPOORE_HOST_PATH="/Users/probe/code/spoore"
 FIXTURE_PATH="${REPO_ROOT}/tests/fixtures/demo_two_instance.runproducts.bin"
 # Pinned prebuild base -- NEWER than services/edge-plugin/build-image.sh's own
-# `rust:1.85-bookworm` pin, and still newer than this workspace's own corrected
+# `rust:1.85-bookworm` pin (R5.3 moved that script to this same 1.90 digest, because the
+# corrected floor makes a 1.85 container refuse to build any crate here), and still newer
+# than this workspace's own corrected
 # `rust-version = "1.87"` (question 208(a) -- the root `Cargo.toml` used to say "1.85", which
 # was never actually true; measured, not guessed). See the Dockerfile's own header comment
 # ("Why this Dockerfile has no Rust builder stage") for the measured reason: av-proposer's

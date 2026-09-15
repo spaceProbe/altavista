@@ -176,7 +176,10 @@ TEST_LABEL_VALUE = "1"
 # be under $HOME for Colima to actually bind-mount it.
 SCRATCH_ROOT = REPO_ROOT / ".av-test-tmp" / "proposer_container"
 
-# NEWER than tests/test_edge_plugin_container.py's own rust:1.85-bookworm pin -- av-command
+# NEWER than the rust:1.85-bookworm pin tests/test_edge_plugin_container.py used to carry
+# (R5.3 moved that file, and services/edge-plugin/build-image.sh, to this same 1.90 digest:
+# the workspace floor is a measured 1.87 now, so a 1.85 container refuses to build at all)
+# -- av-command
 # (this cross-build's own subject) depends on regorus 0.12.0, which needs
 # const_vec_string_slice (Vec::len/is_empty/as_slice as const fn), not yet stable at Rust
 # 1.85 -- a real, measured build failure against that pin (see services/proposer/Dockerfile's

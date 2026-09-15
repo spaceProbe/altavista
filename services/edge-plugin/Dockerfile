@@ -51,7 +51,7 @@
 #     -v "$(pwd)":/workspace \
 #     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
 #     -w /workspace \
-#     rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 \
+#     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
 #     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-ingest-client --bin av-edge-plugin \
@@ -79,14 +79,20 @@
 # header comment states this identically)
 # ------------------------------------------------------------------------------------------
 # `debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171`
-# (resolved via `docker pull debian:bookworm-slim`, matching `rust:1.85-bookworm`'s own
+# (resolved via `docker pull debian:bookworm-slim`, matching `rust:1.90-bookworm`'s own
 # Debian 12 "bookworm" userland byte for byte -- same glibc, same OpenSSL 3.0.x ABI the
 # prebuilt binary above was linked against, confirmed with `ldd` against the prebuilt
 # binary run inside this exact base: `libssl.so.3`, `libcrypto.so.3`, `libgcc_s.so.1`,
 # `libm.so.6`, `libc.so.6`, `/lib/ld-linux-aarch64.so.1` -- all five resolve once `libssl3`
 # is installed below; nothing else the binary links is missing). The prebuild base,
-# `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`
-# (workspace `rust-version = "1.85"`, edition 2021), is used only by build-image.sh's own
+# `rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`
+# (R5.3, question 208(a): the pin was the 1.85 image above until the workspace's declared
+# `rust-version` was measured and corrected from a false "1.85" to "1.87" -- `regorus 0.12.0`
+# needs `const_vec_string_slice`, stabilised in 1.87, and Cargo enforces the floor
+# workspace-wide, so a 1.85 container now refuses to build this crate at all. 1.90 is the
+# digest `services/proposer/build-image.sh` already pins and
+# `tests/test_edge_plugin_container.py` already cross-builds THIS crate with for real),
+# is used only by build-image.sh's own
 # `docker run` above, never referenced by this file -- recorded here anyway so both digests
 # this image's bytes ultimately depend on are pinned in one place.
 #

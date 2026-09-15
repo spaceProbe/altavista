@@ -17,7 +17,7 @@
 #      run's now-superseded `av-edge-plugin:local` tag left behind; the currently-tagged
 #      image, if any, is about to be replaced by step 5 regardless).
 #   4. Prebuilds `av-edge-plugin`, stripped, via a real `docker run` bind-mounting BOTH this
-#      repository and /Users/probe/code/spoore (read-only) into a pinned `rust:1.85-bookworm`
+#      repository and /Users/probe/code/spoore (read-only) into a pinned `rust:1.90-bookworm`
 #      container -- see services/edge-plugin/Dockerfile's own header comment for the exact
 #      command and why a plain `docker build` cannot do this. Writes services/edge-plugin/
 #      bin/av-edge-plugin (git-ignored, a build artifact -- services/cfs/bin/av-lockstep-shim's
@@ -64,8 +64,23 @@ DIGEST_DOC="${SCRIPT_DIR}/IMAGE_DIGEST.md"
 EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 SPOORE_HOST_PATH="/Users/probe/code/spoore"
 # Pinned prebuild base -- see the Dockerfile's own header comment for how this digest was
-# resolved and workspace `rust-version = "1.85"` / `edition = "2021"` for why this tag.
-PREBUILD_BASE_IMAGE="rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+# resolved. R5.3 (question 208(a)): this was
+# `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`,
+# chosen to match the workspace's DECLARED `rust-version = "1.85"`. That floor was measured
+# false this round and corrected to "1.87" (`regorus 0.12.0` needs `const_vec_string_slice`,
+# stabilised in 1.87; the 1.86 failure and the 1.87 pass are both recorded beside
+# `rust-version` in the root `Cargo.toml`), and Cargo enforces `rust-version` workspace-wide --
+# so a 1.85 prebuild container now refuses to build ANY crate here with "rustc 1.85.1 is not
+# supported ... requires rustc 1.87". Leaving it would have been a silent breakage: this image
+# was already built, its digest is recorded in IMAGE_DIGEST.md, and nothing fails until
+# somebody next rebuilds. `rust:1.90-bookworm@sha256:3914072ca...` is the digest
+# `services/proposer/build-image.sh` already pins AND the one
+# `tests/test_edge_plugin_container.py` already cross-builds THIS crate with for real, so the
+# 1.90 toolchain compiling `av-edge-plugin` is measured, not assumed.
+# NOTE: `services/edge-plugin/IMAGE_DIGEST.md` still records the 1.85 base, because it is a
+# GENERATED record of the last REAL build and is never hand-edited -- the next run of this
+# script regenerates it with the digest below.
+PREBUILD_BASE_IMAGE="rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 SCRATCH_TARGET_DIR="${REPO_ROOT}/target-docker-linux"
 
 log() { printf '[build-image] %s\n' "$1" >&2; }

@@ -35,11 +35,17 @@
 #   docker run --rm \
 #     -v "$(pwd)":/workspace \
 #     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
-#     -w /workspace rust:1.85-bookworm \
+#     -w /workspace rust:1.90-bookworm \
 #     cargo build --release -p av-lockstep-shim --target-dir /workspace/target-docker-linux
 #   docker run --rm -v "$(pwd)"/target-docker-linux/release:/b ubuntu:22.04 \
 #     sh -c "apt-get update -qq && apt-get install -y -qq binutils && strip -o /b/av-lockstep-shim-stripped /b/av-lockstep-shim"
 #   cp target-docker-linux/release/av-lockstep-shim-stripped services/cfs/bin/av-lockstep-shim
+#
+# (R5.3, question 208(a): this recipe said `rust:1.85-bookworm` until the workspace's declared
+# `rust-version` was measured and corrected from a false "1.85" to "1.87". Cargo enforces that
+# floor workspace-wide, so a 1.85 container now refuses to build this crate at all; 1.90 is the
+# toolchain `services/proposer/build-image.sh` and `tests/test_edge_plugin_container.py`
+# already cross-build with, so it is the one this recipe names.)
 #
 # (`target-docker-linux/` is `.dockerignore`d -- only the copied-out, stripped binary under
 # `services/cfs/bin/` is ever part of this Dockerfile's build context.) This binary links only
