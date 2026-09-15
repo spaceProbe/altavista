@@ -1,0 +1,53 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- R3.4
+# (docs/open-questions.md question 206: "the GMAT-bound target of ExternalCommandSource gets its
+# test"). **Deliberately zero `scenario.events`** -- every command this run's own trajectory sees
+# comes from a `crate::drm::command_source::ExternalCommandSource` the test wires through
+# `RunConfig.command_source`, never from a DRM-declared `command` `ScenarioEvent` -- mirrors
+# `drms/demo_external_command.drm.yaml`'s own identical convention (A3.1), generalized to a
+# GMAT-bound target instead of a native `ConstantAccelModel` one.
+#
+# Reuses `drms/demo_ground_command.sos.yaml` (and, through it, `demo_ground_command_flight.
+# system.yaml`/`demo_ground_command_ground.system.yaml`) completely unchanged, not modified at
+# all: `demo_flt` already declares a real GMAT-propagated spacecraft
+# (`dynamics_model: gmat.earth.jgm2_8x8.sun_moon`) with `port.consume_framed=cd_cmd_in` targeting
+# `Cd` (`GMAT_WRITABLE_PARAMETERS`), and `demo_ground` already declares `port.cmd_out` -- so this
+# fixture needs no new system or SOS definitions at all, only a DRM with an empty command
+# scenario naming that same topology (the identical `classify_binding`/`resolve_gmat_command_port`
+# resolution `crates/av-kernel/tests/demo_ground_command.rs`'s own DRM-declared-command test
+# already exercises against this exact same topology -- see that file's own module doc, M25.2b).
+#
+# Same scenario window as `drms/demo_ground_command.drm.yaml`, but no fault and no declared
+# events -- just the window -- so `demo_flt`'s propagation here is directly comparable to that
+# fixture's own. `sample_interval_s` is coarser (60 s, not that fixture's 0.2 s) because
+# `DrmError::CommandEpochNotOnSampleGrid` only ever checks a DRM-declared `command`
+# `Scenario.event` (`crate::drm::executor::run_shared_group`'s own event-parsing loop) --
+# an `ExternalCommandSource`-sourced command is never a `Scenario.event` at all, so it is never
+# subject to that grid check, and this fixture needs no fine grid to prove it.
+#
+# crates/av-kernel/tests/external_command_source.rs drives this fixture (R3.4, `docs/
+# open-questions.md` question 206).
+id: external_command_gmat_demo_drm
+version: "1"
+name: "R3.4: external command source against a GMAT-bound target (every command comes from an ExternalCommandSource, none from a declared ScenarioEvent)"
+sos_configuration_id: ground_command_demo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767232837000000000
+measures:
+  - name: demo_flt_cd_at_end
+    expression: "output.demo_flt.cd@end"
+    unit: UNIT_DIMENSIONLESS
+options:
+  covariance: false
+  default_step_rate_hz: 10.0
+  sample_interval_s: 60.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (R3.4)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/demo_external_command_gmat.drm.yaml
+hash: "24210f2b1615d039d946379682641177299066f7990ba7d62f2e008fa9d2d139"

@@ -27,7 +27,7 @@ mod harness {
     use std::sync::Arc;
 
     use av_command::audit::{AuditSinkConfig, AuditWriter};
-    use av_command::authz::{DelegationTable, RoleTable};
+    use av_command::authz::{DelegationTable, RoleTable, ServiceRoleTable};
     use av_command::clock::TestClock;
     use av_command::ledger::Ledger;
     use av_command::oidc::IssuerConfig;
@@ -75,6 +75,12 @@ mod harness {
                 mfa_amr_methods: Arc::new(vec![]),
                 mfa_acr: Arc::new(String::new()),
                 audit,
+                // R3.1: this crate's own ProposeOnlyAuthority never reaches Dispatch/Ack/
+                // Expire/Fail at all (crate::propose_only's own module doc: its generated
+                // client carrying those RPCs is private to it) -- an empty service-role table
+                // and a fresh Counters are all this fixture needs.
+                service_role_table: Arc::new(ServiceRoleTable::from_config(&BTreeMap::new()).expect("an empty table always parses")),
+                counters: Arc::new(av_command::counters::Counters::new()),
             };
 
             let servicer = CommandAuthorityServiceImpl::new(

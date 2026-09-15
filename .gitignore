@@ -54,10 +54,18 @@ services/cfs/build/last-build-events.jsonl
 # Dockerfile) and its own per-run docker events capture.
 services/edge-plugin/bin/av-edge-plugin
 services/edge-plugin/build/last-build-events.jsonl
-# tests/test_edge_plugin_container.py's own scratch directory -- deliberately under $HOME
-# (never system /tmp) so Colima actually bind-mounts files under it into containers (see
-# that test's own module doc, "Why every bind-mount source lives under .av-test-tmp/").
-# Removed at the end of every run, success or failure; never a source.
+# R3.3 (services/proposer/build-image.sh): the prebuilt, stripped av-proposer binary (a
+# compiled artifact, exactly like services/cfs/bin/av-lockstep-shim and
+# services/edge-plugin/bin/av-edge-plugin -- see services/proposer/Dockerfile's own header
+# comment for why it is prebuilt, not compiled by the Dockerfile) and its own per-run docker
+# events capture.
+services/proposer/bin/av-proposer
+services/proposer/build/last-build-events.jsonl
+# tests/test_edge_plugin_container.py's and tests/test_proposer_container.py's own scratch
+# directories -- deliberately under $HOME (never system /tmp) so Colima actually
+# bind-mounts files under it into containers (see that test's own module doc, "Why every
+# bind-mount source lives under .av-test-tmp/"). Removed at the end of every run, success or
+# failure; never a source.
 .av-test-tmp/
 # Symlinks a worktree points at the main checkout's untracked trees (no trailing slash: symlinks are not directories)
 /GMAT R2026a

@@ -5,10 +5,15 @@
 //!
 //! ## Module map
 //!
-//! - [`counters`] -- [`counters::Counters`], the shared refusal-counting primitive every
-//!   other module in this crate increments through: ADR-004's "everything rejected is
-//!   counted" rule, mechanically enforced by having exactly one counting type rather than
-//!   ad hoc counters per module.
+//! - [`counters`] -- **moved to `av_command::counters` (R3.1)**, unchanged in behaviour, and
+//!   re-exported here under the identical `crate::counters::{Counted, Counters}` path so no
+//!   call site in this crate changed: `av-command` gained its own refusal surface this round
+//!   (service-principal verification on `Dispatch`/`Ack`/`Expire`/`Fail`) and needed the
+//!   identical shared counting primitive; the move goes to the lower crate in the dependency
+//!   graph (`av-gateway` already depends on `av-command`, never the reverse) rather than
+//!   duplicating the type. Still ADR-004's "everything rejected is counted" rule,
+//!   mechanically enforced by having exactly one counting type rather than ad hoc counters
+//!   per module, now shared by both crates instead of owned by this one alone.
 //! - [`labels`] -- [`labels::ClearanceLadder`] (D2): an explicit, deployment-configured,
 //!   ordered clearance ladder (rank = index), copied from `crates/av-edge/src/policy.rs`'s
 //!   `ProducerPolicy` convention verbatim -- never a hardcoded enum or a numeric level. A
@@ -27,6 +32,13 @@
 //!   one place the ordered typed-refusal chain lives), and
 //!   [`gateway::DataGatewayServiceImpl`], the generated `DataGatewayService` server trait
 //!   implementation over it.
+//! - [`admin`]/[`evidence_bundle`] -- R3.6/A6, Part 3: `GET /admin/api/evidence/bundle`
+//!   ([`admin::serve`], the same hand-rolled loopback-only `TcpListener` shape `av-command`'s
+//!   own admin surface uses) collects THIS process's own real evidence (its evidence-topic
+//!   ledger's partitions, its own [`counters::Counters::snapshot`]) plus a real HTTP fetch of
+//!   the configured `av-command` service's own `/admin/api/evidence` -- one call, both
+//!   services, an unreachable/unconfigured `av-command` side named rather than omitted. See
+//!   [`evidence_bundle`]'s own module doc.
 //! - [`evidence`] -- [`evidence::EvidenceRecorder`] (D6): "an evidence topic" realized as a
 //!   record on the existing, unmodified `av_command::ledger::Ledger`, under its own
 //!   documented partition convention -- never a broker (no Kafka/Redpanda crate exists in
@@ -35,6 +47,12 @@
 //!   public method is `propose`; the generated `CommandAuthorityServiceClient` (`check`,
 //!   `authorize`, `dispatch`, `ack`, `expire`, `fail`) is a private field, unreachable from
 //!   the MCP or gRPC surface this crate exposes.
+//! - [`propose_flow`] -- R3.2/A4b: the ONE shared implementation `propose_command` runs
+//!   through, called by both the MCP `propose_command` tool ([`mcp`], stdio) and the new
+//!   `ModelProposeService.ProposeCommand` rpc ([`propose_flow::ModelProposeServiceImpl`],
+//!   gRPC -- served by `av-gateway` on the same port as `DataGatewayService`, additive on
+//!   `authority.proto`) -- a containerised proposer with no stdio channel to this process
+//!   needs a network propose path, and this is it. See that module's own doc.
 //! - [`mcp`] -- [`mcp::McpServer`] (D3): hand-rolled JSON-RPC 2.0 over injected
 //!   `AsyncBufRead`/`AsyncWrite` streams (never the process's real stdin/stdout in a test --
 //!   question 199), `initialize`/`tools/list`/`tools/call`, a deny-by-default allow-list
@@ -51,14 +69,24 @@
 //! `av_command::clock::Clock`, never `SystemTime::now()` read directly in this crate), no
 //! random id anywhere (D5's query id and every refusal are pure functions of their inputs).
 
+pub mod admin;
 pub mod catalogue;
-pub mod counters;
+/// R3.1: this module moved to `av_command::counters` unchanged in behaviour -- see that
+/// module's own doc for the full reasoning. Re-exported under this crate's own, pre-existing
+/// `counters` path so every call site here (`crate::counters::{Counted, Counters}`) keeps
+/// resolving without change.
+pub mod counters {
+    pub use av_command::counters::{Counted, Counters};
+}
 pub mod evidence;
+pub mod evidence_bundle;
 pub mod gateway;
 pub mod labels;
 pub mod mcp;
+pub mod propose_flow;
 pub mod propose_only;
 pub mod query_id;
+pub mod unknown_route_counter;
 
 pub mod pb {
     //! Generated `altavista.v1` plumbing, compiled by `build.rs`: the `DataGatewayService`

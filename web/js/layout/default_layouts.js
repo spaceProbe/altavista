@@ -210,6 +210,13 @@ export const FEASIBILITY_PANEL_ID = 'feasibility';
 //     (web/js/layout_bootstrap.js's `contentProviders`) and can only ever be attached
 //     to one pane's DOM at a time -- `availablePanelChoices` offers it only when no
 //     OTHER leaf in the tree currently claims it.
+// R3.5b: the command console panel's own id (web/js/panels/command_panel.js) --
+// singleton, like every other non-viewport REGISTERED_PANEL_TYPES entry (see that
+// list's own comment). Declared here, ahead of REGISTERED_PANEL_TYPES, so both that
+// list and this file's own execution-profile default-layout wrapper
+// (`attachCommandPanel` below) reference the exact same constant.
+export const COMMAND_PANEL_ID = 'command-console';
+
 export const REGISTERED_PANEL_TYPES = [
   { panelId: 'viewport', label: '3D Viewport', factory: true },
   { panelId: MAP_PANEL_ID, label: '2D Map' },
@@ -219,6 +226,12 @@ export const REGISTERED_PANEL_TYPES = [
   // F3b: singleton, like every other non-viewport entry above -- offered whenever no
   // OTHER leaf in the tree currently holds it (availablePanelChoices' own existing rule).
   { panelId: FEASIBILITY_PANEL_ID, label: 'Feasibility Study' },
+  // R3.5b (question 201(d)'s own text: "the console panel lives in the execution
+  // profile's default layout only" -- ONLY about the DEFAULT layout, not about
+  // availability. Registered here unconditionally so any pane, in ANY profile, can be
+  // swapped to the command console through the M26.5 chooser/header-menu, exactly like
+  // FEASIBILITY_PANEL_ID above already is outside its own one profile-shaped default.
+  { panelId: COMMAND_PANEL_ID, label: 'Command Console' },
 ];
 
 /**
@@ -337,7 +350,71 @@ export function buildSweepStudyLayout() {
  * degrades to the same pre-F5.1 default in that case too.
  * @param {object|null} sc a wire scenario object (or null)
  */
-export function defaultLayoutTreeForScenario(sc) {
+function _ordinaryOrSweepLayout(sc) {
   if (hasSweep(sc)) return buildSweepStudyLayout();
   return attachM264Panels(defaultLayoutForScenario(sc));
+}
+
+// ------------------------------------------------------- R3.5b: execution-profile default
+// docs/open-questions.md question 201(d), verbatim: "the console panel lives in the
+// execution profile's default layout only." This module's own top comment explains
+// what "profile" even means to the browser today -- as of this task, exactly ONE new
+// signal: `scenario.profileId` (`altavista/server.py`'s `Hub`, stamped from
+// `create_app(profile=...)` the same way `scenario.imagery` already is). A scenario
+// carrying no `profileId` at all (every scenario published before this change, and
+// every test fixture that builds a `Hub` without one) is NOT execution-shaped by
+// definition -- this degrades to "not execution" rather than guessing, exactly this
+// task's own required rule.
+export function isExecutionProfile(sc) {
+  return !!(sc && sc.profileId === 'execution');
+}
+
+// Deliberately a SEPARATE, additive wrapper -- exactly the same posture
+// `attachM264Panels` already takes relative to `defaultLayoutForScenario`/
+// `buildRpoTripleViewportLayout` (see that function's own doc comment): every existing
+// default-layout function stays byte-identical for every non-execution profile (or a
+// profile-less scenario), because this wrapper is only ever CALLED for
+// `isExecutionProfile(sc) === true`. It works generically over whatever tree
+// `_ordinaryOrSweepLayout` already decided (the 5-leaf ordinary tree, the 7-leaf RPO
+// tree, or the 4-leaf sweep tree) -- adding exactly one new leaf, never touching what
+// was already there, mirroring `attachM264Panels`'s own "never inspects or reshapes
+// `tree`'s own shape" contract.
+//
+// Placement/share (this task's own open design decision, decided here): a narrow
+// right-hand strip at a 0.78/0.22 split -- the SAME 0.22 share `buildBaseSidebarViewportLayout`
+// already uses for its own sidebar, and deliberately narrower than `attachM264Panels`'s
+// own 0.3 share for its whole 3-panel stack (run products + map + console): the command
+// console is one focused, occasional-use panel (propose/review/authorize), not a
+// permanently-referenced dashboard the way run products/map/console are, so it does not
+// need an equal claim on screen space. It is the OUTERMOST wrapper (applied after
+// `_ordinaryOrSweepLayout`, never nested inside it), so every leaf that shape already
+// contained (sidebar, viewport, and -- for the ordinary/RPO cases -- run products/map/
+// console, or -- for the sweep case -- feasibility/run products/console) keeps the
+// exact proportions it already had relative to EACH OTHER; only the whole thing shrinks
+// to make room for this one new strip.
+export function attachCommandPanel(tree) {
+  return createSplit(
+    'row',
+    0.78,
+    [
+      tree,
+      createLeaf(COMMAND_PANEL_ID, { id: 'pane-command-console' }),
+    ],
+    { id: 'split-command-console' },
+  );
+}
+
+/**
+ * The one real default-layout entry point (unchanged call sites, see this function's
+ * own pre-R3.5b doc comment above `_ordinaryOrSweepLayout`) -- now ALSO wraps the
+ * result with `attachCommandPanel` when, and only when, `isExecutionProfile(sc)` is
+ * true. For every non-execution profile (or a profile-less scenario -- `sc` may still
+ * be `null`, exactly as before), this is BYTE-IDENTICAL to what this function computed
+ * before R3.5b: `isExecutionProfile(null)` is `false`, so the pre-existing "no
+ * scenario loaded yet" behaviour is completely unaffected.
+ * @param {object|null} sc a wire scenario object (or null)
+ */
+export function defaultLayoutTreeForScenario(sc) {
+  const tree = _ordinaryOrSweepLayout(sc);
+  return isExecutionProfile(sc) ? attachCommandPanel(tree) : tree;
 }

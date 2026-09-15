@@ -66,7 +66,7 @@ use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use av_cdm::pb::{ChainVerification, Command, CommandState, CommandTransition, LedgerRecord, PolicyDecision};
+use av_cdm::pb::{ChainVerification, Command, CommandProposal, CommandState, CommandTransition, LedgerRecord, PolicyDecision};
 use openssl::sha::sha256;
 use prost::Message;
 
@@ -258,6 +258,7 @@ impl Ledger {
         transition: CommandTransition,
         decision: Option<PolicyDecision>,
         command: Option<&Command>,
+        proposal: Option<CommandProposal>,
         clock: &dyn crate::clock::Clock,
     ) -> io::Result<LedgerRecord> {
         // The self-evidence invariant `LedgerRecord.command`'s own doc comment states
@@ -271,18 +272,69 @@ impl Ledger {
         // included, which is what actually exercises the two production call sites
         // (`crate::authority::check_command`, `crate::service::CommandAuthorityServiceImpl::
         // append_last_transition`) -- proves its caller upheld it.
+        //
+        // R3.5a (manager's review): these were `debug_assert_eq!`, which the compiler REMOVES
+        // from a release build -- so the invariant round 2's review installed, and which round
+        // 2's status and the lead's acceptance both record as "checked in `Ledger::append`",
+        // held only in the test binaries and vanished in the shipped `av-command` binary and
+        // in the container image, which are exactly where a durable, self-contradictory ledger
+        // record would actually matter. A guarantee that exists under `cargo test` and not in
+        // production is the same "failure that leaves no trace" shape this track keeps finding,
+        // one level up. They are now real checks in every profile, and they REFUSE the append
+        // (`InvalidInput`) rather than panicking a running service: the record is never written,
+        // the caller's own `map_err(ServiceError::Io)` turns it into a counted refusal, and the
+        // ledger cannot contain the disagreement at all.
         if let Some(command) = command {
-            debug_assert_eq!(
-                command.state, transition.state,
-                "LedgerRecord.command must be the POST-transition Command: its state disagrees with the transition being recorded for command_id {}",
-                meta.command_id
-            );
-            debug_assert_eq!(
-                command.transitions.last(),
-                Some(&transition),
-                "LedgerRecord.command must be the POST-transition Command: its last transition is not the transition being recorded for command_id {}",
-                meta.command_id
-            );
+            if command.state != transition.state {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "LedgerRecord.command must be the POST-transition Command: its state {} disagrees with the transition being recorded ({}) for command_id {}",
+                        command.state, transition.state, meta.command_id
+                    ),
+                ));
+            }
+            if command.transitions.last() != Some(&transition) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "LedgerRecord.command must be the POST-transition Command: its last transition is not the transition being recorded for command_id {}",
+                        meta.command_id
+                    ),
+                ));
+            }
+        }
+        // R3.5a: the identical self-evidence discipline as `command` above, now for
+        // `LedgerRecord.proposal` (`authority.proto` field 12): it is self-evidence about
+        // THIS record, not a caller's independently-supplied claim, so a `proposal` whose own
+        // `command.id` disagrees with `meta.command_id`, or one attached to a transition that
+        // is not `PROPOSED`, is a bug in the caller this method must catch -- documenting the
+        // invariant on the proto field alone (as `LedgerRecord.command`'s own field 11
+        // originally was, before round 2's review) would leave nothing to stop a future call
+        // site attaching a stale/mismatched proposal, and the ledger would then durably record
+        // a disagreement `Self::scan_proposals` would hand straight back to `Query` with no
+        // trace anything was wrong.
+        // Real checks in every profile, for the same reason as `command`'s above.
+        if let Some(proposal) = &proposal {
+            let proposal_command_id = proposal.command.as_ref().map(|c| c.id.as_str()).unwrap_or("");
+            if proposal_command_id != meta.command_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "LedgerRecord.proposal must be self-evidence about this record: its own command.id {proposal_command_id:?} disagrees with the record's command_id {}",
+                        meta.command_id
+                    ),
+                ));
+            }
+            if transition.state != CommandState::Proposed as i32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "LedgerRecord.proposal is set on the PROPOSED record and only there; this append call attached one to a transition at state {} for command_id {}",
+                        transition.state, meta.command_id
+                    ),
+                ));
+            }
         }
         let partition = meta.partition;
         let path = self.partition_path(partition);
@@ -312,6 +364,7 @@ impl Ledger {
             command_class: meta.command_class.to_string(),
             idempotency_key: meta.idempotency_key.to_string(),
             command: command.cloned(),
+            proposal,
         };
         let hash = compute_hash(&prev_hash, &record);
         record.prev_hash = prev_hash.clone();
@@ -534,6 +587,78 @@ impl Ledger {
         Ok(commands)
     }
 
+    /// Rebuilds every `command_id`'s original `CommandProposal` (rationale + evidence ids) --
+    /// R3.5a, `docs/aiplane-plan.md` milestone A5's "proposals with their rationale and
+    /// evidence" -- from the ledger alone, exactly the same construction-time discipline
+    /// [`Self::scan_commands`]/[`Self::scan_dispatched_idempotency_keys`] already establish:
+    /// read straight from disk, independent of any in-memory state, across every partition,
+    /// in `seq` (chronological) order.
+    ///
+    /// [`LedgerRecord::proposal`] is set on exactly one record per `command_id` -- the
+    /// `PROPOSED` record, [`Self::append`]'s own invariant above -- so, unlike
+    /// [`Self::scan_commands`]'s "last one wins" rule, a later record can never overwrite an
+    /// earlier `command_id`'s proposal: `insert` only ever happens once per id (the `PROPOSED`
+    /// record is always the first record `Self::append` will ever see for a fresh
+    /// `command_id`, since `propose` is this crate's state machine's only entry point). A
+    /// record with no attached `proposal` (every non-`PROPOSED` record, and any `PROPOSED`
+    /// record a test appended with `proposal: None` -- every production `Propose` call
+    /// attaches one, see `crate::service::CommandAuthorityServiceImpl::propose`) is skipped.
+    pub fn scan_proposals(&self) -> io::Result<BTreeMap<String, CommandProposal>> {
+        let mut proposals: BTreeMap<String, CommandProposal> = BTreeMap::new();
+        if !self.dir.exists() {
+            return Ok(proposals);
+        }
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "ledger"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let mut file = File::open(&path)?;
+            while let Some(record) = read_frame(&mut file)? {
+                if let Some(proposal) = record.proposal {
+                    proposals.entry(record.command_id.clone()).or_insert(proposal);
+                }
+            }
+        }
+        Ok(proposals)
+    }
+
+    /// Rebuilds every `command_id`'s [`PolicyDecision`] (R3.5a: "the decision is already on
+    /// the `CHECKED`/`REJECTED` ledger record ... so a console that arrives later can never
+    /// see why a command was checked or rejected") from the ledger alone -- the identical
+    /// disk-only, every-partition, `seq`-order discipline as [`Self::scan_proposals`]/
+    /// [`Self::scan_commands`] above.
+    ///
+    /// `LedgerRecord.decision` (`authority.proto` field 8) is set on at most one record per
+    /// `command_id` in this crate's own production paths (the `CHECKED` or `REJECTED` record
+    /// produced by `crate::authority::check_command`'s one policy evaluation -- a command is
+    /// never re-checked once it leaves `PROPOSED`), so "first one wins" (`or_insert`, matching
+    /// [`Self::scan_proposals`]'s own rule) and "last one wins" agree in practice; `or_insert`
+    /// is chosen anyway, for the same reason as `scan_proposals`, rather than `insert`, since
+    /// this scan makes no attempt to detect or repair a ledger that (only by a bug elsewhere)
+    /// recorded more than one.
+    pub fn scan_decisions(&self) -> io::Result<BTreeMap<String, PolicyDecision>> {
+        let mut decisions: BTreeMap<String, PolicyDecision> = BTreeMap::new();
+        if !self.dir.exists() {
+            return Ok(decisions);
+        }
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "ledger"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let mut file = File::open(&path)?;
+            while let Some(record) = read_frame(&mut file)? {
+                if let Some(decision) = record.decision {
+                    decisions.entry(record.command_id.clone()).or_insert(decision);
+                }
+            }
+        }
+        Ok(decisions)
+    }
+
     /// Every partition with a ledger file on disk, with its true partition name (read back
     /// from each file's own first record -- never guessed from the sanitized filename),
     /// chain head and record count. Used by `/admin/api/evidence`.
@@ -625,7 +750,7 @@ mod tests {
         let dir = tmp_dir("genesis");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(1_000);
-        let record = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, None, &clock).unwrap();
+        let record = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, None, None, &clock).unwrap();
         assert_eq!(record.seq, 1);
         assert_eq!(record.prev_hash, GENESIS);
         assert_eq!(record.hash.len(), 32);
@@ -637,11 +762,11 @@ mod tests {
         let dir = tmp_dir("chain");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let r1 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
+        let r1 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
         clock.advance(1);
-        let r2 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, &clock).unwrap();
+        let r2 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, None, &clock).unwrap();
         clock.advance(1);
-        let r3 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, None, &clock).unwrap();
+        let r3 = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, None, None, &clock).unwrap();
         assert_eq!(r2.prev_hash, r1.hash);
         assert_eq!(r3.prev_hash, r2.hash);
         assert_ne!(r1.hash, r2.hash);
@@ -654,8 +779,8 @@ mod tests {
         let dir = tmp_dir("partitions");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        let a1 = ledger.append(CommandMeta::new("sat-a", "cmd-a", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
-        let b1 = ledger.append(CommandMeta::new("sat-b", "cmd-b", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
+        let a1 = ledger.append(CommandMeta::new("sat-a", "cmd-a", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
+        let b1 = ledger.append(CommandMeta::new("sat-b", "cmd-b", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
         assert_eq!(a1.seq, 1);
         assert_eq!(b1.seq, 1, "a second partition's first record also starts at seq 1");
         assert_eq!(a1.prev_hash, GENESIS);
@@ -669,7 +794,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..5 {
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, None, &clock).unwrap();
         }
         let result = ledger.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -699,7 +824,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..4 {
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, None, &clock).unwrap();
         }
         assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
 
@@ -738,7 +863,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..3 {
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, None, &clock).unwrap();
         }
         let path = ledger.partition_path("sat-1");
         let mut file = File::open(&path).unwrap();
@@ -790,7 +915,7 @@ mod tests {
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
         for i in 0..3 {
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, i), None, None, None, &clock).unwrap();
         }
         assert!(ledger.verify("sat-1").unwrap().ok, "sanity: untampered chain verifies clean");
 
@@ -833,12 +958,12 @@ mod tests {
         {
             let ledger = Ledger::open(&dir).unwrap();
             let clock = TestClock::new(0);
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
-            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, None, &clock).unwrap();
         }
         let ledger2 = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(2);
-        let r3 = ledger2.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, None, &clock).unwrap();
+        let r3 = ledger2.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Authorized, 2), None, None, None, &clock).unwrap();
         assert_eq!(r3.seq, 3, "recovered chain state must count the records already on disk");
         let result = ledger2.verify("sat-1").unwrap();
         assert!(result.ok, "{result:?}");
@@ -851,8 +976,8 @@ mod tests {
         let dir = tmp_dir("summary");
         let ledger = Ledger::open(&dir).unwrap();
         let clock = TestClock::new(0);
-        ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
-        let last = ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
+        let last = ledger.append(CommandMeta::new("sat/weird name", "cmd-1", "burn", ""), transition(CommandState::Checked, 1), None, None, None, &clock).unwrap();
 
         let summaries = ledger.partitions().unwrap();
         assert_eq!(summaries.len(), 1);
@@ -906,7 +1031,7 @@ mod tests {
             let clock = TestClock::new(1_000);
             for (meta, transition, decision, command) in &sequence {
                 clock.set(transition.tai_ns);
-                ledger.append(*meta, transition.clone(), decision.clone(), command.as_ref(), &clock).unwrap();
+                ledger.append(*meta, transition.clone(), decision.clone(), command.as_ref(), None, &clock).unwrap();
             }
         }
 
@@ -941,24 +1066,24 @@ mod tests {
 
         // Two "burn" submissions and one "mode" submission, all inside the window.
         clock.set(1_000);
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Proposed, 1_000), None, None, None, &clock).unwrap();
         clock.set(1_100);
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1_100), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), transition(CommandState::Checked, 1_100), None, None, None, &clock).unwrap();
         clock.set(1_200);
-        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", ""), transition(CommandState::Proposed, 1_200), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", ""), transition(CommandState::Proposed, 1_200), None, None, None, &clock).unwrap();
         clock.set(1_300);
-        ledger.append(CommandMeta::new("sat-1", "cmd-3", "mode", ""), transition(CommandState::Proposed, 1_300), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-3", "mode", ""), transition(CommandState::Proposed, 1_300), None, None, None, &clock).unwrap();
 
         // A "burn" submission long before the window opens -- must not be counted. `append`
         // takes its record's own `tai_ns` from the clock's current value, not from the
         // `CommandTransition.tai_ns` the `transition()` helper embeds -- so the clock must be
         // set back explicitly, not just given a transition struct that says "0".
         clock.set(0);
-        ledger.append(CommandMeta::new("sat-1", "cmd-0", "burn", ""), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-0", "burn", ""), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
         clock.set(1_300);
 
         // A different partition's submission -- must not leak into sat-1's count.
-        ledger.append(CommandMeta::new("sat-2", "cmd-9", "burn", ""), transition(CommandState::Proposed, 1_200), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-2", "cmd-9", "burn", ""), transition(CommandState::Proposed, 1_200), None, None, None, &clock).unwrap();
 
         let counts = ledger.count_proposed_by_class_in_window("sat-1", 1_500, 1_000).unwrap();
         assert_eq!(counts.get("burn").copied(), Some(2), "{counts:?}");
@@ -982,21 +1107,21 @@ mod tests {
         let clock = TestClock::new(0);
 
         // sat-1: PROPOSED then DISPATCHED with a real key -- collected.
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Proposed, 0), None, None, &clock).unwrap();
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Dispatched, 1), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Proposed, 0), None, None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", "idem-a"), transition(CommandState::Dispatched, 1), None, None, None, &clock).unwrap();
 
         // sat-1: a second command, also PROPOSED, but never DISPATCHED -- its key must not
         // appear even though it carries one (only DISPATCHED records count).
-        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", "idem-b"), transition(CommandState::Proposed, 2), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "burn", "idem-b"), transition(CommandState::Proposed, 2), None, None, None, &clock).unwrap();
 
         // sat-2 (a different partition): DISPATCHED with an empty key -- must not be
         // collected (empty means "opts out of deduplication", crate::service's own reading).
-        ledger.append(CommandMeta::new("sat-2", "cmd-3", "mode", ""), transition(CommandState::Dispatched, 3), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-2", "cmd-3", "mode", ""), transition(CommandState::Dispatched, 3), None, None, None, &clock).unwrap();
 
         // sat-2: a second DISPATCHED record reusing "idem-a" -- proves cross-partition
         // collection (idempotency keys are a service-wide, not per-entity, guarantee) and
         // that a repeated key collapses to one set member.
-        ledger.append(CommandMeta::new("sat-2", "cmd-4", "mode", "idem-a"), transition(CommandState::Dispatched, 4), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-2", "cmd-4", "mode", "idem-a"), transition(CommandState::Dispatched, 4), None, None, None, &clock).unwrap();
 
         let keys = ledger.scan_dispatched_idempotency_keys().unwrap();
         assert_eq!(keys, BTreeSet::from(["idem-a".to_string()]), "{keys:?}");
@@ -1027,7 +1152,7 @@ mod tests {
             ..Command::default()
         };
 
-        let record = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t.clone(), None, Some(&command), &clock).unwrap();
+        let record = ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t.clone(), None, Some(&command), None, &clock).unwrap();
 
         let attached = record.command.expect("this append call attached a command");
         assert_eq!(attached.state, record.transition.as_ref().unwrap().state, "Command.state must equal the record's own transition state");
@@ -1067,14 +1192,14 @@ mod tests {
             transitions: vec![t_proposed.clone()],
             ..Command::default()
         };
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_proposed, None, Some(&proposed), &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_proposed, None, Some(&proposed), None, &clock).unwrap();
         let t_checked = transition(CommandState::Checked, 1);
         let checked = Command {
             state: CommandState::Checked as i32,
             transitions: vec![proposed.transitions[0].clone(), t_checked.clone()],
             ..proposed.clone()
         };
-        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_checked, None, Some(&checked), &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_checked, None, Some(&checked), None, &clock).unwrap();
 
         // A different partition, a different command_id -- must appear in the rebuilt map too.
         let t_other = transition(CommandState::Proposed, 2);
@@ -1086,18 +1211,165 @@ mod tests {
             transitions: vec![t_other.clone()],
             ..Command::default()
         };
-        ledger.append(CommandMeta::new("sat-2", "cmd-2", "mode", ""), t_other, None, Some(&other), &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-2", "cmd-2", "mode", ""), t_other, None, Some(&other), None, &clock).unwrap();
 
         // A record with no attached Command at all -- must not appear, and must not be able to
         // erase a real snapshot (there is none for "cmd-none" to erase here, but this proves
         // scan_commands does not panic or insert a default Command for it).
-        ledger.append(CommandMeta::new("sat-1", "cmd-none", "burn", ""), transition(CommandState::Proposed, 3), None, None, &clock).unwrap();
+        ledger.append(CommandMeta::new("sat-1", "cmd-none", "burn", ""), transition(CommandState::Proposed, 3), None, None, None, &clock).unwrap();
 
         let commands = ledger.scan_commands().unwrap();
         assert_eq!(commands.len(), 2, "{commands:?}");
         assert_eq!(commands.get("cmd-1").unwrap().state, CommandState::Checked as i32, "the latest snapshot wins, not the first");
         assert_eq!(commands.get("cmd-2").unwrap().state, CommandState::Proposed as i32);
         assert!(!commands.contains_key("cmd-none"), "a record with no attached Command must not appear in the rebuilt map");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn proposal_for(command: &Command, rationale: &str, evidence_ids: &[&str]) -> CommandProposal {
+        CommandProposal { command: Some(command.clone()), rationale: rationale.to_string(), evidence_ids: evidence_ids.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// **R3.5a's own acceptance property for [`Ledger::scan_proposals`]**: the rationale and
+    /// evidence ids attached to a `PROPOSED` record survive a rebuild from disk alone, across
+    /// every partition -- and a command that only ever reached `PROPOSED` still has its
+    /// proposal on the map (this scan does not require a later transition to exist).
+    #[test]
+    fn scan_proposals_rebuilds_the_rationale_and_evidence_ids_from_the_proposed_record() {
+        let dir = tmp_dir("scan-proposals");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+
+        let t_proposed = transition(CommandState::Proposed, 0);
+        let proposed = Command { id: "cmd-1".to_string(), entity_id: "sat-1".to_string(), command_class: "burn".to_string(), state: CommandState::Proposed as i32, transitions: vec![t_proposed.clone()], ..Command::default() };
+        let proposal = proposal_for(&proposed, "scored radius drifted past threshold", &["run-1/query-1", "run-1/query-2"]);
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_proposed, None, Some(&proposed), Some(proposal.clone()), &clock).unwrap();
+
+        // Advances past PROPOSED -- Ledger::append's own invariant means no second `proposal`
+        // is ever attached here (production callers never try); this proves scan_proposals
+        // still finds the first (and only) one, unerased by a later transition of the same
+        // command_id.
+        let t_checked = transition(CommandState::Checked, 1);
+        let checked = Command { state: CommandState::Checked as i32, transitions: vec![proposed.transitions[0].clone(), t_checked.clone()], ..proposed.clone() };
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "burn", ""), t_checked, None, Some(&checked), None, &clock).unwrap();
+
+        // A different partition, a different command_id, no proposal attached at all -- must
+        // simply be absent from the rebuilt map, never a default/empty entry.
+        let t_other = transition(CommandState::Proposed, 2);
+        let other = Command { id: "cmd-2".to_string(), entity_id: "sat-2".to_string(), command_class: "mode".to_string(), state: CommandState::Proposed as i32, transitions: vec![t_other.clone()], ..Command::default() };
+        ledger.append(CommandMeta::new("sat-2", "cmd-2", "mode", ""), t_other, None, Some(&other), None, &clock).unwrap();
+
+        let proposals = ledger.scan_proposals().unwrap();
+        assert_eq!(proposals.len(), 1, "{proposals:?}");
+        let recovered = proposals.get("cmd-1").expect("cmd-1's proposal must be recovered");
+        assert_eq!(recovered.rationale, "scored radius drifted past threshold");
+        assert_eq!(recovered.evidence_ids, vec!["run-1/query-1".to_string(), "run-1/query-2".to_string()]);
+        assert!(!proposals.contains_key("cmd-2"), "a command with no attached proposal must not appear");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second [`Ledger`] handle over the SAME directory -- i.e. a process restart -- gets
+    /// the rationale back exactly like [`Self::scan_commands`]'s own restart proof
+    /// (`ledger_survives_reopen_and_continues_the_same_chain` above), the acceptance property
+    /// the brief asks for directly ("a test builds a second service over the same directory
+    /// and gets the rationale back").
+    #[test]
+    fn scan_proposals_survives_a_reopen_of_the_same_ledger_directory() {
+        let dir = tmp_dir("scan-proposals-reopen");
+        {
+            let ledger = Ledger::open(&dir).unwrap();
+            let clock = TestClock::new(0);
+            let t = transition(CommandState::Proposed, 0);
+            let command = Command { id: "cmd-1".to_string(), entity_id: "sat-1".to_string(), command_class: "mode".to_string(), state: CommandState::Proposed as i32, transitions: vec![t.clone()], ..Command::default() };
+            let proposal = proposal_for(&command, "restart-survival rationale", &["evidence-a"]);
+            ledger.append(CommandMeta::new("sat-1", "cmd-1", "mode", ""), t, None, Some(&command), Some(proposal), &clock).unwrap();
+        }
+        let reopened = Ledger::open(&dir).unwrap();
+        let proposals = reopened.scan_proposals().unwrap();
+        assert_eq!(proposals.get("cmd-1").expect("survives reopen").rationale, "restart-survival rationale");
+        assert_eq!(proposals.get("cmd-1").unwrap().evidence_ids, vec!["evidence-a".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The invariant `Ledger::append` enforces on `proposal`** (R3.5a, mirroring
+    /// `LedgerRecord.command`'s identical invariant): a `proposal` whose own `command.id`
+    /// disagrees with the record's `command_id` is caught here, not trusted.
+    ///
+    /// Asserted as a returned `Err`, not a panic (the manager's R3.5a review): both invariants
+    /// were `debug_assert_eq!`, which a release build removes entirely, so the guarantee held
+    /// only under `cargo test`. Asserting an `Err` is what makes this test prove something
+    /// about the SHIPPED binary as well as this one -- and it also asserts the record was not
+    /// written, which a panicking check could never establish.
+    #[test]
+    fn append_refuses_a_proposal_whose_command_id_disagrees_with_the_records_own_command_id() {
+        let dir = tmp_dir("proposal-invariant-command-id");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+        let t = transition(CommandState::Proposed, 0);
+        let command = Command { id: "cmd-1".to_string(), entity_id: "sat-1".to_string(), command_class: "mode".to_string(), state: CommandState::Proposed as i32, transitions: vec![t.clone()], ..Command::default() };
+        // The proposal's own nested command.id ("cmd-WRONG") disagrees with meta.command_id
+        // ("cmd-1") below.
+        let mismatched = Command { id: "cmd-WRONG".to_string(), ..command.clone() };
+        let proposal = proposal_for(&mismatched, "reason", &[]);
+        let err = ledger
+            .append(CommandMeta::new("sat-1", "cmd-1", "mode", ""), t, None, Some(&command), Some(proposal), &clock)
+            .expect_err("a mismatched proposal must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains("disagrees with the record's command_id"), "{err}");
+        assert!(ledger.scan_commands().unwrap().is_empty(), "a refused append must write no record at all");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `proposal` attached to a non-`PROPOSED` transition is refused the same way, and in
+    /// every build profile -- see the previous test's own doc for why that distinction matters.
+    #[test]
+    fn append_refuses_a_proposal_attached_to_a_non_proposed_record() {
+        let dir = tmp_dir("proposal-invariant-state");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+        let t = transition(CommandState::Checked, 0); // not PROPOSED
+        let command = Command { id: "cmd-1".to_string(), entity_id: "sat-1".to_string(), command_class: "mode".to_string(), state: CommandState::Checked as i32, transitions: vec![t.clone()], ..Command::default() };
+        let proposal = proposal_for(&command, "reason", &[]);
+        let err = ledger
+            .append(CommandMeta::new("sat-1", "cmd-1", "mode", ""), t, None, Some(&command), Some(proposal), &clock)
+            .expect_err("a proposal on a non-PROPOSED record must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
+        assert!(err.to_string().contains("is set on the PROPOSED record and only there"), "{err}");
+        assert!(ledger.scan_commands().unwrap().is_empty(), "a refused append must write no record at all");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The acceptance property for [`Ledger::scan_decisions`]** (R3.5a): the `PolicyDecision`
+    /// attached to a `CHECKED`/`REJECTED` record survives a rebuild from disk alone, keyed by
+    /// `command_id`, for both outcomes -- a denial is as reproducible from the ledger as an
+    /// approval (mirroring `LedgerRecord.decision`'s own doc comment).
+    #[test]
+    fn scan_decisions_rebuilds_the_decision_for_both_checked_and_rejected_records() {
+        let dir = tmp_dir("scan-decisions");
+        let ledger = Ledger::open(&dir).unwrap();
+        let clock = TestClock::new(0);
+
+        let allow_decision = PolicyDecision { decision_id: "decision-allow".to_string(), allow: true, policy_hash: "hash-1".to_string(), reasons: vec!["admitted".to_string()], matched_rule_path: "data.altavista.authority.allow".to_string(), evaluated_tai_ns: 0, input: None };
+        let t_checked = transition(CommandState::Checked, 0);
+        ledger.append(CommandMeta::new("sat-1", "cmd-1", "mode", ""), t_checked, Some(allow_decision.clone()), None, None, &clock).unwrap();
+
+        let deny_decision = PolicyDecision { decision_id: "decision-deny".to_string(), allow: false, policy_hash: "hash-1".to_string(), reasons: vec!["command_class payload is not admitted by policy".to_string()], matched_rule_path: "data.altavista.authority.deny".to_string(), evaluated_tai_ns: 1, input: None };
+        let t_rejected = transition(CommandState::Rejected, 1);
+        ledger.append(CommandMeta::new("sat-1", "cmd-2", "payload", ""), t_rejected, Some(deny_decision.clone()), None, None, &clock).unwrap();
+
+        // A PROPOSED record with no decision at all -- must not appear.
+        ledger.append(CommandMeta::new("sat-1", "cmd-3", "mode", ""), transition(CommandState::Proposed, 2), None, None, None, &clock).unwrap();
+
+        let decisions = ledger.scan_decisions().unwrap();
+        assert_eq!(decisions.len(), 2, "{decisions:?}");
+        assert_eq!(decisions.get("cmd-1").unwrap().decision_id, "decision-allow");
+        assert!(decisions.get("cmd-1").unwrap().allow);
+        assert_eq!(decisions.get("cmd-2").unwrap().decision_id, "decision-deny");
+        assert!(!decisions.get("cmd-2").unwrap().allow);
+        assert!(!decisions.contains_key("cmd-3"), "a command with no policy decision must not appear");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

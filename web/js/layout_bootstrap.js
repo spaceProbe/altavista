@@ -15,6 +15,7 @@ import { LayoutManager } from './layout/layout_manager.js';
 import {
   ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID,
   RUN_PRODUCTS_PANEL_ID, MAP_PANEL_ID, CONSOLE_PANEL_ID, FEASIBILITY_PANEL_ID,
+  COMMAND_PANEL_ID,
 } from './layout/default_layouts.js';
 
 const layoutManager = new LayoutManager({
@@ -35,6 +36,10 @@ const layoutManager = new LayoutManager({
     // F3b (index.html's #panel-feasibility) -- pane-chooser-only, see
     // default_layouts.js's own comment on FEASIBILITY_PANEL_ID.
     [FEASIBILITY_PANEL_ID]: document.getElementById('panel-feasibility'),
+    // R3.5b (index.html's #panel-command-console) -- default-layout-in-execution-
+    // profile-only, chooser-reachable everywhere else, exactly like FEASIBILITY_PANEL_ID
+    // above.
+    [COMMAND_PANEL_ID]: document.getElementById('panel-command-console'),
   },
   errorBanner: document.getElementById('layout-error'),
   onResize: () => window.dispatchEvent(new Event('resize')), // scene.js's Viewer.resize() is wired to window 'resize' by app.js

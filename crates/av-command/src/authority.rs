@@ -135,6 +135,7 @@ pub fn check_command(
         transition,
         Some(decision.clone()),
         Some(&new_command),
+        None,
         clock,
     )?;
 

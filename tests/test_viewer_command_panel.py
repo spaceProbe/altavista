@@ -1,0 +1,463 @@
+"""R3.5b (docs/aiplane-plan.md milestone A5's browser half; docs/open-questions.md
+question 201(d)): the command console panel in the tiling layout.
+
+Two independent things this file proves, both against REAL artifacts, never a mock of
+either:
+
+1. **Part 1 -- the profile signal.** `altavista/server.py`'s `Hub` now stamps
+   `scenario["profileId"]` beside `scenario["imagery"]`, from the exact same `profile`
+   string `create_app(profile=...)` already took (R3.5b; no new parameter). Proven here
+   through the real `/api/scenario` HTTP route, never by reading `Hub` internals.
+
+2. **Part 3 -- the panel's own headless check.** Follows `tests/test_command_console_
+   routes.py`'s own fixture shape exactly (duplicated, not imported -- this repo's
+   existing viewer test files each stay self-contained, `tests/test_viewer_feasibility_
+   panel.py`'s own module docstring, restated here): builds and starts a REAL `av-command`
+   service, seeds real ledger state through the raw gRPC stub (`Propose`/`Check`, exactly
+   like a real proposer/policy evaluator would), then drives every `/api/command/*` route
+   through a REAL `create_app(profile="execution", ...)` app via `fastapi.testclient.
+   TestClient` to collect REAL payloads -- a real rationale, a real decision id and policy
+   hash, a real transition sequence, real refusal counters, and (the one deliberately
+   negative case) a REAL wrong-role authorize refusal, captured with its own real message
+   text, never fabricated. Those payloads are written to one JSON file and handed to
+   `node web/js/command_panel_check.mjs`, which drives the REAL, shipped
+   `web/js/panels/command_panel.js` and `web/js/layout/default_layouts.js` ES modules and
+   prints one JSON object of named checks -- this file only reads that JSON back and
+   asserts specific check names, exactly like `tests/test_viewer_feasibility_panel.py`.
+
+No network at test time (question 154) / no environment mutation (question 199): see
+`tests/test_command_console_routes.py`'s own module doc, restated here verbatim -- this
+file follows the identical rule.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import List
+
+import grpc
+import pytest
+from fastapi.testclient import TestClient
+
+from altavista.pb import authority_pb2, authority_pb2_grpc
+from altavista.pb.altavista.v1 import command_pb2
+from altavista.server import Hub, create_app
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMMAND_PANEL_CHECK = REPO_ROOT / "web" / "js" / "command_panel_check.mjs"
+READY_TIMEOUT_S = 90.0
+RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
+
+TEST_ISSUER = "https://sso.test.example/"
+TEST_AUDIENCE = "av-command"
+CONSOLE_ENTITY = "sat-console-1"
+EMPTY_ENTITY = "sat-console-empty"
+
+NODE = shutil.which("node")
+
+
+def _require_node() -> str:
+    if NODE is None:
+        pytest.skip("node is not installed in this environment; web/js/command_panel_check.mjs "
+                     "drives real ES modules and is intentionally not ported to Python.")
+    return NODE
+
+
+def _cargo_env() -> dict:
+    env = dict(os.environ)
+    env["PATH"] = f"{RUSTUP_PATH_PREFIX}:{env.get('PATH', '')}"
+    return env
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+class LocalTestIssuer:
+    """Duplicated verbatim from tests/test_command_console_routes.py's own class of the
+    same name -- see that module's own docstring for the full "why openssl, not a new
+    Python dependency" rationale."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.private_key_path = tmp_path / "issuer_private.pem"
+        self.public_key_path = tmp_path / "issuer_public.pem"
+        subprocess.run(["openssl", "genrsa", "-out", str(self.private_key_path), "2048"], check=True, capture_output=True)
+        subprocess.run(
+            ["openssl", "rsa", "-in", str(self.private_key_path), "-pubout", "-out", str(self.public_key_path)], check=True, capture_output=True
+        )
+
+    def mint(self, claims: dict) -> str:
+        header_b64 = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode("utf-8"))
+        payload_b64 = _b64url(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+        signing_input = f"{header_b64}.{payload_b64}"
+        proc = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(self.private_key_path)], input=signing_input.encode("ascii"), check=True, capture_output=True
+        )
+        signature_b64 = _b64url(proc.stdout)
+        return f"{signing_input}.{signature_b64}"
+
+
+def _valid_claims(sub: str, groups: List[str]) -> dict:
+    now = int(time.time())
+    return {"iss": TEST_ISSUER, "aud": TEST_AUDIENCE, "sub": sub, "iat": now, "exp": now + 3600, "groups": groups, "amr": [], "acr": "", "jti": "test-jti"}
+
+
+@pytest.fixture(scope="module")
+def command_bin():
+    proc = subprocess.run(["cargo", "build", "-p", "av-command", "--bin", "av-command"], cwd=str(REPO_ROOT), env=_cargo_env(), capture_output=True, text=True, timeout=900)
+    if proc.returncode != 0:
+        pytest.fail(f"cargo build -p av-command failed:\n--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
+    binary = REPO_ROOT / "target" / "debug" / "av-command"
+    assert binary.is_file(), f"expected {binary} after a successful cargo build"
+    return binary
+
+
+@pytest.fixture(scope="module")
+def issuer(tmp_path_factory):
+    return LocalTestIssuer(tmp_path_factory.mktemp("av_command_panel_issuer"))
+
+
+@pytest.fixture(scope="module")
+def command_service(command_bin, issuer, tmp_path_factory):
+    """Same shape as tests/test_command_console_routes.py's own `command_service` fixture
+    (duplicated, not imported -- see this module's own docstring)."""
+    tmp = tmp_path_factory.mktemp("av_command_panel_service")
+    ledger_dir = tmp / "ledger"
+    policy_dir = REPO_ROOT / "profiles" / "policies" / "authority"
+    profile_path = tmp / "profile.yaml"
+    profile_path.write_text(
+        "authority:\n"
+        "  roles:\n"
+        "    operators: [\"mode\"]\n"
+        "  mfa_amr_methods: []\n"
+        "  mfa_acr: \"\"\n"
+        "  service_roles: {}\n"
+        "  delegations_path: \"\"\n"
+    )
+    grpc_port = _free_port()
+    admin_port = _free_port()
+    proc = subprocess.Popen(
+        [
+            str(command_bin),
+            "--bind", f"127.0.0.1:{grpc_port}",
+            "--admin-bind", f"127.0.0.1:{admin_port}",
+            "--ledger-dir", str(ledger_dir),
+            "--policy-dir", str(policy_dir),
+            "--profile-path", str(profile_path),
+            "--oidc-issuer", TEST_ISSUER,
+            "--oidc-audience", TEST_AUDIENCE,
+            "--oidc-public-key-path", str(issuer.public_key_path),
+            "--run-id", "test_viewer_command_panel",
+        ],
+        cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    grpc_endpoint = f"127.0.0.1:{grpc_port}"
+    admin_endpoint = f"127.0.0.1:{admin_port}"
+    channel = grpc.insecure_channel(grpc_endpoint)
+    try:
+        try:
+            grpc.channel_ready_future(channel).result(timeout=READY_TIMEOUT_S)
+        except Exception as e:
+            channel.close()
+            returncode = proc.poll()
+            output = ""
+            try:
+                if proc.stdout is not None:
+                    output = proc.stdout.read()
+            except Exception:
+                pass
+            pytest.fail(f"av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
+        channel.close()
+        yield SimpleNamespace(grpc_endpoint=grpc_endpoint, admin_endpoint=admin_endpoint, proc=proc, ledger_dir=ledger_dir)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def _propose_and_check(command_service, command_id: str, entity_id: str, command_class: str, rationale: str, evidence_ids: List[str]):
+    channel = grpc.insecure_channel(command_service.grpc_endpoint)
+    try:
+        stub = authority_pb2_grpc.CommandAuthorityServiceStub(channel)
+        command = command_pb2.Command(id=command_id, entity_id=entity_id, command_class=command_class)
+        proposal = command_pb2.CommandProposal(command=command, rationale=rationale, evidence_ids=evidence_ids)
+        stub.Propose(authority_pb2.ProposeRequest(proposal=proposal, principal="model-x"))
+        return stub.Check(authority_pb2.CheckRequest(command_id=command_id))
+    finally:
+        channel.close()
+
+
+def _propose_only(command_service, command_id: str, entity_id: str, command_class: str, rationale: str, evidence_ids: List[str]):
+    channel = grpc.insecure_channel(command_service.grpc_endpoint)
+    try:
+        stub = authority_pb2_grpc.CommandAuthorityServiceStub(channel)
+        command = command_pb2.Command(id=command_id, entity_id=entity_id, command_class=command_class)
+        proposal = command_pb2.CommandProposal(command=command, rationale=rationale, evidence_ids=evidence_ids)
+        return stub.Propose(authority_pb2.ProposeRequest(proposal=proposal, principal="model-x"))
+    finally:
+        channel.close()
+
+
+@pytest.fixture()
+def client(command_service, tmp_path) -> TestClient:
+    """R3.5b: `profile="execution"` -- both to exercise Part 1's real `profileId`
+    stamping end to end and because this is the one profile the command console panel's
+    default layout actually applies to (question 201(d))."""
+    app = create_app(
+        texture_dir=tmp_path, web_dir=tmp_path, profile="execution",
+        command_endpoint=command_service.grpc_endpoint, command_admin_endpoint=command_service.admin_endpoint,
+        command_entities=[CONSOLE_ENTITY, EMPTY_ENTITY],
+    )
+    return TestClient(app)
+
+
+# ============================================================================== Part 1
+def test_hub_stamps_the_real_profile_id_onto_every_published_scenario(client: TestClient):
+    """`create_app(profile="execution")` -> a real `POST /api/scenario` -> the scenario
+    read back over `GET /api/scenario/{name}` carries `profileId: "execution"`, beside
+    its real `imagery` (unchanged, M19.5). Fails against an implementation that only
+    threads `profile` into `load_imagery_config` and never into `Hub` itself."""
+    resp = client.post("/api/scenario", json={"name": "cmd-panel-exec-scenario", "spacecraft": []})
+    assert resp.status_code == 200, resp.text
+    sc = client.get("/api/scenario/cmd-panel-exec-scenario").json()
+    assert sc["profileId"] == "execution"
+    assert sc["imagery"]["urlTemplate"]  # M19.5's pre-existing signal, unaffected
+
+
+def test_hub_with_no_profile_id_stamps_nothing_degrade_never_guess():
+    """A `Hub` built directly with no `profile_id` (every call site that predates this
+    task, and any fixture that constructs one this way) never adds `profileId` at all --
+    the exact "no profile key at all" case web/js/layout/default_layouts.js's
+    `isExecutionProfile` must degrade on, never guess. Fails against an implementation
+    that defaults `profile_id` to something truthy instead of `None`."""
+    hub = Hub()
+    hub.put({"name": "no-profile-scenario", "spacecraft": []})
+    assert "profileId" not in hub.scenarios["no-profile-scenario"]
+
+
+def test_design_profile_gets_its_own_real_profile_id(tmp_path):
+    """The default profile ("design") is not "execution" -- a real, different profile id
+    is stamped just the same, proving this is a genuine per-profile signal and not a
+    hardcoded "execution" string somewhere."""
+    app = create_app(texture_dir=tmp_path, web_dir=tmp_path)  # profile defaults to "design"
+    client = TestClient(app)
+    client.post("/api/scenario", json={"name": "cmd-panel-design-scenario", "spacecraft": []})
+    sc = client.get("/api/scenario/cmd-panel-design-scenario").json()
+    assert sc["profileId"] == "design"
+
+
+# ============================================================================== Part 3
+@pytest.fixture(scope="module")
+def command_panel_check_input_path(tmp_path_factory, command_service, issuer):
+    """Seeds real ledger state (Propose/Check over the raw gRPC stub, `_propose_and_check`/
+    `_propose_only` above -- never through an HTTP route, exactly like
+    tests/test_command_console_routes.py's own convention), then drives EVERY
+    `/api/command/*` route through a real `create_app(profile="execution", ...)` app to
+    collect the real payloads web/js/command_panel_check.mjs needs. Module-scoped: one
+    real server, one real set of seeded commands, shared by every test function below
+    (mirrors tests/test_viewer_feasibility_panel.py's own `panels_check_input_path`)."""
+    with tempfile.TemporaryDirectory() as d:
+        app = create_app(
+            texture_dir=Path(d), web_dir=Path(d), profile="execution",
+            command_endpoint=command_service.grpc_endpoint, command_admin_endpoint=command_service.admin_endpoint,
+            command_entities=[CONSOLE_ENTITY, EMPTY_ENTITY],
+        )
+        http = TestClient(app)
+
+        # cmd-view: proposed only, never Checked -- stays in the PROPOSED-filtered
+        # proposals list for the whole test, with a real rationale/evidence.
+        expected_proposal = {
+            "commandId": "cmd-view", "entityId": CONSOLE_ENTITY, "commandClass": "mode",
+            "rationale": "scored radius drifted past the execution-profile threshold",
+            "evidenceIds": ["run-42/query-3", "run-42/query-5"],
+        }
+        _propose_only(command_service, expected_proposal["commandId"], expected_proposal["entityId"],
+                      expected_proposal["commandClass"], expected_proposal["rationale"], expected_proposal["evidenceIds"])
+
+        # cmd-a: proposed, Checked (real decision), then Authorized with a REAL valid
+        # operator token over the real HTTP route -- the command this file's decision/
+        # trail/authorize sections are all about.
+        checked_a = _propose_and_check(command_service, "cmd-a", CONSOLE_ENTITY, "mode", "reason for cmd-a", [])
+        assert checked_a.decision.allow, "sanity: mode is unconditionally allowed by the shipped policy"
+        operator_token = issuer.mint(_valid_claims("operator-ok", ["operators"]))
+        authorize_resp = http.post("/api/command/commands/cmd-a/authorize", json={"principalToken": operator_token})
+        assert authorize_resp.status_code == 200, authorize_resp.text
+        authorize_success_body = authorize_resp.json()
+
+        # cmd-wrong-role: proposed, Checked, then a REAL wrong-role authorize refusal over
+        # the real HTTP route -- both the refusal message AND the resulting counter are
+        # real artifacts of this one real call.
+        _propose_and_check(command_service, "cmd-wrong-role", CONSOLE_ENTITY, "mode", "reason for cmd-wrong-role", [])
+        wrong_role_token = issuer.mint(_valid_claims("operator-wrong-role", ["nobody"]))
+        refusal_resp = http.post("/api/command/commands/cmd-wrong-role/authorize", json={"principalToken": wrong_role_token})
+        assert refusal_resp.status_code == 403, refusal_resp.text
+        authorize_refusal_error = {"status": refusal_resp.status_code, "message": refusal_resp.json()["detail"]}
+        assert wrong_role_token not in refusal_resp.text  # question 201(b)'s own rule, re-checked here too
+
+        # Real proposals (still-PROPOSED only -- cmd-a/cmd-wrong-role have both moved to
+        # CHECKED/AUTHORIZED by now and correctly do not appear here) and a real empty list.
+        proposals = http.get(f"/api/command/proposals?entity_id={CONSOLE_ENTITY}").json()
+        assert any(p["commandId"] == expected_proposal["commandId"] for p in proposals["proposals"])
+        empty_proposals = http.get(f"/api/command/proposals?entity_id={EMPTY_ENTITY}").json()
+        assert empty_proposals["proposals"] == []
+
+        decision = http.get("/api/command/commands/cmd-a/decision").json()
+        trail = http.get("/api/command/commands/cmd-a/trail").json()
+        assert [t["state"] for t in trail["transitions"]] == [
+            "COMMAND_STATE_PROPOSED", "COMMAND_STATE_CHECKED", "COMMAND_STATE_AUTHORIZED",
+        ]
+
+        # cmd-proposed-only: never Checked -- the route's own real 404.
+        _propose_only(command_service, "cmd-proposed-only", CONSOLE_ENTITY, "mode", "unchecked", [])
+        not_yet_checked_resp = http.get("/api/command/commands/cmd-proposed-only/decision")
+        assert not_yet_checked_resp.status_code == 404, not_yet_checked_resp.text
+        decision_not_yet_checked_error = {"status": 404, "message": not_yet_checked_resp.json()["detail"]}
+
+        counters = http.get("/api/command/counters").json()
+        assert counters["refusals"].get("authz_role_not_granted", 0) >= 1
+
+        # Degraded case: no command service configured at all -- a SEPARATE app, no
+        # av-command subprocess involved.
+        with tempfile.TemporaryDirectory() as d2:
+            unconfigured_app = create_app(texture_dir=Path(d2), web_dir=Path(d2))
+            unconfigured_client = TestClient(unconfigured_app)
+            not_configured_resp = unconfigured_client.get("/api/command/proposals?entity_id=sat-1")
+            assert not_configured_resp.status_code == 503, not_configured_resp.text
+            not_configured_error = {"status": 503, "message": not_configured_resp.json()["detail"]}
+
+        payload = {
+            "proposals": proposals,
+            "emptyProposals": empty_proposals,
+            "expectedProposal": expected_proposal,
+            "decision": decision,
+            "expectedDecisionId": checked_a.decision.decision_id,
+            "trail": trail,
+            "expectedAuthorizedPrincipal": "operator-ok",
+            "counters": counters,
+            "selectedCommandId": "cmd-a",
+            "notYetCheckedCommandId": "cmd-proposed-only",
+            "decisionNotYetCheckedError": decision_not_yet_checked_error,
+            "notConfiguredError": not_configured_error,
+            "authorizeRefusalError": authorize_refusal_error,
+            "authorizeSuccessState": authorize_success_body["state"],
+        }
+        out_dir = tmp_path_factory.mktemp("command_panel_check")
+        path = out_dir / "command_panel_input.json"
+        path.write_text(json.dumps(payload))
+        return path
+
+
+@pytest.fixture(scope="module")
+def command_panel_data(command_panel_check_input_path) -> dict:
+    node = _require_node()
+    proc = subprocess.run([node, str(COMMAND_PANEL_CHECK), str(command_panel_check_input_path)],
+                           cwd=str(COMMAND_PANEL_CHECK.parent), capture_output=True, text=True, timeout=30)
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError(f"command_panel_check.mjs did not print valid JSON (exit {proc.returncode})\n"
+                              f"stdout: {proc.stdout!r}\nstderr: {proc.stderr}")
+    return data
+
+
+def _failed(data: dict, substring: str) -> list[str]:
+    return [c["name"] for c in data["checks"] if substring in c["name"] and not c["pass"]]
+
+
+def test_proposal_rows_show_the_real_rationale_and_evidence(command_panel_data):
+    failed = _failed(command_panel_data, "proposalRows:")
+    assert not failed, f"proposalRows checks failed: {failed}"
+
+
+def test_decision_view_shows_the_real_decision_id_and_policy_hash(command_panel_data):
+    failed = _failed(command_panel_data, "decisionView:")
+    assert not failed, f"decisionView checks failed: {failed}"
+
+
+def test_trail_rows_preserve_the_real_transition_order_never_re_sorted(command_panel_data):
+    failed = _failed(command_panel_data, "trailRows:")
+    assert not failed, f"trailRows checks failed: {failed}"
+
+
+def test_counter_rows_are_sorted_and_show_the_real_refusal(command_panel_data):
+    failed = _failed(command_panel_data, "counterRows:") + _failed(command_panel_data, "counterMeta:")
+    assert not failed, f"counter checks failed: {failed}"
+
+
+def test_error_line_never_invents_or_drops_the_servers_own_message(command_panel_data):
+    failed = _failed(command_panel_data, "errorLine:")
+    assert not failed, f"errorLine checks failed: {failed}"
+
+
+def test_degraded_cases_render_the_real_server_message_never_a_generic_one(command_panel_data):
+    """Question 148's own required shape ("a failure that leaves no trace") is exactly
+    what this guards against: "no command service configured" and "not yet Checked"
+    both show the REAL server text this fixture actually captured, not a hardcoded
+    string, and never a blank panel."""
+    failed = _failed(command_panel_data, 'render: "no command service configured"') + \
+        _failed(command_panel_data, 'render: "not yet Checked"') + \
+        _failed(command_panel_data, 'no proposed commands')
+    assert not failed, f"degraded-case rendering checks failed: {failed}"
+
+
+def test_render_binds_every_real_data_source_into_visible_text(command_panel_data):
+    failed = (
+        _failed(command_panel_data, 'render: the real')
+        + _failed(command_panel_data, 'render: every real')
+        + _failed(command_panel_data, 'render: the trail table')
+        + _failed(command_panel_data, 'render: authorize control')
+        + _failed(command_panel_data, 'render: with no command selected')
+    )
+    assert not failed, f"render binding checks failed: {failed}"
+
+
+def test_authorize_token_is_sent_once_cleared_synchronously_and_never_resurfaces(command_panel_data):
+    """The brief's own non-negotiable rule (question 201(b)): the token reaches
+    `onAuthorize` exactly once, the input is cleared before the promise even settles, and
+    it never appears in any later render's text -- success or refusal alike -- proven
+    against the REAL refusal message this fixture's own wrong-role authorize attempt
+    produced."""
+    failed = _failed(command_panel_data, "token rule:") + _failed(command_panel_data, 'render: an authorize refusal')
+    assert not failed, f"authorize token-safety checks failed: {failed}"
+
+
+def test_command_panel_source_has_no_storage_cookie_or_other_state_change_control(command_panel_data):
+    failed = _failed(command_panel_data, "command_panel.js source:")
+    assert not failed, f"source-inspection checks failed: {failed}"
+
+
+def test_execution_profile_default_layout_gains_the_command_panel_exactly_once(command_panel_data):
+    """Part 1 + Part 3 joined at the one point that matters end to end: `isExecutionProfile`
+    and `defaultLayoutTreeForScenario` (web/js/layout/default_layouts.js) are proven
+    against every shape this task's own brief names -- ordinary/RPO/sweep -- for both an
+    execution-profile scenario (gains the command panel exactly once, at the documented
+    0.78/0.22 share) and every other profile (byte-identical leaf counts to before this
+    task: 5/7/4, never regressed)."""
+    failed = _failed(command_panel_data, "layout:") + _failed(command_panel_data, "isExecutionProfile:")
+    assert not failed, f"layout checks failed: {failed}"
+
+
+def test_command_panel_check_report(command_panel_data, capsys):
+    with capsys.disabled():
+        print(f"\ncommand_panel_check.mjs: {len(command_panel_data['checks'])} checks, allPass={command_panel_data['allPass']}")
+        for c in command_panel_data["checks"]:
+            mark = "PASS" if c["pass"] else "FAIL"
+            print(f"  [{mark}] {c['name']}")
+    assert command_panel_data["allPass"] is True, "command_panel_check.mjs reported at least one failing check -- see the printed table above (-s)"

@@ -285,4 +285,20 @@ button:hover { border-color: var(--accent); }
 .av-feasibility-flat-grid li.av-heat-selected { outline: 1px solid var(--accent); }
 .av-feasibility-draws td { vertical-align: middle; }
 .av-feasibility-open { font-size: 11px; }
+
+/* R3.5b: the command console panel (web/js/panels/command_panel.js). Reuses
+   .av-panel-section/.av-panel-notice/.av-pane-btn/.av-scores-table's own generic rules
+   above wherever they already fit; the rules below are only what those do not cover. */
+.av-command-proposals, .av-command-trail { width: 100%; border-collapse: collapse; font-size: 11px; }
+.av-command-proposals td, .av-command-trail td { padding: 2px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.av-command-proposals tr.av-command-selected { background: var(--panel-2); }
+.av-command-error { color: var(--bad); }
+.av-command-decision { margin: 0; font-size: 11px; }
+.av-command-decision dt { color: var(--muted); float: left; width: 90px; clear: left; }
+.av-command-decision dd { margin: 0 0 2px 96px; }
+.av-command-reasons, .av-command-counters { list-style: none; margin: 0; padding: 0; font-size: 11px; }
+.av-command-reasons li, .av-command-counters li { padding: 1px 0; }
+.av-command-token-label { display: block; margin-bottom: 4px; font-size: 11px; }
+.av-command-token-input { width: 100%; box-sizing: border-box; margin-top: 2px; }
+.av-command-authorize-ok { color: var(--ok); font-style: normal; }
 .av-feasibility-unopenable { display: inline-block; }
