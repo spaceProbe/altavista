@@ -73,12 +73,15 @@ EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 SPOORE_HOST_PATH="/Users/probe/code/spoore"
 FIXTURE_PATH="${REPO_ROOT}/tests/fixtures/demo_two_instance.runproducts.bin"
 # Pinned prebuild base -- NEWER than services/edge-plugin/build-image.sh's own
-# `rust:1.85-bookworm` pin. See the Dockerfile's own header comment ("Why this Dockerfile has
-# no Rust builder stage") for the measured reason: av-proposer's dependency graph reaches
-# av-command -> regorus 0.12.0, which needs `const_vec_string_slice` (Vec::len/is_empty/
-# as_slice as const fn), not yet stable at Rust 1.85 -- confirmed by a real build failure
-# against the 1.85 pin, root-caused, not guessed. rustc 1.90.0 (confirmed:
-# `docker run --rm <image> rustc --version`) compiles it cleanly.
+# `rust:1.85-bookworm` pin, and still newer than this workspace's own corrected
+# `rust-version = "1.87"` (question 208(a) -- the root `Cargo.toml` used to say "1.85", which
+# was never actually true; measured, not guessed). See the Dockerfile's own header comment
+# ("Why this Dockerfile has no Rust builder stage") for the measured reason: av-proposer's
+# dependency graph reaches av-command -> regorus 0.12.0, which needs `const_vec_string_slice`
+# (Vec::len/is_empty/as_slice as const fn) -- confirmed by binary search on this host:
+# 1.86.0 fails with the same error a real 1.85 build hit, 1.87.0 passes. rustc 1.90.0
+# (confirmed: `docker run --rm <image> rustc --version`) compiles it cleanly, comfortably
+# above either floor.
 PREBUILD_BASE_IMAGE="rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 SCRATCH_TARGET_DIR="${REPO_ROOT}/target-docker-linux"
 

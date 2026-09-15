@@ -71,27 +71,33 @@
 #   different image with a different (empty) certificate store -- not this prebuild stage,
 #   which has never been observed to fail this way.
 #
-# Why `rust:1.90-bookworm`, not the workspace's own `rust:1.85-bookworm` pin (measured, not
-# guessed -- a real build failure this task's own R3.3 gate hit and root-caused): unlike
-# `av-edge-plugin`, `av-proposer` depends on `av-command` (for `av_command::clock::Clock`/
+# Why `rust:1.90-bookworm`, still newer than the workspace's own `rust-version` floor even
+# now that question 208(a) has corrected that floor (measured, not guessed -- a real build
+# failure this task's own R3.3 gate hit and root-caused): unlike `av-edge-plugin`,
+# `av-proposer` depends on `av-command` (for `av_command::clock::Clock`/
 # `av_command::counters::Counters` -- `crates/av-proposer/Cargo.toml`'s own comment), and
 # `av-command` depends on `regorus` (`crates/av-command/src/policy.rs`'s Rego evaluator).
 # `regorus 0.12.0` (this workspace's own pinned `Cargo.lock` version, unrelated to this task's
 # own changes -- confirmed with `git diff Cargo.lock` before reaching for a version bump)
 # calls `Vec::len`/`Vec::is_empty`/`Vec::as_slice` from a `const fn` context
 # (`regorus-0.12.0/src/lookup.rs`, `.../value/array/mod.rs`), which needs the
-# `const_vec_string_slice` stabilization -- NOT YET STABLE at Rust 1.85 (the exact compiler
-# error, reproduced against `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`
-# while building THIS image for the first time: "`alloc::vec::Vec::<T, A>::len` is not yet
-# stable as a const fn ... help: add `#![feature(const_vec_string_slice)]`"). `rust:1.90-
-# bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f` (rustc
-# 1.90.0, confirmed directly: `docker run --rm <image> rustc --version`) compiles `regorus`
-# cleanly. This is a narrower fix than bumping the WORKSPACE's own `rust-version = "1.85"`
-# (which many other Dockerfiles/CI assumptions key off): only THIS script's own cross-compile
-# toolchain moves, and moving it newer is always safe for a crate whose own `rust-version` says
-# "at least 1.85" (Rust's own backward-compatibility guarantee) -- `av-edge-plugin`'s own
-# cross-build never hit this wall only because its dependency graph never reaches `av-command`
-# (and therefore never reaches `regorus`) at all.
+# `const_vec_string_slice` stabilization. Question 208(a) binary-searched exactly where that
+# stabilizes, on this host, with `cargo +<version> check -p av-command`: 1.86.0 FAILS with the
+# same error `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`
+# hit building THIS image the first time ("`alloc::vec::Vec::<T, A>::len` is not yet stable as
+# a const fn ... help: add `#![feature(const_vec_string_slice)]`"); 1.87.0 PASSES cleanly. The
+# root workspace `Cargo.toml`'s `rust-version` is now `"1.87"` (measured, adjacent
+# fail/pass pair), not the stale, never-actually-buildable `"1.85"` this comment used to cite.
+# `rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`
+# (rustc 1.90.0, confirmed directly: `docker run --rm <image> rustc --version`) is still
+# comfortably newer than that corrected 1.87 floor and still compiles `regorus` cleanly, so
+# this prebuild pin needs no change -- only the reasoning above it does. This remains a
+# narrower fix than the workspace `rust-version` bump alone would have been for THIS image:
+# only THIS script's own cross-compile toolchain choice matters here, and moving it newer than
+# whatever the workspace floor truthfully is stays always safe (Rust's own backward-
+# compatibility guarantee) -- `av-edge-plugin`'s own cross-build never hit this wall only
+# because its dependency graph never reaches `av-command` (and therefore never reaches
+# `regorus`) at all.
 #
 # (`protobuf-compiler`+`libprotobuf-dev`: this crate's OWN `build.rs` runs two independent
 # `protoc` passes -- spoore's `model_service.proto` server, and this workspace's own
@@ -121,11 +127,11 @@
 # against THIS binary specifically rather than assuming the edge plugin's own measurement
 # transfers unchanged). The prebuild base,
 # `rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`
-# (workspace `rust-version = "1.85"`, edition 2021, but THIS crate's own dependency graph needs
-# a newer cross-compile toolchain than that floor -- see "Why this Dockerfile has no Rust
-# builder stage" above for the measured `regorus`/`const_vec_string_slice` reason), is used
-# only by build-image.sh's own `docker run` above, never referenced by this file -- recorded
-# here anyway so both digests this image's bytes ultimately depend on are pinned in one place.
+# (workspace `rust-version = "1.87"`, measured by question 208(a) -- see "Why this Dockerfile
+# has no Rust builder stage" above -- edition 2021; 1.90 stays newer than that corrected floor,
+# so this pin needs no change), is used only by build-image.sh's own `docker run` above, never
+# referenced by this file -- recorded here anyway so both digests this image's bytes ultimately
+# depend on are pinned in one place.
 #
 # ------------------------------------------------------------------------------------------
 # Labels (question 156: label every image; prune by label before creating)

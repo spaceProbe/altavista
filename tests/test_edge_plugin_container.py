@@ -173,7 +173,7 @@ it as a command-line argument or a bind-mounted file -- never `os.environ[...] =
 never a mutated copy handed to `env=` for anything that did not already need one. Unlike
 `tests/test_edge_ingest_mtls.py` (which runs `cargo build` as a **host** subprocess and so
 needs `PATH`/`GMAT_ROOT`/`CFS_MIRROR_DIR` on that subprocess's own `env=`), every Rust build
-this file needs happens **inside a container** (`docker run rust:1.85-bookworm ...`), which
+this file needs happens **inside a container** (`docker run rust:1.90-bookworm ...`), which
 needs no host toolchain environment forwarded to it at all.
 """
 from __future__ import annotations
@@ -241,7 +241,8 @@ WRITABLE_MOUNT_DEST = "/var/lib/edge-plugin"
 # tempfile/tmp_path" -- must be under $HOME for Colima to actually bind-mount it.
 SCRATCH_ROOT = REPO_ROOT / ".av-test-tmp" / "edge_plugin_container"
 
-PREBUILD_BASE_IMAGE = "rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+# Question 208(a): moved above the corrected 1.87 workspace floor; same digest build-image.sh uses.
+PREBUILD_BASE_IMAGE = "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 
 
 # =================================================================================================

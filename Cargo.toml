@@ -5,7 +5,20 @@ members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# Question 208(a): measured, not guessed (cargo +<version> check -p av-command, then
+# --workspace, on this host, 2026-09-15). regorus 0.12.0 (pinned in Cargo.lock) calls
+# Vec::len/Vec::is_empty/Vec::as_slice from a const fn, which needs the
+# const_vec_string_slice stabilisation:
+#   - 1.86.0 FAILS: "`alloc::vec::Vec::<T, A>::len` is not yet stable as a const fn"
+#     (regorus-0.12.0/src/lookup.rs:135, value/array/mod.rs:36/41/71), with
+#     "help: add `#![feature(const_vec_string_slice)]` to the crate attributes to enable".
+#   - 1.87.0 PASSES: `cargo +1.87.0 check -p av-command` finishes clean (one pre-existing,
+#     unrelated dead_code warning in av-command's own audit.rs), and so does
+#     `cargo +1.87.0 check --workspace` (GMAT_ROOT set) -- no other crate in the workspace
+#     needs a newer toolchain than av-command does.
+# 1.86.0 and 1.87.0 are adjacent minor releases, so 1.87 is the real floor, not an estimate
+# bracketed by untested versions in between.
+rust-version = "1.87"
 license = "Apache-2.0"
 repository = "https://github.com/altavista"
 
@@ -34,8 +47,10 @@ libc = "0.2"
 nalgebra = "0.33"
 # Path dependency onto spoore's own CDM crate (question 12: spoore crates by
 # path dependency). Versions above are kept aligned with spoore/Cargo.toml
-# (edition 2021, rust-version 1.85, prost 0.13) so the two workspaces can share
-# a lockfile-free path dependency without a version conflict.
+# (edition 2021, prost 0.13) so the two workspaces can share a lockfile-free path dependency
+# without a version conflict. spoore/Cargo.toml's own declared rust-version is out of this
+# workspace's control (question 12) and is not asserted here; this workspace's own floor is
+# measured above (question 208(a)) and is 1.87, not 1.85.
 spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }
 
 [profile.release]
