@@ -9,10 +9,10 @@ container images (`edge-plugin-image`, `cfs-image`). `SHA256SUMS` records each f
 
 Generated files are not usually committed — these are, deliberately: they are small,
 deterministic text (see "Determinism" below), they make the licence check
-(`tests/test_sbom.py::test_every_licence_is_allowed_or_declared_an_exception`,
-`docs/compliance/sbom/licence-exceptions.md`) real on every default `pytest` run without
-building anything, and a `git diff` on one of these files shows exactly what changed in a
-dependency tree at a glance.
+(`tests/test_sbom.py::test_every_licence_in_every_committed_sbom_is_allowed_outright`, against
+`deny.toml`'s `[licenses].allow` list -- its single source, question 214(a)) real on every
+default `pytest` run without building anything, and a `git diff` on one of these files shows
+exactly what changed in a dependency tree at a glance.
 
 ## Regenerating
 

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import tomllib
@@ -111,25 +110,12 @@ def test_sha256sums_matches_the_committed_files():
 
 
 # =================================================================================================
-# 4. Every licence is allowed, or is a declared exception (Decision E)
+# 4. Every licence in every committed SBOM is allowed outright (Decision E; question 214(a))
 # =================================================================================================
-
-_EXCEPTION_ROW_RE = re.compile(
-    r"^\|\s*(\S+)\s*\|\s*`([^`]+)`\s*\|\s*([^\|]+?)\s*\|\s*`([^`]+)`\s*\|", re.MULTILINE
-)
-
-
-def _parse_declared_exceptions(text: str) -> set[tuple[str, str, str]]:
-    """(package, version, licence) triples from `licence-exceptions.md`'s table -- the
-    `Component kind` column is informational (both current exceptions are found in every Python
-    component via the one shared `.venv`; the set below is deliberately keyed without the
-    specific component instance -- see that file's own "How this set was produced" section)."""
-    declared = set()
-    for kind, package, version, licence in _EXCEPTION_ROW_RE.findall(text):
-        if kind.lower() == "component" or set(kind) == {"-"}:
-            continue  # header / separator row
-        declared.add((package, version.strip(), licence))
-    return declared
+# The prior carve-out file naming specific non-allowed packages is gone: question 214(a) (lead
+# ruling, docs/open-questions.md) put `0BSD` and `PSF-2.0` into `deny.toml`'s `[licenses].allow`
+# list itself, so the SBOM licence check now reads that list as its single source and nothing
+# found in any committed SBOM needs anything declared separately any more.
 
 
 def _all_licence_findings() -> list[L.LicenseFinding]:
@@ -148,27 +134,87 @@ def _all_licence_findings() -> list[L.LicenseFinding]:
     return findings
 
 
-def test_every_licence_is_allowed_or_declared_an_exception():
-    findings = _all_licence_findings()
-    found = {(f.package, f.version, f.licence) for f in findings}
-    declared = _parse_declared_exceptions(
-        (SBOM_DIR / "licence-exceptions.md").read_text()
-    )
+def _all_licence_combinations() -> set[tuple[str, str, str, str]]:
+    """(component, package, version, licence) combinations actually evaluated across every
+    committed SBOM -- counted separately from `_all_licence_findings` so the test below can
+    print what it checked, not only that it came back clean (question 148)."""
+    combos: set[tuple[str, str, str, str]] = set()
+    for path in sorted(SBOM_DIR.glob("*.cdx.json")):
+        component = path.stem.removesuffix(".cdx")
+        doc = json.loads(path.read_text())
+        for c in doc["components"]:
+            for entry in c.get("licenses") or []:
+                raw = entry.get("expression") or (entry.get("license") or {}).get("id") \
+                    or (entry.get("license") or {}).get("name")
+                if raw:
+                    combos.add((component, c["name"], c["version"], raw))
+    return combos
 
-    undeclared = [
-        f for f in findings if (f.package, f.version, f.licence) not in declared
-    ]
-    assert not undeclared, "non-allowed licence(s) not declared in licence-exceptions.md:\n" + "\n".join(
+
+def test_every_licence_in_every_committed_sbom_is_allowed_outright():
+    """Question 214(a): with `0BSD` and `PSF-2.0` now in `deny.toml`'s `[licenses].allow` list,
+    every licence recorded in every committed SBOM is allowed by that list alone --
+    `_all_licence_findings()` must be empty, with no declared-exception carve-out left anywhere.
+    Prints the number of (component, package, version, licence) combinations actually evaluated,
+    so this test shows what it checked rather than only that it was green (question 148)."""
+    combos = _all_licence_combinations()
+    findings = _all_licence_findings()
+    sbom_count = len(list(SBOM_DIR.glob("*.cdx.json")))
+    print(
+        f"\nlicence check: {len(combos)} (component, package, version, licence) combinations "
+        f"evaluated across {sbom_count} committed SBOMs, {len(findings)} finding(s)"
+    )
+    assert findings == [], "non-allowed licence(s) found in a committed SBOM:\n" + "\n".join(
         f"  component={f.component} package={f.package} version={f.version} "
         f"licence={f.licence!r} reason={f.reason}"
-        for f in undeclared
+        for f in findings
     )
 
-    stale = declared - found
-    assert not stale, (
-        f"licence-exceptions.md declares exception(s) that are no longer found in any "
-        f"committed SBOM (stale -- delete the row): {sorted(stale)}"
+
+def test_a_licence_not_in_the_allow_list_is_still_reported_as_a_finding():
+    """The gate stays meaningful in the failing direction too: a licence genuinely absent from
+    `deny.toml`'s allow list must still come back as a `LicenseFinding`, not be silently
+    accepted, now that the declared-exception carve-out is gone."""
+    allow = L.load_allow_list(REPO_ROOT / "deny.toml")
+    assert "GPL-3.0-only" not in allow
+    findings = L.evaluate_license_field(
+        "fake-component", "fake-package", "9.9.9", "GPL-3.0-only", allow
     )
+    assert len(findings) == 1
+    assert findings[0].licence == "GPL-3.0-only"
+    assert findings[0].reason == "not-allowed"
+
+
+def test_the_previously_excepted_licences_are_allowed_because_deny_toml_says_so():
+    """Question 214(a): `0BSD` and `PSF-2.0` are allowed now because they are IN `deny.toml`'s
+    allow list, not because the check itself was loosened. Proven by evaluating the real
+    licence expressions -- `numpy` 2.5.3's real five-way `AND` and `typing_extensions` 4.16.0's
+    real `PSF-2.0`, both as actually recorded in the committed SBOMs -- against a deliberately
+    REDUCED COPY of the allow list, built in memory from `load_allow_list(...)` minus those two
+    entries (`deny.toml` itself is never touched), and asserting they come back as findings
+    there. This is the test that would catch someone silently deleting the two entries again."""
+    allow = L.load_allow_list(REPO_ROOT / "deny.toml")
+    assert "0BSD" in allow and "PSF-2.0" in allow  # the actual policy, sanity-checked first
+
+    reduced = allow - {"0BSD", "PSF-2.0"}
+
+    numpy_expr = "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0"
+    numpy_findings_reduced = L.evaluate_license_field(
+        "av-viewer", "numpy", "2.5.3", numpy_expr, reduced
+    )
+    assert {f.licence for f in numpy_findings_reduced} == {"0BSD"}
+
+    typing_ext_findings_reduced = L.evaluate_license_field(
+        "av-viewer", "typing_extensions", "4.16.0", "PSF-2.0", reduced
+    )
+    assert {f.licence for f in typing_ext_findings_reduced} == {"PSF-2.0"}
+
+    # Against the REAL, committed deny.toml allow list, both are fully allowed -- no finding at
+    # all -- because deny.toml says so, not because of any other loosening.
+    assert L.evaluate_license_field("av-viewer", "numpy", "2.5.3", numpy_expr, allow) == []
+    assert L.evaluate_license_field(
+        "av-viewer", "typing_extensions", "4.16.0", "PSF-2.0", allow
+    ) == []
 
 
 def test_no_committed_sbom_contains_an_unparseable_licence_string():
@@ -215,11 +261,16 @@ def test_the_spdx_evaluator_allows_the_real_positive_expressions(expr, allow_lis
 
 
 def test_the_spdx_evaluator_and_of_a_non_allowed_leaf_is_not_satisfied(allow_list):
+    """A real-shaped five-way `AND` (numpy 2.5.3's own expression, with its one previously-
+    non-allowed leaf swapped for a licence that is never in `deny.toml`'s allow list, now that
+    question 214(a) put `0BSD` itself into that list -- see
+    `test_the_previously_excepted_licences_are_allowed_because_deny_toml_says_so` for the real,
+    now-fully-allowed `0BSD` expression)."""
     result = L.evaluate_expression(
-        "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0", allow_list
+        "BSD-3-Clause AND GPL-3.0-only AND MIT AND Zlib AND CC0-1.0", allow_list
     )
     assert result.satisfied is False
-    assert result.unmet_leaves == frozenset({"0BSD"})
+    assert result.unmet_leaves == frozenset({"GPL-3.0-only"})
 
 
 @pytest.mark.parametrize("expr, expected_unmet", [
