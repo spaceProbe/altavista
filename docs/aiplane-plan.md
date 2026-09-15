@@ -5,6 +5,105 @@ Requested by the user 2026-09-12 as one of two parallel tracks (the other is
 `architecture.md` ("a model proposes, a human authorizes, a simulated asset acts, replay
 reproduces the trail") and the AI-plane and command-authority halves of ADR-004.
 
+## Delivered
+
+**Every milestone in this plan (A1–A6) is delivered and the consolidation rounds are
+finished.** This section is the state of the track for a reader who has only this file: what
+exists, where its tests are, and what carries into the next charter. The dated status sections
+below are the round-by-round record and are kept unedited.
+
+### What exists
+
+- **A1, the command service — `crates/av-command`.** The nine-edge state machine as a library
+  (`src/state.rs`) with a typed refusal for every illegal edge; a durable file-backed ledger
+  chained per partition, which is the ledger of ADR-004 (`src/ledger.rs`); a gRPC service over
+  the same OpenSSL-backed tonic `av-grpc` uses, exposing `Propose`, `Check`, `Authorize`,
+  `Dispatch`, `Ack`, `Expire`, `Fail` and `Query` (`src/service.rs`); `/admin/api/evidence` and
+  ledger `verify` (`src/admin.rs`); Rego policy at CHECKED evaluated in process by `regorus`
+  with its crypto built-ins off, policies declared by the profile, `allow ∧ ¬deny`, the decision
+  id and policy hash carried in the transition's reason (`src/policy.rs`, `profiles/policies/`).
+  Since round 4 the check runs automatically inside `Propose` as a second, separately logged
+  transition, and a policy denial is a typed `PERMISSION_DENIED` on `Propose` itself.
+- **A2, human authorization.** Principals from OIDC tokens on the secsso claims contract,
+  RS256, verified against a local test issuer's OpenSSL key so no Authentik runs in any test
+  (`src/oidc.rs`); role-gated authorization per command class, MFA for hazardous classes,
+  time-limited delegations evaluated on the injected clock, and a disjoint service-role table
+  gating `Dispatch`/`Ack`/`Expire`/`Fail` (`src/authz.rs`, `profiles/execution.yaml`); every
+  transition written as an RFC 5424 audit line to a configured sink (`src/audit.rs`). The index
+  commit, the idempotency-key insert and the dispatch side effect happen the instant the ledger
+  append succeeds and before the best-effort audit write (round 4's own review defect).
+- **A3, dispatch to the simulated asset.** AUTHORIZED commands reach the kernel's real
+  telecommand path through `RunConfig.command_source` and the controller's framed command port,
+  with `not_before`, deadline-to-EXPIRED on the kernel clock, idempotency keys the binding never
+  dispatches twice, and ack levels mapped from the asset protocol.
+- **A4/A4a/A4b, the AI plane.** `crates/av-gateway`: a read-only, label-aware gateway over run
+  products as gRPC (`DataGatewayService`) and as a hand-rolled MCP server over stdio with a
+  deny-by-default tool allow-list (`src/mcp.rs`); a `propose_command` path that can create
+  PROPOSED and nothing else, structurally (`src/propose_only.rs`), behind one shared
+  implementation used by both the MCP tool and the additive `ModelProposeService`
+  (`src/propose_flow.rs`); an evidence topic on the ledger recording what the model saw
+  (`src/evidence.rs`). **Since round 5 the gateway authenticates every caller on every surface**
+  — gRPC `Query`, gRPC `ProposeCommand`, both MCP tools and the admin bundle — through
+  `av_command::oidc::verify` shared as a library, with a service subject for the proposer and a
+  human token for consoles, the caller's clearance derived from the verified token and ranked on
+  the configured ladder (never read from the request), and every refusal typed and counted
+  (`src/auth.rs`, `profiles/gateway-authority.yaml`). `crates/av-proposer`: the deterministic
+  rule-based station-keeping proposer under spoore's `ModelService` contract, running as a
+  labelled container on a `--network none`-equivalent internal Docker network holding only
+  itself and the gateway, presenting its service token from a file.
+- **A5, the console.** A command console panel in the execution profile's default layout only
+  (`web/js/panels/command_panel.js`), listing the commands awaiting a human with their real
+  state, rationale, evidence ids, policy decision and trail, authorizing with the operator's
+  own token and refreshing the counters after every outcome; server routes under
+  `/api/command/` in `altavista/server.py`, which never mint, store, cache or log a token.
+- **A6, replay and compliance.** A replayed run reproduces every transition, decision id and
+  proposal from the ledger; control matrices for `av-command` and `av-gateway` under
+  `docs/compliance/`; the evidence bundle from both services collects in one call
+  (`crates/av-gateway/src/evidence_bundle.rs`).
+
+### Where the tests are
+
+| What it proves | Where |
+| --- | --- |
+| The state machine, every legal path and every illegal edge, the gRPC surface, the service-principal gate | `crates/av-command/tests/grpc_service.rs` |
+| The policy fixture (one class admitted, one rejected, one rate-limited, every envelope refused), the decision reproduced from the log, the regorus prose tripwire | `crates/av-command/tests/policy_fixture.rs`, `crates/av-command/src/policy.rs`'s own tests |
+| The declared MSRV cannot silently go stale | `crates/av-command/tests/msrv.rs` |
+| Caller authentication on all four gateway surfaces, fail-closed, the clearance rule, the token never in a message | `crates/av-gateway/src/auth.rs`'s own tests, `crates/av-gateway/src/{gateway,propose_flow,mcp,admin}.rs`'s `authenticated` test modules |
+| The gateway refuses a query above the caller's label; the proposer cannot reach any other state | `crates/av-gateway/tests/propose_only.rs`, `crates/av-proposer/tests/no_command_authority_client.rs` |
+| The same run always yields the same proposal | `crates/av-proposer/tests/determinism.rs` |
+| A proposal's evidence carries the verified subject, the declared model node id and the version | `crates/av-proposer/tests/model_service.rs`, `tests/test_proposer_container.py` |
+| A replayed run reproduces the decision trail | `crates/av-gateway/tests/ledger_decision_trail_replay.rs`; and from the console's own route, `tests/test_command_console_routes.py` |
+| The evidence bundle collects both services in one call | `crates/av-gateway/tests/evidence_bundle.rs` |
+| The console routes and the panel's own Authorize button | `tests/test_command_console_routes.py`, `tests/test_viewer_command_panel.py`, `tests/test_viewer_net.py` |
+| The proposer container's isolation, measured (deny-all, no route off the host, the authority unreachable) | `tests/test_proposer_container.py` |
+| The port map and the constants agree | `tests/test_port_map.py` |
+| `buf lint proto` is clean | `tests/test_cdm_v1.py::test_buf_lint_proto_is_clean` |
+
+### What carries into the next charter
+
+1. **Propose-only still stands.** No envelope is enabled anywhere in this track (question 53),
+   and `ProposeOnlyAuthority` makes that structural, not a convention.
+2. **No TLS at either service's own boundary.** `av-command` and `av-gateway` both bind loopback
+   only and link no TLS stack; the cross-host front is nginx mTLS from the
+   `services/gmat-service/deploy/` template (question 155's rule), which has never been built or
+   proven for either. Both control matrices say Gap for "encrypt in transit".
+3. **RS256 only.** ES256/ES384 are a declared gap until secsso's actual signing algorithm is
+   confirmed (question 203(c)).
+4. **The audit sink is a file a forwarder reads**, which satisfies question 54's export as a
+   format, not as a forwarding mechanism; the SIEM control is Partial.
+5. **The console does not poll.** Proposals and counters refresh on selection, on every
+   authorize outcome and on an execution-profile scenario load; a new proposal does not arrive
+   on its own.
+6. **The cFS command-accept and the ADCS execution report** are still a declared gap in the ack
+   ladder; `ASSET_RECEIVED` is a real decode ack.
+7. **The regorus "rule not defined" detection still matches error prose**, pinned to `=0.12.0`
+   with a tripwire test, because 0.12.0 exposes no structural alternative outside a feature this
+   crate must not enable — the search is recorded in `crates/av-command/src/policy.rs` so it is
+   not repeated.
+8. **`container.control_port`'s 50070 collides with `av-command`'s gRPC default** on paper; it is
+   container-internal and never host-bound, and the port map records it rather than renumbering
+   a value that `drms/` and `services/cfs/` artifacts also pin.
+
 ## Goal
 
 The command state machine enforced by a service: policy at CHECKED, a role-gated human at
@@ -1033,3 +1132,207 @@ reviewed. Three of round 4's planned tasks were **not started**:
    failure it exists to catch.
 5. **The Colima VM disk is still full** and the proposer's container test still skips visibly.
    Nothing this round changed that; it remains the user's decision (question 196(d)).
+
+## Status (AI-plane manager, 2026-09-15) — round 5
+
+The last consolidation round before the track's next charter. Every item question 211 left open
+landed: question 208(b) (gateway caller authentication), 208(a) (the MSRV), 208(c) (the port
+map), the proposer image of question 211, `buf lint` to zero, and both capacity items. Eleven
+commits, each its own task, each reviewed by the manager from the artifacts in the tree.
+
+| Commit | Task | State |
+| --- | --- | --- |
+| `253702a` | R5.1 — question 208(b): `av-gateway` authenticates every caller on all four surfaces | landed, reviewed |
+| `bfc4592` | R5.1b — manager's review defect 1: the clearance depended on the order of the `groups` claim | landed |
+| `53ea8f2` | R5.1b — manager's review defect 2: the proposal evidence no longer named the model | landed |
+| `bc49c7e` | R5.2 — question 211, the proposer image: the apt rewrite dropped, the image built, the container test run for real | landed, reviewed |
+| `07d6d00` | R5.2b — manager's review: assert the restored model attribution end to end in the container test | landed |
+| `db1e858` | R5.3 — question 208(a): `rust-version` raised to its measured floor | landed, reviewed |
+| `22d7ae1` | R5.3 — question 208(c): one owned port map, two live collisions resolved | landed, reviewed |
+| `9e6ce93` | R5.3b — manager's review defect: every remaining 1.85 cross-build pin moved off the false floor | landed |
+| `d4932b5` | R5.4 — question 211: `buf lint proto` to zero, and a running gate | landed, reviewed |
+| `96673c8` | R5.5 — question 203(b): why no structural replacement for the regorus prose match exists | landed, reviewed |
+| `3f8880b` | R5.5 — A6: the console's own authorize path replays from the ledger | landed, reviewed |
+
+### Gates, the manager's own runs at `3f8880b` with no worker active
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p av-command -p av-gateway -p av-proposer` | **330 passed**, 0 failed, 0 ignored (287 was round 4's measured end state; +43 this round) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **877 passed**, 0 failed, 3 ignored (834 was the lead's own clone-gate baseline at `32f802d`) |
+| `cargo test -p av-kernel` | **874 passed**, 0 failed, 2 ignored, unchanged from the lead's clone gate (one doc comment in `crates/av-kernel/src/drm/binding.rs` was touched by R5.3's port map, so this gate was run) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, **0 warnings**; `grep -rn "#\[allow" crates/av-command/src crates/av-gateway/src crates/av-proposer/src` is zero hits |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`, the six accepted spoore wildcard warnings (question 207) |
+| `.venv/bin/python -m pytest -q -rs` | **555 passed, 2 skipped**, every skip printing its reason |
+| `buf lint proto` | **0 findings**, down from the 34 question 211 measured. It is a gate from `d4932b5` on, and it now RUNS: `tests/test_cdm_v1.py::test_buf_lint_proto_is_clean` |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | clean, empty output |
+
+The measured starting baselines for this round, taken from the lead's own clone gate at
+`32f802d` (the round-4 status section's 801/545 numbers predate the `develop` merge and are not
+this round's baseline): workspace 834, Python 551 passed / 3 skipped, trio 287.
+
+**`tests/test_proposer_container.py` no longer skips.** It is the round's headline artifact: the
+image builds, the container runs, and the test that had skipped visibly since round 3 now runs
+for real in about 72 seconds.
+
+### The manager's decisions this round
+
+1. **The gateway's clearance comes from the verified token and the request field is only
+   cross-checked, never trusted.** `GatewayQueryRequest.caller_clearance` was a bare string the
+   label gate believed completely, so any caller could read any label by claiming it. It is now
+   overwritten with the token-derived marking before `GatewayCore::query` ever sees it, and a
+   non-empty disagreeing value is a typed, counted `ClearanceMismatch` — never resolved by
+   silently preferring the higher value, and never by silently preferring the lower one either.
+   The alternative (ignore the field) was rejected: a caller that believes it is cleared to
+   SECRET and is served CUI data should be told, not quietly downgraded.
+2. **The caller's effective clearance is the HIGHEST of their mapped groups, ranked on the
+   deployment's existing ladder.** The first implementation took the first group in claim order
+   that the table mapped, which made authorization a function of the order an identity provider
+   serialised a claim in: the same entitlements gave CUI in one order and SECRET in the other.
+   A marking mapped by configuration but absent from the ladder is its own typed refusal rather
+   than being skipped over in favour of a lower one — a misconfiguration must never silently
+   resolve to less access than it names.
+3. **`ProposalEvidence.model_identity` is the VERIFIED subject; the model's own identity is a
+   separate, explicitly caller-declared field.** Making `model_identity` the verified subject is
+   right, but it silently cost the evidence record the one thing milestone A4 names —
+   "attributing the proposal to the model identity and version". `model_node_id` is additive,
+   documented as unverified in contrast to `model_identity`, and asserted end to end in the
+   container test, which is the only place a real container, a real gateway and a real ledger
+   meet.
+4. **The gateway fails closed at startup, not per call.** `av-gateway` refuses to start without
+   `--oidc-issuer`, `--oidc-audience` and `--oidc-public-key-path`; the role and clearance tables
+   are separately safe when absent, because an empty `RoleTable` grants nothing. There is no
+   state this configuration can express in which an absent token or an unconfigured issuer
+   results in a served request, and the worker watched the regression test fail against a
+   deliberately fail-open build before the real one landed.
+5. **MCP `initialize` and `tools/list` stay unauthenticated, declared.** They carry two tool
+   names and a JSON schema, no run data and no command authority. Recorded in the module doc and
+   in the control matrix as a decision, not left as an omission.
+6. **The apt-sources rewrite is dropped rather than patched with `ca-certificates`.** The lead's
+   root cause held exactly: `debian:bookworm-slim` ships no certificate store, its default
+   sources are already `http://`, and apt trusts the GPG-signed `Release` file independently of
+   the transport — so the rewrite bought nothing and only added a failure mode. Both silent
+   shapes on that line are gone, not patched: there is no `2>/dev/null || true` left to hide a
+   failed rewrite, and with no warning to swallow, `apt-get install libssl3` is a true gate,
+   re-verified by the script's own `ldd` against the built image and recorded in
+   `services/proposer/IMAGE_DIGEST.md`. The identical rewrite in the prebuild step was measured
+   rather than argued about: `rust:1.90-bookworm` really does ship 285 certificates, so that
+   rewrite was always inert, and it is gone too. Three obsolete comment blocks describing an
+   "unconfirmed workaround for a known, unresolved host defect" (a GPG-signature story) were
+   deleted as superseded rather than carried forward.
+7. **The measured MSRV is 1.87, and the measurement is recorded as a fail/pass pair.** `cargo
+   +1.86.0 check -p av-command` fails with `` `alloc::vec::Vec::<T, A>::len` is not yet stable as
+   a const fn `` in `regorus-0.12.0/src/lookup.rs`; `cargo +1.87.0 check -p av-command` and
+   `cargo +1.87.0 check --workspace` both pass. `rust-version = "1.85"` had been false since
+   round 1. "1.87 works" without the 1.86 failure beside it would have been a guess; both are in
+   `Cargo.toml`.
+8. **Raising the floor broke every 1.85 cross-build container, and only one of them was under a
+   gate.** Cargo enforces `rust-version` workspace-wide, so a `rust:1.85-bookworm` prebuild
+   container now refuses to build any crate here. `tests/test_edge_plugin_container.py` runs, so
+   it failed and was fixed. `services/edge-plugin/build-image.sh`, `services/cfs/Dockerfile`'s
+   hand-run recipe, and three cross-referencing comments do not run under any gate: nothing would
+   have failed until somebody next rebuilt that image. All moved to the same
+   `rust:1.90-bookworm` digest the proposer script already pins and the edge-plugin container
+   test already cross-builds that crate with for real, so 1.90 compiling it is measured on this
+   host. `services/edge-plugin/IMAGE_DIGEST.md` is deliberately NOT hand-edited: it is a
+   generated record of the last real build, and the next run of that script regenerates it.
+9. **All 34 `buf lint` findings are exceptions, not fixes, and each is scoped to its own file.**
+   Every one of the 34 is a name check, and satisfying any of them means renaming a message, an
+   rpc or a service already on the wire — which this track never does. `proto/buf.yaml` uses
+   `ignore_only` per rule per file rather than a module-wide `except`, so a rule is never
+   silenced for a proto file that does not need it, and every block carries the actual design
+   reason (the seven state-machine RPCs sharing one `CommandResponse`; `GatewayQueryRequest`
+   because `QueryRequest` is already taken in the same package; `ModelInfo` because ADR-002
+   shares that name across the gRPC, C-ABI and FMU faces of one contract). The trade-off — a
+   file-scoped exception also covers anything added to that file later — is written down beside
+   each block rather than discovered later.
+10. **`container.control_port`'s 50070 is recorded in the port map, not renumbered.** It is
+    container-internal, republished to an ephemeral host port, never a host bind, and
+    `drms/demo_attitude_control_controller_cfs.system.yaml` and `services/cfs`'s own entrypoint
+    pin the same number. Renumbering it would desync artifacts outside this track's ownership
+    for no real benefit. `gmat-service`'s hard-coded admin `50161` was a live cross-track
+    collision and WAS fixed: the fixture now picks a second free port exactly as it already
+    picked the gRPC one.
+11. **The regorus prose match stays, and the search that settles it is recorded in the code.**
+    `Engine::eval_rule` returns a plain `anyhow::Error` with no downcastable variant;
+    `compile_with_entrypoint` runs the identical `rule_paths.contains(...)` check and the
+    identical `bail!`; `get_packages()` returns package paths, not rule paths; the one structural
+    answer, `CompiledPolicy::get_rules()`, is reachable only through a function gated behind the
+    `azure_policy` feature, which would pull `jsonschema`, `chrono`, `ipnet`, `dashmap` and more
+    into a crate whose dependency surface ADR-004 constrains. The tripwire of question 203(b)
+    stands, and the next person does not repeat the search.
+
+### Defects found in review, with their root causes
+
+The shape held for the fifth round running — **a failure, refusal or guarantee that leaves no
+trace**:
+
+1. **The gateway's clearance was a function of the order of the `groups` claim** (found by the
+   manager reviewing R5.1). `GroupClearanceMap::clearance_for` returned the marking for the first
+   mapped group in claim order, so a token carrying `["operators","safety-officers"]` cleared to
+   CUI and the same entitlements as `["safety-officers","operators"]` cleared to SECRET. Root
+   cause: the map was written as a lookup, and nobody asked what it should do with more than one
+   answer — the ladder that ranks markings was right there in the same process, used for product
+   labels and not for this. Fixed by ranking every mapped candidate on that same ladder and
+   taking the highest, with an off-ladder marking as its own typed refusal. The regression test
+   was watched failing against the unfixed code first.
+2. **The proposal evidence stopped naming the model** (found by the manager reviewing R5.1).
+   Making `ProposalEvidence.model_identity` the verified service subject is correct, but the
+   proposer then sent an empty declared principal and `--model-node-id` survived only inside a
+   hash, so the evidence record no longer said which model produced the proposal. Root cause: the
+   milestone property ("attributing the proposal to the model identity and version") was not
+   pinned by any assertion, so it could be traded away without anything failing. Fixed additively
+   and pinned end to end in the container test.
+3. **Raising the MSRV broke three cross-build recipes that no gate runs** (found by the manager
+   reviewing R5.3). See decision 8. Root cause: the only 1.85 pin under a test was the one that
+   got fixed; the others live in build scripts and Dockerfile comments that execute only when a
+   human rebuilds an image, which is exactly when a stale pin costs the most.
+4. **Three defects inside `tests/test_proposer_container.py` itself**, all found only because the
+   test finally RAN (found by the R5.2 worker): its `COMMAND_GRPC_ADDR` still named `50110`,
+   which `av-gateway`'s own default moved off in round 3; it never took question 207's host-wide
+   docker lock, unlike the edge-plugin test it was modelled on; and it still asserted
+   `COMMAND_STATE_PROPOSED` after question 209(a) made `Propose` run the check automatically, so
+   a correct service would have failed it. Root cause, common to all three: a test that has
+   skipped since the round it was written cannot notice the tree moving underneath it. This is
+   the strongest argument in the round for closing a visible skip rather than living with it.
+5. **`tests/test_gmat_service.py` collided across tracks on a hard-coded admin port** (found by
+   the R5.1b worker, as eleven setup errors that vanished in isolation). Its fixture randomised
+   the gRPC port and not the admin port, so two instances on one host raced for `50161` — and the
+   edge team's concurrent session was the other instance. Root cause: half a fixture was made
+   parallel-safe. Fixed.
+
+One flake, recorded rather than fixed:
+
+- **`av_lockstep::docker_test_lock::tests::flock_lock_is_visible_across_processes_and_languages`
+  and its Python counterpart fail under `--workspace` parallelism and pass alone.** They assert
+  the visibility of the host-wide lock that question 207 introduced, while a sibling test binary
+  in the same run is holding it. The file is the edge track's; question 207's own rule ("a
+  contended docker failure is re-run alone before it is believed") covers it, and both were
+  re-run alone and passed. It is a test-design defect, not a lock defect, and it belongs to the
+  edge track.
+
+### Declared gaps, all deliberate
+
+- Everything in the "What carries into the next charter" list at the top of this file.
+- MCP `initialize` and `tools/list` are unauthenticated (decision 5).
+- `services/edge-plugin/IMAGE_DIGEST.md` still records the 1.85 prebuild base, because it is a
+  generated record of the last real build; the next run of that script corrects it.
+- The console's A5 replay check proves a clean-shutdown-then-restart replay of the authorize
+  path. It does not cover Dispatch/Ack/delegation flows or a crash mid-write; neither does the
+  Rust-layer replay test it mirrors.
+
+### Open items for the lead
+
+1. **Every question-211 item is closed.** 208(a), 208(b), 208(c), the proposer image and `buf
+   lint` all landed with evidence; both capacity items landed too.
+2. **`buf lint proto` is a gate from `d4932b5` on** and it now runs as a test that skips visibly
+   when `buf` is absent rather than passing silently.
+3. **The MSRV raise reaches outside this track.** `services/edge-plugin/build-image.sh`,
+   `services/cfs/Dockerfile` and `tests/test_edge_plugin_container.py` all moved to
+   `rust:1.90-bookworm`. The edge team is working in its own worktree at the same time; this is
+   the most likely merge conflict of the round, and it is a correctness fix, not a preference.
+4. **The `av-lockstep` docker-lock tests are flaky under `--workspace` parallelism** and belong
+   to the edge track (defect list above).
+5. **The track's charter is complete.** A "## Delivered" section at the top of this file now
+   states what exists, where its tests are, and what carries forward, so a reader of the plan
+   alone knows the state.
