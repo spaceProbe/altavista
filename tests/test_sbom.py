@@ -596,3 +596,31 @@ def test_the_epoch_is_never_wall_clock(component):
     expected = sbom.git_epoch(sbom.epoch_paths_for(component))
     assert doc["metadata"]["timestamp"] == expected
     assert doc["serialNumber"] == sbom.derive_serial_number(component, expected)
+
+
+# =================================================================================================
+# 11. A Rust epoch path is never a source-tree path (the D2-1-class defect, guarded)
+# =================================================================================================
+
+@pytest.mark.parametrize("component", sbom.RUST_BINARIES)
+def test_rust_epoch_paths_match_no_rust_source_file(component):
+    """Guards against the defect this task fixed: `RUST_EPOCH_PATHS` used to include whole-
+    directory `crates/` (its `.rs` sources included), so ANY commit touching ANY `.rs` file made
+    every committed Rust SBOM go stale immediately, even though a Rust SBOM's content
+    (`rust_binary_sbom`'s `cargo auditable`/`cargo metadata` data) is a pure function of the
+    resolved dependency graph and never reads a `.rs` file at all. For each epoch path this
+    asserts the set of git-tracked files it actually matches (`git ls-files -- <path>`) is
+    non-empty and contains no `.rs` file -- it must fail again the moment `crates/` (or any
+    `**/*.rs` pattern) is put back in `RUST_EPOCH_PATHS`."""
+    for path in sbom.epoch_paths_for(component):
+        result = subprocess.run(
+            ["git", "ls-files", "--", path], cwd=REPO_ROOT, capture_output=True, text=True,
+            check=True,
+        )
+        matched = [line for line in result.stdout.splitlines() if line.strip()]
+        assert matched, f"epoch path {path!r} (component {component!r}) matches no tracked file"
+        rust_sources = [f for f in matched if f.endswith(".rs")]
+        assert not rust_sources, (
+            f"epoch path {path!r} (component {component!r}) matches .rs source file(s), which "
+            f"can never change a Rust SBOM's content: {rust_sources}"
+        )

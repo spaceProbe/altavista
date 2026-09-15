@@ -41,11 +41,31 @@ this is visible from the SBOM file alone, not only from this README.
 
 `metadata.timestamp` in every SBOM is **not** `datetime.now()` — it's the committer date
 (`git log -1 --format=%cI`, converted to UTC, printed with a literal `Z`) of the last commit
-that touched that component's own **inputs**: a Rust component's `Cargo.lock`/`Cargo.toml`/
-`crates/`; an image's `IMAGE_DIGEST.md` and, where one exists, `IMAGE_CONTEXT_MANIFEST.txt`; a
-Python component's `pyproject.toml` **alone**. `serialNumber` is likewise derived — a SHA-256
-over the component's name and its own epoch, reformatted into a UUID's canonical hex grouping —
-rather than a real random `uuid.uuid4()`.
+that touched that component's own **inputs**: a Rust component's `Cargo.lock`, the workspace
+`Cargo.toml`, and every crate's own `Cargo.toml` (the pathspec `crates/*/Cargo.toml`); an
+image's `IMAGE_DIGEST.md` and, where one exists, `IMAGE_CONTEXT_MANIFEST.txt`; a Python
+component's `pyproject.toml` **alone**. `serialNumber` is likewise derived — a SHA-256 over the
+component's name and its own epoch, reformatted into a UUID's canonical hex grouping — rather
+than a real random `uuid.uuid4()`.
+
+**Why the Rust epoch is `Cargo.lock`/`Cargo.toml`/`crates/*/Cargo.toml`, not all of `crates/`.**
+A Rust SBOM's package list comes from `cargo auditable`'s embedded dependency data
+(`rust_binary_sbom` → `_cargo_auditable_build` → `_rust_audit_info`) with licences joined from
+`cargo metadata` — both are pure functions of the *resolved dependency graph*: `Cargo.lock` and
+the workspace's and each crate's own `Cargo.toml` manifest (its declared dependencies and
+features). Neither step ever reads a `.rs` file's text, so a source-only change cannot change
+either one's output. `RUST_EPOCH_PATHS` used to be `["Cargo.lock", "Cargo.toml", "crates/"]` —
+whole-directory `crates/`, sources included — which made this the same class of defect as D2-1
+below: commit `3bc12e6` ("Stop two tests from depending on this host's own state") touched only
+`crates/av-lockstep/src/docker_test_lock.rs` (a `.rs` file, no manifest, no `Cargo.lock` change)
+and a test file, yet because `crates/` was an epoch input it became the new epoch commit for
+*all six* Rust SBOMs, immediately making every committed one stale — a gate failure nobody
+caused, over a commit that could not possibly have changed a single package or licence in any
+of them. Narrowing to `crates/*/Cargo.toml` (confirmed against this tree: `git ls-files --
+'crates/*/Cargo.toml'` lists exactly the 18 crate manifest files and no `.rs` file, and no crate
+nests a `Cargo.toml` any deeper than `crates/<name>/Cargo.toml`) makes the true epoch commit
+`d65c360` (`Merge branch 'develop' into edge`, which last touched `Cargo.lock`) instead — the
+last commit that could actually have changed a Rust SBOM's content.
 
 **Why the Python epoch is `pyproject.toml` alone, not a component source path too.** A Python
 SBOM's content is `importlib.metadata` over the shared worktree `.venv` — the set of *installed
@@ -54,12 +74,13 @@ that set (`[project.dependencies]`/`[project.optional-dependencies]`); editing
 `altavista/server.py` or anything under `services/gmat-service/` cannot add, remove, or change
 the version of a single package in the SBOM, so an earlier revision that included those paths in
 the epoch made the *committed* SBOM go stale the instant an unrelated later commit touched them
-— a gate failure nobody caused. Now the only commit that can invalidate a Python SBOM is one
-that changes `pyproject.toml`, which is exactly when the installed dependency set is capable of
-having changed, and is a drift signal worth acting on. (Confirmed safe for the other two kinds
-too: a commit that only adds `pyproject.toml`'s licence field, for example, touches none of
-`Cargo.lock`/`Cargo.toml`/`crates/` or either image's `IMAGE_DIGEST.md`, so it cannot silently
-invalidate a Rust or image SBOM the same way.)
+— a gate failure nobody caused, the identical shape of defect the Rust epoch had. Now the only
+commit that can invalidate a Python SBOM is one that changes `pyproject.toml`, which is exactly
+when the installed dependency set is capable of having changed, and is a drift signal worth
+acting on. (Confirmed safe for the other two kinds too: a commit that only adds
+`pyproject.toml`'s licence field, for example, touches none of `Cargo.lock`/`Cargo.toml`/
+`crates/*/Cargo.toml` or either image's `IMAGE_DIGEST.md`, so it cannot silently invalidate a
+Rust or image SBOM the same way.)
 
 The point of both is the same: **regenerating an SBOM from unchanged inputs must produce the
 byte-identical file.** A wall-clock timestamp or a random UUID would make every regeneration a

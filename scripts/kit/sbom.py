@@ -96,9 +96,21 @@ RUST_BINARIES: dict[str, tuple[str, str]] = {
     "av-edge-plugin": ("av-ingest-client", "av-edge-plugin"),
 }
 
-#: Every Rust SBOM's epoch comes from the SAME three workspace-wide paths (Decision H's own
-#: literal instruction), not a per-crate path -- so all six Rust SBOMs share one epoch.
-RUST_EPOCH_PATHS = ["Cargo.lock", "Cargo.toml", "crates/"]
+#: A Rust SBOM's content (`rust_binary_sbom` below) comes from `cargo auditable`'s embedded
+#: dependency data plus `cargo metadata`'s licence map -- both are pure functions of the
+#: *resolved dependency graph*: `Cargo.lock` and the workspace's and every crate's own
+#: `Cargo.toml` manifest (features/dependencies/version). A `.rs` source file is never read by
+#: either step, so it cannot change what either produces. Whole-directory `"crates/"` (its `.rs`
+#: sources included) was an epoch input until this was measured to be the same class of defect
+#: D2-1 already fixed for the Python components below: any commit touching any crate's source
+#: -- with no dependency-graph change at all -- made every committed Rust SBOM go stale
+#: immediately, a gate failure nobody caused (see docs/compliance/sbom/README.md's
+#: "Determinism" section for the measured before/after commit). `"crates/*/Cargo.toml"` is a
+#: git pathspec matching every crate's own manifest directly (confirmed against this tree:
+#: `git ls-files -- 'crates/*/Cargo.toml'` lists exactly the 18 crate `Cargo.toml` files, no
+#: `.rs` file, no nesting deeper than `crates/<name>/Cargo.toml` in this workspace) -- so all
+#: six Rust SBOMs still share one epoch, now over only the paths that can actually change one.
+RUST_EPOCH_PATHS = ["Cargo.lock", "Cargo.toml", "crates/*/Cargo.toml"]
 
 #: Python components. Both read the IDENTICAL installed-distribution set from the one shared
 #: worktree `.venv` (D2-4: there is no per-component venv) -- so, unlike a Rust binary's linked
