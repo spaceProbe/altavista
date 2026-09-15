@@ -83,8 +83,13 @@ Recorded digest (re-pinned 2026-09-12 by the lead for the mirror-backed fetch, s
 `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d
+sha256:dea163a1bad929b53c27498e182dadc62ef0f63cb6a63ac73dd1ac31bf6cded2
 ```
+
+Re-pinned 2026-09-15 after the user reclaimed the Colima VM disk (question 196(d): the
+kubelet garbage collector had removed the tag a sixth time); rebuilt from an empty cache with
+the same Dockerfile, so the ID moved and the runtime-content hash below did not. The
+previous recorded ID was `sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d`.
 
 Recorded runtime-content hash for this pin (question 185, see the definition above; unchanged
 by the 2026-09-12 re-pin, which is the point of that hash):
