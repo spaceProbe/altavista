@@ -740,6 +740,14 @@ def _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_auth
         # subject ("av-proposer-it", this file's own _mint_rs256_jwt subject above), never
         # MODEL_NODE_ID -- av-proposer itself now sends an empty declared `principal`.
         assert evidence.model_identity == "av-proposer-it", evidence.model_identity
+        # R5.1b defect 2 (the manager's review of R5.1): making `model_identity` the verified
+        # subject had silently cost this record the one thing milestone A4 names -- "attributing
+        # the proposal to the model identity AND version". `model_node_id` is the additive,
+        # explicitly caller-DECLARED field that carries the model's own identity back, and this
+        # is the only place in the tree where that attribution is proven END TO END: a real
+        # container, a real gateway, a real ledger record read back off disk. Without this
+        # assertion the restored field could go empty again and nothing here would fail.
+        assert evidence.model_node_id == MODEL_NODE_ID, evidence.model_node_id
         assert evidence.model_version == MODEL_VERSION, evidence.model_version
         assert evidence.run.run_id == FIXTURE_RUN_ID, evidence.run.run_id
         assert evidence.query_ids, "ProposalEvidence.query_ids must be non-empty (D5: what the model saw)"
@@ -751,7 +759,8 @@ def _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_auth
             f"real ledger Command: state={proposed_command.state} entity_id={proposed_command.entity_id} "
             f"command_class={proposed_command.command_class} transitions={len(proposed_command.transitions)}\n"
             f"real evidence ledger ProposalEvidence: model_identity={evidence.model_identity} "
-            f"model_version={evidence.model_version} run_id={evidence.run.run_id} query_ids={list(evidence.query_ids)}"
+            f"model_node_id={evidence.model_node_id} model_version={evidence.model_version} "
+            f"run_id={evidence.run.run_id} query_ids={list(evidence.query_ids)}"
         )
 
         # -----------------------------------------------------------------------------------
