@@ -6,6 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "altavista"
 version = "0.1.0"
 description = "Build GMAT scenarios in Python and view them in a shared Three.js browser viewer"
+# D2 (docs/compliance/sbom): matches Cargo.toml's [workspace.package] license = "Apache-2.0" --
+# without this, the venv reports `altavista 0.1.0` with no license metadata at all (no
+# `[project].license`), which showed up in the SBOM as a hole rather than the real license.
+license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.110",
