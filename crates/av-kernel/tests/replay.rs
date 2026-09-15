@@ -118,7 +118,6 @@ use av_kernel::drm::replay::ReplayConfig;
 use av_kernel::drm::{execute, hash, schema, DrmError, RunConfig};
 use gmat_sys::Gmat;
 use prost::Message as _;
-use sha2::{Digest, Sha256};
 
 fn drms_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../drms").join(name)
@@ -156,9 +155,12 @@ fn scratch_dir(label: &str) -> PathBuf {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = openssl::sha::sha256(bytes);
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// `drms/demo_attitude_control.*.yaml` -- the closed-loop fixture T1b uses. Four

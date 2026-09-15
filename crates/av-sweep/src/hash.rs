@@ -7,9 +7,10 @@
 //! **`sha256_hex` is reimplemented here, deliberately.** `av_kernel::drm::hash::sha256_hex`
 //! exists and does exactly this, but it is `pub(crate)` there (scoped to `av-kernel` itself,
 //! for `executor::execute`'s own `RunProducts.port_traffic_hash` use) -- not reachable from this
-//! crate. This is a second, independent one-line wrapper around the same `sha2::Sha256`
-//! (already a workspace dependency, pure Rust, no bundled C crypto per ADR-004), not a new
-//! hashing scheme.
+//! crate. This is a second, independent one-line wrapper around `openssl::sha::sha256` (the
+//! system OpenSSL, through the `openssl` crate -- question 204 migrated this off `sha2`, now
+//! banned workspace-wide in the root `deny.toml`'s `[bans]` list, per ADR-004's crypto rule),
+//! not a new hashing scheme.
 //!
 //! **`canonical_drm_hash`/`canonical_sos_hash`/`canonical_system_hash`, by contrast, are NOT
 //! reimplemented here.** Those three *are* `pub` on `av_kernel::drm::hash`, so
@@ -47,14 +48,25 @@
 use std::collections::BTreeMap;
 
 use av_cdm::pb;
-use sha2::{Digest, Sha256};
 
 use crate::error::SweepError;
 
 /// SHA-256 hex digest of arbitrary bytes. See the module doc comment for why this crate has its
 /// own copy rather than reusing `av_kernel::drm::hash::sha256_hex` (`pub(crate)` there).
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex_encode(&openssl::sha::sha256(bytes))
+}
+
+/// Lowercase-hex encode, matching every other SHA-256 call site in this workspace
+/// (`crates/av-command/src/ledger.rs`, `crates/av-dynamics-service/src/evidence.rs`): `[u8; 32]`
+/// (what `openssl::sha::sha256` returns) has no `{:x}` `Formatter` impl the way `sha2`'s
+/// `GenericArray` did, so this is the local replacement for the old `format!("{:x}", ...)`.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// The canonical hash of `sweep`, as if its own `hash` field were empty.

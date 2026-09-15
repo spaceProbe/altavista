@@ -15,6 +15,11 @@ repository.workspace = true
 av-grpc = { path = "../av-grpc" }
 av-cdm = { path = "../av-cdm" }
 thiserror.workspace = true
+# Question 207: `docker_test_lock.rs`'s host-wide docker-test lock needs a raw `flock(2)` call
+# (the whole reason this dependency exists at all -- see the root Cargo.toml's own comment on
+# this line for why `flock`, not a PID-file/Mutex scheme, and why `libc` rather than `fs2`/
+# `fs4`/`nix`).
+libc.workspace = true
 
 # Same restricted feature set as av-grpc's own tonic dependency (default-features off, no
 # `tls`/`tls-native-roots`/`tls-webpki-roots`) -- see av-grpc/Cargo.toml's comment on why: those

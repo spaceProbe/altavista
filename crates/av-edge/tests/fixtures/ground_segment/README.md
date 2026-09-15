@@ -28,7 +28,16 @@ change (their own committed `hash:` fields would need repinning too).
 - `RunProducts.port_traffic_hash` (SHA-256 hex of `port_traffic.pb`'s exact bytes):
   `c548a78c80954c2a6a159d2b27df10e9f55213e2bed2a1628332b31a63e93dc7`
 - `RunProducts.provenance.run_id`: `e4a-demo-ground-segment-fixture`
-- `drms/demo_ground_segment.drm.yaml` hash: `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0`
+- `drms/demo_ground_segment.drm.yaml` hash **at the time this fixture was generated**:
+  `7a5944b319fa0dd6f5781c616a75beac94d94fa8d986e5f0b8eaaa46890412d0` -- recorded provenance
+  only (`RunProducts.provenance.config_hash`/`Trajectory.config_hash`), never re-verified
+  against the DRM's own live, committed `hash:` field by any test (question 207 traced every
+  reader of this fixture: only `run_id`/`created_tai_ns` are ever pulled back out of
+  `RunProducts.provenance`). Round 4 (question 207) registered `earth_fixed_demo_frame` in
+  this DRM's own `scenario.frames`, which moved its committed `hash:` field to
+  `c736e887531cded74bb95de2b319011e7285a148bed9e38f768cc19ab369e2e2` -- that is now a
+  deliberate, harmless mismatch with the value above; regenerate only if something ever
+  starts checking it.
 - `drms/demo_ground_segment.sos.yaml` hash: `111ed78f4e7a0a0055bffddc320a142a5ffde3881161649ca9875ee5a8fae4f2`
 - `drms/demo_ground_segment_flight.system.yaml` hash: `0f7f191b664f7f28dc09f0505d8e1505f0f1601952dd32d5f3260addeca5f32e`
 - `run_products.pb`: 61628 bytes

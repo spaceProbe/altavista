@@ -115,6 +115,67 @@
 # Dockerfile's own ENTRYPOINT), exactly `av-edge-plugin`'s own module doc's "every knob is a
 # command-line argument, never an environment variable" rule (question 199), applied one
 # level up to the container boundary too.
+#
+# ------------------------------------------------------------------------------------------
+# Container hardening (question 207's ruling on edge round 3's review defect 2) -- the
+# EXPECTED RUN POSTURE, and what is/is not implemented here
+# ------------------------------------------------------------------------------------------
+# ADR-004's "Plugins are untrusted code" bullet (docs/adr/004-security-boundary-and-evidence.md)
+# describes a rootless-podman, Quadlet-managed, UBI9-FIPS-base plugin container. Question 207
+# ruled that split explicitly: rootless podman, Quadlet unit management, and the UBI9 FIPS base
+# image are the PRODUCTION substrate's concern (ADR-003, secdeploy on fedora-fips) -- NOT
+# reproducible with Docker on Colima (this development host has no podman, no Quadlet, no UBI9
+# FIPS entitlement), and this Dockerfile does not attempt them. What Docker on Colima CAN express
+# is implemented here and asserted from `docker inspect`/`docker exec` of a RUNNING container by
+# `tests/test_edge_plugin_container.py` (gated on this image) and, in a self-contained form that
+# runs on this host today regardless of whether this image has been built, by
+# `tests/test_edge_plugin_hardening_alpine.py` (see that file's own module doc for why the second
+# test exists and exactly what it shares with this one).
+#
+# This image expects to be run as:
+#
+#   docker run --rm \
+#     --read-only \
+#     -v <a-docker-volume>:/var/lib/edge-plugin \
+#     --cap-drop ALL \
+#     --security-opt no-new-privileges \
+#     av-edge-plugin:local <trailing --flags>
+#
+# (no `--security-opt seccomp=...` at all -- the DEFAULT seccomp profile Docker applies to every
+# container unless overridden is what is asserted; `--security-opt seccomp=unconfined` must never
+# be used to run this image, since that would disable the one hardening item enforced purely by
+# the caller rather than baked into the image itself).
+#
+#   * Non-root user: this image creates and runs as a dedicated, unprivileged, non-login user
+#     (see the `groupadd`/`useradd` below) -- `USER` is this Dockerfile's own last
+#     identity-affecting instruction, so ENTRYPOINT never runs as root.
+#   * Read-only root: `--read-only` (a `docker run` flag, not a Dockerfile instruction -- there
+#     is no Dockerfile-level equivalent) is what this image is built to tolerate. The ONE
+#     writable path under a read-only root is `/var/lib/edge-plugin` (declared `VOLUME` below,
+#     owned by the dedicated user) -- this is where `--buffer-dir`'s durable edge buffer
+#     (`crates/av-ingest-client/src/bin/av-edge-plugin.rs`'s own "`--buffer-dir`: E6's durable
+#     edge buffer, opt-in" doc section; the buffer file is `<producer_id>.buflog`) is meant to be
+#     pointed, e.g. `--buffer-dir /var/lib/edge-plugin`. `av-edge-plugin` itself writes nowhere
+#     else: no other file, no log file, no temp directory anywhere in its own code path.
+#   * `--cap-drop ALL`: this image needs no Linux capability at all (it opens no privileged
+#     socket, binds no port below 1024, changes no ownership) -- dropping every one is pure
+#     hardening, never a functional requirement traded away.
+#   * `--security-opt no-new-privileges`: nothing in this image is setuid/setgid, so this is
+#     belt-and-suspenders against any future accidental setuid binary landing in the image, not a
+#     workaround for anything it does today.
+#   * Default seccomp profile: this image makes no unusual syscall (no `ptrace`, no raw sockets,
+#     no kernel module loading) -- Docker's own default seccomp profile (which blocks roughly 44
+#     "dangerous" syscalls out of ~300+) is sufficient and is never overridden.
+#
+# NOT implemented here, and why (production substrate's, per question 207):
+#   * Rootless podman -- this host runs Docker (rootful, via Colima's VM), not podman; there is
+#     no rootless *Docker* equivalent to switch to here.
+#   * Quadlet-managed units -- a podman/systemd integration; meaningless without podman.
+#   * UBI9 FIPS base image -- this image is `debian:bookworm-slim` (see "Pinning" above for why:
+#     it must byte-for-byte match the prebuild toolchain's own userland). Swapping to UBI9 would
+#     also require re-solving `libssl3`'s FIPS module and re-verifying `ldd` against a rebuilt
+#     binary -- out of scope for a container-hardening task and the production substrate's job
+#     per ADR-003/secdeploy, not this development image's.
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 LABEL org.altavista.project="altavista"
@@ -127,6 +188,19 @@ LABEL org.altavista.component="edge-plugin"
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends libssl3 \
     && rm -rf /var/lib/apt/lists/*
+
+# A dedicated, fixed, explicit uid/gid -- never a dynamically-allocated system id (which can
+# differ run to run / rebuild to rebuild on some base images, and would make a volume's
+# on-disk ownership drift out from under a fixed VOLUME declaration) and never uid/gid 0.
+# 10001 is chosen because every account `debian:bookworm-slim` itself declares (`/etc/passwd`)
+# is below 1000 (Debian's own system-account range), so 10001 cannot collide with anything the
+# base image already defines; it is also comfortably clear of typical host-account uid ranges
+# (usually < 10000 on macOS/Linux), so if this image's volume were ever inspected from the
+# Colima host directly, its ownership would not be mistaken for a real host user's. `--gid
+# edgeplugin --no-create-home --shell /usr/sbin/nologin`: no home directory and no shell this
+# image ever needs (it is never logged into interactively).
+RUN groupadd --gid 10001 edgeplugin \
+    && useradd --uid 10001 --gid edgeplugin --no-create-home --shell /usr/sbin/nologin edgeplugin
 
 WORKDIR /opt/edge-plugin
 
@@ -148,6 +222,22 @@ COPY crates/av-edge/tests/fixtures/ground_segment/port_traffic.pb /opt/edge-plug
 # and `crates/av-ingest/tests/plugin_wire.rs` already build and pin -- see that generator's
 # own module doc for how to regenerate it if that config ever changes).
 COPY services/edge-plugin/plugin-config.default.json /opt/edge-plugin/plugin-config.default.json
+
+# The ONE writable path under `--read-only` (see this file's own "Container hardening" header
+# section above). Created and owned by the dedicated non-root user now, before `USER` switches
+# identity below, so the user that will actually own the mounted volume's contents at runtime
+# already owns the mount point itself. `VOLUME` documents this as a distinct, declared mount
+# point (not just a directory that happens to be writable) -- `av-edge-plugin` writes nowhere
+# else (see the header comment above): no log file, no temp directory, no other path.
+RUN mkdir -p /var/lib/edge-plugin && chown edgeplugin:edgeplugin /var/lib/edge-plugin
+VOLUME ["/var/lib/edge-plugin"]
+
+# Last identity-affecting instruction (question 207): everything above this line -- installing
+# libssl3, creating the user, copying and chmodding the binary, creating and chowning the state
+# directory -- needs root. Nothing below it does. `av-edge-plugin` itself (ENTRYPOINT) therefore
+# always runs as uid/gid 10001, never as root, regardless of what `docker run` is told to do
+# (short of `--user root`, which the run posture documented above never uses).
+USER edgeplugin
 
 # ENTRYPOINT supplies every knob this image can supply on its own (the fixture paths and
 # the default config); `--signing-key` (a secret, never baked into an image) and

@@ -70,6 +70,13 @@ use std::path::Path;
 /// (question 118, M15.3).
 pub mod docker;
 
+/// The host-wide, cross-process, cross-language Docker-test lock (question 207) -- a private
+/// sibling module, re-exported as `av_lockstep::docker::{DockerTestLock, lock_docker_tests}`
+/// (see `docker.rs`'s own `pub use`) so every Docker-lifecycle name in this crate is reached
+/// through the same `docker` module. See `docker_test_lock`'s own module doc comment for the
+/// full account of the defect, the lock path, and why it needed a new dependency.
+mod docker_test_lock;
+
 pub use av_grpc::pb::{
     LockstepBindRequest, LockstepBindResponse, LockstepResetRequest, LockstepResetResponse, LockstepShutdownRequest, LockstepShutdownResponse, LockstepStepRequest, LockstepStepResponse,
 };

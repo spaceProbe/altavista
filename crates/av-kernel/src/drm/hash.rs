@@ -11,12 +11,14 @@
 //! `hash` cleared first) -- `prost::Message::encode_to_vec` is this crate's equivalent of
 //! `SerializeToString(deterministic=True)`.
 //!
-//! **Why `sha2`, not `openssl`.** The task brief allows `sha2` "if it is already a dependency
-//! somewhere in this workspace" -- it is: `crates/av-dynamics/src/lib.rs::settings_hash` uses
-//! it already (pure Rust, no bundled C crypto, matching ADR-004's crypto rule), so this module
-//! reuses the same crate rather than pulling in `openssl` for a second, unrelated hashing need.
-
-use sha2::{Digest, Sha256};
+//! **Why `openssl`, not `sha2`.** Question 204 (the lead's ruling) migrated every `sha2` call
+//! site in this workspace to `openssl::sha::sha256` and banned `sha2` outright in the root
+//! `deny.toml`'s `[bans]` list -- ADR-004's crypto rule is SHA-256 only, through the system
+//! OpenSSL only, with no carve-out for a non-security-critical fingerprint like this one. This
+//! module previously reused `crates/av-dynamics/src/lib.rs::settings_hash`'s `sha2` dependency
+//! on the same reasoning; both now hash through `openssl::sha::sha256` instead, with the
+//! identical bytes in and the identical hex digest out (proved by this crate's own golden and
+//! hash-pinning tests, none of which moved).
 
 use av_cdm::pb::{DesignReferenceMission, SosConfiguration, SystemDefinition};
 
@@ -24,14 +26,24 @@ use super::DrmError;
 
 /// SHA-256 hex digest of arbitrary bytes -- `pub(crate)` (question 175, M25.4a) so `executor::
 /// execute` can reuse this crate's one SHA-256 helper for `RunProducts.port_traffic_hash`
-/// (the `PortTrafficLog` sidecar's own hash) rather than hand-rolling a second call to `sha2`
-/// or pulling in a new crate. Every other caller in this module still goes through the
-/// `canonical_*_hash` wrappers below, which additionally clear a message's own `hash` field
-/// first -- this is the one raw primitive underneath all of them.
+/// (the `PortTrafficLog` sidecar's own hash) rather than hand-rolling a second call to
+/// `openssl::sha::sha256` or pulling in a new crate. Every other caller in this module still
+/// goes through the `canonical_*_hash` wrappers below, which additionally clear a message's
+/// own `hash` field first -- this is the one raw primitive underneath all of them.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex_encode(&openssl::sha::sha256(bytes))
+}
+
+/// Lowercase-hex encode, matching every other SHA-256 call site in this workspace
+/// (`crates/av-command/src/ledger.rs`, `crates/av-dynamics-service/src/evidence.rs`): `[u8; 32]`
+/// (what `openssl::sha::sha256` returns) has no `{:x}` `Formatter` impl the way `sha2`'s
+/// `GenericArray` did, so this is the local replacement for the old `format!("{:x}", ...)`.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// The canonical hash of `drm`, as if its own `hash` field were empty.

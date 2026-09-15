@@ -43,11 +43,11 @@
 //! external oracle: a script (kept at
 //! `/private/tmp/claude-501/-Users-probe-code-AltaVista/ed238b37-d349-42f1-956b-22807101027f/scratchpad/f1a-seed-oracle.py`,
 //! named again in `crates/av-sweep/REPORT.md`) writes the exact input bytes for each test vector
-//! to a file, and the system `shasum -a 256` binary (not this crate's own `sha2` dependency) is
-//! run over that file to produce the expected digest -- see that test's own comment for the
-//! exact commands and the resulting values.
-
-use sha2::{Digest, Sha256};
+//! to a file, and the system `shasum -a 256` binary (not this crate's own `openssl::sha::sha256`
+//! call -- question 204 migrated this module off `sha2`, now banned workspace-wide in the root
+//! `deny.toml`'s `[bans]` list, per ADR-004's crypto rule) is run over that file to produce the
+//! expected digest -- see that test's own comment for the exact commands and the resulting
+//! values.
 
 use crate::error::SweepError;
 
@@ -75,7 +75,7 @@ pub fn derive_seed(base_seed: u64, sweep_hash: &str, point_index: u32, draw_inde
     buf.extend_from_slice(&(key.len() as u32).to_be_bytes());
     buf.extend_from_slice(key.as_bytes());
 
-    let digest = Sha256::digest(&buf);
+    let digest = openssl::sha::sha256(&buf);
     let mut eight = [0u8; 8];
     eight.copy_from_slice(&digest[0..8]);
     Ok(u64::from_be_bytes(eight))

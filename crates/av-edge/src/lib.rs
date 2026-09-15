@@ -83,12 +83,14 @@
 //!   [`identity::verify_batch_signed_by`] is the E1/E2 bridge: it checks a batch's
 //!   declared `signer_cert_sha256` against a verified identity's own fingerprint before
 //!   ever spending a signature verification on it.
-//! - [`plugin`] -- milestone E4: the first plugin, a simulated asset. A reusable,
-//!   pure/testable plugin library ([`plugin::PluginConfig`], [`plugin::MeasurementSource`]/
-//!   [`plugin::PortTrafficSource`], [`plugin::BatchingRule`]/[`plugin::Pacing`],
-//!   [`plugin::BatchBuilder`]) with no network code, no clock reads and no sleeping
-//!   anywhere -- see that module's own doc comment for exactly what this milestone
-//!   replays and why.
+//! - [`plugin`] -- milestone E4: a reusable, pure/testable plugin library
+//!   ([`plugin::PluginConfig`], [`plugin::MeasurementSource`], [`plugin::BatchingRule`]/
+//!   [`plugin::Pacing`], [`plugin::BatchBuilder`]) with no network code, no clock reads
+//!   and no sleeping anywhere, and two [`plugin::MeasurementSource`] implementations built
+//!   on it: [`plugin::PortTrafficSource`] (the first plugin, a simulated asset's recorded
+//!   telemetry) and [`plugin::adsb::AdsbCsvSource`] (the second, question 200(a): an
+//!   ADS-B replay from a committed, synthetic CSV sample) -- see each module's own doc
+//!   comment for exactly what it replays and why.
 //! - [`buffer`] -- milestone E6: [`buffer::EdgeBuffer`], the edge-side durable, file-
 //!   backed log of already-signed batches (mirroring `crates/av-ingest/src/log.rs`'s own
 //!   record framing on purpose -- see that module's own doc for exactly what is mirrored

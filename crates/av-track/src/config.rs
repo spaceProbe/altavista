@@ -258,19 +258,28 @@ impl TrackConfig {
     /// **Why this exists at all, and why it lives here rather than in `av-cdm`.** The real,
     /// committed E4 fixture's own measurements carry `frame_id = "earth_fixed_demo_frame"`
     /// (`av_edge::plugin::PluginConfig.frame_id`, copied verbatim from `drms/
-    /// demo_ground_segment_flight.system.yaml`'s own `parameters: frame_id`), but that
-    /// string is a `scenario.frames` registry id, and the DRM's own `scenario.frames` block
-    /// (`drms/demo_ground_segment.drm.yaml`) declares exactly one frame --
-    /// `ground_station_enu` -- never `earth_fixed_demo_frame`. There is therefore no
-    /// `FrameDefinition` on disk anywhere to look up, and the DRM cannot be made to declare
-    /// one: its canonical hash is embedded in the committed, GMAT-generated fixture
-    /// binaries (`crates/av-edge/tests/fixtures/ground_segment/*.pb`) that E4's pinned
-    /// chain-hash goldens depend on byte-for-byte, so changing it would invalidate them.
-    /// The consequence (the round 2 lead's ruling, question 205's "frame-namespace gap"):
-    /// the registry is a parameter the *caller* supplies, and this crate is that caller --
-    /// it declares the `FrameDefinition` the DRM's own `frame_id` parameter means, in its
-    /// own config, as the narrowest thing that lets `frame_id` resolve without touching the
-    /// DRM or its pinned hash.
+    /// demo_ground_segment_flight.system.yaml`'s own `parameters: frame_id`). As of round 4
+    /// (question 207), `drms/demo_ground_segment.drm.yaml`'s own `scenario.frames` block
+    /// *also* declares this id (alongside `ground_station_enu`) -- round 3's blocker (the
+    /// DRM's canonical hash is embedded, as inert recorded provenance, in the committed
+    /// `crates/av-edge/tests/fixtures/ground_segment/*.pb` fixture binaries) turned out not
+    /// to be a real one on inspection: question 207 traced every reader of that embedded
+    /// hash and found nothing -- not `av-edge`, not `av-ingest`, not this crate -- ever
+    /// re-verifies it against a freshly computed hash of the DRM; only `run_id`/
+    /// `created_tai_ns` are ever pulled back out of `RunProducts.provenance` downstream, and
+    /// E4's pinned chain head is built from `PluginConfig`/batch content and the run id, never
+    /// from the DRM's hash. So the DRM could be, and was, changed freely without touching any
+    /// pinned fixture or golden.
+    ///
+    /// That registration does **not**, however, make this method (or [`Self::frame_id`]/
+    /// [`Self::frame_origin_body`]/[`Self::frame_description`]) redundant, and none of them
+    /// were removed: this crate has no code path that ever reads `Scenario.frames` or
+    /// `RunProducts.frames` at all -- [`crate::bridge::EngineBridge::run`] resolves every
+    /// frame purely from this method's own return value, never from anything the DRM or its
+    /// executor produced. The registry is still a parameter the *caller* supplies, and this
+    /// crate is still that caller -- registering the id in the DRM only fixed the DRM's own
+    /// missing declaration (a genuine gap in its own right, for the CDM/viewer's frame
+    /// graph), it did not, and structurally could not, wire that registry through to here.
     ///
     /// **Why `AXES_KIND_BODY_FIXED` about `frame_origin_body`, not `ENU`/`NED` or an
     /// inertial kind.** Taken from the DRM's own words, not chosen for convenience: `drms/
