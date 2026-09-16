@@ -16,29 +16,38 @@
 # than for the edge plugin, not merely the identical wall)
 # ------------------------------------------------------------------------------------------
 # services/edge-plugin/Dockerfile's own header comment already root-causes this same wall
-# for `av-edge-plugin`: the root workspace `Cargo.toml` pins `spoore-cdm` to an ABSOLUTE HOST
-# PATH (`spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }`), which a
-# `docker build`'s isolated context cannot reach, and this host's classic (non-BuildKit)
-# builder has no host-path bind-mount mechanism at all to work around it (question 196(a)).
-# `av-proposer` (crates/av-proposer/Cargo.toml) hits the IDENTICAL wall through TWO absolute
-# host path dependencies, not one: `spoore-cdm.workspace = true` (the same one) AND
+# for `av-edge-plugin`: the root workspace `Cargo.toml` pins `spoore-cdm` to a HOST PATH
+# outside this repository -- a relative sibling path since question 219(c) (`spoore-cdm =
+# { path = "../spoore/crates/spoore-cdm" }`), which a `docker build`'s isolated context
+# cannot reach, and this host's classic (non-BuildKit) builder has no host-path bind-mount
+# mechanism at all to work around it (question 196(a)). `av-proposer`
+# (crates/av-proposer/Cargo.toml) hits the IDENTICAL wall through TWO spoore host path
+# dependencies, not one: `spoore-cdm.workspace = true` (the same relative one) AND
 # `spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }` (D2's real
 # `spoore_models::KalmanFilter` this crate's ModelService implementation genuinely runs, per
-# decision 11(b) -- never a stub). Its own `build.rs` also reads
+# decision 11(b) -- never a stub) -- STILL an absolute host path, unlike spoore-cdm:
+# question 219(b)/(c) asked every track to convert its own files, and crates/av-proposer is
+# off-limits to the P5 track (the heavy team's remaining half). Its own `build.rs` also reads
 # `/Users/probe/code/spoore/proto/spoore/v0/model_service.proto` directly off the host
 # filesystem at compile time (see that file's own module doc, "spoore's ModelService contract
-# (D2), server only") -- a THIRD host-path dependency a `docker build` context cannot supply
-# BuildKit or not. The accepted, already-precedented answer (`av-lockstep-shim`'s own original
-# case, then `av-edge-plugin`'s) is identical regardless of how many host paths are involved:
+# (D2), server only") -- likewise still absolute, a THIRD host-path dependency a
+# `docker build` context cannot supply BuildKit or not. The accepted, already-precedented
+# answer (`av-lockstep-shim`'s own original case, then `av-edge-plugin`'s) is identical
+# regardless of how many host paths are involved, or whether they're relative or absolute:
 # prebuild the binary OUTSIDE `docker build`, with a real `docker run` bind mount (which --
 # unlike `docker build` -- has always supported host-path bind mounts), strip it, and `COPY`
 # the resulting stripped binary into the image as a build artifact, never compiled by the
 # Dockerfile itself. This Dockerfile follows that SAME precedent, automated (not hand-run) by
-# services/proposer/build-image.sh's own "prebuild" step, which runs:
+# services/proposer/build-image.sh's own "prebuild" step, which runs (SPOORE_ROOT defaults to
+# the sibling checkout `../spoore`, question 219(b); mounted TWICE -- once at the sibling of
+# the workspace mount, for spoore-cdm's own relative resolution, and once at the fixed
+# absolute path av-proposer's still-absolute dependencies expect, regardless of where
+# SPOORE_ROOT itself lives on the host):
 #
 #   docker run --rm \
 #     -v "$(pwd)":/workspace \
-#     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
+#     -v "${SPOORE_ROOT}":/spoore:ro \
+#     -v "${SPOORE_ROOT}":/Users/probe/code/spoore:ro \
 #     -w /workspace \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
 #     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \

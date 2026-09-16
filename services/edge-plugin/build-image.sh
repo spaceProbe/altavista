@@ -6,9 +6,11 @@
 # for exactly why THIS script, not the Dockerfile, has to run the real `cargo build`).
 #
 # What this does, in order:
-#   1. Preconditions: docker installed and running, git present, the Dockerfile present,
-#      and /Users/probe/code/spoore present (the cross-build below needs it bind-mounted --
-#      see the Dockerfile's header comment for why).
+#   1. Preconditions: docker installed and running, git present, the Dockerfile present, and
+#      a spoore checkout present at SPOORE_ROOT -- an environment override, defaulting to
+#      the sibling checkout `../spoore` next to this repository's own root (question 219(b),
+#      question 12's convention) -- the cross-build below needs it bind-mounted (see the
+#      Dockerfile's header comment for why).
 #   2. Starts a live `docker events` capture for this script's own full execution window
 #      (question 194's round-6 amendment -- verbatim precedent from services/cfs/
 #      build-image.sh, adapted paths only).
@@ -17,7 +19,8 @@
 #      run's now-superseded `av-edge-plugin:local` tag left behind; the currently-tagged
 #      image, if any, is about to be replaced by step 5 regardless).
 #   4. Prebuilds `av-edge-plugin`, stripped, via a real `docker run` bind-mounting BOTH this
-#      repository and /Users/probe/code/spoore (read-only) into a pinned `rust:1.90-bookworm`
+#      repository and SPOORE_ROOT (read-only, at the sibling of the repository's own mount
+#      point -- question 219(b)/(c)) into a pinned `rust:1.90-bookworm`
 #      container -- see services/edge-plugin/Dockerfile's own header comment for the exact
 #      command and why a plain `docker build` cannot do this. Writes services/edge-plugin/
 #      bin/av-edge-plugin (git-ignored, a build artifact -- services/cfs/bin/av-lockstep-shim's
@@ -62,7 +65,20 @@ BIN_DIR="${SCRIPT_DIR}/bin"
 BIN_PATH="${BIN_DIR}/av-edge-plugin"
 DIGEST_DOC="${SCRIPT_DIR}/IMAGE_DIGEST.md"
 EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
-SPOORE_HOST_PATH="/Users/probe/code/spoore"
+# Question 219(b): SPOORE_ROOT overrides the spoore checkout used for the cross-build below;
+# unset, it defaults to the sibling checkout next to this repository's own root (question
+# 12's convention, matching the root Cargo.toml's own `spoore-cdm = { path = "../spoore/
+# crates/spoore-cdm" }`, question 219(c)). Resolved to an absolute, existing path below --
+# never left as a possibly-relative string a later `cd`/mount could misinterpret.
+SPOORE_ROOT="${SPOORE_ROOT:-${REPO_ROOT}/../spoore}"
+# The container mount destination for spoore matters (see the Dockerfile's own header
+# comment): with spoore-cdm now a RELATIVE sibling path dependency, `../spoore` is resolved
+# INSIDE the container relative to wherever this repository is mounted -- CONTAINER_WORKSPACE
+# below, `/workspace` -- so spoore's own mount destination is computed as that mount point's
+# sibling, in this one place, rather than hardcoded twice (once here, once implicitly by the
+# Dockerfile comment).
+CONTAINER_WORKSPACE="/workspace"
+SPOORE_CONTAINER_PATH="$(dirname "${CONTAINER_WORKSPACE}")/spoore"
 # Pinned prebuild base -- see the Dockerfile's own header comment for how this digest was
 # resolved. R5.3 (question 208(a)): this was
 # `rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4`,
@@ -157,7 +173,8 @@ if ! docker info >/dev/null 2>&1; then
 fi
 command -v git >/dev/null 2>&1 || die "git binary not found on PATH."
 [ -f "${DOCKERFILE}" ] || die "Dockerfile not found at ${DOCKERFILE}"
-[ -d "${SPOORE_HOST_PATH}/crates/spoore-cdm" ] || die "${SPOORE_HOST_PATH}/crates/spoore-cdm not found -- the prebuild step below bind-mounts this exact path (see the Dockerfile's own header comment for why: av-cdm's spoore-cdm dependency is an absolute host path, not something a plain \`docker build\` can reach)."
+SPOORE_ROOT="$(cd "${SPOORE_ROOT}" 2>/dev/null && pwd)" || die "SPOORE_ROOT (${SPOORE_ROOT}) does not exist -- set SPOORE_ROOT to your spoore checkout, or place one at the sibling-checkout default ${REPO_ROOT}/../spoore (question 219(b))."
+[ -d "${SPOORE_ROOT}/crates/spoore-cdm" ] || die "${SPOORE_ROOT}/crates/spoore-cdm not found -- the prebuild step below bind-mounts SPOORE_ROOT (see the Dockerfile's own header comment for why: av-cdm's spoore-cdm dependency is a relative sibling path resolved inside the container, not something a plain \`docker build\` can reach)."
 
 start_events_capture
 
@@ -179,11 +196,11 @@ fi
 # inside `docker build`.
 mkdir -p "${BIN_DIR}"
 rm -rf "${SCRATCH_TARGET_DIR}"
-log "prebuilding av-edge-plugin (release, stripped) via ${PREBUILD_BASE_IMAGE} with ${SPOORE_HOST_PATH} bind-mounted read-only -- this is the one permitted network window (question 154): apt packages inside the prebuild container"
+log "prebuilding av-edge-plugin (release, stripped) via ${PREBUILD_BASE_IMAGE} with ${SPOORE_ROOT} bind-mounted read-only at ${SPOORE_CONTAINER_PATH} (the sibling of ${CONTAINER_WORKSPACE}, question 219(b)/(c)) -- this is the one permitted network window (question 154): apt packages inside the prebuild container"
 docker run --rm \
-    -v "${REPO_ROOT}:/workspace" \
-    -v "${SPOORE_HOST_PATH}:${SPOORE_HOST_PATH}:ro" \
-    -w /workspace \
+    -v "${REPO_ROOT}:${CONTAINER_WORKSPACE}" \
+    -v "${SPOORE_ROOT}:${SPOORE_CONTAINER_PATH}:ro" \
+    -w "${CONTAINER_WORKSPACE}" \
     "${PREBUILD_BASE_IMAGE}" \
     bash -c 'set -euo pipefail
         apt-get update -qq
