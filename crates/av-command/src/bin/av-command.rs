@@ -69,9 +69,13 @@ use av_command::pb::command_authority_service_server::CommandAuthorityServiceSer
 use av_command::policy::PolicyBundle;
 use av_command::service::{resolve_loopback_bind_address, AuthzConfig, CommandAuthorityServiceImpl, RecordingDispatchSink};
 
+/// Question 208(c): `docs/architecture.md` section 4, "Default ports", is the one owned port
+/// map for every service's default bind in this workspace -- this constant and
+/// `DEFAULT_ADMIN_BIND` below are its entry for `av-command`.
 const DEFAULT_BIND: &str = "127.0.0.1:50070";
 /// `av-dynamics-service`'s own +100-from-gRPC-port convention (`crates/av-dynamics-service/
-/// src/bin/server.rs`'s `DEFAULT_ADMIN_PORT`).
+/// src/bin/server.rs`'s `DEFAULT_ADMIN_PORT`). See `docs/architecture.md` section 4,
+/// "Default ports".
 const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:50170";
 const DEFAULT_RATE_WINDOW_NS: i64 = 3_600_000_000_000;
 

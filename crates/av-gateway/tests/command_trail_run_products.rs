@@ -45,10 +45,13 @@
 //! `CommandAuthorityService` are not wired here at all -- this is the read path alone), so this
 //! file's own harness stays local, mirroring `tests/propose_only.rs`'s identical pattern.
 
+mod auth_common;
+
 mod harness {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use av_gateway::auth::AuthContext;
     use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
     use av_gateway::counters::Counters;
     use av_gateway::gateway::{DataGatewayServiceImpl, DataGatewayServiceServer, GatewayCore};
@@ -73,7 +76,7 @@ mod harness {
     }
 
     impl GatewayServerHarness {
-        pub async fn spawn(entries: BTreeMap<String, CatalogueEntry>, ladder: ClearanceLadder) -> Self {
+        pub async fn spawn(entries: BTreeMap<String, CatalogueEntry>, ladder: ClearanceLadder, auth: Arc<AuthContext>) -> Self {
             let counters = Arc::new(Counters::new());
             let core = Arc::new(GatewayCore::new(RunCatalogue::new(entries), ladder, counters.clone()));
 
@@ -84,7 +87,7 @@ mod harness {
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
             let handle = tokio::spawn(async move {
                 Server::builder()
-                    .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core)))
+                    .add_service(DataGatewayServiceServer::new(DataGatewayServiceImpl::new(core, auth)))
                     .serve_with_incoming_shutdown(incoming, async {
                         let _ = shutdown_rx.await;
                     })
@@ -116,8 +119,10 @@ mod harness {
 use std::collections::BTreeMap;
 
 use av_cdm::pb::{EventKind, GatewayQueryRequest, GatewaySelector, Label, RunIdentity};
+use av_command::test_support::TestIssuer;
 use av_gateway::catalogue::CatalogueEntry;
 use av_gateway::labels::ClearanceLadder;
+use auth_common::{mint_token, test_auth_context, test_clock, TEST_NOW_UNIX_S, GROUP_CUI, GROUP_UNCLASSIFIED};
 use harness::GatewayServerHarness;
 use prost::Message as _;
 use tonic::Code;
@@ -137,12 +142,24 @@ fn catalogue_and_ladder(marking: &str) -> (BTreeMap<String, CatalogueEntry>, Cle
     (entries, ladder)
 }
 
-fn events_request(clearance: &str) -> GatewayQueryRequest {
+fn events_request(clearance: &str, caller_token: &str) -> GatewayQueryRequest {
     GatewayQueryRequest {
         run: Some(RunIdentity { run_id: RUN_ID.to_string(), config_hash: String::new() }),
         caller_clearance: clearance.to_string(),
         selector: GatewaySelector::Events as i32,
         caller_supplied_products_uri: String::new(),
+        caller_token: caller_token.to_string(),
+    }
+}
+
+/// The group name whose configured clearance (`crates/av-gateway/tests/common/mod.rs::
+/// test_auth_context`) equals `clearance` -- both this fixture's tests only ever ask for
+/// `"CUI"`/`"UNCLASSIFIED"`.
+fn group_for_clearance(clearance: &str) -> &'static str {
+    match clearance {
+        "CUI" => GROUP_CUI,
+        "UNCLASSIFIED" => GROUP_UNCLASSIFIED,
+        other => panic!("no test group configured for clearance {other:?}"),
     }
 }
 
@@ -173,9 +190,12 @@ fn the_fixture_is_the_real_command_trail_run_and_carries_the_expected_transition
 #[tokio::test]
 async fn the_gateway_serves_the_real_command_trail_over_a_real_socket_in_sorted_order() {
     let (entries, ladder) = catalogue_and_ladder("CUI");
-    let mut harness = GatewayServerHarness::spawn(entries, ladder).await;
+    let issuer = TestIssuer::new();
+    let auth = test_auth_context(&issuer, test_clock());
+    let mut harness = GatewayServerHarness::spawn(entries, ladder, auth).await;
+    let token = mint_token(&issuer, "operator-1", &[group_for_clearance("CUI")], TEST_NOW_UNIX_S, 3_600);
 
-    let resp = harness.client.query(events_request("CUI")).await.expect("EVENTS query over the real command-trail fixture").into_inner();
+    let resp = harness.client.query(events_request("CUI", &token)).await.expect("EVENTS query over the real command-trail fixture").into_inner();
     assert!(!resp.events.is_empty());
 
     // Sorted order, over the WHOLE response (not just the filtered subset below) -- proves the
@@ -215,16 +235,20 @@ async fn the_gateway_serves_the_real_command_trail_over_a_real_socket_in_sorted_
 #[tokio::test]
 async fn a_caller_below_the_fixtures_own_clearance_is_refused_over_the_real_socket_and_counted() {
     let (entries, ladder) = catalogue_and_ladder("CUI");
-    let mut harness = GatewayServerHarness::spawn(entries, ladder).await;
+    let issuer = TestIssuer::new();
+    let auth = test_auth_context(&issuer, test_clock());
+    let mut harness = GatewayServerHarness::spawn(entries, ladder, auth).await;
+    let unclassified_token = mint_token(&issuer, "operator-1", &[group_for_clearance("UNCLASSIFIED")], TEST_NOW_UNIX_S, 3_600);
+    let cui_token = mint_token(&issuer, "operator-1", &[group_for_clearance("CUI")], TEST_NOW_UNIX_S, 3_600);
 
-    let err = harness.client.query(events_request("UNCLASSIFIED")).await.expect_err("a caller below the fixture's own CUI label must be refused");
+    let err = harness.client.query(events_request("UNCLASSIFIED", &unclassified_token)).await.expect_err("a caller below the fixture's own CUI label must be refused");
     assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
     assert_eq!(harness.counters.get("label_over_clearance"), 1, "the refusal must be counted (ADR-004: everything rejected is counted)");
 
     // The identical query, at the fixture's own clearance, still succeeds against this same
     // running server -- proves the refusal above was genuinely about the caller's clearance,
     // not a broken server or a malformed request this fixture happens to trigger.
-    let ok = harness.client.query(events_request("CUI")).await.expect("the identical query at the fixture's own clearance must succeed");
+    let ok = harness.client.query(events_request("CUI", &cui_token)).await.expect("the identical query at the fixture's own clearance must succeed");
     assert!(!ok.into_inner().events.is_empty());
 
     harness.shutdown().await;

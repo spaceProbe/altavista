@@ -24,6 +24,12 @@ pub struct ProposerConfig {
     pub rule: RuleConfig,
     pub model: ModelIdentity,
     pub rationale_prefix: String,
+    /// R5.1/question 208(b): a compact-serialization JWS for this proposer's SERVICE subject,
+    /// carried on both `GatewayQueryRequest.caller_token` and `ProposeCommandRequest.
+    /// caller_token` -- `crates/av-proposer/src/bin/av-proposer.rs`'s own `--service-token-
+    /// file` flag reads it off disk (never a flag VALUE -- a flag value is visible in `ps` and
+    /// `docker inspect`; invariant G).
+    pub service_token: String,
 }
 
 /// Every way one run can be refused -- see the module doc. Every variant [`Counted`].
@@ -81,6 +87,7 @@ pub async fn run(client: &mut GatewayClient, config: &ProposerConfig, counters: 
         caller_clearance: config.caller_clearance.clone(),
         selector: GatewaySelector::Scores as i32,
         caller_supplied_products_uri: String::new(),
+        caller_token: config.service_token.clone(),
     };
     let response = client.query(request).await.map_err(|status| {
         let err = RunRefusal::GatewayQuery { detail: status.to_string() };
@@ -131,10 +138,22 @@ pub async fn run(client: &mut GatewayClient, config: &ProposerConfig, counters: 
         idempotency_key: idempotency_key.clone(),
         rationale: format!("{}: score {:?} drifted {drift_m:.6} m past reference {:.6} m (threshold {:.6} m); proposing a {burn_mps:.9} m/s correction (gain {:.9} (m/s)/m, clamp +-{:.6} m/s)", config.rationale_prefix, config.rule.score_name, config.rule.reference_radius_m, config.rule.threshold_m, config.rule.gain_per_s, config.rule.max_burn_mps),
         evidence_ids: vec![],
-        principal: config.model.node_id.clone(),
+        // R5.1/invariant D: `principal` is a caller-DECLARED label that must agree with the
+        // gateway's own verified token subject or be refused -- `config.model.node_id` (e.g.
+        // a Kalman-filter version string) has no reason to equal the service token's own
+        // `sub`, so this is left empty ("declares nothing", always accepted); the gateway's
+        // `ProposalEvidence.model_identity` now records the VERIFIED service subject, not this
+        // model-version identifier -- `config.model` is still recorded on `model_version`
+        // below, which invariant D leaves untouched.
+        principal: String::new(),
         model_version: config.model.version.clone(),
+        // R5.1b, defect 2: restores WHICH model produced this proposal to the evidence record
+        // (`ProposalEvidence.model_node_id`), additively -- caller-declared and UNVERIFIED,
+        // exactly like `model_version` above, never checked against the verified `principal`.
+        model_node_id: config.model.node_id.clone(),
         run: Some(RunIdentity { run_id: config.run_id.clone(), config_hash: resolved_config_hash }),
         query_ids: vec![query_id],
+        caller_token: config.service_token.clone(),
     };
 
     let response = client.propose_command(propose_request).await.map_err(|status| {

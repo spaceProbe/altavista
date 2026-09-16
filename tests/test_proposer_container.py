@@ -123,6 +123,8 @@ from pathlib import Path
 
 import pytest
 
+from altavista.docker_test_lock import lock_docker_tests
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROPOSER_DIR = REPO_ROOT / "services" / "proposer"
 DOCKERFILE = PROPOSER_DIR / "Dockerfile"
@@ -147,10 +149,23 @@ MAX_BURN_MPS = "5.0"
 MODEL_NODE_ID = "av-proposer.station-keeping"
 MODEL_VERSION = "1.0.0"
 
-COMMAND_GRPC_ADDR = "127.0.0.1:50110"  # matches av-gateway's own AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT default (http://127.0.0.1:50110) -- no override needed.
+COMMAND_GRPC_ADDR = "127.0.0.1:50070"  # matches av-gateway's own AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT default (http://127.0.0.1:50070, crates/av-gateway/src/bin/av-gateway.rs's own R3.6 comment) -- no override needed. This file previously named 50110 here, stale since R3.6 retargeted the default from a since-superseded 50170; the mismatch was never caught because this test has never actually run (this task's own repair) -- with the wrong port, Container G's own av-gateway would eagerly try to dial 50070, find nothing (av-command was told to bind elsewhere), fall back to a lazily-connecting channel, and every real ProposeCommand call in Part 5 below would then fail to reach av-command at all.
 COMMAND_ADMIN_ADDR = "127.0.0.1:50111"  # explicit: av-command's OWN default admin port (50170) would collide with av-gateway's gRPC bind on this same container.
 GATEWAY_INTERNAL_BIND = "0.0.0.0:50170"
 GATEWAY_PORT = 50170
+
+# R5.1/question 208(b): the throwaway issuer both av-command's (pre-existing, unrelated to this
+# round -- Propose performs no token verification at all) and av-gateway's (new this round,
+# REAL verification against a real token) `--oidc-issuer` flags use. Two distinct AUDIENCEs
+# (one per service, matching each binary's own `--oidc-audience`) even though the same
+# throwaway keypair signs tokens for both, since `av_command::oidc::verify` checks `aud`
+# against exactly the configured service's own audience string.
+OIDC_ISSUER = "https://sso.test.example/"
+GATEWAY_OIDC_AUDIENCE = "av-gateway-container-it"
+# The group name the REAL, committed `profiles/gateway-authority.yaml` (bind-mounted below as
+# this run's own `--auth-config-path`) grants "query"+"propose" -- the proposer's own service
+# token carries this group.
+GATEWAY_SERVICE_GROUP = "proposer-service"
 
 # crates/av-lockstep/src/docker.rs's own established convention (`TEST_LABEL_KEY`/
 # `TEST_LABEL_VALUE`), reused verbatim -- tests/test_edge_plugin_container.py's own precedent.
@@ -161,7 +176,10 @@ TEST_LABEL_VALUE = "1"
 # be under $HOME for Colima to actually bind-mount it.
 SCRATCH_ROOT = REPO_ROOT / ".av-test-tmp" / "proposer_container"
 
-# NEWER than tests/test_edge_plugin_container.py's own rust:1.85-bookworm pin -- av-command
+# NEWER than the rust:1.85-bookworm pin tests/test_edge_plugin_container.py used to carry
+# (R5.3 moved that file, and services/edge-plugin/build-image.sh, to this same 1.90 digest:
+# the workspace floor is a measured 1.87 now, so a 1.85 container refuses to build at all)
+# -- av-command
 # (this cross-build's own subject) depends on regorus 0.12.0, which needs
 # const_vec_string_slice (Vec::len/is_empty/as_slice as const fn), not yet stable at Rust
 # 1.85 -- a real, measured build failure against that pin (see services/proposer/Dockerfile's
@@ -325,13 +343,13 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
             "-w", "/workspace",
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
-            # The sed is an UNCONFIRMED workaround for a KNOWN, UNRESOLVED host defect (see
-            # services/proposer/build-image.sh's own comment at its identical line for the
-            # full writeup): apt-get update against deb.debian.org fails with a GPG signature
-            # error on this host, over both http:// and https://, root-caused only as far as
-            # "the deprecated apt-key verify wrapper fails while a direct gpgv against the
-            # same file succeeds" -- kept anyway since https is strictly no worse.
-            'sed -i "s|http://deb.debian.org|https://deb.debian.org|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && '
+            # SUPERSEDED (question 211, the lead, 2026-09-15): this comment used to claim a
+            # GPG-signature host defect and carried an unconfirmed https-rewriting `sed`,
+            # copied from services/proposer/build-image.sh's own prebuild step -- see that
+            # script's own comment at its identical line for the full re-measurement. Dropped
+            # here too, for the same measured reason: PREBUILD_BASE_IMAGE already ships
+            # ca-certificates, so the rewrite changed nothing, and no GPG/apt-key failure was
+            # reproduced against it on this host.
             "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
             "protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && "
             "cargo build --release -p av-command --bin av-command -p av-gateway --bin av-gateway "
@@ -359,7 +377,7 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
     return dest_command, dest_gateway
 
 
-def _generate_throwaway_oidc_keypair(dest_dir: Path) -> Path:
+def _generate_throwaway_oidc_keypair(dest_dir: Path) -> tuple[Path, Path]:
     """A throwaway RSA keypair, entirely local (`openssl genrsa`/`rsa -pubout` touch no
     network -- question 154 is not violated despite running at test time, the identical
     reasoning `tests/test_edge_plugin_container.py::_run_local_openssl_self_signed_ca` already
@@ -367,14 +385,45 @@ def _generate_throwaway_oidc_keypair(dest_dir: Path) -> Path:
     `--oidc-public-key-path` at startup (A2.1, no default) but this test's own propose flow
     never calls `Authorize` (only `Propose`, which performs no token verification at all --
     `crates/av-command/src/service.rs::propose`) -- so the public key's own content is never
-    actually checked against anything; only its PEM shape (`PKey::public_key_from_pem`) matters
-    for `av-command` to start at all. Returns the public key's own path."""
+    actually checked against anything for av-command's OWN startup; only its PEM shape
+    (`PKey::public_key_from_pem`) matters for it to start at all. R5.1/question 208(b):
+    `av-gateway` now ALSO requires the identical three flags, and DOES verify real tokens
+    signed against this keypair's own PRIVATE half (`_mint_rs256_jwt` below, for the proposer's
+    own service token) -- so this function now returns BOTH halves, not the public key alone."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     key_path = dest_dir / "oidc_private.pem"
     pub_path = dest_dir / "oidc_public.pem"
     subprocess.run([OPENSSL, "genrsa", "-out", str(key_path), "2048"], capture_output=True, timeout=15, check=True)
     subprocess.run([OPENSSL, "rsa", "-in", str(key_path), "-pubout", "-out", str(pub_path)], capture_output=True, timeout=15, check=True)
-    return pub_path
+    return key_path, pub_path
+
+
+def _b64url(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _mint_rs256_jwt(private_key_path: Path, *, issuer: str, audience: str, subject: str, groups: list[str], ttl_s: int = 3600) -> str:
+    """R5.1/question 208(b): mints a real, RS256-signed compact JWS entirely locally (`openssl
+    dgst -sha256 -sign` touches no network -- question 154, the identical reasoning
+    `_generate_throwaway_oidc_keypair`'s own doc gives), for `av-gateway`'s own `crate::auth::
+    AuthContext` (`crates/av-command/src/oidc.rs::verify`) to actually verify -- mirrors that
+    module's own `TestIssuer::mint` byte for byte (header `{"alg":"RS256","typ":"JWT"}`, the
+    signing input `header_b64.payload_b64`, RS256 = SHA-256 digest signed with the RSA private
+    key), but as a subprocess pipeline rather than an in-process `openssl` crate call, since
+    this file is Python, not Rust."""
+    now = int(time.time())
+    header = {"alg": "RS256", "typ": "JWT"}
+    payload = {"iss": issuer, "aud": audience, "sub": subject, "iat": now, "exp": now + ttl_s, "groups": groups}
+    header_b64 = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    sig = subprocess.run(
+        [OPENSSL, "dgst", "-sha256", "-sign", str(private_key_path)],
+        input=signing_input, capture_output=True, timeout=15, check=True,
+    ).stdout
+    return f"{header_b64}.{payload_b64}.{_b64url(sig)}"
 
 
 def _write_minimal_execution_profile(dest_dir: Path) -> Path:
@@ -493,12 +542,45 @@ def _find_proposal_evidence(evidence_ledger_dir: Path, command_id: str):
 
 @pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority():
+    # Question 207/156: every container/network this test creates carries `av.test`/
+    # `av.test.run_id` (`ResourceGuard.label_args()` above) -- exactly the label
+    # `av_lockstep::docker::prune_stale_test_resources` sweeps DAEMON-WIDE, and this test also
+    # cross-builds (docker run) and builds (docker build via services/proposer/build-image.sh's
+    # own image, reused read-only here) against the SAME shared daemon. A concurrent Rust
+    # `cargo test` or another worktree's own Docker-gated test (e.g. AltaVista-edge, running
+    # concurrently with this task) could tear this test's own containers out from under it, or
+    # this test could tear out theirs -- the identical exposure question 207 found and fixed.
+    # Held for this whole test body (not just around any one docker command), via the SAME
+    # `$HOME`-rooted lock file the Rust side uses -- `tests/test_edge_plugin_container.py`'s own
+    # precedent, verbatim.
+    with lock_docker_tests():
+        _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority()
+
+
+def _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority():
     run_id = uuid.uuid4().hex[:12]
     run_scratch = SCRATCH_ROOT / run_id
     run_scratch.mkdir(parents=True, exist_ok=True)
     guard = ResourceGuard(run_id)
 
     try:
+        # -----------------------------------------------------------------------------------
+        # Part 0 -- R5.1/question 208(b): the throwaway OIDC keypair and the proposer's own
+        # real, signed service token, generated FIRST (moved ahead of Part 1, not only Part 2)
+        # because av-proposer's own CLI now REQUIRES --service-token-file to start at all
+        # (invariant B: an absent token must make the proposer fail with a typed error, never
+        # proceed unauthenticated) -- even Part 1's deny-all run needs a token FILE bind-mounted
+        # to get far enough to attempt (and fail) the network connection Part 1 actually
+        # measures. Colima mounts only $HOME (see this module's own doc, "Why every bind-mount
+        # source lives under .av-test-tmp/") -- the token file lives under run_scratch, never
+        # under /tmp, and is passed to the container as --service-token-file <PATH>, never
+        # --service-token <VALUE> (a flag value is visible in `ps`/`docker inspect`).
+        # -----------------------------------------------------------------------------------
+        oidc_private_key, oidc_public_key = _generate_throwaway_oidc_keypair(run_scratch / "oidc")
+        service_token = _mint_rs256_jwt(oidc_private_key, issuer=OIDC_ISSUER, audience=GATEWAY_OIDC_AUDIENCE, subject="av-proposer-it", groups=[GATEWAY_SERVICE_GROUP])
+        service_token_path = run_scratch / "service_token"
+        service_token_path.write_text(service_token)
+
         # -----------------------------------------------------------------------------------
         # Part 1 -- the deny-all proof, the SAME image as the real run below (this task's own
         # requirement: "a --network none run and an internal-network run of the SAME image, so
@@ -511,6 +593,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         deny_all = subprocess.run(
             [
                 "docker", "run", "--rm", "--network", "none", "--name", deny_all_container, *guard.label_args(),
+                "-v", f"{service_token_path}:/etc/av/service_token:ro",
                 IMAGE_TAG,
                 "--gateway-endpoint", "http://198.51.100.1:50170",
                 "--run-id", FIXTURE_RUN_ID, "--caller-clearance", CALLER_CLEARANCE, "--entity-id", ENTITY_ID,
@@ -518,6 +601,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
                 "--reference-radius-m", REFERENCE_RADIUS_M, "--threshold-m", THRESHOLD_M,
                 "--gain-per-s", GAIN_PER_S, "--max-burn-mps", MAX_BURN_MPS,
                 "--model-node-id", MODEL_NODE_ID, "--model-version", MODEL_VERSION,
+                "--service-token-file", "/etc/av/service_token",
             ],
             capture_output=True, text=True, timeout=30,
         )
@@ -529,13 +613,23 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         print(f"\n--- deny-all proof (--network none), observed ---\nav-proposer exit={deny_all.returncode} after {elapsed_s:.3f}s; stderr: {deny_all.stderr.strip()[:300]}")
 
         # -----------------------------------------------------------------------------------
-        # Part 2 -- build Container G's own two real binaries and its own two secrets/configs
-        # (a throwaway OIDC keypair, a minimal execution profile), all under $HOME (see this
+        # Part 2 -- build Container G's own two real binaries and its own remaining
+        # secrets/configs (the minimal execution profile, and R5.1's own gateway-authority.yaml
+        # granting the proposer's service group "query"+"propose"), all under $HOME (see this
         # module's own doc).
         # -----------------------------------------------------------------------------------
         command_bin, gateway_bin = _cross_build_command_and_gateway_binaries(run_scratch / "bin")
-        oidc_public_key = _generate_throwaway_oidc_keypair(run_scratch / "oidc")
         profile_path = _write_minimal_execution_profile(run_scratch / "profile")
+        # R5.1/this task's own repair: bind-mount the REAL, committed profiles/
+        # gateway-authority.yaml (not a hand-written duplicate this file used to synthesize)
+        # -- it already grants GATEWAY_SERVICE_GROUP ("proposer-service") both "query" and
+        # "propose" at CALLER_CLEARANCE ("CUI"), the identical shape the old
+        # `_write_gateway_auth_config` helper wrote by hand. Exercising the real shipped
+        # config is more faithful (this task's own acceptance point) and removes a
+        # hand-maintained duplicate that could silently drift from the file that actually
+        # ships.
+        gateway_auth_config_path = REPO_ROOT / "profiles" / "gateway-authority.yaml"
+        assert gateway_auth_config_path.is_file(), f"real gateway auth config missing at {gateway_auth_config_path}"
         policy_dir = REPO_ROOT / "profiles" / "policies" / "authority"
         assert policy_dir.is_dir(), f"real policy bundle directory missing at {policy_dir}"
 
@@ -564,10 +658,12 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         command_line = (
             f"/usr/local/bin/av-command --bind {COMMAND_GRPC_ADDR} --admin-bind {COMMAND_ADMIN_ADDR} "
             f"--ledger-dir /data/command-ledger --policy-dir /etc/av/policy "
-            f"--profile-path /etc/av/execution.yaml --oidc-issuer https://sso.test.example/ "
+            f"--profile-path /etc/av/execution.yaml --oidc-issuer {OIDC_ISSUER} "
             f"--oidc-audience av-proposer-container-it --oidc-public-key-path /etc/av/oidc_public.pem & "
             f"exec /usr/local/bin/av-gateway --internal-network-bind {GATEWAY_INTERNAL_BIND} "
-            f"--run-products /data/fixture.runproducts.bin:{CALLER_CLEARANCE}"
+            f"--run-products /data/fixture.runproducts.bin:{CALLER_CLEARANCE} "
+            f"--oidc-issuer {OIDC_ISSUER} --oidc-audience {GATEWAY_OIDC_AUDIENCE} "
+            f"--oidc-public-key-path /etc/av/oidc_public.pem --auth-config-path /etc/av/gateway-authority.yaml"
         )
         _docker(
             "run", "-d", "-i", "--name", gateway_container, "--network", network_name, *guard.label_args(),
@@ -579,6 +675,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
             "-v", f"{policy_dir}:/etc/av/policy:ro",
             "-v", f"{profile_path}:/etc/av/execution.yaml:ro",
             "-v", f"{oidc_public_key}:/etc/av/oidc_public.pem:ro",
+            "-v", f"{gateway_auth_config_path}:/etc/av/gateway-authority.yaml:ro",
             "-v", f"{FIXTURE_PATH}:/data/fixture.runproducts.bin:ro",
             "--entrypoint", "/bin/bash",
             IMAGE_TAG,  # reuses the proposer's own already-built, already-pulled runtime base (libssl3 + debian bookworm-slim) -- never a second image pull at test time (question 154).
@@ -601,6 +698,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
         proposer_run = subprocess.run(
             [
                 "docker", "run", "--rm", "--name", proposer_container, "--network", network_name, *guard.label_args(),
+                "-v", f"{service_token_path}:/etc/av/service_token:ro",
                 IMAGE_TAG,
                 "--gateway-endpoint", f"http://{gateway_container}:{GATEWAY_PORT}",
                 "--run-id", FIXTURE_RUN_ID, "--caller-clearance", CALLER_CLEARANCE, "--entity-id", ENTITY_ID,
@@ -608,6 +706,7 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
                 "--reference-radius-m", REFERENCE_RADIUS_M, "--threshold-m", THRESHOLD_M,
                 "--gain-per-s", GAIN_PER_S, "--max-burn-mps", MAX_BURN_MPS,
                 "--model-node-id", MODEL_NODE_ID, "--model-version", MODEL_VERSION,
+                "--service-token-file", "/etc/av/service_token",
             ],
             capture_output=True, text=True, timeout=60,
         )
@@ -619,15 +718,39 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
 
         # Question 148: an exit code (and even the JSON summary above) is not evidence on its
         # own -- read the REAL ledgers back off disk, independently.
+        #
+        # This task's own repair: question 209(a) (a later, unrelated round) made av-command's
+        # own `Propose` RPC run the check step automatically, as a second logged transition,
+        # the instant the `PROPOSED` record lands (`crates/av-command/src/service.rs::propose`'s
+        # own doc: "the check edge now runs automatically, right here, as a *separate* logged
+        # transition"). A legally proposed command therefore normally reaches
+        # `COMMAND_STATE_CHECKED` (2), with an `allow=true` policy decision, before `Propose`
+        # even returns -- `COMMAND_STATE_PROPOSED` (1) alone is no longer the terminal state of
+        # a successful propose-only run. This file asserted `state == 1` since before that
+        # change landed and was never re-run against it (this task's whole reason for existing)
+        # -- confirmed by measurement here (a real container run, `state == 2`, transitions[-1]
+        # rationale containing `allow=true`), not guessed.
         proposed_command = _find_proposed_command(command_ledger_dir, ENTITY_ID)
-        assert proposed_command.state == 1, f"expected COMMAND_STATE_PROPOSED (1), got {proposed_command.state}"  # altavista.v1.CommandState.COMMAND_STATE_PROPOSED
+        assert proposed_command.state == 2, f"expected COMMAND_STATE_CHECKED (2, question 209(a): Propose auto-checks), got {proposed_command.state}"  # altavista.v1.CommandState.COMMAND_STATE_CHECKED
         assert proposed_command.id == command_id, (proposed_command.id, command_id)
         assert proposed_command.command_class == COMMAND_CLASS
-        assert proposed_command.transitions, "the real Command on disk must carry at least one transition"
+        assert len(proposed_command.transitions) >= 2, f"expected at least the PROPOSED and CHECKED transitions question 209(a) describes, got {len(proposed_command.transitions)}"
 
         evidence = _find_proposal_evidence(evidence_ledger_dir, command_id)
         assert evidence is not None, f"no ProposalEvidence for command_id={command_id!r} found on the real evidence ledger at {evidence_ledger_dir}"
-        assert evidence.model_identity == MODEL_NODE_ID, evidence.model_identity
+        # R5.1/invariant D (a deliberate, documented behaviour change -- see crates/av-proposer/
+        # src/proposer.rs's own comment): model_identity now records the VERIFIED service token
+        # subject ("av-proposer-it", this file's own _mint_rs256_jwt subject above), never
+        # MODEL_NODE_ID -- av-proposer itself now sends an empty declared `principal`.
+        assert evidence.model_identity == "av-proposer-it", evidence.model_identity
+        # R5.1b defect 2 (the manager's review of R5.1): making `model_identity` the verified
+        # subject had silently cost this record the one thing milestone A4 names -- "attributing
+        # the proposal to the model identity AND version". `model_node_id` is the additive,
+        # explicitly caller-DECLARED field that carries the model's own identity back, and this
+        # is the only place in the tree where that attribution is proven END TO END: a real
+        # container, a real gateway, a real ledger record read back off disk. Without this
+        # assertion the restored field could go empty again and nothing here would fail.
+        assert evidence.model_node_id == MODEL_NODE_ID, evidence.model_node_id
         assert evidence.model_version == MODEL_VERSION, evidence.model_version
         assert evidence.run.run_id == FIXTURE_RUN_ID, evidence.run.run_id
         assert evidence.query_ids, "ProposalEvidence.query_ids must be non-empty (D5: what the model saw)"
@@ -639,7 +762,8 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
             f"real ledger Command: state={proposed_command.state} entity_id={proposed_command.entity_id} "
             f"command_class={proposed_command.command_class} transitions={len(proposed_command.transitions)}\n"
             f"real evidence ledger ProposalEvidence: model_identity={evidence.model_identity} "
-            f"model_version={evidence.model_version} run_id={evidence.run.run_id} query_ids={list(evidence.query_ids)}"
+            f"model_node_id={evidence.model_node_id} model_version={evidence.model_version} "
+            f"run_id={evidence.run.run_id} query_ids={list(evidence.query_ids)}"
         )
 
         # -----------------------------------------------------------------------------------

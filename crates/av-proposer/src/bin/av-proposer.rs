@@ -36,6 +36,11 @@ struct ProposeArgs {
     max_burn_mps: f64,
     model_node_id: String,
     model_version: String,
+    /// R5.1/question 208(b): this proposer's service token (a compact-serialization JWS),
+    /// read from `--service-token-file <PATH>` (REQUIRED) -- never `--service-token <VALUE>`:
+    /// a flag VALUE is visible in `ps` and in `docker inspect`, and this task's own invariant
+    /// G forbids the token from ever reaching either.
+    service_token: String,
 }
 
 struct ServeModelServiceArgs {
@@ -51,7 +56,7 @@ enum Mode {
     ServeModelService(ServeModelServiceArgs),
 }
 
-const USAGE: &str = "usage:\n  av-proposer --gateway-endpoint URL --run-id ID --caller-clearance MARKING \\\n    --entity-id ID --command-class CLASS --score-name NAME \\\n    --reference-radius-m N --threshold-m N --gain-per-s N --max-burn-mps N \\\n    --model-node-id ID --model-version VERSION [--config-hash HASH]\n  av-proposer --serve-model-service HOST:PORT --model-node-id ID --model-version VERSION \\\n    --process-noise-density N --sensor-id ID";
+const USAGE: &str = "usage:\n  av-proposer --gateway-endpoint URL --run-id ID --caller-clearance MARKING \\\n    --entity-id ID --command-class CLASS --score-name NAME \\\n    --reference-radius-m N --threshold-m N --gain-per-s N --max-burn-mps N \\\n    --model-node-id ID --model-version VERSION --service-token-file PATH [--config-hash HASH]\n  av-proposer --serve-model-service HOST:PORT --model-node-id ID --model-version VERSION \\\n    --process-noise-density N --sensor-id ID";
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
     let _argv0 = args.next();
@@ -59,6 +64,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
     let (mut gateway_endpoint, mut run_id, mut config_hash, mut caller_clearance, mut entity_id, mut command_class) = (None, None, None, None::<String>, None, None);
     let (mut score_name, mut reference_radius_m, mut threshold_m, mut gain_per_s, mut max_burn_mps) = (None, None, None, None, None);
     let (mut model_node_id, mut model_version, mut process_noise_density, mut sensor_id) = (None, None, None, None);
+    let mut service_token_file: Option<String> = None;
 
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} requires a value"));
@@ -79,6 +85,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
             "--model-version" => model_version = Some(value()?),
             "--process-noise-density" => process_noise_density = Some(value()?.parse::<f64>().map_err(|e| format!("--process-noise-density: {e}"))?),
             "--sensor-id" => sensor_id = Some(value()?),
+            "--service-token-file" => service_token_file = Some(value()?),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}\n{USAGE}")),
         }
@@ -92,6 +99,21 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
             process_noise_density: process_noise_density.ok_or("--process-noise-density is required")?,
             sensor_id: sensor_id.ok_or("--sensor-id is required")?,
         }));
+    }
+
+    // R5.1/question 208(b): required -- an absent token file must make this binary fail with a
+    // typed error, never proceed unauthenticated (invariant B). Read here, once, at startup --
+    // `crate::proposer::run`'s own module doc already states "every knob is a command-line
+    // argument, never an environment variable" (question 199); a FILE PATH is still a
+    // command-line argument, only the token's own bytes come from disk, exactly like `av-
+    // command --oidc-public-key-path` already does for the issuer's public key.
+    let service_token_file = service_token_file.ok_or("--service-token-file is required (R5.1: this proposer's service token, read from a file, never a --service-token VALUE)")?;
+    let service_token = std::fs::read_to_string(&service_token_file)
+        .map_err(|e| format!("--service-token-file {service_token_file:?}: {e}"))?
+        .trim()
+        .to_string();
+    if service_token.is_empty() {
+        return Err(format!("--service-token-file {service_token_file:?} is empty -- a proposer with no token must never proceed unauthenticated"));
     }
 
     Ok(Mode::Propose(ProposeArgs {
@@ -108,6 +130,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
         max_burn_mps: max_burn_mps.ok_or("--max-burn-mps is required")?,
         model_node_id: model_node_id.ok_or("--model-node-id is required")?,
         model_version: model_version.ok_or("--model-version is required")?,
+        service_token,
     }))
 }
 
@@ -123,6 +146,7 @@ async fn run_propose(args: ProposeArgs) -> Result<serde_json::Value, String> {
         rule: RuleConfig { score_name: args.score_name, reference_radius_m: args.reference_radius_m, threshold_m: args.threshold_m, gain_per_s: args.gain_per_s, max_burn_mps: args.max_burn_mps },
         model: ModelIdentity { node_id: args.model_node_id, version: args.model_version },
         rationale_prefix: "av-proposer station-keeping rule".to_string(),
+        service_token: args.service_token,
     };
 
     match run(&mut client, &config, &counters).await {

@@ -89,7 +89,11 @@ impl ClearanceLadder {
         Self { ladder }
     }
 
-    fn rank(&self, marking: &str) -> Option<usize> {
+    /// `pub(crate)`, not private: `crate::auth::GroupClearanceMap::clearance_for` reuses this
+    /// SAME rank function to rank a verified token's mapped clearance markings against this
+    /// deployment's ladder (R5.1b, defect 1) -- the whole point being that there is exactly one
+    /// ranking function in this crate, never a second one reimplemented at the auth boundary.
+    pub(crate) fn rank(&self, marking: &str) -> Option<usize> {
         self.ladder.iter().position(|m| m == marking)
     }
 

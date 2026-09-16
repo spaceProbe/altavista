@@ -266,6 +266,50 @@ proposal adopts it rather than re-inventing those pieces:
   deny-by-default tool allow-list; `secagent` is the pattern for command-proposing agents.
   Numeric `ModelService` sidecars are not LLM traffic and stay on gRPC.
 
+### Default ports
+
+Question 208(c): one owned port map for every service's default bind, on this host. Each
+`DEFAULT_BIND`/`DEFAULT_PORT` (and its admin counterpart) in the constants column cites this
+table in its own doc comment, and `tests/test_port_map.py` parses both sides and fails if they
+disagree.
+
+| Service | gRPC default | Admin default | Constant |
+| --- | --- | --- | --- |
+| `av-command` | `127.0.0.1:50070` | `127.0.0.1:50170` | `crates/av-command/src/bin/av-command.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |
+| `av-gateway` | `127.0.0.1:50071` | `127.0.0.1:50171` | `crates/av-gateway/src/bin/av-gateway.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |
+| `av-dynamics-service` | `127.0.0.1:50062` | `127.0.0.1:50162` | `crates/av-dynamics-service/src/config.rs::DEFAULT_PORT` / `crates/av-dynamics-service/src/bin/server.rs::DEFAULT_ADMIN_PORT` |
+| `gmat-service` (Python, ADR-002 depth 1) | `127.0.0.1:50061` | `127.0.0.1:50161` | `services/gmat-service/gmat_service/config.py::DEFAULT_PORT` / `::DEFAULT_ADMIN_PORT` |
+| `av-lockstep-shim` | `127.0.0.1:50080` | *(none)* | `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` |
+| `av-kernel` binding registry, `container.control_port` (container-internal only, never a host bind) | `50070` | *(none)* | `crates/av-kernel/src/drm/binding.rs::ContainerSpec::default` |
+
+The convention: gRPC default first, admin default `gRPC + 100` where an admin surface exists
+at all (`av-lockstep-shim` and the kernel's `container.control_port` have none).
+
+Two collisions this table records rather than silently re-numbering around:
+
+- **`av-command` `50070` vs. `av-kernel`'s `container.control_port` default, also `50070`.**
+  Not fixed: `container.control_port` is a container-*internal* port (`services/lockstep-ref`'s
+  own `Dockerfile EXPOSE`, and `services/cfs/container-entrypoint.sh`'s own fixed
+  `--grpc-addr 0.0.0.0:50070`) that Docker republishes to an OS-chosen ephemeral *host* port
+  (`docker run -p 127.0.0.1::<control_port>`), never bound on the host directly the way
+  `av-command`'s own default is -- so the two never actually fight over one host-visible
+  socket. The numeral match is real, not this table's imagination:
+  `drms/demo_attitude_control_controller_cfs.system.yaml` sets `container.control_port`
+  explicitly to `50070` for the same reason (matching the real, fixed container image), so a
+  golden config hash already depends on this exact value. Changing `ContainerSpec::default`'s
+  `control_port` would not touch that DRM's own hash (it overrides the field explicitly) but
+  would desync the *default* from the two real artifacts it exists to match, for zero
+  practical benefit -- left unchanged, recorded here instead.
+- **`gmat-service`'s admin port, `50161`, collided in practice** -- not with another service's
+  *default*, but with itself: `tests/test_gmat_service.py`'s `server` fixture already picks a
+  free gRPC port per instance, but used to pass no `--admin-port` at all, so every instance
+  fell back to this table's own `50161` default. Two instances on one host (this suite running
+  concurrently in two worktrees, or twice in one test session) then raced for the same admin
+  socket -- `OSError: [Errno 48] Address already in use`, observed for real this round. Fixed
+  in the fixture (question 208(c)), which now picks a second free port for `--admin-port` the
+  same way it already does for `--port`; the table's own `50161` default is correct and
+  unchanged -- it is what a single, standalone `python -m gmat_service` still binds.
+
 ## 5. Configurability: four profiles
 
 Profiles are files first (a console that edits the same files comes later). They select

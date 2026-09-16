@@ -184,3 +184,38 @@ def test_trajectory_signed_batch_and_command_round_trip(pb):
     req = dyn.PropagateRequest(model_id="gmat.earth.jgm2_8x8", seed=seed, horizon_tai_ns=86_400_000_000_000,
                                sample_interval_s=60, covariance=True)
     assert dyn.PropagateRequest.FromString(req.SerializeToString()).seed.epoch_ns == 1
+
+
+# R5.4 (question 211, the lead, 2026-09-15): "buf lint" joined this track's gate the moment the
+# 34 findings measured at that baseline were each fixed or excepted (with a reason, in
+# proto/buf.yaml -- see that file for what is excepted and why). "Joins the gate" has to be
+# mechanical, not a sentence in a doc, so this is a test, not a note: it shells out to the same
+# `buf lint proto` a human runs and asserts zero output, the same way
+# tests/test_proposer_container.py's `_compute_skip_reason()` gates on `docker` (question 194)
+# -- skip VISIBLY, with a typed reason, when `buf` is not on this host, never pass silently
+# because the tool it shells out to could not be found. Runs against the local `proto/`
+# directory only: no `--against` remote, and buf.yaml's `deps: []` means module resolution
+# touches nothing outside this checkout (question 154, no network at test time).
+def _compute_buf_lint_skip_reason() -> "str | None":
+    buf = shutil.which("buf")
+    if buf is None:
+        return (
+            "buf is not installed or not on PATH -- this test shells out to `buf lint proto` "
+            "and cannot without it. Install buf (https://buf.build/docs/installation) and "
+            "re-run."
+        )
+    return None
+
+
+_BUF_LINT_SKIP_REASON = _compute_buf_lint_skip_reason()
+
+
+@pytest.mark.skipif(_BUF_LINT_SKIP_REASON is not None, reason=_BUF_LINT_SKIP_REASON or "")
+def test_buf_lint_proto_is_clean():
+    result = subprocess.run(
+        ["buf", "lint", "proto"], cwd=REPO, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0 and not result.stdout and not result.stderr, (
+        f"buf lint proto is not clean (exit {result.returncode}):\n"
+        f"{result.stdout}{result.stderr}"
+    )

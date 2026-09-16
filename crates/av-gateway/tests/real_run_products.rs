@@ -70,6 +70,7 @@ fn all_request() -> GatewayQueryRequest {
         caller_clearance: "CUI".to_string(),
         selector: GatewaySelector::All as i32,
         caller_supplied_products_uri: String::new(),
+        caller_token: String::new(), // GatewayCore::query itself is auth-agnostic (crate::gateway::authenticated_query is the authenticated layer).
     }
 }
 
@@ -140,6 +141,7 @@ fn two_fresh_evidence_ledgers_given_the_same_input_produce_byte_identical_files(
         query_ids: vec!["q1".to_string(), "q2".to_string()],
         model_identity: "model-x".to_string(),
         model_version: "1.0.0".to_string(),
+        model_node_id: "model-x-node".to_string(),
         recorded_tai_ns: 5_000,
     };
 
