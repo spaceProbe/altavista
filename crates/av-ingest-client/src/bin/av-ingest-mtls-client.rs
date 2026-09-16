@@ -33,6 +33,26 @@
 //!    second batch from the same producer, so this is always that producer's first),
 //!    printing the resulting `BatchVerdict` as a second line of JSON.
 //!
+//! # `--batch-tai-ns`: a literal i64, or the `now` sentinel (question 223)
+//!
+//! `--batch-tai-ns` accepts either a literal TAI-nanosecond `i64`, or the literal string
+//! `now`, meaning "read the wall clock at the moment this process actually builds the
+//! batch (immediately before `av_edge::sign::sign_batch` runs), not whenever the caller
+//! happened to compute a value earlier." Question 223's own defect was exactly this: a
+//! caller (`tests/test_edge_ingest_mtls.py`) that computed a TAI timestamp in Python
+//! *before* spawning this process -- so that stamp's age, by the time the server's
+//! `Submit` handler actually reads it (`av_edge::policy::ProducerPolicy::is_stale`),
+//! already included this process's own startup, the mTLS handshake through the front,
+//! and the `Announce` round trip, none of which the batch's own declared age is supposed
+//! to reflect at all. The `now` sentinel closes that gap by moving the read to the last
+//! possible moment inside the one process that actually needs it: `run` below resolves
+//! it via `real_clock_tai_ns` immediately before constructing `pb::MeasurementBatch`,
+//! using the exact same `SystemTime::now()` -> Unix nanoseconds -> `av_cdm::time::Tai::
+//! from_utc_nanos` conversion `crates/av-ingest/src/bin/av-ingest-server.rs::
+//! read_real_clock_tai_ns` already uses for `--real-clock` -- the one UTC-to-TAI boundary
+//! this workspace has, reused here rather than reinvented (there is no second leap-
+//! second-aware offset anywhere in this tree, and this binary adds none).
+//!
 //! Every failure this binary itself does not have a JSON shape for (a malformed argument,
 //! a file that will not read, `connect` itself failing) is printed to **stderr** and this
 //! process exits non-zero; every RPC OUTCOME this binary understands (`Announce`
@@ -49,6 +69,28 @@ use av_ingest_client::pb_client::edge_ingest_client::EdgeIngestClient;
 use openssl::ec::EcKey;
 use openssl::pkey::Private;
 
+/// `--batch-tai-ns`'s resolved argument: either a literal TAI-nanosecond value the caller
+/// computed itself, or the `now` sentinel, resolved to an actual wall-clock reading only
+/// once, immediately before the batch is built (see this binary's own module doc,
+/// "`--batch-tai-ns`: a literal i64, or the `now` sentinel").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchTaiNs {
+    Literal(i64),
+    Now,
+}
+
+impl std::str::FromStr for BatchTaiNs {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        if raw == "now" {
+            return Ok(BatchTaiNs::Now);
+        }
+        raw.parse::<i64>().map(BatchTaiNs::Literal).map_err(|e| format!("--batch-tai-ns {raw:?} is not \"now\" or a valid i64: {e}"))
+    }
+}
+
+#[derive(Debug)]
 struct Args {
     endpoint: String,
     server_ca: PathBuf,
@@ -60,13 +102,18 @@ struct Args {
     label_caveats: Vec<String>,
     shard_key: String,
     submit_with_key: Option<PathBuf>,
-    batch_tai_ns: Option<i64>,
+    batch_tai_ns: Option<BatchTaiNs>,
 }
 
 const USAGE: &str = "usage: av-ingest-mtls-client --endpoint https://HOST:PORT --server-ca PATH \
     [--client-cert PATH --client-key PATH] --producer-id ID --clearance STR \
     --label-marking STR [--label-caveat STR]... --shard-key STR \
-    [--submit-with-key PATH --batch-tai-ns N]";
+    [--submit-with-key PATH --batch-tai-ns (N | now)]\n\
+    \n\
+    --batch-tai-ns accepts either a literal TAI-nanosecond i64, or the literal string \
+    \"now\", which reads the wall clock at the moment the batch is actually built (question \
+    223: the batch's declared age must not include this process's own startup, the mTLS \
+    handshake, or the Announce round trip).";
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let _argv0 = args.next();
@@ -97,7 +144,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--submit-with-key" => submit_with_key = Some(PathBuf::from(value()?)),
             "--batch-tai-ns" => {
                 let raw = value()?;
-                batch_tai_ns = Some(raw.parse::<i64>().map_err(|e| format!("--batch-tai-ns {raw:?} is not a valid i64: {e}"))?);
+                batch_tai_ns = Some(raw.parse::<BatchTaiNs>()?);
             }
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}\n{USAGE}")),
@@ -129,6 +176,18 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 fn load_ec_private_key(path: &std::path::Path) -> Result<EcKey<Private>, String> {
     let pem = std::fs::read(path).map_err(|e| format!("reading {path:?}: {e}"))?;
     EcKey::private_key_from_pem(&pem).map_err(|e| format!("{path:?} is not a valid EC private key PEM: {e}"))
+}
+
+/// The `now` sentinel's own clock read: `SystemTime::now()` -> Unix nanoseconds ->
+/// `av_cdm::time::Tai::from_utc_nanos` -- the exact same UTC-to-TAI conversion
+/// `crates/av-ingest/src/bin/av-ingest-server.rs::read_real_clock_tai_ns` uses for
+/// `--real-clock`, reused rather than reimplemented (this workspace has exactly one
+/// leap-second-aware UTC-to-TAI boundary, `av_cdm::time::Tai`, and this binary already
+/// depends on `av-cdm` transitively through `av-edge`/`av-ingest-client`).
+fn real_clock_tai_ns() -> i64 {
+    let unix_duration = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system clock is set before the Unix epoch");
+    let unix_ns = i64::try_from(unix_duration.as_nanos()).expect("system clock is implausibly far in the future to fit in an i64 nanosecond count");
+    av_cdm::time::Tai::from_utc_nanos(unix_ns).as_nanos()
 }
 
 async fn run(args: Args) -> Result<serde_json::Value, String> {
@@ -166,11 +225,18 @@ async fn run(args: Args) -> Result<serde_json::Value, String> {
 
     if let Some(key_path) = &args.submit_with_key {
         let key = load_ec_private_key(key_path)?;
+        // Resolved as late as possible -- immediately before the batch is built and
+        // signed, never earlier -- so the `now` sentinel's whole point (question 223) is
+        // not undone by reading it any sooner than this.
+        let batch_tai_ns = match args.batch_tai_ns.expect("validated in parse_args") {
+            BatchTaiNs::Literal(ns) => ns,
+            BatchTaiNs::Now => real_clock_tai_ns(),
+        };
         let mut batch = pb::MeasurementBatch {
             producer_id: args.producer_id,
             sequence: 1,
             label: Some(pb::Label { marking: args.label_marking, caveats: args.label_caveats }),
-            batch_tai_ns: args.batch_tai_ns.expect("validated in parse_args"),
+            batch_tai_ns,
             shard_key: args.shard_key,
             ..Default::default()
         };
@@ -218,5 +284,69 @@ async fn main() -> ExitCode {
             eprintln!("av-ingest-mtls-client: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut v = vec![
+            "av-ingest-mtls-client".to_string(),
+            "--endpoint".to_string(),
+            "https://127.0.0.1:1".to_string(),
+            "--server-ca".to_string(),
+            "/dev/null".to_string(),
+            "--producer-id".to_string(),
+            "p".to_string(),
+            "--clearance".to_string(),
+            "CUI".to_string(),
+            "--label-marking".to_string(),
+            "CUI".to_string(),
+            "--shard-key".to_string(),
+            "shard-a".to_string(),
+        ];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    }
+
+    #[test]
+    fn parse_args_accepts_the_now_sentinel_for_batch_tai_ns() {
+        let a = parse_args(args(&["--submit-with-key", "/dev/null", "--batch-tai-ns", "now"]).into_iter()).expect("parse_args should accept the `now` sentinel");
+        assert_eq!(a.batch_tai_ns, Some(BatchTaiNs::Now));
+    }
+
+    #[test]
+    fn parse_args_accepts_a_literal_i64_for_batch_tai_ns() {
+        let a = parse_args(args(&["--submit-with-key", "/dev/null", "--batch-tai-ns", "1234567890"]).into_iter()).expect("parse_args should accept a literal i64");
+        assert_eq!(a.batch_tai_ns, Some(BatchTaiNs::Literal(1_234_567_890)));
+    }
+
+    #[test]
+    fn parse_args_rejects_garbage_for_batch_tai_ns() {
+        let err = parse_args(args(&["--submit-with-key", "/dev/null", "--batch-tai-ns", "not-a-number"]).into_iter()).expect_err("parse_args should reject garbage");
+        assert!(err.contains("not-a-number"), "{err}");
+        assert!(err.contains("\"now\""), "{err}");
+    }
+
+    #[test]
+    fn batch_tai_ns_from_str_is_case_sensitive_about_the_now_sentinel() {
+        // "Now"/"NOW" are deliberately NOT accepted -- exactly one spelling, matching this
+        // binary's own USAGE string, rather than a case-insensitive guess.
+        assert!("Now".parse::<BatchTaiNs>().is_err());
+        assert!("NOW".parse::<BatchTaiNs>().is_err());
+        assert_eq!("now".parse::<BatchTaiNs>(), Ok(BatchTaiNs::Now));
+    }
+
+    #[test]
+    fn real_clock_tai_ns_is_in_the_right_ballpark() {
+        // Not a golden -- just a sanity bound that this reads an actual current-ish wall
+        // clock through av_cdm::time::Tai rather than, say, returning 0 or a UTC value
+        // mistaken for TAI. 2020-01-01T00:00:00Z in TAI nanoseconds, and 2100-01-01T00:00:00Z,
+        // bound any real reading taken while this test suite runs.
+        let ns = real_clock_tai_ns();
+        assert!(ns > 1_577_836_800_000_000_000, "real_clock_tai_ns() = {ns} is before 2020");
+        assert!(ns < 4_102_444_800_000_000_000, "real_clock_tai_ns() = {ns} is after 2100");
     }
 }
