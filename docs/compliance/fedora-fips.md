@@ -164,3 +164,152 @@ placed services; none of the eight components' names appear as `install <name> c
 other component's FQDN appears nowhere at all. The day `secdeploy` gains generic per-manifest
 dispatch (Proposal 3 above), this test starts failing — the same role
 `test_adr003_tiers_are_still_rejected_upstream` already plays for the tier gap (Proposal 1).
+
+## The Lima Fedora VM
+
+`lima` 2.1.4 is on this host, alongside Colima (its VM runs the Docker daemon other tracks
+depend on — not touched by anything below). Before this task, `limactl list` reported:
+
+```
+No instance found. Run `limactl create` to create an instance.
+```
+
+— no cached Lima instance, and no Fedora qcow2/template artifact anywhere under
+`~/.lima`/`~/Library/Caches/lima` (checked before fetching anything, per D6's own instruction —
+question 154 permits a one-time image fetch at setup, not at test time). `colima status` at the
+same moment:
+
+```
+colima is running using macOS Virtualization.Framework
+arch: aarch64
+runtime: docker
+mountType: virtiofs
+docker socket: unix:///Users/probe/.colima/default/docker.sock
+containerd socket: unix:///Users/probe/.colima/default/containerd.sock
+kubernetes: enabled
+```
+
+### The attempt
+
+```
+limactl start --name=fedora-fips-d6 --tty=false template://fedora
+```
+
+Lima's own `fedora` template (`/opt/homebrew/Cellar/lima/2.1.4/share/lima/templates/fedora.yaml`
+→ `_images/fedora-44.yaml`) resolves to the aarch64 Fedora 44 Cloud Base qcow2 (this host is
+Apple Silicon):
+`https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2`.
+
+**It booted.** Real timings, read from the hostagent's own log:
+
+| Step | Started (local) | Finished | Elapsed |
+|---|---|---|---|
+| Download Fedora 44 Cloud qcow2 (aarch64) | 00:01:50 | 00:14:12 | ~12m22s |
+| Convert qcow2 → raw disk, expand to 100GiB | 00:14:12 | 00:14:14 | ~2s |
+| Download the nerdctl-full archive (the template's default containerd/nerdctl guest tooling — not needed for the FIPS preflight itself, but part of this stock template's own provisioning, not something this task asked for separately) | 00:14:14 | 00:16:35 | ~2m21s |
+| Start VZ, SSH ready | 00:16:35 | 00:16:43 | ~8s |
+
+Total wall time from `limactl start` to a working SSH shell: **~14m53s**. Confirmed booted:
+
+```
+$ limactl shell fedora-fips-d6 -- bash -c 'whoami; cat /etc/os-release | head -5; uname -a'
+probe
+NAME="Fedora Linux"
+VERSION="44 (Cloud Edition)"
+RELEASE_TYPE=stable
+ID=fedora
+VERSION_ID=44
+Linux lima-fedora-fips-d6 6.19.10-300.fc44.aarch64 #1 SMP PREEMPT_DYNAMIC Wed Mar 25 17:45:07 UTC 2026 aarch64 GNU/Linux
+```
+
+### The real FIPS preflight, run for real
+
+`docs/fedora-fips.md` §3 names the exact preflight: `deploy/fedora-fips/fips-preflight.sh`. Copied
+in and run as root, unmodified:
+
+```
+$ limactl copy /Users/probe/code/secdeploy/deploy/fedora-fips/fips-preflight.sh fedora-fips-d6:/tmp/fips-preflight.sh
+$ limactl shell fedora-fips-d6 -- bash -c 'chmod +x /tmp/fips-preflight.sh && sudo /tmp/fips-preflight.sh; echo "EXITCODE=$?"'
+SecDeploy FIPS preflight
+FIPS preflight FAILED: kernel FIPS mode is not enabled — run 'sudo fips-mode-setup --enable' and reboot
+EXITCODE=1
+```
+
+Real, fail-closed, exactly as `fips-preflight.sh`'s own first check
+(`/proc/sys/crypto/fips_enabled`) says it should on a stock cloud image that has never had FIPS
+mode enabled — not a crash, not a skip, the documented fail-closed behaviour working as designed.
+
+**Root cause of why it can't be turned green here, run down to the actual binary:** the
+preflight's own remediation text — `sudo fips-mode-setup --enable` — names a command that does
+not exist on this Fedora 44 image:
+
+```
+$ limactl shell fedora-fips-d6 -- bash -c 'command -v fips-mode-setup; rpm -q crypto-policies-scripts; sudo fips-mode-setup --check'
+crypto-policies-scripts-20251128-3.git19878fe.fc44.noarch
+bash: line 1: fips-mode-setup: command not found
+```
+
+```
+$ limactl shell fedora-fips-d6 -- sudo dnf provides "*/fips-mode-setup"
+No matches found. If searching for a file, try specifying the full path or using a wildcard prefix ("*/") at the beginning.
+```
+
+`rpm -ql crypto-policies-scripts` (the package that ships `update-crypto-policies`, confirmed
+present and reporting policy `DEFAULT`) lists no `fips-mode-setup` file at all — only
+`update-crypto-policies` itself and its Python implementation. This is as far as this task's
+budget goes on root-causing the gap: `docs/fedora-fips.md` §1 and `fips-preflight.sh`'s own
+remediation message both name a tool that is not installable by that name via `dnf provides` on
+Fedora 44 — closing it (finding Fedora 44's actual current FIPS-enablement path, applying it,
+rebooting, and re-running the preflight to green) is out of scope for D6's bounded VM attempt
+("do not burn the budget trying to make a VM work" — this task's own charter) and is not
+attempted further here.
+
+### What cannot run in this VM no matter what
+
+- **Hardware attestation of the FIPS boundary** (e.g. a TPM-rooted remote-attestation quote for
+  the host running FIPS mode) — Lima's `vz`-driver VM here has no virtual TPM device in its
+  config, and even a virtual one would root its attestation in Apple's Virtualization.framework,
+  not an independently-verifiable physical root of trust the way a real Fedora server with a
+  discrete TPM would. No Lima VM on any Mac can produce this.
+- **A real HSM** — `docs/fedora-fips.md`'s own backup/restore section (`## Backup and restore` →
+  "Encryption: public-key, to a recipient cert (private key offline)") names exactly this: "keep
+  `backup-key.pem` OFFLINE (an HSM, an air-gapped USB)". This VM (or any Lima VM) has no physical
+  HSM attached and none can be attached to a `vz` guest on this host.
+- **A real enclave network** — every network path in and out of this VM is Lima's own
+  NAT/port-forwarding through the single host Mac's network interface; there is no physically
+  segmented, air-gapped enclave network to exercise SecRouter's egress allow-list
+  (`SECROUTER_EGRESS_FILE`) or SecLLM pool addressing against — that boundary is only real on
+  actual separately-networked hardware.
+
+### Teardown — the host left as found
+
+```
+$ limactl stop fedora-fips-d6
+... The instance fedora-fips-d6 has shut down
+$ limactl delete fedora-fips-d6
+... Deleted `fedora-fips-d6` (`/Users/probe/.lima/fedora-fips-d6`)
+$ limactl list
+No instance found. Run `limactl create` to create an instance.
+$ colima status
+colima is running using macOS Virtualization.Framework
+arch: aarch64
+runtime: docker
+mountType: virtiofs
+docker socket: unix:///Users/probe/.colima/default/docker.sock
+containerd socket: unix:///Users/probe/.colima/default/containerd.sock
+kubernetes: enabled
+```
+
+Both match the before-state exactly (`limactl list` reports the same "no instance" message it
+did before this task started; `colima status` is byte-identical). Lima's download cache
+(`~/Library/Caches/lima/download/` — 504MiB Fedora qcow2 + 256MiB nerdctl-full archive, ~760MiB
+total) was left in place: it is Lima's own reusable setup cache, not a VM instance, and nothing
+in D6 asks for it to be cleared.
+
+### Network use, recorded
+
+One-time setup fetch only (question 154), no network at test time: the Fedora 44 Cloud aarch64
+qcow2 (504MiB) and the `fedora` template's own nerdctl-full guest-tooling archive (256MiB) — the
+latter is part of Lima's stock template provisioning, not something fetched separately for this
+task. `dnf` metadata refreshes (~80MiB, inside the VM, while checking for `fips-mode-setup`) are
+likewise one-time-setup network use inside a VM that no longer exists. Total: ~840MiB.
