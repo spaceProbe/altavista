@@ -27,6 +27,11 @@
 //!   `(emit, accept)` instant pairs; never reads a clock itself (question 199) -- see that
 //!   module's own doc for exactly which two instants and why, and `src/bin/
 //!   av-edge-latency.rs` for the one binary in this crate allowed to read a real clock.
+//! - [`harness`] -- D5a: `src/bin/av-edge-latency.rs`'s own driving core, moved into this
+//!   library (not rewritten) so a test can drive two or three in-process `EdgeIngestService`s
+//!   concurrently through the identical code path the container-based, multi-placement
+//!   binary run later uses -- see that module's own doc for the in-process/targets modes,
+//!   the pacing discipline, and exactly where the two `Instant` reads still sit.
 //!
 //! # Why this crate, and not `av-edge`
 //!
@@ -51,6 +56,7 @@ pub mod bridge;
 pub mod compare;
 pub mod config;
 pub mod consumer;
+pub mod harness;
 pub mod latency;
 
 pub use av_edge::pb;
