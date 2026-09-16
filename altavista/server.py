@@ -75,7 +75,24 @@ from .pb.altavista.v1 import run_pb2
 
 log = logging.getLogger("altavista.server")
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+def _default_web_dir() -> Path:
+    """Round 3 (question 217(b)): the same packaged-copy-before-in-repo-copy treatment
+    ``altavista.profile``'s ``resolve_profiles_dir`` gives ``PROFILES_DIR`` (see that module's own
+    doc for the full argument) -- prefer ``altavista/web/`` beside this file (the packaged copy a
+    real wheel build materialises, ``setup.py``'s ``build_py`` subclass) if it exists, else fall
+    back to the in-repo copy at the worktree root, sibling of ``altavista/``. A source checkout
+    (this worktree, an editable install) never has the packaged copy, so this always reaches the
+    in-repo fallback there -- unchanged behaviour for every existing in-repo caller. Computed once
+    at import time (unlike ``resolve_profiles_dir``, this has no env-var/explicit-argument/
+    monkeypatch escape hatch of its own to re-check per call -- ``create_app``'s own ``web_dir``
+    parameter, already supported and unchanged, is that escape hatch)."""
+    packaged = Path(__file__).resolve().parent / "web"
+    if packaged.is_dir():
+        return packaged
+    return Path(__file__).resolve().parent.parent / "web"
+
+
+WEB_DIR = _default_web_dir()
 DEFAULT_PORT = 8765
 
 
@@ -179,12 +196,22 @@ class Hub:
 def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.PathLike] = None,
                 profile: str = profile_loader.DEFAULT_PROFILE_ID,
                 command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
-                command_entities: Sequence[str] = ()) -> FastAPI:
+                command_entities: Sequence[str] = (),
+                profiles_dir: Optional[os.PathLike] = None) -> FastAPI:
     """``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
     section every published scenario gets stamped with (``Hub.put``) -- defaults to the
     "design" profile (altavista has no running "current profile" console yet; see
     ``altavista/profile.py``'s module docstring). Raises ``altavista.profile.ProfileError``
     (never silently falls back) if the named profile has no usable ``imagery:`` section.
+
+    ``profiles_dir`` (round 3, question 217(b)): where that ``profiles/*.yaml`` file actually
+    lives -- passed straight through to ``altavista.profile.load_imagery_config`` as its own
+    explicit override (that function's own doc has the full, ordered search). Left at its default
+    (``None``), resolution falls through to the environment variable / module constant /
+    packaged-or-in-repo fallback chain exactly as it always has -- this parameter exists for
+    exactly the same reason ``web_dir`` does: an externally-configured deploy-time override,
+    ``altavista/__main__.py``'s ``--profiles-dir`` CLI flag being the one caller that actually
+    supplies it today.
 
     R3.5b (question 201(d)): ``profile`` itself is now ALSO threaded straight through to
     ``Hub`` as ``profile_id``, which stamps it onto every scenario as ``scenario["profileId"]``
@@ -204,7 +231,10 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     failing this function or the app's startup.
     """
     app = FastAPI(title="altavista")
-    hub = Hub(imagery=profile_loader.load_imagery_config(profile), profile_id=profile)
+    hub = Hub(
+        imagery=profile_loader.load_imagery_config(profile, profiles_dir=profiles_dir),
+        profile_id=profile,
+    )
     app.state.hub = hub
     command_config = command_client.CommandServiceConfig(
         grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))
@@ -1180,17 +1210,22 @@ def _default_texture_dir() -> Path:
 def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional[os.PathLike] = None,
           log_level: str = "info", profile: str = profile_loader.DEFAULT_PROFILE_ID,
           command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
-          command_entities: Sequence[str] = ()) -> None:
+          command_entities: Sequence[str] = (),
+          profiles_dir: Optional[os.PathLike] = None) -> None:
     """Run the viewer server (blocking). ``profile`` -- see ``create_app``'s docstring
     (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
     ``command_entities`` -- see ``create_app``'s docstring (R3.5a); all three passed straight
-    through, never read from the process environment (question 199)."""
+    through, never read from the process environment (question 199). ``profiles_dir`` (round 3,
+    question 217(b)) -- see ``create_app``'s own doc; passed straight through as a CLI argument
+    (``altavista/__main__.py``'s ``--profiles-dir``), never read from the process environment
+    either."""
     import uvicorn
 
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO),
                         format="%(asctime)s %(name)s: %(message)s")
     app = create_app(texture_dir=texture_dir, profile=profile, command_endpoint=command_endpoint,
-                      command_admin_endpoint=command_admin_endpoint, command_entities=command_entities)
+                      command_admin_endpoint=command_admin_endpoint, command_entities=command_entities,
+                      profiles_dir=profiles_dir)
     log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s)",
              host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

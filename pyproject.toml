@@ -1,6 +1,12 @@
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+# Round 3 (question 217(b), lead ruling): `setup.py` beside this file supplies exactly one
+# `cmdclass` hook (`build_py`) -- see that file's own doc -- so the built wheel can carry `web/`
+# and `profiles/` (siblings of `altavista/` at the repo root) as `altavista/web/`/
+# `altavista/profiles/`. `build-backend` stays `setuptools.build_meta` (the pyproject-native
+# backend, not the deprecated `setuptools.build_meta:__legacy__`): that backend already executes
+# `setup.py` when one is present, merging its `cmdclass` with everything else declared here.
 
 [project]
 name = "altavista"
@@ -39,6 +45,21 @@ altavista = "altavista.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["altavista*"]
+
+# Round 3 (question 217(b)): `web/` and `profiles/` are siblings of `altavista/` at the repo root,
+# so `packages.find` above -- which only ever discovers real Python packages under `altavista*` --
+# never sees them; that gap is what `tests/test_kit_zero_egress_install.py`'s own module doc
+# named directly, and what the P5 kit had to work around by carrying both as separate copied
+# packs. `setup.py`'s `build_py` subclass copies their bytes into the build tree as
+# `altavista/web/`/`altavista/profiles/` (a real, physical location INSIDE the `altavista`
+# package directory, not a `packages.find` entry of its own -- neither name is declared as a
+# package here, so neither becomes a top-level `site-packages/web`/`site-packages/profiles`
+# that could collide with some other installed project of the same name). This `package-data`
+# entry is what then makes the wheel builder keep those copied files: patterns are resolved
+# relative to the named package's own directory (`altavista/`), so `"web/**/*"` means
+# `altavista/web/**/*` in the BUILD tree, exactly what `build_py` just populated.
+[tool.setuptools.package-data]
+altavista = ["web/**/*", "profiles/**/*"]
 
 [tool.pytest.ini_options]
 # M23.2 added services/cfs/tests/ (the cFS lockstep clock, CCSDS golden and image-digest
