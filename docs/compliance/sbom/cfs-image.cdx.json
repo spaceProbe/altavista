@@ -1,0 +1,49 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f04908af8394ee42703850832d3af949569cc9e76cd60938a604862e8e644dea"
+        }
+      ],
+      "name": "av-lockstep-shim",
+      "properties": [
+        {
+          "name": "altavista:sbom:no-licence-metadata",
+          "value": "true"
+        }
+      ],
+      "type": "file",
+      "version": "0.1.0"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "dea163a1bad929b53c27498e182dadc62ef0f63cb6a63ac73dd1ac31bf6cded2"
+        }
+      ],
+      "name": "cfs-image",
+      "properties": [
+        {
+          "name": "altavista:sbom:gap",
+          "value": "base image digest not recorded: services/cfs/IMAGE_DIGEST.md has no single current-state field for it (only narrative changelog prose, e.g. the 'Digest-pinned base, both stages' section) and IMAGE_CONTEXT_MANIFEST.txt does not record base-image provenance -- omitted rather than parsed out of prose that could be stale"
+        },
+        {
+          "name": "altavista:sbom:runtime-content-hash",
+          "value": "sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef"
+        }
+      ],
+      "type": "container",
+      "version": "altavista-cfs-lockstep:local"
+    },
+    "timestamp": "2026-09-15T12:43:32Z"
+  },
+  "serialNumber": "urn:uuid:ea6bc9e8-cee5-a96f-a8bb-10f98c963a92",
+  "specVersion": "1.5",
+  "version": 1
+}

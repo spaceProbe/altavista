@@ -62,6 +62,17 @@ allow = [
                # means when it says "BSL"; unrelated, permissive, spelled out here so the
                # abbreviation collision is never silently conflated with the license this
                # policy actually exists to keep out (see the `deny` list below).
+    "0BSD", # the zero-clause BSD licence -- public-domain-equivalent, even more permissive than
+            # BSD-3-Clause; one term of numpy 2.5.3's five-way `AND` expression (a transitive
+            # Python dependency of the viewer's own stack). Question 214(a) (lead, docs/open-
+            # questions.md): joins this list so the SBOM licence check -- which reads this list
+            # as its single source -- allows it outright, with nothing else recorded separately.
+    "PSF-2.0", # the Python Software Foundation License 2.0 -- permissive, OSI-approved;
+               # typing_extensions 4.16.0's declared licence, a near-universal transitive Python
+               # dependency of the viewer's own stack. Question 214(a) (lead, docs/open-
+               # questions.md): joins this list so the SBOM licence check -- which reads this
+               # list as its single source -- allows it outright, with nothing else recorded
+               # separately.
 ]
 # `cargo-deny` 0.20's `[licenses]` policy is allow-list-only (an explicit `deny` list was
 # removed upstream -- https://github.com/EmbarkStudios/cargo-deny/pull/611): anything whose

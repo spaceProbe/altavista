@@ -46,6 +46,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from altavista import command_client
+from altavista.test_env import drain_after_terminate
 from altavista.pb import authority_pb2, authority_pb2_grpc
 from altavista.pb.altavista.v1 import command_pb2
 from altavista.server import create_app
@@ -176,12 +177,11 @@ def command_service(command_bin, issuer, tmp_path_factory):
         except Exception as e:
             channel.close()
             returncode = proc.poll()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # `proc.stdout.read()` here is a readall on a subprocess that is still running
+            # (a readiness wait times out precisely when the child is alive), so it used to
+            # block FOREVER -- measured, 34 minutes, in P5 round 3's acceptance gate. See
+            # `altavista.test_env.drain_after_terminate`'s own doc for the measurement.
+            output = drain_after_terminate(proc)
             pytest.fail(f"av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
         channel.close()
         # `profile_path`/`policy_dir` are exposed alongside the endpoints so a second,
@@ -419,18 +419,12 @@ def _start_replay_service(command_bin: Path, command_service, issuer, run_id: st
         grpc.channel_ready_future(channel).result(timeout=READY_TIMEOUT_S)
     except Exception as e:
         returncode = proc.poll()
-        output = ""
-        try:
-            if proc.stdout is not None:
-                output = proc.stdout.read()
-        except Exception:
-            pass
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
+        # readall on a still-running child blocks forever -- see
+        # `altavista.test_env.drain_after_terminate`'s own doc (P5 round 3, measured).
+        # `drain_after_terminate` has already terminated (and, if needed, killed) the child and
+        # reaped it, so the terminate/wait ladder that used to stand here is gone rather than
+        # left behind to `wait()` on an already-reaped process.
+        output = drain_after_terminate(proc)
         raise _ReplayServiceStartupError(
             f"replay av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n"
             f"--- subprocess output ---\n{output}"

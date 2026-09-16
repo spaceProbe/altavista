@@ -105,6 +105,12 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 import edge_local_ca as ca  # noqa: E402  (path insert must precede this import)
 
+from altavista.test_env import (  # noqa: E402
+    drain_after_terminate,
+    resolve_cfs_mirror_dir,
+    resolve_gmat_root,
+)
+
 DEPLOY_DIR = REPO_ROOT / "services" / "av-ingest" / "deploy"
 TEMPLATE_PATH = DEPLOY_DIR / "nginx-av-ingest-grpc.conf.template"
 FORWARDED_CERT_RS = REPO_ROOT / "crates" / "av-ingest" / "src" / "forwarded_cert.rs"
@@ -114,8 +120,14 @@ OPENSSL_BIN = "/opt/homebrew/opt/openssl@3/bin/openssl"  # Homebrew OpenSSL, NOT
 # system LibreSSL -- see tests/test_grpc_tls.py's own identical note on ECDSA P-384.
 
 RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
-GMAT_ROOT = "/Users/probe/code/AltaVista/GMAT R2026a"
-CFS_MIRROR_DIR = "/Users/probe/code/AltaVista/third_party/mirrors"
+
+# Resolved ONCE at import time (question 217(d)): see `tests/test_edge_identity_seccert.py`'s
+# own identical note and `altavista/test_env.py`'s own doc -- env var first, then this
+# worktree's own machine-local `GMAT R2026a`/`third_party/mirrors` entries, else `None` with a
+# named reason rather than a `/Users/probe` literal. Never assigned back into `os.environ`
+# (question 199).
+GMAT_ROOT, _GMAT_ROOT_SKIP_REASON = resolve_gmat_root()
+CFS_MIRROR_DIR, _CFS_MIRROR_DIR_SKIP_REASON = resolve_cfs_mirror_dir()
 OPENSSL_DIR = "/opt/homebrew/opt/openssl@3"
 
 NGINX_READY_TIMEOUT_S = 10.0
@@ -124,10 +136,16 @@ TAI_MINUS_UNIX_NS = 37_000_000_000  # see tests/test_edge_identity_seccert.py's 
 
 
 def _cargo_env() -> dict:
+    """Never assigned back into `os.environ` itself (question 199). Only overrides
+    GMAT_ROOT/CFS_MIRROR_DIR when they actually resolved (`av_ingest_binaries` below skips
+    visibly before ever calling this when they did not) -- never overwrites an inherited
+    value with a `/Users/probe` literal that might not exist on this machine."""
     env = dict(os.environ)
     env["PATH"] = f"{RUSTUP_PATH_PREFIX}:{env.get('PATH', '')}"
-    env["GMAT_ROOT"] = GMAT_ROOT
-    env["CFS_MIRROR_DIR"] = CFS_MIRROR_DIR
+    if GMAT_ROOT is not None:
+        env["GMAT_ROOT"] = GMAT_ROOT
+    if CFS_MIRROR_DIR is not None:
+        env["CFS_MIRROR_DIR"] = CFS_MIRROR_DIR
     env["OPENSSL_DIR"] = OPENSSL_DIR
     return env
 
@@ -228,8 +246,15 @@ def _fullchain(dest: Path, leaf: Path, issuer: Path) -> Path:
 @pytest.fixture(scope="module")
 def av_ingest_binaries():
     """Builds `av-ingest-server` (crates/av-ingest) and `av-ingest-mtls-client`
-    (crates/av-ingest-client) once for the module. A build failure is a real failure of
-    this task, never something to skip."""
+    (crates/av-ingest-client) once for the module. Skips visibly (question 194) if
+    `GMAT_ROOT`/`CFS_MIRROR_DIR` could not be resolved -- see `tests/
+    test_edge_identity_seccert.py::av_edge_binaries`'s own identical note. A build failure
+    once both directories ARE present is a real failure of this task, never something to
+    skip."""
+    if _GMAT_ROOT_SKIP_REASON is not None:
+        pytest.skip(_GMAT_ROOT_SKIP_REASON)
+    if _CFS_MIRROR_DIR_SKIP_REASON is not None:
+        pytest.skip(_CFS_MIRROR_DIR_SKIP_REASON)
     env = _cargo_env()
     proc = subprocess.run(
         ["cargo", "build", "-p", "av-ingest", "--bin", "av-ingest-server", "-p", "av-ingest-client", "--bin", "av-ingest-mtls-client"],
@@ -378,8 +403,11 @@ def _running_nginx(conf_path: Path, listen_port: int, work: Path):
         try:
             _wait_for_port(listen_port, NGINX_READY_TIMEOUT_S)
         except TimeoutError as e:
-            proc.terminate()
-            output = proc.stdout.read() if proc.stdout else ""
+            # `terminate()` + readall still blocks forever whenever the child outlives SIGTERM
+            # (nginx's own graceful shutdown is exactly such a child);
+            # `drain_after_terminate` bounds the read and escalates to kill. P5 round 3, measured
+            # -- see that helper's own doc.
+            output = drain_after_terminate(proc)
             log = (work / "error.log").read_text() if (work / "error.log").is_file() else ""
             pytest.fail(f"nginx did not start listening on 127.0.0.1:{listen_port}: {e}\n--- nginx stdout/stderr ---\n{output}\n--- error.log ---\n{log}")
         yield SimpleNamespace(port=listen_port, error_log=work / "error.log")

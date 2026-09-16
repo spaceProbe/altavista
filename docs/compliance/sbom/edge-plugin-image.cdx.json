@@ -1,0 +1,73 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "707415b3e5b7fbdeb41e4a2efb9ea63946bf6c197b8ae09e955c46837200c510"
+        }
+      ],
+      "name": "av-edge-plugin",
+      "properties": [
+        {
+          "name": "altavista:sbom:no-licence-metadata",
+          "value": "true"
+        }
+      ],
+      "type": "file",
+      "version": "0.1.0"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171"
+        }
+      ],
+      "name": "debian:bookworm-slim",
+      "properties": [
+        {
+          "name": "altavista:sbom:no-licence-metadata",
+          "value": "true"
+        }
+      ],
+      "type": "container",
+      "version": "0.1.0"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+        }
+      ],
+      "name": "rust:1.85-bookworm",
+      "properties": [
+        {
+          "name": "altavista:sbom:no-licence-metadata",
+          "value": "true"
+        }
+      ],
+      "type": "container",
+      "version": "0.1.0"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "38062a487a4346dc5a23eb26dcf00fe7d06e3fec9d6813e003fe612fcaef234e"
+        }
+      ],
+      "name": "edge-plugin-image",
+      "type": "container",
+      "version": "av-edge-plugin:local"
+    },
+    "timestamp": "2026-09-15T14:45:39Z"
+  },
+  "serialNumber": "urn:uuid:f558b515-1b0c-4e56-5c4c-91d8ed6ea7c8",
+  "specVersion": "1.5",
+  "version": 1
+}

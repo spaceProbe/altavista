@@ -64,6 +64,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from altavista.pb import authority_pb2, authority_pb2_grpc
+from altavista.test_env import drain_after_terminate
 from altavista.pb.altavista.v1 import command_pb2
 from altavista.server import Hub, create_app
 
@@ -190,12 +191,11 @@ def command_service(command_bin, issuer, tmp_path_factory):
         except Exception as e:
             channel.close()
             returncode = proc.poll()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # `proc.stdout.read()` here is a readall on a subprocess that is still running
+            # (a readiness wait times out precisely when the child is alive), so it used to
+            # block FOREVER -- measured, 34 minutes, in P5 round 3's acceptance gate. See
+            # `altavista.test_env.drain_after_terminate`'s own doc for the measurement.
+            output = drain_after_terminate(proc)
             pytest.fail(f"av-command subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
         channel.close()
         yield SimpleNamespace(grpc_endpoint=grpc_endpoint, admin_endpoint=admin_endpoint, proc=proc, ledger_dir=ledger_dir)

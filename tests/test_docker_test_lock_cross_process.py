@@ -2,7 +2,7 @@
 cross-process, cross-language test
 (`docker_test_lock::tests::flock_lock_is_visible_across_processes_and_languages`): this file
 proves the SAME mutual exclusion holds between two independent PYTHON processes on
-`altavista.docker_test_lock`'s own production lock path, not merely between Rust and Python.
+`altavista.docker_test_lock`'s own production lock CODE PATH, not merely between Rust and Python.
 
 Needs no Docker at all -- this test never skips for a Docker reason, and always runs (or fails
 outright) on any host with a Python interpreter, which this test itself already is.
@@ -17,6 +17,24 @@ whether `flock` even serialises that case at all, by the Rust side's own
 file exists to prove the cross-PROCESS claim directly, the same way that Rust test's own sibling
 (`flock_lock_is_visible_across_processes_and_languages`) does across languages.
 
+# Never asserts the REAL shared lock is free (docs/open-questions.md question 212(b))
+
+The two locking tests below used to run their child processes against the real, host-wide
+`$HOME/.altavista/locks/docker-tests.lock` -- the exact path every OTHER Docker-gated test on
+this host (Rust or Python, this worktree or any other) also locks. Whenever a different track on
+this host genuinely held that lock while this file ran, `observed_after_release == "ACQUIRED"`
+was simply false, for a reason that has nothing to do with `altavista.docker_test_lock`'s own
+correctness -- the lock isn't the module's to give up. The fix: each locking test gives its own
+child processes a PRIVATE `$HOME` (a fresh directory under `tmp_path`, via `subprocess.Popen`'s
+`env=` argument -- never `os.environ[...] = ...` on this test process itself, question 199), so
+`lock_path()` -- the real, unmodified production function -- resolves to a lock file only this
+test's own children ever touch. The production `lock_docker_tests()`/`lock_path()` code is still
+exercised for real (this is not a hand-rolled `flock`); only the PATH it resolves to differs from
+today's default. The cross-language path-agreement claim the old shared-path test also proved by
+construction is kept, but split out into its own non-locking test below
+(`test_lock_path_matches_the_documented_home_relative_convention`) that asserts against the real,
+inherited `$HOME` and takes no lock at all.
+
 # No fixed sleep
 
 Every synchronisation point below blocks on a real OS event (a child process's own stdout line,
@@ -25,9 +43,12 @@ unblocking) -- never a fixed-duration `time.sleep` guess.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+from altavista.test_env import drain_after_terminate
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,10 +77,11 @@ with lock_docker_tests():
     print("WAITER_ACQUIRED", flush=True)
 """
 
-# Runs inside a SEPARATE child process: a single non-blocking attempt on the identical
-# production path (via `lock_path()`, never re-deriving it independently -- this probe is
-# testing mutual exclusion between two Python processes, not path agreement, so it reuses the
-# module's own path function on purpose).
+# Runs inside a SEPARATE child process: a single non-blocking attempt on `lock_path()`'s own
+# resolved path (never re-deriving it independently -- this probe is testing mutual exclusion
+# between two Python processes, not path agreement, so it reuses the module's own path function
+# on purpose). Which actual path that is depends entirely on the child's own $HOME, supplied via
+# `env=` by whoever spawns this script -- see `_child_env` below.
 _PROBE_SCRIPT = """
 import fcntl
 import os
@@ -79,16 +101,33 @@ finally:
 """
 
 
-def _run_probe_child() -> str:
-    result = subprocess.run([sys.executable, "-c", _PROBE_SCRIPT], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+def _child_env(private_home: Path) -> dict[str, str]:
+    """A copy of THIS process's own environment (never assigned back into `os.environ` --
+    question 199) with `$HOME` overridden to a private, per-test scratch directory. Every child
+    spawned with this env computes `lock_path()` (the real, unmodified production function) as
+    `private_home / ".altavista" / "locks" / "docker-tests.lock"` -- a path only this test's own
+    children ever touch, never the real host-wide lock every other Docker-gated test on this
+    host also locks (question 212(b))."""
+    env = dict(os.environ)
+    env["HOME"] = str(private_home)
+    return env
+
+
+def _run_probe_child(env: dict[str, str]) -> str:
+    result = subprocess.run([sys.executable, "-c", _PROBE_SCRIPT], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, f"the probe child itself must not error: stdout={result.stdout!r} stderr={result.stderr!r}"
     return result.stdout.strip()
 
 
-def test_two_python_processes_mutually_exclude_on_the_docker_test_lock():
+def test_two_python_processes_mutually_exclude_on_the_docker_test_lock(tmp_path):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
     holder = subprocess.Popen(
         [sys.executable, "-c", _HOLDER_SCRIPT],
         cwd=REPO_ROOT,
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -98,18 +137,28 @@ def test_two_python_processes_mutually_exclude_on_the_docker_test_lock():
         # Block on a real OS event: the holder child's own stdout line, written only after its
         # `fcntl.flock(LOCK_EX)` call has actually returned -- never a sleep-and-hope.
         held_line = holder.stdout.readline().strip()
-        assert held_line == "HELD", f"holder child did not report holding the lock (got {held_line!r}); stderr: {holder.stderr.read()}"
+        if held_line != "HELD":
+            # `holder.stderr.read()` used to sit in this assert's MESSAGE -- evaluated only
+            # on failure, at which point the holder child is still running with its stdin
+            # open, so the readall blocked forever and the failure was never reported at
+            # all. P5 round 3, measured; see `altavista.test_env.drain_after_terminate`.
+            raise AssertionError(
+                f"holder child did not report holding the lock (got {held_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
-        observed_while_held = _run_probe_child()
+        observed_while_held = _run_probe_child(env)
 
         # Release the holder by satisfying its own blocking `stdin.readline()` -- another real
         # OS event, not a sleep -- then wait for its own confirmation line before probing again.
         holder.stdin.write("release\n")
         holder.stdin.flush()
         released_line = holder.stdout.readline().strip()
-        assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {holder.stderr.read()}"
+        if released_line != "RELEASED":
+            raise AssertionError(
+                f"holder child did not confirm release (got {released_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
-        observed_after_release = _run_probe_child()
+        observed_after_release = _run_probe_child(env)
     finally:
         holder.stdin.close()
         holder.wait(timeout=10)
@@ -141,15 +190,23 @@ def _read_line_containing(pipe, needle: str, *, what: str) -> str:
             return line.strip()
 
 
-def test_the_waiting_process_announces_its_own_wait():
+def test_the_waiting_process_announces_its_own_wait(tmp_path):
     """Question 207's own follow-up: `lock_docker_tests()` must not block silently when
     contended -- see altavista/docker_test_lock.py's "A blocked wait is announced, never silent"
     doc section. Mirrors the Rust side's own
     `docker_test_lock::tests::lock_docker_tests_announces_a_blocked_wait_never_silently`, between
-    two Python processes instead of a nested `cargo test` subprocess."""
+    two Python processes instead of a nested `cargo test` subprocess. Runs its holder/waiter pair
+    on a private `$HOME` (see `_child_env`), never the real shared lock (question 212(b)) --
+    this test only needs to prove ITS OWN waiter announces and then acquires, not that the real
+    host-wide lock was free."""
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
     holder = subprocess.Popen(
         [sys.executable, "-c", _HOLDER_SCRIPT],
         cwd=REPO_ROOT,
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -157,11 +214,19 @@ def test_the_waiting_process_announces_its_own_wait():
     )
     try:
         held_line = holder.stdout.readline().strip()
-        assert held_line == "HELD", f"holder child did not report holding the lock (got {held_line!r}); stderr: {holder.stderr.read()}"
+        if held_line != "HELD":
+            # `holder.stderr.read()` used to sit in this assert's MESSAGE -- evaluated only
+            # on failure, at which point the holder child is still running with its stdin
+            # open, so the readall blocked forever and the failure was never reported at
+            # all. P5 round 3, measured; see `altavista.test_env.drain_after_terminate`.
+            raise AssertionError(
+                f"holder child did not report holding the lock (got {held_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
         waiter = subprocess.Popen(
             [sys.executable, "-c", _WAITER_SCRIPT],
             cwd=REPO_ROOT,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -177,7 +242,10 @@ def test_the_waiting_process_announces_its_own_wait():
             holder.stdin.write("release\n")
             holder.stdin.flush()
             released_line = holder.stdout.readline().strip()
-            assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {holder.stderr.read()}"
+            if released_line != "RELEASED":
+                raise AssertionError(
+                    f"holder child did not confirm release (got {released_line!r}); "
+                    f"stderr: {drain_after_terminate(holder)}")
 
             acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what="waiter")
 
@@ -204,3 +272,16 @@ def test_the_waiting_process_announces_its_own_wait():
         f"expected an ACQUIRED-after-waiting line reporting the real elapsed wait, got {acquired_line!r}"
     )
     assert "WAITER_ACQUIRED" in waiter_stdout, f"the waiter must have actually acquired the lock and printed its own confirmation -- got stdout {waiter_stdout!r} (stderr tail: {waiter_stderr_rest!r})"
+
+
+def test_lock_path_matches_the_documented_home_relative_convention():
+    """The cross-language path-agreement claim the old shared-path test proved by construction
+    (both a bare `python3 -c` probe and this module's own `lock_path()` computing the identical
+    `$HOME`-relative path), kept as its own assertion -- but taking NO lock at all, against this
+    process's own real, inherited `$HOME`, so it can never be affected by whether some other
+    process on this host holds the real lock (question 212(b)). The Rust side's own equivalent,
+    non-locking path-only test is
+    `docker_test_lock::tests::rust_and_python_compute_the_identical_lock_path`."""
+    from altavista.docker_test_lock import lock_path
+
+    assert lock_path() == Path(os.environ["HOME"]) / ".altavista" / "locks" / "docker-tests.lock"

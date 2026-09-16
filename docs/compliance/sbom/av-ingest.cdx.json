@@ -1,0 +1,2906 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "name": "aho-corasick",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.5"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "anyhow",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.104"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "approx",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "async-stream",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.6"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "async-stream-impl",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.6"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "async-trait",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.92"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "atomic-waker",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "autocfg",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.5.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-cdm",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-codec",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-dynamics",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-edge",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-ingest",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "axum",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.9"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "axum-core",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.5"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "base64",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.22.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "bitflags",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.13.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Zlib OR Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "bytemuck",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.25.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "bytes",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.12.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "cc",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.4.4"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "cfg-if",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.4"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "either",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.18.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "equivalent",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "errno",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.14"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "fastrand",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.5.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "find-msvc-tools",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.11"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "fixedbitset",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.7"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 / MIT"
+        }
+      ],
+      "name": "fnv",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.7"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "foreign-types",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "foreign-types-shared",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "futures-channel",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "futures-core",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "futures-sink",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "futures-task",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "futures-util",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "getrandom",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.17"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "getrandom",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "h2",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.19"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "hashbrown",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.12.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "hashbrown",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.17.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "heck",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "http",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.5.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "http-body",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "http-body-util",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.5"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "httparse",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.10.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "httpdate",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "hyper",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.11.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "hyper-timeout",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "hyper-util",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.20"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "indexmap",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.9.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "indexmap",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.14.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "inventory",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.24"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "itertools",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.14.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "itoa",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.18"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "libc",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.189"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "libm",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.16"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "log",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT AND BSD-3-Clause"
+        }
+      ],
+      "name": "matchit",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "matrixmultiply",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.11"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "name": "memchr",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.8.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "mime",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.17"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "mio",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.2.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "multimap",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.10.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "nalgebra",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.33.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "nalgebra-macros",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "num-bigint",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.8"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "num-complex",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.6"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "num-integer",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.47"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "num-rational",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "num-traits",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.19"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "once_cell",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.21.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "openssl",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.10.81"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "openssl-macros",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "openssl-sys",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.9.117"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "paste",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.15"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "percent-encoding",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "petgraph",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "pin-project",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.13"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "pin-project-internal",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.13"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "pin-project-lite",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.17"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "pkg-config",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.34"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "ppv-lite86",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.21"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "prettyplease",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.37"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "proc-macro2",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.107"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "prost",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.13.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "prost-build",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.13.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "prost-derive",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.13.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "prost-types",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.13.5"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "quote",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.47"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "rand",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.8.8"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "rand_chacha",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "rand_core",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.6.4"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "rand_distr",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.3"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "rawpointer",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "regex",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.13.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "regex-automata",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.18"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "regex-syntax",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.8.11"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "rustix",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.1.4"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "rustversion",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.23"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Zlib OR Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "safe_arch",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.4"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "serde",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.229"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "serde_core",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.229"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "serde_derive",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.229"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "serde_json",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.151"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "shlex",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.0.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "signal-hook-registry",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.4.8"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "simba",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.9.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "slab",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.12"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "smallvec",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.16.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "socket2",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.10"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "socket2",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.6.5"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "spoore-cdm",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.0.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "syn",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.0.119"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "syn",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "3.0.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "sync_wrapper",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.2"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "tempfile",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "3.27.0"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "thiserror",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.0.20"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "thiserror-impl",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.0.20"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tokio",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.53.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tokio-macros",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "2.7.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tokio-stream",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.19"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tokio-util",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.19"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tonic",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.12.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tonic-build",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.12.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tower",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.4.13"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tower",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.5.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tower-layer",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tower-service",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tracing",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.44"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tracing-attributes",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.31"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tracing-core",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.36"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "try-lock",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.5"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "name": "typenum",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.20.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "(MIT OR Apache-2.0) AND Unicode-3.0"
+        }
+      ],
+      "name": "unicode-ident",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.24"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "MIT/Apache-2.0"
+        }
+      ],
+      "name": "vcpkg",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "build"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.2.15"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "want",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.3.1"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "Zlib OR Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "wide",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.7.33"
+    },
+    {
+      "licenses": [
+        {
+          "expression": "BSD-2-Clause OR Apache-2.0 OR MIT"
+        }
+      ],
+      "name": "zerocopy",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "0.8.56"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "zmij",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "crates.io"
+        }
+      ],
+      "type": "library",
+      "version": "1.0.23"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "name": "av-ingest",
+      "properties": [
+        {
+          "name": "altavista:sbom:cargo-package",
+          "value": "av-ingest"
+        },
+        {
+          "name": "altavista:sbom:cargo-bin",
+          "value": "av-ingest-server"
+        },
+        {
+          "name": "altavista:sbom:cargo-profile",
+          "value": "debug"
+        },
+        {
+          "name": "altavista:sbom:rust-audit-info-version",
+          "value": "0.5.4"
+        }
+      ],
+      "type": "application",
+      "version": "0.1.0"
+    },
+    "timestamp": "2026-09-16T08:01:19Z"
+  },
+  "serialNumber": "urn:uuid:35e1e619-c2c1-f8cd-995b-691add01fe87",
+  "specVersion": "1.5",
+  "version": 1
+}

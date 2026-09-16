@@ -124,6 +124,7 @@ from pathlib import Path
 import pytest
 
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.test_env import missing_spoore_reason, spoore_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROPOSER_DIR = REPO_ROOT / "services" / "proposer"
@@ -240,8 +241,9 @@ def _compute_skip_reason() -> "str | None":
             "on disk with the committed altavista.pb bindings. Run "
             "`.venv/bin/python altavista/pb/generate.py` on a host with protoc installed, then re-run."
         )
-    if not (Path("/Users/probe/code/spoore") / "crates" / "spoore-cdm").exists():
-        return "/Users/probe/code/spoore/crates/spoore-cdm not found -- av-proposer's own cross-build (and this test's av-command/av-gateway cross-build) bind-mounts it (see services/proposer/Dockerfile's own header comment)."
+    spoore_reason = missing_spoore_reason()
+    if spoore_reason is not None:
+        return spoore_reason
     if not Path(OPENSSL).exists():
         return f"{OPENSSL} not found -- this test generates a throwaway RSA keypair for av-command's --oidc-public-key-path with it, entirely locally (question 154)."
     return None
@@ -339,7 +341,14 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
         [
             "docker", "run", "--rm",
             "-v", f"{REPO_ROOT}:/workspace",
-            "-v", "/Users/probe/code/spoore:/Users/probe/code/spoore:ro",
+            # HOST source resolved by altavista.test_env.spoore_dir() (AV_SPOORE_DIR, else a
+            # `spoore` checkout beside this repository's own root -- question 217(d), never a
+            # `/Users/probe` literal). The CONTAINER destination stays the literal
+            # `/Users/probe/code/spoore` -- the root Cargo.toml's own `spoore-cdm = { path =
+            # "/Users/probe/code/spoore/crates/spoore-cdm" }` bakes that exact path into every
+            # crate that depends on it, and Cargo.toml is out of this task's scope to change
+            # (it would stale the Rust SBOMs); see altavista/test_env.py::spoore_dir's own doc.
+            "-v", f"{spoore_dir()}:/Users/probe/code/spoore:ro",
             "-w", "/workspace",
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
