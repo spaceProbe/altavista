@@ -340,3 +340,274 @@ Every one was found by re-running from the tree, not by reading a worker's claim
 6. **D3's second half needs a decision on what the kit actually carries**: `cargo vendor`'s tree
    and the Python wheels are hundreds of megabytes, and the GMAT pack is 738 MB reached by a
    symlink into the main worktree. The install proof cannot start until that is settled.
+
+## Status (P5 manager, 2026-09-15) — round 2
+
+The two test defects the lead's clone gate found at `6ddb9c1` are fixed; question 214(a)'s licence
+ruling is implemented and the declared exceptions are gone; **D3 is complete** — a kit now carries a
+real install payload and a zero-egress install proof runs the demo path from it inside a Docker
+`--internal` network, measured. D4 was not reached; D5 and D6 remain untouched.
+
+### What landed on `edge`
+
+| Commit | What |
+|---|---|
+| `3bc12e6` | Task 1: both clone-gate defects — the symlinked-pack test builds its own pack under `tmp_path`; the lock tests prove only that their own processes serialise |
+| `8223ea0` | Task 2A: `0BSD` and `PSF-2.0` join `deny.toml`'s allow list; `licence-exceptions.md` and its machinery deleted; the gate keeps both directions |
+| `327fe70` | Task 2B: the Rust SBOM epoch narrows to the manifests, so a `.rs` edit no longer makes six committed SBOMs stale; six documents regenerated |
+| `206ae69` | Task 3a: the kit carries real bytes — copied packs with their symlinks, `cargo vendor`, the viewer's linux wheels, cross-built Linux binaries, the recorded runs (`kit_format` 2) |
+| `519c612` | Manager review fix: the cross-build cache is keyed on the source state, not the commit; a kit says when a step used the network |
+| `6cbcf0b` | Task 3b: `scripts/kit/install.sh`/`install.py` and `tests/test_kit_zero_egress_install.py` — D3's second half |
+| `381b29d` | Task 3c: the viewer's `web/` and `profiles/` are carried in the kit and installed from it, so the proof mounts no worktree asset |
+
+### Gate counts (run by the manager at `381b29d`'s tree, no worker active)
+
+- `cargo test --workspace --exclude av-kernel --no-fail-fast`: **835 passed, 0 failed, 3 ignored**
+  across 109 test binaries, exit 0. Round 1 measured 834; the one new Rust test is the non-locking
+  cross-language path-agreement test task 1 split out.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0, zero warnings. No `#[allow]` was
+  added anywhere this round (grepped, not assumed).
+- `cargo deny check`: exit 0, "advisories ok, bans ok, licenses ok, sources ok", with exactly the six
+  `warning[wildcard]` lines question 207 accepts. Two `warning[license-not-encountered]` lines are new
+  and expected: `0BSD` and `PSF-2.0` are Python licences that cargo-deny's Rust-only graph never sees.
+- `.venv/bin/python -m pytest -q -rs`: **1 failed, 661 passed, 13 skipped**, 301.66s. Round 1's
+  baseline was 1 failed, 634 passed, 10 skipped: +27 tests and +3 visible, opt-in skips. That run
+  included the zero-egress proof for real (the proof kit was present), not as a skip. The one failure
+  is still `tests/test_proposer_container.py::test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority`,
+  the AI-plane's image and question 212(a)'s gap, reproduced with its own error text
+  (`--service-token-file is required`), not ours.
+- secdeploy over the merged manifest, offline against the user's own checkout: `verify` exit 0
+  ("✓ manifest valid", "✓ target assets present", "✓ topology valid — domain altavista.internal,
+  1 resource(s)", all 17 components placed) and `plan macos` exit 0 with every AltaVista component
+  listed at its `ref`. Unchanged from round 1.
+- The kit built twice from this tree with every gated flag: manifest hash
+  **`36eb5e30a74d61f2827292178e829a4c2a4b444c42d2d067e407e8928a290de3`** both times, the two
+  `KIT_MANIFEST` files byte-identical (`cmp`, not eyeballed).
+
+### Task 1 — the two clone-gate defects
+
+**(a) A test that read this worktree's own symlinks.**
+`test_pack_descriptor_records_a_symlinked_out_of_worktree_pack_honestly` asserted against
+`third_party/cspice`, a symlink into another worktree that exists only here; in a plain clone the
+path is absent or a fetched directory, so the test either errored or asserted the wrong values. It
+now fabricates its own pack under `tmp_path` — an `outside/` tree with a file and a subdirectory
+file, a `worktree/` standing in for the repo root, and `worktree/third_party/cspice` symlinked at it
+— and asserts the identical Decision-K properties plus a now-deterministic `resolved_real_path`
+(`"../outside"`) and an exact `file_count`.
+
+**(b) Two tests that asserted the host-wide lock was free** (question 212(b)). Both the Rust
+`flock_lock_is_visible_across_processes_and_languages` and the Python
+`test_two_python_processes_mutually_exclude_on_the_docker_test_lock` took the real
+`$HOME/.altavista/locks/docker-tests.lock`, dropped it, and asserted a child could then acquire it —
+false whenever another track holds it, for a reason that has nothing to do with the lock's own
+correctness. Both now run on a private path while still exercising the production code:
+`lock_docker_tests()` is now `lock_docker_tests_at(lock_file_path())` and the Rust test locks a path
+under its own `repo_scratch_dir()`, handing it to the python child through argv; the Python test's
+children get a private `$HOME` through `subprocess.Popen(env=…)` — never a mutation of the test
+process's own environment — so the unmodified `lock_path()` resolves somewhere only those children
+touch. The cross-language path-agreement claim the old tests proved as a side effect of locking is
+kept as its own non-locking test on each side.
+
+`lock_docker_tests_announces_a_blocked_wait_never_silently` and its probe deliberately stay on the
+real lock: they never assert it is free, only that a genuinely contended acquire announces itself.
+
+Proof, run by the manager independently of the worker: a helper process took the real host-wide lock,
+a one-shot `LOCK_EX|LOCK_NB` probe confirmed `BlockingIOError` ("real host-wide lock is HELD"), and
+with it held the three Python lock tests passed in 1.37s and the two fixed Rust tests in 0.07s —
+neither blocked, neither failed. The helper then released and the lock was confirmed free again.
+
+### Task 2 — the licence allow list, and an SBOM staleness defect
+
+`0BSD` and `PSF-2.0` are in `deny.toml`'s allow list with their reason (numpy 2.5.3's five-way `AND`,
+`typing_extensions` 4.16.0; question 214(a)), `docs/compliance/sbom/licence-exceptions.md` and every
+reference to it are gone, and the check reads the allow list as its single source. The replacement
+test asserts zero findings and prints what it evaluated — **949 (component, package, version,
+licence) combinations across the ten documents, 0 findings**. Two tests keep the gate honest in both
+directions: a licence outside the allow list is still a finding, and numpy's real expression plus
+`PSF-2.0` come back as findings against an in-memory allow list with those two entries removed — the
+test that catches someone silently deleting them.
+
+Along the way the manager found a defect of the same class as round 1's D2-1: **`RUST_EPOCH_PATHS`
+included the whole of `crates/`**, so any commit touching any `.rs` file made all six committed Rust
+SBOMs stale immediately. Demonstrated, not argued: task 1's commit touched one `.rs` file and one
+test file, changed no manifest and no lockfile, and six `test_the_epoch_is_never_wall_clock`
+parametrisations failed at once. A Rust SBOM's content comes from `cargo auditable`'s embedded
+dependency data and `cargo metadata`'s licence map — both pure functions of the resolved dependency
+graph, neither of which reads a `.rs` file — so the epoch is now `Cargo.lock`, `Cargo.toml` and
+`crates/*/Cargo.toml` (18 manifests, no `.rs` file, confirmed with `git ls-files`). The six documents
+were regenerated; the only change inside them is `metadata.timestamp` and `serialNumber`, and the
+gated rebuild proof (`AV_SBOM_REBUILD=1`) ran for real — 64 passed, 0 skipped — so the committed
+documents are reproducible from the tree. A new test asserts no Rust epoch path matches any `.rs`
+file, so the defect cannot return quietly.
+
+### D3 — what a kit carries, and the zero-egress install proof
+
+**The payload** (`kit_format` 2). A full kit of this tree is **327 MB, 11,285 files, 2 symlinks**:
+`vendor/` 231 MB (180 crates, `cargo vendor --offline` — no network needed on this host), `images/`
+58 MB (both tarballs, each saved only after its live digest matched its recorded one), `wheels/`
+24 MB (22 wheels: the viewer's 21-package linux/aarch64/cp313 runtime closure plus a wheel of
+`altavista` itself), `runs/` 4.2 MB (the four recorded kernel runs), `packs/` 3.8 MB (`web`,
+`profiles`, `data-time`), `binaries/` 2.6 MB, `sbom/` 400 KB, and a 2.2 MB `KIT_MANIFEST`. The GMAT
+pack was exercised once at full size in task 3a — 738 MB, 2,072 files, 183 symlinks, taking the kit
+to 1.0 GB, still reproducible — and is deliberately absent from the proof kit (decision 8 below).
+
+`web/` and `profiles/` are copied into **every** kit unconditionally, because an installed viewer
+cannot start without them and together they cost 3.75 MB.
+
+**A pack's internal symlinks are now carried verbatim and declared.** Round 1's rule ("a kit contains
+no symlink at all") could not survive a real GMAT install, whose 183 symlinks are all relative,
+same-directory `.dylib` re-exports, nor `web/node_modules/three`'s two. A symlink inside a copied
+pack is now copied without dereferencing and listed in `KIT_MANIFEST`'s `pack_symlinks` with its raw
+target; it is allowed only if that target is relative and stays lexically inside the pack; an
+absolute or escaping target is a hard build-time refusal. `verify_manifest` still reports an
+undeclared symlink, a changed target, a declared symlink that is missing, and any unsafe target —
+round 1's D3-1 defence is intact and still under test.
+
+**The install.** `scripts/kit/install.sh` (a POSIX wrapper over `install.py`) verifies the manifest
+first and refuses on any finding, refuses a non-empty target, a wrong `kit_format`, a missing
+section, a kit with no wheels or without the viewer's assets; then copies the kit tree, makes the
+binaries executable, creates a venv and runs `pip install --no-index --find-links <kit>/wheels
+altavista`, and writes an `INSTALL_RECORD` naming the kit manifest's own SHA-256, what was installed,
+and the gaps the kit declared. It reaches the network nowhere.
+
+**The proof** (`tests/test_kit_zero_egress_install.py`, gated, run for real by the manager at
+`381b29d`, full output saved with the round's gate logs). Kit manifest
+`36eb5e30a74d61f2827292178e829a4c2a4b444c42d2d067e407e8928a290de3`:
+
+- **Image provenance.** `docker load` of each tarball, then a digest comparison before the image is
+  used at all: `av-edge-plugin:local` recorded and loaded
+  `sha256:38062a487a4346dc5a23eb26dcf00fe7d06e3fec9d6813e003fe612fcaef234e`;
+  `altavista-cfs-lockstep:local` recorded and loaded
+  `sha256:dea163a1bad929b53c27498e182dadc62ef0f63cb6a63ac73dd1ac31bf6cded2`.
+- **No route out, before and after the install.** From inside the labelled `--internal` network, both
+  `8.8.8.8:53` and `1.1.1.1:443` failed with **errno 101, "Network is unreachable"**, in
+  **3.2×10⁻⁵ s and 3.8×10⁻⁵ s** before the install and **2.9×10⁻⁵ s and 4.7×10⁻⁵ s** after it —
+  immediate, which is what distinguishes "no route exists" from "a connection timed out".
+- **The install itself**, inside that network, from a read-only kit: **12.16 s**, printing the same
+  manifest SHA-256 the host computed independently, and an `INSTALL_RECORD` listing 22 installed
+  packages.
+- **The demo path, from the installed kit.** The viewer server, started from the installed wheels,
+  answered a real `GET /api/scenarios` over loopback with **200 `{"names": []}`**. `av-ingest-server`,
+  the kit's own cross-built binary, printed `GRPC_LISTENING 127.0.0.1:50070` and
+  `ADMIN_LISTENING 127.0.0.1:50071`. The edge plugin, from the kit's just-loaded image and joined to
+  the ingest's network namespace, delivered **900 batches / 900 measurements, none rejected, chain
+  head `d1d80d0b6cc9228aaa7479864b8a89f18be88382fb3772bd3c4cc3d7c2dc2698`**, and the ingest's own
+  evidence endpoint read back `accepted_total=900, rejected_total=0`.
+- **The kernel run reproduced from its hash.** All four recorded runs were re-hashed from the
+  installed tree against `KIT_MANIFEST` and decoded far enough to compare each run's own
+  `config_hash` (e.g. `demo_attitude_control` → `f3e755a6…cadb93`).
+- **The command service is a named gap**, carrying the kit's own recorded reason (below).
+
+### Decisions taken this round
+
+1. **Worker tasks ran strictly sequentially, never in parallel.** Two workers committing to one
+   worktree share an index; explicit pathspecs reduce but do not remove the risk of one staging the
+   other's in-progress edits, and task 2's SBOM regeneration had to happen after task 1's Rust change
+   was already in history. Wall time was the price; a clean history was the purchase.
+2. **The blocking-announcement lock tests stay on the real host-wide lock.** Question 212(b) forbids
+   asserting the shared lock is *free*; it does not forbid waiting for it. Those two tests prove that
+   a genuinely contended acquire announces itself, which is only true of the real production path.
+   Their cost is that they hold the real lock across a nested `cargo test` — see open item 6.
+3. **The Rust SBOM epoch is narrowed rather than the SBOMs regenerated every round.** The alternative
+   was a regeneration commit after every Rust change forever — a gate failure nobody caused, which
+   question 207 already rejects and which D2-1 already rejected for the Python components. The
+   narrowing is justified by what actually produces the document, and guarded by its own test.
+4. **A pack's internal symlinks are carried verbatim, declared, and bounded by the pack root**;
+   absolute or escaping targets are refused at build time, not at verify time. Dereferencing a real
+   install's 183 `.dylib` links would have both bloated the kit and destroyed the install's own
+   structure. `kit_format` moved to 2 because the format changed.
+5. **The viewer's wheels are fetched with the network, once, at kit-build time**, behind
+   `--with-wheels`, recorded in `KIT_MANIFEST` as `wheels.network_used` with every filename and
+   SHA-256 — exactly question 154's "built with network once and installed with none". No test can
+   trigger it.
+6. **The cross-built binary cache is keyed on the source state, not the commit.** A cross-built
+   binary is not reproducible (round 1 measured three hashes from three links of identical source),
+   so a kit reuses cached bytes; keying that cache on the commit alone would have let a kit built from
+   a dirty tree carry bytes compiled from a different tree, with nothing saying so.
+7. **`web/` and `profiles/` are carried in every kit, unconditionally.** The alternative — leaving the
+   proof to bind-mount them from this worktree — would have made "the demo runs from the installed
+   kit" false for the viewer while the test still looked green.
+8. **The proof kit deliberately omits the GMAT pack.** The pack is carried as bytes when asked for and
+   was exercised at full size once, but this install is a macOS-native GMAT tree and the proof runs in
+   a linux/aarch64 container, where it could only ever be hash-verified, never run. Carrying 738 MB
+   into every proof run to hash it twice would have bought nothing. ADR-003's evaluation target is
+   macOS; 213(c)'s container is the stand-in for an enclave, not for the install host.
+9. **The kit does not yet carry its own installer** — the proof mounts `scripts/kit` read-only into
+   the installing container. Question 214(b) enumerates the payload and does not name the installer,
+   and the claim being proven is "no network, nothing from outside the kit's payload". Recorded as
+   open item 4 rather than closed silently.
+10. **D4 was not started.** After D3's second half and three review fixes there was not enough round
+    left to do `secdeploy evidence` plus `scripts/kit/evidence.py` honestly, and a half-built evidence
+    bundle is exactly the stub decision 12 of round 1 refused to ship.
+
+### Defects found in review, and their root causes
+
+Every one was found by re-running from the tree, not by reading a worker's claims.
+
+- **The cross-build cache was keyed on `git_commit` alone** (task 3a, found by the manager, fixed in
+  `519c612`). Root cause definitive: `RESULTS.json` in `<cache>/<commit>/` short-circuits the rebuild,
+  so a kit built from a tree with uncommitted changes reuses a binary compiled from different bytes,
+  and nothing in the kit says so. Now keyed on the commit plus a hash of `git status --porcelain` and
+  `git diff HEAD`, recorded as `binaries.source_state`, with a pure-function test driving all three
+  inputs. What the key cannot cover (the *content* of an already-named untracked file) is stated in
+  its own doc comment.
+- **`--with-binaries` used the network and the kit denied it** (task 3a, fixed in `519c612`). Root
+  cause definitive: the cross-build container runs `apt-get update` and installs four packages before
+  `cargo build`, while `scripts/kit/README.md` positively claimed the step had "no network of its
+  own" and the manifest recorded nothing. Question 154 permits the use; it does not permit the
+  silence. `binaries.network_used` is now recorded and the README corrected.
+- **The zero-egress proof's viewer did not come entirely from the kit** (task 3b, found by the
+  manager, fixed in `381b29d`). Root cause definitive and pre-existing: `pyproject.toml`'s
+  `[tool.setuptools.packages.find]` includes `altavista*` only, so the wheel ships neither `web/` nor
+  `profiles/`, and the test worked around it by bind-mounting this worktree's own copies. The kit now
+  carries both as packs and the proof mounts no worktree asset into the viewer's container. The
+  underlying packaging gap is open item 3.
+- **The Rust SBOM epoch treadmill** (pre-existing, fixed in `327fe70`) — see task 2 above.
+- **Three tests hardcode `/Users/probe` paths** (found by task 1's clone survey, reported not fixed):
+  `tests/test_edge_ingest_mtls.py:117` and `tests/test_edge_identity_seccert.py:36` set `GMAT_ROOT`
+  and `CFS_MIRROR_DIR` to absolute paths in the main worktree, overriding whatever the harness set,
+  with no guard; `tests/test_edge_plugin_container.py:426` bind-mounts `/Users/probe/code/spoore`
+  with no existence check, unlike its sibling in `test_proposer_container.py`. All three are the same
+  class the clone gate caught. Open item 5.
+- **One flake, root-caused and not believed on first sight**: a worker saw
+  `test_edge_ingest_mtls.py::test_valid_seccert_leaf_is_accepted_through_nginx_and_batches_submit`
+  fail three different ways while a full `cargo test --workspace` ran concurrently in the AI-plane
+  worktree (load average 3.5). That test uses `--real-clock` against a fixed 5 s staleness budget by
+  its own design. It passed in the manager's own gate run. Recorded as host contention, not a
+  regression — the contention rule applied.
+
+### Open items for the lead
+
+1. **Question 214(a) is closed.** `deny.toml` carries `0BSD` and `PSF-2.0` with their reasons, and
+   `docs/compliance/sbom/licence-exceptions.md` is deleted.
+2. **`av-command` has never cross-built for Linux**, so the command service is the one demo-path
+   component the zero-egress proof cannot start. Root cause read from the real compiler error:
+   `regorus` 0.12.0 calls `alloc::vec::Vec::len` in a `const fn`, which the pinned
+   `rust:1.85-bookworm` toolchain rejects (`add #![feature(const_vec_string_slice)]`). Bumping the
+   pinned cross-build image is a decision with an image-digest consequence, so it is the lead's.
+3. **The viewer cannot be installed from its own wheel.** The `altavista` wheel ships no `web/` or
+   `profiles/`, and `altavista/profile.py`'s `PROFILES_DIR` is a fixed module constant with no
+   parameter or CLI flag, so the proof's container bootstrap still has to assign it. The kit works
+   around both by carrying the directories; the real fix is in `pyproject.toml` and `altavista/`,
+   which this track did not touch.
+4. **The kit does not carry its own installer.** `scripts/kit/install.sh`/`install.py` (and the
+   `manifest.py`/`sbom.py` they import) are mounted from the repository into the installing container.
+   Carrying them inside the kit is the obvious next step and would make "installs from the kit alone"
+   literal rather than payload-only.
+5. **Three tests still hardcode this host's absolute paths** (named above). A plain clone elsewhere on
+   disk would fail two of them outright.
+6. **`lock_docker_tests_announces_a_blocked_wait_never_silently` holds the real host-wide lock across
+   a nested `cargo test`**, which serialises every other track's Docker-gated work for the length of
+   that build. It is correct as written (decision 2); whether the gate can afford it is a scheduling
+   question for the lead.
+7. **`scripts/kit/build_kit.py` imports `packaging`**, which this project does not declare as a
+   dependency — it is present only transitively through pip/pytest in the shared venv. Small, but it
+   is the kind of thing that breaks a clone.
+8. **Question 208(c)'s port map still blocks `av-ingest` and `av-proposer`** (carried from round 1).
+9. **`tests/test_proposer_container.py` has now failed on this branch for two rounds** for question
+   212(a)'s reason. Every P5 pytest count carries one failure that is not this track's.
+10. **The network was used at kit-build time, by ruling, three ways**: `pip download` for the viewer's
+    wheels, `apt` inside the cross-build container, and a `docker pull`-free image path that used
+    none. `cargo vendor` needed none. All are recorded in the manifest; no test uses the network.
+11. **D4, D5 and D6 are untouched**, and the E5 latency retake the lead owes (question 212) is still
+    the blocker in front of D5.
