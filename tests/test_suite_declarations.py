@@ -420,3 +420,63 @@ def test_adr003_tiers_are_still_rejected_upstream(tmp_path):
     combined = result.stdout + result.stderr
     assert "tier must be one of" in combined
     assert any(adr003_tier in combined for adr003_tier in ("engine", "design")), combined
+
+
+# ── 4. fedora-fips dry-run render (P5 round 3, D6) ──────────────────────────────────────────
+#
+# `secdeploy deploy fedora-fips --dry-run` run for real, offline, over OUR merged manifest and
+# OUR evaluation site — see docs/compliance/fedora-fips.md, which this test backs. Proves the
+# predicted shape (also true of `targets/macos.py`'s `deploy()`, see docs/secdeploy-upstream.md
+# Proposal 3): `targets/fedora_fips.py`'s `deploy()` walks its own hard-coded `SERVICES` tuple
+# (`secdns`/`seccert`/`secllm`/`secrouter`/`secagent`/`secrecorder`/`secproxy`), never the
+# manifest, so none of our eight components get installed code, a config file, or a systemd
+# unit — with exactly one partial exception: `av-viewer` (the only AltaVista component with
+# `fronted = true`) is named as a certbot `-d` flag for secproxy's SAN cert, because
+# `wiring.fronted_instances` reads the WHOLE merged manifest, independent of `SERVICES`.
+
+FEDORA_FIPS_NATIVE_SERVICES = "secdns, seccert, secrouter, secrecorder, secproxy"
+
+
+@requires_secdeploy
+def test_secdeploy_deploy_fedora_fips_dry_run_renders_nothing_for_our_components(tmp_path):
+    out = tmp_path / "out"
+    merged = merge.merge(base=BASE_MANIFEST, fragment=FRAGMENT_PATH, site=EVAL_SITE, out=out)
+    site_copy = out / "secsite.merged.toml"
+
+    result = _uv_run(
+        "--manifest", str(merged),
+        "--work", str(tmp_path / "work"), "--out", str(tmp_path / "secdeploy-out"),
+        "deploy", "fedora-fips", "--dry-run", "--site", str(site_copy),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    stdout = result.stdout
+
+    # secdeploy's own native services placed here — no --with-inference/--with-agent passed, so
+    # secllm/secagent are excluded too. This is the real rendered header line, not an assumption.
+    assert f"native services here: {FEDORA_FIPS_NATIVE_SERVICES}" in stdout, stdout
+
+    # None of our eight components got a code install or a systemd unit — the positive assertion
+    # docs/p5-plan.md D6 asks for: "render nothing", stated and checked, not just absence of a
+    # crash.
+    for name in ALTAVISTA_COMPONENTS:
+        assert f"install {name} code" not in stdout, (name, "unexpectedly got a code install", stdout)
+        assert f"install {name}.service" not in stdout, (name, "unexpectedly got a systemd unit", stdout)
+
+    # The one partial exception: av-viewer's FQDN is named in the certbot SAN-cert -d flags for
+    # secproxy (it's the only AltaVista component with `fronted = true` in suite.altavista.toml)
+    # -- the description line names it in the -d COUNT/list, and the actual certbot command line
+    # right below it carries the real `-d av-viewer.altavista.internal` flag.
+    desc_lines = [l for l in stdout.splitlines() if "issue secproxy SAN cert" in l]
+    assert len(desc_lines) == 1, stdout
+    assert "av-viewer.altavista.internal" in desc_lines[0], desc_lines[0]
+    cmd_lines = [l for l in stdout.splitlines() if "certbot certonly --standalone" in l]
+    assert len(cmd_lines) == 1, stdout
+    assert "-d av-viewer.altavista.internal" in cmd_lines[0], cmd_lines[0]
+
+    # Every OTHER AltaVista FQDN is entirely absent from the render — av-viewer is the only
+    # component that appears anywhere, and even it gets no code/config/unit (asserted above).
+    for name in ALTAVISTA_COMPONENTS:
+        if name == "av-viewer":
+            continue
+        assert f"{name}.altavista.internal" not in stdout, (name, stdout)
+        assert f"install {name}" not in stdout, (name, stdout)

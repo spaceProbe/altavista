@@ -204,10 +204,107 @@ code change on either side — which is exactly the gap `scripts/kit/evidence.py
 `ledger_verify.live` declared, not-yet-collected slot (`docs/compliance/BUNDLE.md`) is waiting
 for a second worker to fill from the live side.
 
+## Proposal 3: `deploy()` should walk the manifest, not a hard-coded services tuple
+
+### The problem, reproduced
+
+`src/secdeploy/targets/fedora_fips.py` line 60 hard-codes the entire set of components any
+`fedora-fips` deploy will ever install:
+
+```python
+# src/secdeploy/targets/fedora_fips.py, line 60
+SERVICES = ("secdns", "seccert", "secllm", "secrouter", "secagent", "secrecorder", "secproxy")
+```
+
+`deploy()`'s own placement filter (lines 525–538) intersects this fixed tuple with whatever the
+topology actually placed — it never asks the manifest what else is on this resource:
+
+```python
+# src/secdeploy/targets/fedora_fips.py, lines 525–538
+    def _include(svc: str) -> bool:
+        if svc in without:
+            return False
+        if svc == "secdns" and topology is None:
+            return False
+        if svc == "secllm" and (topology is None or not with_inference):
+            return False
+        if svc == "secagent" and (topology is None or not with_agent):
+            return False
+        if svc == "secproxy" and topology is None:
+            return False
+        return placed is None or svc in placed
+
+    services = [s for s in SERVICES if _include(s)]
+```
+
+`targets/macos.py` has the identical gap, at its own `deploy()` (lines 877–885) — not a module
+constant there, an inline literal with the same seven names:
+
+```python
+# src/secdeploy/targets/macos.py, lines 877–885
+    services = [
+        n for n in ("secdns", "seccert", "secllm", "secrouter", "secagent", "secrecorder", "secproxy")
+        if n not in without
+        and (n != "secdns" or topology is not None)
+        and (n != "secllm" or (topology is not None and with_inference))
+        and (n != "secagent" or (topology is not None and with_agent))
+        and (n != "secproxy" or topology is not None)
+        and _here(n)
+    ]
+```
+
+This is real output, reproduced by `tests/test_suite_declarations.py::
+test_secdeploy_deploy_fedora_fips_dry_run_renders_nothing_for_our_components` (P5 round 3, D6 —
+see `docs/compliance/fedora-fips.md`): `secdeploy --manifest <our merged manifest> deploy
+fedora-fips --dry-run --site <our eval site>` renders a full plan — but every step in it names
+one of the seven `SERVICES` entries, never `av-ingest`/`av-command`/`av-gateway`/`av-proposer`/
+`av-dynamics-service`/`gmat-service`/`av-edge-plugin`/`av-viewer`, even though all eight are
+declared components in the manifest `deploy()` was handed and are placed on the deploying
+resource by the topology. The one partial exception is a side effect of a DIFFERENT,
+manifest-driven code path: `av-viewer` (the only AltaVista component with `fronted = true`) gets
+named as a `-d` flag in secproxy's certbot SAN-cert command, because `wiring.fronted_instances`
+(which builds that flag list) reads `topology.manifest.select(without)` directly — the whole
+manifest, not `SERVICES` — while every other step of `deploy()` (code install, config file,
+systemd unit, state dir, system user) still never mentions it. `av-viewer` gets a TLS name and
+nothing else; the other seven get nothing at all.
+
+### What we propose
+
+The same shape as Proposal 1's fix, applied to `deploy()` instead of `Manifest.validate`: derive
+`SERVICES` from the manifest's own components (filtered to `kind = "service"`, the ones this
+native-systemd/launchd path knows how to install) rather than a fixed tuple, with the eight
+named native components (`secdns`, `seccert`, `secllm`, `secrouter`, `secagent`, `secrecorder`,
+`secproxy`, and macOS's own local-only entries) kept as the ones with a real installer (checkout
+copy, env template, systemd/launchd unit) and everything else in the manifest still eligible for
+the parts of `deploy()` that are already manifest-driven today — the addressing/DNS zone, the
+audit artifact's component count, and (as `av-viewer` already proves) the fronted-FQDN set. Short
+of that generic dispatch, even a documented "manifest components outside `SERVICES` are placed
+but not installable on this target" `P.warn()` at the top of `deploy()` would turn today's
+*silent* gap into a *reported* one.
+
+### Why this is additive and backward-compatible
+
+- Every one of secdeploy's own five targets ships a fixed, known-shape set of native units
+  (systemd files, launchd plists) that live in this repository's own `deploy/<target>/` tree —
+  there is no generic "install this manifest component's code + unit" machinery to hook into yet,
+  so a full fix is a bigger change than Proposals 1/2. The additive, low-risk piece is only the
+  `P.warn()` above: it changes no installed behavior, only what operators are told.
+- `SERVICES`/the inline macOS tuple stay exactly as they are today for every component secdeploy
+  itself ships; nothing about their behavior changes.
+
+### What it would let us delete
+
+Nothing in this repository yet — `docs/compliance/fedora-fips.md` and
+`scripts/kit/evidence.py`/`scripts/kit/live_evidence.py` (D4/D4b, see `docs/compliance/BUNDLE.md`)
+remain the actual mechanism by which our own components' evidence/health gets collected on a
+placement that includes them; this proposal is what would eventually let a real `fedora-fips`
+*deploy* (not just its dry-run render) stand our components up through secdeploy itself, which
+nothing today does or claims to do.
+
 ## Scope
 
-Two proposals this round produced enough evidence to write down. Both are intentionally narrow —
-Proposal 1 does not attempt to also propose, e.g., a `tiers` key on `topology.toml`/
+Three proposals across two rounds produced enough evidence to write down. All are intentionally
+narrow — Proposal 1 does not attempt to also propose, e.g., a `tiers` key on `topology.toml`/
 `secsite.toml` beyond what `Topology`'s existing `unknown tier` check already validates, or any
 change to `TARGET_KINDS`/`COMPONENT_KINDS`, neither of which this round's fragment needed to
 stretch; Proposal 2 does not attempt to also propose that `secdeploy evidence` itself learn to
@@ -216,4 +313,8 @@ probe an AltaVista-shaped `/admin/api/evidence` response body (its shape already
 `gmat_service.evidence.EvidenceLog.verify`'s own doc, but reconciling that with SecRouter's own
 `/admin/api/evidence` response shape is a separate, unreproduced question this round did not
 investigate) or that `evidence.collect`'s five-second-per-component `DEFAULT_TIMEOUT` needs
-tuning for a mixed suite -- neither is evidenced here, so neither is proposed here.
+tuning for a mixed suite -- neither is evidenced here, so neither is proposed here; Proposal 3
+(P5 round 3, D6) does not attempt to design the generic per-manifest install/unit-generation
+machinery that a full fix would need (there is no evidence yet for what that would look like
+across five very different targets), only the narrow, reproduced gap and the one low-risk,
+additive step (a `P.warn()`) available short of that larger redesign.
