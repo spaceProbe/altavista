@@ -1,7 +1,10 @@
 //! H3a (`docs/heavy-plan.md` H3, first half; question 216): the durable job queue, the job
-//! record types, and the runner. **The tiler itself is task 3b and is not in this crate** --
-//! `crate::runner::Executor` is the seam H3b implements against, not something this crate
-//! provides an implementation of.
+//! record types, and the runner -- plus, as of task 3b (H3, second half), the tiler itself:
+//! `crate::tiler::TilerExecutor` is the `crate::runner::Executor` implementation for
+//! `JobSpec.kind == "tiler"`, built against `crate::scheme` (the globe's tile layout,
+//! Rust-side), `crate::raster` (the input raster format) and `crate::png` (a
+//! dependency-free PNG encoder). See `crate::tiler`'s own module doc for the tiler's full
+//! design.
 //!
 //! # Why a file-backed hash chain, not a broker
 //!
@@ -68,5 +71,9 @@
 pub mod clock;
 pub mod hash;
 pub mod log;
+pub mod png;
 pub mod queue;
+pub mod raster;
 pub mod runner;
+pub mod scheme;
+pub mod tiler;

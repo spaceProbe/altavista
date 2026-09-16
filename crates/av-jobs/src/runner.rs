@@ -105,7 +105,15 @@ impl ObjectSource for MemoryObjectSource {
 /// every object under one flat key. `sha256_hex` is always this module's own
 /// [`crate::hash::hex_encode`] output (exactly 64 lowercase hex characters), so unlike
 /// `object_key` this private helper does not re-validate it.
-fn content_addressed_key(prefix: &str, sha256_hex: &str) -> String {
+///
+/// `pub(crate)` (not private) so [`crate::tiler::TilerExecutor`] can compute the exact same
+/// key [`MemoryObjectSink::put`] below will independently derive for the same bytes --
+/// **one shared helper**, never a second, independently-written key scheme. See
+/// `TileSetManifest`'s own doc comment (`heavy.proto`) for why a tiler executor needs to
+/// predict a sink's own key layout at all (the manifest-vs-sink-ordering constraint), and
+/// for the caveat that creates: the caller wiring up a `Runner` must construct the
+/// `ObjectSink` and the tiler executor with the same `prefix`.
+pub(crate) fn content_addressed_key(prefix: &str, sha256_hex: &str) -> String {
     format!("{prefix}/{}/{}/{sha256_hex}", &sha256_hex[0..2], &sha256_hex[2..4])
 }
 

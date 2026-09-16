@@ -161,6 +161,18 @@ enum JobFailureKind {
   JOB_FAILURE_KIND_LABEL_REFUSED = 7;
   // `JobSpec.kind` names no registered `Executor`.
   JOB_FAILURE_KIND_UNSUPPORTED_JOB_KIND = 8;
+  // H3b (`crates/av-jobs::tiler::TilerExecutor`): `JobSpec.parameters` failed this job
+  // kind's own typed validation -- an unparseable `min_level`/`max_level`, `min_level >
+  // max_level`, a `max_level` above the documented ceiling, a `tile_size` that is not a
+  // bounded power of two, or an `output` value this round recognises as neither
+  // implemented nor a documented future kind (see `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`
+  // for the latter).
+  JOB_FAILURE_KIND_INVALID_PARAMETERS = 9;
+  // H3b: an input was fetched and hash-verified (so this is never
+  // `JOB_FAILURE_KIND_INPUT_HASH_MISMATCH`'s job), but its *content* is invalid for this
+  // job kind -- the wrong number of inputs, or a raster that does not decode per
+  // `crates/av-jobs::raster`'s own typed `RasterError`.
+  JOB_FAILURE_KIND_INVALID_INPUT = 10;
 }
 
 // One job as submitted to the durable queue (`crates/av-jobs::queue::JobQueue::submit`) -- the
@@ -269,4 +281,100 @@ message JobLogRecord {
     // Appended by `crates/av-jobs::queue::JobQueue::complete`.
     JobCompletion completed = 2;
   }
+}
+
+// H3b (`docs/heavy-plan.md` H3, second half; task 3b): the tiler's own wire shapes.
+// `crates/av-jobs::tiler::TilerExecutor` is the `JobExecutorKind`-independent `Executor`
+// (`kind == "tiler"`) that turns one raw raster/point-cloud input into a tile set matching
+// `web/js/globe_lod.js`'s geographic (EPSG:4326, plate-carree) tiling scheme --
+// `crates/av-jobs::scheme` is that scheme's Rust twin, pinned against that file by test.
+
+// Which family of tile a `TileSetManifest` describes -- `crates/av-jobs::tiler`'s
+// `JobSpec.parameters["output"]` (`"imagery"`, `"terrain"`, `"tiles3d"`) decides this,
+// never a caller-suppliable enum field on the request itself (the tiler's own typed
+// refusal covers an unknown `output` string; this enum only ever appears on the *result*).
+enum TileSetKind {
+  TILE_SET_KIND_UNSPECIFIED = 0;
+  // `image/png` tiles, `crates/av-jobs::png`'s hand-written encoder, RGB8.
+  TILE_SET_KIND_IMAGERY = 1;
+  // `application/vnd.altavista.terrain-tile+raw` tiles (P2) -- `crates/av-jobs::tiler`'s
+  // own module doc has the exact on-disk layout.
+  TILE_SET_KIND_TERRAIN = 2;
+  // 3D Tiles 1.0 (P3): a `tileset.json` root plus `.pnts` point-cloud tiles.
+  TILE_SET_KIND_TILES3D = 3;
+}
+
+// One tile in a `TileSetManifest.tiles` list -- `(level, x, y)` addressed exactly the way
+// `crates/av-jobs::scheme::Tile` and `web/js/globe_lod.js`'s `tileKey`/`compareTiles`
+// address a tile; this message never invents a second addressing scheme.
+message TileEntry {
+  uint32 level = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+  // Hex SHA-256 of this tile's own encoded bytes (`openssl::sha::sha256`, ADR-004) -- the
+  // tile object's own content hash, identical to what the configured `ObjectSink` derives
+  // when it stores those same bytes (`crates/av-jobs::runner::MemoryObjectSink::put`'s own
+  // `sha256_hex` -- see `TileSetManifest`'s own doc for why the tiler computes this itself
+  // rather than reading it back off the `AssetRef` the sink returns).
+  string sha256 = 4;
+  uint64 size_bytes = 5;
+  // Where the `ObjectSink` stored this tile -- content-addressed the same way
+  // `av_store::keys::object_key` lays out a key (`"<prefix>/<hex[0..2]>/<hex[2..4]>/<hex>"`),
+  // via the one shared helper `crates/av-jobs::runner::content_addressed_key` that both
+  // `MemoryObjectSink` and `TilerExecutor` call -- never a second, independently-written key
+  // scheme (see `TileSetManifest`'s own doc for the prefix-agreement caveat this creates).
+  string uri = 6;
+  string media_type = 7;
+}
+
+// H3b's tile-set identity, `crates/av-jobs::tiler::TilerExecutor`'s one manifest output
+// (`JobOutput::manifest == true`) -- `JobCompletion.manifest_sha256` is this message's own
+// SHA-256 once the configured `ObjectSink` stores its encoded bytes.
+//
+// **This manifest's own SHA-256 is the tile set's identity.** What makes that hash
+// reproducible run to run, over the same input raster and the same `JobSpec.parameters`:
+//   - `tiles` is always built and emitted in `(level, x, y)` ascending order (`crates/
+//     av-jobs::scheme::tiles_covering`'s own documented order, walked level by level,
+//     never a `HashMap`/`HashSet` iteration order that could vary run to run).
+//   - `parameters` mirrors `JobSpec.parameters` verbatim, and (like every `map<..>` field
+//     in this package) is generated as a `BTreeMap` (`crates/av-cdm/build.rs`'s
+//     `.btree_map(["."])`), so its own wire encoding is a deterministic function of its
+//     key/value pairs regardless of insertion order.
+//   - every `TileEntry.sha256` is a content hash of bytes `crates/av-jobs::tiler` produced
+//     deterministically (nearest-neighbour resampling with no filter-kernel ambiguity, a
+//     PNG encoder with no compressor entropy -- see that module's own doc).
+//
+// **The ordering constraint this creates, and how it is resolved:** this manifest must
+// name each tile's `uri` and `sha256`, but the configured `ObjectSink` is what actually
+// assigns a stored object's `uri`, and `crates/av-jobs::runner::Runner::run_one` only calls
+// the sink *after* `Executor::execute` has already returned every `JobOutput`. Rather than
+// have the manifest carry placeholder URIs the executor cannot know yet,
+// `crates/av-jobs::tiler::TilerExecutor` computes each tile's `sha256` itself
+// (`openssl::sha::sha256` of the encoded tile bytes -- the identical content hash the sink
+// will separately derive from the same bytes) and its `uri` through the same
+// `content_addressed_key` helper `MemoryObjectSink::put` calls, **configured with the same
+// `prefix` string** -- whoever wires up a `Runner` (production code or a test) is
+// responsible for constructing `TilerExecutor` and the `ObjectSink` with matching prefixes,
+// exactly the way a job kind's registration and its executor implementation must already
+// agree out of band. This is an honest, visible coupling (documented here and in
+// `crates/av-jobs::tiler`'s own module doc), not a second, independently-computed key
+// scheme -- the two call sites share one function.
+message TileSetManifest {
+  TileSetKind kind = 1;
+  // `crates/av-jobs::scheme::SCHEME_ID`.
+  string scheme = 2;
+  uint32 min_level = 3;
+  uint32 max_level = 4;
+  uint32 tile_size = 5;
+  GeoBbox bounds = 6;
+  // `(level, x, y)` ascending, always -- see this message's own doc.
+  repeated TileEntry tiles = 7;
+  // The `JobSpec.inputs`' own hex SHA-256, in that same order -- this manifest's own record
+  // of exactly which input bytes it was built from.
+  repeated string source_sha256 = 8;
+  // `JobSpec.parameters`, verbatim -- a `BTreeMap` (see this message's own doc).
+  map<string, string> parameters = 9;
+  // TILES3D only: the `tileset.json` entry's own `uri` (P3). Empty for every other `kind`.
+  string root_uri = 10;
+  string job_id = 11;
 }
