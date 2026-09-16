@@ -947,6 +947,53 @@ def test_with_binaries_runs_the_real_cross_build_path(tmp_path):
 
 
 # =================================================================================================
+# 20a. Question 217(a): the cross-build pin moved to 1.90, and is verified by digest (question 212)
+# =================================================================================================
+
+def test_prebuild_base_image_is_pinned_to_the_1_90_digest():
+    """Regression guard for the review defect this round fixed: `PREBUILD_BASE_IMAGE` was left at
+    the `rust:1.85-bookworm` digest after question 215 moved every OTHER cross-build pin in this
+    workspace to `rust:1.90-bookworm` -- 1.85 cannot build this workspace at all (`rust-version =
+    "1.87"`), which is exactly why `av-ingest-server`/`av-command` stopped cross-building and
+    `tests/test_kit_zero_egress_install.py` could only skip. No Docker needed -- this only reads
+    the constant."""
+    assert build_kit.PREBUILD_BASE_IMAGE == (
+        "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
+    ), build_kit.PREBUILD_BASE_IMAGE
+
+
+def _compute_prebuild_digest_skip_reason() -> "str | None":
+    if not _docker_available():
+        return "Docker is not available on this host (`docker info` failed)."
+    return None
+
+
+_PREBUILD_DIGEST_SKIP_REASON = _compute_prebuild_digest_skip_reason()
+
+
+@pytest.mark.skipif(_PREBUILD_DIGEST_SKIP_REASON is not None, reason=_PREBUILD_DIGEST_SKIP_REASON or "")
+def test_verify_prebuild_base_image_digest_trusts_only_a_matching_digest():
+    """Question 212's ordering, applied here (question 217(a)): before this fix, nothing in
+    `build_kit.py` compared `PREBUILD_BASE_IMAGE` to anything before handing it to `docker run` --
+    `_verify_prebuild_base_image_digest` is the new comparison. Real `docker image inspect` calls,
+    no cross-build: the real pin must verify (proving the digest really is cached on this host,
+    the same evidence the manager recorded), a floating tag must be refused before any inspection,
+    and a digest that is syntactically valid but not what's cached must be refused with the
+    mismatch named."""
+    build_kit._verify_prebuild_base_image_digest(build_kit.PREBUILD_BASE_IMAGE)  # must not raise
+
+    with pytest.raises(RuntimeError, match="not pinned by digest"):
+        build_kit._verify_prebuild_base_image_digest("rust:1.90-bookworm")
+
+    # A syntactically valid but uncached digest: `docker image inspect` cannot find it locally
+    # (it never pulls on `inspect`), so this is refused before any cross-build is attempted rather
+    # than silently falling through to a network pull inside `docker run`.
+    bogus_digest = "sha256:" + ("0" * 64)
+    with pytest.raises(RuntimeError, match="not present locally under this exact digest"):
+        build_kit._verify_prebuild_base_image_digest(f"rust:1.90-bookworm@{bogus_digest}")
+
+
+# =================================================================================================
 # 20b. The cross-built binary cache is keyed on the SOURCE STATE, never the commit alone
 # =================================================================================================
 

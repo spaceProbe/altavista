@@ -604,10 +604,70 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
 # Round 2, item 6: Linux service binaries
 # =================================================================================================
 
-#: Same pin `tests/test_edge_plugin_container.py::_cross_build_ingest_server_binary` already
-#: establishes -- the identical bind-mounted `docker run` idiom, reused here for a second binary.
-PREBUILD_BASE_IMAGE = "rust:1.85-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+#: Question 217(a) (review defect found in round 3): this pin was left at the `rust:1.85-bookworm`
+#: digest after question 215 moved EVERY OTHER cross-build pin in this workspace to the
+#: `rust:1.90-bookworm` digest below (`services/proposer/build-image.sh`, `services/cfs/
+#: Dockerfile`, `services/edge-plugin/Dockerfile` -- all measured there, not guessed: question 215
+#: records "1.86 fails on regorus, 1.87 passes" as the measured MSRV floor, and `rust-version` in
+#: the workspace `Cargo.toml` is "1.87"). `scripts/kit/build_kit.py` is this track's own file,
+#: written after that merge, so it never picked up the move. Consequence, measured directly in
+#: `.av-test-tmp/kit-binaries-cache/<this tree's own cache key>/RESULTS.json` before this fix:
+#: rustc 1.85.1 refused to build `av-cdm`/`av-command`/`av-ingest` at all ("rustc 1.85.1 is not
+#: supported ... requires rustc 1.87"), so BOTH `av-ingest-server` and `av-command` failed to
+#: cross-build and `tests/test_kit_zero_egress_install.py` could only SKIP rather than prove
+#: anything (D3's proof going dark). `rust:1.90-bookworm` is still newer than the 1.87 floor
+#: (headroom, the same reasoning `services/proposer/Dockerfile`'s own header records), and this
+#: exact digest is already present on this host (`docker image inspect rust@sha256:3914072ca0c3...`
+#: -> `RepoDigests=["rust@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"]`),
+#: so moving to it costs no network pull. `_verify_prebuild_base_image_digest` below is new:
+#: question 212 ruled that a test must not trust an image it has not compared to its recorded
+#: digest, and until this fix nothing in this module compared `PREBUILD_BASE_IMAGE` to anything --
+#: `docker run` was simply handed the pin and would have silently reached the network to pull a
+#: replacement had the locally-cached digest ever gone missing. That comparison is now explicit
+#: and fails closed instead.
+PREBUILD_BASE_IMAGE = "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 SPOORE_MOUNT = "/Users/probe/code/spoore"
+
+
+def _verify_prebuild_base_image_digest(image_ref: str) -> None:
+    """Question 212's ordering, applied to `PREBUILD_BASE_IMAGE` (round 3, question 217(a)):
+    compare the image this module is about to build with to its OWN recorded digest -- the digest
+    literally embedded in `image_ref` -- via `docker image inspect ... RepoDigests` BEFORE ever
+    invoking `docker run`. `image_ref` is already a `repo:tag@sha256:...` reference, so `docker
+    run`/`docker image inspect` will themselves refuse anything that doesn't match that digest
+    ONCE the image is resolved -- what this function adds is refusing to proceed AT ALL when the
+    image is not already present locally under that exact digest, rather than letting `docker run`
+    silently fall through to a network pull mid cross-build (this step is not documented as one
+    that reaches the network the way `--with-wheels` is; only `apt-get` inside the container is,
+    and that is recorded separately in `collect_binaries`'s own `network_used`)."""
+    if "@sha256:" not in image_ref:
+        raise RuntimeError(
+            f"PREBUILD_BASE_IMAGE {image_ref!r} is not pinned by digest -- question 154/185's own "
+            f"rule: every base image is pinned by content digest, never a floating tag."
+        )
+    repo_and_tag, _, digest = image_ref.partition("@")
+    repo, _, _tag = repo_and_tag.partition(":")
+    expected = f"{repo}@{digest}"
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_ref, "--format", "{{json .RepoDigests}}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"PREBUILD_BASE_IMAGE {image_ref!r} is not present locally under this exact digest "
+            f"(`docker image inspect` failed, rc={result.returncode}): {result.stderr.strip()}. "
+            f"This step does not pull images from the network -- `docker pull {image_ref}` first, "
+            f"or investigate why the digest this module is pinned to no longer matches what is "
+            f"cached on this host."
+        )
+    repo_digests = json.loads(result.stdout)
+    if expected not in repo_digests:
+        raise RuntimeError(
+            f"PREBUILD_BASE_IMAGE {image_ref!r} does NOT match its recorded digest (question 212) "
+            f"-- `docker image inspect` reports RepoDigests={repo_digests!r}, which does not "
+            f"contain {expected!r}. Refusing to cross-build against an image that is not the one "
+            f"this module is pinned to."
+        )
 
 #: manifest binary name -> (cargo package, cargo --bin name). `av-command` is included but this
 #: module never edits `crates/av-command` -- only builds it (this task's own hard rule).
@@ -734,6 +794,7 @@ def _cross_build_binaries(repo_root: Path, cache_dir: Path) -> dict:
     results: dict[str, dict] = {}
     with lock_docker_tests():
         prune_stale_labelled_resources()
+        _verify_prebuild_base_image_digest(PREBUILD_BASE_IMAGE)
         for bin_name, (pkg, cargo_bin) in BINARY_TARGETS.items():
             ok, built_path, error = _cross_build_one_binary(repo_root, pkg, cargo_bin, run_id)
             if ok:
