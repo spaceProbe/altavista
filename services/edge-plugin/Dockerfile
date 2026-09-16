@@ -20,12 +20,15 @@
 # same structural reason `services/cfs/Dockerfile`'s own header comment already documents
 # for `av-lockstep-shim`: the root workspace `Cargo.toml` pins `spoore-cdm` (an `av-cdm` ->
 # `av-edge`/`av-grpc` -> `av-ingest-client` dependency, exactly on `av-edge-plugin`'s own
-# path) to an ABSOLUTE HOST PATH, `spoore-cdm = { path = "/Users/probe/code/spoore/crates/
-# spoore-cdm" }` -- a real, compiled dependency (not just a manifest fact: `av-cdm`'s own
+# path) to a HOST PATH outside this repository -- a relative sibling path since question
+# 219(c) (`spoore-cdm = { path = "../spoore/crates/spoore-cdm" }`, resolved against wherever
+# the workspace root is mounted; an absolute `/Users/probe/code/spoore/...` path before that
+# -- a real, compiled dependency either way (not just a manifest fact: `av-cdm`'s own
 # `spoore.v0` adapter names `spoore_cdm` types directly), which a `docker build`'s isolated
-# context has no access to. Measured directly (this task's own R1 investigation): a bare
-# `RUN cargo build --release -p av-ingest-client --bin av-edge-plugin` inside a builder
-# stage, given the full repository as its build context, fails immediately with
+# context has no access to. Measured directly (this task's own R1 investigation, against the
+# pre-219(c) absolute-path shape): a bare `RUN cargo build --release -p av-ingest-client
+# --bin av-edge-plugin` inside a builder stage, given the full repository as its build
+# context, failed immediately with
 #
 #   error: failed to load manifest for dependency `av-cdm`
 #   Caused by:
@@ -34,6 +37,9 @@
 #     failed to read `/Users/probe/code/spoore/crates/spoore-cdm/Cargo.toml`
 #   Caused by:
 #     No such file or directory (os error 2)
+#
+# (the same failure shape recurs with the relative path today -- see the round 4 commit's
+# own clone-proof for the exact post-219(c) error text naming the missing relative sibling.)
 #
 # `docker build`'s classic (non-BuildKit) builder has no host-path bind-mount mechanism at
 # all -- and per question 196(a), THIS HOST HAS NO BUILDKIT `buildx` (confirmed again while
@@ -48,15 +54,28 @@
 # hand-run) by services/edge-plugin/build-image.sh's own "prebuild" step, which runs:
 #
 #   docker run --rm \
-#     -v "$(pwd)":/workspace \
-#     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
-#     -w /workspace \
+#     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
+#     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
+#     -w /Users/probe/code/AltaVista-edge \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
 #     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-ingest-client --bin av-edge-plugin \
-#         --target-dir /workspace/target-docker-linux && \
-#       strip /workspace/target-docker-linux/release/av-edge-plugin'
+#         --target-dir target-docker-linux && \
+#       strip target-docker-linux/release/av-edge-plugin'
+#
+# (the repository is mounted at a container path whose PARENT is literally `/Users/probe/code`,
+# not `/workspace` -- question 219(c) defect fix, round 4, `services/edge-plugin/
+# build-image.sh`'s own `CONTAINER_WORKSPACE` comment has the full, measured account: a
+# workspace mounted at plain `/workspace` needs spoore's relative-sibling mount at `/spoore`,
+# which satisfies THIS crate's own `spoore-cdm` dependency but NOT `crates/av-proposer/
+# Cargo.toml`'s still-absolute `spoore-models`/`spoore-ml` dependencies -- cargo has to load
+# av-proposer's manifest too to resolve the workspace at all, whichever `-p` target is actually
+# being built, and a second mount or an in-container symlink at the fixed absolute path does
+# not work either, measured directly: cargo then sees `spoore-cdm` as two different packages
+# and refuses to write the lockfile. Mounting the repo itself under `/Users/probe/code` makes
+# spoore's own relative-sibling destination equal that fixed absolute path by construction, so
+# one mount satisfies both.)
 #
 # (`protobuf-compiler`+`libprotobuf-dev` satisfy `crates/av-cdm/build.rs::resolve_protoc`'s
 # own PATH fallback plus its well-known-types include-dir search, which under Debian needs

@@ -41,11 +41,31 @@ toml = "0.8"
 # why and what an upstream PR would need), so `spoore-io` -- and its `clickhouse_sink`
 # module in particular -- never appears anywhere in this crate's dependency tree at all
 # (see `tests/no_object_store.rs`).
+#
+# Question 219(c) defect fix: these four were absolute (`/Users/probe/code/spoore/crates/...`)
+# and are now relative, matching the root `Cargo.toml`'s own `spoore-cdm` path and the
+# `SPOORE_ROOT` sibling-checkout convention in `services/*/build-image.sh` (question 219(b)) --
+# a clone of this repo placed anywhere, with a spoore checkout beside it, resolves them. The
+# absolute form made every spoore crate these four pull in (including `spoore-cdm`, reached
+# through spoore's own workspace) resolve to a *second*, different path than the root
+# manifest's already-relative `spoore-cdm`, so cargo saw two different packages claiming the
+# same name/version and refused to write the lockfile ("package collision in the lockfile").
+# `../../../spoore/crates/<name>` is not copied from the root manifest's `../spoore/...`: a
+# path dependency resolves relative to *this* manifest's own directory, `crates/av-track/`, not
+# the workspace root, so it needs one more `..` than the root manifest's. Measured, not
+# guessed: `cd crates/av-track && cd ../../../spoore/crates/spoore-engine && pwd -P` lands on
+# the same directory as `realpath /Users/probe/code/spoore/crates/spoore-engine`; one fewer
+# `..` (`../../spoore/...`) or one more (`../../../../spoore/...`) is not a directory at all.
+#
+# Left as four repeated crate-local `path = "..."` entries rather than hoisted into
+# `[workspace.dependencies]` beside `spoore-cdm`: only this one crate (`av-track`) depends on
+# any of them, so a workspace-level alias would add a layer of indirection with nothing to
+# share it with -- the smallest correct fix is the local edit these four lines already were.
 spoore-cdm.workspace = true
-spoore-engine = { path = "/Users/probe/code/spoore/crates/spoore-engine" }
-spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }
-spoore-assoc = { path = "/Users/probe/code/spoore/crates/spoore-assoc" }
-spoore-tree = { path = "/Users/probe/code/spoore/crates/spoore-tree" }
+spoore-engine = { path = "../../../spoore/crates/spoore-engine" }
+spoore-models = { path = "../../../spoore/crates/spoore-models" }
+spoore-assoc = { path = "../../../spoore/crates/spoore-assoc" }
+spoore-tree = { path = "../../../spoore/crates/spoore-tree" }
 nalgebra.workspace = true
 
 # `src/bin/av-edge-latency.rs` is the one place in this crate that ever touches a

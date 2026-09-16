@@ -87,6 +87,15 @@
 //! itself durable -- `sync_all` asks the OS to flush to the device, which is as far as a
 //! userspace process can reach.
 //!
+//! **A note on `sync_all`'s cost, which differs by OS (round 4 manager review):** Rust's
+//! `File::sync_all` issues `fcntl(F_FULLFSYNC)` on macOS (a full device-cache barrier) but
+//! plain `fsync(2)` on Linux -- the same durability *guarantee* this section describes, at
+//! very different measured cost (macOS: p50 ~5.67 ms; Linux: p50 ~37 us, on the same
+//! directory). `scripts/kit/d5_three_placements.py`'s own module doc has the full
+//! measurement, the artifact it was measured from, and the consequence: a Linux-container
+//! placement's append latency and a macOS-native placement's append latency are not
+//! directly comparable at face value, because they are not paying for the same barrier.
+//!
 //! # Crash recovery
 //!
 //! [`PartitionLog::open`] always scans the whole file from byte 0 before doing anything
