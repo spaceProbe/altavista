@@ -136,6 +136,12 @@ def _real_constants() -> dict[str, dict[str, "str | None"]]:
         "admin": None,
     }
 
+    proposer = _read("crates/av-proposer/src/bin/av-proposer.rs")
+    real["av-proposer"] = {
+        "grpc": _extract(proposer, r'const DEFAULT_MODEL_SERVICE_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-proposer/src/bin/av-proposer.rs"),
+        "admin": None,
+    }
+
     binding = _read("crates/av-kernel/src/drm/binding.rs")
     default_impl = _extract(binding, r"impl Default for ContainerSpec \{(.*?)\n\}", source="crates/av-kernel/src/drm/binding.rs", flags=re.DOTALL)
     real["av-kernel"] = {
