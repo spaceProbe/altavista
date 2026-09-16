@@ -82,6 +82,33 @@ grows a `50063`/`50064` row and forces this script to move:
     edge-b: grpc 127.0.0.1:50063, admin 127.0.0.1:50163  (deliberately outside every owned-map row)
     edge-c: grpc 127.0.0.1:50064, admin 127.0.0.1:50164  (deliberately outside every owned-map row)
 
+# Cross-OS latency comparison caveat (round 4 manager review, defect 3)
+
+D5b's own measured p50/p99 (its runner's timing output, not reproduced in this module) looked
+like a 6x improvement over the lead's single-placement macOS-native baseline (p50 6.8 ms / p99
+11.3 ms vs. D5b's p50 ~1.12 ms / p99 ~2.81 ms). That gap is NOT a platform improvement --
+root-caused (manager, round 4) to `crates/av-ingest/src/log.rs::append`'s `f.sync_all()`, which
+Rust maps to a DIFFERENT durability primitive per OS: `fcntl(F_FULLFSYNC)` on macOS (a full
+device-cache barrier) vs. plain `fsync(2)` on Linux. Measured directly on this host, on the very
+directory this script bind-mounts as each placement's durable log (`out/d5/logs/<placement>`,
+200 iterations each, artifact `scratchpad/r4/fullfsync-macos.json`; independently re-measured by
+this round's own worker, same directory, same iteration count, materially agreeing --
+`scratchpad/r4/w6/fullfsync-worker-verify.json`):
+
+    fsync(2):              p50   37 us, p99   443 us
+    fcntl(F_FULLFSYNC):     p50 5665 us (5.67 ms), p99 10539 us (10.54 ms), max 85.7 ms
+
+The lead's baseline ran macOS-native, so its 6.8 ms p50 / 11.3 ms p99 is almost entirely one
+`F_FULLFSYNC` (5.67 / 10.54 ms) plus roughly a millisecond of RPC/framing. D5's placements
+(this script) run inside Linux containers, where the IDENTICAL Rust code issues plain
+`fsync(2)` at 37 us instead -- explaining, too, why the native-host control (p50 13.4 ms) sits
+near, rather than far above, the baseline. The two numbers measure two DIFFERENT durability
+guarantees, not the same work done faster: a container-placement latency measured by this
+script, compared against a macOS-native baseline, is a cross-OS comparison and must always be
+labelled as one, never presented as an apples-to-apples speed difference. See
+`crates/av-ingest/src/log.rs`'s own "Durability" module-doc section for the short
+cross-reference back to this one.
+
 # Question 212: image digest, verified before every container start
 
 `up()` reads `services/av-ingest/IMAGE_DIGEST.md`'s own recorded Image ID and compares it to
