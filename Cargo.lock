@@ -301,6 +301,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-orbital"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "thiserror",
+]
+
+[[package]]
 name = "av-proposer"
 version = "0.1.0"
 dependencies = [
