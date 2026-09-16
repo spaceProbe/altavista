@@ -1,0 +1,97 @@
+{
+  "central_body_readback": {
+    "equatorial_radius_km": 6378.1363,
+    "flattening": 0.0033527,
+    "mu_km3_per_s2": 398600.4415
+  },
+  "duration_s": 86400.0,
+  "epoch_a1mjd": 31041.500428638676,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "final_state": [
+    -1869.0797556034977,
+    3841.829568870482,
+    5380.316950414095,
+    -6.873084998687701,
+    -3.2776056109279494,
+    -0.04506520132161276
+  ],
+  "force_model": {
+    "central_body": "Earth",
+    "drag": null,
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [],
+    "relativity": false,
+    "srp": false,
+    "tides": false
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-16T22:49:59+00:00",
+  "gmat_version": "R2026a",
+  "gravity_file_name": "JGM2.cof",
+  "gravity_file_readback": {
+    "body_name": "Earth",
+    "degree": 8,
+    "mu_km3_per_s2": 398600.4415,
+    "order": 8,
+    "potential_file": "JGM2.cof"
+  },
+  "gravity_file_sha256": "bf182b1208e33be3716c8292a3947c1f87d4041ad6663a0c9ae621f65cafc20d",
+  "initial_state": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "name": "leo_1day_jgm2_8x8",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "propagator_readback": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0,
+    "note": "read from prop.GetPropagator() after PrepareInternals(), not the front-end Propagator or the bare integrator object -- see this script's module doc"
+  },
+  "reason": "N1 (docs/native-dynamics-plan.md): the same arc as leo_1day_jgm2_8x8_sunmoon.json (same epoch, same initial Keplerian elements, same ballistic set) with the third bodies (Sun, Moon; N2 scope) removed and no drag/SRP/relativity/tides added, so N1's EarthGravityModel (point-mass/spherical-harmonic gravity only) has a golden to pin against without a force outside its own scope",
+  "sha256": "f18c1e4521638aea67a5129461f1dad147d066043e6f6b65cbbcdf9797efd034",
+  "solver_iterations": null,
+  "spacecraft": {
+    "AOP": 0.0,
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "spacecraft_ballistics_readback": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0,
+    "TotalMass": 500.0
+  },
+  "tolerance_m": 0.05,
+  "tolerance_mps": 5e-05,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}

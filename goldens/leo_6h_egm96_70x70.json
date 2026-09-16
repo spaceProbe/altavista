@@ -1,0 +1,97 @@
+{
+  "central_body_readback": {
+    "equatorial_radius_km": 6378.1363,
+    "flattening": 0.0033527,
+    "mu_km3_per_s2": 398600.4415
+  },
+  "duration_s": 21600.0,
+  "epoch_a1mjd": 31041.500428638676,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "final_state": [
+    4212.056120884532,
+    -2184.661060309994,
+    -4968.667253287817,
+    5.286721269772317,
+    4.979629685533291,
+    2.291411877240801
+  ],
+  "force_model": {
+    "central_body": "Earth",
+    "drag": null,
+    "gravity": {
+      "degree": 70,
+      "file": "EGM96.cof",
+      "order": 70
+    },
+    "point_masses": [],
+    "relativity": false,
+    "srp": false,
+    "tides": false
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-16T22:50:10+00:00",
+  "gmat_version": "R2026a",
+  "gravity_file_name": "EGM96.cof",
+  "gravity_file_readback": {
+    "body_name": "Earth",
+    "degree": 70,
+    "mu_km3_per_s2": 398600.4415,
+    "order": 70,
+    "potential_file": "EGM96.cof"
+  },
+  "gravity_file_sha256": "3e8806223250224d3c1333a010eb5c2cc5a212a56ccee4024db81b9d889db5ea",
+  "initial_state": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "name": "leo_6h_egm96_70x70",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "propagator_readback": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0,
+    "note": "read from prop.GetPropagator() after PrepareInternals(), not the front-end Propagator or the bare integrator object -- see gen_leo_1day_jgm2_8x8.py's module doc"
+  },
+  "reason": "N1 (docs/native-dynamics-plan.md): a second, higher-degree gravity golden beyond leo_1day_jgm2_8x8's JGM2 8x8, to pin the native spherical-harmonic recursion at the degree/order (70x70) this crate's own doc claims stability to; same central body, spacecraft ballistic set and epoch as the JGM2 goldens, no third bodies or other forces, six hours (not one day, EGM96 70x70 being expensive per this task's own cost note)",
+  "sha256": "34b99a442653041c66494933e5ab2a7f6f056d3e6ed86218008c369ff3b50622",
+  "solver_iterations": null,
+  "spacecraft": {
+    "AOP": 0.0,
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "spacecraft_ballistics_readback": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0,
+    "TotalMass": 500.0
+  },
+  "tolerance_m": 0.05,
+  "tolerance_mps": 5e-05,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}
