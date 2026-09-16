@@ -259,6 +259,28 @@
       "licenses": [
         {
           "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "av-label",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
             "id": "MIT"
           }
         }
@@ -3192,9 +3214,9 @@
       "type": "application",
       "version": "0.1.0"
     },
-    "timestamp": "2026-09-16T12:27:33Z"
+    "timestamp": "2026-09-16T19:54:20Z"
   },
-  "serialNumber": "urn:uuid:74a47cba-80fb-ec39-f7b3-e19ac686ceb8",
+  "serialNumber": "urn:uuid:8a4de17b-953c-31a5-1fb6-99f8b7f9e845",
   "specVersion": "1.5",
   "version": 1
 }
