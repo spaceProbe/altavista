@@ -281,6 +281,7 @@ disagree.
 | `gmat-service` (Python, ADR-002 depth 1) | `127.0.0.1:50061` | `127.0.0.1:50161` | `services/gmat-service/gmat_service/config.py::DEFAULT_PORT` / `::DEFAULT_ADMIN_PORT` |
 | `av-lockstep-shim` | `127.0.0.1:50080` | *(none)* | `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` |
 | `av-proposer` | `127.0.0.1:50063` | *(none)* | `crates/av-proposer/src/bin/av-proposer.rs::DEFAULT_MODEL_SERVICE_BIND` |
+| `av-tiles` | `127.0.0.1:50073` | *(none)* | `crates/av-tiles/src/bin/av-tiles.rs::DEFAULT_BIND` |
 | `av-kernel` binding registry, `container.control_port` (container-internal only, never a host bind) | `50070` | *(none)* | `crates/av-kernel/src/drm/binding.rs::ContainerSpec::default` |
 
 The convention: gRPC default first, admin default `gRPC + 100` where an admin surface exists

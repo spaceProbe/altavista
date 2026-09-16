@@ -160,6 +160,77 @@ impl ClearanceLadder {
     }
 }
 
+/// H4/P0 (`docs/open-questions.md` question 218, round 2): `group -> clearance marking`,
+/// deployment-configured, moved here unchanged from `crates/av-gateway/src/auth.rs` (its
+/// original, and until now only, home). `av-tiles` needs the identical group-to-clearance
+/// mapping `av-gateway` already has -- a tile gateway deriving a caller's clearance from a
+/// verified token's groups is exactly the same problem `av-gateway`'s own `AuthContext`
+/// solved, and a second, independently-typed copy of `group -> marking` would be precisely
+/// the divergence this crate's own module doc (see "Question 218") already warns against.
+/// `av-gateway::auth` re-exports [`GroupClearanceMap`] and [`GroupClearanceOutcome`] under
+/// their original path (`pub use av_label::{GroupClearanceMap, GroupClearanceOutcome};`)
+/// so every existing call site there -- production and test -- keeps compiling unchanged,
+/// and every counter code string that depends on the *outcome* of a `clearance_for` call
+/// (via `av-gateway`'s own local `AuthRefusal`, which is built from these outcomes but was
+/// not itself moved) is byte-identical to before this move.
+///
+/// A thin `BTreeMap` wrapper, not a second [`ClearanceLadder`]: this map does not itself
+/// rank a subject's label against a clearance (that is still entirely [`ClearanceLadder::
+/// classify`]'s own job); [`GroupClearanceMap::clearance_for`] ranks a *principal's own*
+/// mapped markings against each other only far enough to pick the single highest one,
+/// reusing [`ClearanceLadder::rank`] to do it -- never a second, independent ranking
+/// implementation.
+#[derive(Debug, Clone, Default)]
+pub struct GroupClearanceMap {
+    by_group: std::collections::BTreeMap<String, String>,
+}
+
+/// The result of [`GroupClearanceMap::clearance_for`] -- see that method's own doc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupClearanceOutcome {
+    /// The highest-ranked (on this deployment's [`ClearanceLadder`]) marking among every one
+    /// of the principal's groups this map lists.
+    Marking(String),
+    /// None of the principal's groups appear in this map at all.
+    NoneMapped,
+    /// At least one of the principal's mapped groups names a marking absent from this
+    /// deployment's ladder -- a misconfiguration, never silently ranked as 0 and never
+    /// silently skipped over in favor of a lower mapped marking that IS on the ladder.
+    NotOnLadder(String),
+}
+
+impl GroupClearanceMap {
+    pub fn new(by_group: std::collections::BTreeMap<String, String>) -> Self {
+        Self { by_group }
+    }
+
+    /// Ranks every one of `groups` that this map lists against `ladder` and returns the
+    /// highest-ranked marking -- order-independent: the same set of mapped markings always
+    /// yields the same [`GroupClearanceOutcome::Marking`] regardless of the order `groups`
+    /// lists them in. A group absent from this map is simply skipped (it asserts no
+    /// clearance); a group whose mapped marking is absent from `ladder` short-circuits the
+    /// whole call to [`GroupClearanceOutcome::NotOnLadder`] immediately -- never silently
+    /// dropped in favor of a lower, on-ladder marking found elsewhere in `groups`.
+    /// [`GroupClearanceOutcome::NoneMapped`] only when no group in `groups` is in this map
+    /// at all.
+    pub fn clearance_for(&self, groups: &[String], ladder: &ClearanceLadder) -> GroupClearanceOutcome {
+        let mut best: Option<(usize, &str)> = None;
+        for g in groups {
+            let Some(marking) = self.by_group.get(g) else { continue };
+            let Some(rank) = ladder.rank(marking) else {
+                return GroupClearanceOutcome::NotOnLadder(marking.clone());
+            };
+            if best.map(|(best_rank, _)| rank > best_rank).unwrap_or(true) {
+                best = Some((rank, marking.as_str()));
+            }
+        }
+        match best {
+            Some((_, marking)) => GroupClearanceOutcome::Marking(marking.to_string()),
+            None => GroupClearanceOutcome::NoneMapped,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +328,62 @@ mod tests {
     #[test]
     fn markings_returns_the_whole_configured_ladder_in_order() {
         assert_eq!(ladder().markings(), &["UNCLASSIFIED".to_string(), "CUI".to_string(), "SECRET".to_string()]);
+    }
+
+    // -- GroupClearanceMap: moved here from crates/av-gateway/src/auth.rs (question 218,
+    // round 2, P0) -- direct unit coverage of clearance_for at the layer it now lives at.
+    // av-gateway's own auth.rs tests continue to exercise the identical logic through
+    // AuthContext::authenticate_query (an integration-level test, not a duplicate of these).
+
+    fn clearance_map(entries: &[(&str, &str)]) -> GroupClearanceMap {
+        let mut m = std::collections::BTreeMap::new();
+        for (group, marking) in entries {
+            m.insert(group.to_string(), marking.to_string());
+        }
+        GroupClearanceMap::new(m)
+    }
+
+    #[test]
+    fn clearance_for_a_group_not_in_the_map_at_all_is_none_mapped() {
+        let map = clearance_map(&[("operators", "CUI")]);
+        assert_eq!(map.clearance_for(&["guests".to_string()], &ladder()), GroupClearanceOutcome::NoneMapped);
+    }
+
+    #[test]
+    fn clearance_for_a_single_mapped_group_returns_its_marking() {
+        let map = clearance_map(&[("operators", "CUI")]);
+        assert_eq!(map.clearance_for(&["operators".to_string()], &ladder()), GroupClearanceOutcome::Marking("CUI".to_string()));
+    }
+
+    /// Order-independence, pinned directly at this layer: the same set of mapped markings
+    /// yields the same highest-ranked result regardless of claim order.
+    #[test]
+    fn clearance_for_the_same_two_groups_in_either_order_yields_the_same_higher_marking() {
+        let map = clearance_map(&[("operators", "CUI"), ("safety-officers", "SECRET")]);
+        let high_first = map.clearance_for(&["safety-officers".to_string(), "operators".to_string()], &ladder());
+        let low_first = map.clearance_for(&["operators".to_string(), "safety-officers".to_string()], &ladder());
+        assert_eq!(high_first, GroupClearanceOutcome::Marking("SECRET".to_string()));
+        assert_eq!(low_first, GroupClearanceOutcome::Marking("SECRET".to_string()));
+    }
+
+    /// A mapped marking absent from the ladder short-circuits to NotOnLadder immediately --
+    /// never silently skipped over in favor of a lower, on-ladder marking mapped elsewhere.
+    #[test]
+    fn clearance_for_an_off_ladder_marking_short_circuits_even_with_a_lower_on_ladder_marking_present() {
+        let map = clearance_map(&[("operators", "CUI"), ("misconfigured-group", "TOP-SECRET")]);
+        let outcome = map.clearance_for(&["operators".to_string(), "misconfigured-group".to_string()], &ladder());
+        assert_eq!(outcome, GroupClearanceOutcome::NotOnLadder("TOP-SECRET".to_string()));
+    }
+
+    #[test]
+    fn clearance_for_an_empty_groups_list_is_none_mapped() {
+        let map = clearance_map(&[("operators", "CUI")]);
+        assert_eq!(map.clearance_for(&[], &ladder()), GroupClearanceOutcome::NoneMapped);
+    }
+
+    #[test]
+    fn clearance_for_a_default_empty_map_is_always_none_mapped() {
+        let map = GroupClearanceMap::default();
+        assert_eq!(map.clearance_for(&["anything".to_string()], &ladder()), GroupClearanceOutcome::NoneMapped);
     }
 }

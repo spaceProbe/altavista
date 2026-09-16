@@ -401,6 +401,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-tiles"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-command",
+ "av-label",
+ "av-store",
+ "openssl",
+ "prost",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "av-track"
 version = "0.1.0"
 dependencies = [
