@@ -85,10 +85,135 @@ five plus whichever of ADR-003's nine are in play) directly in the merged `suite
 every component's `tier` field would be its real ADR-003 tier, unmapped, un-translated, with
 nothing to keep in sync between two vocabularies.
 
+## Proposal 2: `secdeploy evidence`'s `collect()` should iterate the manifest, not a module constant
+
+### The problem, reproduced
+
+`src/secdeploy/evidence.py` line 39 hard-codes the entire set of components this collector will
+ever probe:
+
+```python
+# src/secdeploy/evidence.py, line 39
+COMPONENTS = ("secrouter", "seccert", "secllm", "secchat", "secrecorder")
+```
+
+`collect()` (defined line 116) loops over it directly:
+
+```python
+# src/secdeploy/evidence.py, line 132
+    for name in COMPONENTS:
+```
+
+That is real output, not a hypothetical: `src/secdeploy/cli.py`'s own `cmd_evidence` (lines
+396–414) already loads the manifest one call before it needs this fixed list —
+
+```python
+# src/secdeploy/cli.py, lines 399, 406–407
+    m = Manifest.load(args.manifest)
+    ...
+    urls = site.topology.urls(without)
+    result = evidence_mod.collect(urls, args.out, token=args.token, timeout=args.timeout)
+```
+
+— and `m` is never passed to `evidence_mod.collect` at all; only the already-narrowed `urls` dict
+is. So no matter what a merged manifest declares, `collect()`'s own loop can only ever ask about
+`secrouter`/`seccert`/`secllm`/`secchat`/`secrecorder`.
+
+The one-line irony, also reproduced directly rather than assumed: `Topology.urls` (the function
+that builds the `urls` dict `collect()` already receives) is ITSELF manifest-driven —
+
+```python
+# src/secdeploy/topology.py, line 354
+        for name, c in self.manifest.select(without).items():
+```
+
+— so the `urls` dict handed into `collect()` already reflects whatever the active manifest
+declares. `collect()`'s own outer loop is the one place in this path that does not ask the
+manifest anything; it asks a five-name constant instead, then does `urls.get(name.upper())` for
+each. A component present in the manifest and in `urls` but absent from `COMPONENTS` is simply
+never looked at — not even to be recorded `"not_in_topology"`.
+
+This is precisely why AltaVista's own `scripts/kit/evidence.py` (this repository's D4 offline
+half — see `docs/compliance/BUNDLE.md`) exists as a *separate* collector rather than something
+`secdeploy evidence` could eventually absorb by config alone: `av-command`, `av-dynamics-service`,
+`av-edge-plugin`, `av-gateway`, `av-ingest`, `gmat-service` — none of AltaVista's six components
+share a name with any of secdeploy's five — so even a fully successful, fully authorized
+`deploy/secdeploy/merge.py` merge, run against a live placement that includes an AltaVista
+component with a real `/admin/api/evidence` endpoint of its own, could never make `secdeploy
+evidence` collect it. The gap is `COMPONENTS` itself, not anything about how the merge is done.
+
+### What we propose
+
+Give `collect()` the same manifest-selection call `Topology.urls` already makes, instead of the
+module constant, additively:
+
+```python
+# src/secdeploy/evidence.py -- collect()'s new signature
+def collect(
+    urls: dict[str, str], out_dir: str | Path, *,
+    manifest: "Manifest | None" = None, without: list[str] | None = None,
+    token: str | None = None, timeout: float = DEFAULT_TIMEOUT, today: date | None = None,
+) -> dict[str, object]:
+    component_names = (
+        sorted(manifest.select(without)) if manifest is not None else COMPONENTS
+    )
+    for name in component_names:
+        ...  # unchanged body
+```
+
+`cmd_evidence` (`src/secdeploy/cli.py`) would then pass the `m`/`without` it already has in
+scope one call earlier than today:
+
+```python
+# src/secdeploy/cli.py, cmd_evidence -- the one-line call-site change
+    result = evidence_mod.collect(
+        urls, args.out, manifest=m, without=without, token=args.token, timeout=args.timeout,
+    )
+```
+
+`manifest.select(without)` is the exact call `Topology.urls` already makes internally
+(`topology.py` line 354) to build `urls` in the first place — so after this change, the set of
+components `collect()` asks about and the set `Topology.urls` resolved addresses for are
+guaranteed to agree (both are `manifest.select(without)`, called with the identical `without`),
+rather than merely overlapping by coincidence the way `COMPONENTS ⊂ {secrouter, seccert, secllm,
+secchat, secrecorder}` happens to today.
+
+### Why this is additive and backward-compatible
+
+- `manifest`/`without` are both optional, defaulting to `None`. Absent `manifest`, `collect()`
+  falls back to exactly today's `COMPONENTS` tuple — any existing caller (including
+  `tests/test_suite_declarations.py`-style tests that call `collect()` directly without a
+  `Manifest` in hand) keeps its current behavior unchanged.
+- The per-component probing logic itself (`fetch_one`, `resolve_token`, the `"skipped"`/
+  `"error"`/`"not_in_topology"`/`"ok"` tolerance) is untouched — only WHICH names are looped over
+  changes, never how each one is handled once named.
+- `COMPONENTS` itself is not removed; it stays the documented default for a caller with no
+  manifest at hand, exactly as it is used today.
+
+### What it would let us delete
+
+Nothing in this repository — `deploy/secdeploy/merge.py`/`suite.altavista.toml` do not touch
+`evidence.py` at all today, unlike Proposal 1's `[tier_compat]` table. The benefit is purely
+forward-looking: the moment any AltaVista component grows a real `/admin/api/evidence` endpoint
+of its own (this round's `gmat_service.evidence.EvidenceLog`/`crates/av-dynamics-service/src/
+evidence.rs` are already real, hash-chained, file-backed ledgers with real verifiers — an HTTP
+`/admin/api/evidence` surface over either is a small step, already true for `gmat_service.admin`
+and `av-dynamics-service`'s own admin surface today), `secdeploy evidence` run over a live
+placement that includes it would collect that component's evidence for real, with no further
+code change on either side — which is exactly the gap `scripts/kit/evidence.py`'s own
+`ledger_verify.live` declared, not-yet-collected slot (`docs/compliance/BUNDLE.md`) is waiting
+for a second worker to fill from the live side.
+
 ## Scope
 
-This is the one proposal this round produced enough evidence to write down. It is intentionally
-narrow — it does not attempt to also propose, e.g., a `tiers` key on `topology.toml`/
+Two proposals this round produced enough evidence to write down. Both are intentionally narrow —
+Proposal 1 does not attempt to also propose, e.g., a `tiers` key on `topology.toml`/
 `secsite.toml` beyond what `Topology`'s existing `unknown tier` check already validates, or any
 change to `TARGET_KINDS`/`COMPONENT_KINDS`, neither of which this round's fragment needed to
-stretch.
+stretch; Proposal 2 does not attempt to also propose that `secdeploy evidence` itself learn to
+probe an AltaVista-shaped `/admin/api/evidence` response body (its shape already matches
+`ChainVerification`'s `ok`/`checked`/`broken_at_seq`/`detail` fields closely, per
+`gmat_service.evidence.EvidenceLog.verify`'s own doc, but reconciling that with SecRouter's own
+`/admin/api/evidence` response shape is a separate, unreproduced question this round did not
+investigate) or that `evidence.collect`'s five-second-per-component `DEFAULT_TIMEOUT` needs
+tuning for a mixed suite -- neither is evidenced here, so neither is proposed here.
