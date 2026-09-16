@@ -611,3 +611,342 @@ Every one was found by re-running from the tree, not by reading a worker's claim
     none. `cargo vendor` needed none. All are recorded in the manifest; no test uses the network.
 11. **D4, D5 and D6 are untouched**, and the E5 latency retake the lead owes (question 212) is still
     the blocker in front of D5.
+
+## Status (P5 manager, 2026-09-16) — round 3
+
+The lead's merge (`3bcbd63`) broke eight Python tests; all eight are fixed and root-caused.
+**Every item of question 217 is closed** — (a) through (g) — and **D4 is complete**: one hashed
+evidence bundle collects every component's control matrix, a cross-component coverage table, the
+deficiency list, real ledger `verify` results and the SBOM and kit hashes, with `secdeploy
+evidence` run for real over a placement we stood up. **D6 is complete as far as this host allows**:
+the `fedora-fips` runbook rendered, a Lima Fedora VM booted, and the FIPS preflight ran for real
+and failed closed. D5 was not started — the lead's E5 latency retake (question 213(g)) still gates
+it.
+
+### What landed on `edge`
+
+| Commit | What |
+|---|---|
+| `c42cc06` | 217(g): the fragment's port check reads the owned port map; av-gateway's renamed constant |
+| `4bb82a2` | The six Rust SBOMs regenerated for the `rust-version` epoch move, and the epoch rule's other half documented |
+| `48fd3cd` | 217(b): the wheel ships `altavista/web/` and `altavista/profiles/`, with a five-step `PROFILES_DIR` override chain |
+| `cee62f9` | The two Python SBOMs regenerated for `48fd3cd`'s `pyproject.toml` epoch move |
+| `e84b303` | The kit stops carrying `web`/`profiles` as separate packs (`kit_format` 3) |
+| `1bdbbc3` | 217(a): the kit's cross-build pin moves to `rust:1.90-bookworm`, compared to its recorded digest before use |
+| `ba72dab` | A deleted source file no longer survives into every later wheel |
+| `45f87a9` | 217(e): `packaging` declared in the `dev` extra, where `build_kit.py` imports it |
+| `9a73636` | 217(c): the kit carries its own installer (`kit_format` 4) |
+| `b442bbc` | The two Python SBOMs regenerated for `45f87a9`'s `pyproject.toml` epoch move |
+| `614cda4` | 217(d): `GMAT_ROOT`/`CFS_MIRROR_DIR`/spoore resolved, never hardcoded to `/Users/probe` |
+| `71bb21e` | 217(f): the waiting-announcement lock test moves off the real host-wide lock |
+| `0b435e2` | D4a: the offline half of the evidence bundle, `docs/compliance/BUNDLE.md`, three acceptance tests |
+| `18d923a` | `docs/secdeploy-upstream.md` proposal 2: manifest-driven evidence collection |
+| `3f53aca` | The bundle's hash excludes `git_commit`, so its committed record is re-verifiable |
+| `30dc71c` | D4 live half: `secdeploy evidence` over a real placement, real component `verify` responses |
+| `e2b0b60` | D6: the `fedora-fips` dry-run render, and upstream proposal 3 |
+| `6c70912` | D6: the Lima Fedora VM record — it booted, the preflight ran and failed closed |
+| `7b853f1` | The manifest doc names `KIT_FORMAT` instead of a number two bumps stale |
+| `0792465` | A readiness-failure path no longer hangs the whole test session (eleven sites) |
+
+### Gate counts (run by the manager at `0792465`'s tree, no worker active)
+
+- `cargo test --workspace --exclude av-kernel --no-fail-fast`: **878 passed, 0 failed, 3 ignored**
+  across 110 test binaries, exit 0. Round 2 measured 835 across 109; the +43 and the extra binary
+  arrived with the lead's merge, not from this round (this round added no Rust test).
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0, zero warnings. No `#[allow]` was
+  added anywhere this round — `git diff 3bcbd63..HEAD -- '*.rs' | grep -c '^+.*#\[allow'` is 0,
+  grepped, not assumed.
+- `cargo deny check`: exit 0, "advisories ok, bans ok, licenses ok, sources ok", with exactly the
+  six `warning[wildcard]` lines question 207 accepts. Also five `warning[license-not-encountered]`
+  (ISC, MPL-2.0, CC0-1.0, 0BSD, PSF-2.0 — allow-list entries this Rust graph does not reach; round
+  2 saw two, the difference is the merge's own dependency changes) and seven `warning[duplicate]`.
+  None is an error.
+- `.venv/bin/python -m pytest -q -rs`: **1 failed, 716 passed, 13 skipped**, 874.58s, 730 collected.
+  Round 2's baseline was 1 failed, 661 passed, 13 skipped. The one failure is
+  `test_edge_ingest_mtls.py::test_valid_seccert_leaf_is_accepted_through_nginx_and_batches_submit`,
+  the `--real-clock`-against-a-fixed-5 s-staleness-budget test round 2 already recorded as host
+  contention; the contention rule was applied rather than believed on first sight — re-run alone
+  with the fixture binaries pre-built, that file and the six others that had failed passed:
+  **108 passed in 119.25s, 0 failed**. The AI-plane track was running `cargo test --workspace` in
+  its own worktree throughout.
+- `buf lint proto`: exit 0, no output.
+- secdeploy over the merged manifest, offline against the user's own checkout: `verify` exit 0
+  ("✓ manifest valid", "✓ target assets present", "✓ topology valid — domain altavista.internal,
+  1 resource(s)", all 17 components placed) and `plan macos` exit 0.
+- **The kit built twice** from this tree with every gated flag
+  (`--with-images --with-vendor --with-wheels --with-binaries --copy-pack data-time`): manifest hash
+  **`cb7133e69462db70b1b9b4f800de14959020c6a72f037306f9f7dd1ac11cc82f`** both times, the two
+  `KIT_MANIFEST` files byte-identical (`cmp`, not eyeballed). 330 MB.
+- **The evidence bundle built twice** over the same state: `bundle_sha256`
+  **`e688766e517c9c94303c162ecb8acfccfa656b6d81a0ae6243e37df6e3ef9b78`** both times, the two
+  `bundle.json` files byte-identical (`cmp`). Without a kit — the invocation
+  `docs/compliance/BUNDLE.md` records — the hash is
+  **`f5c4c12e1106c5507a3d9465e9d1d69514f3027d82176a3ea5927047a3104f8a`**, which is the number
+  committed in that file and which a test now re-verifies on every run.
+
+Full outputs for every gate are saved with the round's gate logs.
+
+### Task 1 — the eight post-merge failures
+
+Both causes were reproduced before anything was changed.
+
+**(a) Two port failures, one cause.** The merge replaced av-gateway's inline
+`env_or("AV_GATEWAY_BIND", "127.0.0.1:50071")` literal with a named `DEFAULT_BIND` constant, so
+`[ports.av-gateway]`'s hand-written regex matched zero times. Fixed — but 217(g) asked for more
+than a regex repair, and the more turns out not to be literally executable: **the owned port map
+in `docs/architecture.md` section 4 has no row for `av-ingest` and none for `av-proposer`**, and
+neither binary has gained a default bind (`av-ingest-server.rs` still fails with
+`--grpc-bind is required`; `av-proposer.rs` still takes its address only from
+`--serve-model-service HOST:PORT`). There is nothing in the owned map to fill those two rows from,
+and inventing a number is exactly what round 1's decision 4 refused. So 217(g) is honoured a
+different way: `ports.py` now parses the real markdown table (`load_owned_port_map`), every
+`kind = "const"` row is checked **three** ways — fragment, owned map, source constant, all three
+must agree — and the two `kind = "gap"` rows gain a positive check that they are still **absent**
+from the map. The day the AI-plane adds either row, the gap check fails and forces a `const` row.
+Four new tests drive each case from a mutated copy of the fragment or of the markdown under
+`tmp_path`, never the real files. `av-viewer` is not in the map either; rather than a silent skip
+it carries an explicit, commented `owned_map_exempt = true`, and a test proves removing that
+exemption makes the finding reappear.
+
+**(b) Six stale Rust SBOMs, one legitimate cause.** Commit `db1e858` raised the workspace
+`rust-version` to `1.87`. `Cargo.toml` is a real `RUST_EPOCH_PATHS` input, so all six Rust epochs
+moved together, `2026-09-15T12:30:33Z` → `2026-09-15T18:02:25Z`. **That is the rule working, not a
+treadmill**: round 2 narrowed the epoch away from `.rs` files precisely because a source edit
+cannot change a resolved dependency graph, while a manifest edit can and does. The six documents
+were regenerated, `SHA256SUMS` updated, and the rule's other half is now written down in both
+`RUST_EPOCH_PATHS`'s own doc comment and `docs/compliance/sbom/README.md`, with the operational
+consequence stated plainly: a commit touching `Cargo.lock`, the workspace `Cargo.toml` or a crate
+manifest must be followed by an SBOM regeneration in a separate, later commit, and
+`test_the_epoch_is_never_wall_clock` is what enforces it. A new test states the property
+positively — all six share one epoch, equal to git's own committer date for that path set,
+recomputed independently of `sbom.git_epoch`. The gated rebuild proof ran for real:
+`AV_SBOM_REBUILD=1` → 65 passed, 0 skipped, 147.65s.
+
+### Question 217 — every item, and what it cost
+
+**(b) The viewer ships its assets in its own wheel.** A `setup.py` with a `build_py` subclass
+copies `web/` and `profiles/` into the build tree as `altavista/web/` and `altavista/profiles/`;
+neither source directory moves. Verified independently by the manager, not from the worker's
+claim: a wheel built from this tree carries **127 files under `altavista/web/`** (117 regular files
+plus the 10 the two relative symlinks dereference into) and **8 under `altavista/profiles/`**, with
+**zero** top-level `web/`/`profiles/` entries — no site-packages namespace pollution.
+`altavista/profile.py` gains `resolve_profiles_dir` with a five-step order (explicit argument,
+`ALTAVISTA_PROFILES_DIR`, the module-level `PROFILES_DIR` if assigned, the packaged copy, the
+in-repo copy); an in-repo developer run still gets the worktree's `profiles/`, because step 4
+provably does not exist in a source checkout. `altavista/server.py`'s `WEB_DIR` gets the same
+treatment and `__main__.py` gains `--profiles-dir`. The kit stops carrying the two packs, and
+`install.py`'s deleted pack-presence refusal is **replaced**, not dropped: it now opens the kit's
+`altavista` wheel and checks its namelist for the viewer's assets.
+
+**(c) The kit carries its own installer.** `<kit>/installer/` holds `install.sh`, `install.py`,
+`manifest.py`, `sbom.py`, `licences.py` — the exact, recursively checked import closure, none of
+which needs a third-party package. The proof now runs `/kit/installer/install.sh` from the
+read-only kit mount and mounts nothing from this repository; `_assert_no_repo_source_mounted`
+builds the `-v` list in one place and asserts positively that no element points inside the repo
+root. The code states its own limit rather than overclaiming: a self-carried, self-verifying
+installer proves internal consistency, never authenticity — the anchor is the manifest hash held
+independently of the kit.
+
+**(d) Three tests that hardcoded `/Users/probe`.** `GMAT_ROOT`/`CFS_MIRROR_DIR` now resolve through
+`altavista/test_env.py` (inherited environment, then this worktree's own entries if they are real
+directories, else a visible skip naming the variable to set); the spoore bind-mount's host source
+resolves from `AV_SPOORE_DIR` or a sibling checkout and carries the same visible-skip guard
+`test_proposer_container.py` already had. Proven the way a clone gate would: the three files were
+run from a relocated copy of the tracked tree with both variables unset — 4 passed, 9 skipped, every
+skip naming what to set, no attempted `cargo build` against a path that does not exist. The
+container-side *destination* stays the literal `/Users/probe/code/spoore` because the root
+`Cargo.toml` bakes that path into `spoore-cdm`'s path dependency, which is out of this track's
+scope; that is recorded, not hidden.
+
+**(e) `packaging`** is declared in the `dev` extra, held there by an AST-based test that names the
+module importing it, plus a `python -S` test proving the installer still imports with only the
+standard library.
+
+**(f) The waiting-announcement lock test** moved to a private lock path under `repo_scratch_dir()`,
+handed to its child through `AV_LOCKSTEP_PROBE_LOCK_PATH` on the child's environment (never a
+mutation of the test process's own). The announcement code under test, `lock_docker_tests_at`, is
+exactly what `lock_docker_tests` calls in production, so nothing is given up. Measured, not
+asserted: with a forced cold nested compile the real host-wide lock was held **~8.0 s**; after the
+change it is **never acquired** — 0 s. Round 2's decision 2 is corrected in the code comments
+rather than left claiming the opposite.
+
+### D4 — the evidence package
+
+`scripts/kit/evidence.py` writes one JSON bundle to `out/evidence/bundle.json`, never committed;
+`docs/compliance/BUNDLE.md` records what it is, the exact command, the hash, and what the hash
+depends on.
+
+The real numbers: **6 components, 176 control-matrix rows** (32/29/30/28/29/28, matching the
+committed files), **41 distinct practices** named by at least one component, **223 (practice, mark,
+component) attributions**, and **44 deficiencies** (15/4/10/6/5/4). The denominator is stated
+honestly in the bundle itself: "practices named by at least one component", *not* 800-171's 110 —
+this repository carries no authoritative list of all 110 identifiers and one was not invented.
+A row naming two practices (`3.1.1 / 3.1.2`) contributes to both; the reconciliation test proves a
+bijection between every `(component, row, practice, mark)` and every coverage attribution, and
+prints the numbers.
+
+The live half: **`secdeploy deploy macos` cannot stand up any AltaVista component**, measured and
+not inferred — `targets/macos.py`'s `deploy()` is hand-written for secdeploy's own component names
+with no per-manifest dispatch, and a dry-run over our merged manifest printed steps for none of our
+eight. So the charter's sanctioned fallback was used: our own placement. `av-dynamics-service`,
+`gmat-service` and `av-ingest` were brought up and their real `/admin/api/evidence/verify`
+responses recorded verbatim (`{"ok": true, "checked": 4, ...}` for gmat-service, and so on);
+`av-command`, `av-gateway` and `av-edge-plugin` are recorded by name with the reason each could not
+be. `secdeploy evidence` ran for real with its output redirected inside our own `out/` — it
+contributed its deploy-audit chain verify (`{"ok": true, "checked": 0, "brokenAt": null}`) and five
+`skipped` records, because **`secdeploy/src/secdeploy/evidence.py` line 39 hardcodes
+`COMPONENTS = ("secrouter", "seccert", "secllm", "secchat", "secrecorder")` and `collect()` loops
+over that constant rather than the manifest it was just handed**. That is proposal 2 in
+`docs/secdeploy-upstream.md`; proposal 3 is the same shape one level up, in the per-target
+`deploy()`.
+
+The three required tests all pass, plus two more: byte-identity across two runs; a tampered ledger
+making both the verifier and the bundle say so (`{"ok": false, "broken_at_seq": 3, ...}`, and the
+bundle hash changes); every control-matrix row in the coverage table exactly once; the committed
+`BUNDLE.md` hash reproducing from the tree; and a test proving that last check can actually fail.
+
+### D6 — the Fedora target
+
+`secdeploy deploy fedora-fips --dry-run` renders, exit 0, over our merged manifest — and renders
+**nothing at all for seven of our eight components**; `av-viewer` appears once, only as a certbot
+`-d av-viewer.altavista.internal` SAN flag, because it is the one component with `fronted = true`.
+Root cause read from the source with line numbers: `targets/fedora_fips.py`'s `SERVICES` tuple and
+`_include()`. Recorded in `docs/compliance/fedora-fips.md` and proposed upstream.
+
+Lima **did** boot Fedora 44 Cloud aarch64 (~14m53s including a 504 MiB one-time image fetch), and
+secdeploy's own `deploy/fedora-fips/fips-preflight.sh` ran for real inside it:
+
+```
+FIPS preflight FAILED: kernel FIPS mode is not enabled — run 'sudo fips-mode-setup --enable' and reboot
+```
+
+It fails closed on a stock image, which is correct. One step further, root-caused rather than
+assumed: the preflight's own remediation binary, `fips-mode-setup`, **does not exist on Fedora 44**
+(`dnf provides` finds no package owning it; only `update-crypto-policies` ships), so the
+remediation the preflight prints cannot be followed on that image. What cannot run here at all is
+listed with its reason: hardware attestation (no vTPM under `vz`), a real HSM, a real enclave
+network. The VM was stopped and deleted; `limactl list` and `colima status` are byte-identical to
+before.
+
+### Decisions taken this round
+
+1. **217(g) is honoured by anchoring the checker to the owned map, not by filling two rows that
+   the map does not define.** The map has no `av-ingest` or `av-proposer` row and neither binary
+   has a default bind; the lead's instruction assumed otherwise. Inventing ports would have
+   created exactly the drift question 208(c) exists to close. Instead every `const` row is now a
+   three-way agreement and every `gap` row asserts its own absence from the map positively, so the
+   day the map gains either row the gate fails and forces the update. Open item 1.
+2. **`av-viewer` gets a declared `owned_map_exempt`, never a silent skip.** It is not in the owned
+   map (that table's scope is the DRM/kernel network path) and it sits behind secproxy. The
+   exemption is one commented line, and a test proves removing it makes the missing-provenance
+   finding reappear.
+3. **A workspace-manifest edit moving all six Rust epochs at once is correct and is now written
+   down as such.** The alternative reading — "the epoch is too broad again" — would have narrowed
+   it past the truth: a manifest genuinely changes what `cargo auditable` and `cargo metadata`
+   resolve. The rule is now stated in both directions with `db1e858` as the worked example.
+4. **The wheel carries `altavista/web/` and `altavista/profiles/`, not top-level `web/`/`profiles/`.**
+   A top-level layout would have made the existing `parent.parent / "web"` lookup work with no code
+   change at all, which is precisely why it is wrong: it installs two generic names into the
+   site-packages root where any other project could collide with them.
+5. **The kit's cross-build pin was this track's to fix, not the lead's.** 217(a) says av-command
+   cross-builds "once the MSRV pins of question 215 reach this branch"; they reached every
+   `services/*` script but not `scripts/kit/build_kit.py`, which is ours and was written after the
+   merge. Moving it to the 1.90 digest closed round 2's open item 2 — `av-command` cross-built for
+   the first time on this branch (5,059,016 bytes) and now starts from the kit in the proof.
+6. **`kit_format` moved twice this round, 2 → 3 → 4, deliberately.** Dropping the `web`/`profiles`
+   packs and adding a required `installer/` each change what an older installer may assume; a
+   version bump makes an old installer refuse a new kit for the right reason instead of
+   mis-installing one with no static root.
+7. **`install.py`'s viewer-asset refusal was replaced, not deleted.** The old check asked whether
+   the kit carried two packs; the new one opens the kit's own wheel and checks its namelist. A
+   safety check whose subject moves must move with it, not disappear.
+8. **The evidence bundle's hash excludes `git_commit`.** Including it made the number recorded in
+   `docs/compliance/BUNDLE.md` stale the instant the next commit landed — measured: `7d0a2053…`
+   became `d5df21cf…` one commit later, and that commit touched only
+   `docs/secdeploy-upstream.md`. This is question 214's own platform lesson ("a committed artifact
+   whose input set includes its own commit is stale the moment it lands"), fixed the same way it
+   was fixed for the SBOMs. A test now re-verifies the committed number, and another test proves
+   that check can fail.
+9. **The bundle's coverage denominator is what the matrices name, and says so.** Claiming coverage
+   against all 110 practices would have required inventing an identifier list this repository does
+   not have. The bundle carries the caveat in its own `denominator_note`, so a reader cannot mistake
+   41 for 110.
+10. **`secdeploy deploy` was never run for real.** secdeploy is the user's checkout, read and run
+    only; a real deploy writes into its own `out/audit/`. Only `--dry-run` and read-only commands
+    were used, with every output redirected inside our tree. D4's placement is ours, which the
+    charter explicitly permits.
+11. **Workers ran strictly sequentially again**, for round 2's decision-1 reason (one git index),
+    and the sizing was wrong once: the 217(b) worker took 2,363 tool calls against a 300-call
+    brief. The task was genuinely large (packaging plus kit plus the proof), and it should have been
+    split at the kit boundary. Recorded so the next round splits it.
+12. **D5 was not started**, per the charter: question 213(g)'s latency retake is the lead's and
+    still ungiven.
+
+### Defects found in review, and their root causes
+
+Every one was found by re-running from the tree, not from a worker's claims.
+
+- **The kit's cross-build pin was three toolchain versions behind** (found by the manager from a
+  worker's "the proof skips" report, fixed in `1bdbbc3`). Root cause definitive, read from the
+  compiler: `rustc 1.85.1 is not supported … requires rustc 1.87`. The consequence was worse than a
+  skip in a log — D3's zero-egress proof, the whole of round 2's deliverable, had gone dark on this
+  branch. Nothing in `build_kit.py` compared that image to a recorded digest either; it does now.
+- **A file deleted from `web/` survived into every later wheel** (found by the manager, fixed in
+  `ba72dab`). Root cause definitive and reproduced by hand before it was reported: `copy_tree` is
+  purely additive and `pip wheel .` never cleans `build/`, so a probe file added, built, deleted and
+  rebuilt was still in the second wheel. `build_py` now removes the destination first; the test
+  drives the real `setup.py` against a synthetic tree under `tmp_path`.
+- **The evidence bundle's own recorded hash was stale on arrival** (found by the manager, fixed in
+  `3f53aca`) — decision 8 above.
+- **A readiness-failure path hung the entire test session** (found by the manager *in* the gate,
+  fixed in `0792465`). Root cause definitive, from a stack sample of the stalled process, not a
+  guess: `proc.stdout.read()` is a readall that returns only at EOF, and EOF arrives only when the
+  child exits — but a readiness wait times out precisely when the child is still alive. Under the
+  AI-plane track's concurrent `cargo test --workspace`, `test_dynamics_service_rs.py`'s 90 s budget
+  was exceeded, the fixture reached that line, and pytest sat silent for **34 minutes**. The test
+  reported nothing at all, which is strictly worse than reporting the failure it was built to
+  report — a hang is the one failure mode that leaves no trace. Grepping for the shape rather than
+  assuming it was unique found **eleven sites across nine files**, including four inside `assert`
+  *messages* (evaluated only on failure, against a live child with its stdin still open) and three
+  where a lone `terminate()` preceded the readall — no help at all for nginx, which outlives
+  SIGTERM. All eleven now use one helper that terminates, reads with a timeout, and escalates to
+  kill. The two sites where the child is already killed are left alone, with the reason.
+- **A manifest doc line said `kit_format` was 2** while the constant beside it had moved to 3 and
+  then 4 in the same round (fixed in `7b853f1`). Small, and exactly the failure mode a hand-copied
+  number has; the line now names `KIT_FORMAT`.
+- **One `pytest.ini`-level contention artefact, root-caused and not believed on first sight.** The
+  first full gate run produced 28 errors and 1 failure; every single one was a `cargo build`/`cargo
+  run` hitting its 900/600/300 s timeout or a gRPC readiness wait expiring, while the AI-plane
+  track held the shared cargo package-cache lock. Re-run alone with the fixture binaries pre-built:
+  **108 passed, 0 failed, 119 s**. Contention, definitively — and the reason the hang above was
+  found at all.
+
+### Open items for the lead
+
+1. **Question 217(g) could not be executed as written.** The owned port map carries no `av-ingest`
+   and no `av-proposer` row, and neither binary has a default bind, so the two port-0 rows stay
+   gaps. They are now guarded from both sides and will fail the day either row appears. If the
+   lead wants real ports, someone must first give those two binaries defaults — and that is the
+   AI-plane's crate, not ours.
+2. **`av-proposer/build.rs`'s `SPOORE_PROTO_ROOT` and the two `services/*/build-image.sh`
+   `SPOORE_HOST_PATH` values still hardcode `/Users/probe/code/spoore`**, the same class 217(d)
+   just closed in the tests. `av-proposer` is off-limits to this track; the build scripts were out
+   of the prescribed scope. Both want the same `AV_SPOORE_DIR`-with-default treatment.
+3. **The root `Cargo.toml` bakes `/Users/probe/code/spoore/crates/spoore-cdm` into a path
+   dependency**, which is why the container-side mount destination is still that literal. Nothing
+   below `Cargo.toml` can fix it, and editing `Cargo.toml` stales six SBOMs, so it needs to be
+   someone's deliberate commit with the regeneration attached.
+4. **`secdeploy` cannot deploy or collect evidence for any AltaVista component**, for two separate
+   hardcoded lists — `evidence.py`'s `COMPONENTS` tuple and each target's own `SERVICES` tuple.
+   Proposals 2 and 3 in `docs/secdeploy-upstream.md` are written and ready to send alongside
+   proposal 1. Until then D4's live half is our own placement by necessity, not by preference.
+5. **Fedora 44 has no `fips-mode-setup`**, so secdeploy's own FIPS preflight prints remediation
+   that cannot be followed on the image its docs point at. That is upstream's to decide; it is
+   recorded in `docs/compliance/fedora-fips.md` with the evidence.
+6. **D5 is still blocked on question 213(g)'s latency retake**, now for a fourth round.
+7. **The two-track host is the largest single cost in this round's wall time.** The gate's first
+   full pytest took 79 minutes and produced 29 contention artefacts; alone, the same work takes
+   two. Whatever the lead decides about scheduling, the numbers above are the measured price.
+8. **`altavista/test_env.py` is test-support code that now ships inside the wheel.** It is small and
+   dependency-free, and `build_kit.py` deliberately does not import it, but it is worth a decision
+   whether test helpers belong in the installed package or somewhere the wheel does not carry.
