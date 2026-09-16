@@ -88,6 +88,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use av_catalog::{PgConfig, PgTls};
 use av_cdm::pb::{Label, RunProducts};
 use av_command::authz::RoleTable;
 use av_command::clock::SystemClock;
@@ -95,6 +96,7 @@ use av_command::ledger::Ledger;
 use av_command::oidc::IssuerConfig;
 use av_command::service::{resolve_internal_network_bind_address, resolve_loopback_bind_address};
 use av_gateway::auth::{load_gateway_auth_config, AuthContext, GroupClearanceMap};
+use av_gateway::catalog_selector::CatalogHandle;
 use av_gateway::catalogue::{CatalogueEntry, RunCatalogue};
 use av_gateway::gateway::{DataGatewayServiceImpl, DataGatewayServiceServer, GatewayCore};
 use av_gateway::labels::ClearanceLadder;
@@ -121,12 +123,24 @@ const DEFAULT_BIND: &str = "127.0.0.1:50071";
 /// ports".
 const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:50171";
 
+/// H2c: PostgreSQL's own standard port -- NOT an entry in `docs/architecture.md` section 4's
+/// port map, because that table is "one owned port map for every SERVICE's default BIND"
+/// (that section's own header comment) -- a listening address THIS workspace's own binary
+/// opens. `--catalog-host`/`--catalog-port` below configure an OUTBOUND dial to a Postgres
+/// server this workspace does not itself bind (mirrors `AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT`
+/// above, which dials another of this workspace's OWN services and is likewise absent from
+/// that table for the identical reason). This task's own final report names this reasoning
+/// for the manager rather than silently editing that table.
+const DEFAULT_CATALOG_PORT: u16 = 5432;
+
 fn default_auth_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../profiles/gateway-authority.yaml")
 }
 
 const USAGE: &str = "usage: av-gateway --oidc-issuer ISS --oidc-audience AUD --oidc-public-key-path PATH \
-                      [--auth-config-path PATH] [--internal-network-bind ADDR] [--run-products PATH:MARKING]...";
+                      [--auth-config-path PATH] [--internal-network-bind ADDR] [--run-products PATH:MARKING]... \
+                      [--catalog-host HOST --catalog-user USER --catalog-password PASSWORD --catalog-database DB \
+                      [--catalog-port PORT] [--catalog-tls-ca-file PATH]]";
 
 /// This binary's own additive CLI surface (see the module doc's "R3.3" section) -- parsed
 /// once, from `std::env::args()` (question 199: never an environment variable for either of
@@ -156,6 +170,25 @@ struct CliArgs {
     /// the role/clearance half of this binary's configuration specifically (the issuer half
     /// above uses the OTHER acceptable shape, "refuse to start").
     auth_config_path: PathBuf,
+    /// H2c: `Some` only when `--catalog-host` was given -- the presence signal for "this
+    /// deployment has a catalog tier configured" (mirrors `auth_config_path`'s OWN "absent is
+    /// itself a safe state" shape, restated for a different field: absent here means
+    /// `GatewayCore::with_catalog` is never called at all, and `GATEWAY_SELECTOR_CATALOG` is
+    /// refused `CatalogNotConfigured` for every caller -- deny-by-default, never a silently
+    /// half-configured catalog connection). When present, `--catalog-user`/`--catalog-password`/
+    /// `--catalog-database` are all REQUIRED together (`parse_cli_args` refuses to return `Ok`
+    /// otherwise) -- a partially-specified catalog connection is a configuration defect this
+    /// binary reports at startup, never a silently incomplete `PgConfig`.
+    catalog_host: Option<String>,
+    catalog_port: u16,
+    catalog_user: Option<String>,
+    catalog_password: Option<String>,
+    catalog_database: Option<String>,
+    /// `Some` selects `PgTls::Required { ca_file: Some(..) }`; `None` (the default) selects
+    /// `PgTls::Disabled` -- matching `services/catalog/IMAGE_DIGEST.md`'s own measured
+    /// deployment shape for this round (the catalog container is reached over loopback, no
+    /// TLS, exactly like `crates/av-catalog/tests/catalog_postgis.rs`'s own fixture).
+    catalog_tls_ca_file: Option<PathBuf>,
 }
 
 fn parse_cli_args(mut args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
@@ -167,6 +200,12 @@ fn parse_cli_args(mut args: impl Iterator<Item = String>) -> Result<CliArgs, Str
         oidc_audience: None,
         oidc_public_key_path: None,
         auth_config_path: default_auth_config_path(),
+        catalog_host: None,
+        catalog_port: DEFAULT_CATALOG_PORT,
+        catalog_user: None,
+        catalog_password: None,
+        catalog_database: None,
+        catalog_tls_ca_file: None,
     };
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} requires a value"));
@@ -177,6 +216,12 @@ fn parse_cli_args(mut args: impl Iterator<Item = String>) -> Result<CliArgs, Str
             "--oidc-audience" => out.oidc_audience = Some(value()?),
             "--oidc-public-key-path" => out.oidc_public_key_path = Some(PathBuf::from(value()?)),
             "--auth-config-path" => out.auth_config_path = PathBuf::from(value()?),
+            "--catalog-host" => out.catalog_host = Some(value()?),
+            "--catalog-port" => out.catalog_port = value()?.parse::<u16>().map_err(|e| format!("--catalog-port: {e}"))?,
+            "--catalog-user" => out.catalog_user = Some(value()?),
+            "--catalog-password" => out.catalog_password = Some(value()?),
+            "--catalog-database" => out.catalog_database = Some(value()?),
+            "--catalog-tls-ca-file" => out.catalog_tls_ca_file = Some(PathBuf::from(value()?)),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}\n{USAGE}")),
         }
@@ -186,6 +231,13 @@ fn parse_cli_args(mut args: impl Iterator<Item = String>) -> Result<CliArgs, Str
             "--oidc-issuer, --oidc-audience and --oidc-public-key-path are all required (R5.1/question \
              208(b): every surface authenticates every caller; there is no default issuer to fall back \
              to). {USAGE}"
+        ));
+    }
+    if out.catalog_host.is_some() && (out.catalog_user.is_none() || out.catalog_password.is_none() || out.catalog_database.is_none()) {
+        return Err(format!(
+            "--catalog-host was given but --catalog-user/--catalog-password/--catalog-database were not \
+             all also given (H2c: a partially-specified catalog connection is refused at startup, never \
+             a silently incomplete one). {USAGE}"
         ));
     }
     Ok(out)
@@ -276,7 +328,42 @@ async fn main() {
         std::process::exit(1);
     }));
     let counters = Arc::new(av_gateway::counters::Counters::new());
-    let core = Arc::new(GatewayCore::new(catalogue, ladder.clone(), counters.clone()));
+    let mut core_builder = GatewayCore::new(catalogue, ladder.clone(), counters.clone());
+
+    // H2c: --catalog-host present is the ONE presence signal for "this deployment has a
+    // catalog tier" (CliArgs::catalog_host's own doc) -- parse_cli_args has already refused a
+    // partially-specified catalog connection, so every field this arm reads is real.
+    if let Some(catalog_host) = &cli.catalog_host {
+        let catalog_user = cli.catalog_user.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_user absent");
+        let catalog_password = cli.catalog_password.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_password absent");
+        let catalog_database = cli.catalog_database.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_database absent");
+        let tls = match &cli.catalog_tls_ca_file {
+            Some(ca_file) => PgTls::Required { ca_file: Some(ca_file.clone()) },
+            None => PgTls::Disabled,
+        };
+        let pg_config = PgConfig {
+            host: catalog_host.clone(),
+            port: cli.catalog_port,
+            user: catalog_user,
+            password: catalog_password,
+            database: catalog_database,
+            application_name: "av-gateway".to_string(),
+            connect_timeout: std::time::Duration::from_secs(5),
+            tls,
+        };
+        // H2c: av_catalog::labels::ClearanceLadder is its own, structurally distinct copy of
+        // the clearance-ladder convention (crate::catalog_selector::CatalogHandle's own doc
+        // explains why) -- built from the SAME configured marking list (AV_GATEWAY_CLEARANCE_LADDER,
+        // ladder_raw above) as crate::labels::ClearanceLadder, never a second, independently
+        // configured list.
+        let catalog_ladder = av_catalog::labels::ClearanceLadder::new(ladder_raw.split(',').map(str::to_string).collect());
+        core_builder = core_builder.with_catalog(CatalogHandle { pg_config, ladder: catalog_ladder });
+        eprintln!("av-gateway: catalog tier configured at {catalog_host}:{}", cli.catalog_port);
+    } else {
+        eprintln!("av-gateway: no --catalog-host given -- GATEWAY_SELECTOR_CATALOG will be refused CatalogNotConfigured for every caller");
+    }
+
+    let core = Arc::new(core_builder);
 
     // R5.1/question 208(b): parsed once, at startup -- av_command::oidc::verify itself does no
     // I/O of any kind (that module's own doc, "Purity"); this is the caller "being handed a
@@ -464,6 +551,36 @@ mod tests {
         assert_eq!(cli.internal_network_bind, None);
         assert!(cli.run_products.is_empty());
         assert_eq!(cli.auth_config_path, default_auth_config_path(), "auth_config_path defaults, never required (deny-by-default is a safe unconfigured state)");
+        assert_eq!(cli.catalog_host, None, "H2c: absent --catalog-host is itself a safe, deny-by-default state -- no field defaults to a half-configured connection");
+        assert_eq!(cli.catalog_port, DEFAULT_CATALOG_PORT);
+    }
+
+    /// H2c: every `--catalog-*` flag is read, and `--catalog-port` parses as `u16`.
+    #[test]
+    fn parse_cli_args_reads_every_catalog_flag() {
+        let args = REQUIRED_OIDC_ARGS
+            .iter()
+            .copied()
+            .chain(["--catalog-host", "127.0.0.1", "--catalog-port", "55432", "--catalog-user", "av", "--catalog-password", "secret", "--catalog-database", "avcatalog"])
+            .map(str::to_string);
+        let cli = parse_cli_args(std::iter::once("av-gateway".to_string()).chain(args)).unwrap();
+        assert_eq!(cli.catalog_host, Some("127.0.0.1".to_string()));
+        assert_eq!(cli.catalog_port, 55432);
+        assert_eq!(cli.catalog_user, Some("av".to_string()));
+        assert_eq!(cli.catalog_password, Some("secret".to_string()));
+        assert_eq!(cli.catalog_database, Some("avcatalog".to_string()));
+        assert_eq!(cli.catalog_tls_ca_file, None);
+    }
+
+    /// H2c: `--catalog-host` alone, without `--catalog-user`/`--catalog-password`/
+    /// `--catalog-database`, is refused at parse time -- a partially-specified catalog
+    /// connection is a configuration defect reported at startup, never a silently incomplete
+    /// `PgConfig` this binary would otherwise build.
+    #[test]
+    fn parse_cli_args_refuses_a_catalog_host_with_no_credentials() {
+        let args = REQUIRED_OIDC_ARGS.iter().copied().chain(["--catalog-host", "127.0.0.1"]).map(str::to_string);
+        let err = parse_cli_args(std::iter::once("av-gateway".to_string()).chain(args)).unwrap_err();
+        assert!(err.contains("--catalog-host"), "{err}");
     }
 
     /// **R5.1/invariant B acceptance evidence**: `parse_cli_args` refuses to return `Ok` at
@@ -535,6 +652,7 @@ mod tests {
                 selector: GatewaySelector::All as i32,
                 caller_supplied_products_uri: String::new(),
                 caller_token: String::new(), // GatewayCore::query itself is auth-agnostic.
+                catalog_query: None,
             })
             .expect("a real query against the real, flag-loaded catalogue");
         assert!(!resp.trajectories.is_empty(), "the real fixture has trajectories");

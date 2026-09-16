@@ -71,6 +71,12 @@ pub enum DockerError {
     Stop { container_id: String, detail: String },
     #[error("docker rm {container_id}: {detail}")]
     Remove { container_id: String, detail: String },
+    /// `docker image inspect <image_ref>` itself failed (as opposed to succeeding and
+    /// reporting an id this crate then compares against a recorded one -- that comparison is
+    /// [`DockerGateReason::ImageDigestMismatch`], a gate reason, not this transport-level
+    /// error). Added for [`local_image_id`] (`docs/open-questions.md` question 212(a)).
+    #[error("docker image inspect {image_ref}: {detail}")]
+    Inspect { image_ref: String, detail: String },
 }
 
 /// `docker info` succeeding -- the one precondition question 118 gates every Docker-lifecycle
@@ -124,6 +130,13 @@ pub enum DockerGateReason {
     /// `crates/av-lockstep-shim/tests/end_to_end_kernel_path.rs`'s own Python reference peer).
     /// `hint` names how to obtain it.
     PrerequisiteUnavailable { what: String, hint: String },
+    /// [`recorded_digest_gate`] (question 212(a)): the image IS present locally, but its own
+    /// [`local_image_id`] does not equal `recorded_id` -- the digest recorded beside the
+    /// image's run/build script (e.g. `services/store/IMAGE_DIGEST.md`) no longer describes
+    /// what is actually on this host. Distinct from [`Self::ImageNotBuilt`] (which covers "not
+    /// present at all"): this variant means the image inspect itself succeeded, just with a
+    /// different id than expected.
+    ImageDigestMismatch { image_ref: String, recorded_id: String, actual_id: String },
 }
 
 impl DockerGateReason {
@@ -141,6 +154,9 @@ impl DockerGateReason {
             Self::ImageNotBuilt { image_ref, build_hint } => format!("image {image_ref:?} is not built locally -- {build_hint}"),
             Self::RequiredFileMissing { what, path } => format!("{what} is missing at {path}"),
             Self::PrerequisiteUnavailable { what, hint } => format!("{what} is unavailable -- {hint}"),
+            Self::ImageDigestMismatch { image_ref, recorded_id, actual_id } => {
+                format!("image {image_ref:?} is present locally as {actual_id}, but the digest recorded beside its run/build script is {recorded_id} -- refused rather than trusted")
+            }
         }
     }
 }
@@ -188,6 +204,48 @@ pub fn image_gate_status(default_image_ref: &str, build_hint: &str) -> Result<()
         return Err(DockerGateReason::ImageNotBuilt { image_ref, build_hint: build_hint.to_string() });
     }
     Ok(())
+}
+
+// ------------------------------------------------------------------------------------------
+// Question 154 / 212(a) (H1b, the av-store MinIO integration proof): a test must never pull an
+// image at test time -- the manager pulls once at setup and records the digest beside the
+// image's run/build script (e.g. `services/store/IMAGE_DIGEST.md`). [`local_image_id`] and
+// [`recorded_digest_gate`] are the two additive pieces that let a gated test compare the LOCAL
+// image against that recorded digest, without ever running `docker pull`. [`ManagedContainer::
+// run_local`], further below, is [`ManagedContainer::pull_and_run`] with the `docker pull` step
+// removed -- everything else (argv building, loopback publishing, teardown) is shared, not
+// duplicated.
+// ------------------------------------------------------------------------------------------
+
+/// `docker image inspect <image_ref> --format {{.Id}}` -- resolves only against an image already
+/// present on this host; never triggers a pull (question 154). Returns the id exactly as Docker
+/// reports it (e.g. `"sha256:..."`), trimmed. Question 212(a)'s own building block: this is the
+/// "LOCAL image's id" half of the comparison [`recorded_digest_gate`] performs.
+pub fn local_image_id(image_ref: &str) -> Result<String, DockerError> {
+    run_docker(&["image", "inspect", image_ref, "--format", "{{.Id}}"]).map_err(|detail| DockerError::Inspect { image_ref: image_ref.to_string(), detail })
+}
+
+/// Question 212(a): "every image a test depends on records its digest beside its run/build
+/// script, and the test compares the running image to the recorded digest before it trusts it."
+/// `Ok(())` iff the Docker daemon is reachable AND the image named by `image_ref` is present
+/// locally AND its [`local_image_id`] equals `recorded_id` exactly. A gate failure is always a
+/// named, typed [`DockerGateReason`] -- never a panic, and never a silent pass: the image being
+/// entirely absent is [`DockerGateReason::ImageNotBuilt`] (mirroring [`image_gate_status`]'s own
+/// use of that variant for the identical "not present at all" case); the image being present
+/// under a DIFFERENT id than what was recorded is [`DockerGateReason::ImageDigestMismatch`], a
+/// distinct reason a caller (or a human reading a skip line) should not confuse with "absent".
+pub fn recorded_digest_gate(image_ref: &str, recorded_id: &str) -> Result<(), DockerGateReason> {
+    docker_daemon_status()?;
+    match local_image_id(image_ref) {
+        Err(detail) => Err(DockerGateReason::ImageNotBuilt {
+            image_ref: image_ref.to_string(),
+            build_hint: format!(
+                "this image is expected to already be present locally (pulled once at setup, never at test time -- question 154); `docker image inspect` failed: {detail}"
+            ),
+        }),
+        Ok(actual_id) if actual_id != recorded_id => Err(DockerGateReason::ImageDigestMismatch { image_ref: image_ref.to_string(), recorded_id: recorded_id.to_string(), actual_id }),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Env var (question 194 item 4): when set to a truthy value, [`announce_gate_skip`] does not
@@ -539,6 +597,50 @@ impl ManagedContainer {
     }
 }
 
+impl ManagedContainer {
+    /// Question 154/212(a): identical to [`Self::pull_and_run`] except it never runs `docker
+    /// pull` -- `image_ref` is assumed already present locally (pulled once at setup, outside
+    /// any test; a caller that wants that assumption checked first should call
+    /// [`recorded_digest_gate`] before this function, as every test in
+    /// `crates/av-store/tests/minio_store.rs` does). Shares [`build_run_args`] and
+    /// [`Self::published_host_port`] with `pull_and_run` -- the argv-building, loopback
+    /// publishing, and best-effort teardown-on-port-lookup-failure behaviour is exactly the
+    /// same, just with the pull step removed; nothing here is a second, drifting copy of that
+    /// logic. `image_ref` is the full reference this function runs directly (already combining
+    /// image and digest/tag, e.g. `"quay.io/minio/minio@sha256:..."` -- unlike `pull_and_run`,
+    /// which takes `image`/`image_digest` separately only so it can format the same combined
+    /// reference for its own `docker pull` call). Seven parameters, one under clippy's
+    /// `too_many_arguments` default threshold -- no `#[allow]` needed here (unlike
+    /// `pull_and_run`'s own pre-existing one, which has an eighth: `image_digest`).
+    pub fn run_local(
+        image_ref: &str,
+        command: &[String],
+        control_container_port: u16,
+        extra_port_endpoints: &BTreeMap<String, String>,
+        env: &BTreeMap<String, String>,
+        extra_sysctls: &BTreeMap<String, String>,
+        extra_labels: &BTreeMap<String, String>,
+    ) -> Result<(Self, u16), DockerError> {
+        let args = build_run_args(image_ref, command, control_container_port, extra_port_endpoints, env, extra_sysctls, extra_labels)?;
+
+        let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+        let container_id = run_docker(&args_ref).map_err(|detail| DockerError::Run { image_ref: image_ref.to_string(), detail })?;
+        let managed = Self { container_id: container_id.clone(), stopped: false };
+
+        let host_port = match managed.published_host_port(control_container_port) {
+            Ok(p) => p,
+            Err(e) => {
+                // Same best-effort teardown as pull_and_run's own identical branch: a
+                // container we just started but can never address is not left running.
+                let mut managed = managed;
+                let _ = managed.stop_and_remove();
+                return Err(e);
+            }
+        };
+        Ok((managed, host_port))
+    }
+}
+
 impl Drop for ManagedContainer {
     fn drop(&mut self) {
         if !self.stopped {
@@ -630,6 +732,53 @@ mod tests {
         // Display must render the same text (announce_gate_skip formats reasons through
         // Display, via `format!("SKIPPED {test_name}: {reason}")`).
         assert_eq!(image_not_built.to_string(), image_not_built.message());
+    }
+
+    /// [`DockerGateReason::ImageDigestMismatch`]'s own message: names the image, what was
+    /// recorded, and what is actually present, so a human reading a skip line (or a
+    /// `require_docker_tests` panic) does not have to go read the source to know which of the
+    /// two ids is which.
+    #[test]
+    fn image_digest_mismatch_names_both_the_recorded_and_the_actual_id() {
+        let reason = DockerGateReason::ImageDigestMismatch {
+            image_ref: "quay.io/minio/minio@sha256:aaaa".to_string(),
+            recorded_id: "sha256:aaaa".to_string(),
+            actual_id: "sha256:bbbb".to_string(),
+        };
+        let msg = reason.message();
+        assert!(msg.contains("quay.io/minio/minio@sha256:aaaa"), "{msg:?}");
+        assert!(msg.contains("sha256:aaaa"), "{msg:?}");
+        assert!(msg.contains("sha256:bbbb"), "{msg:?}");
+        assert_eq!(reason.to_string(), msg);
+    }
+
+    /// `local_image_id` on a reference that cannot exist is a typed `DockerError::Inspect`,
+    /// never a panic -- needs no real Docker daemon at all: `Command::new("docker")` either
+    /// fails to launch (no docker installed) or launches and itself returns non-zero for a
+    /// nonexistent reference, and `run_docker` turns either into an `Err` this maps from.
+    #[test]
+    fn local_image_id_is_a_typed_inspect_error_for_a_reference_that_cannot_exist() {
+        let err = local_image_id("this-image-reference-cannot-possibly-exist:av-store-probe").unwrap_err();
+        assert!(matches!(err, DockerError::Inspect { .. }), "{err:?}");
+    }
+
+    /// `recorded_digest_gate` reports `ImageNotBuilt` (never `ImageDigestMismatch`, and never a
+    /// panic) for an image reference that is not present locally at all -- the "absent" case,
+    /// distinct from the "present under a different id" case the next test covers. Requires a
+    /// real, reachable Docker daemon to distinguish "image absent" from "daemon absent" at all;
+    /// skips through the very mechanism under test on a host with none, consistent with this
+    /// module's other Docker-daemon-requiring unit tests (e.g.
+    /// `image_gate_status_reports_image_not_built_for_a_deliberately_nonexistent_override`
+    /// above).
+    #[test]
+    fn recorded_digest_gate_reports_image_not_built_for_an_absent_image() {
+        if docker_daemon_status().is_err() {
+            let line = announce_gate_skip("recorded_digest_gate_reports_image_not_built_for_an_absent_image", &docker_daemon_status().unwrap_err());
+            assert!(line.starts_with("SKIPPED "));
+            return;
+        }
+        let err = recorded_digest_gate("this-image-reference-cannot-possibly-exist:av-store-probe", "sha256:doesnotmatter").unwrap_err();
+        assert!(matches!(err, DockerGateReason::ImageNotBuilt { .. }), "{err:?}");
     }
 
     /// `resolve_image_ref` (question 194 item 5): the override env var, when set to a

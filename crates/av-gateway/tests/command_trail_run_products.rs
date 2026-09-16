@@ -149,6 +149,7 @@ fn events_request(clearance: &str, caller_token: &str) -> GatewayQueryRequest {
         selector: GatewaySelector::Events as i32,
         caller_supplied_products_uri: String::new(),
         caller_token: caller_token.to_string(),
+        catalog_query: None,
     }
 }
 

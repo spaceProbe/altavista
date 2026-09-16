@@ -389,33 +389,56 @@ finally:
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// Proves real mutual exclusion between a Rust `DockerTestLock` guard and a `python3`
-    /// child using stdlib `fcntl.flock` on the SAME path -- but a PRIVATE one, under this
-    /// test's own scratch directory (`repo_scratch_dir`, this module's established
-    /// convention), never the real `$HOME/.altavista/locks/docker-tests.lock` every other
-    /// Docker-gated test on this host also locks.
+    /// The same probe, but against a path this test OWNS (passed in `argv`) rather than the
+    /// host-wide production lock. See
+    /// [`flock_release_is_visible_across_processes_and_languages`] for why the release half of
+    /// the proof cannot run against the production path.
+    const PYTHON_FLOCK_PROBE_AT_PATH: &str = r#"
+import fcntl, os, sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("ACQUIRED")
+    fcntl.flock(fd, fcntl.LOCK_UN)
+except BlockingIOError:
+    print("BLOCKED")
+finally:
+    os.close(fd)
+"#;
+
+    fn run_python_probe_at(path: &std::path::Path) -> String {
+        let output = Command::new("python3").args(["-c", PYTHON_FLOCK_PROBE_AT_PATH, &path.to_string_lossy()]).output().expect("python3 was already confirmed present by this test's own gate");
+        assert!(output.status.success(), "the python3 probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// `None` iff `python3` is on `PATH`; otherwise the visible-skip line both probe tests
+    /// print instead of asserting (question 194's precedent, unchanged from the single test
+    /// these two were split out of).
+    fn python3_skip_line(test_name: &str) -> Option<String> {
+        let present = Command::new("python3").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if present {
+            return None;
+        }
+        let reason = crate::docker::DockerGateReason::PrerequisiteUnavailable { what: "python3".to_string(), hint: "install python3 and put it on PATH".to_string() };
+        Some(crate::docker::announce_gate_skip(test_name, &reason))
+    }
+
+    /// Half one of the cross-language proof, and the only half that may name the PRODUCTION
+    /// lock path: while this process holds the real [`DockerTestLock`], a python3 child that
+    /// re-derives that path from `$HOME` by itself must observe the lock as taken. That is
+    /// what proves the two independent implementations agree on the path *by construction*.
     ///
-    /// `docs/open-questions.md` question 212(b): the old version of this test locked the REAL
-    /// shared path, then asserted a python3 child observed `"ACQUIRED"` once the Rust guard
-    /// dropped -- an assertion that is simply false whenever a *different* process on this host
-    /// (a different track's `cargo test`/`pytest`, in this worktree or any other) genuinely
-    /// holds that lock at the same moment, for a reason that has nothing to do with whether
-    /// `lock_docker_tests`/`DockerTestLock` are correct. This test now proves only that ITS OWN
-    /// two processes (this Rust test, and its own python3 child) serialise on the SAME
-    /// mechanism (`lock_docker_tests_at`, the exact code `lock_docker_tests` calls, just
-    /// pointed at a path this test owns) -- never that the real shared lock is free. The
-    /// separate cross-language path-AGREEMENT claim the old test also proved by construction
-    /// (Rust and Python compute the identical `$HOME`-relative path) is kept, but as its own
-    /// non-locking test: `rust_and_python_compute_the_identical_lock_path` below.
+    /// This direction is contention-proof: another holder elsewhere on this host cannot make it
+    /// pass spuriously, because [`lock_docker_tests`] blocks until this process is the holder.
     #[test]
     fn flock_lock_is_visible_across_processes_and_languages() {
         // This test needs no Docker at all (question 194's own distinction: gate on the ONE
         // real precondition this test has, never a broader "docker available" check that would
         // misreport the actual reason for a skip) -- only python3 on PATH.
-        let python3_present = Command::new("python3").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
-        if !python3_present {
-            let reason = crate::docker::DockerGateReason::PrerequisiteUnavailable { what: "python3".to_string(), hint: "install python3 and put it on PATH".to_string() };
-            let line = crate::docker::announce_gate_skip("flock_lock_is_visible_across_processes_and_languages", &reason);
+        if let Some(line) = python3_skip_line("flock_lock_is_visible_across_processes_and_languages") {
             assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
             return;
         }
@@ -426,21 +449,73 @@ finally:
         let guard = lock_docker_tests_at(private_lock_path.clone());
         let observed_while_held = run_python_probe(&private_lock_path);
         drop(guard);
-        let observed_after_drop = run_python_probe(&private_lock_path);
-
-        fs::remove_dir_all(&scratch).ok();
 
         // Question 148: an exit code is not evidence -- print exactly what was observed
         // (visible with `--nocapture`; also asserted on directly below, not merely eyeballed).
-        println!("flock cross-process/cross-language proof (private path {private_lock_path:?}, this test's own two processes only): while the Rust guard held the lock, the python3 child observed {observed_while_held:?}; after the guard was dropped, the identical python3 child observed {observed_after_drop:?}");
+        println!("flock cross-process/cross-language proof: while the Rust guard held the production lock, the python3 child observed {observed_while_held:?}");
 
         assert_eq!(
             observed_while_held, "BLOCKED",
             "a python3 child using fcntl.flock(LOCK_EX|LOCK_NB) on the IDENTICAL private path this Rust guard just locked must fail to acquire while the guard holds it -- got {observed_while_held:?}"
         );
+    }
+
+    /// Half two: **releasing** an `flock` really does let another process's `LOCK_EX|LOCK_NB`
+    /// succeed -- proved on a lock file this test creates and owns, never on the production
+    /// path.
+    ///
+    /// # Why this may not use the production path (the defect this split fixes)
+    ///
+    /// Until 2026-09-15 this assertion lived in
+    /// [`flock_lock_is_visible_across_processes_and_languages`] above, as "drop the guard, then
+    /// the same probe must print ACQUIRED" against `$HOME/.altavista/locks/docker-tests.lock`.
+    /// That asserts **the host-wide lock is free at a particular instant** -- which is exactly
+    /// what question 212(b) already ruled a defect for the Python counterpart
+    /// (`tests/test_docker_test_lock_cross_process.py` "must not assert that a host-wide lock
+    /// is free, only that its own two processes serialise"). The Rust side was missed then, and
+    /// it is not a theoretical gap: two sibling tests in THIS very test binary legitimately
+    /// hold the same lock concurrently under libtest's default thread pool --
+    /// [`probe_process_that_blocks_acquiring_the_docker_test_lock`] takes it directly, and
+    /// [`lock_docker_tests_announces_a_blocked_wait_never_silently`] spawns a nested `cargo
+    /// test` child that takes it and holds it for however long that child's own build takes.
+    /// Measured on this host: the old assertion FAILED (`got "BLOCKED"`) on a cold target
+    /// directory, where the nested child's build kept the lock for ~131 s, and PASSED on a warm
+    /// one, where the same test binary finished in 0.15 s. A second track's worktree running
+    /// its own Docker-gated tests widens the same window further (question 207's contention
+    /// rule). Release semantics are a property of `flock` itself, so they are provable on any
+    /// file -- no reason to prove them on the one file the whole host contends for.
+    #[test]
+    fn flock_release_is_visible_across_processes_and_languages() {
+        if let Some(line) = python3_skip_line("flock_release_is_visible_across_processes_and_languages") {
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        // A lock file this test alone uses: same directory as the production lock (so it lives
+        // under `$HOME`, the one directory Colima mounts and macOS does not reclaim -- see this
+        // module's own doc), a name no other code in this workspace ever opens, and this
+        // process's own pid so two concurrent `cargo test` runs cannot collide on it either.
+        let own_path = lock_file_path().with_file_name(format!("docker-tests.selftest.{}.lock", std::process::id()));
+        if let Some(parent) = own_path.parent() {
+            fs::create_dir_all(parent).unwrap_or_else(|e| panic!("could not create {parent:?} for this test's own lock file: {e}"));
+        }
+        let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&own_path).unwrap_or_else(|e| panic!("could not open {own_path:?}: {e}"));
+        // SAFETY: `fd` is valid and owned by `file` for the whole of this call.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "this test's own, uncontended lock file must be acquirable without blocking: {}", io::Error::last_os_error());
+
+        let observed_while_held = run_python_probe_at(&own_path);
+        drop(file); // closing the fd releases the flock -- the mechanism under test
+        let observed_after_drop = run_python_probe_at(&own_path);
+
+        println!("flock release proof on this test's own lock file {}: while held, the python3 child observed {observed_while_held:?}; after release, {observed_after_drop:?}", own_path.display());
+
+        fs::remove_file(&own_path).ok();
+
+        assert_eq!(observed_while_held, "BLOCKED", "while this test's own fd held the exclusive lock, a python3 child must not be able to take it -- got {observed_while_held:?}");
         assert_eq!(
             observed_after_drop, "ACQUIRED",
-            "after the Rust guard is dropped (closing its fd releases the flock), the SAME python3 child command must now succeed -- got {observed_after_drop:?}"
+            "after the fd was closed (which releases the flock), the SAME python3 child command on the SAME path must succeed -- got {observed_after_drop:?}"
         );
     }
 
