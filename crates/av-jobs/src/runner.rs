@@ -106,14 +106,20 @@ impl ObjectSource for MemoryObjectSource {
 /// [`crate::hash::hex_encode`] output (exactly 64 lowercase hex characters), so unlike
 /// `object_key` this private helper does not re-validate it.
 ///
-/// `pub(crate)` (not private) so [`crate::tiler::TilerExecutor`] can compute the exact same
+/// `pub` (not `pub(crate)`) so [`crate::tiler::TilerExecutor`] can compute the exact same
 /// key [`MemoryObjectSink::put`] below will independently derive for the same bytes --
 /// **one shared helper**, never a second, independently-written key scheme. See
 /// `TileSetManifest`'s own doc comment (`heavy.proto`) for why a tiler executor needs to
 /// predict a sink's own key layout at all (the manifest-vs-sink-ordering constraint), and
 /// for the caveat that creates: the caller wiring up a `Runner` must construct the
-/// `ObjectSink` and the tiler executor with the same `prefix`.
-pub(crate) fn content_addressed_key(prefix: &str, sha256_hex: &str) -> String {
+/// `ObjectSink` and the tiler executor with the same `prefix`. Widened from `pub(crate)` to
+/// `pub` by task 3c (`crates/av-jobs/tests/store_tiler.rs`): that test asserts, for a real
+/// hash, that this function and [`av_store::keys::object_key`] (a crate this one must not
+/// depend on in `[dependencies]` -- `av_store` is a dev-dependency of the test binary only)
+/// agree byte for byte, so the mirrored layout this doc comment already claimed is checked
+/// mechanically rather than merely asserted in prose. No caller inside this crate is
+/// affected by the wider visibility.
+pub fn content_addressed_key(prefix: &str, sha256_hex: &str) -> String {
     format!("{prefix}/{}/{}/{sha256_hex}", &sha256_hex[0..2], &sha256_hex[2..4])
 }
 

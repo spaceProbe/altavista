@@ -67,4 +67,37 @@ openssl = "0.10"
 # (ProcessExecutor's NONZERO_EXIT/EXECUTOR_START_FAILED tests) -- both are already covered
 # by the standard library (std::env::temp_dir or a per-test tempdir built by hand) and this
 # crate's own MemoryObjectSource/MemoryObjectSink test doubles, so no dev-only dependency is
-# needed at all.
+# needed at all -- except for tests/store_tiler.rs (task 3c, H3's exit proof), which needs
+# the three entries below. Every one of them is a DEV dependency only: this crate's own
+# production code (src/**) still has no dependency on av-store, av-lockstep or tokio at all
+# -- see src/lib.rs's own crate doc, "Why this crate depends on neither av-store, av-edge,
+# nor av-command", and Cargo.lock already resolves all three (rule 2: no new registry
+# dependency), av-store/av-lockstep already pulling tokio in their own [dependencies].
+#
+# av-store: tests/store_tiler.rs's own store-backed ObjectSource/ObjectSink implementation
+# (task 3b/3c's own deferred seam -- src/runner.rs's ObjectSource/ObjectSink doc comments)
+# talks to av_store::StoreClient directly; a path dependency onto an in-workspace crate, not
+# a registry fetch.
+av-store = { path = "../av-store" }
+# av-lockstep: the same docker-gate/lock/label/prune discipline crates/av-store/Cargo.toml's
+# own dev-dependency comment explains (ManagedContainer::run_local, recorded_digest_gate,
+# lock_docker_tests, prune_stale_test_resources, test_label_args, announce_gate_skip) --
+# crates/av-store/tests/minio_store.rs is this test's own template, copied exactly.
+av-lockstep = { path = "../av-lockstep" }
+# tokio: av_store::client::StoreClient's put/get/ensure_bucket/head are async
+# (crates/av-store/src/client.rs); crate::runner::ObjectSource::fetch/ObjectSink::put are
+# synchronous by design (this crate's own std::process::Child-blocking ProcessExecutor, and
+# Runner::run_one's synchronous call stack -- no caller of this crate should need an async
+# runtime just to drain the queue). tests/store_tiler.rs bridges the two with one
+# tokio::runtime::Runtime the test owns and block_on's each store call against, never one
+# runtime per call. "rt-multi-thread" for Runtime::new(); "net" for the real TCP connect to
+# the MinIO container -- the identical feature pair crates/av-store/Cargo.toml's own
+# [dependencies] entry already declares (that crate's tokio, pulled in here transitively as
+# well, already carries "macros" for its own #[tokio::test]s; this crate's test uses no
+# #[tokio::test] of its own, so "macros" is not named again here).
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+# bytes: av_store::client::StoreClient::put's own parameter type (Bytes, not &[u8] or
+# Vec<u8>) -- already resolved in this workspace's Cargo.lock (crates/av-store/Cargo.toml's
+# own `bytes = "1"`), so this is not a new registry dependency, only a new Cargo.toml entry
+# naming an already-locked crate for this dev-only test target.
+bytes = "1"

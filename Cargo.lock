@@ -262,9 +262,13 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-label",
+ "av-lockstep",
+ "av-store",
+ "bytes",
  "openssl",
  "prost",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
