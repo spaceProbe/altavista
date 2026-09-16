@@ -144,7 +144,7 @@ role = "Three.js viewer — python -m altavista serve"
 kind = "gap"
 file = "crates/av-ingest/src/bin/av-ingest-server.rs"
 flag = '--grpc-bind is required'
-note = "question 208(c) — the other track's port map. The day av-ingest lands a default bind, ports.py's gap check goes stale (fails) and forces this row to be updated to kind = \"const\" with a real port."
+note = "question 217(g): the owned port map (docs/architecture.md '### Default ports') is now the single source ports.py's check_ports() cross-checks every kind = \"const\" row against, but the map as merged carries no row for av-ingest — there is nothing to fill this gap from, and inventing a number is exactly what round 1's decision 4 refused. kind stays \"gap\", checked two ways: the existing flag-marker/DEFAULT_BIND check on the source file above, AND a check that av-ingest is still absent from the owned port map. The day av-ingest lands a default bind in source, OR the owned port map itself gains an av-ingest row, either check goes stale (fails) and forces this row to become kind = \"const\" with a real port."
 
 [ports.av-command]
 kind = "const"
@@ -154,13 +154,19 @@ pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
 [ports.av-gateway]
 kind = "const"
 file = "crates/av-gateway/src/bin/av-gateway.rs"
-pattern = '"AV_GATEWAY_BIND",\s*"[\d.]+:(\d+)"'
+# Fixed for question 217(g)/round 5 (AI-plane commit db1e858's merge): the inline literal this
+# pattern used to match ("AV_GATEWAY_BIND", "127.0.0.1:50071") was replaced by a named
+# DEFAULT_BIND constant, same shape av-command's own row already matches. Careful: this file
+# mentions DEFAULT_BIND in several doc comments too (a bare name, or "`DEFAULT_BIND`" in prose)
+# — this pattern requires the "DEFAULT_BIND: &str = "..."" declaration shape, which appears
+# exactly once (verified: `const DEFAULT_BIND: &str = "127.0.0.1:50071";`).
+pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
 
 [ports.av-proposer]
 kind = "gap"
 file = "crates/av-proposer/src/bin/av-proposer.rs"
 flag = '--serve-model-service'
-note = "question 208(c) — the other track's port map. The day av-proposer's serve mode grows a default bind, ports.py's gap check goes stale (fails) and forces this row to be updated to kind = \"const\" with a real port."
+note = "question 217(g): the owned port map (docs/architecture.md '### Default ports') is now the single source ports.py's check_ports() cross-checks every kind = \"const\" row against, but the map as merged carries no row for av-proposer — there is nothing to fill this gap from, and inventing a number is exactly what round 1's decision 4 refused. kind stays \"gap\", checked two ways: the existing flag-marker check above (the serve mode's address comes only from --serve-model-service), AND a check that av-proposer is still absent from the owned port map. The day av-proposer's serve mode grows a default bind, OR the owned port map itself gains an av-proposer row, either check goes stale (fails) and forces this row to become kind = \"const\" with a real port."
 
 [ports.av-dynamics-service]
 kind = "const"
@@ -186,3 +192,14 @@ file = "crates/av-ingest-client/src/bin/av-edge-plugin.rs"
 kind = "const"
 file = "altavista/__main__.py"
 pattern = '"--port".*?default=(\d+)'
+# Question 217(g): av-viewer has no row in docs/architecture.md's owned port map either -- that
+# table's own scope (section 4) is the DRM/kernel network path services (av-command,
+# av-gateway, av-dynamics-service, gmat-service, av-lockstep-shim, av-kernel's container
+# control port); av-viewer sits behind secproxy (question 65, see `fronted = true` above) and
+# was never part of that set. Rather than silently skip the owned-map cross-check for a
+# kind = "const" row with no map entry, this is an EXPLICIT, commented exemption -- see
+# ports.py's `owned_map_exempt` handling (the fragment-vs-source two-way check still applies)
+# and tests/test_suite_declarations.py's exemption test, which keeps this honest by asserting
+# the exemption disappearing makes check_ports flag av-viewer again. If av-viewer is ever added
+# to the owned port map, delete this line so the three-way check covers it too.
+owned_map_exempt = true

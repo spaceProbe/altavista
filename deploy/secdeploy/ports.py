@@ -52,16 +52,91 @@ class Finding(NamedTuple):
     detail: str
 
 
-def check_ports(fragment: dict, repo_root: str | Path) -> list[Finding]:
+# The "### Default ports" table's own section marker in docs/architecture.md (question 208(c),
+# owned by 217(g)). `load_owned_port_map` looks for this exact string.
+_ARCH_TABLE_MARKER = "### Default ports"
+
+
+def load_owned_port_map(architecture_md: str | Path) -> dict[str, dict[str, object]]:
+    """Parse ``docs/architecture.md``'s "### Default ports" table (question 208(c), made the
+    single source for the fragment's own port checks by question 217(g)) into
+    ``{service: {"grpc": int | None, "admin": int | None, "constant": str}}``.
+
+    This is a real parse of the real committed markdown, mirroring
+    ``tests/test_port_map.py``'s own independent parser (which proves this same table matches
+    the real source constants) — kept as a separate implementation deliberately, so this
+    library module never imports from the test suite. Raises ``ValueError`` if the section or
+    its rows cannot be found; never silently returns an empty/partial map.
+    """
+    path = Path(architecture_md)
+    text = path.read_text()
+    start = text.find(_ARCH_TABLE_MARKER)
+    if start == -1:
+        raise ValueError(f"{path}: no {_ARCH_TABLE_MARKER!r} section found")
+    rest = text[start:]
+    next_heading = re.search(r"\n## ", rest)
+    section = rest[:next_heading.start()] if next_heading else rest
+
+    def _port_only(cell: str) -> "str | None":
+        cell = cell.strip("`")
+        if cell in ("*(none)*", "", "-"):
+            return None
+        if ":" in cell:
+            return cell.rsplit(":", 1)[1]
+        return cell
+
+    rows: dict[str, dict[str, object]] = {}
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue  # skips the header row and the `| --- | --- | ... |` separator row
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            raise ValueError(f"{path}: table row does not have exactly 4 cells: {line!r}")
+        service_cell, grpc_cell, admin_cell, constant_cell = cells
+        service_match = re.match(r"`([^`]+)`", service_cell)
+        if service_match is None:
+            raise ValueError(f"{path}: table row's service cell has no backtick name: {service_cell!r}")
+        service = service_match.group(1)
+        grpc_raw = _port_only(grpc_cell)
+        admin_raw = _port_only(admin_cell)
+        rows[service] = {
+            "grpc": int(grpc_raw) if grpc_raw is not None else None,
+            "admin": int(admin_raw) if admin_raw is not None else None,
+            "constant": constant_cell,
+        }
+    if not rows:
+        raise ValueError(f"{path}: found {_ARCH_TABLE_MARKER!r} but parsed zero table rows")
+    return rows
+
+
+def check_ports(
+    fragment: dict,
+    repo_root: str | Path,
+    architecture_md: str | Path | None = None,
+) -> list[Finding]:
     """Check every ``[ports.<name>]`` row in a parsed fragment (``load_fragment`` /
     ``tomllib.loads`` output — a dict with top-level ``components`` and ``ports`` tables)
-    against the real source tree rooted at ``repo_root``. Returns an empty list when every row
-    checks out.
+    against the real source tree rooted at ``repo_root``, AND against the owned port map in
+    ``docs/architecture.md`` (question 217(g)). ``architecture_md`` defaults to
+    ``repo_root / "docs" / "architecture.md"`` — pass a different path (e.g. a mutated copy
+    under ``tmp_path``) to test the owned-port-map checks in isolation from the real file.
+    Returns an empty list when every row checks out.
     """
     repo_root = Path(repo_root)
+    if architecture_md is None:
+        architecture_md = repo_root / "docs" / "architecture.md"
     components: dict = fragment.get("components") or {}
     ports: dict = fragment.get("ports") or {}
     findings: list[Finding] = []
+
+    try:
+        port_map = load_owned_port_map(architecture_md)
+    except (FileNotFoundError, ValueError) as exc:
+        port_map = {}
+        findings.append(Finding(
+            "<owned-port-map>", None, None, "port-map",
+            f"failed to parse the owned port map at {architecture_md}: {exc}",
+        ))
 
     # Every declared component must have a matching [ports.<name>] row and vice versa — a
     # component with no row gets NO port provenance checked at all, silently, which is worse
@@ -100,16 +175,19 @@ def check_ports(fragment: dict, repo_root: str | Path) -> list[Finding]:
         path = repo_root / file_rel if file_rel else None
 
         if kind == "const":
-            findings.extend(_check_const(name, declared, spec, path, file_rel))
+            findings.extend(_check_const(name, declared, spec, path, file_rel, port_map))
         elif kind == "gap":
-            findings.extend(_check_gap(name, declared, spec, path, file_rel))
+            findings.extend(_check_gap(name, declared, spec, path, file_rel, port_map))
         elif kind == "no-listener":
             findings.extend(_check_no_listener(name, declared, path, file_rel))
 
     return findings
 
 
-def _check_const(name: str, declared: int, spec: dict, path: Path | None, file_rel: str) -> list[Finding]:
+def _check_const(
+    name: str, declared: int, spec: dict, path: Path | None, file_rel: str,
+    port_map: dict[str, dict[str, object]],
+) -> list[Finding]:
     findings: list[Finding] = []
     if declared == 0:
         findings.append(Finding(name, declared, None, "const",
@@ -136,13 +214,47 @@ def _check_const(name: str, declared: int, spec: dict, path: Path | None, file_r
         findings.append(Finding(name, declared, matches[0], "const",
                                  f"pattern {pattern!r} captured a non-integer {matches[0]!r} in {file_rel}"))
         return findings
-    if found_port != declared:
-        findings.append(Finding(name, declared, found_port, "const",
-                                 f"declared port {declared} != source port {found_port} in {file_rel}"))
+
+    # Question 217(g): a `kind = "const"` row is checked THREE ways -- the fragment's own
+    # declared port, the source constant this pattern just extracted, and the owned port map
+    # in docs/architecture.md's "### Default ports" table. All three must agree.
+    exempt = bool(spec.get("owned_map_exempt", False))
+    map_entry = port_map.get(name)
+    if map_entry is None:
+        if not exempt:
+            findings.append(Finding(
+                name, declared, found_port, "const",
+                f"components.{name} (kind = \"const\") has no row in the owned port map "
+                f"(docs/architecture.md '### Default ports', question 217(g)) -- no owned "
+                f"provenance for its port at all (fragment declares {declared}, source "
+                f"constant {file_rel} says {found_port})",
+            ))
+        # Exempt (or not) -- the fragment-vs-source agreement still has to hold on its own.
+        if found_port != declared:
+            findings.append(Finding(name, declared, found_port, "const",
+                                     f"declared port {declared} != source port {found_port} in {file_rel}"))
+        return findings
+
+    map_grpc = map_entry.get("grpc")
+    try:
+        map_port = int(map_grpc) if map_grpc is not None else None
+    except (TypeError, ValueError):
+        map_port = None
+
+    if map_port is None or not (declared == found_port == map_port):
+        findings.append(Finding(
+            name, declared, found_port, "const",
+            f"three-way port mismatch for {name}: fragment declares {declared}, "
+            f"owned port map (docs/architecture.md '### Default ports') says {map_port!r}, "
+            f"source constant {file_rel} says {found_port}",
+        ))
     return findings
 
 
-def _check_gap(name: str, declared: int, spec: dict, path: Path | None, file_rel: str) -> list[Finding]:
+def _check_gap(
+    name: str, declared: int, spec: dict, path: Path | None, file_rel: str,
+    port_map: dict[str, dict[str, object]],
+) -> list[Finding]:
     findings: list[Finding] = []
     if declared != 0:
         findings.append(Finding(name, declared, None, "gap",
@@ -168,6 +280,16 @@ def _check_gap(name: str, declared: int, spec: dict, path: Path | None, file_rel
                                  f"({default_match.group(0)!r}) — the documented gap (question 208(c)) "
                                  f"looks closed; update suite.altavista.toml's port and change kind to "
                                  f"\"const\" with a real pattern"))
+    # The OTHER positive check (question 217(g)): the day the OWNED PORT MAP itself gains a row
+    # for this component -- independent of whether the source file has grown a default bind --
+    # the gap is closed too and must become a "const" row that the three-way check above covers.
+    if name in port_map:
+        findings.append(Finding(
+            name, declared, port_map[name], "gap",
+            f"{name} now has a row in the owned port map (docs/architecture.md '### Default "
+            f"ports', question 217(g)) -- the documented gap looks closed; update "
+            f"suite.altavista.toml's port and change kind to \"const\" with a real pattern",
+        ))
     return findings
 
 

@@ -86,6 +86,21 @@ def test_fragment_ports_match_their_sources():
         f"{f.component}: fragment declares {f.expected!r}, source says {f.found!r} ({f.detail})"
         for f in findings
     )
+    # Question 217(g): the owned port map (docs/architecture.md "### Default ports") is now the
+    # single source every kind = "const" row is cross-checked against too -- assert how many
+    # fragment rows were checked against how many map entries, so this isn't just "zero
+    # findings" but a stated, non-trivial coverage claim.
+    port_map = ports.load_owned_port_map(REPO_ROOT / "docs" / "architecture.md")
+    const_rows = {n for n, spec in fragment["ports"].items() if spec.get("kind") == "const"}
+    exempt_rows = {n for n in const_rows if fragment["ports"][n].get("owned_map_exempt")}
+    print(f"checked {len(fragment['ports'])} fragment [ports.*] rows "
+          f"({len(const_rows)} kind=\"const\") against {len(port_map)} owned port map entries "
+          f"({len(exempt_rows)} const row(s) explicitly exempted: {sorted(exempt_rows)})")
+    assert len(port_map) == 6, sorted(port_map)
+    assert const_rows - exempt_rows <= set(port_map), (
+        "every non-exempt const row must have owned-map provenance", const_rows, exempt_rows, port_map
+    )
+    assert exempt_rows == {"av-viewer"}, exempt_rows
 
 
 def test_a_wrong_port_is_caught(tmp_path):
@@ -108,6 +123,96 @@ def test_a_wrong_port_is_caught(tmp_path):
     finding = matches[0]
     assert finding.expected == 12345, finding
     assert finding.found == 50070, finding
+
+
+def test_a_wrong_owned_port_map_entry_is_caught(tmp_path):
+    """New capability (question 217(g)): a const row's declared port and its source constant
+    can both be correct while the OWNED PORT MAP itself disagrees -- mutate a COPY of
+    docs/architecture.md's "### Default ports" table under tmp_path (never the real file) and
+    confirm check_ports flags it, naming the map."""
+    arch_text = (REPO_ROOT / "docs" / "architecture.md").read_text()
+    line = (
+        "| `av-command` | `127.0.0.1:50070` | `127.0.0.1:50170` | "
+        "`crates/av-command/src/bin/av-command.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |\n"
+    )
+    assert line in arch_text, "fixture assumption: av-command's exact owned-port-map row"
+    mutated = arch_text.replace(line, line.replace("50070", "50099", 1), 1)
+    assert mutated != arch_text
+
+    arch_copy = tmp_path / "architecture.md"
+    arch_copy.write_text(mutated)
+
+    fragment = merge.load_fragment(FRAGMENT_PATH)
+    findings = ports.check_ports(fragment, REPO_ROOT, architecture_md=arch_copy)  # real repo_root -- only the MAP moved
+
+    matches = [f for f in findings if f.component == "av-command"]
+    assert len(matches) == 1, findings
+    finding = matches[0]
+    assert finding.kind == "const"
+    assert "owned port map" in finding.detail
+    assert "50099" in finding.detail
+    other = [f for f in findings if f.component != "av-command"]
+    assert other == [], other
+
+
+def test_a_const_row_missing_from_the_owned_port_map_is_caught(tmp_path):
+    """A kind = "const" row whose component has NO row in the owned port map at all -- and no
+    explicit `owned_map_exempt` -- must be its own Finding: it has no owned provenance,
+    independent of whether fragment and source agree with each other. Remove av-viewer's
+    documented exemption from a COPY of the fragment (never the real file) and confirm
+    check_ports catches the missing provenance against the REAL (unmutated) architecture.md,
+    which genuinely carries no av-viewer row."""
+    text = FRAGMENT_PATH.read_text()
+    line = "owned_map_exempt = true\n"
+    assert line in text, "fixture assumption: av-viewer's owned_map_exempt exemption line"
+    mutated = text.replace(line, "", 1)
+    assert mutated != text
+
+    frag_copy = tmp_path / "suite.altavista.toml"
+    frag_copy.write_text(mutated)
+
+    fragment = merge.load_fragment(frag_copy)
+    assert "owned_map_exempt" not in fragment["ports"]["av-viewer"]
+
+    findings = ports.check_ports(fragment, REPO_ROOT)  # real architecture.md -- genuinely no av-viewer row
+    matches = [f for f in findings if f.component == "av-viewer"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "const"
+    assert "no row in the owned port map" in matches[0].detail
+    other = [f for f in findings if f.component != "av-viewer"]
+    assert other == [], other
+
+
+def test_a_new_owned_port_map_row_closes_the_gap(tmp_path):
+    """New capability (question 217(g)): a kind = "gap" row (av-ingest, av-proposer) must fail
+    the day the OWNED PORT MAP itself grows a row for it -- independent of whether the source
+    file has grown a default bind (that's the existing, separate check). Mutate a COPY of
+    docs/architecture.md to insert a fabricated av-ingest row and confirm check_ports reports
+    the gap as closed, with a Finding whose detail names the map."""
+    arch_text = (REPO_ROOT / "docs" / "architecture.md").read_text()
+    separator = "| --- | --- | --- | --- |\n"
+    assert separator in arch_text, "fixture assumption: the owned port map's header separator row"
+    fabricated_row = (
+        '| `av-ingest` | `127.0.0.1:59999` | *(none)* | '
+        '`crates/av-ingest/src/bin/av-ingest-server.rs::DEFAULT_BIND` |\n'
+    )
+    mutated = arch_text.replace(separator, separator + fabricated_row, 1)
+    assert mutated != arch_text
+    assert "av-ingest" in mutated
+
+    arch_copy = tmp_path / "architecture.md"
+    arch_copy.write_text(mutated)
+
+    fragment = merge.load_fragment(FRAGMENT_PATH)
+    assert fragment["ports"]["av-ingest"]["kind"] == "gap"
+    findings = ports.check_ports(fragment, REPO_ROOT, architecture_md=arch_copy)  # real repo_root -- only the MAP moved
+
+    matches = [f for f in findings if f.component == "av-ingest"]
+    assert len(matches) == 1, findings
+    assert matches[0].kind == "gap"
+    assert "owned port map" in matches[0].detail.lower()
+    other = [f for f in findings if f.component != "av-ingest"]
+    assert other == [], other
 
 
 def test_a_new_default_bind_closes_the_gap(tmp_path):
