@@ -27,6 +27,8 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
+from altavista.test_env import drain_after_terminate
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_DIR = REPO_ROOT / "services" / "lockstep-ref"
 
@@ -69,8 +71,9 @@ def _start_server(extra_env: "dict[str, str] | None" = None, **serve_kwargs) -> 
     except Exception as e:
         channel.close()
         returncode = proc.poll()
-        proc.terminate()
-        output = proc.stdout.read() if proc.stdout is not None else ""
+        # A bare `terminate()` followed by a readall still blocks forever when the child
+        # ignores SIGTERM; `drain_after_terminate` bounds the read and escalates to kill.
+        output = drain_after_terminate(proc)
         pytest.fail(f"lockstep-ref subprocess did not become ready within {READY_TIMEOUT_S}s (returncode={returncode}): {e}\n--- subprocess output ---\n{output}")
     stub = lockstep_pb2_grpc.LockstepServiceStub(channel)
     return SimpleNamespace(channel=channel, stub=stub, port=port, proc=proc)

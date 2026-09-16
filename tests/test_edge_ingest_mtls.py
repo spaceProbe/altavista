@@ -105,7 +105,11 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 import edge_local_ca as ca  # noqa: E402  (path insert must precede this import)
 
-from altavista.test_env import resolve_cfs_mirror_dir, resolve_gmat_root  # noqa: E402
+from altavista.test_env import (  # noqa: E402
+    drain_after_terminate,
+    resolve_cfs_mirror_dir,
+    resolve_gmat_root,
+)
 
 DEPLOY_DIR = REPO_ROOT / "services" / "av-ingest" / "deploy"
 TEMPLATE_PATH = DEPLOY_DIR / "nginx-av-ingest-grpc.conf.template"
@@ -399,8 +403,11 @@ def _running_nginx(conf_path: Path, listen_port: int, work: Path):
         try:
             _wait_for_port(listen_port, NGINX_READY_TIMEOUT_S)
         except TimeoutError as e:
-            proc.terminate()
-            output = proc.stdout.read() if proc.stdout else ""
+            # `terminate()` + readall still blocks forever whenever the child outlives SIGTERM
+            # (nginx's own graceful shutdown is exactly such a child);
+            # `drain_after_terminate` bounds the read and escalates to kill. P5 round 3, measured
+            # -- see that helper's own doc.
+            output = drain_after_terminate(proc)
             log = (work / "error.log").read_text() if (work / "error.log").is_file() else ""
             pytest.fail(f"nginx did not start listening on 127.0.0.1:{listen_port}: {e}\n--- nginx stdout/stderr ---\n{output}\n--- error.log ---\n{log}")
         yield SimpleNamespace(port=listen_port, error_log=work / "error.log")

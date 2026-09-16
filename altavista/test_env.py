@@ -104,3 +104,45 @@ def missing_spoore_reason() -> Optional[str]:
         f"check one out at {spoore_dir()} (a sibling of this repository's own root), then "
         f"re-run this test."
     )
+
+
+def drain_after_terminate(proc, timeout: float = 10.0) -> str:
+    """End `proc` and return whatever it had written, bounded -- the safe replacement for
+    ``proc.stdout.read()`` on a subprocess that is still running.
+
+    Why this exists (measured, P5 round 3's acceptance gate, 2026-09-15). Several readiness
+    fixtures shared one shape: wait for a gRPC channel or an HTTP port, and if that wait times
+    out, read the child's piped output to put it in the failure message. ``proc.stdout.read()``
+    is a *readall*: it returns only at EOF, and EOF on that pipe arrives only when the child
+    exits. A readiness wait times out precisely in the case where the child is still alive, so
+    that read blocks forever. Observed for real in ``tests/test_dynamics_service_rs.py``: under
+    heavy host contention (a second track compiling the whole workspace at the same time) the
+    90 s readiness budget was exceeded, the fixture reached its own failure path, and the whole
+    pytest session hung for 34 minutes with the service sitting idle beside it -- the test
+    reported nothing at all, which is strictly worse than reporting the failure it was built to
+    report. A hang is the one failure mode that leaves no trace (question 148's own premise).
+
+    The fix, uniform across every such site: terminate first, then read with a timeout; escalate
+    to ``kill()`` and drain once more if the child ignores SIGTERM; never wait unbounded. Every
+    exception here is swallowed deliberately -- this function only ever runs while a test is
+    already failing for another reason, and it must not replace that reason with its own.
+    """
+    import subprocess as _subprocess
+
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        return proc.communicate(timeout=timeout)[0] or ""
+    except _subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            return proc.communicate(timeout=timeout)[0] or ""
+        except Exception:
+            return ""
+    except Exception:
+        return ""

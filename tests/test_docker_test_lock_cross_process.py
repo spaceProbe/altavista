@@ -48,6 +48,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from altavista.test_env import drain_after_terminate
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Runs inside a CHILD process: acquires the real, production `lock_docker_tests()` context
@@ -135,7 +137,14 @@ def test_two_python_processes_mutually_exclude_on_the_docker_test_lock(tmp_path)
         # Block on a real OS event: the holder child's own stdout line, written only after its
         # `fcntl.flock(LOCK_EX)` call has actually returned -- never a sleep-and-hope.
         held_line = holder.stdout.readline().strip()
-        assert held_line == "HELD", f"holder child did not report holding the lock (got {held_line!r}); stderr: {holder.stderr.read()}"
+        if held_line != "HELD":
+            # `holder.stderr.read()` used to sit in this assert's MESSAGE -- evaluated only
+            # on failure, at which point the holder child is still running with its stdin
+            # open, so the readall blocked forever and the failure was never reported at
+            # all. P5 round 3, measured; see `altavista.test_env.drain_after_terminate`.
+            raise AssertionError(
+                f"holder child did not report holding the lock (got {held_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
         observed_while_held = _run_probe_child(env)
 
@@ -144,7 +153,10 @@ def test_two_python_processes_mutually_exclude_on_the_docker_test_lock(tmp_path)
         holder.stdin.write("release\n")
         holder.stdin.flush()
         released_line = holder.stdout.readline().strip()
-        assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {holder.stderr.read()}"
+        if released_line != "RELEASED":
+            raise AssertionError(
+                f"holder child did not confirm release (got {released_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
         observed_after_release = _run_probe_child(env)
     finally:
@@ -202,7 +214,14 @@ def test_the_waiting_process_announces_its_own_wait(tmp_path):
     )
     try:
         held_line = holder.stdout.readline().strip()
-        assert held_line == "HELD", f"holder child did not report holding the lock (got {held_line!r}); stderr: {holder.stderr.read()}"
+        if held_line != "HELD":
+            # `holder.stderr.read()` used to sit in this assert's MESSAGE -- evaluated only
+            # on failure, at which point the holder child is still running with its stdin
+            # open, so the readall blocked forever and the failure was never reported at
+            # all. P5 round 3, measured; see `altavista.test_env.drain_after_terminate`.
+            raise AssertionError(
+                f"holder child did not report holding the lock (got {held_line!r}); "
+                f"stderr: {drain_after_terminate(holder)}")
 
         waiter = subprocess.Popen(
             [sys.executable, "-c", _WAITER_SCRIPT],
@@ -223,7 +242,10 @@ def test_the_waiting_process_announces_its_own_wait(tmp_path):
             holder.stdin.write("release\n")
             holder.stdin.flush()
             released_line = holder.stdout.readline().strip()
-            assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {holder.stderr.read()}"
+            if released_line != "RELEASED":
+                raise AssertionError(
+                    f"holder child did not confirm release (got {released_line!r}); "
+                    f"stderr: {drain_after_terminate(holder)}")
 
             acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what="waiter")
 
