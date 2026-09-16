@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-4d55fe50888b9df89cc64fb4b0f26f9fc0c8efd2e38aed01e4a26487cebfc32a
+f5c4c12e1106c5507a3d9465e9d1d69514f3027d82176a3ea5927047a3104f8a
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
@@ -50,6 +50,13 @@ the command's own stderr prints.
 regenerates the bundle from the current tree and asserts its `bundle_sha256` equals this exact
 number, parsed out of this file for real -- so this number is load-bearing, not decorative: if it
 ever drifts from what the current tree actually regenerates, CI fails until this file is updated.
+
+This number moved from the commit-1 value (`4d55fe50888b...`) because of D4b (commit 2, this
+task's live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new top-level
+`secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
+committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content --
+exactly the "the hash moves when the EVIDENCE moves" rule this section states below, not a
+regression of the round-3 `git_commit` fix (see "What the hash depends on").
 
 ## What the hash depends on
 
@@ -68,11 +75,15 @@ Everything else is evidence-dependent:
   hashes for (the bundle re-verifies every one against the files on disk -- a stale `SHA256SUMS`
   becomes a recorded `sbom_hashes.stale` finding, not a silent pass-through of the recorded
   value).
-- **Whatever `--kit`/`--ledger-dir` content the invocation was given** (or, given neither, the
-  fixed "not given this run" placeholders) -- these are run-time inputs, not committed files, so
-  they do not move with a commit the way the two bullets above do; two regenerations at the SAME
-  commit with the SAME `--kit`/`--ledger-dir` state (including "neither") produce the identical
-  hash (`tests/test_evidence_bundle.py::test_two_runs_over_the_same_state_are_byte_identical`).
+- **Whatever `--kit`/`--ledger-dir` content the invocation was given**, and (D4b, new)
+  **whatever `ledger_verify_live`/`secdeploy_evidence` content `assemble_bundle`'s caller
+  supplied** -- or, given none of the four, the fixed "not given this run"/`"not_collected"`
+  placeholders. These are all run-time inputs, not committed files, so they do not move with a
+  commit the way the two bullets above do; two regenerations at the SAME commit with the SAME
+  four-input state (including "none of them") produce the identical hash
+  (`tests/test_evidence_bundle.py::test_two_runs_over_the_same_state_are_byte_identical`;
+  `tests/test_live_evidence.py::test_two_bundles_over_the_same_saved_live_input_are_byte_identical`
+  extends this to a live-input fixture specifically).
 - **`epoch`**, a git-derived timestamp -- never `datetime.now()`; `git log`'s own committer date
   for exactly the paths in the first two bullets (`bundle.json`'s own `epoch_paths` field lists
   them, so a reader never has to re-derive which commits touch them, matching the SBOM README's
@@ -103,14 +114,69 @@ Two regenerations at the literal SAME commit, with the same `--kit`/`--ledger-di
 so do two regenerations at *different* commits that touch none of the evidence-dependent inputs
 above (`tests/test_evidence_bundle.py::test_git_commit_is_excluded_from_what_bundle_sha256_hashes`).
 
-## What is NOT collected by this half
+## The live half (D4b, commit 2): `scripts/kit/live_evidence.py`
 
-`scripts/kit/evidence.py` is the OFFLINE half of D4 only. Its `ledger_verify.live` section is
-always a declared, named `"not_collected"` placeholder (never fabricated, never a silently-empty
-dict that would read as "verified") until a second worker's live collection --
-`secdeploy evidence` run over an actually-reachable deployed placement, plus real
-`/admin/api/evidence/verify` results fetched from each running component's own HTTP endpoint --
-supplies it. `scripts/kit/evidence.py:assemble_bundle`'s `ledger_verify_live` parameter is the
-exact, documented plug-in point (see that function's own doc, and
-`LIVE_LEDGER_VERIFY_NOT_COLLECTED`'s own `"plug_in"` field, which carries the same instructions
-into every bundle that has not yet been given a live half).
+`scripts/kit/evidence.py` alone (the command above, no other flags) is the OFFLINE half of D4
+only -- by itself, its `ledger_verify.live` and `secdeploy_evidence` sections are always the
+declared, named `"not_collected"` placeholders above (never fabricated, never a silently-empty
+dict that would read as "verified"). `scripts/kit/live_evidence.py` supplies both, for real:
+
+```
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+export GMAT_ROOT="/Users/probe/code/AltaVista/GMAT R2026a"
+export CFS_MIRROR_DIR=/Users/probe/code/AltaVista/third_party/mirrors
+.venv/bin/python scripts/kit/live_evidence.py --out out/evidence
+```
+
+**The deployment question (D4's own text), settled with evidence:** `secdeploy deploy macos`
+cannot stand up any AltaVista component -- its `deploy()` function
+(`/Users/probe/code/secdeploy/src/secdeploy/targets/macos.py`) is hand-written for a fixed set of
+secdeploy-native component names only, with no generic per-manifest-component dispatch; measured
+directly, `secdeploy deploy macos --dry-run` over our own merged manifest never mentions one of
+our eight components
+(`tests/test_live_evidence.py::test_deploy_macos_dry_run_never_mentions_an_altavista_component`).
+So `live_evidence.py` stands up an evaluation placement we fully control instead -- our own
+compose from the kit, the charter's sanctioned fallback -- never a real `secdeploy deploy` against
+the user's own checkout.
+
+**What it brings up, cheaply, for real:** `av-ingest-server` (docker, from the kit's own
+cross-built binary and hash-verified image -- D4b's own floor), `av-dynamics-service` (a plain
+native subprocess, real GMAT warm-up, no docker/cross-build needed), and `gmat-service`
+(in-process, `gmat_service.admin.serve_admin` reused directly). Each contributes a REAL
+`/admin/api/evidence/verify` response to `ledger_verify.live`. `av-command` (needs an OIDC
+issuer/public key this task cannot supply), `av-edge-plugin` (a one-shot CLI client, no admin
+server of its own), and `av-gateway` (its one admin route is a Bearer-token-gated evidence-bundle
+AGGREGATOR, not a ledger `verify` endpoint, needing a live catalogue/proposer connection) are
+recorded by name in `ledger_verify.live` with their own reason, never silently omitted -- see
+`live_evidence.NOT_COLLECTED_COMPONENTS`.
+
+**What `secdeploy evidence`/`secdeploy audit verify` actually contribute:** run for real over our
+merged manifest (`deploy/secdeploy/merge.py`'s output), captured verbatim into
+`secdeploy_evidence`. `secdeploy evidence`'s own `COMPONENTS` constant
+(`secrouter`/`seccert`/`secllm`/`secchat`/`secrecorder`) can never name an AltaVista component
+(`docs/secdeploy-upstream.md` Proposal 2) -- measured, every one of those five reports
+`"skipped"` (DNS-unreachable; our eval site names them but nothing answers on this host) rather
+than `"ok"`. Its real contribution here is its own deploy-audit chain verify result (`{"ok": true,
+"checked": 0, ...}` -- no real deploy has run yet, so there is nothing to break) plus those five
+named, non-fabricated per-component records. `secdeploy audit verify`, run separately and also
+captured, reports the identical "no chained audit files found yet" result.
+
+Both plug into `scripts/kit/evidence.py::assemble_bundle` verbatim, never re-fetched by that
+module itself: `ledger_verify_live` (see `LIVE_LEDGER_VERIFY_NOT_COLLECTED`'s own `"plug_in"`
+field) and `secdeploy_evidence` (see `SECDEPLOY_EVIDENCE_NOT_COLLECTED`'s own `"plug_in"` field).
+Determinism holds across the live half too: live responses are INPUTS to `assemble_bundle`, and
+two calls fed the same saved live-input dict produce byte-identical bytes
+(`tests/test_live_evidence.py::test_two_bundles_over_the_same_saved_live_input_are_byte_identical`).
+The one live field this task deliberately did not strip or normalise is `av-dynamics-service`'s
+own `fips.detail` string (names this host's OpenSSL install path/version) -- real, reproducible on
+THIS host, not a wall-clock value, and legitimately host-dependent (which is what makes it
+evidence, not noise); it is recorded as-is.
+
+The live tampered-ledger proof (D4b's own "if achievable offline, add it"): achievable, and added
+-- `gmat_service.admin.serve_admin` (reused, not re-implemented) started over a REAL, deliberately
+tampered `EvidenceLog`, its `/admin/api/evidence/verify` fetched over real loopback HTTP, reports
+the break (`tests/test_live_evidence.py::
+test_gmat_service_verify_over_tampered_ledger_reports_the_break_live`; `tests/test_compliance.py::
+test_admin_evidence_verify_detects_a_tampered_record_via_http` already covers the identical
+surface directly against `gmat_service.admin`, restated here through `live_evidence.py`'s own
+collector).

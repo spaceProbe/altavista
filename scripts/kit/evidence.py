@@ -63,6 +63,15 @@ can quote (rule 148: "an exit code is not evidence -- quote the artifact").
 - `ledger_verify` -- `{"offline": {...}, "live": {...}}`. **This is where the second worker's live
   half plugs in** -- see `assemble_bundle`'s `ledger_verify_live` parameter, immediately below,
   and its own doc comment for the exact shape to pass.
+- `secdeploy_evidence` -- round 3, task D4b (the second worker's live half, part 2): `secdeploy
+  evidence`'s own real output (per-component `skipped`/`error`/`not_in_topology`/`ok` records plus
+  its own deploy-audit chain verify result -- `secdeploy.evidence.collect`'s own return shape,
+  captured verbatim) and, alongside it, `secdeploy audit verify`'s own real result. A declared,
+  named `"not_collected"` placeholder (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`, below) by default --
+  `secdeploy evidence` itself documents "there is no dry-run/offline mode"
+  (`/Users/probe/code/secdeploy/src/secdeploy/evidence.py`'s own module doc), so this offline half
+  never runs it. See `assemble_bundle`'s `secdeploy_evidence` parameter, immediately below, for the
+  exact shape to pass, and `scripts/kit/live_evidence.py` for the actual collector.
 - `sbom_hashes` -- `docs/compliance/sbom/SHA256SUMS`'s ten recorded hashes, RE-VERIFIED against
   the files on disk right now (deliverable 5: "a stale SHA256SUMS must be a recorded finding, not
   a silent copy") -- `recorded`, `actual`, `stale` (paths where they disagree), `missing` (a
@@ -95,12 +104,15 @@ directory walk or dict iteration happened to produce. Two runs over the same tre
 
 # What this module does NOT do
 
-It never runs `secdeploy evidence` itself (that is the live half, a separate worker's job, run
-over an actually-reachable deployment -- see `/Users/probe/code/secdeploy/docs/compliance.md`'s
-own "this needs a live, reachable deployment" rule, and `docs/secdeploy-upstream.md`'s Proposal 2
-in this repo for why `secdeploy evidence` could never enumerate an AltaVista component even if
-one were reachable: `COMPONENTS` there is a five-name module constant, not manifest-driven). It
-never re-implements `tests/test_compliance.py`'s own structural checks (every `Met` row names a
+It never RUNS `secdeploy evidence` itself, and never stands up any live component -- that is
+`scripts/kit/live_evidence.py`'s job (the live half, D4b), run over an actually-reachable
+placement -- see `/Users/probe/code/secdeploy/docs/compliance.md`'s own "this needs a live,
+reachable deployment" rule, and `docs/secdeploy-upstream.md`'s Proposal 2 in this repo for why
+`secdeploy evidence` could never enumerate an AltaVista component even if one were reachable:
+`COMPONENTS` there is a five-name module constant, not manifest-driven. This module (`evidence.py`)
+only ever ASSEMBLES the bundle -- `secdeploy_evidence`/`ledger_verify_live` are parameters it
+accepts and stores verbatim, never data it goes and fetches. It never re-implements
+`tests/test_compliance.py`'s own structural checks (every `Met` row names a
 real `file:function` that exists) -- this module only PARSES what is already there; the
 enforcement that it is honest lives in that test file, run separately, every time.
 """
@@ -456,6 +468,35 @@ LIVE_LEDGER_VERIFY_NOT_COLLECTED = {
 }
 
 
+#: D4b's own declared, honest placeholder for `secdeploy evidence`'s real output -- the exact
+#: value `assemble_bundle` stores at `bundle["secdeploy_evidence"]` when its `secdeploy_evidence`
+#: parameter is not supplied (this offline half's own default; see that parameter's doc,
+#: immediately below, and `scripts/kit/live_evidence.py`, which is what actually runs `secdeploy
+#: evidence`/`secdeploy audit verify` and supplies this).
+SECDEPLOY_EVIDENCE_NOT_COLLECTED = {
+    "status": "not_collected",
+    "reason": (
+        "`secdeploy evidence` is a CLIENT that dials each component's real, running "
+        "/admin/api/evidence endpoint over the network -- it needs an actually-reachable "
+        "deployment to produce anything meaningful (the secdeploy checkout's own "
+        "src/secdeploy/evidence.py module doc: 'there is no dry-run/offline mode') and is the "
+        "second worker's job, not this offline half's."
+    ),
+    "plug_in": (
+        "scripts/kit/evidence.py:assemble_bundle's `secdeploy_evidence` parameter is exactly "
+        "where this plugs in -- pass a dict `{'evidence': <secdeploy.evidence.collect's own "
+        "return-shape JSON, captured verbatim: 'product'/'generated_at'/'components'/"
+        "'deploy_audit_chain'>, 'audit_verify': <secdeploy audit verify's own real result>}` and "
+        "this placeholder is replaced verbatim. NOTE (docs/secdeploy-upstream.md Proposal 2): "
+        "`secdeploy evidence`'s own `COMPONENTS` constant (secrouter/seccert/secllm/secchat/"
+        "secrecorder) can never name an AltaVista component -- its real contribution here is its "
+        "own deploy-audit chain verify result plus per-component skipped/not_in_topology/error "
+        "records for ITS OWN five components, never AltaVista-component evidence; that comes from "
+        "`ledger_verify['live']` instead (`LIVE_LEDGER_VERIFY_NOT_COLLECTED`'s own plug-in)."
+    ),
+}
+
+
 def build_ledger_verify(
     repo_root: Path, ledger_dir: Optional[Path], ledger_verify_live: Optional[dict],
 ) -> dict:
@@ -582,17 +623,27 @@ def assemble_bundle(
     kit_dir: Optional[Path] = None,
     ledger_dir: Optional[Path] = None,
     ledger_verify_live: Optional[dict] = None,
+    secdeploy_evidence: Optional[dict] = None,
 ) -> dict:
     """Builds the whole bundle dict (unwritten -- see `write_bundle`). Two calls with the same
-    `repo_root` tree state, the same `kit_dir` content (or both `None`), and the same
-    `ledger_dir` content (or both `None`) produce byte-identical `json.dumps` output (the
-    determinism this module's own top doc proves is the point).
+    `repo_root` tree state, the same `kit_dir` content (or both `None`), the same `ledger_dir`
+    content (or both `None`), and the same `ledger_verify_live`/`secdeploy_evidence` content (or
+    both `None`) produce byte-identical `json.dumps` output (the determinism this module's own
+    top doc proves is the point) -- live results are INPUTS here, recorded verbatim, never
+    re-fetched.
 
-    `ledger_verify_live` IS THE SECOND WORKER'S PLUG-IN POINT for the live half (`secdeploy
-    evidence` over a reachable deployment, plus real `/admin/api/evidence/verify` results) --
-    pass a dict shaped like `LIVE_LEDGER_VERIFY_NOT_COLLECTED`'s own `"plug_in"` field describes;
-    leaving it `None` (this offline half's own default) records the honest, declared
-    `"not_collected"` placeholder instead of an empty dict that would read as "verified".
+    `ledger_verify_live` IS THE SECOND WORKER'S PLUG-IN POINT for real `/admin/api/evidence/
+    verify` results fetched from running components -- pass a dict shaped like
+    `LIVE_LEDGER_VERIFY_NOT_COLLECTED`'s own `"plug_in"` field describes; leaving it `None` (this
+    offline half's own default) records the honest, declared `"not_collected"` placeholder instead
+    of an empty dict that would read as "verified".
+
+    `secdeploy_evidence` IS THE SECOND WORKER'S PLUG-IN POINT for `secdeploy evidence`'s own real
+    output plus `secdeploy audit verify`'s own real result -- pass a dict shaped like
+    `SECDEPLOY_EVIDENCE_NOT_COLLECTED`'s own `"plug_in"` field describes; leaving it `None` (this
+    offline half's own default) records the honest, declared `"not_collected"` placeholder the
+    same way. See `scripts/kit/live_evidence.py` for the actual live-half collector that supplies
+    both of these.
     """
     control_matrices = build_control_matrices(repo_root)
     coverage = build_coverage(control_matrices)
@@ -600,6 +651,9 @@ def assemble_bundle(
     ledger_verify = build_ledger_verify(repo_root, ledger_dir, ledger_verify_live)
     sbom_hashes = build_sbom_hashes(repo_root)
     kit_manifest = build_kit_manifest_section(kit_dir, repo_root)
+    secdeploy_evidence_section = (
+        secdeploy_evidence if secdeploy_evidence is not None else SECDEPLOY_EVIDENCE_NOT_COLLECTED
+    )
 
     epoch_paths = sorted(
         (Path("docs") / "compliance" / c / "control-matrix.md").as_posix()
@@ -616,6 +670,7 @@ def assemble_bundle(
         "coverage": coverage,
         "deficiencies": deficiencies,
         "ledger_verify": ledger_verify,
+        "secdeploy_evidence": secdeploy_evidence_section,
         "sbom_hashes": sbom_hashes,
         "kit_manifest": kit_manifest,
     }
