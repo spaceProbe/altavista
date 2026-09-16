@@ -61,13 +61,26 @@ network" reading of this task's own brief, with the evidence above -- not silent
 # Ports (D5's three placements)
 
 `av-ingest`'s own stated default bind is `127.0.0.1:50060` (gRPC) / `127.0.0.1:50160`
-(admin) -- `edge-a` keeps that exact default; `edge-b`/`edge-c` are offset by 1/2 so all
-three can run `--network host` (one shared loopback, since `--network host` means every
-container's "own loopback" really is the identical Colima-VM loopback) without colliding:
+(admin) -- `edge-a` keeps that exact default (`docs/architecture.md`'s "### Default ports"
+table, `av-ingest`'s own row, question 208(c)/217(g)). `edge-b`/`edge-c` need distinct ports so
+all three can run `--network host` (one shared loopback, since `--network host` means every
+container's "own loopback" really is the identical Colima-VM loopback) without colliding --
+but they must NOT collide with any OTHER service's own owned default either, since
+`--network host` binds against the real host (Colima-VM) loopback, not a container-private
+one, and a docker container simply not being started right now is not the same as a port
+being free (round 4 manager review, defect 1): `50061`/`50161` is `gmat-service`'s own owned
+gRPC/admin default and `50062`/`50162` is `av-dynamics-service`'s (the SAME table) -- an
+earlier version of this script squatted on both, quietly, and only ever worked because neither
+service happened to be running at the time. `50063`/`50163` and `50064`/`50164` are chosen
+instead, deliberately outside every row of the owned port map -- parsed and verified, not
+merely eyeballed, by `deploy/secdeploy/ports.py::load_owned_port_map` (the same parser
+`tests/test_suite_declarations.py` and `deploy/secdeploy/ports.py` itself already trust as the
+single source), in `tests/test_d5_placement_ports.py`, which fails the day the owned map ever
+grows a `50063`/`50064` row and forces this script to move:
 
-    edge-a: grpc 127.0.0.1:50060, admin 127.0.0.1:50160
-    edge-b: grpc 127.0.0.1:50061, admin 127.0.0.1:50161
-    edge-c: grpc 127.0.0.1:50062, admin 127.0.0.1:50162
+    edge-a: grpc 127.0.0.1:50060, admin 127.0.0.1:50160  (av-ingest's own owned default)
+    edge-b: grpc 127.0.0.1:50063, admin 127.0.0.1:50163  (deliberately outside every owned-map row)
+    edge-c: grpc 127.0.0.1:50064, admin 127.0.0.1:50164  (deliberately outside every owned-map row)
 
 # Question 212: image digest, verified before every container start
 
@@ -133,11 +146,18 @@ CLEARANCE_LADDER = "UNCLASSIFIED,CUI"
 MAX_BATCH_AGE_NS = "10000000000000"
 
 # D5's three placements -- deploy/secdeploy/secsite.altavista-3.toml's own three resource
-# names, in the identical order. Ports: see this module's own doc, "Ports."
+# names, in the identical order. Ports: see this module's own doc, "Ports." `edge-a` is
+# av-ingest's own owned default (docs/architecture.md "### Default ports", question
+# 208(c)/217(g)); `edge-b`/`edge-c` are 50063/50163 and 50064/50164, chosen DELIBERATELY
+# outside every row of that same owned port map (never gmat-service's 50061/50161 or
+# av-dynamics-service's 50062/50162, which an earlier version of this script quietly squatted
+# on -- round 4 manager review, defect 1) -- guarded by tests/test_d5_placement_ports.py, which
+# parses the real owned map with deploy/secdeploy/ports.py::load_owned_port_map and fails the
+# day it ever grows a 50063/50064 row.
 PLACEMENTS: list[dict[str, Any]] = [
     {"label": "edge-a", "grpc_port": 50060, "admin_port": 50160},
-    {"label": "edge-b", "grpc_port": 50061, "admin_port": 50161},
-    {"label": "edge-c", "grpc_port": 50062, "admin_port": 50162},
+    {"label": "edge-b", "grpc_port": 50063, "admin_port": 50163},
+    {"label": "edge-c", "grpc_port": 50064, "admin_port": 50164},
 ]
 
 
