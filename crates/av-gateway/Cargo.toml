@@ -24,6 +24,20 @@ av-cdm = { path = "../av-cdm" }
 # gateway binary both writes evidence and dials the command authority service, so this is a
 # regular [dependencies] entry, exactly like av-command's own av-cdm dependency.
 av-command = { path = "../av-command" }
+# H2c (docs/heavy-plan.md H2: "The av-gateway learns a `catalog` selector through the same
+# authentication it already has"): crate::catalog_selector calls straight into av-catalog's
+# own PgClient/find_assets/ClearanceLadder -- this IS a regular (non-dev) dependency, unlike
+# av-lockstep below, because the production av-gateway BINARY dials the real catalog Postgres
+# tier at runtime, not only this crate's own test suite. This does not touch the claim-check
+# rule (crates/av-store/tests/claim_check_hot_path.rs's own HOT_PATH_CRATES list: av-ingest,
+# av-track, av-command -- av-gateway is not on it, and docs/heavy-plan.md itself draws the
+# claim-check boundary around av-store specifically, not av-catalog): av-gateway depends on
+# the CATALOG tier (a Postgres+PostGIS metadata store, never a payload byte), never on
+# av-store (the S3 claim-check store) -- the two are independent data tiers this crate was
+# already free to depend on before this round (av-store's own claim-check discipline is about
+# keeping HOT-PATH crates off av-store, not about av-gateway, which is a read-path service,
+# not on that hot path at all).
+av-catalog = { path = "../av-catalog" }
 prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true
@@ -95,6 +109,15 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # ["test-support"]`, active for `cargo test` only -- see that crate's own Cargo.toml comment).
 av-command = { path = "../av-command", features = ["test-support"] }
 prost-types.workspace = true
+# crates/av-gateway/tests/catalog_selector.rs (H2c, this task's own real-PostGIS proof) needs
+# the identical container lifecycle/gate/lock/label/prune discipline
+# crates/av-catalog/tests/catalog_postgis.rs already established -- ManagedContainer::
+# run_local, recorded_digest_gate, lock_docker_tests, prune_stale_test_resources,
+# test_label_args, announce_gate_skip -- mirroring crates/av-catalog/Cargo.toml's own
+# identical dev-dependency and comment, word for word: a path dependency onto an in-workspace
+# crate (rule 2's "no new registry crate" bar does not apply), added as a DEV dependency only
+# -- this crate's own production code (src/**) has no reason to know Docker exists at all.
+av-lockstep = { path = "../av-lockstep" }
 
 [[bin]]
 name = "av-gateway"

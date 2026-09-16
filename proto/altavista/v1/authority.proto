@@ -89,10 +89,44 @@ syntax = "proto3";
 //     all before this round. See each field's own doc comment above for the exact
 //     self-evidence invariant `Ledger::append` now enforces on `proposal`, mirroring
 //     `LedgerRecord.command`'s (field 11) identical, already-enforced invariant.
+//   - H2c (additive only -- no field number above moves; `docs/heavy-plan.md` H2: "The
+//     av-gateway learns a `catalog` selector through the same authentication it already
+//     has"): `GATEWAY_SELECTOR_CATALOG = 6` on `GatewaySelector`, `GatewayQueryRequest.
+//     catalog_query` (field 6) and `GatewayQueryResponse.catalog_records` (field 8) below.
+//     The catalog is a SELECTOR on the existing `DataGatewayService`, not a new service,
+//     because it is the same read-only, label-aware read surface as every other selector,
+//     gated by the exact same `crate::auth::AuthContext::authenticate_query` call and the
+//     exact same "the caller's clearance comes from the verified token, never the request"
+//     rule (`crate::catalog_selector`, `av-gateway` -- see that module's own doc for the full
+//     refusal chain) -- and because the milestone text itself asks for "a selector", not a
+//     second service. `heavy-plan.md` H2's own acceptance line already names this exact
+//     shape: a caller resolves through `DataGatewayService.Query` regardless of whether the
+//     product behind it is a run's trajectories/events/scores/measurements or a catalog
+//     search result; splitting the catalog out to its own service would mean a SECOND
+//     authentication gate to keep in sync with this one, exactly the risk `crate::auth`'s own
+//     module doc names ("there is no second copy of any check") -- a new rpc on the existing
+//     service, gated by the existing `AuthContext`, is the one-gate answer.
+//     `CatalogQuery`/`CatalogRecord`/`GeoBbox` -- the request/response payload types these
+//     three fields carry -- live in `heavy.proto`, not here, for the identical reason this
+//     file's own header states for A4a/A4b: this track owns `heavy.proto` (question 216(f)),
+//     so a message that is genuinely THIS selector's own business (not shared by any other
+//     selector or service) belongs there, keeping `authority.proto` itself additive-only and
+//     free of a whole message family only one caller (`GATEWAY_SELECTOR_CATALOG`) ever uses --
+//     mirroring how `RunIdentity`/`GatewayQueryRequest`/`GatewayQueryResponse` themselves
+//     already live in THIS file (the service's own shared shape) while the run-product
+//     payload types they carry (`Trajectory`, `Event`, `ScoreResult`, `Measurement`) live in
+//     their own files (`trajectory.proto`, `core.proto`, `run.proto`), imported here by name
+//     -- the identical split, just with `heavy.proto` playing that role for H2c's own payload
+//     instead of a pre-existing file.
 package altavista.v1;
 
 import "altavista/v1/command.proto";
 import "altavista/v1/envelope.proto";
+// H2c only: GatewayQueryRequest.catalog_query/GatewayQueryResponse.catalog_records
+// (GATEWAY_SELECTOR_CATALOG's own payload) -- see this file's header comment, "H2c", for why
+// CatalogQuery/CatalogRecord/GeoBbox live in heavy.proto (this track's own file) rather than
+// here.
+import "altavista/v1/heavy.proto";
 // A4a only: the run-product types the gateway serves (Trajectory/Event from
 // trajectory.proto, ScoreResult from run.proto, Measurement from core.proto) -- named
 // individually rather than importing a whole `RunProducts` value; see
@@ -687,6 +721,14 @@ enum GatewaySelector {
   GATEWAY_SELECTOR_EVENTS = 3;
   GATEWAY_SELECTOR_SCORES = 4;
   GATEWAY_SELECTOR_MEASUREMENTS = 5;
+  // H2c (additive; this file's header comment, "H2c"): a `crates/av-catalog` search, not a
+  // run product -- a `GatewayQueryRequest` carrying this selector carries no `run`
+  // (`RunIdentity`) at all (`crate::catalog_selector`'s own module doc names this fork
+  // explicitly: a run identity is never required for this one selector, unlike every other
+  // one above, which all still require it). `GatewayQueryRequest.catalog_query`/
+  // `GatewayQueryResponse.catalog_records` (below) are this selector's own request/response
+  // payload.
+  GATEWAY_SELECTOR_CATALOG = 6;
 }
 
 // `DataGatewayService.Query` request.
@@ -722,6 +764,12 @@ message GatewayQueryRequest {
   // token-derived clearance is used. An empty `caller_token` is refused the same way a
   // malformed one is -- there is no "no token supplied" default that means "allow".
   string caller_token = 5;
+  // H2c (additive; this file's header comment, "H2c"): the payload for
+  // `GATEWAY_SELECTOR_CATALOG` -- unset for every other selector, and itself required
+  // (`crate::catalog_selector`'s own refusal chain: an unset `catalog_query` on a
+  // `GATEWAY_SELECTOR_CATALOG` request is refused, typed and counted, before any query
+  // reaches the catalog tier).
+  CatalogQuery catalog_query = 6;
 }
 
 message GatewayQueryResponse {
@@ -749,6 +797,14 @@ message GatewayQueryResponse {
   // ProposalEvidence.query_ids (below) so a replay can find exactly which queries a
   // proposal's rationale is grounded in.
   string query_id = 7;
+  // H2c (additive; this file's header comment, "H2c"): populated only for
+  // GATEWAY_SELECTOR_CATALOG, empty for every other selector -- the catalog search result,
+  // `crates/av-catalog::find_assets`'s own matched rows, label-filtered exactly like every
+  // other selector's own product (`crate::catalog_selector`'s own module doc). Ordered
+  // `asset_id`-ascending, matching `find_assets`'s own `ORDER BY asset_id` (ADR-004's
+  // determinism rule: the same query against the same data always returns the same rows in
+  // the same order).
+  repeated CatalogRecord catalog_records = 8;
 }
 
 // The read-only, label-aware gateway over run products (A4a). Every rpc here is

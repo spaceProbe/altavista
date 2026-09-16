@@ -122,6 +122,8 @@ async fn reissuing_the_identical_query_reproduces_the_identical_query_id() {
         selector: av_cdm::pb::GatewaySelector::Scores as i32,
         caller_supplied_products_uri: String::new(),
         caller_token: harness.mint_service_token(),
+        // H2c (crates/av-gateway): this test never asks for GATEWAY_SELECTOR_CATALOG.
+        catalog_query: None,
     };
     let first = client.query(request.clone()).await.expect("first query").query_id;
     let second = client.query(request).await.expect("second query").query_id;

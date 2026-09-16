@@ -1,0 +1,101 @@
+[package]
+name = "av-catalog"
+publish = false
+description = "H2a (docs/heavy-plan.md, ADR-003 question 40): a hand-rolled PostgreSQL v3 frontend/backend wire client, with SCRAM-SHA-256 on the system OpenSSL, for the catalog (PostgreSQL+PostGIS) tier. This task delivers only the transport (protocol framing, SCRAM auth, the async PgClient); a later task adds the schema, migrations and catalog queries on top."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Why this crate exists at all, restated here because it is the single most important thing
+# a reader of THIS file needs to know before adding anything to the list below: every
+# off-the-shelf Rust PostgreSQL client -- `tokio-postgres`, `postgres` (the same project,
+# sync wrapper), `sqlx` (its `postgres` feature), `deadpool-postgres` (pools `tokio-postgres`
+# connections, same problem one layer up) -- reaches SCRAM authentication through the
+# RustCrypto crates `sha2`, `hmac` and (for the legacy MD5 auth path) `md-5`. All three crate
+# NAMES are on `deny.toml`'s `[bans] deny` list (ADR-004: SHA-256 only, through the system
+# OpenSSL only): `cargo deny check` fails the instant any of them lands in `Cargo.lock`, so
+# none of those clients -- and no crate that depends on one of them -- can ever be a
+# dependency of this workspace. `pq-sys`/libpq (the C client library `sqlx`'s `postgres`
+# feature can also be pointed at) was considered and rejected by the manager for a different
+# reason: it makes a C library and its `pkg-config`/`libpq-dev` discovery a hard build-time
+# prerequisite for `cargo build --workspace` on every host, turning a plain clone from
+# "builds" into "fails to build" depending on what happens to be installed. So this crate
+# speaks the wire protocol itself: see `src/lib.rs`'s crate doc for the full "why hand-rolled"
+# reasoning and `src/scram.rs`'s module doc for the OpenSSL primitives SCRAM-SHA-256 needs.
+av-cdm = { path = "../av-cdm" }
+# `av_cdm::pb` generated `altavista.v1` wire types -- NOT referenced by this round's transport
+# code (protocol.rs/scram.rs/client.rs move only PostgreSQL wire bytes and this crate's own
+# `Param`/`Row` text-format types, never an `altavista.v1` message). Declared now, not added
+# later, because the schema/migrations/catalog-queries layer this task's brief says is "a
+# later task... on top of what you deliver" lives in this SAME crate (`av-catalog`, not a
+# second one) and will need `av_cdm::pb` for the rows it reads/writes -- getting the crate's
+# full dependency list right in the one Cargo.toml edit this round is allowed to make (rule
+# 2: the workspace member line) is simpler than a second, minor Cargo.toml diff next round for
+# a dependency this round's own code has no use for yet. Mirrors `crates/av-gateway/Cargo.toml`
+# and `crates/av-store/Cargo.toml`'s identical `av-cdm` path dependency and comment style.
+prost.workspace = true
+# ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate --
+# `openssl::pkcs5::pbkdf2_hmac` (SCRAM's `Hi()`), `openssl::sign::Signer` + `openssl::pkey::
+# PKey::hmac` (HMAC-SHA256, every SCRAM HMAC step), `openssl::sha::sha256` (StoredKey),
+# `openssl::memcmp::eq` (the constant-time ServerSignature compare -- `src/scram.rs`'s own doc
+# explains why not a plain `==`), `openssl::rand::rand_bytes` (the client nonce). Never `sha2`,
+# never `hmac`, never `ring` -- see this crate's own doc above for exactly which off-the-shelf
+# client that ban rules out. Also drives `src/client.rs`'s `PgTls::Required` (`openssl::ssl::
+# SslConnector`) -- see that module's own doc for the TLS story and its one honestly-documented
+# gap.
+openssl = "0.10"
+# `tokio::net::TcpStream` for the wire connection (`src/client.rs`); "io-util" for
+# `AsyncReadExt::read_exact`/`AsyncWriteExt::write_all`, the two primitives every message read/
+# write in this crate is built from; "time" for `tokio::time::timeout` bounding `PgConfig::
+# connect_timeout` -- a deadline on a `TcpStream::connect` future, never a `sleep` used as a
+# synchronisation device (rule 7; see `src/client.rs::connect`'s own comment); "sync" for the
+# `PgTls::Required` blocking-OpenSSL bridge's `tokio::task::spawn_blocking`, which needs no
+# extra feature of its own but "rt"/"rt-multi-thread" (pulled in by "macros"'s own
+# `#[tokio::test]"/production `#[tokio::main]` need) does; "macros" for `#[tokio::test]` in
+# this crate's own unit tests and `tests/wire_protocol.rs`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+thiserror.workspace = true
+# `SASLInitialResponse`'s mechanism-specific data and SCRAM's `p=`/`c=`/salt fields are all
+# base64 (RFC 5802/7677) -- already in this workspace's `Cargo.lock` at 0.22.1 (rule 2, pulled
+# in by `crates/av-command/src/oidc.rs`'s base64url token decoding and `crates/av-store/src/
+# metadata.rs`'s header encoding), not a new dependency to the tree.
+base64 = "0.22"
+
+# Deliberately NOT a dependency, and why: `tokio-postgres`/`postgres`/`sqlx`/
+# `deadpool-postgres` (this file's own top comment -- all reach RustCrypto SHA-256/HMAC/MD5,
+# banned by `deny.toml`), `pq-sys`/libpq (a C build-time prerequisite the manager rejected),
+# `tokio-openssl` (the natural crate for bridging `openssl::ssl::SslStream` onto an async
+# `AsyncRead`/`AsyncWrite` -- NOT already in this workspace's `Cargo.lock`, rule 2, and
+# `hyper-openssl` 0.10 -- which IS already present -- does not pull it transitively either
+# (its own `[dependencies]`, checked directly: `http`, `hyper`, `hyper-util`,
+# `linked_hash_set`, `once_cell`, `openssl`, `openssl-sys`, `parking_lot`, `pin-project`,
+# `tower-layer`, `tower-service` -- no `tokio-openssl`); `src/client.rs`'s `PgTls::Required`
+# instead bridges blocking `openssl::ssl::SslStream<std::net::TcpStream>` I/O onto this crate's
+# async API with `tokio::task::spawn_blocking` per call, using only the two dependencies
+# already listed above -- see that module's own doc for why, and for the one thing this
+# round's test suite cannot exercise about it.
+# `sha2`/`hmac`/`ring` (ADR-004; SHA-256 and HMAC-SHA256 both come from `openssl` alone),
+# `chrono`/`time` (nothing in this transport layer reads or formats a calendar date -- SCRAM
+# has no timestamp of its own), `rand` (`openssl::rand::rand_bytes` is this crate's one
+# randomness need, the client nonce), `bytes` (this crate is not a `hyper` client; every
+# buffer here is a plain `Vec<u8>`), `anyhow` (every error is the one typed `CatalogError`,
+# `src/error.rs`).
+
+[dev-dependencies]
+# `tests/wire_protocol.rs`'s fake server is a second, independent listener built from this
+# crate's own `protocol` encoders/decoders -- no dev-only dependency exists for it beyond the
+# `tokio` features already listed above (this crate's own `[dependencies]` already carries
+# every tokio feature a `TcpListener`-based test server needs: "net", "io-util", "macros").
+#
+# `tests/catalog_postgis.rs` (H2, this task's own real-PostGIS integration proof) needs the
+# container lifecycle helpers and the docker-gate/lock/label/prune discipline this workspace
+# already has ONE home for -- `crates/av-lockstep/src/docker.rs` (`ManagedContainer::run_local`,
+# `recorded_digest_gate`, `lock_docker_tests`, `prune_stale_test_resources`, `test_label_args`,
+# `announce_gate_skip`) -- mirroring `crates/av-store/Cargo.toml`'s own identical dev-dependency
+# and its own comment, word for word: a path dependency onto an in-workspace crate (rule 2's
+# "no new registry crate" bar does not apply), added as a DEV dependency only, because this
+# crate's own production code (`src/**`) has no reason to know Docker exists at all.
+av-lockstep = { path = "../av-lockstep" }

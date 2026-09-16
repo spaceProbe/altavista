@@ -72,6 +72,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "av-catalog"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-lockstep",
+ "base64",
+ "openssl",
+ "prost",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "av-cdm"
 version = "0.1.0"
 dependencies = [
@@ -159,8 +172,10 @@ dependencies = [
 name = "av-gateway"
 version = "0.1.0"
 dependencies = [
+ "av-catalog",
  "av-cdm",
  "av-command",
+ "av-lockstep",
  "http",
  "openssl",
  "prost",
@@ -322,6 +337,26 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+]
+
+[[package]]
+name = "av-store"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-lockstep",
+ "base64",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-openssl",
+ "hyper-util",
+ "openssl",
+ "percent-encoding",
+ "prost",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

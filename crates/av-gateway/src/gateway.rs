@@ -22,6 +22,30 @@
 //! attempted. `config_hash` mismatch (D1's own addition, absent from the Python route) is
 //! likewise checked only after a successful decode, since the value it compares against
 //! (`RunProducts.provenance.config_hash`) only exists once decoded.
+//!
+//! ## H2c: `GATEWAY_SELECTOR_CATALOG` is routed BEFORE this chain, never through it
+//!
+//! Every check this module's own doc above describes (`caller-supplied path` through
+//! `product missing on this host`) is about ONE `RunIdentity`'s own `RunProducts` -- a
+//! `GATEWAY_SELECTOR_CATALOG` request carries no `run` at all (`crate::catalog_selector`'s
+//! own module doc: "a run identity is NOT required for it"), so [`GatewayCore::query`] itself
+//! is never the function that serves it. [`authenticated_query`] below is the ONE place that
+//! decides which of the two functions a request reaches: authentication itself runs first,
+//! UNCONDITIONALLY, for every selector including `GATEWAY_SELECTOR_CATALOG` (there is no
+//! selector-dependent branch anywhere in [`crate::auth::AuthContext::authenticate_query`]
+//! itself, and this function adds none) -- only AFTER that succeeds and `req.caller_clearance`
+//! has been overwritten to the verified marking does a raw peek at `req.selector` route
+//! `GATEWAY_SELECTOR_CATALOG` to [`crate::catalog_selector::query_catalog`] and every other
+//! selector to [`GatewayCore::query`], unchanged. [`GatewayCore::query`]'s own exhaustive
+//! `selector` match (below) still
+//! has to name `GatewaySelector::Catalog` for the compiler, so it folds that arm into the
+//! SAME `empty => false` catch-all `GatewaySelector::All`/`GatewaySelector::Unspecified`
+//! already use, as a defensive no-op: a `GATEWAY_SELECTOR_CATALOG` request that somehow
+//! reaches [`GatewayCore::query`] directly (bypassing [`authenticated_query`]'s own routing --
+//! not a real code path in this crate, but this function is also called directly by this
+//! module's own tests) still refuses cleanly as `MalformedRequest` (its `run` field check
+//! runs first, and a catalog request carries no `run`), never a panic and never a silent
+//! empty-but-Ok(All)-shaped response.
 
 use std::sync::Arc;
 
@@ -32,6 +56,7 @@ use crate::pb::data_gateway_service_server::DataGatewayService;
 pub use crate::pb::data_gateway_service_server::DataGatewayServiceServer;
 
 use crate::auth::{to_status as auth_to_status, AuthContext, AuthRefusal};
+use crate::catalog_selector::{self, CatalogHandle, CatalogRefusal};
 use crate::catalogue::{ResolveError, ResolvedRun, RunCatalogue};
 use crate::counters::{Counted, Counters};
 use crate::labels::{ClearanceLadder, LabelRefusal};
@@ -41,7 +66,14 @@ use crate::query_id::compute_query_id;
 /// counted reason (D1/D2's own acceptance line) -- never one opaque string, and never
 /// swallowed: [`GatewayCore::query`] returns `Err` the instant one of these is decided, and
 /// the counter for it has already been incremented by then (see that method's own body).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` only, no `Eq` (H2c): [`RefusalReason::Catalog`] nests [`CatalogRefusal`], which
+/// carries `f64` fields (a refused `CatalogQuery.bbox`'s own coordinates) -- `f64` has no
+/// total equality, so nothing wrapping it can derive `Eq` either. Every existing test against
+/// this enum uses `assert_eq!`/`matches!`, both of which need only `PartialEq`+`Debug`; no
+/// code in this crate ever required `RefusalReason: Eq` specifically (checked: it is never a
+/// `HashSet`/`BTreeSet` element or map key anywhere in this crate).
+#[derive(Debug, Clone, PartialEq)]
 pub enum RefusalReason {
     /// D1: `GatewayQueryRequest.caller_supplied_products_uri` was non-empty. Checked FIRST,
     /// before any other field of the request is even inspected -- see the module doc's
@@ -63,6 +95,10 @@ pub enum RefusalReason {
     /// checked only for a non-`ALL` selector (an `ALL` response legitimately has empty
     /// sub-fields for a run that never produced that kind of product at all).
     ProductMissingOnHost { run_id: String, selector: GatewaySelector },
+    /// H2c: `GATEWAY_SELECTOR_CATALOG`'s own refusal chain -- see [`crate::catalog_selector`]'s
+    /// own module doc. Nested exactly like [`RefusalReason::Resolve`]/[`RefusalReason::
+    /// Label`] above: one sub-module's own typed enum, never flattened into this one.
+    Catalog(CatalogRefusal),
 }
 
 impl Counted for RefusalReason {
@@ -73,6 +109,7 @@ impl Counted for RefusalReason {
             RefusalReason::Resolve(e) => e.code(),
             RefusalReason::Label(e) => e.code(),
             RefusalReason::ProductMissingOnHost { .. } => "gateway_product_missing_on_host",
+            RefusalReason::Catalog(e) => e.code(),
         }
     }
 }
@@ -87,6 +124,7 @@ impl std::fmt::Display for RefusalReason {
             RefusalReason::MalformedRequest { detail } => write!(f, "malformed GatewayQueryRequest: {detail}"),
             RefusalReason::Resolve(e) => write!(f, "{e}"),
             RefusalReason::Label(e) => write!(f, "{e}"),
+            RefusalReason::Catalog(e) => write!(f, "{e}"),
             RefusalReason::ProductMissingOnHost { run_id, selector } => {
                 write!(f, "run {run_id:?} has no product for selector {} on this host", selector.as_str_name())
             }
@@ -99,15 +137,42 @@ pub struct GatewayCore {
     catalogue: RunCatalogue,
     ladder: ClearanceLadder,
     counters: Arc<Counters>,
+    /// H2c: how to reach `crates/av-catalog`'s own PostgreSQL+PostGIS tier, or `None` when
+    /// this deployment has none configured -- [`Self::new`]'s own signature is UNCHANGED
+    /// (every one of this crate's eight existing `GatewayCore::new(...)` call sites, in
+    /// `crates/av-gateway/src/{bin/av-gateway.rs,gateway.rs,mcp.rs}` and four integration
+    /// test files, keeps compiling with no edit) -- a fresh `GatewayCore` always starts with
+    /// no catalog handle; [`Self::with_catalog`] is the one, additive way to attach one. See
+    /// [`crate::catalog_selector`]'s own module doc for what "no catalog configured" means at
+    /// query time: a typed, counted refusal, never an empty success and never a panic.
+    catalog: Option<CatalogHandle>,
 }
 
 impl GatewayCore {
     pub fn new(catalogue: RunCatalogue, ladder: ClearanceLadder, counters: Arc<Counters>) -> Self {
-        Self { catalogue, ladder, counters }
+        Self { catalogue, ladder, counters, catalog: None }
+    }
+
+    /// H2c: attaches this deployment's own catalog handle, additively -- see [`Self::catalog`]
+    /// field doc for why this is a separate, consuming builder method rather than a fourth
+    /// constructor argument. `crates/av-gateway/src/bin/av-gateway.rs` is this method's one
+    /// production call site (when `--catalog-host` is configured); this crate's own
+    /// `tests/catalog_selector.rs` is the other.
+    pub fn with_catalog(mut self, catalog: CatalogHandle) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
 
     pub fn counters(&self) -> &Arc<Counters> {
         &self.counters
+    }
+
+    /// H2c: `Some` when this deployment has a catalog tier configured ([`Self::
+    /// with_catalog`]), `None` otherwise -- [`crate::catalog_selector::query_catalog`]'s one
+    /// way to reach it, and the one place `GATEWAY_SELECTOR_CATALOG`'s "not configured"
+    /// refusal is decided.
+    pub(crate) fn catalog_handle(&self) -> Option<&CatalogHandle> {
+        self.catalog.as_ref()
     }
 
     fn refuse(&self, reason: RefusalReason) -> RefusalReason {
@@ -149,7 +214,15 @@ impl GatewayCore {
                 GatewaySelector::Events => resolved.run_products.events.is_empty(),
                 GatewaySelector::Scores => resolved.run_products.scores.is_empty(),
                 GatewaySelector::Measurements => resolved.run_products.measurements.is_empty(),
-                GatewaySelector::All | GatewaySelector::Unspecified => false,
+                // GatewaySelector::Catalog never legitimately reaches this line at all: the
+                // module doc's "H2c" section names the real path (authenticated_query routes
+                // it to crate::catalog_selector::query_catalog before GatewayCore::query is
+                // ever called) -- named here, not omitted, purely so this match stays
+                // exhaustive and defensive (never a panic) if some future or test call site
+                // ever does reach GatewayCore::query directly with this selector: such a
+                // request already failed the `run` check above (a catalog request carries
+                // none), so this arm's own value is never actually observed.
+                GatewaySelector::All | GatewaySelector::Unspecified | GatewaySelector::Catalog => false,
             };
             if empty {
                 return Err(self.refuse(RefusalReason::ProductMissingOnHost { run_id: identity.run_id.clone(), selector }));
@@ -174,6 +247,12 @@ impl GatewayCore {
             scores: if want_scores { resolved.run_products.scores } else { Default::default() },
             measurements: if want_measurements { resolved.run_products.measurements } else { Vec::new() },
             query_id,
+            // H2c: never populated by GatewayCore::query itself -- GATEWAY_SELECTOR_CATALOG
+            // is routed to crate::catalog_selector::query_catalog before this function is
+            // ever reached (see the module doc's "H2c" section), so every response THIS
+            // function builds carries an empty catalog_records, exactly like every existing
+            // (pre-H2c) selector's response implicitly did before this field existed.
+            catalog_records: Vec::new(),
         })
     }
 }
@@ -203,14 +282,32 @@ impl std::fmt::Display for AuthenticatedQueryError {
 /// the MCP `query` tool (`crate::mcp::McpHandler::handle_query`) call through -- never a second
 /// copy of the auth-then-query sequence. Authenticates `token` for [`crate::auth::Surface::
 /// Query`] (verify -> human role check -> clearance derivation -> clearance-agreement check
-/// against `req.caller_clearance`, invariant C), then runs the existing, UNMODIFIED
-/// [`GatewayCore::query`] with `req.caller_clearance` overwritten to the verified, token-
-/// derived marking -- so D1/D2's own ordered refusal chain still sees exactly one clearance
-/// value, the authoritative one, never the caller-supplied field directly.
-pub fn authenticated_query(core: &GatewayCore, auth: &AuthContext, counters: &Counters, token: &str, mut req: GatewayQueryRequest) -> Result<GatewayQueryResponse, AuthenticatedQueryError> {
+/// against `req.caller_clearance`, invariant C) EXACTLY as before H2c -- this is still the only
+/// place a `GatewayQueryRequest` is authenticated, and [`crate::auth::AuthContext::
+/// authenticate_query`] itself is entirely unaware `GATEWAY_SELECTOR_CATALOG` exists (there is
+/// no second verifier and no relaxed check for it: common.md's binding rule, restated here at
+/// the one call site that could have been tempted to add one).
+///
+/// H2c: `async` (it was not, before this task) purely because [`crate::catalog_selector::
+/// query_catalog`] genuinely needs to await a real PostgreSQL round trip -- [`GatewayCore::
+/// query`] itself stays perfectly synchronous, unchanged. After authentication succeeds and
+/// `req.caller_clearance` is overwritten to the verified, token-derived marking (so BOTH
+/// branches below see exactly one clearance value, the authoritative one, never the
+/// caller-supplied field directly), a raw peek at `req.selector` decides which of the two
+/// functions serves this request: `GATEWAY_SELECTOR_CATALOG` routes to [`crate::
+/// catalog_selector::query_catalog`] (which carries no `run` at all and so could never survive
+/// [`GatewayCore::query`]'s own `run`-required check -- see that function's own module-doc
+/// section, "H2c"); every other selector routes to [`GatewayCore::query`], byte-for-byte the
+/// same call this function made before H2c existed.
+pub async fn authenticated_query(core: &GatewayCore, auth: &AuthContext, counters: &Counters, token: &str, mut req: GatewayQueryRequest) -> Result<GatewayQueryResponse, AuthenticatedQueryError> {
     let (_principal, verified_clearance) = auth.authenticate_query(token, &req.caller_clearance, counters).map_err(AuthenticatedQueryError::Auth)?;
     req.caller_clearance = verified_clearance;
-    core.query(&req).map_err(AuthenticatedQueryError::Refusal)
+
+    if req.selector == GatewaySelector::Catalog as i32 {
+        catalog_selector::query_catalog(core, &req, counters).await.map_err(AuthenticatedQueryError::Refusal)
+    } else {
+        core.query(&req).map_err(AuthenticatedQueryError::Refusal)
+    }
 }
 
 /// Maps an [`AuthenticatedQueryError`] to a [`tonic::Status`] for [`DataGatewayServiceImpl`] --
@@ -235,6 +332,19 @@ fn to_status(reason: RefusalReason) -> Status {
         RefusalReason::Resolve(ResolveError::UndecodableBytes { .. }) => Status::internal(message),
         RefusalReason::Label(_) => Status::permission_denied(message),
         RefusalReason::ProductMissingOnHost { .. } => Status::not_found(message),
+        // H2c: a malformed CatalogQuery is the caller's own fault (invalid_argument, mirroring
+        // CallerSuppliedPath/MalformedRequest above); "not configured" is this DEPLOYMENT's own
+        // state, not something a differently-shaped request could avoid (failed_precondition,
+        // mirroring how a client is expected to treat that code: retrying with a different
+        // request will not help); a real catalog-tier failure (connect/query) is this
+        // deployment's own backend failing, not the caller's (internal, mirroring
+        // ResolveError::UndecodableBytes above).
+        RefusalReason::Catalog(CatalogRefusal::NoCatalogQuery)
+        | RefusalReason::Catalog(CatalogRefusal::LimitOutOfRange { .. })
+        | RefusalReason::Catalog(CatalogRefusal::BboxInvalid { .. })
+        | RefusalReason::Catalog(CatalogRefusal::TimeRangeInvalid { .. }) => Status::invalid_argument(message),
+        RefusalReason::Catalog(CatalogRefusal::CatalogNotConfigured) => Status::failed_precondition(message),
+        RefusalReason::Catalog(CatalogRefusal::QueryFailed { .. }) => Status::internal(message),
     }
 }
 
@@ -260,7 +370,7 @@ impl DataGatewayService for DataGatewayServiceImpl {
     async fn query(&self, request: Request<GatewayQueryRequest>) -> Result<Response<GatewayQueryResponse>, Status> {
         let req = request.into_inner();
         let token = req.caller_token.clone();
-        authenticated_query(&self.core, &self.auth, self.core.counters(), &token, req).map(Response::new).map_err(authenticated_query_to_status)
+        authenticated_query(&self.core, &self.auth, self.core.counters(), &token, req).await.map(Response::new).map_err(authenticated_query_to_status)
     }
 }
 
@@ -307,6 +417,11 @@ mod tests {
             selector: selector as i32,
             caller_supplied_products_uri: String::new(),
             caller_token: String::new(),
+            // H2c: this module's own tests never exercise GATEWAY_SELECTOR_CATALOG (that is
+            // crates/av-gateway/tests/catalog_selector.rs's own job) -- every request this
+            // helper builds carries no catalog_query, exactly as a pre-H2c request did before
+            // this field existed.
+            catalog_query: None,
         }
     }
 
@@ -432,12 +547,12 @@ mod tests {
 
         /// An unauthenticated (empty-token) caller is refused before D1/D2's own chain ever
         /// runs, and the auth counter -- not any `RefusalReason` counter -- is what moved.
-        #[test]
-        fn an_unauthenticated_caller_is_refused_before_gatewaycore_query_runs_and_the_auth_counter_moves() {
+        #[tokio::test]
+        async fn an_unauthenticated_caller_is_refused_before_gatewaycore_query_runs_and_the_auth_counter_moves() {
             let core = core_with_two_runs();
             let auth = auth_ctx(&TestIssuer::new(), &[("operators", &["query"])], &[("operators", "CUI")]);
             let counters = Counters::new();
-            let err = authenticated_query(&core, &auth, &counters, "", req("run-cui", "", GatewaySelector::All)).unwrap_err();
+            let err = authenticated_query(&core, &auth, &counters, "", req("run-cui", "", GatewaySelector::All)).await.unwrap_err();
             assert!(matches!(err, AuthenticatedQueryError::Auth(crate::auth::AuthRefusal::MissingToken { .. })), "{err:?}");
             assert_eq!(counters.get("gateway_auth_missing_token"), 1);
             // D1/D2's own chain never ran -- no RefusalReason counter incremented.
@@ -450,8 +565,8 @@ mod tests {
         /// refused, and the counter for the exact refusal moved. Proves the request field can
         /// never buy read access to a SECRET-labelled product a CUI-cleared token does not
         /// actually have.
-        #[test]
-        fn a_low_clearance_token_declaring_secret_for_a_secret_labelled_run_is_refused_and_the_counter_moves() {
+        #[tokio::test]
+        async fn a_low_clearance_token_declaring_secret_for_a_secret_labelled_run_is_refused_and_the_counter_moves() {
             let core = core_with_two_runs(); // run-secret is labelled SECRET, per this module's own fixture above.
             let issuer = TestIssuer::new();
             let auth = auth_ctx(&issuer, &[("operators", &["query"])], &[("operators", "CUI")]);
@@ -459,7 +574,7 @@ mod tests {
             let token = mint(&issuer, &["operators"]);
 
             assert_eq!(counters.get("gateway_auth_clearance_mismatch"), 0);
-            let err = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "SECRET", GatewaySelector::All)).unwrap_err();
+            let err = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "SECRET", GatewaySelector::All)).await.unwrap_err();
             assert!(matches!(err, AuthenticatedQueryError::Auth(crate::auth::AuthRefusal::ClearanceMismatch { .. })), "{err:?}");
             assert_eq!(counters.get("gateway_auth_clearance_mismatch"), 1, "the counter for this exact refusal must have moved");
             // The over-clearance product read never happened either -- D2's own counter is untouched.
@@ -469,8 +584,8 @@ mod tests {
         /// A properly-authenticated, correctly-cleared caller still gets a real answer --
         /// authentication is additive, not a second way to be refused when everything else is
         /// in order.
-        #[test]
-        fn a_correctly_authenticated_and_cleared_caller_still_gets_a_real_answer() {
+        #[tokio::test]
+        async fn a_correctly_authenticated_and_cleared_caller_still_gets_a_real_answer() {
             let core = core_with_two_runs();
             let issuer = TestIssuer::new();
             let auth = auth_ctx(&issuer, &[("operators", &["query"])], &[("operators", "CUI")]);
@@ -478,7 +593,7 @@ mod tests {
             let token = mint(&issuer, &["operators"]);
             // The request's own caller_clearance is left empty -- the token-derived marking
             // (CUI) is what GatewayCore::query actually sees, per authenticated_query's own doc.
-            let resp = authenticated_query(&core, &auth, &counters, &token, req("run-cui", "", GatewaySelector::All)).unwrap();
+            let resp = authenticated_query(&core, &auth, &counters, &token, req("run-cui", "", GatewaySelector::All)).await.unwrap();
             assert_eq!(resp.product_label.unwrap().marking, "CUI");
         }
 
@@ -489,8 +604,8 @@ mod tests {
         /// coming back. Proves the highest-ranked mapped marking is what actually reaches
         /// `GatewayCore::query`, not just what `AuthContext::authenticate_query` returns in
         /// isolation (`crate::auth`'s own unit tests already cover that half).
-        #[test]
-        fn a_caller_whose_highest_mapped_clearance_is_secret_is_served_a_real_secret_product() {
+        #[tokio::test]
+        async fn a_caller_whose_highest_mapped_clearance_is_secret_is_served_a_real_secret_product() {
             let core = core_with_two_runs();
             let issuer = TestIssuer::new();
             let auth = auth_ctx(&issuer, &[("operators", &["query"]), ("safety-officers", &["query"])], &[("operators", "CUI"), ("safety-officers", "SECRET")]);
@@ -498,6 +613,7 @@ mod tests {
             let token = mint(&issuer, &["operators", "safety-officers"]);
 
             let resp = authenticated_query(&core, &auth, &counters, &token, req("run-secret", "", GatewaySelector::All))
+                .await
                 .expect("a caller whose highest mapped clearance is SECRET must be served the SECRET-labelled run");
             assert_eq!(resp.run.unwrap().run_id, "run-secret");
             assert_eq!(resp.product_label.unwrap().marking, "SECRET");

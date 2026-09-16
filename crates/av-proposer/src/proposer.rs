@@ -88,6 +88,8 @@ pub async fn run(client: &mut GatewayClient, config: &ProposerConfig, counters: 
         selector: GatewaySelector::Scores as i32,
         caller_supplied_products_uri: String::new(),
         caller_token: config.service_token.clone(),
+        // H2c (crates/av-gateway): this proposer never asks for GATEWAY_SELECTOR_CATALOG.
+        catalog_query: None,
     };
     let response = client.query(request).await.map_err(|status| {
         let err = RunRefusal::GatewayQuery { detail: status.to_string() };
