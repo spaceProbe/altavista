@@ -38,7 +38,17 @@ dependencies = [
 # venv's `generate.py` run crashed on `PackageNotFoundError`.
 grpc = ["grpcio>=1.60", "grpcio-tools==1.83.1"]
 # The test suite covers the gRPC services, so a dev install carries the grpc extra too.
-dev = ["pytest>=8", "httpx>=0.27", "grpcio>=1.60", "grpcio-tools==1.83.1"]
+# `packaging` (question 217(e), a review defect this round fixed): `scripts/kit/build_kit.py`
+# imports `packaging.markers`/`packaging.requirements` (its `--with-wheels` step needs them to
+# evaluate a dependency's environment markers) but the project declared no dependency on
+# `packaging` at all -- it was present only transitively, through pip/pytest, in the one shared
+# venv this was written and tested in, so a clean clone's venv would break the moment
+# `build_kit.py` ran. `build_kit.py` is a build/dev tool, never imported by the viewer at runtime
+# (`scripts/kit/install.py` deliberately does NOT import it, precisely to stay importable with
+# only the standard library -- see that file's own module doc and
+# tests/test_kit_manifest.py's `test_packaging_is_declared_where_it_is_imported`), so `packaging`
+# belongs here in `dev`, not in `[project].dependencies`.
+dev = ["pytest>=8", "httpx>=0.27", "grpcio>=1.60", "grpcio-tools==1.83.1", "packaging>=23"]
 
 [project.scripts]
 altavista = "altavista.__main__:main"

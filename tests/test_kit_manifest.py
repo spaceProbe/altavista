@@ -11,12 +11,14 @@ test_edge_plugin_container.py`'s `_compute_skip_reason` pattern -- computed once
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -1040,3 +1042,103 @@ def test_binary_cache_key_changes_with_any_working_tree_change():
             f"{label} must produce a different cache key -- otherwise a kit would carry a binary "
             f"compiled from a source state it does not record"
         )
+
+
+# =================================================================================================
+# 21. Question 217(e): `packaging` is declared where it is imported, and `install.py` stays
+#     importable with only the standard library
+# =================================================================================================
+
+def _modules_importing_top_level_package(module_paths: "list[Path]", package: str) -> "list[str]":
+    """Static (AST-based) check for `import <package>` / `from <package> import ...` /
+    `from <package>.<submodule> import ...` in each of `module_paths` -- no import side effects,
+    so this works even for a module (`build_kit.py`) whose import would itself fail in a venv
+    that lacks `packaging`, which is exactly the failure mode this test guards against."""
+    hits: list[str] = []
+    for path in module_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import) and any(
+                alias.name == package or alias.name.startswith(package + ".") for alias in node.names
+            ):
+                hits.append(path.name)
+                break
+            if isinstance(node, ast.ImportFrom) and node.module and (
+                node.module == package or node.module.startswith(package + ".")
+            ):
+                hits.append(path.name)
+                break
+    return hits
+
+
+def test_packaging_is_declared_where_it_is_imported():
+    """Review finding (question 217(e)): `scripts/kit/build_kit.py` imports
+    `packaging.markers`/`packaging.requirements` (its `--with-wheels` step needs them to evaluate
+    a dependency's environment markers for the current platform), but the project declared no
+    dependency on `packaging` anywhere -- it was present only transitively, through pip/pytest, in
+    the one shared venv this was written and tested in, so a clean clone's venv would break the
+    moment `build_kit.py` ran.
+
+    Two things are asserted together so deleting the declaration -- or moving it to the wrong
+    place -- fails this gate: (1) `build_kit.py` really is the (a) module that imports `packaging`,
+    found by parsing its AST rather than trusting a claim in a comment; (2) `pyproject.toml`
+    declares `packaging` in `[project.optional-dependencies].dev`, never in `[project].dependencies`
+    -- `build_kit.py` is a build/dev tool, not something the viewer imports at runtime."""
+    importers = _modules_importing_top_level_package([KIT_DIR / "build_kit.py"], "packaging")
+    assert importers == ["build_kit.py"], (
+        f"expected build_kit.py to import packaging; got {importers!r}"
+    )
+
+    doc = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_deps = doc["project"]["dependencies"]
+    dev_deps = doc["project"]["optional-dependencies"]["dev"]
+
+    assert not any(d == "packaging" or d.startswith("packaging" + " ") or d.startswith("packaging>")
+                   or d.startswith("packaging=") or d.startswith("packaging<") for d in runtime_deps), (
+        f"packaging must NOT be a runtime dependency (build_kit.py is a build/dev tool, never "
+        f"imported by the viewer at runtime) -- [project].dependencies={runtime_deps!r}"
+    )
+    assert any(d.split()[0].split(">")[0].split("=")[0].split("<")[0] == "packaging" for d in dev_deps), (
+        f"packaging must be declared in [project.optional-dependencies].dev "
+        f"(the extra build_kit.py's own dependents install) -- dev={dev_deps!r}"
+    )
+
+
+def test_install_py_stays_importable_with_only_the_standard_library():
+    """`scripts/kit/install.py`'s own module doc states this as deliberate: it does NOT import
+    `build_kit` (which pulls in `packaging`), precisely so the installer half of the kit tooling
+    stays importable with nothing beyond the standard library plus its own two local modules
+    (`manifest`, `sbom`) -- a property round 3's commit 4 (question 217(c)) depends on, since the
+    installer now ships INSIDE every kit and runs on a target machine that may have no `packaging`
+    (or any other third-party package) installed at all. Checked two ways: statically (AST, no
+    import side effects) that `install.py` never imports `build_kit` or `packaging` directly, and
+    dynamically, by actually importing it in a real subprocess whose `sys.path` excludes
+    site-packages entirely -- so a hidden transitive import of a third-party package fails loudly
+    here rather than passing by accident because this test's own venv happens to have everything
+    installed."""
+    installer_and_deps = [KIT_DIR / "install.py", KIT_DIR / "manifest.py", KIT_DIR / "sbom.py",
+                           KIT_DIR / "licences.py"]
+    for path in installer_and_deps:
+        for forbidden in ("build_kit", "packaging"):
+            hits = _modules_importing_top_level_package([path], forbidden)
+            assert hits == [], f"{path.name} must not import {forbidden!r} (found: {hits})"
+
+    # Stronger than the static check: actually import install.py, manifest.py and sbom.py in a
+    # subprocess started with -S (no site-packages at all) and an otherwise-empty PYTHONPATH, so
+    # only the standard library and scripts/kit/ itself are on sys.path. Question 199: env= is
+    # explicit, this process's own os.environ is never touched.
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(KIT_DIR)!r})\n"
+        "import install\n"
+        "import manifest\n"
+        "import sbom\n"
+        "print('OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", script],
+        capture_output=True, text=True, timeout=30,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "OK"
