@@ -36,6 +36,14 @@ struct Golden {
     duration_s: f64,
     initial_state: Vec<f64>,
     final_state: Vec<f64>,
+    /// The tolerance the golden itself records, which is the tolerance actually in force
+    /// (ADR-002's goldens rule: the tolerance is committed WITH the golden). Both goldens were
+    /// regenerated through their own scripts, with the reason recorded in the file, once the
+    /// residual below had been measured -- so these fields are the measured tolerance, not a
+    /// generation default, and a test never carries a second copy of the number that could
+    /// drift away from the file's.
+    tolerance_m: f64,
+    tolerance_mps: f64,
 }
 
 #[derive(Deserialize)]
@@ -224,10 +232,12 @@ fn leo_1day_jgm2_8x8_trajectory_residual() {
         "[leo_1day_jgm2_8x8] residual vs P0 spike's 5.7 mm/day integrator-only reference: {:.1}x",
         dr / P0_SPIKE_INTEGRATOR_ONLY_RESIDUAL_M
     );
-    const TOLERANCE_M: f64 = 6e-3; // measured 4.557868e-3 m
-    const TOLERANCE_MPS: f64 = 7e-6; // measured 5.050580e-6 m/s
-    assert!(dr < TOLERANCE_M, "position residual {dr:e} m exceeds the measured tolerance {TOLERANCE_M:e} m");
-    assert!(dv < TOLERANCE_MPS, "velocity residual {dv:e} m/s exceeds the measured tolerance {TOLERANCE_MPS:e} m/s");
+    // The tolerance in force is the one the golden itself records (6e-3 m / 6e-6 m/s, set from
+    // the measured 4.557868e-3 m / 5.050580e-6 m/s when the golden was regenerated through
+    // `goldens/gen_leo_1day_jgm2_8x8.py` with that reason). Read, never re-typed here.
+    let golden = load_golden("leo_1day_jgm2_8x8");
+    assert!(dr < golden.tolerance_m, "position residual {dr:e} m exceeds the golden's recorded tolerance {:e} m", golden.tolerance_m);
+    assert!(dv < golden.tolerance_mps, "velocity residual {dv:e} m/s exceeds the golden's recorded tolerance {:e} m/s", golden.tolerance_mps);
 }
 
 /// Golden A's acceleration-level agreement -- isolates the force-model/rotation difference
@@ -267,10 +277,12 @@ fn leo_6h_egm96_70x70_trajectory_residual() {
         "[leo_6h_egm96_70x70] residual vs P0 spike's 5.7 mm/day integrator-only reference (6h, not 1 day): {:.1}x",
         dr / P0_SPIKE_INTEGRATOR_ONLY_RESIDUAL_M
     );
-    const TOLERANCE_M: f64 = 5e-4; // measured 2.742649e-4 m
-    const TOLERANCE_MPS: f64 = 5e-7; // measured 3.043023e-7 m/s
-    assert!(dr < TOLERANCE_M, "position residual {dr:e} m exceeds the measured tolerance {TOLERANCE_M:e} m");
-    assert!(dv < TOLERANCE_MPS, "velocity residual {dv:e} m/s exceeds the measured tolerance {TOLERANCE_MPS:e} m/s");
+    // As golden A: the tolerance in force is the golden's own recorded 5e-4 m / 5e-7 m/s, set
+    // from the measured 2.742649e-4 m / 3.043023e-7 m/s when the golden was regenerated through
+    // `goldens/gen_leo_6h_egm96_70x70.py` with that reason.
+    let golden = load_golden("leo_6h_egm96_70x70");
+    assert!(dr < golden.tolerance_m, "position residual {dr:e} m exceeds the golden's recorded tolerance {:e} m", golden.tolerance_m);
+    assert!(dv < golden.tolerance_mps, "velocity residual {dv:e} m/s exceeds the golden's recorded tolerance {:e} m/s", golden.tolerance_mps);
 }
 
 /// **Measured**: max abs disagreement 3.316145e-14 m/s^2, max relative 3.922327e-15 -- about
