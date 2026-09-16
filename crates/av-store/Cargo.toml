@@ -1,0 +1,97 @@
+[package]
+name = "av-store"
+publish = false
+description = "H1 (docs/heavy-plan.md, question 216): an S3-API client over the system OpenSSL and the content-addressed object store it implements, plus the claim-check (altavista.v1.AssetRef) that keeps heavy payload bytes off the hot path."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1::pb::AssetRef/Label/Provenance/SpatialExtent/TemporalExtent -- the shared
+# prost build (crates/av-cdm/build.rs walks every proto/altavista/v1/*.proto file). This
+# crate never generates a second, independently-compiled copy of a wire type av-cdm already
+# compiles -- the same rule crates/av-gateway/Cargo.toml states for its own av-cdm dependency.
+av-cdm = { path = "../av-cdm" }
+prost.workspace = true
+
+# ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate
+# (`openssl::sha::sha256`, `openssl::sign::Signer` + `openssl::pkey::PKey::hmac` for SigV4's
+# HMAC chain, `openssl::memcmp::eq` for verify_payload's constant-time compare) -- never
+# `sha2`, never `ring`, never `hmac`/`rust-crypto`. See src/sigv4.rs's module doc for exactly
+# which OpenSSL primitives this crate calls and why no other crypto crate is ever needed:
+# SigV4 needs SHA-256 and HMAC-SHA256 only, both already covered by this one dependency.
+openssl = "0.10"
+
+# The S3 HTTP client (src/client.rs), mirroring crates/av-grpc/src/tls.rs's own hyper/
+# hyper-util/hyper-openssl combination byte for byte -- this crate is not a gRPC client (no
+# `tonic` dependency at all), so it drives `hyper_util::client::legacy::Client` directly
+# rather than through `tonic::transport::Endpoint::connect_with_connector`. "client"/"http1"
+# only (never "http2", which MinIO's S3 API does not need and which would only grow this
+# crate's dependency tree for nothing this round uses).
+hyper = { version = "1", features = ["client", "http1"] }
+# "client-legacy" for the `hyper_util::client::legacy` module itself; "http1"/"tokio" for the
+# same reason as `hyper`'s own features above; "client" for `hyper_util::client::legacy::
+# connect::HttpConnector`, the plain-TCP half `hyper_openssl::client::legacy::HttpsConnector`
+# wraps (see src/client.rs's module doc for why one `HttpsConnector<HttpConnector>` serves
+# both the `http://` endpoint the next task's MinIO integration test needs and a real
+# `https://` deployment, with no separate code path for either).
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+# The OpenSSL-backed connector (crates.io: sfackler/hyper-openssl) -- never `hyper-rustls`,
+# never `hyper-tls` (BoringSSL). Links `openssl` (openssl-sys -> the system/Homebrew
+# libssl+libcrypto), never `ring` -- ADR-004's crypto rule, the identical dependency
+# crates/av-grpc/Cargo.toml already carries for its own tonic `Channel` connector.
+hyper-openssl = { version = "0.10", features = ["client-legacy", "tokio"] }
+# `http::Uri`/`Request`/`Response`/`HeaderMap` -- the wire types both `hyper` and `hyper-util`
+# already depend on directly; naming it here makes those types nameable from this crate's own
+# code without a second, redundant version resolution (mirrors crates/av-grpc/Cargo.toml's
+# identical `http = "1"` entry for the same reason).
+http = "1"
+# `Full<Bytes>` (the request body type for a PUT whose whole payload is already in memory --
+# this round's payloads are not streamed) and `BodyExt::collect` (reading a `hyper::body::
+# Incoming` response body back into `Bytes`). Not `hyper::body::Body` alone: that trait has no
+# built-in "collect the whole thing" helper, which is exactly what `http-body-util` adds.
+http-body-util = "0.1"
+# The request/response body currency, shared with `hyper`/`http-body-util` rather than a
+# crate-local `Vec<u8>` newtype, so `StoredObject::bytes` (src/claim_check.rs) is exactly what
+# a caller's own `hyper` stack already understands.
+bytes = "1"
+# `hyper_util::client::legacy::Client::request` is async; `#[tokio::test]` for this crate's
+# own async unit tests. "rt-multi-thread"/"macros" for the test runtime; "net" for
+# `HttpConnector`'s own TCP connect (a transitive requirement of "client", named directly
+# here for clarity, matching crates/av-grpc/Cargo.toml's identical tokio feature set). No
+# "time": this crate's clock is always the caller's own `now_unix_secs` parameter (rule 7,
+# src/client.rs's module doc) -- no test here needs `tokio::time` for anything.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+thiserror.workspace = true
+# SigV4's canonical-URI/canonical-query percent-encoding (src/sigv4.rs): RFC 3986's unreserved
+# set, by hand-built `AsciiSet`s, never a bespoke byte-by-byte encoder this crate would have to
+# get right (and re-verify) itself.
+percent-encoding = "2"
+# src/metadata.rs's `x-amz-meta-av-label`/`x-amz-meta-av-provenance` headers: standard-
+# alphabet, padded base64 of the exact `prost`-encoded `Label`/`Provenance` bytes (that
+# module's own doc explains why base64-of-the-wire-encoding, not one header per field).
+# Already in this workspace's `Cargo.lock` at 0.22.1 (rule 2), pulled in for
+# `crates/av-command/src/oidc.rs`'s base64url token decoding -- this is a second, unrelated
+# call site of the same already-present crate, not a new dependency to the tree.
+base64 = "0.22"
+
+# Deliberately NOT a dependency (question 216's brief, and ADR-004/ADR-003's crypto and
+# licensing rules): `aws-sdk-s3`/`aws-sigv4` (pulls `aws-lc-rs`/`ring` transitively -- ADR-004
+# bans both), `reqwest` (its default TLS backend is rustls -- ADR-004), `rusoto` (unmaintained,
+# and the same rustls/ring problem), a standalone `s3` crate (none of the crates.io options are
+# already in this workspace's Cargo.lock -- rule 2), `sha2`/`hmac`/`ring` (ADR-004: SHA-256 and
+# HMAC-SHA256 both come from `openssl` alone), `rustls` (ADR-004), `chrono`/`time` (src/sigv4.rs
+# implements the civil-from-days calendar conversion by hand instead -- no clock crate needed
+# for a pure calendar calculation, and rule 7 forbids this crate from reading a clock at all),
+# `rand`/`uuid` (this crate mints no id of its own -- an object's identity is its content hash),
+# `once_cell`/`lazy_static` (nothing here needs process-wide lazy state), `anyhow` (every error
+# is the one typed `StoreError`, src/error.rs), `tracing` (out of scope for this round; the
+# next task's MinIO integration test is where observability would first matter).
+
+[dev-dependencies]
+# tests/claim_check_hot_path.rs asserts `cargo tree`'s own output, so it needs nothing beyond
+# the standard library -- no dev-only dependency exists for that test. This section is empty
+# on purpose (not omitted -- so a reviewer scanning Cargo.toml sees the omission was
+# considered, not overlooked).

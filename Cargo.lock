@@ -325,6 +325,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-store"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "base64",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-openssl",
+ "hyper-util",
+ "openssl",
+ "percent-encoding",
+ "prost",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "av-sweep"
 version = "0.1.0"
 dependencies = [
