@@ -43,18 +43,28 @@
 //!
 //! # The manifest-vs-sink ordering constraint
 //!
-//! See `TileSetManifest`'s own doc comment (`heavy.proto`) for the full reasoning: this
-//! executor computes each tile's `sha256` itself and predicts its `uri` via
-//! [`crate::runner::content_addressed_key`] -- the exact function
-//! [`crate::runner::MemoryObjectSink::put`] independently calls for the same bytes -- rather
-//! than inventing a second key scheme. **This round's only `ObjectSink` is
-//! `MemoryObjectSink`, which always returns `"memory://{key}"`**; [`TilerExecutor`]
-//! hard-codes that same `"memory://"` scheme prefix, so a caller wiring up a `Runner` must
-//! construct the `ObjectSink` and this executor with the identical `prefix` string for the
-//! manifest's `uri`s to actually match what the sink assigns -- an honest, visible coupling
-//! this module does not attempt to hide. A real, store-backed `ObjectSink` (task 3b's own
-//! deferred P4) would need its own URI scheme, at which point this hard-coded
-//! `"memory://"` assumption becomes something that implementation must revisit explicitly.
+//! The manifest must name where each tile can be found, but this executor runs *before* the
+//! [`crate::runner::ObjectSink`] that stores its outputs -- so it cannot read a location back
+//! off an `AssetRef` the sink has not produced yet. It resolves that by computing each tile's
+//! `sha256` itself and deriving its key with [`crate::runner::content_addressed_key`], the
+//! exact function every `ObjectSink` independently calls for the same bytes, rather than
+//! inventing a second key scheme. `crates/av-jobs/tests/store_tiler.rs` asserts that helper
+//! and `av_store::keys::object_key` agree for a real hash, so the mirror cannot drift
+//! silently. The coupling this leaves is honest and visible: a caller wiring up a `Runner`
+//! must construct the `ObjectSink` and this executor with the identical `prefix` string.
+//!
+//! **What a `TileEntry` deliberately does NOT carry is a URI.** The first implementation
+//! filled `TileEntry.uri` with `format!("memory://{key}")` unconditionally, which
+//! `tests/store_tiler.rs` measured to be plainly wrong against a real object store -- every
+//! tile claimed `memory://tiles/...` while the object lived at `s3://<bucket>/tiles/...`.
+//! Filling it *correctly* would have been worse: a fully-qualified URI names a bucket and an
+//! endpoint, so the manifest's encoded bytes -- and hence the tile set's identity, which is
+//! the SHA-256 of exactly those bytes -- would change with the store that happened to hold
+//! the tiles, and a tile set copied between buckets would acquire a second identity. So
+//! `uri` is left empty and reserved, and [`pb::TileEntry::object_key`] carries the
+//! backend-independent half instead, with `TileSetManifest.object_key_prefix` naming the
+//! prefix it was built under. A reader joins that key with whatever store it is reading
+//! from. (Manager's review finding, task 3c.)
 
 use std::collections::BTreeMap;
 
@@ -211,8 +221,7 @@ impl TilerExecutor {
             for tile in tiles {
                 let png_bytes = render_imagery_tile(raster, tile, params.tile_size);
                 let sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&png_bytes));
-                let key = content_addressed_key(&self.key_prefix, &sha256_hex);
-                let uri = format!("memory://{key}");
+                let object_key = content_addressed_key(&self.key_prefix, &sha256_hex);
 
                 tile_entries.push(pb::TileEntry {
                     level: tile.level,
@@ -220,8 +229,15 @@ impl TilerExecutor {
                     y: tile.y,
                     sha256: sha256_hex,
                     size_bytes: png_bytes.len() as u64,
-                    uri,
+                    // Deliberately empty -- see `TileEntry.uri`'s own doc comment in
+                    // `heavy.proto`. This executor runs before the `ObjectSink` and cannot
+                    // know its URI scheme; the first version hard-coded `"memory://"` and
+                    // was measurably wrong against a real store. A fully-qualified URI
+                    // would also make this manifest's hash -- the tile set's identity --
+                    // depend on which bucket happened to hold the tiles.
+                    uri: String::new(),
                     media_type: IMAGERY_TILE_MEDIA_TYPE.to_string(),
+                    object_key,
                 });
                 outputs.push(JobOutput { bytes: png_bytes, media_type: IMAGERY_TILE_MEDIA_TYPE.to_string(), manifest: false });
             }
@@ -239,6 +255,7 @@ impl TilerExecutor {
             parameters: spec.parameters.clone(),
             root_uri: String::new(),
             job_id: spec.job_id.clone(),
+            object_key_prefix: self.key_prefix.clone(),
         };
         let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
         outputs.push(JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true });

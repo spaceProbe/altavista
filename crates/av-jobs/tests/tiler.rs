@@ -302,7 +302,7 @@ fn the_manifest_hash_is_pinned_for_the_fixture() {
     // manifest-shape will change it.
     // This pin was cross-checked at review by the manager with tools that are NOT this
     // crate, so it is an anchored golden rather than a self-referential one:
-    //   1. the manifest object's 1935 bytes were hashed with Python's own `hashlib`, which
+    //   1. the manifest object's 1852 bytes were hashed with Python's own `hashlib`, which
     //      reproduces the value below;
     //   2. those same bytes were decoded by the Python protobuf runtime (a different
     //      protobuf implementation from `prost`) via `altavista/pb`'s generated
@@ -311,10 +311,18 @@ fn the_manifest_hash_is_pinned_for_the_fixture() {
     //      tile_size=16, bounds (-180,-90,180,90), 10 tiles in (level,x,y) ascending order
     //      [(0,0,0),(0,1,0),(1,0,0),(1,0,1),(1,1,0),(1,1,1),(1,2,0),(1,2,1),(1,3,0),(1,3,1)],
     //      parameters {min_level:"0", max_level:"1", tile_size:"16"}, job_id "job-pin",
-    //      source_sha256 [dc1ad94693aff21cdf7ea74e6af7352994d81371eeeccfd930e0d021a252d814];
+    //      source_sha256 [dc1ad94693aff21cdf7ea74e6af7352994d81371eeeccfd930e0d021a252d814],
+    //      object_key_prefix "tiles", every TileEntry.uri empty, and every
+    //      TileEntry.object_key equal to "<prefix>/<hh>/<hh>/<sha256>" -- the first being
+    //      tiles/a1/23/a1237bfcf56238b594d8145bd1d6e1c2c721aec4ae76f2be40b27829a387f509;
     //   3. re-serialising that decoded message deterministically gives back the identical
     //      bytes, so the encoding is canonical and not merely self-consistent.
-    let expected = "cbf064bcbf6f8450a5b3b7cc5e0a246adb6db8c26ee1cf2db0dc7189fd9fe5c4";
+    //
+    // This replaced an earlier pin (cbf064bc..., over 1935 bytes) when the manager's task-3c
+    // review emptied `TileEntry.uri` and added `TileEntry.object_key`/`object_key_prefix`.
+    // See `crate::tiler`'s own module doc: a fully-qualified URI in the manifest would have
+    // made this very hash depend on which bucket happened to hold the tiles.
+    let expected = "7c23f4f0b6a81270c196df8acf8d6c17c86d69185b31a35357c444f3bcdaa430";
     assert_eq!(completion.manifest_sha256, expected, "pinned manifest hash for the documented fixture");
 }
 

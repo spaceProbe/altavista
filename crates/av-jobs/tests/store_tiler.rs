@@ -37,40 +37,30 @@
 //! See [`StoreBridge`]'s own doc comment for the synchronous/async seam and why one
 //! `tokio::runtime::Runtime` is built once and shared, never one per call.
 //!
-//! # A genuine finding: `TileEntry.uri` never reflects the real store
+//! # The finding this test produced, and the fix it drove
 //!
-//! `crates/av-jobs::tiler`'s own module doc already predicts this, in so many words: "This
-//! round's only `ObjectSink` is `MemoryObjectSink`, which always returns
-//! `"memory://{key}"`; [`TilerExecutor`] hard-codes that same `"memory://"` scheme prefix...
-//! A real, store-backed `ObjectSink` (task 3b's own deferred P4) would need its own URI
-//! scheme, at which point this hard-coded `"memory://"` assumption becomes something that
-//! implementation must revisit explicitly." This test is that revisit, and the assumption
-//! does not hold: `crate::tiler::TilerExecutor::run_imagery` builds every `TileEntry.uri` via
-//! `format!("memory://{key}")` unconditionally -- it has no way to know, and does not ask,
-//! what scheme the `Runner`'s actual configured `ObjectSink` will use. So every
-//! `TileEntry.uri` this test's manifest carries reads `"memory://tiles/.../<hash>"` even
-//! though the tile is, in fact, stored in this test's real MinIO container at
-//! `"s3://<bucket>/tiles/.../<hash>"`. A real consumer of this manifest cannot use
-//! `TileEntry.uri` to locate a tile in a store-backed deployment -- it would have to already
-//! know (out of band) that the manifest's own `uri` field is a lie for any backend other than
-//! `MemoryObjectSink`. This test therefore does NOT dereference `TileEntry.uri` at all: it
-//! resolves each tile by matching `TileEntry.sha256` against `JobCompletion.outputs` (whose
-//! `AssetRef.uri` fields ARE the real `s3://` locations [`StoreSink`] received back from
-//! [`av_store::StoreClient::put`]), exactly as a caller who already knew about this gap would
-//! have to. This is reported as a finding, not silently worked around: the fix belongs in
-//! `crate::tiler::TilerExecutor` (a store-backed `Runner` needs some way to learn its sink's
-//! own URI scheme, or the manifest needs a second pass after storage, or `ObjectSink::put`
-//! needs to run before tile hashes are computed) and is out of this task's scope (this task
-//! writes a test, not a production-code redesign of the manifest-vs-sink ordering).
+//! When this test was first written, `crate::tiler::TilerExecutor::run_imagery` built every
+//! `TileEntry.uri` as `format!("memory://{key}")` unconditionally -- it runs before the
+//! `ObjectSink` and has no way to know, and did not ask, what scheme the configured sink
+//! would use. So every tile in this test's manifest claimed `"memory://tiles/.../<hash>"`
+//! while the object genuinely lived in this test's real MinIO container at
+//! `"s3://<bucket>/tiles/.../<hash>"`. A consumer could not have used the manifest to find a
+//! tile in any store-backed deployment.
 //!
-//! Despite that gap, [`PINNED_MANIFEST_SHA256`] itself still matches: the pin covers the
-//! manifest's *bytes*, and every one of those bytes (including the `"memory://"` URIs) is
-//! computed by `TilerExecutor` alone, entirely independently of which `ObjectSink` actually
-//! ends up storing them -- so the tile-set identity this task's brief calls "the same tile
-//! set identity the in-memory test produces" does not, in fact, depend on the storage
-//! backend. That is a direct consequence of the same gap: the manifest's own content is
-//! backend-blind, which is exactly why its `uri` fields are wrong for any backend but the one
-//! `MemoryObjectSink` implements.
+//! The manager's task-3c review fixed it, and the fix is worth understanding because the
+//! obvious repair is the wrong one. Filling `uri` in *correctly* would have made the manifest
+//! name a bucket and an endpoint -- and since the tile set's identity is the SHA-256 of the
+//! manifest's own bytes, that identity would then change with the store that happened to hold
+//! the tiles, so one tile set copied between buckets would acquire two identities. Instead
+//! `TileEntry.uri` is left empty and reserved, and `TileEntry.object_key` carries the
+//! genuinely backend-independent `<prefix>/<hh>/<hh>/<sha256>` layout, with
+//! `TileSetManifest.object_key_prefix` naming the prefix. A reader joins that key with
+//! whatever store it is reading from -- which is exactly what the assertions below do.
+//!
+//! [`PINNED_MANIFEST_SHA256`] is therefore the same value the in-memory test in
+//! `tests/tiler.rs` pins, and now for a principled reason rather than an accidental one: the
+//! manifest is backend-independent by construction. (Before the fix it also matched, but only
+//! because the `memory://` URI it carried was uniformly *wrong* rather than absent.)
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -103,9 +93,17 @@ const BUCKET: &str = "av-jobs-store-tiler-test";
 const KEY_PREFIX: &str = "tiles";
 const RASTER_MEDIA_TYPE: &str = "application/vnd.altavista.raster+raw";
 /// `tests/tiler.rs::the_manifest_hash_is_pinned_for_the_fixture`'s own pinned value, for the
-/// identical fixture/params/`KEY_PREFIX`/job id -- see this file's own module doc for why a
-/// real store backend does not change it.
-const PINNED_MANIFEST_SHA256: &str = "cbf064bcbf6f8450a5b3b7cc5e0a246adb6db8c26ee1cf2db0dc7189fd9fe5c4";
+/// identical fixture/params/`KEY_PREFIX`/job id.
+///
+/// **This equality across two completely different storage backends is the point**, not an
+/// incidental detail: the in-memory run and this real-MinIO run must produce the SAME tile
+/// set identity, because a tile set copied between stores is the same tile set. That holds
+/// by construction now, not by accident -- `TileEntry.uri` is empty and `object_key` carries
+/// only the backend-independent `<prefix>/<hh>/<hh>/<sha256>` layout (`crate::tiler`'s own
+/// module doc, and the manager's task-3c review finding that replaced the earlier
+/// `cbf064bc...` pin, which matched across backends only because the `memory://` URI it
+/// carried was uniformly WRONG rather than uniformly absent).
+const PINNED_MANIFEST_SHA256: &str = "7c23f4f0b6a81270c196df8acf8d6c17c86d69185b31a35357c444f3bcdaa430";
 /// `tests/tiler.rs`'s own pinned-hash test job id -- part of the encoded `TileSetManifest`
 /// (`job_id` field), so it must match exactly, not merely be "a" valid job id.
 const PINNED_JOB_ID: &str = "job-pin";
@@ -474,20 +472,19 @@ fn tiler_job_round_trips_through_a_real_minio_store() {
     assert!(completion.ok, "{TEST_NAME}: job did not complete ok: {completion:?}");
 
     // -- assertion 2: the manifest hash is the SAME tile-set identity the in-memory test
-    // produces -- see this file's own module doc, "A genuine finding", for why this DOES
-    // match despite TileEntry.uri being wrong for this backend.
+    // produces. This equality across two different storage backends is the whole point --
+    // see this file's own module doc and PINNED_MANIFEST_SHA256's own comment.
     assert_eq!(
         completion.manifest_sha256, PINNED_MANIFEST_SHA256,
-        "{TEST_NAME}: manifest_sha256 did not match the pin -- see this file's own module doc \
-         (\"A genuine finding\") for the one already-known reason this could legitimately \
-         differ (TileEntry.uri is backend-blind, but that alone does not change the hash); a \
-         MISMATCH here is itself the finding to report, with this actual value: {}",
+        "{TEST_NAME}: manifest_sha256 did not match the pin. The tile set's identity must NOT \
+         depend on which store holds the tiles -- a mismatch here means something backend- \
+         specific has leaked into the manifest's encoded bytes, which is itself the finding to \
+         report, with this actual value: {}",
         completion.manifest_sha256
     );
 
     // -- fetch the manifest bytes back from the REAL store, via the real AssetRef
-    // JobCompletion.outputs carries (never via TileEntry.uri -- see this file's own module
-    // doc, "A genuine finding"). --------------------------------------------------------
+    // JobCompletion.outputs carries. ----------------------------------------------------
     let manifest_output = completion
         .outputs
         .iter()
@@ -507,16 +504,31 @@ fn tiler_job_round_trips_through_a_real_minio_store() {
     let manifest: pb::TileSetManifest = prost::Message::decode(manifest_bytes.as_slice()).unwrap_or_else(|e| panic!("{TEST_NAME}: decoding the fetched manifest bytes as TileSetManifest: {e}"));
     assert!(!manifest.tiles.is_empty(), "{TEST_NAME}: the fetched manifest names no tiles at all");
 
-    // -- assertion 4: every TileEntry.sha256/size_bytes in the manifest resolves against a
-    // REAL object in the store -- resolved via JobCompletion.outputs (real s3:// AssetRefs),
-    // never via TileEntry.uri (see this file's own module doc, "A genuine finding"). -----
+    // -- assertion 4: every TileEntry resolves against a REAL object in the store, and the
+    // manifest's own backend-independent addressing is what makes that possible. -----------
+    assert_eq!(manifest.object_key_prefix, KEY_PREFIX, "the manifest must name the key prefix its object_keys were built under, so a reader needs nothing out of band");
     for tile in &manifest.tiles {
+        // The manifest deliberately carries NO URI (see this file's module doc and
+        // `TileEntry.uri`'s own doc comment in heavy.proto): a fully-qualified URI would make
+        // the tile set's identity depend on which bucket held it.
+        assert!(tile.uri.is_empty(), "tile (level={}, x={}, y={}): TileEntry.uri must be empty, got {:?}", tile.level, tile.x, tile.y, tile.uri);
+
+        // What it carries instead is the backend-independent key. This is the assertion that
+        // proves the manifest is actually USABLE against a real store: joining
+        // object_key_prefix/object_key the way any reader would must land on the exact object
+        // av-store itself chose for these bytes.
+        let expected_key = av_store::object_key(&manifest.object_key_prefix, &tile.sha256).unwrap_or_else(|e| panic!("av_store::object_key for tile sha256 {:?}: {e}", tile.sha256));
+        assert_eq!(tile.object_key, expected_key, "tile (level={}, x={}, y={}): TileEntry.object_key must be exactly the key av-store lays this content hash out under", tile.level, tile.x, tile.y);
+
         let stored = completion
             .outputs
             .iter()
             .find(|a| a.sha256 == tile.sha256)
             .unwrap_or_else(|| panic!("{TEST_NAME}: tile (level={}, x={}, y={}) sha256 {:?} has no matching JobCompletion.outputs entry", tile.level, tile.x, tile.y, tile.sha256));
         assert!(stored.uri.starts_with(&format!("s3://{BUCKET}/")), "tile output AssetRef.uri must be a real s3:// location, got {:?}", stored.uri);
+        // And the real s3:// location the sink assigned really is that same key under this
+        // bucket -- so a reader that only has the manifest can reconstruct it.
+        assert_eq!(stored.uri, format!("s3://{BUCKET}/{expected_key}"), "the sink's own s3:// location must be the manifest's object_key under this bucket");
 
         let tile_bytes = bridge.fetch(stored).unwrap_or_else(|e| panic!("{TEST_NAME}: fetching tile (level={}, x={}, y={}) back from the real store: {e:?}", tile.level, tile.x, tile.y));
         assert_eq!(tile_bytes.len() as u64, tile.size_bytes, "tile (level={}, x={}, y={}): fetched byte length must equal TileEntry.size_bytes", tile.level, tile.x, tile.y);

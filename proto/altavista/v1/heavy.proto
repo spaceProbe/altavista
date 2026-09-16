@@ -318,13 +318,33 @@ message TileEntry {
   // rather than reading it back off the `AssetRef` the sink returns).
   string sha256 = 4;
   uint64 size_bytes = 5;
-  // Where the `ObjectSink` stored this tile -- content-addressed the same way
-  // `av_store::keys::object_key` lays out a key (`"<prefix>/<hex[0..2]>/<hex[2..4]>/<hex>"`),
-  // via the one shared helper `crates/av-jobs::runner::content_addressed_key` that both
-  // `MemoryObjectSink` and `TilerExecutor` call -- never a second, independently-written key
-  // scheme (see `TileSetManifest`'s own doc for the prefix-agreement caveat this creates).
+  // **Always empty, deliberately** -- reserved, not removed (this file's own additive-only
+  // rule once a round has shipped). The tiler runs BEFORE the `ObjectSink` that stores its
+  // outputs and cannot know that sink's URI scheme, so the first implementation of this
+  // field hard-coded `"memory://"` and was simply wrong against a real object store
+  // (`crates/av-jobs/tests/store_tiler.rs` measured exactly that: every tile named
+  // `memory://tiles/...` while the object really lived at `s3://<bucket>/tiles/...`).
+  // Filling it correctly would be worse, not better: a fully-qualified URI names a bucket
+  // and an endpoint, so the manifest's own encoded bytes -- and therefore the tile set's
+  // identity, which is the SHA-256 of exactly those bytes -- would change depending on
+  // which store happened to hold the tiles. A tile set that has two identities because it
+  // was copied between buckets is not content-addressed at all. `object_key` below carries
+  // the part that is genuinely backend-independent; a consumer joins it with its own
+  // bucket and endpoint.
   string uri = 6;
   string media_type = 7;
+  // The backend-independent, content-addressed key this tile is stored under:
+  // `"<prefix>/<hex[0..2]>/<hex[2..4]>/<hex>"`, exactly the layout
+  // `av_store::keys::object_key` produces, via the one shared helper
+  // `crates/av-jobs::runner::content_addressed_key` that both `MemoryObjectSink` and
+  // `TilerExecutor` call -- never a second, independently-written key scheme
+  // (`crates/av-jobs/tests/store_tiler.rs` asserts the two derive the identical key for a
+  // real hash, so the mirror cannot drift silently). No scheme, no bucket, no endpoint: a
+  // reader resolves a tile by joining this with whatever store it is reading from, which is
+  // what keeps `TileSetManifest`'s own hash the same for the same tiles no matter where
+  // they live. `TileSetManifest.object_key_prefix` names the `<prefix>` these were built
+  // under.
+  string object_key = 8;
 }
 
 // H3b's tile-set identity, `crates/av-jobs::tiler::TilerExecutor`'s one manifest output
@@ -377,4 +397,11 @@ message TileSetManifest {
   // TILES3D only: the `tileset.json` entry's own `uri` (P3). Empty for every other `kind`.
   string root_uri = 10;
   string job_id = 11;
+  // The `<prefix>` every `TileEntry.object_key` above was built under, so this manifest is
+  // self-describing: a reader that has the manifest has everything it needs to turn a tile
+  // address into a key without being told the tiler's configuration out of band. Part of
+  // the hashed bytes on purpose -- two tile sets of the identical tiles laid out under
+  // different key prefixes are genuinely different tile sets to a reader, and should not
+  // share an identity.
+  string object_key_prefix = 12;
 }
