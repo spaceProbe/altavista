@@ -329,6 +329,7 @@ name = "av-store"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-lockstep",
  "base64",
  "bytes",
  "http",

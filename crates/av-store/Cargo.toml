@@ -92,6 +92,16 @@ base64 = "0.22"
 
 [dev-dependencies]
 # tests/claim_check_hot_path.rs asserts `cargo tree`'s own output, so it needs nothing beyond
-# the standard library -- no dev-only dependency exists for that test. This section is empty
-# on purpose (not omitted -- so a reviewer scanning Cargo.toml sees the omission was
-# considered, not overlooked).
+# the standard library -- no dev-only dependency exists for that test.
+#
+# tests/minio_store.rs (H1b, the real-MinIO integration proof) needs the container lifecycle
+# helpers and the docker-gate/lock/label/prune discipline this workspace already has ONE home
+# for -- crates/av-lockstep/src/docker.rs (`ManagedContainer::run_local`, `recorded_digest_gate`,
+# `lock_docker_tests`, `prune_stale_test_resources`, `test_label_args`, `announce_gate_skip`).
+# This is a path dependency onto an in-workspace crate (rule 2's "no new registry crate" bar
+# does not apply -- av-lockstep is not a registry fetch), added deliberately as a DEV
+# dependency only: this crate's own production code (src/**) has no reason to know Docker
+# exists at all, and never will (a hot-path-adjacent claim-check crate depending on a
+# container-lifecycle crate in its normal `[dependencies]` would be exactly the kind of
+# unnecessary coupling `src/lib.rs`'s own module doc warns against for this crate generally).
+av-lockstep = { path = "../av-lockstep" }

@@ -187,7 +187,7 @@ impl StoreClient {
         if s3_err.code == "BucketAlreadyOwnedByYou" || s3_err.code == "BucketAlreadyExists" {
             return Ok(());
         }
-        Err(s3_err.into_store_error())
+        Err(s3_err.into_store_error(&format!("s3://{}/", self.config.bucket)))
     }
 
     /// Hashes `bytes`, derives its content-addressed key, signs and sends a PUT carrying the
@@ -204,7 +204,7 @@ impl StoreClient {
 
         let (status, _headers, body) = self.send(Method::PUT, &key, &headers, &asset.sha256, bytes, now_unix_secs).await?;
         if !status.is_success() {
-            return Err(parse_s3_error(status, &body).into_store_error());
+            return Err(parse_s3_error(status, &body).into_store_error(&asset.uri));
         }
         Ok(asset)
     }
@@ -228,7 +228,7 @@ impl StoreClient {
         let key = key_from_uri(&asset.uri)?;
         let (status, _headers, body) = self.send(Method::GET, &key, &[], &sigv4::empty_payload_hash_hex(), Bytes::new(), now_unix_secs).await?;
         if !status.is_success() {
-            return Err(parse_s3_error(status, &body).into_store_error());
+            return Err(parse_s3_error(status, &body).into_store_error(&asset.uri));
         }
         verify_payload(asset, &body)?;
         Ok(body)
@@ -243,7 +243,7 @@ impl StoreClient {
         let key = key_from_uri(&asset.uri)?;
         let (status, headers, body) = self.send(Method::HEAD, &key, &[], &sigv4::empty_payload_hash_hex(), Bytes::new(), now_unix_secs).await?;
         if !status.is_success() {
-            return Err(parse_s3_error(status, &body).into_store_error());
+            return Err(parse_s3_error(status, &body).into_store_error(&asset.uri));
         }
         let header_pairs = headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|v| (name.as_str(), v)));
         let meta = metadata::decode(header_pairs)?;
@@ -284,7 +284,16 @@ struct S3Error {
 }
 
 impl S3Error {
-    fn into_store_error(self) -> StoreError {
+    /// Maps this parsed error onto the crate's one typed [`StoreError`], given the `uri` the
+    /// request was about (`"s3://<bucket>/<key>"`, or the bucket root for
+    /// [`StoreClient::ensure_bucket`]). A 404 status, or an S3 `<Code>` of `NoSuchKey` /
+    /// `NoSuchBucket` at any status, becomes [`StoreError::NotFound`] (review finding -- H1a's
+    /// own brief asked for this and it was missed, see that variant's own doc comment); every
+    /// other non-2xx stays [`StoreError::S3`], exactly as before this fix.
+    fn into_store_error(self, uri: &str) -> StoreError {
+        if self.status == StatusCode::NOT_FOUND || self.code == "NoSuchKey" || self.code == "NoSuchBucket" {
+            return StoreError::NotFound { uri: uri.to_string(), status: self.status.as_u16(), code: self.code };
+        }
         StoreError::S3 { status: self.status.as_u16(), code: self.code, message: self.message, request_id: self.request_id }
     }
 }
@@ -355,6 +364,41 @@ mod tests {
         assert_eq!(code, "unparsed");
         assert_eq!(message, "unparsed");
         assert_eq!(request_id, "unparsed");
+    }
+
+    /// Review finding (H1b's brief item 1): a 404 with `<Code>NoSuchKey</Code>` must map onto
+    /// the typed [`StoreError::NotFound`], not the untyped [`StoreError::S3`] H1a shipped with.
+    #[test]
+    fn into_store_error_maps_a_404_no_such_key_to_store_error_not_found() {
+        let err = parse_s3_error(StatusCode::NOT_FOUND, MINIO_NO_SUCH_KEY.as_bytes()).into_store_error("s3://altavista-heavy/imagery/ab/cd/abcd...");
+        match err {
+            StoreError::NotFound { uri, status, code } => {
+                assert_eq!(uri, "s3://altavista-heavy/imagery/ab/cd/abcd...");
+                assert_eq!(status, 404);
+                assert_eq!(code, "NoSuchKey");
+            }
+            other => panic!("expected StoreError::NotFound, got {other:?}"),
+        }
+    }
+
+    /// `NoSuchBucket` maps to `NotFound` too, even checked against a status other than 404 --
+    /// the code alone is enough (S3/MinIO do not always pair `NoSuchBucket` with a literal 404
+    /// in every response shape), never only the numeric status.
+    #[test]
+    fn into_store_error_maps_no_such_bucket_to_not_found_by_code_alone() {
+        let body = r#"<Error><Code>NoSuchBucket</Code><Message>m</Message><RequestId>ID</RequestId></Error>"#;
+        let err = parse_s3_error(StatusCode::NOT_FOUND, body.as_bytes()).into_store_error("s3://altavista-heavy/");
+        assert!(matches!(err, StoreError::NotFound { .. }), "{err:?}");
+    }
+
+    /// Every OTHER non-2xx response is unaffected by this fix -- still the untyped
+    /// [`StoreError::S3`], exactly as before (the review finding's own "keeping StoreError::S3
+    /// for every other non-2xx" requirement).
+    #[test]
+    fn into_store_error_leaves_every_other_non_2xx_as_store_error_s3() {
+        let body = r#"<Error><Code>AccessDenied</Code><Message>m</Message><RequestId>ID</RequestId></Error>"#;
+        let err = parse_s3_error(StatusCode::FORBIDDEN, body.as_bytes()).into_store_error("s3://altavista-heavy/imagery/x");
+        assert!(matches!(err, StoreError::S3 { status: 403, .. }), "{err:?}");
     }
 
     #[test]

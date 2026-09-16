@@ -29,14 +29,17 @@
 //! new header, and a decoder that does not yet know about it, every time the message grows.
 //!
 //! Every header value is checked against S3's per-object user-metadata budget (2 KiB) before
-//! it is ever sent -- checked **per header** here, which is the conservative reading of a
-//! budget S3 actually shares across the *sum* of every `x-amz-meta-*` header on one object:
-//! refusing any single header already over the whole budget catches the case this crate can
-//! detect cheaply (one oversized value, most likely `x-amz-meta-av-provenance` if
-//! `Provenance.attributes` grows large) without this module having to also track every other
-//! header's size to enforce the combined limit exactly -- `StoreClient::put` is free to add
-//! that combined check later if a deployment's `Provenance.attributes` usage ever makes it
-//! necessary, without changing this module's own per-header contract.
+//! it is ever sent -- **both per header and summed across every header** (H1b's review
+//! finding: this module used to check only per header, which its own doc here called "the
+//! conservative reading of a budget S3 actually shares across the sum of every
+//! `x-amz-meta-*` header on one object" -- conservative for a single oversized value, but not
+//! actually enforcing the shared budget at all when several headers are each individually
+//! under it yet collectively over it. H1a's own brief already asked for the summed check; this
+//! module now does both: [`encode`] first refuses any SINGLE header value already over
+//! [`USER_METADATA_BUDGET_BYTES`] (cheaper, more specific -- names the one oversized header,
+//! most likely `x-amz-meta-av-provenance` if `Provenance.attributes` grows large), then refuses
+//! if the SUM of every header's name+value bytes is over the same budget, with the measured
+//! total in [`crate::error::StoreError::UserMetadataBudgetExceeded`].
 
 use std::collections::BTreeMap;
 
@@ -81,6 +84,7 @@ pub fn encode(meta: &ObjectMetadata) -> Result<BTreeMap<String, String>, StoreEr
     headers.insert(HEADER_PROVENANCE.to_string(), STANDARD.encode(meta.provenance.encode_to_vec()));
     headers.insert(HEADER_MEDIA_TYPE.to_string(), meta.media_type.clone());
 
+    let mut total_bytes = 0usize;
     for (header, value) in &headers {
         if value.len() > USER_METADATA_BUDGET_BYTES {
             return Err(StoreError::MetadataTooLarge {
@@ -89,6 +93,13 @@ pub fn encode(meta: &ObjectMetadata) -> Result<BTreeMap<String, String>, StoreEr
                 limit: USER_METADATA_BUDGET_BYTES,
             });
         }
+        // S3's real budget is shared across the SUM of every `x-amz-meta-*` header's own
+        // name+value bytes on the object, not allotted separately per header (review finding --
+        // see this module's own doc comment).
+        total_bytes += header.len() + value.len();
+    }
+    if total_bytes > USER_METADATA_BUDGET_BYTES {
+        return Err(StoreError::UserMetadataBudgetExceeded { total: total_bytes, limit: USER_METADATA_BUDGET_BYTES });
     }
     Ok(headers)
 }
@@ -212,6 +223,36 @@ mod tests {
                 assert!(size > limit);
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// Review finding (H1b's brief item 2): each of `x-amz-meta-av-label` and
+    /// `x-amz-meta-av-provenance` here is, alone, comfortably under
+    /// [`USER_METADATA_BUDGET_BYTES`] (2048) -- roughly 1.9 KiB and 1.3 KiB respectively, both
+    /// under 2 KiB on their own -- but together (plus the other three headers) the SUM is over
+    /// it, which is exactly the gap this module's own doc used to admit: checked per header,
+    /// never summed, even though S3's real budget is shared across every `x-amz-meta-*` header
+    /// on one object. **What this fails against:** an `encode` that checks only per header
+    /// (the pre-fix shape) would return `Ok(_)` here instead of refusing.
+    #[test]
+    fn encode_refuses_when_the_sum_of_every_header_is_over_budget_even_though_each_is_individually_under_it() {
+        let mut meta = sample();
+        meta.label.caveats = vec!["C".repeat(1400)];
+        meta.provenance.attributes.insert("k".to_string(), "V".repeat(900));
+
+        match encode(&meta) {
+            Err(StoreError::UserMetadataBudgetExceeded { total, limit }) => {
+                assert_eq!(limit, USER_METADATA_BUDGET_BYTES);
+                assert!(total > limit, "measured total {total} must exceed the {limit}-byte shared budget");
+            }
+            Err(StoreError::MetadataTooLarge { header, size, .. }) => {
+                panic!(
+                    "expected the SUMMED-budget refusal (UserMetadataBudgetExceeded), got a per-header \
+                     MetadataTooLarge for {header} at {size} bytes instead -- this test's fixture sizes must \
+                     each stay under the per-header budget so only the summed check can fire"
+                );
+            }
+            other => panic!("expected Err(UserMetadataBudgetExceeded), got {other:?}"),
         }
     }
 

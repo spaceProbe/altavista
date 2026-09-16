@@ -52,12 +52,21 @@ pub enum StoreError {
     /// silently re-encode).
     #[error("marking {marking:?} contains a non-ASCII or non-printable byte, refused before it reaches x-amz-meta-av-marking")]
     InvalidMarking { marking: String },
-    /// One `x-amz-meta-av-*` header's encoded value is over S3's per-object user-metadata
-    /// budget (2 KiB, checked per header -- see `crate::metadata`'s module doc for why a
-    /// per-header check is the conservative reading of a budget S3 actually shares across
-    /// every `x-amz-meta-*` header on the object).
+    /// One `x-amz-meta-av-*` header's encoded value is, by itself, over S3's per-object
+    /// user-metadata budget (2 KiB). Checked first, per header, in [`crate::metadata::encode`]
+    /// -- before the summed check below -- because a single oversized value (most likely
+    /// `x-amz-meta-av-provenance`, if `Provenance.attributes` grows large) is a more specific
+    /// diagnosis than reporting the total.
     #[error("{header} is {size} bytes, over S3's {limit}-byte user-metadata budget")]
     MetadataTooLarge { header: &'static str, size: usize, limit: usize },
+    /// Every individual `x-amz-meta-av-*` header was under [`crate::metadata::
+    /// USER_METADATA_BUDGET_BYTES`] on its own, but their SUM (name + value bytes, summed
+    /// across every header [`crate::metadata::encode`] emits) is not -- S3's real budget is
+    /// shared across the whole object's user metadata, not allotted separately per header.
+    /// H1a's own brief asked for this check (H1b's review finding, this crate's module doc on
+    /// `crate::metadata` used to admit only the narrower per-header reading was implemented).
+    #[error("the sum of every x-amz-meta-av-* header's name+value bytes is {total} bytes, over S3's {limit}-byte SHARED user-metadata budget")]
+    UserMetadataBudgetExceeded { total: usize, limit: usize },
     /// [`crate::metadata::decode`] found `header` present but could not decode its value
     /// (bad base64, or a `prost` decode failure on the decoded bytes).
     #[error("decoding {header}: {reason}")]
@@ -118,6 +127,14 @@ pub enum StoreError {
     /// Reading the response body failed (`hyper::Error` from `BodyExt::collect`).
     #[error("reading the HTTP response body: {0}")]
     Body(String),
+    /// [`crate::client::StoreClient::get`]/[`crate::client::StoreClient::head`] found no object
+    /// at `uri`: S3/MinIO answered 404, or its `<Code>` was `NoSuchKey`/`NoSuchBucket` (H1b's
+    /// review finding -- H1a's own brief already asked for this typed variant and it was
+    /// missed; every 404 became an untyped [`StoreError::S3`] instead, indistinguishable by
+    /// type from any other server error). Every OTHER non-2xx response is still `StoreError::
+    /// S3`, unchanged.
+    #[error("no object at {uri:?}: S3 {status} {code}")]
+    NotFound { uri: String, status: u16, code: String },
     /// A non-2xx S3/MinIO response, with its status and the `<Code>`/`<Message>`/
     /// `<RequestId>` [`crate::client::parse_s3_error_xml`] extracted from the body (or the
     /// placeholders that function documents when the body did not parse as S3's error XML
