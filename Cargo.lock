@@ -304,7 +304,12 @@ dependencies = [
 name = "av-orbital"
 version = "0.1.0"
 dependencies = [
+ "av-cdm",
+ "av-dynamics",
+ "gmat-sys",
  "openssl",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

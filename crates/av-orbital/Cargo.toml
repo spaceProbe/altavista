@@ -1,34 +1,60 @@
 [package]
 name = "av-orbital"
 publish = false
-description = "N1 (docs/native-dynamics-plan.md): the GMAT-free numerical core of the native orbital force model behind ADR-002's depth-3 native Rust models -- a .cof gravity-file reader, normalised associated Legendre recursion stable to degree 70, and point-mass/spherical-harmonic gravity acceleration with analytic partials in the body-fixed frame. No frame rotation, no DynamicsModel impl and no goldens here (the second N1 worker's half); no gmat-sys dependency, so this crate builds without GMAT."
+description = "N1 (docs/native-dynamics-plan.md): the native orbital force model behind ADR-002's depth-3 native Rust models -- a .cof gravity-file reader, normalised associated Legendre recursion stable to degree 70, point-mass/spherical-harmonic gravity acceleration with analytic partials in the body-fixed frame (the first N1 worker's half), plus the body-fixed-to-inertial rotation, the av_dynamics::DynamicsModel binding for a single spacecraft, and the two-body analytic golden (the second N1 worker's half, this crate as of that task). The GMAT-backed rotation is behind the `gmat-frames` cargo feature (default-on): with it disabled, this crate still builds and its non-GMAT tests still pass, so a kernel built without gmat-sys can still carry this crate's pure-numerical and DynamicsModel-generic code (the N5/N6 portability hedge, made real now at little cost)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["gmat-frames"]
+# The GMAT-backed `BodyFixedRotation` impl (`src/frame_gmat.rs`) and every test that needs a
+# real GMAT engine. Default-on because every current caller (the DRM executor, the N1b tests)
+# wants the GMAT-validated rotation charter decision 222(c) calls for until N5 replaces it
+# natively; a kernel build that must omit `gmat-sys` entirely turns this off and still gets a
+# crate that builds and unit-tests cleanly (`cargo test -p av-orbital --no-default-features`,
+# verified in this task's own report) -- `EarthGravityModel<R>` itself is generic over any
+# `R: BodyFixedRotation`, so it needs no feature gate at all; only the GMAT-backed `R` does.
+gmat-frames = ["dep:gmat-sys"]
+
 [dependencies]
 thiserror.workspace = true
 
-[dev-dependencies]
-# ADR-004's crypto rule: SHA-256 only, through the system OpenSSL, never `sha2`/`ring` --
-# used by `src/cof.rs`'s own `#[cfg(test)]` module (see that module's doc) to pin GMAT's own
-# `.cof` gravity data-pack files against a committed digest, matching the identical
-# `openssl = "0.10"` pin already carried by `crates/av-edge/Cargo.toml` and
-# `crates/av-store/Cargo.toml` (question 204's precedent, not a new dependency choice).
-#
-# A DEV-dependency, not a dependency (manager's N1a review): the only use of it in this crate
-# is inside `#[cfg(test)]`, and this crate's whole purpose is to be the portable half that a
-# kernel built without GMAT can carry (N5/N6). A normal dependency would make every downstream
-# consumer link the system OpenSSL for a digest none of them computes.
+# `av_dynamics::DynamicsModel`/`StepResult`/`integrate::Dopri5`/`settings_hash` for
+# `src/model.rs`'s `EarthGravityModel` -- this half of N1 (unlike the first half) genuinely
+# implements the contract, so this is a real dependency now, not the "deliberately not a
+# dependency" the first half's Cargo.toml comment recorded (question: "only if you actually
+# use it" -- this crate now does). `av-dynamics` itself has no GMAT dependency (its own module
+# doc: "this crate must build, and be unit-tested, in an environment that has never linked
+# GMAT"), so pulling it in unconditionally does not compromise the `--no-default-features`
+# build this crate's own feature gate protects.
+av-dynamics = { path = "../av-dynamics" }
+# `av_cdm::pb::ModelInfo`/`ModelCapability` for `describe()`, and `av_cdm::time::Tai` for the
+# TAI-nanoseconds <-> A.1 Modified Julian Date epoch conversion `src/frame_gmat.rs` needs at
+# the `Gmat::convert_with_rotation` boundary (identical conversion `av-kernel`'s own executor
+# uses -- `Tai::from_nanos(t_tai_ns).to_a1_mjd()`). No GMAT dependency of its own either.
+av-cdm = { path = "../av-cdm" }
+# ADR-004's crypto rule: SHA-256 only, through the system OpenSSL, never `sha2`/`ring`. Was a
+# dev-dependency through the first N1 worker's half (used only by `src/cof.rs`'s own
+# `#[cfg(test)]` data-pack pin); promoted to a real dependency here because
+# `src/model.rs::EarthGravityModel::new` now hashes the bound gravity file's own bytes into
+# `ModelInfo.settings_hash`'s input at construction time (not merely in a test) -- the
+# settings hash must cover "the gravity file NAME, its SHA-256, degree, order, mu, reference
+# radius, the frame names, and the integrator settings" per this task's brief, and a SHA-256
+# of the file's own bytes is not something `av_dynamics::settings_hash` (which hashes a
+# caller-supplied `BTreeMap<String, String>`, not a file) can produce on its own. Same pin
+# already carried by `crates/av-edge/Cargo.toml`/`crates/av-store/Cargo.toml` (question 204's
+# precedent, not a new dependency choice).
 openssl = "0.10"
 
-# Deliberately NOT a dependency: `av-dynamics` (question: "only if you actually use it").
-# This half of N1 is the pure numerical core -- a .cof reader, the Legendre recursion, and
-# body-fixed gravity acceleration/partials -- and never touches `DynamicsModel`, `ErasedModel`,
-# `Dopri5` or CDM state types; nothing here needs `av-cdm` or `av-dynamics` at all. The second
-# N1 worker wires this crate's `GravityModel`/`legendre`/`gravity` functions into a
-# `DynamicsModel` impl in a crate that *does* depend on `av-dynamics`, per the assignment brief.
-# `sha2` (ADR-004 ban; `deny.toml`'s `[bans]` list) and any new crypto crate are not
-# considered at all, per the same rule.
+# The GMAT-backed `BodyFixedRotation` (`src/frame_gmat.rs`), behind the `gmat-frames` feature
+# above -- `optional = true` is what lets that feature control whether this edge even exists,
+# so `cargo build -p av-orbital --no-default-features` never touches `gmat-sys` (and therefore
+# never needs a linked GMAT) at all.
+gmat-sys = { path = "../gmat-sys", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

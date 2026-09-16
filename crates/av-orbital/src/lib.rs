@@ -1,14 +1,17 @@
-//! N1's GMAT-free numerical core (`docs/native-dynamics-plan.md`, milestone N1; ADR-002's
-//! depth 3, "native Rust models, with GMAT as the oracle").
+//! The native orbital force model behind ADR-002's depth 3, "native Rust models, with GMAT as
+//! the oracle" (`docs/native-dynamics-plan.md`, milestone N1).
 //!
-//! This crate is the *first half* of N1: the pure, GMAT-free numerical pieces of a native
-//! Earth gravity force model, each pinned against a closed-form or published reference and
-//! fully tested on its own. It deliberately does **not** implement `DynamicsModel`, does
-//! **not** rotate anything between frames, and does **not** touch GMAT or `gmat-sys` -- a
-//! second worker adds the body-fixed-to-inertial rotation through the frame registry's
-//! convert shim, wires this crate into `DynamicsModel`, and adds the GMAT goldens.
+//! Built in two halves. The first (the GMAT-free numerical core, still true of every module
+//! below except [`frame_gmat`]): a `.cof` gravity-file reader, a normalised associated
+//! Legendre recursion stable to degree 70, and point-mass/spherical-harmonic gravity
+//! acceleration with analytic partials in the body-fixed frame -- pinned against closed-form
+//! or published references and fully tested on its own, touching neither `DynamicsModel` nor
+//! GMAT. The second (this task): the body-fixed-to-inertial rotation through the frame
+//! registry's GMAT-validated `convert` shim (charter decision 222(c)), the
+//! `av_dynamics::DynamicsModel` binding for a single spacecraft, and the two-body analytic
+//! golden that needs no GMAT at all.
 //!
-//! Three pieces:
+//! Five pieces:
 //!
 //! - [`cof`]: a reader for GMAT's own `.cof` Earth gravity-coefficient files (`JGM2`,
 //!   `JGM3`, `EGM96`, `EGM96low`, `JGM2F70`, all shipped under
@@ -22,32 +25,55 @@
 //!   pole-free (Cunningham/Gottlieb) recursion in body-fixed Cartesian coordinates -- no
 //!   latitude, no longitude, no `1/cos(latitude)` term anywhere, so the poles are not a
 //!   special case.
+//! - [`frame`]: [`frame::BodyFixedRotation`], the trait [`model::EarthGravityModel`] is
+//!   generic over, and [`frame::Rotation`], its result -- always compiled, no GMAT
+//!   dependency, the seam N5's native frame reduction will implement against instead of
+//!   [`frame_gmat::GmatBodyFixedRotation`].
+//! - [`frame_gmat`] (behind the `gmat-frames` cargo feature, default-on):
+//!   [`frame_gmat::GmatBodyFixedRotation`], the GMAT-backed [`frame::BodyFixedRotation`] --
+//!   see that module's own doc comment for the exact `Gmat::convert_with_rotation` call.
+//! - [`model`]: [`model::EarthGravityModel`], the `av_dynamics::DynamicsModel` implementation
+//!   for one spacecraft under Earth point-mass/spherical-harmonic gravity.
 //!
 //! # Units
 //!
-//! Every public function in this crate works in SI: metres, seconds, and `m^3/s^2` for `mu`.
-//! GMAT's own `.cof` files are *themselves* already stored in SI (`data/gravity/earth/*.cof`'s
-//! `POTFIELD` record: `mu = 3.986004415e14` m^3/s^2, reference radius `6.3781363e6` m -- see
-//! [`cof`]'s module doc for how this was verified), so [`cof::read_earth_gravity`] performs no
-//! unit conversion at all; it is documented here because the rest of this workspace's GMAT
-//! shim (`crates/gmat-sys`) and goldens work in kilometres, and the next worker's frame-
-//! rotation half is the boundary where that conversion must happen, not this crate.
+//! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
+//! `m^3/s^2` for `mu`. GMAT's own `.cof` files are *themselves* already stored in SI
+//! (`data/gravity/earth/*.cof`'s `POTFIELD` record: `mu = 3.986004415e14` m^3/s^2, reference
+//! radius `6.3781363e6` m -- see [`cof`]'s module doc for how this was verified), so
+//! [`cof::read_earth_gravity`] performs no unit conversion at all. [`model::EarthGravityModel`]
+//! carries the same SI convention all the way out to `DynamicsModel::derivatives`/`state` --
+//! see [`model`]'s own module doc, "Units", for exactly how this was matched to
+//! `gmat_sys::model::GmatModel`'s SI boundary.
 //!
 //! # Dependencies
 //!
-//! Only `thiserror` (typed errors, no panics on malformed input) and `openssl` (SHA-256 over
-//! the system OpenSSL, ADR-004's crypto rule -- never `sha2`, never any other crypto crate;
-//! used solely by the `.cof` data-pack hash test in `src/cof.rs`). No `av-dynamics`
-//! dependency: this half of N1 never touches `DynamicsModel`, `ErasedModel` or CDM state
-//! types, so there is nothing in `av-dynamics` for it to use (see `Cargo.toml`'s doc comment
-//! for the full reasoning). No `gmat-sys`, so a workspace build that omits `gmat-sys`
-//! (no GMAT linked) still builds this crate.
+//! `thiserror` (typed errors, no panics on malformed input); `openssl` (SHA-256 over the
+//! system OpenSSL, ADR-004's crypto rule -- never `sha2`, never any other crypto crate; used by
+//! the `.cof` data-pack hash test in `src/cof.rs` AND, as of this task, by
+//! [`model::EarthGravityModel::new`]'s own gravity-file digest that feeds
+//! `describe().settings_hash`); `av-dynamics` (the `DynamicsModel` trait, `Dopri5`,
+//! `settings_hash` -- itself GMAT-free, so depending on it does not compromise the
+//! `--no-default-features` build below); `av-cdm` (`ModelInfo`/`ModelCapability`, `Tai` for the
+//! TAI<->A.1 epoch conversion `frame_gmat` needs -- also GMAT-free). `gmat-sys` is an
+//! OPTIONAL dependency, pulled in only by the `gmat-frames` feature (default-on): `cargo build
+//! -p av-orbital --no-default-features` never touches it, and [`cof`]/[`legendre`]/[`gravity`]/
+//! [`frame`]/[`model`] (everything except [`frame_gmat`] itself) still build and unit-test
+//! cleanly without it -- see this crate's own N1 report for the verified command and output.
 
 pub mod cof;
 pub mod dual;
+pub mod frame;
+#[cfg(feature = "gmat-frames")]
+pub mod frame_gmat;
 pub mod gravity;
 pub mod legendre;
+pub mod model;
 
 pub use cof::{CofError, GravityModel};
+pub use frame::{BodyFixedRotation, Rotation};
+#[cfg(feature = "gmat-frames")]
+pub use frame_gmat::GmatBodyFixedRotation;
 pub use gravity::{point_mass_acceleration, point_mass_partials, spherical_harmonic_gravity};
 pub use legendre::NormalizedLegendre;
+pub use model::{EarthGravityModel, EarthGravityModelInfo, OrbitalModelError};

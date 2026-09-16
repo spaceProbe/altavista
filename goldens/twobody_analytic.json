@@ -1,0 +1,92 @@
+{
+  "cases": [
+    {
+      "case": "circular_like",
+      "elements": {
+        "argp_deg": 20.0,
+        "ecc": 0.001,
+        "inc_deg": 45.0,
+        "period_s": 5828.516639879384,
+        "raan_deg": 10.0,
+        "sma_m": 7000000.0,
+        "ta0_deg": 0.0
+      },
+      "final_state": [
+        5583747.929198428,
+        -2478836.762992821,
+        -3410785.3151038177,
+        4448.536999951361,
+        4714.367975702444,
+        3870.2657896987675
+      ],
+      "initial_state": [
+        6177760.787870876,
+        2806616.1335744737,
+        1691220.425197291,
+        -3415.7913146656856,
+        4494.221356169672,
+        5019.089972391156
+      ]
+    },
+    {
+      "case": "eccentric_e0p6",
+      "elements": {
+        "argp_deg": 15.0,
+        "ecc": 0.6,
+        "inc_deg": 28.5,
+        "period_s": 28148.546496857245,
+        "raan_deg": 50.0,
+        "sma_m": 20000000.0,
+        "ta0_deg": 0.0
+      },
+      "final_state": [
+        -10191745.27341501,
+        4632625.198531077,
+        5855844.498415627,
+        -5325.8028744453495,
+        -3738.3664028788253,
+        910.4422844300148
+      ],
+      "initial_state": [
+        3573158.528710694,
+        7089176.913157337,
+        987982.1975415557,
+        -7291.455836031789,
+        3101.5993973529453,
+        4115.1963828641055
+      ]
+    }
+  ],
+  "central_body": "Earth",
+  "duration_s": 86400.0,
+  "force_model": {
+    "central_body": "Earth",
+    "drag": null,
+    "gravity": {
+      "degree": 0,
+      "order": 0
+    },
+    "point_masses": [],
+    "srp": false
+  },
+  "generated": "2026-09-16T22:35:24+00:00",
+  "mu_m3_per_s2": 398600441500000.0,
+  "mu_source": "crates/av-orbital/src/cof.rs module doc, verified against GMAT's JGM2.cof POTFIELD record",
+  "name": "twobody_analytic",
+  "propagator": {
+    "atol": 1e-12,
+    "initial_step_s": 30.0,
+    "integrator": "Dopri5 (av_dynamics::integrate)",
+    "max_step_s": 600.0,
+    "rtol": 1e-12
+  },
+  "reason": "ADR-002's goldens rule requires goldens against GMAT with a generator script and a recorded reason (docs/adr/002-dynamics-contract.md, Goldens). This golden is the documented exception docs/native-dynamics-plan.md milestone N1 calls for: a pure two-body (spherical-harmonic degree/order (0,0), point-mass only) arc has an exact closed-form solution (Kepler's equation solved by Newton iteration to machine precision, converted to Cartesian by the standard classical-elements transform), so it is proved against that analytic reference instead of a GMAT run -- GMAT is not needed to validate Kepler's equation. This is NOT the fifth amendment's one recorded exception (docs/adr/002-dynamics-contract.md, amendment 2026-09-05): that exception is about a covariance golden in a ROTATING frame, proved against a closed-form rotation built from GMAT's OWN reported R/Rdot because GMAT's OrbitErrorCovariance report was measured to omit the Rdot term -- a GMAT implementation gap that exception works around while still anchoring to GMAT's own numbers. This golden reads nothing GMAT ever produced: it is a first-principles ANALYTIC reference (Kepler's equation plus Vallado's COE2RV), not a GMAT reference with a documented gap, stated here plainly rather than folded quietly into the same kind of exception. Every other native force this plan adds still gets its golden against GMAT, per ADR-002's rule verbatim -- see this crate's own N1 report. Tolerance measured (not asserted): the native EarthGravityModel<IdentityRotation> at degree/order (0,0), stepped once with its default Dopri5 (rtol=atol=1e-12), reproduces the analytic final state to 6.83e-3 m / 7.36e-6 m/s (circular_like) and 8.36e-4 m / 3.19e-7 m/s (eccentric_e0p6) -- tolerance_m/tolerance_mps set just above the larger of the two measured residuals.",
+  "reference": "closed-form two-body: Kepler's equation (Newton iteration, this script's solve_kepler) + classical-elements-to-Cartesian (Vallado COE2RV, this script's coe_to_cartesian)",
+  "sha256": "0ab1a86ae20d862bf1a6ca15689c9cdafc3f0cb65ecbb55e7833a2b1c9663d6e",
+  "tolerance_m": 0.01,
+  "tolerance_mps": 1e-05,
+  "units": {
+    "position": "m",
+    "velocity": "m/s"
+  }
+}
