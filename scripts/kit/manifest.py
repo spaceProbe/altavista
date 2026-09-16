@@ -166,8 +166,11 @@ or calls `sys.exit`.
 `KIT_MANIFEST` is JSON, written by `write_manifest` as `json.dump(..., indent=2, sort_keys=True,
 ensure_ascii=False)` plus one trailing newline. It contains:
 
-- `kit_format` (int, bumped whenever this shape changes -- 2 as of this round, see this module's
-  own top doc for what changed).
+- `kit_format` (int, bumped whenever this shape changes -- `KIT_FORMAT` below is the one source
+  of truth for its current value, 4 as of round 3; see this module's own top doc for the whole
+  bump history and what changed at each step. This line said "2 as of this round" through two
+  later bumps, which is exactly the failure mode a hand-copied number has -- it now names the
+  constant instead).
 - `git_commit` / `git_dirty` / `git_status` -- unchanged from round 1 (see `build_manifest`'s own
   doc).
 - `files` -- every regular, non-symlink file actually present under the kit root at the moment
