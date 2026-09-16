@@ -175,6 +175,28 @@
           }
         }
       ],
+      "name": "av-catalog",
+      "properties": [
+        {
+          "name": "altavista:sbom:audit-kind",
+          "value": "runtime"
+        },
+        {
+          "name": "altavista:sbom:source",
+          "value": "local"
+        }
+      ],
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
       "name": "av-cdm",
       "properties": [
         {
@@ -3170,9 +3192,9 @@
       "type": "application",
       "version": "0.1.0"
     },
-    "timestamp": "2026-09-15T18:02:25Z"
+    "timestamp": "2026-09-16T08:01:19Z"
   },
-  "serialNumber": "urn:uuid:27b7f37f-ab85-6606-4327-794bbe1d153b",
+  "serialNumber": "urn:uuid:303b365e-4944-0212-3bc0-4f7df626e3ae",
   "specVersion": "1.5",
   "version": 1
 }
