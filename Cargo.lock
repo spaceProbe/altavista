@@ -257,6 +257,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-jobs"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-label",
+ "openssl",
+ "prost",
+ "thiserror",
+]
+
+[[package]]
 name = "av-kernel"
 version = "0.1.0"
 dependencies = [

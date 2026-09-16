@@ -23,19 +23,36 @@ _sym_db = _symbol_database.Default()
 
 
 from . import entity_pb2 as altavista_dot_v1_dot_entity__pb2
+from . import envelope_pb2 as altavista_dot_v1_dot_envelope__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x61ltavista/v1/heavy.proto\x12\x0c\x61ltavista.v1\x1a\x19\x61ltavista/v1/entity.proto\"M\n\x07GeoBbox\x12\x0f\n\x07min_lon\x18\x01 \x01(\x01\x12\x0f\n\x07min_lat\x18\x02 \x01(\x01\x12\x0f\n\x07max_lon\x18\x03 \x01(\x01\x12\x0f\n\x07max_lat\x18\x04 \x01(\x01\"\x92\x01\n\x0c\x43\x61talogQuery\x12#\n\x04\x62\x62ox\x18\x01 \x01(\x0b\x32\x15.altavista.v1.GeoBbox\x12*\n\x04time\x18\x02 \x01(\x0b\x32\x1c.altavista.v1.TemporalExtent\x12\x12\n\nmedia_type\x18\x03 \x01(\t\x12\x0e\n\x06job_id\x18\x04 \x01(\t\x12\r\n\x05limit\x18\x05 \x01(\r\"\x87\x01\n\rCatalogRecord\x12\x10\n\x08\x61sset_id\x18\x01 \x01(\t\x12%\n\x05\x61sset\x18\x02 \x01(\x0b\x32\x16.altavista.v1.AssetRef\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x16\n\x0e\x63reated_tai_ns\x18\x04 \x01(\x03\x12\x15\n\rfootprint_wkt\x18\x05 \x01(\tb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x18\x61ltavista/v1/heavy.proto\x12\x0c\x61ltavista.v1\x1a\x19\x61ltavista/v1/entity.proto\x1a\x1b\x61ltavista/v1/envelope.proto\"M\n\x07GeoBbox\x12\x0f\n\x07min_lon\x18\x01 \x01(\x01\x12\x0f\n\x07min_lat\x18\x02 \x01(\x01\x12\x0f\n\x07max_lon\x18\x03 \x01(\x01\x12\x0f\n\x07max_lat\x18\x04 \x01(\x01\"\x92\x01\n\x0c\x43\x61talogQuery\x12#\n\x04\x62\x62ox\x18\x01 \x01(\x0b\x32\x15.altavista.v1.GeoBbox\x12*\n\x04time\x18\x02 \x01(\x0b\x32\x1c.altavista.v1.TemporalExtent\x12\x12\n\nmedia_type\x18\x03 \x01(\t\x12\x0e\n\x06job_id\x18\x04 \x01(\t\x12\r\n\x05limit\x18\x05 \x01(\r\"\x87\x01\n\rCatalogRecord\x12\x10\n\x08\x61sset_id\x18\x01 \x01(\t\x12%\n\x05\x61sset\x18\x02 \x01(\x0b\x32\x16.altavista.v1.AssetRef\x12\x0e\n\x06job_id\x18\x03 \x01(\t\x12\x16\n\x0e\x63reated_tai_ns\x18\x04 \x01(\x03\x12\x15\n\rfootprint_wkt\x18\x05 \x01(\t\"\xf6\x02\n\x07JobSpec\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x0c\n\x04kind\x18\x02 \x01(\t\x12&\n\x06inputs\x18\x03 \x03(\x0b\x32\x16.altavista.v1.AssetRef\x12\x39\n\nparameters\x18\x04 \x03(\x0b\x32%.altavista.v1.JobSpec.ParametersEntry\x12\"\n\x05label\x18\x05 \x01(\x0b\x32\x13.altavista.v1.Label\x12\x18\n\x10requested_tai_ns\x18\x06 \x01(\x03\x12/\n\x08\x65xecutor\x18\x07 \x01(\x0e\x32\x1d.altavista.v1.JobExecutorKind\x12\x0f\n\x07\x63ommand\x18\x08 \x03(\t\x12\x17\n\x0f\x63ontainer_image\x18\t \x01(\t\x12\x1e\n\x16\x63ontainer_image_digest\x18\n \x01(\t\x1a\x31\n\x0fParametersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"[\n\nJobFailure\x12*\n\x04kind\x18\x01 \x01(\x0e\x32\x1c.altavista.v1.JobFailureKind\x12\x0e\n\x06\x64\x65tail\x18\x02 \x01(\t\x12\x11\n\texit_code\x18\x03 \x01(\x05\"\xf4\x01\n\rJobCompletion\x12\x0e\n\x06job_id\x18\x01 \x01(\t\x12\x13\n\x0bspec_sha256\x18\x02 \x01(\t\x12\x14\n\x0cinput_sha256\x18\x03 \x03(\t\x12\'\n\x07outputs\x18\x04 \x03(\x0b\x32\x16.altavista.v1.AssetRef\x12\x17\n\x0fmanifest_sha256\x18\x05 \x01(\t\x12\x16\n\x0estarted_tai_ns\x18\x06 \x01(\x03\x12\x17\n\x0f\x66inished_tai_ns\x18\x07 \x01(\x03\x12\n\n\x02ok\x18\x08 \x01(\x08\x12)\n\x07\x66\x61ilure\x18\t \x01(\x0b\x32\x18.altavista.v1.JobFailure\"u\n\x0cJobLogRecord\x12*\n\tsubmitted\x18\x01 \x01(\x0b\x32\x15.altavista.v1.JobSpecH\x00\x12\x30\n\tcompleted\x18\x02 \x01(\x0b\x32\x1b.altavista.v1.JobCompletionH\x00\x42\x07\n\x05\x65vent*t\n\x0fJobExecutorKind\x12!\n\x1dJOB_EXECUTOR_KIND_UNSPECIFIED\x10\x00\x12\x1d\n\x19JOB_EXECUTOR_KIND_PROCESS\x10\x01\x12\x1f\n\x1bJOB_EXECUTOR_KIND_CONTAINER\x10\x02*\xef\x02\n\x0eJobFailureKind\x12 \n\x1cJOB_FAILURE_KIND_UNSPECIFIED\x10\x00\x12\"\n\x1eJOB_FAILURE_KIND_INPUT_MISSING\x10\x01\x12(\n$JOB_FAILURE_KIND_INPUT_HASH_MISMATCH\x10\x02\x12)\n%JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE\x10\x03\x12*\n&JOB_FAILURE_KIND_EXECUTOR_START_FAILED\x10\x04\x12!\n\x1dJOB_FAILURE_KIND_NONZERO_EXIT\x10\x05\x12$\n JOB_FAILURE_KIND_OUTPUT_REJECTED\x10\x06\x12\"\n\x1eJOB_FAILURE_KIND_LABEL_REFUSED\x10\x07\x12)\n%JOB_FAILURE_KIND_UNSUPPORTED_JOB_KIND\x10\x08\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'altavista.v1.heavy_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_GEOBBOX']._serialized_start=69
-  _globals['_GEOBBOX']._serialized_end=146
-  _globals['_CATALOGQUERY']._serialized_start=149
-  _globals['_CATALOGQUERY']._serialized_end=295
-  _globals['_CATALOGRECORD']._serialized_start=298
-  _globals['_CATALOGRECORD']._serialized_end=433
+  _globals['_JOBSPEC_PARAMETERSENTRY']._loaded_options = None
+  _globals['_JOBSPEC_PARAMETERSENTRY']._serialized_options = b'8\001'
+  _globals['_JOBEXECUTORKIND']._serialized_start=1300
+  _globals['_JOBEXECUTORKIND']._serialized_end=1416
+  _globals['_JOBFAILUREKIND']._serialized_start=1419
+  _globals['_JOBFAILUREKIND']._serialized_end=1786
+  _globals['_GEOBBOX']._serialized_start=98
+  _globals['_GEOBBOX']._serialized_end=175
+  _globals['_CATALOGQUERY']._serialized_start=178
+  _globals['_CATALOGQUERY']._serialized_end=324
+  _globals['_CATALOGRECORD']._serialized_start=327
+  _globals['_CATALOGRECORD']._serialized_end=462
+  _globals['_JOBSPEC']._serialized_start=465
+  _globals['_JOBSPEC']._serialized_end=839
+  _globals['_JOBSPEC_PARAMETERSENTRY']._serialized_start=790
+  _globals['_JOBSPEC_PARAMETERSENTRY']._serialized_end=839
+  _globals['_JOBFAILURE']._serialized_start=841
+  _globals['_JOBFAILURE']._serialized_end=932
+  _globals['_JOBCOMPLETION']._serialized_start=935
+  _globals['_JOBCOMPLETION']._serialized_end=1179
+  _globals['_JOBLOGRECORD']._serialized_start=1181
+  _globals['_JOBLOGRECORD']._serialized_end=1298
 # @@protoc_insertion_point(module_scope)
