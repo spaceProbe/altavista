@@ -40,10 +40,13 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-b5b99cac4338633f3ea960deecf7d4896b37bb438323632f1b1b07d4263fad1e
+06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e
 ```
 
-Moved here from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
+Recorded from the verification clone at the commit that regenerated the SBOMs (the bundle's
+epoch is the last commit touching its inputs, so the SBOM commit itself moved it, and this
+record is written in a following commit that touches no input). Moved here, in two steps,
+from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
 2026-09-16 by the lead at the heavy round 2 merge: the two Python SBOMs (`av-viewer`,
 `gmat-service`) had been regenerated from a worktree venv that lacks `setuptools` and carries
 a stale `altavista` dist-info, so they recorded `setuptools:no-longer-there` and
