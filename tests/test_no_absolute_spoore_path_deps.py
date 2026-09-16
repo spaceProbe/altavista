@@ -161,22 +161,59 @@ def test_av_track_four_spoore_deps_are_the_measured_relative_path():
         )
 
 
-def test_build_rs_spoore_proto_root_absolute_reference_is_the_declared_exception():
-    """`crates/av-proposer/build.rs`'s `SPOORE_PROTO_ROOT` constant is the same off-limits
-    crate's remaining absolute path, just in a build script rather than a Cargo.toml, so it
-    does not fit `_ALLOWED_ABSOLUTE_PATH_LINES` (that dict is keyed by Cargo.toml path/line;
-    forcing a `.rs` file into the same shape would obscure more than it would share) -- covered
-    here instead with the same positive-exception shape: this test both pins that the absolute
-    constant is still there today and, like the Cargo.toml exceptions above, is expected to
-    start failing (and be deleted) the day the heavy track relativizes it."""
-    build_rs = REPO_ROOT / "crates/av-proposer/build.rs"
-    expected = 'const SPOORE_PROTO_ROOT: &str = "/Users/probe/code/spoore/proto";'
-    text = build_rs.read_text()
-    assert expected in text, (
-        f"crates/av-proposer/build.rs: expected SPOORE_PROTO_ROOT's absolute path constant "
-        f"still present verbatim: {expected!r}. If this has been relativized, delete this "
-        f"test -- it is the heavy track's own remaining half of question 219(b)/(c), and a "
-        f"stale allowance must not outlive the thing it was excusing."
+def test_no_build_rs_hardcodes_an_absolute_spoore_path():
+    """The build.rs half of question 219(b)/(c) is now closed: `crates/av-proposer/build.rs`
+    used to hardcode `SPOORE_PROTO_ROOT = "/Users/probe/code/spoore/proto"` as a declared,
+    pinned exception (`test_build_rs_spoore_proto_root_absolute_reference_is_the_declared_
+    exception`, which lived here and is now deleted) -- the heavy track replaced the constant
+    with a `SPOORE_ROOT` environment override, `../spoore` sibling-checkout default
+    (`crates/av-proposer/spoore_root.rs`'s `resolve_spoore_root`, question 219(b)). This walks
+    every `build.rs` git tracks and asserts none of them declares an absolute
+    `/Users/probe/...` path literal in live code -- the same positive coverage the Cargo.toml
+    guard above gives path dependencies, closed here with no exception list at all, unlike that
+    guard's still-open `crates/av-proposer/Cargo.toml` entries (the heavy track's own remaining
+    half of question 219(b)/(c), untouched by this fix)."""
+    result = subprocess.run(
+        ["git", "ls-files", "*build.rs"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    )
+    build_rs_files = sorted(REPO_ROOT / line for line in result.stdout.splitlines() if line)
+    assert build_rs_files, "fixture assumption: at least one build.rs is tracked"
+    for path in build_rs_files:
+        rel = str(path.relative_to(REPO_ROOT))
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue  # prose explaining the fix, not live code
+            assert "/Users/probe/" not in line, (
+                f"{rel}:{lineno}: hardcodes an absolute /Users/probe/... path in live code: "
+                f"{line!r} -- question 219(b)/(c): a spoore checkout root must be resolved "
+                f"through SPOORE_ROOT with a ../spoore sibling-checkout default instead."
+            )
+
+
+def test_av_proposer_build_rs_reads_spoore_root_with_the_sibling_default():
+    """Positive replacement for the deleted pinned exception: `crates/av-proposer/build.rs`
+    must actually resolve its spoore checkout root through `SPOORE_ROOT` (with a `../spoore`
+    sibling-checkout default), not merely lack the old hardcoded `SPOORE_PROTO_ROOT` constant --
+    a file could pass the negative check above by deleting spoore support outright, which this
+    test rules out."""
+    build_rs_text = (REPO_ROOT / "crates/av-proposer/build.rs").read_text()
+    assert 'env::var("SPOORE_ROOT")' in build_rs_text, (
+        "crates/av-proposer/build.rs: expected it to read the SPOORE_ROOT environment variable"
+    )
+    assert 'include!("spoore_root.rs")' in build_rs_text, (
+        "crates/av-proposer/build.rs: expected it to include spoore_root.rs's resolution logic"
+    )
+
+    spoore_root_text = (REPO_ROOT / "crates/av-proposer/spoore_root.rs").read_text()
+    assert 'fn resolve_spoore_root(' in spoore_root_text
+    assert '.join("..").join("spoore")' in spoore_root_text, (
+        "crates/av-proposer/spoore_root.rs: expected the ../spoore sibling-checkout default"
+    )
+    assert '"proto/spoore/v0/model_service.proto"' in spoore_root_text, (
+        "crates/av-proposer/spoore_root.rs: expected the resolved root to be verified against "
+        "a real spoore checkout marker file"
     )
 
 

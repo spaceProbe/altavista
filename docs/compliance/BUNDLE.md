@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6
+c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
@@ -57,6 +57,27 @@ task's live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a ne
 committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content --
 exactly the "the hash moves when the EVIDENCE moves" rule this section states below, not a
 regression of the round-3 `git_commit` fix (see "What the hash depends on").
+
+It moved again, to the number above, from `19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6`,
+because of the aiplane merge's own SBOM regeneration (commit `4f559a9`, "Regenerate the SBOMs for
+the merge's workspace-manifest epoch move (question 220)"): that commit's real content change
+(confirmed with `git show --stat`, not assumed from its message alone) was `docs/compliance/sbom/
+av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json` losing stale distribution
+entries the two Python SBOMs no longer install in the shared worktree `.venv` (`setuptools` is no
+longer an installed distribution there at all, and `altavista` itself now carries no captured
+licence metadata rather than the `Apache-2.0` an earlier, differently-provisioned `.venv` once
+reported) -- `docs/compliance/sbom/SHA256SUMS` changed as a direct result, `SHA256SUMS` is one of
+`epoch_paths` above, and `sbom_hashes` is one of the evidence-dependent inputs `bundle_sha256`
+hashes (see "What the hash depends on" below): the bundle regenerated from the current tree no
+longer matched this file's previously recorded number, caught by
+`test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed by re-running the documented
+command and recording what it actually printed. Re-running `scripts/kit/sbom.py --out docs/
+compliance/sbom` for `av-viewer`/`gmat-service` against this same tree reproduces
+`docs/compliance/sbom/av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json`
+byte-for-byte -- confirmed with a real regeneration and `git status`/`diff` showing no change --
+so both files, and the bundle hash above, are already consistent with this worktree's real,
+current `.venv`; no component set, control matrix, or evidence content changed, only the two
+Python SBOMs' `.venv`-derived package list.
 
 ## What the hash depends on
 
