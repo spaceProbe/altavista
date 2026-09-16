@@ -76,6 +76,7 @@ name = "av-catalog"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-lockstep",
  "base64",
  "openssl",
  "prost",

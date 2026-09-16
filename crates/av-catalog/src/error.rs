@@ -227,9 +227,47 @@ pub enum CatalogError {
     /// [`crate::client::Row::get_i64`]/`get_f64`/`get_bool`: `column`'s text value did not
     /// parse as the requested type. Names the column, the expected shape, and the raw text
     /// PostgreSQL actually sent, so a caller sees exactly what it got (this task's brief,
-    /// verbatim: "a typed error naming the column and what it actually contained").
+    /// verbatim: "a typed error naming the column and what it actually contained"). Reused by
+    /// [`crate::pgtext`]'s array/bytea decoders and [`crate::model::CatalogAsset::from_row`]
+    /// for the identical shape of failure (a column's TEXT-format value did not parse as the
+    /// PostgreSQL wire type this crate expected it to be) -- see those modules' own doc
+    /// comments for why one variant serves every "malformed column value" case rather than a
+    /// family of near-identical ones.
     #[error("column {column:?}: expected {expected}, got {raw:?}")]
     ColumnParse { column: String, expected: &'static str, raw: String },
+
+    // -- src/migrate.rs (schema migrations) ------------------------------------------------
+    /// [`crate::migrate::Migrator::apply_pending`]/[`crate::migrate::Migrator::verify`]: a
+    /// migration recorded in `schema_migrations` as already applied has a `recorded_hash` that
+    /// no longer equals the committed migration file's own `file_hash` -- the file was edited
+    /// after it was applied. Refused rather than silently re-applied or silently ignored: a
+    /// migration file is committed, reviewed history; if what is on disk today no longer
+    /// matches what actually ran against this database, this crate has no way to know which of
+    /// the two is the database's real schema, and guessing would be exactly the kind of silent
+    /// failure this workspace's other docker-gated tests are built to catch instead.
+    #[error("migration {version} drift: schema_migrations recorded hash {recorded_hash}, but the committed migration file's own SHA-256 is {file_hash} -- the file was edited after it was applied")]
+    MigrationDrift { version: String, recorded_hash: String, file_hash: String },
+
+    // -- src/model.rs (AssetRef <-> CatalogAsset conversion) --------------------------------
+    /// [`crate::model::CatalogAsset::from_asset_ref`]: the source `AssetRef` had no `label` (or
+    /// no `provenance`) set. Both are `assets` table `NOT NULL` columns (`label_bytes`,
+    /// `provenance`), so a `CatalogAsset` cannot be built from an `AssetRef` missing either --
+    /// this crate refuses at conversion time rather than writing an empty/default value a
+    /// caller never actually supplied.
+    #[error("AssetRef.{field} is required to catalog an asset but was not set")]
+    AssetRefMissingField { field: &'static str },
+
+    // -- src/labels.rs (the clearance ladder) ------------------------------------------------
+    /// [`crate::labels::ClearanceLadder::markings_at_or_below`]: `marking` (a caller's claimed
+    /// clearance, passed to [`crate::query::find_assets`]) does not appear anywhere on this
+    /// deployment's ladder. Refused before any SQL runs -- never defaulted to a rank -- mirrors
+    /// `crates/av-store/src/labels.rs::ClearanceLadder::authorize_read`'s and `crates/
+    /// av-gateway/src/labels.rs::ClearanceLadder::classify`'s identical two-copy precedent (see
+    /// `src/labels.rs`'s own module doc: this is deliberately the third-in-workspace, now
+    /// fourth-counting-this-crate, copy of that convention, not a shared crate this task
+    /// unilaterally creates).
+    #[error("caller clearance {marking:?} is not on this deployment's clearance ladder -- refused before any SQL runs, never defaulted to a rank")]
+    CallerMarkingNotOnLadder { marking: String },
 }
 
 impl From<openssl::error::ErrorStack> for CatalogError {

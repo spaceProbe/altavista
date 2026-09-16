@@ -38,14 +38,24 @@
 //! SCRAM-SHA-256; `trust` covers only `local`/`127.0.0.1` INSIDE the container. Server version
 //! `17.11`, PostGIS `3.5.4`.
 //!
-//! # Scope of this crate today
+//! # Scope of this crate: H2a's transport, plus H2's schema/migrations/queries on top
 //!
-//! This crate delivers the TRANSPORT half only: wire framing ([`protocol`]), authentication
-//! ([`scram`]), and the async connection with the extended query protocol ([`client`]). It
-//! defines no catalog schema, ships no migrations, and knows nothing about what tables the
-//! catalog actually has -- a later task adds the schema, the migrations and the catalog
-//! queries on top of what this crate delivers today, using [`client::PgClient`] as its one
-//! entry point to the wire.
+//! H2a delivered the TRANSPORT half only: wire framing ([`protocol`]), authentication
+//! ([`scram`]), and the async connection with the extended query protocol ([`client`]). H2
+//! (this task) adds the catalog schema on top of that transport, using [`client::PgClient`] as
+//! its one entry point to the wire, never a second connection path:
+//!
+//! - [`migrate`] -- [`migrate::Migrator`], the committed/hashed/ordered `.sql` migration set
+//!   (`migrations/`) and its drift refusal.
+//! - [`model`] -- [`model::CatalogAsset`], the Rust record for one `assets` row, with
+//!   conversions to/from `av_cdm::pb::AssetRef`.
+//! - [`query`] -- [`query::find_assets`] (extent/time/label-filtered, the label filter always
+//!   evaluated IN SQL) and the job-lineage read/write pair.
+//! - [`labels`] -- [`labels::ClearanceLadder`], this crate's own copy of the workspace's
+//!   clearance-ladder convention (see that module's own doc for why it is a copy, not a shared
+//!   dependency).
+//! - [`pgtext`] -- pure PostgreSQL TEXT-format array/`bytea` encode/decode, shared by
+//!   [`model`] and [`query`].
 //!
 //! # Module layout
 //!
@@ -59,11 +69,22 @@
 //!   [`client::PgTls::Required`], an OpenSSL-wrapped stream), driving [`protocol`] and
 //!   [`scram`] to speak the startup/auth handshake and the extended query protocol.
 //! - [`error`] -- [`error::CatalogError`], the one error type for this crate.
+//! - [`migrate`], [`model`], [`query`], [`labels`], [`pgtext`] -- this task's own additions,
+//!   described above.
 
 pub mod client;
 pub mod error;
+pub mod labels;
+pub mod migrate;
+pub mod model;
+pub mod pgtext;
 pub mod protocol;
+pub mod query;
 pub mod scram;
 
-pub use error::CatalogError;
 pub use client::{Param, PgClient, PgConfig, PgTls, Row};
+pub use error::CatalogError;
+pub use labels::ClearanceLadder;
+pub use migrate::{MigrationRecord, Migrator, MIGRATIONS};
+pub use model::CatalogAsset;
+pub use query::{find_assets, insert_lineage, lineage_parents, AssetQuery, GeoBbox, TimeRange, MAX_QUERY_LIMIT};
