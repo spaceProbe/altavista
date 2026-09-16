@@ -26,13 +26,14 @@
       "version": "2.21.0"
     },
     {
-      "name": "altavista",
-      "properties": [
+      "licenses": [
         {
-          "name": "altavista:sbom:no-licence-metadata",
-          "value": "true"
+          "license": {
+            "id": "Apache-2.0"
+          }
         }
       ],
+      "name": "altavista",
       "type": "library",
       "version": "0.1.0"
     },
@@ -313,6 +314,18 @@
       "name": "python-dotenv",
       "type": "library",
       "version": "1.2.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "setuptools",
+      "type": "library",
+      "version": "84.0.0"
     },
     {
       "licenses": [

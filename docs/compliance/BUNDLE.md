@@ -40,8 +40,17 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec
+b5b99cac4338633f3ea960deecf7d4896b37bb438323632f1b1b07d4263fad1e
 ```
+
+Moved here from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
+2026-09-16 by the lead at the heavy round 2 merge: the two Python SBOMs (`av-viewer`,
+`gmat-service`) had been regenerated from a worktree venv that lacks `setuptools` and carries
+a stale `altavista` dist-info, so they recorded `setuptools:no-longer-there` and
+`altavista:no-licence-metadata`; regenerated from a venv installed with `pip install -e
+".[dev]"` (the verification clone's), which is what the committed documents describe. The
+finding that a Python SBOM records the live venv rather than the declared dependency set is
+question 224.
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
 slots) and reading `bundle_sha256` from the written `out/evidence/bundle.json` -- the same value
