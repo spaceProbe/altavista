@@ -117,6 +117,12 @@ def _real_constants() -> dict[str, dict[str, "str | None"]]:
         "admin": _extract(av_gateway, r'const DEFAULT_ADMIN_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-gateway/src/bin/av-gateway.rs"),
     }
 
+    av_ingest = _read("crates/av-ingest/src/bin/av-ingest-server.rs")
+    real["av-ingest"] = {
+        "grpc": _extract(av_ingest, r'const DEFAULT_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-ingest/src/bin/av-ingest-server.rs"),
+        "admin": _extract(av_ingest, r'const DEFAULT_ADMIN_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-ingest/src/bin/av-ingest-server.rs"),
+    }
+
     dyn_config = _read("crates/av-dynamics-service/src/config.rs")
     dyn_grpc = _extract(dyn_config, r"pub const DEFAULT_PORT: u16 = (\d+);", source="crates/av-dynamics-service/src/config.rs")
     dyn_server = _read("crates/av-dynamics-service/src/bin/server.rs")

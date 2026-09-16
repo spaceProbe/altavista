@@ -52,10 +52,12 @@ repo = "spaceProbe/altavista"
 ref = "develop"  # D3's kit manifest pins the exact commit
 kind = "service"
 tier = "engine"
-# GAP, not a real 0: crates/av-ingest/src/bin/av-ingest-server.rs has no default bind at all —
-# --grpc-bind/--admin-bind are required flags (question 208(c), the other track's port map).
-# See [ports.av-ingest] below; ports.py's gap check fails the day this becomes a real default.
-port = 0
+# Question 219(a): av-ingest now owns a real default bind in docs/architecture.md's
+# "### Default ports" table -- 127.0.0.1:50060 (admin 127.0.0.1:50160), the free slot
+# immediately below gmat-service (50061) and av-dynamics-service (50062). See
+# [ports.av-ingest] below (kind = "const"); ports.py's three-way check cross-checks this
+# value against the source constant AND the owned port map.
+port = 50060
 runtime = "rust"
 role = "edge telemetry ingest — signed, chained MeasurementBatch gRPC intake + admin HTTP"
 
@@ -141,10 +143,10 @@ role = "Three.js viewer — python -m altavista serve"
 #   "no-listener" the component never listens at all — declared port must be 0.
 
 [ports.av-ingest]
-kind = "gap"
+kind = "const"
 file = "crates/av-ingest/src/bin/av-ingest-server.rs"
-flag = '--grpc-bind is required'
-note = "question 217(g): the owned port map (docs/architecture.md '### Default ports') is now the single source ports.py's check_ports() cross-checks every kind = \"const\" row against, but the map as merged carries no row for av-ingest — there is nothing to fill this gap from, and inventing a number is exactly what round 1's decision 4 refused. kind stays \"gap\", checked two ways: the existing flag-marker/DEFAULT_BIND check on the source file above, AND a check that av-ingest is still absent from the owned port map. The day av-ingest lands a default bind in source, OR the owned port map itself gains an av-ingest row, either check goes stale (fails) and forces this row to become kind = \"const\" with a real port."
+pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
+note = "question 219(a): the gap question 217(g) recorded is now closed -- av-ingest owns a real default bind (docs/architecture.md '### Default ports', 127.0.0.1:50060 / admin 127.0.0.1:50160) checked three ways by ports.py's check_ports(): this fragment's declared port, the DEFAULT_BIND constant in the source file above, and the owned port map row. av-proposer (see [ports.av-proposer] below) stays a \"gap\" row -- that crate is the heavy team's, next round."
 
 [ports.av-command]
 kind = "const"
