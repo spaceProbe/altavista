@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-f5c4c12e1106c5507a3d9465e9d1d69514f3027d82176a3ea5927047a3104f8a
+19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
