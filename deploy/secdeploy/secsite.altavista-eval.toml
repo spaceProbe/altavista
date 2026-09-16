@@ -1,0 +1,37 @@
+# AltaVista D1 evaluation site placement — a STANDALONE secdeploy site file (Decision B:
+# never merged with, or dependent on, the user's own secsite.toml — that file carries the
+# user's LAN address, model directories, and voice settings, none of which we read or copy).
+#
+# This is the one-resource macOS shape: every secdeploy tier (identity, inference, gateway,
+# collab, edge) plus every AltaVista component (via [tier_compat]'s mapping onto those same
+# five tiers — see deploy/secdeploy/suite.altavista.toml) lands on a single local resource.
+# It only has to VALIDATE this round (`secdeploy ... verify --site secsite.altavista-eval.toml`
+# / `plan macos --site ...`) — nothing is deployed from it.
+
+domain = "altavista.internal"
+upstream_dns = []
+
+[resources.local]
+target = "macos"
+address = "127.0.0.1"
+# "gpu" here is not a literal discrete GPU — it is this Apple-Silicon host's unified-memory
+# acceleration, which is true of this host. Declaring it also keeps topology.py's inference/gpu
+# check quiet: our engine-tier component (av-ingest, mapped engine -> inference by
+# [tier_compat]) would otherwise trip src/secdeploy/topology.py's Topology.validate()
+# "inference tier is on resource ... which declares no 'gpu' capability" WARNING.
+capabilities = ["gpu"]
+
+[groups.identity]
+resource = "local"
+
+[groups.inference]
+resource = "local"
+
+[groups.gateway]
+resource = "local"
+
+[groups.collab]
+resource = "local"
+
+[groups.edge]
+resource = "local"

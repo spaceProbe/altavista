@@ -32,9 +32,18 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 import edge_local_ca as ca  # noqa: E402  (path insert must precede this import)
 
+from altavista.test_env import resolve_cfs_mirror_dir, resolve_gmat_root  # noqa: E402
+
 RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
-GMAT_ROOT = "/Users/probe/code/AltaVista/GMAT R2026a"
-CFS_MIRROR_DIR = "/Users/probe/code/AltaVista/third_party/mirrors"
+
+# Resolved ONCE at import time (question 217(d)): env var first, then this worktree's own
+# machine-local `GMAT R2026a`/`third_party/mirrors` entries (gitignored symlinks on THIS
+# machine, real directories elsewhere -- see `altavista/test_env.py`'s own doc); on a plain
+# clone elsewhere neither exists, so these come back `None` with a named reason instead of a
+# `/Users/probe` literal that would make `av_edge_binaries`' `cargo build` fail for a reason
+# unrelated to this test. Never assigned back into `os.environ` (question 199).
+GMAT_ROOT, _GMAT_ROOT_SKIP_REASON = resolve_gmat_root()
+CFS_MIRROR_DIR, _CFS_MIRROR_DIR_SKIP_REASON = resolve_cfs_mirror_dir()
 
 OPENSSL_BIN = "openssl"  # LibreSSL 3.3.6 on this host -- fine for the plain `-text`/
 # `verify`/`-dates`/`-noout -subject` assertions this file makes (no Python `cryptography`
@@ -57,11 +66,15 @@ SECCERT_DIR_FOR_TEST = Path(_SECCERT_DIR_OVERRIDE) if _SECCERT_DIR_OVERRIDE else
 def _cargo_env() -> dict:
     """A fresh copy of the process environment, with the additions every `cargo`/`pytest`
     invocation in this task needs (never assigned back into `os.environ` itself --
-    question 199)."""
+    question 199). Only overrides GMAT_ROOT/CFS_MIRROR_DIR when they actually resolved
+    (`av_edge_binaries` below skips visibly before ever calling this when they did not) --
+    never overwrites an inherited value with a `/Users/probe` literal that might not exist."""
     env = dict(os.environ)
     env["PATH"] = f"{RUSTUP_PATH_PREFIX}:{env.get('PATH', '')}"
-    env["GMAT_ROOT"] = GMAT_ROOT
-    env["CFS_MIRROR_DIR"] = CFS_MIRROR_DIR
+    if GMAT_ROOT is not None:
+        env["GMAT_ROOT"] = GMAT_ROOT
+    if CFS_MIRROR_DIR is not None:
+        env["CFS_MIRROR_DIR"] = CFS_MIRROR_DIR
     return env
 
 
@@ -103,9 +116,15 @@ def _require_seccert_and_lego() -> None:
 @pytest.fixture(scope="module")
 def av_edge_binaries():
     """Builds `av-edge-identity` and `av-edge-make-signed-batch` once for the module.
-    Skips visibly if `cargo` itself is not on `PATH` (question 194: docker/toolchain-gated
-    tests skip visibly or run for real, never pass silently); a build failure once cargo
-    IS present is a real failure of this task, not something to paper over by skipping."""
+    Skips visibly if `cargo` itself is not on `PATH`, or if `GMAT_ROOT`/`CFS_MIRROR_DIR`
+    could not be resolved (question 194: docker/toolchain-gated tests skip visibly or run
+    for real, never pass silently, and never fail obscurely inside a `cargo build` for a
+    reason unrelated to this test); a build failure once cargo and both directories ARE
+    present is a real failure of this task, not something to paper over by skipping."""
+    if _GMAT_ROOT_SKIP_REASON is not None:
+        pytest.skip(_GMAT_ROOT_SKIP_REASON)
+    if _CFS_MIRROR_DIR_SKIP_REASON is not None:
+        pytest.skip(_CFS_MIRROR_DIR_SKIP_REASON)
     env = _cargo_env()
     cargo = None
     for candidate in (f"{RUSTUP_PATH_PREFIX}/cargo", "cargo"):

@@ -188,7 +188,7 @@ import shutil
 import subprocess
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -201,6 +201,7 @@ from altavista.container_hardening import (
     prune_stale_labelled_resources,
 )
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.test_env import missing_spoore_reason, spoore_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EDGE_PLUGIN_DIR = REPO_ROOT / "services" / "edge-plugin"
@@ -208,6 +209,39 @@ DOCKERFILE = EDGE_PLUGIN_DIR / "Dockerfile"
 BUILD_SCRIPT = "services/edge-plugin/build-image.sh"
 IMAGE_TAG = "av-edge-plugin:local"
 PROBE_IMAGE = "python:3.13-slim"
+
+# Question 219(c) defect fix (round 4). Three shapes tried, in order -- see
+# `scripts/kit/build_kit.py`'s own `CONTAINER_WORKSPACE` comment for the full account of the
+# first two and how each was measured broken with a real `docker run`, not assumed:
+#
+# 1. Single mount at the relative sibling of wherever this repository is mounted (what the root
+#    Cargo.toml's own now-relative `spoore-cdm` dependency resolves to). Broken: cargo has to
+#    load EVERY workspace member's manifest to resolve the workspace at all, `av-proposer`
+#    included, even though this function never builds it, and that crate's own
+#    `spoore-models`/`spoore-ml` dependencies are still absolute `/Users/probe/code/spoore/...`
+#    host paths (off-limits to this track) -- failed with `error: failed to load manifest for
+#    workspace member .../crates/av-proposer ... failed to read
+#    /Users/probe/code/spoore/crates/spoore-models/Cargo.toml`.
+# 2. A second real bind mount of the SAME host spoore directory at that fixed absolute path (or
+#    an in-container symlink between the two -- also tried, also failed identically). Broken:
+#    cargo then sees `spoore-cdm` as two different packages (reached once via this workspace's
+#    own relative dependency, once via `spoore-models`' own `spoore-cdm.workspace = true`,
+#    resolved through spoore's OWN workspace root) and refuses to write the lockfile: `error:
+#    package collision in the lockfile: packages spoore-cdm v0.0.0
+#    (/Users/probe/code/spoore/crates/spoore-cdm) and spoore-cdm v0.0.0
+#    (/spoore/crates/spoore-cdm) are different` -- confirmed with a real `cargo generate-
+#    lockfile` run (`cargo metadata --no-deps` alone does NOT reproduce this, since `--no-deps`
+#    skips the resolution step that hits it).
+# 3. THE FIX: mount this repository itself at a container path whose PARENT directory is
+#    literally `/Users/probe/code` (`CONTAINER_WORKSPACE` below), not `/workspace`. Spoore's own
+#    bind-mount destination, still computed as that mount point's sibling, is then
+#    `/Users/probe/code/spoore` BY CONSTRUCTION -- the exact literal `crates/av-proposer/
+#    Cargo.toml`'s own absolute dependency already needs, so ONE real mount now satisfies both
+#    routes to `spoore-cdm` because they name the identical container path, not two aliased by a
+#    mount or a symlink. Verified with a real `cargo generate-lockfile` (all 186 packages
+#    locked, no collision) and then a full cross-build producing a real Linux ELF.
+CONTAINER_WORKSPACE = "/Users/probe/code/AltaVista-edge"
+SPOORE_CONTAINER_PATH = str(PurePosixPath(CONTAINER_WORKSPACE).parent / "spoore")
 
 FIXTURES_DIR = REPO_ROOT / "crates" / "av-edge" / "tests" / "fixtures" / "ground_segment"
 SIGNING_KEY_PEM = REPO_ROOT / "crates" / "av-edge" / "tests" / "fixtures" / "test_signing_key.pem"
@@ -293,6 +327,9 @@ def _compute_skip_reason() -> "str | None":
             f"image itself (question 154: no network at test time). Run `docker pull {PROBE_IMAGE}` "
             f"once, on a host with network access, then re-run this test."
         )
+    spoore_reason = missing_spoore_reason()
+    if spoore_reason is not None:
+        return spoore_reason
     return None
 
 
@@ -417,21 +454,35 @@ def _cross_build_ingest_server_binary(dest_dir: Path) -> Path:
     workspace's `spoore-cdm` path dependency). `av-ingest-server` is deliberately NOT part of
     `services/edge-plugin/Dockerfile`'s own deliverable image (that Dockerfile packages the
     plugin only) -- this test needs a real ingest to prove the plugin actually delivers
-    batches somewhere, so it builds one for itself, independent of the plugin's own image."""
+    batches somewhere, so it builds one for itself, independent of the plugin's own image.
+    Mounted spoore at SPOORE_CONTAINER_PATH -- the fixed absolute path by construction, see
+    that constant's own module-level comment for the full, measured reasoning (a single mount
+    now satisfies both this workspace's own relative `spoore-cdm` dependency and av-proposer's
+    still-absolute one, because CONTAINER_WORKSPACE's own parent is deliberately
+    `/Users/probe/code`)."""
     scratch_target = REPO_ROOT / "target-docker-linux"  # already .gitignore'd/.dockerignore'd
     shutil.rmtree(scratch_target, ignore_errors=True)
     build = subprocess.run(
         [
             "docker", "run", "--rm",
-            "-v", f"{REPO_ROOT}:/workspace",
-            "-v", "/Users/probe/code/spoore:/Users/probe/code/spoore:ro",
-            "-w", "/workspace",
+            "-v", f"{REPO_ROOT}:{CONTAINER_WORKSPACE}",
+            # HOST source resolved by altavista.test_env.spoore_dir() (AV_SPOORE_DIR, else a
+            # `spoore` checkout beside this repository's own root -- question 217(d), never a
+            # `/Users/probe` literal). The CONTAINER destination is the sibling of
+            # CONTAINER_WORKSPACE (question 219(c) defect fix, round 4): the root Cargo.toml's
+            # own `spoore-cdm = { path = "../spoore/crates/spoore-cdm" }` is now a RELATIVE
+            # sibling path, resolved inside the container against wherever this repository is
+            # mounted -- not the literal `/Users/probe/code/spoore` this comment used to name
+            # (that was true only while the root Cargo.toml's own dependency was itself
+            # absolute); see altavista/test_env.py::spoore_dir's own doc.
+            "-v", f"{spoore_dir()}:{SPOORE_CONTAINER_PATH}:ro",
+            "-w", CONTAINER_WORKSPACE,
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
             "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
             "protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && "
-            "cargo build --release -p av-ingest --bin av-ingest-server --target-dir /workspace/target-docker-linux && "
-            "strip /workspace/target-docker-linux/release/av-ingest-server",
+            f"cargo build --release -p av-ingest --bin av-ingest-server --target-dir {CONTAINER_WORKSPACE}/target-docker-linux && "
+            f"strip {CONTAINER_WORKSPACE}/target-docker-linux/release/av-ingest-server",
         ],
         capture_output=True, text=True, timeout=600,
     )

@@ -277,6 +277,7 @@ disagree.
 | --- | --- | --- | --- |
 | `av-command` | `127.0.0.1:50070` | `127.0.0.1:50170` | `crates/av-command/src/bin/av-command.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |
 | `av-gateway` | `127.0.0.1:50071` | `127.0.0.1:50171` | `crates/av-gateway/src/bin/av-gateway.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |
+| `av-ingest` | `127.0.0.1:50060` | `127.0.0.1:50160` | `crates/av-ingest/src/bin/av-ingest-server.rs::DEFAULT_BIND` / `::DEFAULT_ADMIN_BIND` |
 | `av-dynamics-service` | `127.0.0.1:50062` | `127.0.0.1:50162` | `crates/av-dynamics-service/src/config.rs::DEFAULT_PORT` / `crates/av-dynamics-service/src/bin/server.rs::DEFAULT_ADMIN_PORT` |
 | `gmat-service` (Python, ADR-002 depth 1) | `127.0.0.1:50061` | `127.0.0.1:50161` | `services/gmat-service/gmat_service/config.py::DEFAULT_PORT` / `::DEFAULT_ADMIN_PORT` |
 | `av-lockstep-shim` | `127.0.0.1:50080` | *(none)* | `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` |
@@ -293,6 +294,14 @@ the `5007x` authority plane (`av-command`, `av-gateway`), which is deliberately 
 `av-ingest`'s own bind (P5, same round). `altavista.v1.ModelProposeService` is a *client* in
 this crate, not a bind, and is not in this table for that reason; `av-proposer` has no admin
 surface at all.
+
+Question 219(a): `av-ingest` gets a real default bind this round (the P5 team's crate);
+`av-proposer` stays a `gap` row (the heavy team's, next round). `50060` is the free slot
+immediately below `gmat-service` (`50061`) and `av-dynamics-service` (`50062`), so the three
+data-plane services sit adjacent in this table; grep-verified free across this worktree,
+`/Users/probe/code/spoore` and `/Users/probe/code/secdeploy` before being chosen (only
+incidental client-side ephemeral ports in old secdeploy health-check logs matched the same two
+numbers, not a real reservation -- see the round 4 commit for the full grep evidence).
 
 Two collisions this table records rather than silently re-numbering around:
 

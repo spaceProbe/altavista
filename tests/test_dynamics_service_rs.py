@@ -46,6 +46,7 @@ import grpc
 import pytest
 
 from altavista import cdm as cdm_adapter
+from altavista.test_env import drain_after_terminate
 from altavista.pb import core_pb2, dynamics_service_pb2, dynamics_service_pb2_grpc, trajectory_pb2
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -109,12 +110,11 @@ def server(server_bin, tmp_path_factory):
         except Exception as e:
             channel.close()
             returncode = proc.poll()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # The readiness wait timed out, so the subprocess is (almost always) STILL RUNNING,
+            # and `proc.stdout.read()` here used to block FOREVER -- measured, 34 minutes, in the
+            # P5 round-3 acceptance gate. See `altavista.test_env.drain_after_terminate`'s own
+            # doc for the whole measurement and why every site of this shape now uses it.
+            output = drain_after_terminate(proc)
             pytest.fail(
                 f"av-dynamics-service subprocess did not become ready within {READY_TIMEOUT_S}s "
                 f"(returncode={returncode}): {e}\n--- subprocess output ---\n{output}")

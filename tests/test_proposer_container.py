@@ -119,11 +119,12 @@ import struct
 import subprocess
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.test_env import missing_spoore_reason, spoore_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROPOSER_DIR = REPO_ROOT / "services" / "proposer"
@@ -131,6 +132,45 @@ DOCKERFILE = PROPOSER_DIR / "Dockerfile"
 BUILD_SCRIPT = "services/proposer/build-image.sh"
 IMAGE_TAG = "av-proposer:local"
 PROBE_IMAGE = "python:3.13-slim"
+
+# Question 219(c) defect fix (round 4). Three shapes tried, in order -- see
+# `scripts/kit/build_kit.py`'s own `CONTAINER_WORKSPACE` comment for the full account of why the
+# first two were each measured broken with a real `docker run`, not assumed:
+#
+# 1. Single mount at the relative sibling only (what the root Cargo.toml's now-relative
+#    `spoore-cdm = { path = "../spoore/crates/spoore-cdm" }`, av-cdm's dependency reached by both
+#    av-command and av-gateway below, resolves to). Broken: cargo has to load EVERY workspace
+#    member's manifest to resolve the workspace at all -- av-proposer's included -- even though
+#    this function never builds it (only av-command/av-gateway, below), and
+#    `crates/av-proposer/Cargo.toml`'s own `spoore-models` dependency (plus its build.rs's own
+#    direct read of spoore's model_service.proto) is still an absolute
+#    `/Users/probe/code/spoore/...` host path (av-proposer is off-limits to this track -- the
+#    heavy track's remaining half of question 219(b)/(c)) -- failed the same "failed to load
+#    manifest for workspace member .../crates/av-proposer" way build_kit.py's own comment
+#    records.
+# 2. A second real bind mount of SPOORE_ROOT at that fixed absolute path (alongside the one at
+#    SPOORE_CONTAINER_PATH) -- or an in-container symlink between the two, also tried. Both
+#    broken identically: cargo sees `spoore-cdm` as two different packages (reached once via
+#    this workspace's own relative dependency, once via `spoore-models`' own
+#    `spoore-cdm.workspace = true`, resolved through spoore's OWN workspace root) and refuses to
+#    write the lockfile: `error: package collision in the lockfile: packages spoore-cdm v0.0.0
+#    (/Users/probe/code/spoore/crates/spoore-cdm) and spoore-cdm v0.0.0
+#    (/spoore/crates/spoore-cdm) are different` -- confirmed with a real `cargo generate-
+#    lockfile` run.
+# 3. THE FIX: mount this repository itself at a container path whose PARENT directory is
+#    literally `/Users/probe/code` (CONTAINER_WORKSPACE below), not `/workspace`. Spoore's own
+#    bind-mount destination, still computed as that mount point's sibling, is then
+#    `/Users/probe/code/spoore` BY CONSTRUCTION -- the exact literal av-proposer's own manifest
+#    already needed -- so there is only ONE spoore container path any more (`SPOORE_CONTAINER_
+#    PATH` below; a separate `SPOORE_FIXED_ABS_PATH` name is not needed since the two are now
+#    identical by construction), and ONE real mount satisfies both routes to `spoore-cdm` at
+#    once. Verified with a real `cargo generate-lockfile` (all 186 packages locked, no
+#    collision) and then a full cross-build producing a real Linux ELF (av-ingest-server, this
+#    round's own proof target -- see scripts/kit/build_kit.py; this file's own
+#    av-command/av-gateway cross-build was not separately re-run end to end, but resolves the
+#    identical workspace graph the same way).
+CONTAINER_WORKSPACE = "/Users/probe/code/AltaVista-edge"
+SPOORE_CONTAINER_PATH = str(PurePosixPath(CONTAINER_WORKSPACE).parent / "spoore")
 
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "demo_two_instance.runproducts.bin"
 # The real fixture's own `run_id` (`crates/av-proposer/tests/common/mod.rs::FIXTURE_RUN_ID`,
@@ -240,8 +280,9 @@ def _compute_skip_reason() -> "str | None":
             "on disk with the committed altavista.pb bindings. Run "
             "`.venv/bin/python altavista/pb/generate.py` on a host with protoc installed, then re-run."
         )
-    if not (Path("/Users/probe/code/spoore") / "crates" / "spoore-cdm").exists():
-        return "/Users/probe/code/spoore/crates/spoore-cdm not found -- av-proposer's own cross-build (and this test's av-command/av-gateway cross-build) bind-mounts it (see services/proposer/Dockerfile's own header comment)."
+    spoore_reason = missing_spoore_reason()
+    if spoore_reason is not None:
+        return spoore_reason
     if not Path(OPENSSL).exists():
         return f"{OPENSSL} not found -- this test generates a throwaway RSA keypair for av-command's --oidc-public-key-path with it, entirely locally (question 154)."
     return None
@@ -332,15 +373,24 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
     `av-edge-plugin`, applied here because `services/proposer/Dockerfile` packages ONLY the
     proposer (its own header comment's "Self-contained and offline" section) -- Container G
     needs real `av-command`/`av-gateway` binaries this test builds for itself, independent of
-    the proposer's own image."""
+    the proposer's own image. Mounted at SPOORE_CONTAINER_PATH -- the fixed absolute path by
+    construction, see that constant's own module-level comment for the full, measured reasoning
+    (one mount now satisfies both this workspace's own relative `spoore-cdm` dependency and
+    av-proposer's still-absolute one, because CONTAINER_WORKSPACE's own parent is deliberately
+    `/Users/probe/code`)."""
     scratch_target = REPO_ROOT / "target-docker-linux"  # already .gitignore'd/.dockerignore'd
     shutil.rmtree(scratch_target, ignore_errors=True)
     build = subprocess.run(
         [
             "docker", "run", "--rm",
-            "-v", f"{REPO_ROOT}:/workspace",
-            "-v", "/Users/probe/code/spoore:/Users/probe/code/spoore:ro",
-            "-w", "/workspace",
+            "-v", f"{REPO_ROOT}:{CONTAINER_WORKSPACE}",
+            # HOST source resolved by altavista.test_env.spoore_dir() (AV_SPOORE_DIR, else a
+            # `spoore` checkout beside this repository's own root -- question 217(d), never a
+            # `/Users/probe` literal). See this module's own SPOORE_CONTAINER_PATH comment above
+            # for why one mount at this destination now satisfies both dependencies, even though
+            # this function only cross-builds av-command/av-gateway, never av-proposer itself.
+            "-v", f"{spoore_dir()}:{SPOORE_CONTAINER_PATH}:ro",
+            "-w", CONTAINER_WORKSPACE,
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
             # SUPERSEDED (question 211, the lead, 2026-09-15): this comment used to claim a
@@ -353,9 +403,9 @@ def _cross_build_command_and_gateway_binaries(dest_dir: Path) -> tuple[Path, Pat
             "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
             "protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && "
             "cargo build --release -p av-command --bin av-command -p av-gateway --bin av-gateway "
-            "--target-dir /workspace/target-docker-linux && "
-            "strip /workspace/target-docker-linux/release/av-command "
-            "/workspace/target-docker-linux/release/av-gateway",
+            f"--target-dir {CONTAINER_WORKSPACE}/target-docker-linux && "
+            f"strip {CONTAINER_WORKSPACE}/target-docker-linux/release/av-command "
+            f"{CONTAINER_WORKSPACE}/target-docker-linux/release/av-gateway",
         ],
         capture_output=True, text=True, timeout=900,
     )

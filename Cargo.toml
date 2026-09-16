@@ -51,7 +51,14 @@ nalgebra = "0.33"
 # without a version conflict. spoore/Cargo.toml's own declared rust-version is out of this
 # workspace's control (question 12) and is not asserted here; this workspace's own floor is
 # measured above (question 208(a)) and is 1.87, not 1.85.
-spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }
+#
+# Question 219(c): relative sibling path, not an absolute one -- a clone of this repo placed
+# anywhere, with a spoore checkout beside it (`../spoore` from this file), builds; an absolute
+# `/Users/probe/code/spoore/...` only ever worked on this one host. Matches the sibling-checkout
+# default the two `services/*/build-image.sh` scripts' `SPOORE_ROOT` override now uses
+# (question 219(b)) -- both conventions assume the same layout: spoore checked out next to this
+# repo's own root, never a fixed absolute path baked into committed source.
+spoore-cdm = { path = "../spoore/crates/spoore-cdm" }
 
 [profile.release]
 debug = 1

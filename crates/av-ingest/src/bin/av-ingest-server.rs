@@ -48,9 +48,11 @@
 //!
 //! # Printing the bound addresses
 //!
-//! Both `--grpc-bind`/`--admin-bind` are handed to `crate::server::bind_loopback` as
-//! given (typically `127.0.0.1:0`, an ephemeral port -- never a fixed one, matching every
-//! other test in this workspace); the OS-assigned addresses are then printed to **stdout**
+//! Both `--grpc-bind`/`--admin-bind` are optional (question 219(a)): given explicitly, the
+//! value is handed to `crate::server::bind_loopback` as-is (every test in this workspace
+//! passes `127.0.0.1:0`, an ephemeral port, which always wins over the default below);
+//! omitted, each falls back to its own `DEFAULT_BIND`/`DEFAULT_ADMIN_BIND` constant. Either
+//! way the OS-assigned addresses are then printed to **stdout**
 //! as `GRPC_LISTENING <addr>` / `ADMIN_LISTENING <addr>`, each its own line, flushed
 //! before either server starts accepting, so a test driving this binary as a subprocess
 //! can read the two lines back instead of guessing a port or re-implementing this
@@ -89,6 +91,19 @@ use av_ingest::pb::edge_ingest_server::EdgeIngestServer;
 use av_ingest::server::bind_loopback;
 use av_ingest::service::{EdgeIngestConfig, EdgeIngestService};
 
+/// Question 219(a): `docs/architecture.md` section 4, "### Default ports", is the one owned
+/// port map for every service's default bind in this workspace -- this constant and
+/// `DEFAULT_ADMIN_BIND` below are its entry for `av-ingest`. `50060` is the free slot
+/// immediately below `gmat-service` (`50061`) and `av-dynamics-service` (`50062`), keeping
+/// the three data-plane services adjacent -- grep-verified free across this worktree,
+/// `/Users/probe/code/spoore` and `/Users/probe/code/secdeploy` before being chosen (question
+/// 219(a)'s own instruction not to invent a number the manager hadn't picked).
+const DEFAULT_BIND: &str = "127.0.0.1:50060";
+/// The table's own "gRPC default first, admin default gRPC + 100" convention
+/// (`crates/av-command/src/bin/av-command.rs`'s `DEFAULT_ADMIN_BIND` is the closest
+/// precedent). See `docs/architecture.md` section 4, "### Default ports".
+const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:50160";
+
 #[derive(Debug)]
 enum ClockArg {
     Fixed(i64),
@@ -110,7 +125,7 @@ struct Args {
 }
 
 const USAGE: &str = "usage: av-ingest-server \
-    --grpc-bind ADDR --admin-bind ADDR --log-dir PATH \
+    [--grpc-bind ADDR] [--admin-bind ADDR] --log-dir PATH \
     [--trust-anchor PATH]... [--intermediate-chain PATH] \
     --clearance-ladder A,B,C --max-batch-age-ns N \
     [--require-client-cert | --no-require-client-cert] \
@@ -185,8 +200,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     }
 
     Ok(Args {
-        grpc_bind: grpc_bind.ok_or("--grpc-bind is required")?,
-        admin_bind: admin_bind.ok_or("--admin-bind is required")?,
+        // Question 219(a): both fall back to this workspace's owned default bind
+        // (docs/architecture.md "### Default ports") when omitted -- an explicit flag
+        // (every test in this workspace passes `127.0.0.1:0`) always wins, since it is only
+        // ever assigned here when `args.next()` actually produced one.
+        grpc_bind: grpc_bind.unwrap_or_else(|| DEFAULT_BIND.to_string()),
+        admin_bind: admin_bind.unwrap_or_else(|| DEFAULT_ADMIN_BIND.to_string()),
         log_dir: log_dir.ok_or("--log-dir is required")?,
         trust_anchors: trust_anchors_final,
         intermediate_chain,
@@ -314,6 +333,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("--clock-tai-ns or --real-clock"), "{err}");
+    }
+
+    #[test]
+    fn parse_args_defaults_grpc_and_admin_bind_when_omitted() {
+        // Question 219(a): omitting --grpc-bind/--admin-bind must yield this workspace's
+        // owned default bind (docs/architecture.md "### Default ports"), not an error --
+        // replaces the old "--grpc-bind is required" refusal this binary used to have.
+        let args = parse_args(
+            ["av-ingest-server", "--log-dir", "/tmp/x", "--clearance-ladder", "UNCLASSIFIED", "--max-batch-age-ns", "1", "--no-require-client-cert", "--clock-tai-ns", "1"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(args.grpc_bind, DEFAULT_BIND);
+        assert_eq!(args.admin_bind, DEFAULT_ADMIN_BIND);
+    }
+
+    #[test]
+    fn parse_args_explicit_bind_wins_over_the_default() {
+        // Every existing caller in this workspace passes 127.0.0.1:0 explicitly (an
+        // ephemeral port) -- that must still win over DEFAULT_BIND/DEFAULT_ADMIN_BIND.
+        let args = parse_args(
+            ["av-ingest-server", "--grpc-bind", "127.0.0.1:0", "--admin-bind", "127.0.0.1:0", "--log-dir", "/tmp/x", "--clearance-ladder", "UNCLASSIFIED", "--max-batch-age-ns", "1", "--no-require-client-cert", "--clock-tai-ns", "1"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(args.grpc_bind, "127.0.0.1:0");
+        assert_eq!(args.admin_bind, "127.0.0.1:0");
+        assert_ne!(args.grpc_bind, DEFAULT_BIND);
     }
 
     #[test]

@@ -64,6 +64,8 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
+from altavista.test_env import drain_after_terminate
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_DIR = REPO_ROOT / "services" / "gmat-service"
 DEPLOY_DIR = SERVICE_DIR / "deploy"
@@ -269,12 +271,9 @@ def gmat_service_backend(tmp_path_factory):
             grpc.channel_ready_future(channel).result(timeout=READY_TIMEOUT_S)
         except Exception as e:
             channel.close()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # readall on a still-running child blocks forever -- see
+            # `altavista.test_env.drain_after_terminate`'s own doc (P5 round 3, measured).
+            output = drain_after_terminate(proc)
             pytest.fail(
                 f"gmat-service subprocess did not become ready within "
                 f"{READY_TIMEOUT_S}s: {e}\n--- subprocess output ---\n{output}")
@@ -335,13 +334,11 @@ def nginx_mtls_proxy(tmp_path_factory, gmat_service_backend):
         try:
             _wait_for_port(listen_port, NGINX_READY_TIMEOUT_S)
         except TimeoutError as e:
-            proc.terminate()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # `drain_after_terminate` terminates, then reads with a timeout, then kills and
+            # drains if SIGTERM was ignored -- the bare `terminate()` + readall that used to
+            # stand here still blocked forever whenever the child ignored SIGTERM (nginx, with
+            # a worker still up, is exactly such a child). See that helper's own doc.
+            output = drain_after_terminate(proc)
             log = ""
             try:
                 log = (work / "error.log").read_text()
@@ -461,12 +458,9 @@ def av_dynamics_service_backend(av_dynamics_service_bin, tmp_path_factory):
             grpc.channel_ready_future(channel).result(timeout=READY_TIMEOUT_S)
         except Exception as e:
             channel.close()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # readall on a still-running child blocks forever -- see
+            # `altavista.test_env.drain_after_terminate`'s own doc (P5 round 3, measured).
+            output = drain_after_terminate(proc)
             pytest.fail(
                 f"av-dynamics-service subprocess did not become ready within "
                 f"{READY_TIMEOUT_S}s: {e}\n--- subprocess output ---\n{output}")
@@ -524,13 +518,11 @@ def nginx_mtls_proxy_rust(tmp_path_factory, av_dynamics_service_backend):
         try:
             _wait_for_port(listen_port, NGINX_READY_TIMEOUT_S)
         except TimeoutError as e:
-            proc.terminate()
-            output = ""
-            try:
-                if proc.stdout is not None:
-                    output = proc.stdout.read()
-            except Exception:
-                pass
+            # `drain_after_terminate` terminates, then reads with a timeout, then kills and
+            # drains if SIGTERM was ignored -- the bare `terminate()` + readall that used to
+            # stand here still blocked forever whenever the child ignored SIGTERM (nginx, with
+            # a worker still up, is exactly such a child). See that helper's own doc.
+            output = drain_after_terminate(proc)
             log = ""
             try:
                 log = (work / "error.log").read_text()

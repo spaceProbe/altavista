@@ -39,6 +39,11 @@ services/cfs/bin/av-lockstep-shim
 .cbuild-cache/
 # Scratch target dir of the cross-build (see .dockerignore).
 target-docker-linux/
+# scripts/kit/build_kit.py's own --with-binaries scratch target dir and its per-commit binary
+# cache (kit_binaries-cache -- the actual cross-built bytes a kit ships live under out/, never
+# here; this is only the cache that lets two kit builds at the same commit reuse one build).
+target-docker-linux-kit/
+.av-test-tmp/kit-binaries-cache/
 # Generated GMAT scripts and report files from the golden generators (never sources).
 goldens/_gen_*
 # Per-user Claude Code settings; launch.json stays tracked.
@@ -72,3 +77,6 @@ services/proposer/build/last-build-events.jsonl
 /third_party/gmat-src
 /third_party/cspice
 /third_party/cfs
+# scripts/kit/build_kit.py's own output directory (P5 track, D3 second half): kits are built
+# here, never committed -- `git check-ignore -v out/kit` proves this entry covers it.
+/out/

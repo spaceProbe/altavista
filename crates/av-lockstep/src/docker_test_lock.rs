@@ -84,6 +84,29 @@
 //! between two Python processes, by
 //! `tests/test_docker_test_lock_cross_process.py::test_the_waiting_process_announces_its_own_wait`.
 //!
+//! **Round 3 (question 217(f)) revised WHICH lock this proof runs against.** Round 2 held the
+//! REAL, host-wide lock for this test deliberately, reasoning that question 212(b) forbids a
+//! test from ASSERTING the shared lock is free, not from WAITING on it -- so blocking on the
+//! real lock looked safe. What round 2 did not measure is the COST of that choice: the parent
+//! test held the real lock from before it even spawned the nested `cargo test` child until that
+//! child's own WAITING line appeared, and that window includes the CHILD'S OWN COMPILATION, not
+//! merely its run. Measured directly (round 3, `cargo clean -p av-lockstep` then re-running this
+//! same proof against a pre-built parent binary, forcing the nested child to compile from
+//! scratch inside the window the real lock was held): **~8.0s** of real, host-wide lock hold
+//! time for one nested crate's worth of compilation alone -- every other track's Docker-gated
+//! test on this host blocked for that whole window, for a reason (this proof's own child
+//! compiling) that has nothing to do with what any of them were doing. Round 3 moves this proof
+//! onto a PRIVATE lock path instead -- [`lock_docker_tests_at`], this module's own established
+//! pattern (`flock_lock_is_visible_across_processes_and_languages` below already uses it, for
+//! the identical question-212(b) reason). The announcement code under test
+//! (`lock_docker_tests_at`'s own WAITING/ACQUIRED lines) is exactly what `lock_docker_tests`
+//! calls in production -- pointing it at a private path changes nothing about what is proved,
+//! only removes the real lock from the picture entirely: measured after the fix, this proof
+//! holds the real host-wide lock for **0s** -- it is never acquired at all. See
+//! `lock_docker_tests_announces_a_blocked_wait_never_silently`'s own doc comment below for the
+//! mechanism (`AV_LOCKSTEP_PROBE_LOCK_PATH`, passed to the child's environment, never by
+//! mutating this process's own).
+//!
 //! ## Why [`crate::docker::prune_stale_test_resources`] takes `&DockerTestLock` as a parameter
 //!
 //! See that function's own doc comment for the full "acquire-inside-the-function would
@@ -160,7 +183,20 @@ pub struct DockerTestLock {
 /// silent no-lock fallback (this task's own binding rule, restated from
 /// `docs/open-questions.md` question 207's ruling).
 pub fn lock_docker_tests() -> DockerTestLock {
-    let path = lock_file_path();
+    lock_docker_tests_at(lock_file_path())
+}
+
+/// The actual implementation behind [`lock_docker_tests`], taking the lock path as a parameter
+/// rather than always computing it from `$HOME` via [`lock_file_path`]. [`lock_docker_tests`]
+/// itself is `lock_docker_tests_at(lock_file_path())` and nothing else -- every production
+/// caller keeps calling `lock_docker_tests()` with no signature change at all. This split
+/// exists solely so this module's own tests can prove real mutual exclusion (blocked while
+/// held, acquired after release, the WAITING/ACQUIRED announcement) against a PRIVATE lock file
+/// under a test's own scratch directory, instead of the real host-wide path -- see
+/// `tests::flock_lock_is_visible_across_processes_and_languages`'s own doc comment
+/// (`docs/open-questions.md` question 212(b): a test must never depend on the real, shared lock
+/// being free).
+pub(crate) fn lock_docker_tests_at(path: PathBuf) -> DockerTestLock {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|e| panic!("could not create {parent:?} for the docker-test lock: {e}"));
     }
@@ -323,15 +359,14 @@ mod tests {
     // silently.
     // -------------------------------------------------------------------------------------
 
-    /// Deliberately re-derives the lock path inline from `$HOME`, rather than importing
-    /// `altavista.docker_test_lock` -- this is the plain system `python3` a fresh checkout has
-    /// on `PATH`, not necessarily this repository's own `.venv`, and the whole point of this
-    /// test is to prove the two independent implementations agree on the path BY CONSTRUCTION,
-    /// not by one importing the other's constant.
+    /// Takes the lock path as its first (and only) `argv` element, rather than deriving it from
+    /// `$HOME` itself -- see `flock_lock_is_visible_across_processes_and_languages`'s own doc
+    /// comment for why: that test now runs against a PRIVATE lock file under its own scratch
+    /// directory, never the real host-wide path, so the path has to come from the Rust side,
+    /// the one place that already knows it.
     const PYTHON_FLOCK_PROBE: &str = r#"
-import fcntl, os
-home = os.environ["HOME"]
-path = os.path.join(home, ".altavista", "locks", "docker-tests.lock")
+import fcntl, os, sys
+path = sys.argv[1]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
 try:
@@ -344,8 +379,12 @@ finally:
     os.close(fd)
 "#;
 
-    fn run_python_probe() -> String {
-        let output = Command::new("python3").args(["-c", PYTHON_FLOCK_PROBE]).output().expect("python3 was already confirmed present by this test's own gate");
+    fn run_python_probe(path: &std::path::Path) -> String {
+        let output = Command::new("python3")
+            .args(["-c", PYTHON_FLOCK_PROBE])
+            .arg(path)
+            .output()
+            .expect("python3 was already confirmed present by this test's own gate");
         assert!(output.status.success(), "the python3 probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
@@ -404,8 +443,11 @@ finally:
             return;
         }
 
-        let guard = lock_docker_tests();
-        let observed_while_held = run_python_probe();
+        let scratch = repo_scratch_dir("flock-cross-language-probe");
+        let private_lock_path = scratch.join("docker-tests.lock");
+
+        let guard = lock_docker_tests_at(private_lock_path.clone());
+        let observed_while_held = run_python_probe(&private_lock_path);
         drop(guard);
 
         // Question 148: an exit code is not evidence -- print exactly what was observed
@@ -414,7 +456,7 @@ finally:
 
         assert_eq!(
             observed_while_held, "BLOCKED",
-            "a python3 child using fcntl.flock(LOCK_EX|LOCK_NB) on the IDENTICAL path this Rust module computes from $HOME must fail to acquire while this process's own DockerTestLock guard holds it -- got {observed_while_held:?} (either the paths disagree, or the lock is not actually exclusive)"
+            "a python3 child using fcntl.flock(LOCK_EX|LOCK_NB) on the IDENTICAL private path this Rust guard just locked must fail to acquire while the guard holds it -- got {observed_while_held:?}"
         );
     }
 
@@ -477,6 +519,46 @@ finally:
         );
     }
 
+    /// The cross-language PATH-agreement claim the old version of
+    /// `flock_lock_is_visible_across_processes_and_languages` used to prove as a side effect of
+    /// locking the real shared path -- kept as its own assertion, but doing NO locking
+    /// whatsoever, against the real `lock_file_path()` (this module's actual production path
+    /// function): a bare `python3 -c` re-derives the identical path inline from `$HOME` (never
+    /// importing `altavista.docker_test_lock` -- proving agreement BY CONSTRUCTION, not by one
+    /// side importing the other's constant), and this test asserts the two strings are equal.
+    /// Nothing here ever touches the real lock file, so this can never be affected by whether
+    /// some other process on this host holds it. Skips visibly (question 194's precedent) if
+    /// python3 is absent, exactly as `flock_lock_is_visible_across_processes_and_languages`
+    /// does. The Python-side equivalent is
+    /// `tests/test_docker_test_lock_cross_process.py::test_lock_path_matches_the_documented_home_relative_convention`.
+    #[test]
+    fn rust_and_python_compute_the_identical_lock_path() {
+        let python3_present = Command::new("python3").arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        if !python3_present {
+            let reason = crate::docker::DockerGateReason::PrerequisiteUnavailable { what: "python3".to_string(), hint: "install python3 and put it on PATH".to_string() };
+            let line = crate::docker::announce_gate_skip("rust_and_python_compute_the_identical_lock_path", &reason);
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        const PYTHON_PATH_PROBE: &str = r#"
+import os
+print(os.path.join(os.environ["HOME"], ".altavista", "locks", "docker-tests.lock"))
+"#;
+        let output = Command::new("python3").args(["-c", PYTHON_PATH_PROBE]).output().expect("python3 was already confirmed present by this test's own gate");
+        assert!(output.status.success(), "the python3 path probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let python_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let rust_path = lock_file_path();
+
+        println!("lock path agreement proof: Rust lock_file_path() = {rust_path:?}, python3's own inline computation = {python_path:?}");
+
+        assert_eq!(
+            rust_path.to_string_lossy(),
+            python_path,
+            "Rust's lock_file_path() and a bare python3's own inline $HOME-relative computation must name the IDENTICAL path -- got Rust={rust_path:?}, python3={python_path:?}"
+        );
+    }
+
     // -------------------------------------------------------------------------------------
     // A blocked wait is announced, never silent (question 207's own follow-up). Proved against
     // a genuinely separate process (not just in-process reasoning about what the code SHOULD
@@ -486,29 +568,71 @@ finally:
     // already establishes for exactly this "does a raw stderr write survive libtest's capture"
     // question. `Command::output()`'s own pipes capture a child's raw fd writes regardless of
     // libtest's internal capture state, so no `--nocapture` is needed on the nested invocation.
+    //
+    // Round 3 (question 217(f)): this proof now runs against a PRIVATE lock path, never the
+    // real host-wide one -- see `lock_docker_tests_announces_a_blocked_wait_never_silently`'s
+    // own doc comment below for the measured reason.
     // -------------------------------------------------------------------------------------
 
     /// Not meaningful on its own -- exists ONLY as the nested-subprocess target for
-    /// `lock_docker_tests_announces_a_blocked_wait_never_silently` below. Acquires the REAL,
-    /// production lock and announces success on stdout so the parent test can tell the child's
-    /// own `flock` call actually returned (as opposed to the child having crashed before
-    /// reaching it). When run as an ordinary part of this crate's own test suite (no
-    /// contention), this passes trivially and silently, the same as any other acquire-then-
-    /// release of an uncontended lock.
+    /// `lock_docker_tests_announces_a_blocked_wait_never_silently` below. Acquires the lock at
+    /// `AV_LOCKSTEP_PROBE_LOCK_PATH` (read from THIS process's own inherited environment --
+    /// reading is not the mutation question 199 forbids; the parent test sets it on the CHILD's
+    /// environment via `Command::env`, never by mutating its own `std::env`) if that variable is
+    /// set, else falls back to the REAL, production lock via `lock_docker_tests()`. The fallback
+    /// matters: when run as an ordinary, standalone part of this crate's own test suite (`cargo
+    /// test -p av-lockstep --lib`, no parent test involved, no env var set), this must still
+    /// pass trivially and silently, the same as any other acquire-then-release of an uncontended
+    /// lock -- exactly the case this crate's own FINAL CHECKS command exercises.
+    ///
+    /// Round 3 (question 217(f)): `lock_docker_tests_announces_a_blocked_wait_never_silently`
+    /// used to point this probe at the real lock unconditionally, holding the real, host-wide
+    /// lock for this whole process's compilation as a nested `cargo test` child -- see that
+    /// test's own updated doc comment, and this module's own top-level doc, "A blocked wait is
+    /// announced, never silent", for the measured before/after. Announces success on stdout so
+    /// the parent test can tell the child's own `flock` call actually returned (as opposed to
+    /// the child having crashed before reaching it).
     #[test]
     fn probe_process_that_blocks_acquiring_the_docker_test_lock() {
-        let _guard = lock_docker_tests();
+        let _guard = match std::env::var_os("AV_LOCKSTEP_PROBE_LOCK_PATH") {
+            Some(path) => lock_docker_tests_at(PathBuf::from(path)),
+            None => lock_docker_tests(),
+        };
         println!("PROBE_ACQUIRED");
     }
 
+    /// Round 3 (question 217(f)): moved off the REAL, host-wide lock onto a PRIVATE path
+    /// (`lock_docker_tests_at`, this module's own established pattern -- see
+    /// `flock_lock_is_visible_across_processes_and_languages`'s own doc comment for the
+    /// identical question-212(b) reasoning). Round 2 had kept this one test on the real lock
+    /// deliberately: question 212(b) forbids a test from ASSERTING the shared lock is free, not
+    /// from WAITING on it, so blocking on the real lock looked safe. What round 2 did not
+    /// measure is the COST: the real lock was held from before this test even spawned the
+    /// nested `cargo test` child until that child's own WAITING line appeared -- a window that
+    /// includes the child's own COMPILATION, not merely its run. Measured directly (`cargo clean
+    /// -p av-lockstep`, then re-running this same proof from a pre-built parent binary so the
+    /// nested child had to compile from scratch inside that window): the real, host-wide lock
+    /// was held for **~8.0s** -- every other track's Docker-gated test on this host blocked for
+    /// that whole window, for a reason that has nothing to do with any of them. Moving to a
+    /// private path removes that cost while proving the identical thing: `lock_docker_tests_at`
+    /// is the exact code `lock_docker_tests` calls in production, merely pointed at a path this
+    /// test owns, so the announcement logic under test is unchanged. Measured after this change:
+    /// the real lock is held for **0s** -- this test never acquires it at all.
     #[test]
     fn lock_docker_tests_announces_a_blocked_wait_never_silently() {
         use std::io::{BufRead, BufReader, Write};
         use std::process::Stdio;
 
-        // This process acquires the lock FIRST -- nothing else holds it yet, so this is the
-        // silent, non-blocking path (no announcement expected here).
-        let guard = lock_docker_tests();
+        // A PRIVATE lock path under this crate's own scratch-dir convention (`repo_scratch_dir`,
+        // the same one `flock_lock_is_visible_across_processes_and_languages` uses) -- never the
+        // real, shared `$HOME/.altavista/locks/docker-tests.lock` (question 212(b): a test must
+        // never depend on, or hold, the real lock).
+        let scratch = repo_scratch_dir("blocked-wait-announce");
+        let private_lock_path = scratch.join("docker-tests.lock");
+
+        // This process acquires the (private) lock FIRST -- nothing else holds it yet, so this
+        // is the silent, non-blocking path (no announcement expected here).
+        let guard = lock_docker_tests_at(private_lock_path.clone());
 
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         // `--nocapture` on the NESTED invocation: without it, libtest would swallow the probe
@@ -518,9 +642,15 @@ finally:
         // passed through its own `flock` call, not merely that the subprocess exited 0. The
         // WAITING/ACQUIRED lines themselves need no such flag (`write_real_stderr` already
         // bypasses libtest's capture on its own), but harmless to request together.
+        //
+        // `AV_LOCKSTEP_PROBE_LOCK_PATH` is set on the CHILD's own environment via `Command::env`
+        // -- never by mutating this process's own `std::env` (question 199) -- so
+        // `probe_process_that_blocks_acquiring_the_docker_test_lock` locks the SAME private path
+        // this test just locked, not the real one.
         let mut child = Command::new("cargo")
             .args(["test", "-p", "av-lockstep", "--lib", "--", "--exact", "docker_test_lock::tests::probe_process_that_blocks_acquiring_the_docker_test_lock", "--nocapture"])
             .current_dir(&repo_root)
+            .env("AV_LOCKSTEP_PROBE_LOCK_PATH", &private_lock_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -567,6 +697,11 @@ finally:
         if let Some(mut out) = child.stdout.take() {
             std::io::Read::read_to_string(&mut out, &mut child_stdout_buf).ok();
         }
+
+        // The child has fully exited (and therefore closed its own fd on the private lock file)
+        // by this point -- safe to remove the scratch directory now, same as
+        // `flock_lock_is_visible_across_processes_and_languages`'s own cleanup below.
+        fs::remove_dir_all(&scratch).ok();
 
         // Question 148: an exit code is not evidence -- print exactly what the child process
         // actually wrote, not a paraphrase.
