@@ -67,6 +67,30 @@ nests a `Cargo.toml` any deeper than `crates/<name>/Cargo.toml`) makes the true 
 `d65c360` (`Merge branch 'develop' into edge`, which last touched `Cargo.lock`) instead — the
 last commit that could actually have changed a Rust SBOM's content.
 
+**Why a workspace-manifest edit legitimately moves all six Rust epochs at once, and that's not
+the same defect.** All six Rust components share one epoch over one input set
+(`RUST_EPOCH_PATHS`), so a commit that edits the workspace `Cargo.toml` — or any crate's own
+`Cargo.toml`, or `Cargo.lock` — moves every Rust component's epoch simultaneously. This is the
+rule working correctly, not the whole-directory-`crates/` treadmill defect above (a `.rs`-only
+commit must still not move the epoch — `test_rust_epoch_paths_match_no_rust_source_file` guards
+that). The worked example: the AI-plane round 5 merge, commit `db1e858` ("bump the workspace to
+`rust-version = "1.87"`", landing on `edge` at `3bcbd63`), touched no `.rs` file and added no
+dependency, yet correctly moved all six committed SBOMs' epoch from `2026-09-15T12:30:33Z` to
+`2026-09-15T18:02:25Z` — a workspace manifest is a real input to the resolved dependency graph
+*and* the MSRV that `cargo auditable`/`cargo metadata` read, so its own commit date is exactly
+right as every Rust SBOM's new epoch. `tests/test_sbom.py::
+test_all_six_rust_components_share_exactly_one_epoch_from_git` asserts this positively: all six
+share exactly one committed epoch, and it equals git's own committer date for
+`RUST_EPOCH_PATHS`, computed independently of `sbom.git_epoch`.
+
+**The operational consequence.** Any commit that edits `Cargo.lock`, the workspace `Cargo.toml`,
+or a crate's own `Cargo.toml` must be followed by (or accompanied by, in a separate later
+commit) an SBOM regeneration — see "Regenerating" above for the exact command.
+`tests/test_sbom.py::test_the_epoch_is_never_wall_clock` is what enforces this: it recomputes
+each component's epoch straight from git and fails the moment a manifest edit lands without a
+matching regeneration, exactly what happened (for real, not hypothetically) when `db1e858`
+merged into `edge` without one — the six failures this task's commit fixed.
+
 **Why the Python epoch is `pyproject.toml` alone, not a component source path too.** A Python
 SBOM's content is `importlib.metadata` over the shared worktree `.venv` — the set of *installed
 distributions*, not this repository's own source. `pyproject.toml` is the file that declares

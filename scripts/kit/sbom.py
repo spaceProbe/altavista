@@ -110,6 +110,23 @@ RUST_BINARIES: dict[str, tuple[str, str]] = {
 #: `git ls-files -- 'crates/*/Cargo.toml'` lists exactly the 18 crate `Cargo.toml` files, no
 #: `.rs` file, no nesting deeper than `crates/<name>/Cargo.toml` in this workspace) -- so all
 #: six Rust SBOMs still share one epoch, now over only the paths that can actually change one.
+#:
+#: The other half of the rule (measured for real by the AI-plane round 5 merge, commit
+#: `db1e858`, "bump the workspace to `rust-version = "1.87"`", landing on `edge` at `3bcbd63`):
+#: because all six Rust components share this ONE path set, a commit that edits the workspace
+#: `Cargo.toml` -- or any crate's own `Cargo.toml`, or `Cargo.lock` -- legitimately moves EVERY
+#: Rust component's epoch AT ONCE. `db1e858`'s `rust-version` bump touched no `.rs` file and
+#: added no dependency, yet correctly moved all six committed SBOMs' epoch from
+#: `2026-09-15T12:30:33Z` to `2026-09-15T18:02:25Z`, because a workspace manifest is a real input
+#: to the resolved dependency graph and the MSRV `cargo auditable`/`cargo metadata` read -- this
+#: is the rule working, not the whole-directory-`crates/` treadmill defect described above (a
+#: `.rs`-only commit still must NOT move the epoch; `tests/test_sbom.py::
+#: test_rust_epoch_paths_match_no_rust_source_file` guards that). Operationally: any commit that
+#: edits `Cargo.lock`, the workspace `Cargo.toml`, or a crate's own `Cargo.toml` must be followed
+#: by (or accompanied by, in a separate later commit) an SBOM regeneration
+#: (`docs/compliance/sbom/README.md`'s "Regenerating" section) -- `tests/test_sbom.py::
+#: test_the_epoch_is_never_wall_clock` is what enforces that; it fails loudly, for exactly that
+#: reason, the moment such a commit lands without one.
 RUST_EPOCH_PATHS = ["Cargo.lock", "Cargo.toml", "crates/*/Cargo.toml"]
 
 #: Python components. Both read the IDENTICAL installed-distribution set from the one shared

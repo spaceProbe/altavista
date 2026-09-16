@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tomllib
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -624,3 +625,41 @@ def test_rust_epoch_paths_match_no_rust_source_file(component):
             f"epoch path {path!r} (component {component!r}) matches .rs source file(s), which "
             f"can never change a Rust SBOM's content: {rust_sources}"
         )
+
+
+# =================================================================================================
+# 12. A workspace/crate manifest edit legitimately moves every Rust epoch at once (this is the
+#     rule working, not the D2-1-class treadmill defect -- see docs/compliance/sbom/README.md's
+#     "Determinism" section, and RUST_EPOCH_PATHS's own doc comment in scripts/kit/sbom.py)
+# =================================================================================================
+
+def test_all_six_rust_components_share_exactly_one_epoch_from_git():
+    """Positive statement of the rule commit db1e858 ("bump the workspace to
+    `rust-version = "1.87"`", merged into `edge` at 3bcbd63) just demonstrated for real: all six
+    Rust components share ONE epoch over ONE input set (`RUST_EPOCH_PATHS` --
+    `Cargo.lock`/`Cargo.toml`/`crates/*/Cargo.toml`), so editing the workspace manifest legitimately
+    moves every Rust SBOM's epoch at once -- not a gate failure nobody caused (that's the
+    whole-directory-`crates/` defect test 11 above guards against; a `.rs`-only commit must NOT
+    move the epoch), but the intended behaviour: a workspace/crate manifest is a real input to the
+    resolved dependency graph and the MSRV. This recomputes the committer date straight from
+    `git log` (independently of `sbom.git_epoch`, so this isn't just re-calling the function under
+    test) and asserts it against every committed Rust SBOM's own `metadata.timestamp`."""
+    result = subprocess.run(
+        ["git", "log", "-1", "--format=%cI", "--", *sbom.RUST_EPOCH_PATHS],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    )
+    raw = result.stdout.strip()
+    assert raw, f"git log produced no committer date for RUST_EPOCH_PATHS={sbom.RUST_EPOCH_PATHS!r}"
+    independent_epoch = (
+        datetime.fromisoformat(raw).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+    epochs = {}
+    for component in sbom.RUST_BINARIES:
+        doc = json.loads((SBOM_DIR / f"{component}.cdx.json").read_text())
+        epochs[component] = doc["metadata"]["timestamp"]
+
+    assert set(epochs.values()) == {independent_epoch}, (
+        f"all six Rust components must share exactly one committed epoch, equal to git's own "
+        f"committer date for RUST_EPOCH_PATHS ({independent_epoch!r}); got {epochs}"
+    )
