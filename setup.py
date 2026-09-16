@@ -46,6 +46,7 @@ do not physically live there in this repository's source tree at all, only after
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from setuptools import setup
@@ -71,6 +72,19 @@ class build_py(_build_py):
                 # missing profile file.
                 continue
             dest = Path(self.build_lib) / "altavista" / name
+            # Review finding (round 3): `self.copy_tree` (`distutils`/`setuptools`' `copy_tree`) is
+            # purely ADDITIVE -- it never deletes a file at `dest` that is no longer present at
+            # `src`. `build/lib/...` is a PERSISTENT tree (`pip wheel .` never cleans it), so a
+            # file removed from `web/`/`profiles/` between two builds stayed in `build/lib/
+            # altavista/web/...` forever, and every wheel built after the removal still packaged
+            # it -- proved directly: a probe file added to `web/`, built, removed from `web/`,
+            # rebuilt, and the probe was STILL in the second wheel. Removing `dest` first makes the
+            # packaged copy exactly the source tree, nothing more -- `copy_tree` below then
+            # recreates it from scratch every `build_py` run. The "a missing source directory is
+            # skipped, not fatal" behaviour above is untouched: `dest` is only ever removed once the
+            # `src.is_dir()` check already passed.
+            if dest.exists():
+                shutil.rmtree(dest)
             self.copy_tree(str(src), str(dest))
 
 
