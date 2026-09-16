@@ -40,18 +40,25 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-7d0a205333ced6c38f843aaa695b58ceb5da3be86172fa7aaf50491a8d4e8593
+4d55fe50888b9df89cc64fb4b0f26f9fc0c8efd2e38aed01e4a26487cebfc32a
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
 slots) and reading `bundle_sha256` from the written `out/evidence/bundle.json` -- the same value
-the command's own stderr prints. **This number will not reproduce on a different commit** unless
-the epoch inputs below are unchanged since this commit -- see "What the hash depends on".
+the command's own stderr prints.
+`tests/test_evidence_bundle.py::test_bundle_sha256_matches_the_hash_recorded_in_bundle_md`
+regenerates the bundle from the current tree and asserts its `bundle_sha256` equals this exact
+number, parsed out of this file for real -- so this number is load-bearing, not decorative: if it
+ever drifts from what the current tree actually regenerates, CI fails until this file is updated.
 
-## What the hash depends on (the epoch rule)
+## What the hash depends on
 
 Same discipline `docs/compliance/sbom/README.md`'s own "Determinism" section already carries for
-the ten committed SBOMs, applied here to the bundle:
+the ten committed SBOMs, applied here to the bundle -- **the rule is that `bundle_sha256` moves
+when the EVIDENCE moves, never merely because a commit landed.** Concretely, `bundle_sha256` is
+computed over the bundle's canonical JSON with exactly two fields excluded: itself, and
+`git_commit` (round 3 defect fix -- see below for why `git_commit` had to join that exclusion).
+Everything else is evidence-dependent:
 
 - **The six control matrices** (`docs/compliance/{av-command,av-dynamics-service,av-edge-plugin,
   av-gateway,av-ingest,gmat-service}/control-matrix.md`) -- every row, every deficiency, and each
@@ -66,31 +73,35 @@ the ten committed SBOMs, applied here to the bundle:
   they do not move with a commit the way the two bullets above do; two regenerations at the SAME
   commit with the SAME `--kit`/`--ledger-dir` state (including "neither") produce the identical
   hash (`tests/test_evidence_bundle.py::test_two_runs_over_the_same_state_are_byte_identical`).
-- **`git rev-parse HEAD`** (`git_commit`) -- recorded for provenance (which commit this bundle
-  was built against), and, being part of the bundle's own canonical content like every other
-  field, part of what `bundle_sha256` covers too (deliverable 7 excludes only the hash field
-  itself from what it hashes -- nothing else).
 - **`epoch`**, a git-derived timestamp -- never `datetime.now()`; `git log`'s own committer date
   for exactly the paths in the first two bullets (`bundle.json`'s own `epoch_paths` field lists
   them, so a reader never has to re-derive which commits touch them, matching the SBOM README's
-  own transparency rule).
+  own transparency rule). `epoch` only moves when a commit actually touches one of those paths.
 
-Two consequences worth separating, since they answer different questions:
-
-- **Does `bundle_sha256` change between two commits?** Yes, always -- `git_commit` changes with
-  every commit, and it is hashed like every other field. `bundle_sha256` is not itself a "did the
-  evidence change" signal across commits.
-- **Did the evidence a reader would actually care about change?** Compare `epoch` instead (or,
-  more precisely, each `control_matrices.<component>.sha256` / `sbom_hashes.actual` entry): those
-  only move when a commit actually touches `epoch_paths` -- a control matrix or a committed SBOM.
-  A commit that touches neither leaves `epoch` and every content hash identical even though
-  `bundle_sha256` itself will still differ (because `git_commit` did). This is why the bundle
-  records both a content-derived `epoch` AND a commit-derived `git_commit`/`bundle_sha256`,
-  rather than treating the top-level hash alone as the "did anything change" answer.
+**`git rev-parse HEAD` (`git_commit`) is recorded in the bundle for provenance only -- which
+commit this bundle was built against -- and is explicitly EXCLUDED from what `bundle_sha256`
+hashes**, exactly the same "a record cannot hash itself" treatment the `bundle_sha256` field
+already gives its own value. This is a round 3 code-review fix: `git_commit` used to sit INSIDE
+the hashed canonical content, so `bundle_sha256` changed on *every* commit regardless of whether
+any evidence input changed -- question 214's round 1 platform lesson ("a committed artifact whose
+input set includes its own commit is stale the moment it lands"), already fixed once for the
+SBOMs (round 1 decisions 6 and 7) and now fixed here the same way. Concretely, measured: this
+fix's own parent commit (`18d923a`, `docs/secdeploy-upstream.md` only -- touching neither a
+control matrix nor `SHA256SUMS`) left every evidence-dependent field identical to ITS parent
+(`0b435e2`, which is when this file's number was originally recorded as
+`7d0a205333ced6c38f843aaa695b58ceb5da3be86172fa7aaf50491a8d4e8593`), yet regenerating at `18d923a`
+with the pre-fix code produced a DIFFERENT `bundle_sha256`
+(`d5df21cfca7ae4b9f3a3039f4a77c7fbd852800bc7c64344d4253a9673d36286`) purely because `git_commit`
+had changed -- proof the old rule was broken, and exactly the failure this fix removes. With the
+fix applied, regenerating at `18d923a` produces this file's current number
+(`4d55fe50888b9df89cc64fb4b0f26f9fc0c8efd2e38aed01e4a26487cebfc32a`), and it will keep producing
+that same number at any later commit that does not touch an evidence-dependent input.
 
 Two regenerations at the literal SAME commit, with the same `--kit`/`--ledger-dir` state
 (including "neither"), always reproduce the identical `bundle_sha256`
-(`tests/test_evidence_bundle.py::test_two_runs_over_the_same_state_are_byte_identical`).
+(`tests/test_evidence_bundle.py::test_two_runs_over_the_same_state_are_byte_identical`), and now
+so do two regenerations at *different* commits that touch none of the evidence-dependent inputs
+above (`tests/test_evidence_bundle.py::test_git_commit_is_excluded_from_what_bundle_sha256_hashes`).
 
 ## What is NOT collected by this half
 

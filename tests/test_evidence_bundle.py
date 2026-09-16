@@ -17,7 +17,10 @@ reads already-committed files from this checkout and/or writes to `tmp_path`.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -330,6 +333,97 @@ def test_kit_dir_given_but_no_kit_manifest_is_a_declared_gap_not_a_crash(tmp_pat
     assert km["collected"] is False
     assert km["sha256"] is None
     assert "KIT_MANIFEST" in km["reason"]
+
+
+# =================================================================================================
+# 5. `git_commit` is provenance, not hashed content -- and docs/compliance/BUNDLE.md's recorded
+#    `bundle_sha256` is a real, re-verifiable number (round 3 defect fix, commit 1)
+# =================================================================================================
+
+def _bundle_canonical_sha256(bundle: dict) -> str:
+    """Recomputes `bundle_sha256` the exact way `assemble_bundle` does: over the canonical
+    `json.dumps(..., indent=2, sort_keys=True, ensure_ascii=False)` content with BOTH
+    `bundle_sha256` and `git_commit` excluded. A standalone helper (not calling back into
+    `evidence`) so the perturbation test below can recompute the hash over a hand-mutated dict
+    without re-running the whole assembly pipeline."""
+    content = {k: v for k, v in bundle.items() if k not in ("bundle_sha256", "git_commit")}
+    canonical = json.dumps(content, indent=2, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _bundle_md_recorded_sha256() -> str:
+    """Parses the hash out of `docs/compliance/BUNDLE.md`'s own fenced code block -- for real,
+    from the committed file, never hard-coded into this test module (a hard-coded expected value
+    would silently go stale the next time BUNDLE.md is regenerated, exactly the failure mode this
+    whole commit is fixing)."""
+    text = (REPO_ROOT / "docs" / "compliance" / "BUNDLE.md").read_text(encoding="utf-8")
+    match = re.search(r"```\n([0-9a-f]{64})\n```", text)
+    assert match, "docs/compliance/BUNDLE.md: could not find a recorded 64-hex-char SHA-256"
+    return match.group(1)
+
+
+def test_git_commit_is_excluded_from_what_bundle_sha256_hashes():
+    """The defect: `git_commit` (`git rev-parse HEAD`) used to sit INSIDE the canonical content
+    `bundle_sha256` is computed over, so `bundle_sha256` changed on every commit regardless of
+    whether any evidence input changed. Proof of the fix: two bundles that differ ONLY in
+    `git_commit` must have the SAME `bundle_sha256`."""
+    bundle = evidence.assemble_bundle(repo_root=REPO_ROOT)
+    mutated = copy.deepcopy(bundle)
+    mutated["git_commit"] = "0" * 40  # a different commit, nothing else about the evidence changed
+    assert mutated["git_commit"] != bundle["git_commit"]
+    assert _bundle_canonical_sha256(mutated) == _bundle_canonical_sha256(bundle) == bundle["bundle_sha256"]
+
+
+def test_bundle_sha256_matches_the_hash_recorded_in_bundle_md():
+    """The record is made load-bearing: regenerate the bundle from the CURRENT tree (no `--kit`,
+    no `--ledger-dir` -- the exact invocation `docs/compliance/BUNDLE.md`'s own "Regenerating it"
+    section documents) and assert its `bundle_sha256` equals the number BUNDLE.md records, parsed
+    out of that file for real (not re-typed into this test). This is what forces BUNDLE.md to be
+    regenerated whenever the evidence genuinely changes -- a stale recorded hash now fails CI
+    instead of silently drifting."""
+    bundle = evidence.assemble_bundle(repo_root=REPO_ROOT)
+    recorded = _bundle_md_recorded_sha256()
+    assert bundle["bundle_sha256"] == recorded, (
+        f"regenerated bundle_sha256={bundle['bundle_sha256']!r} does not match "
+        f"docs/compliance/BUNDLE.md's recorded {recorded!r} -- run the documented command and "
+        f"update BUNDLE.md"
+    )
+
+
+def test_the_bundle_md_equality_check_can_actually_fail(tmp_path):
+    """Proves the test immediately above is load-bearing, not decorative -- it CAN fail. Copies a
+    real control matrix's text into `tmp_path`, tampers the copy, re-parses the tampered copy
+    (`evidence.parse_control_matrix` needs no git access, just a file), splices the tampered
+    component's content into a deep copy of the real bundle, and shows the recomputed
+    `bundle_sha256` no longer matches `docs/compliance/BUNDLE.md`'s recorded value -- i.e. a real
+    evidence change is caught, not silently ignored the way `git_commit`-in-the-hash silently
+    ignored "nothing evidence-relevant changed" before this commit's fix."""
+    real_bundle = evidence.assemble_bundle(repo_root=REPO_ROOT)
+    recorded = _bundle_md_recorded_sha256()
+    assert real_bundle["bundle_sha256"] == recorded  # sanity: agrees before anything is perturbed
+
+    component = "av-ingest"
+    real_path = evidence.discover_components(REPO_ROOT)[component]
+    original_text = real_path.read_text(encoding="utf-8")
+    tampered_copy = tmp_path / "control-matrix.md"
+    tampered_copy.write_text(
+        original_text + "\n<!-- perturbed by "
+        "test_the_bundle_md_equality_check_can_actually_fail, tmp_path only -->\n",
+        encoding="utf-8",
+    )
+    tampered_parsed = evidence.parse_control_matrix(tampered_copy)
+    assert tampered_parsed["sha256"] != real_bundle["control_matrices"][component]["sha256"]
+
+    perturbed_bundle = copy.deepcopy(real_bundle)
+    perturbed_bundle["control_matrices"][component]["sha256"] = tampered_parsed["sha256"]
+
+    perturbed_sha256 = _bundle_canonical_sha256(perturbed_bundle)
+    assert perturbed_sha256 != recorded, (
+        "perturbing a control matrix's content did not change the recomputed bundle_sha256 -- "
+        "the BUNDLE.md equality check above would not have caught this and is decorative"
+    )
+    # And the real (unperturbed) file on disk was never touched.
+    assert real_path.read_text(encoding="utf-8") == original_text
 
 
 # =================================================================================================

@@ -38,7 +38,12 @@ can quote (rule 148: "an exit code is not evidence -- quote the artifact").
   alongside so a reader never has to re-derive which commits legitimately move this field --
   exactly the transparency `docs/compliance/sbom/README.md`'s own "Determinism" section models.
 - `git_commit` -- `git rev-parse HEAD`, informational only (which commit this bundle was built
-  against), never used to compute anything else in this module.
+  against). Added to the bundle AFTER `bundle_sha256` is computed, so it is present in the
+  returned/written dict but EXCLUDED from the canonical content `bundle_sha256` hashes -- the same
+  "a record cannot hash itself" treatment `bundle_sha256` already gives its own field, extended to
+  the one other field that is run/commit-dependent rather than evidence-dependent (round 3 defect
+  fix: excluding it is what makes `bundle_sha256` a pure function of the actual evidence, unchanged
+  by a commit that touches neither a control matrix nor a committed SBOM).
 - `control_matrices` -- keyed by component name (`av-command`, `av-dynamics-service`,
   `av-edge-plugin`, `av-gateway`, `av-ingest`, `gmat-service`, discovered from
   `docs/compliance/*/control-matrix.md` rather than hard-coded -- see `discover_components`, the
@@ -65,11 +70,15 @@ can quote (rule 148: "an exit code is not evidence -- quote the artifact").
 - `kit_manifest` -- deliverable 6: the named kit's own `KIT_MANIFEST` hash when `--kit <dir>` is
   given, or a declared, named absence (never fabricated) when it is not.
 - `bundle_sha256` -- deliverable 7, added LAST: SHA-256 over `json.dumps(bundle, indent=2,
-  sort_keys=True, ensure_ascii=False)` computed with this key itself absent, exactly the
-  `secdeploy` deploy-audit chain's own convention (`/Users/probe/code/secdeploy/src/secdeploy/
-  audit.py`'s own comment: "the SHA-256 of this record's own canonical content, `prevHash`
-  included, `hash` itself excluded -- you cannot hash yourself") -- cited here rather than
-  reinvented, per this task's own instruction to follow that precedent.
+  sort_keys=True, ensure_ascii=False)` computed with this key itself AND `git_commit` both absent,
+  exactly the `secdeploy` deploy-audit chain's own convention (`/Users/probe/code/secdeploy/src/
+  secdeploy/audit.py`'s own comment: "the SHA-256 of this record's own canonical content,
+  `prevHash` included, `hash` itself excluded -- you cannot hash yourself") -- cited here rather
+  than reinvented, per this task's own instruction to follow that precedent, and extended to
+  `git_commit` for the identical reason: a commit that changes with every commit regardless of
+  whether any evidence input changed cannot be part of a hash a reader expects to move only when
+  the evidence moves (round 3 defect fix -- see `git_commit`'s own bullet above and
+  `assemble_bundle`'s inline comment for the full reasoning).
 
 # Determinism (the point of this module, same rule `sbom.py` already proves)
 
@@ -603,7 +612,6 @@ def assemble_bundle(
         "schema_version": 1,
         "epoch": epoch,
         "epoch_paths": epoch_paths,
-        "git_commit": _git_head_commit(repo_root),
         "control_matrices": control_matrices,
         "coverage": coverage,
         "deficiencies": deficiencies,
@@ -615,8 +623,24 @@ def assemble_bundle(
     # field itself excluded (secdeploy's own deploy-audit chain convention, cited in this
     # module's top doc) -- so this key is added LAST, after every other key already has its
     # final value, never included in what it hashes.
+    #
+    # `git_commit` gets the SAME treatment, for the SAME reason, and it is a defect fix (round 3
+    # code review) that it did not from the start: `git rev-parse HEAD` changes on every commit
+    # regardless of whether any evidence input changed, so a record whose hashed content includes
+    # its own commit is stale the instant it lands -- question 214's platform lesson from round 1
+    # ("a committed artifact whose input set includes its own commit is stale the moment it
+    # lands"), already fixed once for the SBOMs (round 1 decisions 6 and 7) and now fixed here the
+    # same way. `git_commit` is added AFTER `canonical`/`bundle_sha256` are computed -- present in
+    # the returned/written bundle as provenance (which commit this bundle was built against), never
+    # part of what `bundle_sha256` covers. Every other top-level field stays in the hashed content
+    # because each one is a pure function of the actual evidence (the control matrices, the SBOMs,
+    # the caller-supplied `--kit`/`--ledger-dir` content, or the fixed offline/live placeholders) --
+    # `epoch` in particular LOOKS commit-adjacent but is not: it is the committer date of the last
+    # commit to actually TOUCH `epoch_paths`, so it is unchanged by a commit like this fix's own
+    # sibling (docs-only, touching neither a control matrix nor `SHA256SUMS`).
     canonical = json.dumps(bundle, indent=2, sort_keys=True, ensure_ascii=False)
     bundle["bundle_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    bundle["git_commit"] = _git_head_commit(repo_root)
     return bundle
 
 
