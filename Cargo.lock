@@ -76,6 +76,7 @@ name = "av-catalog"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-label",
  "av-lockstep",
  "base64",
  "openssl",
@@ -175,6 +176,7 @@ dependencies = [
  "av-catalog",
  "av-cdm",
  "av-command",
+ "av-label",
  "av-lockstep",
  "http",
  "openssl",
@@ -274,6 +276,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-label"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "thiserror",
+]
+
+[[package]]
 name = "av-lockstep"
 version = "0.1.0"
 dependencies = [
@@ -344,6 +354,7 @@ name = "av-store"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-label",
  "av-lockstep",
  "base64",
  "bytes",
