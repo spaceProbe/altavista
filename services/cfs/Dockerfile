@@ -26,17 +26,32 @@
 #
 # The shim binary itself (`services/cfs/bin/av-lockstep-shim`, a stripped linux/aarch64 ELF) is
 # PREBUILT, not compiled by this Dockerfile -- `crates/av-lockstep-shim` depends on `av-cdm`,
-# which depends on `spoore-cdm` via the workspace `Cargo.toml`'s own ABSOLUTE host path
-# dependency (`/Users/probe/code/spoore/crates/spoore-cdm`, this task's own file ownership
-# excludes `~/code/spoore` and the root `Cargo.toml`) -- a plain `docker build` has no access to
-# that host path, and vendoring/rewriting the dependency is out of this task's scope. Rebuild it
-# with (from the repository root, on this same host, where that path already resolves):
+# which depends on `spoore-cdm` via the workspace `Cargo.toml`'s own host path dependency -- a
+# RELATIVE sibling path since question 219(c) (`spoore-cdm = { path =
+# "../spoore/crates/spoore-cdm" }`, resolved against wherever the workspace root is mounted; an
+# absolute `/Users/probe/code/spoore/...` path before that, this task's own file ownership
+# excludes `~/code/spoore` and the root `Cargo.toml` either way) -- a plain `docker build` has no
+# access to that host path, and vendoring/rewriting the dependency is out of this task's scope.
+# Rebuild it with (from the repository root, on this same host; `SPOORE_ROOT` defaults to the
+# sibling checkout `../spoore` next to this repository's own root, question 219(b)):
 #
 #   docker run --rm \
-#     -v "$(pwd)":/workspace \
-#     -v /Users/probe/code/spoore:/Users/probe/code/spoore:ro \
-#     -w /workspace rust:1.90-bookworm \
-#     cargo build --release -p av-lockstep-shim --target-dir /workspace/target-docker-linux
+#     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
+#     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
+#     -w /Users/probe/code/AltaVista-edge rust:1.90-bookworm \
+#     cargo build --release -p av-lockstep-shim --target-dir /Users/probe/code/AltaVista-edge/target-docker-linux
+#
+# (the repository is mounted at a container path whose PARENT is literally `/Users/probe/code`,
+# not `/workspace` -- round 4's own worker report, `scripts/kit/build_kit.py`'s own
+# `CONTAINER_WORKSPACE` comment: a workspace mounted at `/workspace` needs spoore's relative
+# sibling mount at `/spoore`, which satisfies THIS crate's own `spoore-cdm` dependency but NOT
+# `crates/av-proposer/Cargo.toml`'s still-absolute `spoore-models`/`spoore-ml` dependencies --
+# cargo has to load av-proposer's manifest too to resolve the workspace at all, whichever `-p`
+# target is actually being built, and a SECOND mount or an in-container symlink at the fixed
+# absolute path does not work either, measured directly: cargo then sees `spoore-cdm` as two
+# different packages and refuses to write the lockfile. Mounting the repo itself under
+# `/Users/probe/code` makes spoore's own relative-sibling destination equal that fixed absolute
+# path by construction, so one mount satisfies both.)
 #   docker run --rm -v "$(pwd)"/target-docker-linux/release:/b ubuntu:22.04 \
 #     sh -c "apt-get update -qq && apt-get install -y -qq binutils && strip -o /b/av-lockstep-shim-stripped /b/av-lockstep-shim"
 #   cp target-docker-linux/release/av-lockstep-shim-stripped services/cfs/bin/av-lockstep-shim

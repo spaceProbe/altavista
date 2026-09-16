@@ -77,13 +77,16 @@ def spoore_dir() -> Path:
     """The HOST directory bind-mounted read-only into a cross-build container for the
     `spoore-cdm` (and sibling) path dependencies.
 
-    The root `Cargo.toml`'s own `spoore-cdm = { path = "/Users/probe/code/spoore/crates/
-    spoore-cdm" }` entry pins that dependency to the literal `/Users/probe/code/spoore`
-    INSIDE the container, on every host -- `Cargo.toml` is out of this task's scope to change
-    (it would stale the Rust SBOMs), so every cross-build's bind-mount DESTINATION stays that
-    same literal, unavoidably. The HOST-side SOURCE of that bind mount need not be a
-    `/Users/probe` literal, though: this resolves `AV_SPOORE_DIR` if set, else a `spoore`
-    checkout beside this repository's own root (`REPO_ROOT.parent / "spoore"`).
+    Question 219(c) defect fix (round 4): the root `Cargo.toml`'s own `spoore-cdm` entry is now
+    a RELATIVE sibling path (`spoore-cdm = { path = "../spoore/crates/spoore-cdm" }`), resolved
+    INSIDE the container against wherever this repository is mounted -- so a cross-build's
+    bind-mount DESTINATION is that mount point's sibling (see e.g.
+    `tests/test_edge_plugin_container.py`'s own `CONTAINER_WORKSPACE`/`SPOORE_CONTAINER_PATH`),
+    never a fixed `/Users/probe/code/spoore` literal (that was true only while the root
+    Cargo.toml's own dependency was itself absolute -- it no longer is). This function resolves
+    only the HOST-side SOURCE of that bind mount, which never was a `/Users/probe` literal:
+    `AV_SPOORE_DIR` if set, else a `spoore` checkout beside this repository's own root
+    (`REPO_ROOT.parent / "spoore"`).
     """
     override = os.environ.get("AV_SPOORE_DIR")
     if override:

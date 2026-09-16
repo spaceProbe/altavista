@@ -21,13 +21,36 @@ means the exception list is asserted to still be accurate, not just used to sile
 the heavy track relativizes av-proposer's two lines, `test_every_declared_exception_is_still_
 present` below starts failing, forcing this file's exception list (and this docstring) to be
 edited rather than silently continuing to permit something already fixed.
+
+Round 4 (the defect this docstring's own commit fixes): three container mount sites --
+`scripts/kit/build_kit.py`, `tests/test_edge_plugin_container.py`,
+`tests/test_proposer_container.py` -- were left bind-mounting spoore at the OLD absolute
+container destination after c7c04dd/a210ef7 relativized the dependency they mount for, invisible
+to `cargo test`/`cargo clippy`/the default `pytest` run because every one of these sites is
+docker-gated. The same guard is applied below to CONTAINER-side bind-mount DESTINATIONS this
+track's own Python cross-build code passes to `docker run` (`-v host:container`), not just Cargo
+manifests.
+
+Unlike the Cargo-manifest guard above, this one needs NO exception list: all three sites now
+mount this repository itself at a container path whose PARENT directory is deliberately
+`/Users/probe/code` (`CONTAINER_WORKSPACE`, chosen this way precisely so spoore's own bind-mount
+destination, computed as that mount point's sibling, lands on the exact literal
+`/Users/probe/code/spoore` av-proposer's still-absolute `spoore-models`/`spoore-ml` dependencies
+already need -- see each file's own `CONTAINER_WORKSPACE` comment for the full, measured account
+of the two broken shapes tried first: a single mount at the relative sibling alone (cargo can't
+load av-proposer's manifest), and a second real mount or symlink at the fixed absolute path
+alongside it (cargo sees `spoore-cdm` as two different packages and refuses to write the
+lockfile)). So there is no longer any HARDCODED `/Users/probe/code/spoore` literal anywhere in
+these three files' live code at all -- only in `#`-comments explaining the history above --
+and `test_no_hardcoded_absolute_spoore_literal_in_container_mount_code` below simply asserts
+that stays true, with no positive exception to keep in sync.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -154,4 +177,95 @@ def test_build_rs_spoore_proto_root_absolute_reference_is_the_declared_exception
         f"still present verbatim: {expected!r}. If this has been relativized, delete this "
         f"test -- it is the heavy track's own remaining half of question 219(b)/(c), and a "
         f"stale allowance must not outlive the thing it was excusing."
+    )
+
+
+# =================================================================================================
+# Round 4 (question 219(c) defect): container-side bind-mount DESTINATIONS, not Cargo manifests.
+# =================================================================================================
+#
+# The actual defect this file's own commit fixes: `scripts/kit/build_kit.py`,
+# `tests/test_edge_plugin_container.py` and `tests/test_proposer_container.py` all bind-mounted
+# spoore into a cross-build container at the OLD absolute container destination
+# (`/Users/probe/code/spoore`) even after the dependency it satisfies (the root Cargo.toml's own
+# `spoore-cdm`) became a relative sibling path -- invisible to `cargo test`/`cargo clippy`/the
+# default `pytest` run because every one of these sites is docker-gated. Guarded here the same
+# positive-exception way as the Cargo-manifest guard above.
+#
+# Measured, not assumed (round 4 worker report -- real cross-builds of av-ingest-server, run
+# before and after each step of this fix). Three shapes were tried, and the first two were each
+# measured broken with a real `docker run` before being ruled out -- see each of the three
+# files' own `CONTAINER_WORKSPACE` comment for the full account:
+#
+# 1. Single mount at the relative sibling of wherever the repo is mounted. Broken: cargo has to
+#    load every workspace member's manifest to resolve the workspace at all -- `crates/
+#    av-proposer` included, regardless of which `-p` target is actually being compiled -- and
+#    that crate's own `spoore-models`/`spoore-ml` dependencies are still absolute host paths
+#    (off-limits to this track, the heavy track's remaining half of question 219(b)/(c)). Failed
+#    with `error: failed to load manifest for workspace member .../crates/av-proposer ... failed
+#    to read /Users/probe/code/spoore/crates/spoore-models/Cargo.toml`.
+# 2. A second real bind mount of the same host directory at the fixed absolute path (or an
+#    in-container symlink between the two, also tried). Also broken: cargo then sees
+#    `spoore-cdm` as two different packages (once via this workspace's own relative dependency,
+#    once via `spoore-models`' own `spoore-cdm.workspace = true`, resolved through spoore's OWN
+#    workspace root) and refuses to write the lockfile: `error: package collision in the
+#    lockfile: packages spoore-cdm v0.0.0 (/Users/probe/code/spoore/crates/spoore-cdm) and
+#    spoore-cdm v0.0.0 (/spoore/crates/spoore-cdm) are different` -- confirmed with a real
+#    `cargo generate-lockfile` run (`cargo metadata --no-deps` alone does NOT reproduce this,
+#    since `--no-deps` skips the resolution step that hits it).
+#
+# THE FIX: mount the repository itself at a container path whose PARENT directory is literally
+# `/Users/probe/code` (`CONTAINER_WORKSPACE`, chosen deliberately, not `/workspace`), so spoore's
+# own bind-mount destination -- still computed as that mount point's sibling, never hardcoded --
+# lands on the exact literal `/Users/probe/code/spoore` av-proposer's manifest already needs. ONE
+# real mount then satisfies both routes to `spoore-cdm`, because they now name the identical
+# container path rather than two aliased by a mount or a symlink. There is therefore no longer
+# any HARDCODED `/Users/probe/code/spoore` string literal anywhere in these three files' live
+# code -- only in `#`-comments recording this history -- so this guard needs no positive
+# exception list at all, unlike the Cargo-manifest guard above.
+_CONTAINER_MOUNT_FILES: tuple[str, ...] = (
+    "scripts/kit/build_kit.py",
+    "tests/test_edge_plugin_container.py",
+    "tests/test_proposer_container.py",
+)
+
+
+@pytest.mark.parametrize("rel", _CONTAINER_MOUNT_FILES)
+def test_no_hardcoded_absolute_spoore_literal_in_container_mount_code(rel: str):
+    """No line of live code (i.e. not a `#`-comment) in any of the three container-mount sites
+    may hardcode the literal absolute `/Users/probe/code/spoore` string -- every one of them
+    computes its spoore mount destination as the sibling of its own `CONTAINER_WORKSPACE`
+    constant instead (see this file's module docstring for why that sibling is nonetheless
+    guaranteed to equal that same literal). Unlike the Cargo-manifest guard above, there is no
+    positive exception here: a hardcoded occurrence in live code would mean either a regression
+    back to the old broken shape, or a change that needs this file's own docstring updated
+    alongside it -- never a silent new exception."""
+    path = REPO_ROOT / rel
+    text = path.read_text()
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue  # prose explaining the fix and its rejected alternatives, not live code
+        assert "/Users/probe/code/spoore" not in line, (
+            f"{rel}:{lineno}: hardcodes the literal absolute /Users/probe/code/spoore path in "
+            f"live code -- question 219(c)'s fix computes this as the sibling of "
+            f"CONTAINER_WORKSPACE instead (see this file's module docstring for why that's "
+            f"guaranteed to equal the same literal without hardcoding it). Found: {line!r}."
+        )
+
+
+@pytest.mark.parametrize("rel", _CONTAINER_MOUNT_FILES)
+def test_container_workspace_parent_is_users_probe_code(rel: str):
+    """Pins the actual mechanism the fix above depends on: each file's own `CONTAINER_WORKSPACE`
+    constant must have `/Users/probe/code` as its immediate parent, which is what makes
+    `PurePosixPath(CONTAINER_WORKSPACE).parent / "spoore"` equal av-proposer's own still-absolute
+    `spoore-models`/`spoore-ml` container path without hardcoding it a second time. If this ever
+    changes, the whole "one mount satisfies both dependencies" argument above stops holding."""
+    path = REPO_ROOT / rel
+    match = re.search(r'^CONTAINER_WORKSPACE\s*=\s*"([^"]+)"\s*$', path.read_text(), re.MULTILINE)
+    assert match is not None, f"{rel}: expected a CONTAINER_WORKSPACE = \"...\" assignment"
+    parent = str(PurePosixPath(match.group(1)).parent)
+    assert parent == "/Users/probe/code", (
+        f"{rel}: CONTAINER_WORKSPACE={match.group(1)!r} has parent {parent!r}, expected "
+        f"'/Users/probe/code' -- see this file's module docstring for why that parent matters."
     )

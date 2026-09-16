@@ -77,7 +77,7 @@ import sys
 import tempfile
 import tomllib
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
@@ -668,18 +668,52 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
 #: and fails closed instead.
 PREBUILD_BASE_IMAGE = "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
 
-#: Question 217(d) (round 3 task 2C): the CONTAINER destination for the `spoore-cdm` bind mount
-#: stays the literal `/Users/probe/code/spoore` on every host -- the root `Cargo.toml`'s own
-#: `spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }` bakes that exact path
-#: into every crate that depends on it, and `Cargo.toml` is out of this task's scope to change
-#: (it would stale the Rust SBOMs). The HOST source of that mount need not be a `/Users/probe`
-#: literal, though, since this builder is meant to run on a build host that is not this
-#: developer's own machine: `AV_SPOORE_DIR` if set, else a `spoore` checkout beside this
-#: repository's own root -- the identical convention `altavista/test_env.py::spoore_dir` uses
-#: for the test suite (kept inline, not imported, so this module -- copied standalone into
-#: `<kit>/installer/` by `assemble_installer` below -- never gains a dependency on the full
-#: `altavista` package being importable on whatever host runs it).
-SPOORE_MOUNT_DEST = "/Users/probe/code/spoore"
+#: Question 219(c) defect fix (round 4). Three shapes were tried here, in order, and the first
+#: two were each measured broken with a REAL `docker run` before being ruled out -- recorded
+#: because the wrong shape is not obvious from reading the Cargo.toml fix alone:
+#:
+#: 1. Single mount at the RELATIVE sibling only (what the root `Cargo.toml`'s own
+#:    `spoore-cdm = { path = "../spoore/crates/spoore-cdm" }` resolves to, relative to wherever
+#:    this repository is mounted). Broken: cargo has to load EVERY workspace member's manifest
+#:    to resolve the workspace at all, `av-proposer` included, even though this function never
+#:    builds it -- `crates/av-proposer/Cargo.toml`'s own `spoore-models`/`spoore-ml`
+#:    dependencies are still absolute `/Users/probe/code/spoore/...` host paths (that crate is
+#:    off-limits to this track, the heavy track's remaining half of question 219(b)/(c)), so a
+#:    single relative mount failed with `error: failed to load manifest for workspace member
+#:    .../crates/av-proposer ... failed to read
+#:    /Users/probe/code/spoore/crates/spoore-models/Cargo.toml`.
+#: 2. A SECOND real bind mount of the SAME host spoore directory at that fixed absolute path
+#:    (alongside the relative one). Also broken: cargo then sees `spoore-cdm` TWICE -- once via
+#:    this workspace's own relative dependency, once via `spoore-models`' own
+#:    `spoore-cdm.workspace = true`, resolved through spoore's OWN workspace root (found by
+#:    walking up from wherever `spoore-models`' manifest lives) -- and refuses to write the
+#:    lockfile: `error: package collision in the lockfile: packages spoore-cdm v0.0.0
+#:    (/Users/probe/code/spoore/crates/spoore-cdm) and spoore-cdm v0.0.0
+#:    (/spoore/crates/spoore-cdm) are different`. An in-container SYMLINK between the two paths
+#:    (instead of a second real mount) was also tried and also failed identically -- confirmed
+#:    with a real `cargo generate-lockfile` run (`cargo metadata --no-deps` alone did NOT
+#:    reproduce the collision, since `--no-deps` skips the resolution step that hits it; do not
+#:    trust that flag as a stand-in for a real lockfile write). Cargo's path-dependency identity
+#:    is the un-resolved container path string as reached via each manifest's own `path = ...`,
+#:    not the host inode a bind mount or symlink ultimately points at, so two distinct routes to
+#:    the same content are still "different" packages to it, symlinked or not.
+#: 3. THE FIX: mount THIS REPOSITORY itself at a container path whose PARENT directory is
+#:    literally `/Users/probe/code` (`CONTAINER_WORKSPACE` below) -- not `/workspace`. Spoore's
+#:    bind-mount destination, computed as that mount point's sibling exactly as before, is then
+#:    `/Users/probe/code/spoore` BY CONSTRUCTION -- the exact same literal string
+#:    `crates/av-proposer/Cargo.toml`'s own absolute dependency already needs. ONE real mount
+#:    now satisfies both: this workspace's own relative `spoore-cdm` dependency (which resolves
+#:    relative to wherever the repo is mounted) and av-proposer's still-absolute one, because
+#:    they now name the IDENTICAL container path rather than two different ones aliased by a
+#:    bind mount or a symlink. Verified with a real `cargo generate-lockfile` inside the pinned
+#:    prebuild image (this exact mount shape): all 186 packages locked, no collision -- then
+#:    with a full `cargo build --release` producing a real Linux ELF (this round's own worker
+#:    report has the transcript). The container-internal path chosen for the repository mount
+#:    is arbitrary otherwise (nothing else depends on it being named `/workspace`); this is
+#:    still not a HOST path assumption -- `SPOORE_MOUNT_SRC` below is unaffected and never a
+#:    `/Users/probe` literal.
+CONTAINER_WORKSPACE = "/Users/probe/code/AltaVista-edge"
+SPOORE_MOUNT_DEST = str(PurePosixPath(CONTAINER_WORKSPACE).parent / "spoore")
 SPOORE_MOUNT_SRC = os.environ.get("AV_SPOORE_DIR") or str(REPO_ROOT.parent / "spoore")
 
 
@@ -734,12 +768,16 @@ BINARY_TARGETS: dict[str, tuple[str, str]] = {
 def _cross_build_one_binary(repo_root: Path, pkg: str, bin_name: str, run_id: str) -> tuple[bool, "Path | None", "str | None"]:
     """Cross-builds ONE `BINARY_TARGETS` entry for Linux, the identical bind-mounted `docker run`
     idiom `tests/test_edge_plugin_container.py::_cross_build_ingest_server_binary` establishes
-    (read before writing this: it bind-mounts `/Users/probe/code/spoore` read-only because
-    `av-cdm` -- and therefore every crate in this workspace -- carries a path dependency onto
-    `spoore-cdm`, `Cargo.toml`'s own `[workspace.dependencies]`). Returns `(ok, built_path,
-    error)` -- `error` is the REAL compiler/build stderr, never a synthesized message, so a
-    genuine cross-build failure (e.g. `av-command`) can be recorded as a named gap with its own
-    actual root cause."""
+    (read before writing this: it bind-mounts spoore read-only at `SPOORE_MOUNT_DEST` above --
+    the fixed absolute path by construction, see that constant's own comment for why -- both
+    because `av-cdm` -- and therefore every crate in this workspace -- carries a path dependency
+    onto `spoore-cdm`, `Cargo.toml`'s own `[workspace.dependencies]`, now a relative sibling
+    path (question 219(c)), AND because cargo has to load `av-proposer`'s own manifest too when
+    resolving the workspace, whatever `pkg`/`bin_name` are actually being built, and that
+    manifest's own `spoore-models`/`spoore-ml` dependencies are still the absolute path this
+    same mount destination happens to equal). Returns `(ok, built_path, error)` -- `error` is
+    the REAL compiler/build stderr, never a synthesized message, so a genuine cross-build
+    failure (e.g. `av-command`) can be recorded as a named gap with its own actual root cause."""
     scratch_target = repo_root / "target-docker-linux-kit" / pkg
     shutil.rmtree(scratch_target, ignore_errors=True)
     container_name = f"av-kit-binary-build-{pkg}-{run_id}"
@@ -747,16 +785,16 @@ def _cross_build_one_binary(repo_root: Path, pkg: str, bin_name: str, run_id: st
         [
             "docker", "run", "--rm", "--name", container_name,
             "--label", "av.test=1", "--label", f"av.test.run_id={run_id}",
-            "-v", f"{repo_root}:/workspace",
+            "-v", f"{repo_root}:{CONTAINER_WORKSPACE}",
             "-v", f"{SPOORE_MOUNT_SRC}:{SPOORE_MOUNT_DEST}:ro",
-            "-w", "/workspace",
+            "-w", CONTAINER_WORKSPACE,
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
             "apt-get update -qq && apt-get install -y -qq --no-install-recommends "
             "protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && "
             f"cargo build --release -p {pkg} --bin {bin_name} "
-            f"--target-dir /workspace/target-docker-linux-kit/{pkg} && "
-            f"strip /workspace/target-docker-linux-kit/{pkg}/release/{bin_name}",
+            f"--target-dir {CONTAINER_WORKSPACE}/target-docker-linux-kit/{pkg} && "
+            f"strip {CONTAINER_WORKSPACE}/target-docker-linux-kit/{pkg}/release/{bin_name}",
         ],
         capture_output=True, text=True, timeout=900,
     )
