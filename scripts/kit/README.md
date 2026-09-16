@@ -57,20 +57,22 @@ Flags:
   mismatch is a hard error, never a tarball saved under the wrong name. Takes the host-wide
   Docker test lock (`altavista.docker_test_lock.lock_docker_tests`) for the whole step.
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
-  the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`, `web`,
-  `profiles` (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it
-  resolves, a content hash, a file count, a byte count) is recorded.
+  the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
+  (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
+  content hash, a file count, a byte count) is recorded. Round 2 task 3c added `web` and
+  `profiles` here too (the viewer's own static assets and profile/policy store, copied in EVERY
+  kit unconditionally, since neither shipped in the `altavista` wheel); round 3 (question 217(b))
+  removed both again -- `pyproject.toml`/`setup.py` now ship both INSIDE the `altavista` wheel
+  itself (`altavista/web/`, `altavista/profiles/`), so the kit does not carry either separately
+  any more. See `scripts/kit/manifest.py`'s own top doc, "P5 track round 3", for the full
+  reasoning and the `kit_format` bump (2 -> 3) it required.
 - `--copy-pack <name>` (repeatable) -- **round 2**: copy that pack's real BYTES into
   `<kit>/packs/<name>/`, not merely its descriptor (implies `--with-pack` for that name). The
   pack's own internal symlinks are carried verbatim (never dereferenced) when safe -- see "Pack
   symlinks: carried verbatim when safe, refused at build time when not" below -- and an unsafe
-  one is a hard build-time refusal, never a silent copy. **`web` and `profiles` (task 3c) are
-  copied this same way in EVERY kit, unconditionally -- no flag needed, not gated behind this
-  one** (`manifest.ALWAYS_COPY_PACKS`): the viewer's own static assets and profile/policy store,
-  without which an installed viewer cannot start at all (neither ships in the `altavista` wheel --
-  see `tests/test_kit_zero_egress_install.py`'s own top doc). Measured cost: `web/` is 3.7 MB /
-  117 files / 2 pack-internal symlinks, `profiles/` is 52 KB / 7 files -- trivial next to keeping
-  the default (no-flag) kit build fast.
+  one is a hard build-time refusal, never a silent copy. Nothing is copied unconditionally any
+  more (round 3 removed the `web`/`profiles` special case along with the packs themselves) --
+  pass this flag explicitly for any pack you want real bytes for.
 - `--max-pack-bytes <n>` -- refuse (never silently skip) any `--with-pack`/`--copy-pack` pack
   whose total size exceeds this. Default 50,000,000 bytes -- comfortably above the small in-tree
   `data-time` pack, well below the ~738 MB `gmat` pack, so a big pack needs an explicit larger
@@ -131,7 +133,8 @@ byte-identical -- this is the test that would fail first if that rule were ever 
 JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trailing newline; see
 `scripts/kit/manifest.py`'s own module doc for the full field-by-field description):
 
-- `kit_format` -- an integer, bumped whenever this shape changes. **2 as of round 2.**
+- `kit_format` -- an integer, bumped whenever this shape changes. **3 as of round 3** (question
+  217(b) removed the `web`/`profiles` packs -- see `scripts/kit/manifest.py`'s own top doc).
 - `git_commit` / `git_dirty` / `git_status` -- the full HEAD SHA, whether the tree that built the
   kit was clean, and the sorted, verbatim `git status --porcelain` lines. `git_dirty` alone is a
   permanently-`true` flag IN THIS WORKTREE specifically: it carries pre-existing, untracked

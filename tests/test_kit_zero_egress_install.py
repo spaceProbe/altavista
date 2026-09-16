@@ -1,7 +1,7 @@
-"""D3's second half (docs/p5-plan.md, P5 track round 2 tasks 3b and 3c): the zero-egress install
-proof. Task 3c closed the one gap task 3b's own harness had to work around by hand -- see "The
-viewer's own static assets now come from the kit" below for what changed and what genuinely
-remains.
+"""D3's second half (docs/p5-plan.md, P5 track round 2 tasks 3b and 3c, round 3 question
+217(b)): the zero-egress install proof. Task 3c closed the one gap task 3b's own harness had to
+work around by hand; round 3 closed task 3c's OWN remaining gap in turn -- see "The viewer's own
+static assets now come from the WHEEL alone" below for the full history and what is true now.
 
 Modelled directly on `tests/test_edge_plugin_container.py` (read that file first) -- the same
 labelled `--internal` bridge network, the same `ResourceGuard`/`prune_stale_labelled_resources`/
@@ -56,48 +56,54 @@ scratch inside the enclave, not an already-built plugin image run directly).
    test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_tarball_hashes`
    already treats its own expensive case separately from the cheap default-gate one.
 
-# The viewer's own static assets now come from the kit (task 3c) -- what was fixed, and what
-# genuinely remains
+# The viewer's own static assets now come from the WHEEL alone (round 3, question 217(b)) -- the
+# full history
 
 Task 3b's own first cut of this test proved everything EXCEPT the viewer's own static/config
 assets came from the kit alone: `altavista/server.py::create_app` eagerly constructs `starlette.
-staticfiles.StaticFiles(directory=web_dir)` for the frontend, and `altavista/profile.py`'s
-`PROFILES_DIR` is a fixed constant (`Path(__file__).resolve().parent.parent / "profiles"`).
-Neither `web/` nor `profiles/` was part of the `altavista` wheel then, or now (`pyproject.toml`'s
-`[tool.setuptools.packages.find]` only ever includes `altavista*` -- confirmed directly: `python
--m altavista serve` from a wheel-only install is unable to even construct its own ASGI app,
-`StaticFiles.__init__` raising `RuntimeError: Directory '.../web' does not exist` before a single
-route is registered). Task 3b's own harness worked around this by bind-mounting THIS WORKTREE's
-own `web/`/`profiles/` into the viewer's container, read-only, and said so honestly in this same
-place -- a real, if narrow, hole in the round's headline "the demo path runs from the installed
-kit alone" claim, since a genuinely air-gapped install with no access to this worktree could not
-have started the viewer that way.
+staticfiles.StaticFiles(directory=web_dir)` for the frontend, and (at the time) `altavista/
+profile.py`'s `PROFILES_DIR` was a fixed constant (`Path(__file__).resolve().parent.parent /
+"profiles"`). Neither `web/` nor `profiles/` was part of the `altavista` wheel then
+(`pyproject.toml`'s `[tool.setuptools.packages.find]` only ever included `altavista*` --
+confirmed directly: `python -m altavista serve` from a wheel-only install was unable to even
+construct its own ASGI app, `StaticFiles.__init__` raising `RuntimeError: Directory '.../web'
+does not exist` before a single route was registered). Task 3b's own harness worked around this
+by bind-mounting THIS WORKTREE's own `web/`/`profiles/` into the viewer's container, read-only --
+a real, if narrow, hole in that round's headline "the demo path runs from the installed kit
+alone" claim, since a genuinely air-gapped install with no access to this worktree could not have
+started the viewer that way.
 
-**Task 3c closes that hole at the kit/install layer**: `scripts/kit/manifest.py` gained two new
-named packs, `web` and `profiles` (`manifest.PACKS`), copied into every kit UNCONDITIONALLY
-(`manifest.ALWAYS_COPY_PACKS` -- no flag, not even `--copy-pack`, since an installed viewer
-cannot start without them and the combined cost is trivial: 3.7 MB / 117 files / 2 pack-internal
-symlinks for `web`, 52 KB / 7 files for `profiles`, measured). `scripts/kit/install.py` now
-refuses a kit that somehow lacks either (`_check_required_viewer_assets`, mirroring its existing
-wheels refusal) and names both in `INSTALL_RECORD["installed"]["viewer_assets"]`
-(`{"web_dir": "kit/packs/web", "profiles_dir": "kit/packs/profiles"}`). Below,
-`_run_viewer_from_installed_kit` now points `web_dir`/`PROFILES_DIR` at those INSTALLED paths --
-`/target/kit/packs/web`, `/target/kit/packs/profiles`, both already reachable through the
-`install_volume` mount every step here already uses -- and bind-mounts nothing from this worktree
-at all. Every byte the viewer serves, and every line of code that runs, is now the kit's own.
+**Task 3c** closed that hole at the kit/install layer instead of the packaging layer:
+`scripts/kit/manifest.py` gained two new named packs, `web` and `profiles`, copied into every kit
+UNCONDITIONALLY, and `_run_viewer_from_installed_kit` pointed `web_dir`/`PROFILES_DIR` at those
+INSTALLED pack paths. That closed the "bind-mounts this worktree" hole, but left the underlying
+gap on record for the lead: the `altavista` WHEEL itself still shipped no `web/`/`profiles/`, and
+`altavista.profile.PROFILES_DIR` was still a fixed module constant with no parameter or CLI flag
+-- monkeypatching it was the only way to point it anywhere else, so task 3c's own version of
+`_viewer_bootstrap_script` did exactly that, against the installed pack copy.
 
-**What remains, and is NOT this task's job to fix** (`altavista/**` and `pyproject.toml` are
-explicitly out of scope for this worker -- a decision for the lead): the `altavista` WHEEL itself
-still ships no `web/`/`profiles/` (the same `pyproject.toml` gap, unchanged), and `altavista.
-profile.PROFILES_DIR` is still a fixed module constant with no parameter or CLI flag -- there is
-no other way to point it anywhere but monkeypatching it, so `_viewer_bootstrap_script` still does
-exactly that, now against the INSTALLED copy rather than this worktree's. `web_dir`, by contrast,
-is a real, already-supported `create_app` parameter, used here for exactly its intended purpose
-(an externally-configured deploy-time static root, precisely like `--textures` already is) -- not
-a workaround, just its ordinary calling convention. Closing the wheel-packaging gap for good
-(shipping `web/`/`profiles/` as package data, or giving the CLI a `--profiles-dir` flag matching
-`web_dir`'s own shape) is a `pyproject.toml`/`altavista/__main__.py`/`altavista/profile.py` fix,
-recorded here for the lead, not attempted by this task.
+**Round 3 (question 217(b), the lead's ruling) closes the gap for real, at the packaging layer**:
+`pyproject.toml`/`setup.py` (see both files' own docs) now ship `web/` and `profiles/` INSIDE the
+`altavista` wheel itself, as `altavista/web/`/`altavista/profiles/`; `altavista/profile.py` gained
+an ordered `resolve_profiles_dir` search (explicit argument, `ALTAVISTA_PROFILES_DIR` env var,
+the module constant if assigned, the packaged copy, the in-repo copy -- see that module's own
+doc) that finds the packaged copy automatically with NO override of any kind; `altavista/
+server.py`'s `WEB_DIR` gained the equivalent packaged-copy-first default. Because of this, the two
+`web`/`profiles` packs task 3c added are GONE again (`manifest.PACKS`, `kit_format` bumped 2 -> 3
+-- see `manifest.py`'s own top doc) and `_run_viewer_from_installed_kit` below no longer
+monkeypatches `altavista.profile.PROFILES_DIR` or passes `web_dir=` pointing at a kit pack at
+all: it calls `create_app()` with neither argument, and the installed wheel's own default
+resolution finds both entirely on its own. `INSTALLED_WEB_DIR`/`INSTALLED_PROFILES_DIR` (the old
+pack-path constants) are gone along with the packs they named. The proof is strengthened to
+match: a real `GET /index.html`/`GET /` and a real `GET /node_modules/three/three.module.js`
+(status 200, non-trivial body length -- what actually proves `web/` came out of the wheel,
+symlinks included, not merely that SOME static root exists), plus a real profile
+(`profiles/design.yaml`) loaded through `altavista.profile`'s own loader, inside the container,
+against nothing but the installed wheel.
+
+Nothing from this worktree, and nothing from `kit/packs/`, is bind-mounted or referenced for the
+viewer anywhere in this file any more -- every byte it serves, and every line of code that runs,
+is the installed wheel's own.
 
 # Gating (question 194) -- computed once, at import time
 
@@ -134,6 +140,7 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -165,12 +172,17 @@ _PROOF_KIT_BUILD_CMD = (
 
 PROBE_IMAGE = "python:3.13-slim"
 
-# (task 3c) Paths INSIDE the installed tree -- reachable through the `install_volume` mount every
-# step here already uses (`-v f"{install_volume}:/target:ro"`), never a bind-mount of this
-# worktree's own `web/`/`profiles/` (see this module's own top doc, "The viewer's own static
-# assets now come from the kit"). Matches `INSTALL_RECORD["installed"]["viewer_assets"]` exactly.
-INSTALLED_WEB_DIR = "/target/kit/packs/web"
-INSTALLED_PROFILES_DIR = "/target/kit/packs/profiles"
+# Round 3 (question 217(b)): the marker paths inside the `altavista` wheel's own zip namelist that
+# prove it carries the viewer's static/config assets -- identical to
+# `scripts/kit/install.py::_VIEWER_ASSET_WHEEL_MARKERS`, restated here (not imported -- this file
+# reuses that check's CONVENTION, not its text, exactly like every other helper in this module)
+# because `_proof_kit_missing_sections` needs to skip visibly, by name, if the proof kit's own
+# altavista wheel predates the round-3 packaging change, rather than failing deep inside
+# `_run_viewer_from_installed_kit` with a confusing 404. Task 3c's `INSTALLED_WEB_DIR`/
+# `INSTALLED_PROFILES_DIR` pack-path constants are gone along with the `web`/`profiles` packs
+# themselves (see this module's own top doc) -- there is no separate installed path to name any
+# more, only the wheel.
+VIEWER_ASSET_WHEEL_MARKERS = ("altavista/web/index.html", "altavista/profiles/design.yaml")
 
 GROUND_SEGMENT_FIXTURES = REPO_ROOT / "crates" / "av-edge" / "tests" / "fixtures" / "ground_segment"
 SIGNING_KEY_PEM = GROUND_SEGMENT_FIXTURES.parent / "test_signing_key.pem"
@@ -217,8 +229,10 @@ def _image_present(tag: str) -> bool:
     return result.returncode == 0
 
 
-def _proof_kit_missing_sections(doc: dict) -> list[str]:
+def _proof_kit_missing_sections(doc: dict, kit_dir: Path) -> list[str]:
     missing = []
+    if doc.get("kit_format") != kit_manifest.KIT_FORMAT:
+        missing.append(f"kit_format (proof kit is {doc.get('kit_format')!r}, this worktree builds {kit_manifest.KIT_FORMAT!r})")
     for component in sbom.IMAGE_COMPONENTS:
         if not doc.get("images", {}).get(component, {}).get("collected"):
             missing.append(f"images.{component}")
@@ -231,15 +245,29 @@ def _proof_kit_missing_sections(doc: dict) -> list[str]:
     pack = doc.get("packs", {}).get("data-time")
     if not pack or not pack.get("copied"):
         missing.append("packs.data-time (copied)")
-    # (task 3c) `web`/`profiles` are copied unconditionally by any kit `build_kit.py` itself
-    # writes (`manifest.ALWAYS_COPY_PACKS`) -- checked explicitly anyway, the same defence in
-    # depth `install.py::_check_required_viewer_assets` applies, so a stale kit built before task
-    # 3c (or one missing them for any other reason) is skipped with a clear reason rather than
-    # failing deep inside `_run_viewer_from_installed_kit`.
-    for name in ("web", "profiles"):
-        pack = doc.get("packs", {}).get(name)
-        if not pack or not pack.get("copied"):
-            missing.append(f"packs.{name} (copied)")
+    # Round 3 (question 217(b)): task 3c's `web`/`profiles` packs are gone (see this module's own
+    # top doc) -- the equivalent check is now on the `altavista` WHEEL itself, the same one
+    # `scripts/kit/install.py::_check_viewer_assets_in_wheel` runs at install time, restated here
+    # (not imported -- see `VIEWER_ASSET_WHEEL_MARKERS`'s own comment) so a proof kit built before
+    # round 3's packaging change (or with a stale/unpackaged wheel for any other reason) is
+    # skipped with a clear, named reason rather than failing deep inside
+    # `_run_viewer_from_installed_kit`.
+    altavista_entry = next(
+        (f for f in doc.get("wheels", {}).get("fetched", []) if f["name"].lower() == "altavista"),
+        None,
+    )
+    if altavista_entry is None:
+        missing.append("wheels.fetched (no altavista entry)")
+    else:
+        wheel_path = kit_dir / "wheels" / altavista_entry["filename"]
+        try:
+            with zipfile.ZipFile(wheel_path) as zf:
+                names = set(zf.namelist())
+        except (OSError, zipfile.BadZipFile):
+            names = set()
+        for marker in VIEWER_ASSET_WHEEL_MARKERS:
+            if marker not in names:
+                missing.append(f"altavista wheel missing {marker!r} (round 3 packaging change)")
     return missing
 
 
@@ -265,7 +293,7 @@ def _compute_skip_reason() -> "str | None":
         doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         return f"{manifest_path} could not be read/parsed ({e}) -- rebuild with: {_PROOF_KIT_BUILD_CMD}"
-    missing = _proof_kit_missing_sections(doc)
+    missing = _proof_kit_missing_sections(doc, _PROOF_KIT_DIR)
     if missing:
         return (
             f"the kit at {_PROOF_KIT_DIR} exists but is missing expensive section(s) {missing!r} "
@@ -529,12 +557,16 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         assert install_record["installed"]["wheels"]["installed_packages"], "INSTALL_RECORD reports no installed Python packages"
         installed_names = {p["name"].lower().replace("_", "-") for p in install_record["installed"]["wheels"]["installed_packages"]}
         assert "altavista" in installed_names, f"altavista itself was not installed: {installed_names}"
-        # (task 3c) INSTALL_RECORD names where the viewer's own static/config assets landed --
-        # the exact paths (relative to /target) INSTALLED_WEB_DIR/INSTALLED_PROFILES_DIR
-        # hard-code, cross-checked here rather than merely assumed.
-        assert install_record["installed"]["viewer_assets"] == {
-            "web_dir": "kit/packs/web", "profiles_dir": "kit/packs/profiles",
-        }, install_record["installed"]["viewer_assets"]
+        # Round 3 (question 217(b)): INSTALL_RECORD no longer names a separate "viewer_assets"
+        # path -- task 3c's `web`/`profiles` packs are gone, and the installed wheel already
+        # carries both (`scripts/kit/install.py::install`'s own comment on why that key was
+        # removed). `_run_viewer_from_installed_kit`, below, is this test's own proof that the
+        # viewer actually finds them with no such path at all.
+        assert "viewer_assets" not in install_record["installed"], (
+            f"INSTALL_RECORD still names a viewer_assets path -- task 3c's web/profiles packs "
+            f"were supposed to be fully removed (round 3, question 217(b)): "
+            f"{install_record['installed'].get('viewer_assets')!r}"
+        )
         print(f"\n--- INSTALL_RECORD (question 148) ---\n{json.dumps(install_record, indent=2)[:2000]}")
 
         # ---------------------------------------------------------------------------------
@@ -590,24 +622,35 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
 
 
 def _viewer_bootstrap_script() -> str:
-    """See this module's own top doc, "The viewer's own static assets now come from the kit" --
-    every line of CODE here is the installed wheel's own (`altavista.server.create_app`,
-    `uvicorn`); `web_dir` is a real, already-supported parameter used for its intended purpose,
-    pointed at the INSTALLED `web/` pack (`INSTALLED_WEB_DIR`, reachable through the
-    `install_volume` mount alone -- no bind-mount of this worktree's own `web/` anywhere), and
-    `altavista.profile.PROFILES_DIR` is monkeypatched (the one piece of this path with no
-    parameter at all -- a real, named packaging gap, see this module's own top doc) to point at
-    the INSTALLED `profiles/` pack the same way."""
+    """Round 3 (question 217(b)) -- see this module's own top doc, "The viewer's own static
+    assets now come from the WHEEL alone". Every line of code here is the installed wheel's own
+    (`altavista.server.create_app`, `uvicorn`); `create_app()` is called with NEITHER `web_dir=`
+    nor any profile override at all -- no bind-mount, no kit pack path, no monkeypatch of
+    `altavista.profile.PROFILES_DIR` (task 3c's own last resort, gone along with the packaging
+    gap it worked around). Both resolve entirely on their own, against the packaged copies the
+    round-3 `pyproject.toml`/`setup.py` change put inside this very venv's own installed
+    `altavista` package (`site-packages/altavista/{web,profiles}/`)."""
     return (
-        "import pathlib\n"
-        "import altavista.profile as _profile_mod\n"
-        f"_profile_mod.PROFILES_DIR = pathlib.Path({INSTALLED_PROFILES_DIR!r})\n"
         "import uvicorn\n"
         "from altavista.server import create_app\n"
-        f"app = create_app(web_dir={INSTALLED_WEB_DIR!r}, texture_dir='/nonexistent-textures')\n"
+        "app = create_app(texture_dir='/nonexistent-textures')\n"
         "print('APP_CREATED_OK', flush=True)\n"
         "uvicorn.run(app, host='0.0.0.0', port=8765, log_level='info')\n"
     )
+
+
+#: A minimal, stdlib-only probe body run INSIDE the installed venv (`/target/venv/bin/python3`,
+#: never the bare `python:3.13-slim` interpreter -- this needs the installed `altavista` package
+#: itself) that loads a real profile through `altavista.profile`'s own loader, proving the
+#: packaged `profiles/` copy is genuinely reachable and readable from the installed wheel alone,
+#: not merely present on disk somewhere this test never actually reads.
+_PROFILE_LOAD_PROBE_SCRIPT = (
+    "import json\n"
+    "import altavista.profile as profile_mod\n"
+    "resolved = profile_mod.resolve_profiles_dir()\n"
+    "imagery = profile_mod.load_imagery_config('design')\n"
+    "print(json.dumps({'resolved_profiles_dir': str(resolved), 'imagery': imagery}))\n"
+)
 
 
 def _run_viewer_from_installed_kit(guard: ResourceGuard, run_id: str, network_name: str, install_volume: str, run_scratch: Path) -> dict:
@@ -617,10 +660,11 @@ def _run_viewer_from_installed_kit(guard: ResourceGuard, run_id: str, network_na
     viewer_container = _labelled_id(run_id, "viewer")
     guard.track_container(viewer_container)
     _docker(
-        # (task 3c) `install_volume` is the ONLY content mount here -- it already carries
-        # `kit/packs/web` and `kit/packs/profiles` (INSTALLED_WEB_DIR/INSTALLED_PROFILES_DIR,
-        # above) from the kit's own install, so no bind-mount of this worktree's own `web/` or
-        # `profiles/` is needed, or present, anywhere in this test.
+        # Round 3 (question 217(b)): `install_volume` is STILL the only content mount here, but
+        # for a different reason than task 3c's -- it carries the installed venv (`/target/
+        # venv/`), whose own `site-packages/altavista/{web,profiles}/` the wheel itself put there.
+        # No kit pack path is read or referenced at all any more -- there is no pack left to
+        # reference (`manifest.PACKS` no longer has `web`/`profiles` entries).
         "run", "-d", "--name", viewer_container, "--network", network_name, *guard.label_args(),
         "-v", f"{install_volume}:/target:ro",
         "-v", f"{bootstrap_path}:/bootstrap.py:ro",
@@ -635,13 +679,53 @@ def _run_viewer_from_installed_kit(guard: ResourceGuard, run_id: str, network_na
         "run", "--rm", "--name", probe_container, "--network", f"container:{viewer_container}", *guard.label_args(),
         PROBE_IMAGE, "python3", "-c",
         "import urllib.request, json\n"
+        "results = {}\n"
         "r = urllib.request.urlopen('http://127.0.0.1:8765/api/scenarios', timeout=5)\n"
-        "print(json.dumps({'status': r.status, 'body': json.loads(r.read())}))\n",
+        "results['scenarios'] = {'status': r.status, 'body': json.loads(r.read())}\n"
+        # Round 3 (question 217(b)): the strengthened proof -- GET /api/scenarios returning 200
+        # only proves an ASGI app started at all (its body comes from an in-memory Hub, never
+        # from disk); a real GET for the viewer's own index page and a real GET for one of the
+        # two symlinks-turned-real-files inside web/node_modules/three/ (setup.py's own doc on
+        # what happened to them) is what actually proves web/ came out of the WHEEL.
+        "r = urllib.request.urlopen('http://127.0.0.1:8765/index.html', timeout=5)\n"
+        "results['index_html'] = {'status': r.status, 'body_len': len(r.read())}\n"
+        "r = urllib.request.urlopen('http://127.0.0.1:8765/node_modules/three/three.module.js', timeout=5)\n"
+        "results['three_module_js'] = {'status': r.status, 'body_len': len(r.read())}\n"
+        "print(json.dumps(results))\n",
     )
     result = json.loads(http.stdout.strip().splitlines()[-1])
-    assert result["status"] == 200, f"GET /api/scenarios did not return 200: {result}"
-    assert result["body"] == {"names": []}, f"unexpected body from a freshly started viewer: {result}"
-    return {"http_status": result["status"], "body": result["body"], "startup_log_tail": log_lines[-5:]}
+    assert result["scenarios"]["status"] == 200, f"GET /api/scenarios did not return 200: {result}"
+    assert result["scenarios"]["body"] == {"names": []}, f"unexpected body from a freshly started viewer: {result}"
+    assert result["index_html"]["status"] == 200, f"GET /index.html did not return 200 -- web/ did not come out of the wheel: {result}"
+    assert result["index_html"]["body_len"] > 200, f"GET /index.html returned a suspiciously small body: {result}"
+    assert result["three_module_js"]["status"] == 200, (
+        f"GET /node_modules/three/three.module.js did not return 200 -- the dereferenced symlink "
+        f"(setup.py's own build_py copy) did not make it into the wheel: {result}"
+    )
+    assert result["three_module_js"]["body_len"] > 100_000, (
+        f"GET /node_modules/three/three.module.js returned a suspiciously small body (three.js "
+        f"itself is hundreds of KB): {result}"
+    )
+
+    # Round 3 (question 217(b)): a real profile, loaded through altavista.profile's own loader,
+    # from inside the installed venv -- proves the packaged profiles/ copy is genuinely reachable
+    # from the wheel alone, not merely that SOME static root answered HTTP above.
+    profile_probe_container = _labelled_id(run_id, "profile-load-probe")
+    guard.track_container(profile_probe_container)
+    profile_probe = _docker(
+        "run", "--rm", "--name", profile_probe_container, "--network", network_name, *guard.label_args(),
+        "-v", f"{install_volume}:/target:ro",
+        "--entrypoint", "/target/venv/bin/python3",
+        PROBE_IMAGE, "-c", _PROFILE_LOAD_PROBE_SCRIPT,
+    )
+    profile_result = json.loads(profile_probe.stdout.strip().splitlines()[-1])
+    assert profile_result["resolved_profiles_dir"].endswith("altavista/profiles"), (
+        f"altavista.profile.resolve_profiles_dir() did not resolve to the packaged copy inside "
+        f"the installed wheel: {profile_result}"
+    )
+    assert "urlTemplate" in profile_result["imagery"], f"design profile's imagery section did not load: {profile_result}"
+
+    return {"http": result, "profile_load": profile_result, "startup_log_tail": log_lines[-5:]}
 
 
 def _run_ingest_from_installed_kit(guard: ResourceGuard, run_id: str, network_name: str, install_volume: str) -> tuple[str, dict]:

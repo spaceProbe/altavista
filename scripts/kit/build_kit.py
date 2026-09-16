@@ -19,17 +19,20 @@ why "source state" is the commit AND the working tree on top of it, never the co
 IN, always: the merged suite/site files, the ten committed SBOMs + `SHA256SUMS`, the two
 `IMAGE_DIGEST.md` records, the recorded kernel runs (`tests/fixtures/*.runproducts.bin`), the
 Decision-K pack descriptors (`data/time` by default), the git commit/dirty state, and
-`KIT_MANIFEST` itself. **Task 3c adds**: real BYTES for the `web` and `profiles` packs (the
-viewer's own static assets and profile/policy store), copied UNCONDITIONALLY, no flag -- see
-`manifest.ALWAYS_COPY_PACKS`'s own doc for why (an installed viewer cannot start without them,
-and both together measure to ~3.75 MB, trivial next to keeping the default build fast).
+`KIT_MANIFEST` itself. **Task 3c added, round 3 (question 217(b)) removed**: real BYTES for the
+`web` and `profiles` packs (the viewer's own static assets and profile/policy store), copied
+UNCONDITIONALLY, no flag. Round 3's packaging change (`pyproject.toml`/`setup.py`) now ships both
+INSIDE the `altavista` wheel itself, so the kit does not need to carry either separately any more
+-- see `manifest.py`'s own top doc, "P5 track round 3", for the full reasoning and the resulting
+`kit_format` bump (2 -> 3).
 
 GATED, opt-in, off by default:
 - `--with-images` -- `docker save` of the two recorded images.
 - `--with-pack <name>` (repeatable) -- an additional pack's DESCRIPTOR (content hash only).
 - `--copy-pack <name>` (repeatable) -- round 2: that pack's real BYTES, copied into the kit
-  (implies the descriptor too; `--max-pack-bytes` still gates it). `web`/`profiles` are copied
-  this same way but are never gated behind this flag -- see above.
+  (implies the descriptor too; `--max-pack-bytes` still gates it). Round 2 also copied `web`/
+  `profiles` this same way, unconditionally, never gated behind this flag; round 3 removed both
+  packs outright (see above) -- the `altavista` wheel carries them now.
 - `--with-vendor` -- round 2: `cargo vendor --offline` (falling back to the network exactly once
   if genuinely necessary, question 154's one exception) into `<kit>/vendor/`.
 - `--with-wheels` -- round 2: the viewer's real runtime dependency wheels, pinned to this
@@ -841,12 +844,11 @@ def build(
     assemble_image_digest_docs(repo_root, kit_root)
     runs = assemble_runs(repo_root, kit_root)
 
-    # Task 3c: `web`/`profiles` are copied in EVERY kit, unconditionally -- unioned in here
-    # rather than requiring the caller to pass `--copy-pack web --copy-pack profiles` (see
-    # `manifest.ALWAYS_COPY_PACKS`'s own doc for why: an installed viewer cannot start without
-    # them, and the combined cost is trivial). A caller's own explicit `--copy-pack` request is
-    # still honoured for every other pack exactly as before.
-    copy_set = set(copy_pack_names or []) | set(kit_manifest.ALWAYS_COPY_PACKS)
+    # Round 2 task 3c unioned `web`/`profiles` into every kit's copy set here, unconditionally.
+    # Round 3 (question 217(b)) removed both packs -- the `altavista` wheel carries them now (see
+    # manifest.py's own top doc) -- so nothing is unioned in any more; a caller's own explicit
+    # `--copy-pack` request is still honoured for every other pack exactly as before.
+    copy_set = set(copy_pack_names or [])
     pack_names = list(dict.fromkeys([kit_manifest.DEFAULT_PACK, *(with_pack_names or []), *copy_set]))
     unknown_packs = [n for n in pack_names if n not in kit_manifest.PACKS]
     if unknown_packs:
@@ -936,9 +938,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--copy-pack", action="append", default=[], dest="copy_pack",
         help="repeatable: copy that pack's real BYTES into the kit (round 2), not merely its "
-             f"descriptor -- implies --with-pack for that name. --max-pack-bytes still gates it. "
-             f"{sorted(kit_manifest.ALWAYS_COPY_PACKS)} are copied unconditionally regardless of "
-             f"this flag (task 3c) -- pass it for any other pack.",
+             "descriptor -- implies --with-pack for that name. --max-pack-bytes still gates it. "
+             "Nothing is copied unconditionally any more (round 3, question 217(b), removed the "
+             "web/profiles packs that once were) -- pass it explicitly for any pack you want.",
     )
     p.add_argument(
         "--max-pack-bytes", type=int, default=kit_manifest.DEFAULT_MAX_PACK_BYTES,

@@ -55,6 +55,22 @@ changed and why:
   most of it (a kit genuinely installs and runs its demo now), so it names only what still
   remains out of scope (standing up a supervised, persistent deployment) rather than the
   now-false claim that installing anything from a kit was entirely someone else's job.
+- **P5 track round 3 (question 217(b), the lead's ruling)**: round 2's `web`/`profiles` packs are
+  REMOVED outright -- `pyproject.toml`/`setup.py` (round 3's own packaging change, `altavista/**`)
+  now ships both inside the `altavista` wheel itself (`altavista/web/`, `altavista/profiles/`), so
+  the kit no longer needs to carry either separately at all. `PACKS` drops both entries;
+  `ALWAYS_COPY_PACKS` is removed along with them (nothing is unconditionally copied any more --
+  `data-time` stays the one `--with-pack`-only default, unchanged). This is a real `kit_format`
+  bump (2 -> 3, `KIT_FORMAT` below), not merely an internal refactor: a `kit_format` 2 installer's
+  own understanding (`install.py`'s round-2 `_check_required_viewer_assets`) hard-refuses any kit
+  whose `packs` section lacks `"web"`/`"profiles"` entries showing `"copied": true` -- exactly
+  what every round-3 kit now looks like, by design. Bumping the format makes that refusal fire for
+  the RIGHT reason (a shape a round-2-only installer was never written to understand) rather than
+  a round-2 installer silently limping along against a kit it would in fact mis-install (no static
+  root, no profile store, from packs that no longer exist). `install.py`'s own round-3 replacement
+  check reads the `altavista` wheel's own namelist instead (a wheel is a zip) -- see that module's
+  own doc for why this is the load-bearing safety check `_check_required_viewer_assets` used to
+  be, not simply deleted.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -169,7 +185,7 @@ from typing import Optional
 # mutating sys.path itself.
 import sbom  # noqa: E402  (see comment above -- caller is responsible for sys.path)
 
-KIT_FORMAT = 2
+KIT_FORMAT = 3
 
 # --- Round-1 fixed gap reasons, unchanged. Round-2 gaps that can be genuinely collected
 # (cargo-vendor, python-wheels) move to `build_gaps` below, which decides per-build whether they
@@ -268,30 +284,20 @@ PACKS: dict[str, str] = {
     "mirrors": "third_party/mirrors",
     "cspice": "third_party/cspice",
     "cfs": "third_party/cfs",
-    # P5 track round 2 task 3c: the VIEWER's own static/config assets. Neither is part of the
-    # `altavista` wheel (`pyproject.toml`'s `[tool.setuptools.packages.find]` only ever includes
-    # `altavista*` -- a `pyproject.toml`/packaging-level gap this task does not own, see
-    # tests/test_kit_zero_egress_install.py's own top doc), so a kit must carry them itself as
-    # copied packs or an installed viewer has no static root and no profile store to read from.
-    "web": "web",
-    "profiles": "profiles",
+    # Round 2 task 3c added "web"/"profiles" copied packs here (the viewer's own static assets
+    # and profile/policy store, neither part of the `altavista` wheel at the time). Round 3
+    # (question 217(b)) removes them again: `pyproject.toml`/`setup.py` now ships both INSIDE the
+    # `altavista` wheel itself (`altavista/web/`, `altavista/profiles/`), so the kit no longer
+    # carries either as a pack of its own at all -- see this module's own top doc, "P5 track round
+    # 3", for the full reasoning and the `kit_format` bump it required.
 }
 
 #: The one pack every kit DESCRIBES regardless of `--with-pack` (Decision K: "keep the default
-#: test set to the small in-tree pack (data/time) so the default gate stays fast"). Distinct from
-#: `ALWAYS_COPY_PACKS`, below -- `data-time` is a descriptor-only default, not copied unless
-#: `--copy-pack data-time` is also passed.
+#: test set to the small in-tree pack (data/time) so the default gate stays fast"). Round 2 also
+#: had an `ALWAYS_COPY_PACKS` constant (`web`/`profiles`, copied unconditionally); round 3 removed
+#: it along with those two packs -- nothing is copied unconditionally any more, `data-time` stays
+#: descriptor-only unless `--copy-pack data-time` is also passed.
 DEFAULT_PACK = "data-time"
-
-#: Packs whose real BYTES every kit copies unconditionally -- no flag, never gated -- because an
-#: installed viewer cannot start without them (see the `"web"`/`"profiles"` entries in `PACKS`,
-#: above). Measured cost (task 3c): `web/` is 3.7 MB across 117 regular files and 2 pack-internal
-#: symlinks, `profiles/` is 52 KB across 7 files -- both trivial next to the ~738 MB `gmat` pack
-#: that DOES stay opt-in, so making these two unconditional does not compromise "the default kit
-#: build stays fast" (Decision K). `build_kit.build` unions this into whatever `--copy-pack` the
-#: caller also requested, so they cannot be disabled by omission -- only a kit that never runs
-#: `build_kit.build` at all (nothing in this repository) could ever lack them.
-ALWAYS_COPY_PACKS: tuple[str, ...] = ("web", "profiles")
 
 #: Generous for any small in-tree pack (data/time is ~16 KB), far short of the 738 MB GMAT
 #: pack -- so requesting a big pack needs an explicit, larger `--max-pack-bytes` alongside

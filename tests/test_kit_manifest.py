@@ -61,12 +61,17 @@ def test_a_kit_builds_and_verifies(tmp_path):
     # Review finding D3-1(a): an earlier cut of this builder let deploy/secdeploy/merge.py plant
     # a `deploy` symlink (an absolute path into the user's own secdeploy checkout) inside the
     # kit. A freshly built kit must contain NO symlinks OUTSIDE a copied pack's own
-    # `packs/<name>/...` tree -- unchanged since round 1. Task 3c's `web`/`profiles` packs are now
-    # copied unconditionally (`manifest.ALWAYS_COPY_PACKS`), even with no `--copy-pack` flag at
-    # all, so a freshly built kit is no longer symlink-free outright: it carries exactly the two
-    # pack-internal symlinks `web/`'s own `node_modules/three/` re-export requires (measured,
-    # task 3c's own report), both declared in `pack_symlinks` and both classified safe by
-    # `verify_manifest` above. Anywhere else in the kit must still be symlink-free.
+    # `packs/<name>/...` tree -- unchanged since round 1. Task 3c's `web`/`profiles` packs were
+    # copied unconditionally for one round (`manifest.ALWAYS_COPY_PACKS`), which made a freshly
+    # built kit carry exactly the two pack-internal symlinks `web/`'s own `node_modules/three/`
+    # re-export required; round 3 (question 217(b)) removed both packs outright -- the
+    # `altavista` wheel carries the same two paths, dereferenced into real file copies, instead
+    # (see `setup.py`'s own doc) -- so a freshly built DEFAULT kit (no `--copy-pack` at all, as
+    # `_build_kit` above builds one) is back to carrying no symlinks anywhere, the same as round
+    # 1. This assertion stays general (not hard-coded to "zero") because `--copy-pack data-time`
+    # and friends remain available and still must stay symlink-free themselves; only a pack that
+    # legitimately carries its own internal symlinks (none of the packs left in `manifest.PACKS`
+    # do, as of round 3) would make this non-empty.
     symlink_rel_paths = {p.relative_to(kit_root).as_posix() for p in kmanifest._walk_kit_symlinks(kit_root)}
     non_pack = {p for p in symlink_rel_paths if Path(p).parts[0] != "packs"}
     assert non_pack == set(), f"a freshly built kit must contain no symlinks outside a copied pack, found: {non_pack}"
@@ -492,14 +497,18 @@ def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_
 
 
 # =================================================================================================
-# 13. Round 2 (P5 track round 2 task 3a, lead ruling 214(b)): kit_format is bumped
+# 13. kit_format is bumped -- round 2 (P5 track round 2 task 3a, lead ruling 214(b)) moved it
+# 1 -> 2; round 3 (question 217(b)) moved it again, 2 -> 3, when the web/profiles packs were
+# removed (they now ship inside the altavista wheel instead -- manifest.py's own top doc, "P5
+# track round 3", has the full reasoning for why that counts as a real format change and not
+# merely an internal refactor).
 # =================================================================================================
 
-def test_kit_format_is_bumped_for_round_2(tmp_path):
+def test_kit_format_is_bumped_for_round_3(tmp_path):
     _kit_root, manifest_path, _digest = _build_kit(tmp_path)
     doc = json.loads(manifest_path.read_text())
-    assert doc["kit_format"] == 2
-    assert kmanifest.KIT_FORMAT == 2
+    assert doc["kit_format"] == 3
+    assert kmanifest.KIT_FORMAT == 3
 
 
 # =================================================================================================
