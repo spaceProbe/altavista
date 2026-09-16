@@ -76,6 +76,7 @@ name = "av-catalog"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-label",
  "av-lockstep",
  "base64",
  "openssl",
@@ -175,6 +176,7 @@ dependencies = [
  "av-catalog",
  "av-cdm",
  "av-command",
+ "av-label",
  "av-lockstep",
  "http",
  "openssl",
@@ -255,6 +257,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-jobs"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-label",
+ "av-lockstep",
+ "av-store",
+ "bytes",
+ "openssl",
+ "prost",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "av-kernel"
 version = "0.1.0"
 dependencies = [
@@ -271,6 +288,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "av-label"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "thiserror",
 ]
 
 [[package]]
@@ -344,6 +369,7 @@ name = "av-store"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-label",
  "av-lockstep",
  "base64",
  "bytes",
@@ -372,6 +398,21 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
+]
+
+[[package]]
+name = "av-tiles"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-command",
+ "av-label",
+ "av-store",
+ "openssl",
+ "prost",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

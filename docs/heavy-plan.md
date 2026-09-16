@@ -411,3 +411,362 @@ proof in `av-lockstep`.
    worktree; the lead should expect to resolve that at merge.
 7. **H3 is the first item of round 2**, with H4–H7 behind it. The claim-check, the store and
    the catalog are the foundation it needs, and both are now real.
+
+## Status (heavy manager, 2026-09-16) — round 2
+
+**Questions 219(a)/(b) and 218 are executed, H3 is delivered and H4 is delivered.**
+H3 went further than the milestone asked — a tile set now round-trips through a real MinIO —
+and that extra proof is what exposed the round's sharpest defect. H5–H7 are untouched.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `928d22e` | Question 219(a)/(b): `av-proposer`'s `DEFAULT_MODEL_SERVICE_BIND` in the owned port map; `SPOORE_ROOT` with the `../spoore` sibling default in `crates/av-proposer/build.rs` |
+| `b77e2f3` | Question 218: `crates/av-label` extracted, adopted by `av-store`, `av-catalog` and `av-gateway` in one change |
+| `8d4779f` | H3a: `crates/av-jobs` — the durable hash-chained queue, the job record types in `heavy.proto`, and the runner |
+| `5ee646a` | H3b: the tiler — imagery to the globe's tile layout under a hashed manifest, with a dependency-free PNG encoder |
+| `d10ed8f` | H3's exit proof: a tile set through a real MinIO container, and the defect it exposed |
+| `2d9365c` | The manifest's backend-dependent addressing fixed (manager's review finding) |
+| `185aebc` | H4: `crates/av-tiles`, the tile gateway; `GroupClearanceMap` moved into `av-label` |
+
+### Question 219: the port map and `SPOORE_ROOT`
+
+`av-proposer`'s only listening socket is the `spoore.v0.ModelService` server it serves under
+`--serve-model-service` (D2's numeric sidecar). `altavista.v1.ModelProposeService` — which the
+lead's brief named — is a **client** in that crate, and the port map is a map of binds, so the
+default belongs to the server. `127.0.0.1:50063` groups it with `gmat-service` (`50061`) and
+`av-dynamics-service` (`50062`), the other model/dynamics sidecars, and deliberately leaves the
+`5007x` authority plane clear for `av-ingest`'s own bind (question 219(a)'s other half, the P5
+team's, in the same round). **The P5 team must avoid `50063`.**
+
+`--serve-model-service`'s value became optional through a `Peekable` parser: the next token is
+the flag's value only if it is present and does not begin with `--`. Every existing call site
+passes an explicit address and is unchanged. The load-bearing test is the one where
+`--serve-model-service` is immediately followed by `--model-node-id`: the default is taken AND
+that flag still parses, which a plain `args.next()` would have silently corrupted.
+
+`crates/av-proposer/spoore_root.rs` is a separate source unit precisely so `build.rs` can
+`include!` it and `tests/spoore_root.rs` can `#[path]`-include the identical text under test. It
+never canonicalizes, so a symlinked root works, and the test builds its whole proof on a temp
+symlink layout with no absolute host path anywhere in it. The load-bearing build proof is the
+negative one: `SPOORE_ROOT=/definitely/not/a/real/path` fails the build with a typed panic
+naming that path, **even though `/Users/probe/code/spoore` still exists on this host** — which
+is what proves the absolute path is no longer consulted at all.
+
+### Question 218: the shared `av-label` crate
+
+One `ClearanceLadder` with `rank`, `markings`, `classify` and the set-valued
+`markings_at_or_below`, one `LabelRefusal`, one `Side { Caller, Subject }`. Dependencies:
+`av-cdm` and `thiserror`, and that is deliberate — a store tier, a catalog tier and a gateway
+all rank markings through this crate, so its dependency set is a security surface.
+
+`Side::Subject` is the neutral name; each adopting crate keeps its own outward-facing spelling
+by mapping at its own boundary. `av-store` re-exports the type and adds an `AuthorizeRead`
+extension trait so `ladder.authorize_read(...)` in `client.rs` is character for character the
+call it always was, and every `StoreError` variant and message is untouched. `av-catalog`'s
+`find_assets` line is likewise unchanged, because `impl From<LabelRefusal> for CatalogError` is
+what `?` now uses; that impl maps only the `Side::Caller` arm onto the existing
+`CallerMarkingNotOnLadder` and sends the two arms `markings_at_or_below` cannot produce to a new,
+additive variant rather than mis-diagnosing them. **The gateway's three counter key strings are
+byte-identical** — `label_caller_marking_not_on_ladder`,
+`label_product_marking_not_on_ladder` (the `Side::Subject` arm deliberately keeps `product`,
+because the key is already observable) and `label_over_clearance`.
+
+The gateway also stopped holding two ladders: `CatalogHandle::ladder` was a structurally
+distinct `av_catalog::labels::ClearanceLadder` built a second time from the same configured
+string, and both are now the one `av_label::ClearanceLadder` the binary builds once.
+
+`crates/av-edge/src/policy.rs` is **untouched and nothing depends on it** — question 218 gives
+that fourth copy to the P5 team when it next opens that file.
+
+A defect surfaced during the extraction and is worth the next team's attention:
+`impl Counted for LabelRefusal` could move nowhere. `Counted` had already moved to
+`av_command::counters` in R3.1, so with `LabelRefusal` foreign too, **neither** the trait nor the
+Self type is local to `av-gateway` and the impl is E0117. The fix is a free
+`crate::labels::code(&LabelRefusal)` with the identical mapping, called from `RefusalReason`'s
+own `Counted` impl — `RefusalReason` is local, and production only ever records a
+`RefusalReason`, never a bare `LabelRefusal`. The counter test was rewritten to go through
+`RefusalReason::Label(..)`, which is the real production path, so it is a **stronger** assertion
+than the one it replaces. H4's `GroupClearanceMap` move hit the same rule and reused the same
+precedent rather than inventing a second approach.
+
+### H3: the job runner and the tiler (`crates/av-jobs`)
+
+The queue copies `crates/av-ingest/src/log.rs`'s framing byte for byte — `payload_len u32 LE`,
+`record_hash [u8;32]`, payload — chained `SHA-256(prev || payload)` from the literal `GENESIS`.
+The primitive is reimplemented over `openssl::sha::sha256` rather than taken from `av-edge`,
+which is off this track; `src/hash.rs`'s doc says so and says why the hash-chain convention, unlike
+the clearance ladder, has no shared home to extract into.
+
+Recovery follows the same rule as the ingest log: only a torn tail or a corrupt **trailing**
+record is discarded, always with a `RecoveryReport` naming the byte count and the reason; a
+corrupt record in the middle is left byte for byte alone and reported by `verify`, because
+truncating it would destroy the tamper evidence a reviewer needs.
+
+The runner never loses a failed job. Every refusal — unsupported kind, a label off the ladder, a
+missing input, an input whose recomputed SHA-256 does not match its `AssetRef` (compared with
+`openssl::memcmp::eq`, and an executor is never handed unverified bytes), a non-zero exit with
+its real code, a failed spawn, a rejected output — becomes a `JobCompletion { ok: false }`
+appended to the log. **Manager's review finding:** `run_one` originally *panicked* if that
+append failed. It now returns `Result<JobCompletion, JobError>` where the `Ok` always carries the
+completion and the `Err` means only that the completion could not be made durable — an
+infrastructure failure of the queue, categorically different from a job that ran and failed, and
+not something to abort a long-running runner process over.
+
+The tiler matches the globe's own scheme from `web/js/globe_lod.js` — geographic plate-carrée,
+level 0 two tiles side by side, canonical order `(level, x, y)` — pinned against it by a test
+whose expected bounds are literals with the arithmetic in a comment. The worker's first
+`tiles_covering` iterated y-outer while `compareTiles` is x-primary; its own pin caught it. That
+is exactly the drift the pin exists for.
+
+`src/png.rs` is a PNG encoder with **no dependency**: the IDAT is a real zlib stream built from
+*stored* (uncompressed) deflate blocks, which every decoder accepts and which needs no
+compressor. **CRC-32 and Adler-32 are ordinary error-detecting checksums, not cryptography** —
+ADR-004 governs cryptographic hashing and TLS, and the only cryptographic hash in this crate is
+still `openssl::sha::sha256`. The module doc says so explicitly so no reviewer has to guess. Its
+golden was computed independently with Python's `zlib`, and a second test drives
+`.venv/bin/python` (standard library only, no PIL) to decode the encoder's real output.
+
+Resampling is nearest-neighbour with an explicit formula, chosen because it is exactly
+reproducible with no filter-kernel ambiguity — which is what "deterministic for the same input
+hash" actually requires. A better resampler is recorded as a later decision rather than silently
+picked.
+
+**The pinned manifest hash for the fixture is
+`7c23f4f0b6a81270c196df8acf8d6c17c86d69185b31a35357c444f3bcdaa430`** (1852 bytes). It is an
+anchored golden, not a self-referential one: the manager re-derived it with tools that are not
+this crate — Python's `hashlib` over the manifest object's bytes, and the **Python protobuf
+runtime**, a different implementation from `prost`, decoding those same bytes to exactly
+kind=IMAGERY, scheme `geographic-plate-carree-2x1`, levels 0..1, tile_size 16, whole-globe
+bounds, 10 tiles in `(level,x,y)` ascending order, the three parameters, job_id `job-pin`, the
+fixture raster's own sha256 as the single source, `object_key_prefix` `tiles`, every `uri` empty,
+and every `object_key` equal to `<prefix>/<hh>/<hh>/<sha256>`. Deterministic re-serialisation
+returns the identical bytes, so the encoding is canonical rather than merely self-consistent.
+
+### The round's sharpest defect, and why the obvious fix was the wrong one
+
+`d10ed8f`'s real-MinIO proof exposed it: the tiler built every `TileEntry.uri` as
+`format!("memory://{key}")` unconditionally, because it runs before the `ObjectSink` and has no
+way to learn that sink's URI scheme. Against the real store every tile in the manifest claimed
+`memory://tiles/...` while the object lived at `s3://<bucket>/tiles/...`. A consumer could not
+have used the manifest to find a tile in any store-backed deployment — and H4's tile gateway is
+exactly such a consumer.
+
+Filling `uri` in *correctly* would have been worse. A fully-qualified URI names a bucket and an
+endpoint, and since the tile set's identity is the SHA-256 of the manifest's own bytes, that
+identity would then change with the store that happened to hold the tiles: one tile set copied
+between buckets would acquire two identities. A tile set that is not the same thing in two
+buckets is not content-addressed at all.
+
+So `TileEntry.uri` is emptied and reserved (kept on the wire — `heavy.proto` is additive-only now
+that a round has shipped), and two additive fields carry the genuinely backend-independent part:
+`TileEntry.object_key` and `TileSetManifest.object_key_prefix`. The prefix is inside the hashed
+bytes on purpose: two tile sets of identical tiles under different prefixes are different tile
+sets to a reader. The store test now asserts, for every tile, that `uri` is empty, that
+`object_key` equals what `av_store::object_key` independently derives, and that the sink's own
+`s3://` location is exactly `s3://<bucket>/<object_key>` — so a reader holding only the manifest
+can reconstruct where each tile lives. The manifest hash matching across the in-memory and
+real-MinIO backends is now a property of the design; **before the fix it matched only because the
+`memory://` URI was uniformly wrong rather than uniformly absent.**
+
+### H4: the tile gateway (`crates/av-tiles`)
+
+Serves `GET /v1/tilesets/{manifest_sha256}/manifest` and
+`GET /v1/tilesets/{manifest_sha256}/tiles/{level}/{x}/{y}` over the plain
+`tokio::net::TcpListener` pattern `crates/av-command/src/admin.rs` already established — no HTTP
+framework, no hyper server, and no new dependency of any kind.
+
+The request path is a fixed order of typed, counted refusals: route parsing before any auth
+work; `av_command::oidc::verify` with an injected clock — the shared verifier, never a second
+one; the caller's clearance derived from the verified token's groups through `av-label`'s
+`GroupClearanceMap`, **never from a caller-supplied header or query parameter**; the manifest
+fetched by content hash and its SHA-256 recomputed and compared to the requested hash *before* it
+is decoded; the label check; the `TileEntry` lookup; the tile fetched by `object_key` and
+hash-verified before a single byte is returned. Sixteen distinct counter keys, asserted as a set.
+Range requests (`206`/`416`, a malformed `Range` ignored per RFC 9110), `ETag` = the tile's own
+SHA-256, `Cache-Control: immutable` because content-addressed bytes never change, and `304` on a
+matching `If-None-Match`.
+
+`av-tiles` takes `127.0.0.1:50073` in the owned port map, cited from `DEFAULT_BIND`'s own doc
+comment, with the table row and `tests/test_port_map.py` extended.
+
+**A judgement call recorded rather than quietly implemented.** H4 asks for label enforcement "per
+layer and per request". `crates/av-tiles/src/refusal.rs`'s module doc works it through and
+concludes a second check would do nothing: every tile in one manifest carries the same label as
+the manifest (`Runner::execute_spec` puts every output of a job under one label), and both the
+caller's clearance and that label are fixed for the lifetime of a request, so a second `classify`
+with identical inputs can only reproduce the first answer. One evaluation is both enforcements
+for the request it belongs to. The doc names the condition under which a second check becomes
+real: a data model that gives tiles labels of their own.
+
+### Gates, run by the manager with no worker active
+
+| Gate | Result |
+| --- | --- |
+| `cargo test -p av-label -p av-store -p av-catalog -p av-jobs -p av-tiles` | **314 passed, 0 failed, 0 ignored**, exit 0, 18 binaries |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **1225 passed, 0 failed, 3 ignored**, exit 0 (round 1's accepted gate at `b3a9956`: 1062/0/3) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, **zero warnings**; no `#[allow]` added anywhere this round (grepped) |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`, exit 0, with **exactly the six accepted spoore wildcard warnings** |
+| `.venv/bin/python -m pytest -q -rs` | 553 passed, **1 failed**, 6 skipped — the failure re-run alone passes; see below |
+| `buf lint proto` | exit 0, no output |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | exit 0, no output |
+
+The per-crate breakdown of the 314: `av-catalog` 83 + 8 wire + **9 against real PostGIS** = 100
+and `av-store` 52 + 3 claim-check + **5 against real MinIO** = 60, both identical to round 1;
+`av-label` 19; `av-jobs` 58 + 11 + 8 + **2 against real MinIO** = 79; `av-tiles` 50 + 6 = 56.
+**The +163** on the workspace gate (1062 → 1225) is exactly 9 (`av-proposer`) + 19 (`av-label`) +
+79 (`av-jobs`) + 56 (`av-tiles`); `av-gateway`'s own count is unchanged by the two extractions.
+
+`docker events` was captured around every docker-gated run this round. No `oom`, no unexpected
+`die`/`destroy`, and `docker ps -a --filter label=av.test` and `docker volume ls --filter
+label=av.test` were both empty before and after every gate. **Question 218's unreproduced
+`docker logs: No such container` did not recur**, and there are now evidence files for the
+windows if it ever does.
+
+The digest gate was proved to actually fire, not merely to exist: recording a deliberately wrong
+digest in `services/store/IMAGE_DIGEST.md` makes `crates/av-jobs/tests/store_tiler.rs` print a
+named `SKIPPED` line on real stderr **without `--nocapture`**, and `git diff` on that file is
+empty after restoring it.
+
+### The one pytest failure, root-caused
+
+`tests/test_edge_ingest_mtls.py::test_valid_seccert_leaf_is_accepted_through_nginx_and_batches_submit`
+failed with `BATCH_REJECTION_STALE`: "batch ... is older than `max_age_ns=5000000000` relative to
+`now_tai_ns=...`". **Re-run alone it passes, in 53.9 s** (question 207's rule: a contended
+failure is re-run alone before it is believed).
+
+**Root cause, definitive, and it is a latent defect in that test rather than a flake to shrug
+at.** The test takes `batch_tai_ns = now_tai_ns()` at the top of its body and then does an
+unbounded amount of work before the batch is actually submitted — building a server certificate,
+provisioning a full seccert chain, starting nginx and the ingest binary — against a server run
+with `--real-clock` and a fixed five-second freshness window. Even *alone and unloaded* that
+setup takes 53.9 s of wall clock; the five-second budget survives only because the batch is
+signed late in the sequence. With this round's workspace gate and the lead's concurrent P5 gate
+both building, the gap between the timestamp and its use crossed the window and the ingest
+**correctly** rejected the batch. Nothing this round changed touches `av-edge`, `av-ingest`, the
+mTLS path, nginx or the staleness rule.
+
+The fix belongs to whoever owns that file: take `batch_tai_ns` at the moment the batch is built,
+immediately before the submit, rather than at the top of the test body — or raise this test's own
+`--max-batch-age-ns` with the reason recorded at the call site. This track did not edit another
+track's test at the end of its round; it is an open item below.
+
+The six skips (against round 1's two) are all "image not present on this host" skips —
+`av-edge-plugin:local`, `alpine:latest`, `av-proposer:local` and the cFS build artifacts. Each
+prints a named reason, and `alpine:latest`'s own skip text already explains the cause: Colima's
+kubelet image garbage collector evicts every image no container uses once the VM disk passes its
+high threshold (questions 196(d)/205). Host state, not this round.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **`av-proposer`'s default bind is `127.0.0.1:50063`, and it belongs to `ModelService`, not
+   `ModelProposeService`.** The brief named the latter, but that is a *client* in this crate and
+   the port map is a map of binds; the only listening socket `av-proposer` opens is the
+   `spoore.v0.ModelService` server under `--serve-model-service`. `5006x` is the model/dynamics
+   sidecar group; `5007x` is left clear for `av-ingest`. **The P5 team must avoid `50063`.**
+2. **`--serve-model-service`'s value became optional via a `Peekable` parser**, rather than
+   splitting the flag in two, so every existing call site is unchanged byte for byte.
+3. **`services/proposer/build-image.sh`'s `SPOORE_HOST_PATH` was deliberately NOT changed.** It
+   bind-mounts spoore at its own absolute path *because* the workspace manifest's `spoore-cdm`
+   path dependency is absolute, so it cannot honour a different `SPOORE_ROOT` until question
+   219(c) lands, and proving any change to it needs a full image rebuild in question 154's one
+   permitted network window. Recorded, not silently skipped.
+4. **`av-label` depends on `av-cdm` and `thiserror`, and nothing else, ever.** Three tiers rank
+   markings through it; its dependency set is a security surface.
+5. **`Side::Subject` is the shared neutral name; each consumer maps at its own boundary.** The
+   gateway's `label_product_marking_not_on_ladder` counter key is deliberately unchanged, because
+   it is already observable and a dashboard built on it must survive an internal refactor.
+6. **`Counted` for a foreign refusal is a free function, not a trait impl.** `Counted` lives in
+   `av-command` and the refusal types now live in `av-label`, so an impl in `av-gateway` is
+   E0117. Used twice this round (`LabelRefusal`, `GroupClearanceOutcome`) with one precedent, not
+   two approaches.
+7. **`av-jobs` depends on neither `av-store`, `av-edge` nor `av-command`.** `ObjectSource`/
+   `ObjectSink` are the seam; the store-backed implementation lives in a **dev-dependency** test
+   so the production dependency set stays clean and the crate stays out of the hot-path
+   claim-check assertion's blast radius.
+8. **`Runner::run_one` returns a `Result`, and a failed *job* is never the `Err`.** The `Err` is
+   only "the completion could not be made durable". The first implementation panicked there.
+9. **The CONTAINER executor is deferred with a typed, recorded refusal**, not a silent skip: a
+   test registers a real working `ProcessExecutor` under the job's own kind and shows it is never
+   invoked.
+10. **The tiler's PNG encoder is hand-written with stored deflate blocks** because no image crate
+    is in `Cargo.lock` and none was added. CRC-32 and Adler-32 are checksums, not cryptography;
+    ADR-004 is untouched.
+11. **Nearest-neighbour resampling**, because it is exactly reproducible with no filter-kernel
+    ambiguity, which is what determinism actually requires. A better resampler is a later,
+    recorded decision.
+12. **A tile set's manifest carries no URI.** `TileEntry.uri` is empty and reserved;
+    `object_key` + `object_key_prefix` carry the backend-independent addressing. A manifest whose
+    hash changes with the bucket is not an identity. (The review finding above.)
+13. **`av-tiles` performs one label evaluation, not two**, and says so rather than adding a check
+    that does nothing — with the condition named under which a second one becomes real.
+14. **`GroupClearanceMap` moved into `av-label` rather than being copied into `av-tiles`**, for
+    exactly the reason question 218 gives.
+15. **`av-tiles` takes `127.0.0.1:50073`**, no admin surface, hence no `+100` counterpart.
+
+### Defects found in review, and their root causes
+
+1. **`Runner::run_one` panicked on a failed log append** (H3a). Root cause: the brief's "never
+   returns an `Err`" was read as covering the append too, and the tension was resolved with a
+   panic. Fixed; the `Ok`/`Err` split now distinguishes a failed job from a failed queue.
+2. **`TileEntry.uri` was a hardcoded `memory://`** (H3b), wrong against every real backend. Root
+   cause: the manifest-vs-sink ordering constraint — the executor must name a location before the
+   sink has assigned one — was solved for the *key* but not for the *scheme*, and the only sink
+   in existence at the time made the wrong answer invisible. Found only because H3's exit proof
+   ran against a real store. Fixed in `2d9365c`; the manifest hash was re-pinned and
+   independently re-verified.
+3. **A weak assertion in the `SPOORE_ROOT` test** (task 1): `err.contains("spoore")` is satisfied
+   by the message's own literal text and so could never distinguish a correctly-resolved default
+   path from a wrong one. Root cause: an assertion written against the error's prose rather than
+   against the value under test. Strengthened to name the exact resolved path, so a resolver that
+   walked the wrong number of directories up now fails instead of passing by coincidence.
+4. **The manager's own baseline run was invalidated** by starting `cargo test --workspace`
+   concurrently with the first worker's edits; it picked up a half-written file and failed to
+   compile. Root cause: a process error of the manager's, not of the tree. Recorded rather than
+   quietly re-run: round 1's accepted gate at `b3a9956` (1062/0/3) is the baseline this status
+   compares against, and no manager cargo run overlapped a worker after that.
+5. **A worker clobbered one of its own new files** with two `mv` calls sharing a destination
+   basename while using `git stash` to isolate a baseline. It caught and rewrote both files, and
+   both were verified at review. Root cause: `git stash` used for baseline isolation in a
+   worktree with concurrent activity. Every later brief forbade `git stash` outright and told
+   workers to measure baselines before editing.
+6. **`cargo test` passing does not imply clippy is clean** — observed directly when a doc-comment
+   edit introduced eight `doc_lazy_continuation` warnings that the full test suite happily
+   ignored. Every later brief states it explicitly.
+
+### Open items for the lead
+
+1. **`tests/test_edge_ingest_mtls.py`'s timestamp is taken too early.** Root-caused above. The
+   fix belongs to whoever owns that file: take `batch_tai_ns` immediately before the submit, or
+   raise that test's own `--max-batch-age-ns` with the reason recorded. This track did not edit
+   another track's test at the end of its round.
+2. **`av-proposer` took `50063`; the P5 team must avoid it** when it assigns `av-ingest` its own
+   bind under question 219(a).
+3. **`services/proposer/build-image.sh` still hardcodes `/Users/probe/code/spoore`**, and cannot
+   honour `SPOORE_ROOT` until question 219(c) makes the workspace manifest's `spoore-cdm` path
+   relative. Sequence it after 219(c) and prove it with one image rebuild.
+4. **`crates/av-edge/src/policy.rs` is still the fourth ladder copy.** `av-label` is ready for it;
+   question 218 gives the adoption to the P5 team.
+5. **Not done in H3b, at a clean boundary rather than half-built:** the terrain tiler and the 3D
+   Tiles point-cloud tiler. `output=="terrain"` and `output=="tiles3d"` are recognised and refused
+   as not implemented, with a test pinning both refusals, so neither is a silent gap. H5's
+   ten-gigabyte proof needs at least one of them.
+6. **Not done in H4:** a docker-gated proof of `av-tiles` serving out of a real MinIO. The
+   store-backed `ObjectSource` exists and is what the binary runs on; only the container-backed
+   test is missing, and `crates/av-jobs/tests/store_tiler.rs` already proves that seam end to end.
+7. **The container executor (`JOB_EXECUTOR_KIND_CONTAINER`) is unimplemented**, refused with a
+   typed, logged `EXECUTOR_UNAVAILABLE`. H3's milestone text says "a labelled container **or** a
+   process"; the process executor satisfies it, and the container path is recorded as future work
+   rather than claimed.
+8. **A control-matrix row is still owed** for `av-store`'s and `av-catalog`'s hand-rolled
+   protocol clients — question 218 accepted them on that condition, and `docs/compliance/` today
+   carries matrices for services only, not for these library crates. An H7 item.
+9. **The host is still over-subscribed**, and it now costs correctness signal, not just time: the
+   one pytest failure this round is a real-clock freshness window losing a race to concurrent
+   builds. `CARGO_BUILD_JOBS=4` held throughout, and the lead's P5 round-4 gate was running in
+   `AltaVista-verify` for much of this round's own gate.
+10. **Six image-absent pytest skips, against round 1's two.** Colima's kubelet image garbage
+    collector has evicted `alpine:latest`, `av-edge-plugin:local` and `av-proposer:local`. Each
+    skip is visible and named, but a suite that silently loses coverage to a disk-pressure
+    collector between rounds is worth a standing decision.

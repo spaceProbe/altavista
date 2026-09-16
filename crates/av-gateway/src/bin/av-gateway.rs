@@ -351,13 +351,12 @@ async fn main() {
             connect_timeout: std::time::Duration::from_secs(5),
             tls,
         };
-        // H2c: av_catalog::labels::ClearanceLadder is its own, structurally distinct copy of
-        // the clearance-ladder convention (crate::catalog_selector::CatalogHandle's own doc
-        // explains why) -- built from the SAME configured marking list (AV_GATEWAY_CLEARANCE_LADDER,
-        // ladder_raw above) as crate::labels::ClearanceLadder, never a second, independently
-        // configured list.
-        let catalog_ladder = av_catalog::labels::ClearanceLadder::new(ladder_raw.split(',').map(str::to_string).collect());
-        core_builder = core_builder.with_catalog(CatalogHandle { pg_config, ladder: catalog_ladder });
+        // Question 218's extraction collapsed what used to be two structurally distinct
+        // ClearanceLadder types (this crate's own, and av-catalog's) into the one shared
+        // av_label::ClearanceLadder -- CatalogHandle::ladder is that same type now, so this
+        // is a clone of the ONE ladder already built above from AV_GATEWAY_CLEARANCE_LADDER
+        // (`ladder`), never a second, independently configured instance.
+        core_builder = core_builder.with_catalog(CatalogHandle { pg_config, ladder: ladder.clone() });
         eprintln!("av-gateway: catalog tier configured at {catalog_host}:{}", cli.catalog_port);
     } else {
         eprintln!("av-gateway: no --catalog-host given -- GATEWAY_SELECTOR_CATALOG will be refused CatalogNotConfigured for every caller");

@@ -14,6 +14,9 @@ repository.workspace = true
 # crate never generates a second, independently-compiled copy of a wire type av-cdm already
 # compiles -- the same rule crates/av-gateway/Cargo.toml states for its own av-cdm dependency.
 av-cdm = { path = "../av-cdm" }
+# Question 218: the shared clearance-ladder crate -- crate::labels is now a thin adapter
+# over av_label::ClearanceLadder (an in-workspace path dependency, not a registry crate).
+av-label = { path = "../av-label" }
 prost.workspace = true
 
 # ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate

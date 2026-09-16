@@ -96,7 +96,7 @@ def test_fragment_ports_match_their_sources():
     print(f"checked {len(fragment['ports'])} fragment [ports.*] rows "
           f"({len(const_rows)} kind=\"const\") against {len(port_map)} owned port map entries "
           f"({len(exempt_rows)} const row(s) explicitly exempted: {sorted(exempt_rows)})")
-    assert len(port_map) == 7, sorted(port_map)
+    assert len(port_map) == 9, sorted(port_map)
     assert const_rows - exempt_rows <= set(port_map), (
         "every non-exempt const row must have owned-map provenance", const_rows, exempt_rows, port_map
     )
@@ -209,48 +209,74 @@ def test_a_const_row_missing_from_the_owned_port_map_is_caught(tmp_path):
 
 
 def test_a_new_owned_port_map_row_closes_the_gap(tmp_path):
-    """New capability (question 217(g)): a kind = "gap" row (av-proposer, since av-ingest
-    became a "const" row in question 219(a)) must fail the day the OWNED PORT MAP itself
-    grows a row for it -- independent of whether the source file has grown a default bind
-    (that's the existing, separate check). Mutate a COPY of docs/architecture.md to insert a
-    fabricated av-proposer row and confirm check_ports reports the gap as closed, with a
-    Finding whose detail names the map."""
+    """New capability (question 217(g)): a `kind = "gap"` row must fail the day the OWNED PORT
+    MAP itself grows a row for it -- independent of whether the source file has grown a default
+    bind (that's the existing, separate check). This used to be pinned to av-proposer, but
+    av-proposer's own gap closed for real this round (question 219(a): the heavy track's crate
+    landed a default bind, matching av-ingest's kind = "const" shape) and the fragment now has
+    no real "gap" row left at all -- so this uses a synthetic in-memory fragment (never a fake
+    row added to suite.altavista.toml) with the identical shape a real gap row would have.
+    Mutate a COPY of docs/architecture.md to insert a fabricated row for the synthetic
+    component and confirm check_ports reports the gap as closed, with a Finding whose detail
+    names the map."""
+    fragment = {
+        "components": {"synthetic-gap-svc": {"port": 0}},
+        "ports": {
+            "synthetic-gap-svc": {
+                "kind": "gap",
+                "file": "synthetic/gap_svc.rs",
+                "flag": "--serve-model-service",
+            },
+        },
+    }
+
+    fabricated_source = tmp_path / "synthetic" / "gap_svc.rs"
+    fabricated_source.parent.mkdir(parents=True, exist_ok=True)
+    fabricated_source.write_text("// --serve-model-service (no default bind declared)\n")
+
     arch_text = (REPO_ROOT / "docs" / "architecture.md").read_text()
     separator = "| --- | --- | --- | --- |\n"
     assert separator in arch_text, "fixture assumption: the owned port map's header separator row"
     fabricated_row = (
-        '| `av-proposer` | `127.0.0.1:59999` | *(none)* | '
-        '`crates/av-proposer/src/bin/av-proposer.rs::DEFAULT_BIND` |\n'
+        '| `synthetic-gap-svc` | `127.0.0.1:59999` | *(none)* | '
+        '`synthetic/gap_svc.rs::DEFAULT_BIND` |\n'
     )
     mutated = arch_text.replace(separator, separator + fabricated_row, 1)
     assert mutated != arch_text
-    assert "av-proposer" in mutated
+    assert "synthetic-gap-svc" in mutated
 
     arch_copy = tmp_path / "architecture.md"
     arch_copy.write_text(mutated)
 
-    fragment = merge.load_fragment(FRAGMENT_PATH)
-    assert fragment["ports"]["av-proposer"]["kind"] == "gap"
-    findings = ports.check_ports(fragment, REPO_ROOT, architecture_md=arch_copy)  # real repo_root -- only the MAP moved
+    findings = ports.check_ports(fragment, repo_root=tmp_path, architecture_md=arch_copy)
 
-    matches = [f for f in findings if f.component == "av-proposer"]
+    matches = [f for f in findings if f.component == "synthetic-gap-svc"]
     assert len(matches) == 1, findings
     assert matches[0].kind == "gap"
     assert "owned port map" in matches[0].detail.lower()
-    other = [f for f in findings if f.component != "av-proposer"]
-    assert other == [], other
 
 
 def test_a_new_default_bind_closes_the_gap(tmp_path):
     """Inverse deliberate-failure proof, for a `kind = "gap"` row: point the checker at a
     FABRICATED source file (under tmp_path, never the real repo) that now declares a real
-    default bind, and confirm the checker reports that gap row as stale. Uses av-proposer,
-    since av-ingest's own gap closed for real in question 219(a) (it is a "const" row now)."""
-    fragment = merge.load_fragment(FRAGMENT_PATH)
-    proposer_file = fragment["ports"]["av-proposer"]["file"]
-    assert fragment["ports"]["av-proposer"]["kind"] == "gap"
+    default bind, and confirm the checker reports that gap row as stale. This used to be pinned
+    to av-proposer, but av-proposer's own gap closed for real this round (question 219(a): the
+    heavy track's crate landed a default bind, matching av-ingest's kind = "const" shape since
+    the round before it) and the fragment now has no real "gap" row left at all -- so this uses
+    a synthetic in-memory fragment (never a fake row added to suite.altavista.toml) with the
+    identical shape a real gap row would have."""
+    fragment = {
+        "components": {"synthetic-gap-svc": {"port": 0}},
+        "ports": {
+            "synthetic-gap-svc": {
+                "kind": "gap",
+                "file": "synthetic/gap_svc.rs",
+                "flag": "--serve-model-service",
+            },
+        },
+    }
 
-    fabricated = tmp_path / proposer_file
+    fabricated = tmp_path / "synthetic" / "gap_svc.rs"
     fabricated.parent.mkdir(parents=True, exist_ok=True)
     fabricated.write_text(
         'const DEFAULT_BIND: &str = "127.0.0.1:9999";\n'
@@ -258,16 +284,11 @@ def test_a_new_default_bind_closes_the_gap(tmp_path):
     )
 
     findings = ports.check_ports(fragment, repo_root=tmp_path)  # repo_root swapped to tmp_path
-    stale = [f for f in findings if f.component == "av-proposer"]
+    stale = [f for f in findings if f.component == "synthetic-gap-svc"]
     assert len(stale) == 1, findings
     assert stale[0].kind == "gap"
     assert "DEFAULT_BIND" in str(stale[0].found)
     assert "closed" in stale[0].detail.lower()
-    # The day av-proposer actually lands a default bind for real (the heavy team's, question
-    # 219(a)), THIS is the assertion that starts failing in
-    # test_fragment_ports_match_their_sources -- forcing suite.altavista.toml's av-proposer
-    # row to be updated to kind = "const" with a real port, the same way av-ingest's already
-    # was this round.
 
 
 def test_a_component_with_no_ports_row_is_caught(tmp_path):

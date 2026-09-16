@@ -38,6 +38,10 @@ av-command = { path = "../av-command" }
 # keeping HOT-PATH crates off av-store, not about av-gateway, which is a read-path service,
 # not on that hot path at all).
 av-catalog = { path = "../av-catalog" }
+# Question 218: the shared clearance-ladder crate -- crate::labels is now a thin adapter
+# over av_label::ClearanceLadder, and CatalogHandle::ladder (crate::catalog_selector) is
+# this same type too (question 218 collapsed the two ladders this crate used to build).
+av-label = { path = "../av-label" }
 prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true

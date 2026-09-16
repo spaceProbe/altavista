@@ -1,0 +1,103 @@
+[package]
+name = "av-jobs"
+publish = false
+description = "H3a (docs/heavy-plan.md, question 216): the durable, hash-chained job queue and the runner that drains it -- crates/av-jobs's own job record types (JobSpec/JobCompletion/JobFailure), the queue over a file-backed hash-chained log (the av-ingest/av-edge pattern), and the Executor/ObjectSource/ObjectSink-driven runner. The tiler itself (H3b) is a later task and is not in this crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1::pb::{JobSpec, JobCompletion, JobFailure, JobLogRecord, AssetRef, Label,
+# Provenance, ...} -- the shared prost build (crates/av-cdm/build.rs walks every
+# proto/altavista/v1/*.proto file, heavy.proto included). This crate never generates a
+# second, independently-compiled copy of a wire type av-cdm already compiles -- the same
+# rule crates/av-store/Cargo.toml and crates/av-gateway/Cargo.toml state for their own
+# av-cdm dependency.
+av-cdm = { path = "../av-cdm" }
+# Question 218's shared clearance-ladder crate: Runner::run_one checks JobSpec.label
+# against the configured av_label::ClearanceLadder (JOB_FAILURE_KIND_LABEL_REFUSED) the
+# same way av-store/av-catalog/av-gateway already do -- an in-workspace path dependency,
+# not a registry crate, so rule 2's "no new registry crate" bar does not apply.
+av-label = { path = "../av-label" }
+prost.workspace = true
+thiserror.workspace = true
+
+# ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate
+# (`openssl::sha::sha256` for src/hash.rs's chain_hash, `openssl::memcmp::eq` for
+# src/runner.rs's constant-time input-hash compare, mirroring
+# crates/av-store/src/claim_check.rs::verify_payload's identical pairing of the same two
+# calls) -- never `sha2`, never `ring`, never `hmac`/`rust-crypto`. Already resolved in this
+# workspace's Cargo.lock at 0.10.81 (crates/av-store/Cargo.toml, crates/av-catalog/Cargo.toml
+# already depend on it) -- this crate adds no new registry dependency at all.
+openssl = "0.10"
+
+# Deliberately NOT a dependency:
+# - av-edge: this crate reimplements av_edge::hash's two-line GENESIS/chain_hash primitive
+#   (src/hash.rs's own module doc) instead of depending on it -- question 216's own ruling,
+#   already applied once by crates/av-store/src/labels.rs's former module doc ("av-edge is
+#   off this heavy track entirely"): av-jobs is on this track, av-edge is not, and this
+#   track does not touch av-edge or add a workspace dependency edge onto it.
+# - av-store: task 3b (the tiler) wires a real store-backed ObjectSource/ObjectSink from a
+#   crate that depends on both av-jobs and av-store; av-jobs itself must not depend on
+#   av-store so that H1's own hot-path claim-check discipline (crates/av-store/tests/
+#   claim_check_hot_path.rs) is never at risk of a job-runner crate quietly becoming a
+#   fourth hot-path dependent by accident. src/runner.rs's ObjectSource/ObjectSink traits
+#   are the seam task 3b implements against.
+# - av-command: src/clock.rs defines its own two-method Clock trait (SystemClock/TestClock)
+#   mirroring crates/av-command/src/clock.rs's convention rather than depending on it --
+#   av-command is a hot-path crate (crates/av-command/src/clock.rs's own module doc: "every
+#   epoch this crate writes... comes from a Clock passed in by the caller") and av-jobs has
+#   no business anywhere in its dependency tree.
+# - av-catalog: this round's runner never queries the catalog; H3b/H4 may need it, not H3a.
+# - sha2/hmac/ring: ADR-004 (see openssl above).
+# - serde/serde_json: every wire shape this crate reads or writes is the JobLogRecord
+#   protobuf encoding (src/log.rs); nothing here is ever serialized as JSON.
+# - anyhow: every error is one of this crate's own typed enums (JobLogError, JobError).
+# - tokio/async-anything: crates/av-jobs::runner::Runner::run_one is synchronous --
+#   ProcessExecutor blocks on std::process::Child::wait, and nothing in H3a needs
+#   concurrency within one job run.
+# - chrono/time: src/clock.rs's SystemClock converts via av_cdm::time::Tai, the same
+#   boundary crates/av-command/src/clock.rs already uses; no separate calendar crate needed.
+
+[dev-dependencies]
+# tests/*.rs use real temp-directory file I/O (RecoveryReport/verify()'s own acceptance
+# evidence needs real files, not a mock) and a real /bin/sh child process
+# (ProcessExecutor's NONZERO_EXIT/EXECUTOR_START_FAILED tests) -- both are already covered
+# by the standard library (std::env::temp_dir or a per-test tempdir built by hand) and this
+# crate's own MemoryObjectSource/MemoryObjectSink test doubles, so no dev-only dependency is
+# needed at all -- except for tests/store_tiler.rs (task 3c, H3's exit proof), which needs
+# the three entries below. Every one of them is a DEV dependency only: this crate's own
+# production code (src/**) still has no dependency on av-store, av-lockstep or tokio at all
+# -- see src/lib.rs's own crate doc, "Why this crate depends on neither av-store, av-edge,
+# nor av-command", and Cargo.lock already resolves all three (rule 2: no new registry
+# dependency), av-store/av-lockstep already pulling tokio in their own [dependencies].
+#
+# av-store: tests/store_tiler.rs's own store-backed ObjectSource/ObjectSink implementation
+# (task 3b/3c's own deferred seam -- src/runner.rs's ObjectSource/ObjectSink doc comments)
+# talks to av_store::StoreClient directly; a path dependency onto an in-workspace crate, not
+# a registry fetch.
+av-store = { path = "../av-store" }
+# av-lockstep: the same docker-gate/lock/label/prune discipline crates/av-store/Cargo.toml's
+# own dev-dependency comment explains (ManagedContainer::run_local, recorded_digest_gate,
+# lock_docker_tests, prune_stale_test_resources, test_label_args, announce_gate_skip) --
+# crates/av-store/tests/minio_store.rs is this test's own template, copied exactly.
+av-lockstep = { path = "../av-lockstep" }
+# tokio: av_store::client::StoreClient's put/get/ensure_bucket/head are async
+# (crates/av-store/src/client.rs); crate::runner::ObjectSource::fetch/ObjectSink::put are
+# synchronous by design (this crate's own std::process::Child-blocking ProcessExecutor, and
+# Runner::run_one's synchronous call stack -- no caller of this crate should need an async
+# runtime just to drain the queue). tests/store_tiler.rs bridges the two with one
+# tokio::runtime::Runtime the test owns and block_on's each store call against, never one
+# runtime per call. "rt-multi-thread" for Runtime::new(); "net" for the real TCP connect to
+# the MinIO container -- the identical feature pair crates/av-store/Cargo.toml's own
+# [dependencies] entry already declares (that crate's tokio, pulled in here transitively as
+# well, already carries "macros" for its own #[tokio::test]s; this crate's test uses no
+# #[tokio::test] of its own, so "macros" is not named again here).
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+# bytes: av_store::client::StoreClient::put's own parameter type (Bytes, not &[u8] or
+# Vec<u8>) -- already resolved in this workspace's Cargo.lock (crates/av-store/Cargo.toml's
+# own `bytes = "1"`), so this is not a new registry dependency, only a new Cargo.toml entry
+# naming an already-locked crate for this dev-only test target.
+bytes = "1"

@@ -107,7 +107,11 @@ impl Counted for RefusalReason {
             RefusalReason::CallerSuppliedPath => "gateway_caller_supplied_path",
             RefusalReason::MalformedRequest { .. } => "gateway_malformed_request",
             RefusalReason::Resolve(e) => e.code(),
-            RefusalReason::Label(e) => e.code(),
+            // question 218: LabelRefusal is a foreign type (av-label) now, and Counted is
+            // also foreign (av-command, R3.1) -- `impl Counted for LabelRefusal` here would
+            // be E0117 (neither is local to this crate). `crate::labels::code` is the same
+            // mapping as a free function; see that module's own doc.
+            RefusalReason::Label(e) => crate::labels::code(e),
             RefusalReason::ProductMissingOnHost { .. } => "gateway_product_missing_on_host",
             RefusalReason::Catalog(e) => e.code(),
         }

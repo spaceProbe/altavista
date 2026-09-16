@@ -281,10 +281,19 @@ disagree.
 | `av-dynamics-service` | `127.0.0.1:50062` | `127.0.0.1:50162` | `crates/av-dynamics-service/src/config.rs::DEFAULT_PORT` / `crates/av-dynamics-service/src/bin/server.rs::DEFAULT_ADMIN_PORT` |
 | `gmat-service` (Python, ADR-002 depth 1) | `127.0.0.1:50061` | `127.0.0.1:50161` | `services/gmat-service/gmat_service/config.py::DEFAULT_PORT` / `::DEFAULT_ADMIN_PORT` |
 | `av-lockstep-shim` | `127.0.0.1:50080` | *(none)* | `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` |
+| `av-proposer` | `127.0.0.1:50063` | *(none)* | `crates/av-proposer/src/bin/av-proposer.rs::DEFAULT_MODEL_SERVICE_BIND` |
+| `av-tiles` | `127.0.0.1:50073` | *(none)* | `crates/av-tiles/src/bin/av-tiles.rs::DEFAULT_BIND` |
 | `av-kernel` binding registry, `container.control_port` (container-internal only, never a host bind) | `50070` | *(none)* | `crates/av-kernel/src/drm/binding.rs::ContainerSpec::default` |
 
 The convention: gRPC default first, admin default `gRPC + 100` where an admin surface exists
-at all (`av-lockstep-shim` and the kernel's `container.control_port` have none).
+at all (`av-lockstep-shim` and the kernel's `container.control_port` have none). Question
+219(a): `av-proposer`'s bind is the `spoore.v0.ModelService` server it serves under
+`--serve-model-service` (D2's numeric sidecar), grouped with `gmat-service` (`50061`) and
+`av-dynamics-service` (`50062`) as the same class of model/dynamics sidecar rather than with
+the `5007x` authority plane (`av-command`, `av-gateway`), which is deliberately left clear for
+`av-ingest`'s own bind (P5, same round). `altavista.v1.ModelProposeService` is a *client* in
+this crate, not a bind, and is not in this table for that reason; `av-proposer` has no admin
+surface at all.
 
 Question 219(a): `av-ingest` gets a real default bind this round (the P5 team's crate);
 `av-proposer` stays a `gap` row (the heavy team's, next round). `50060` is the free slot

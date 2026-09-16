@@ -258,21 +258,52 @@ pub enum CatalogError {
     AssetRefMissingField { field: &'static str },
 
     // -- src/labels.rs (the clearance ladder) ------------------------------------------------
-    /// [`crate::labels::ClearanceLadder::markings_at_or_below`]: `marking` (a caller's claimed
+    /// [`av_label::ClearanceLadder::markings_at_or_below`] (question 218: the shared crate
+    /// `crate::labels` now adapts, not reimplements): `marking` (a caller's claimed
     /// clearance, passed to [`crate::query::find_assets`]) does not appear anywhere on this
-    /// deployment's ladder. Refused before any SQL runs -- never defaulted to a rank -- mirrors
-    /// `crates/av-store/src/labels.rs::ClearanceLadder::authorize_read`'s and `crates/
-    /// av-gateway/src/labels.rs::ClearanceLadder::classify`'s identical two-copy precedent (see
-    /// `src/labels.rs`'s own module doc: this is deliberately the third-in-workspace, now
-    /// fourth-counting-this-crate, copy of that convention, not a shared crate this task
-    /// unilaterally creates).
+    /// deployment's ladder. Refused before any SQL runs -- never defaulted to a rank -- the
+    /// identical rule `av_label::ClearanceLadder::classify`'s own two-sided check enforces
+    /// for `av-store` and `av-gateway`'s own adoptions of the same shared crate.
     #[error("caller clearance {marking:?} is not on this deployment's clearance ladder -- refused before any SQL runs, never defaulted to a rank")]
     CallerMarkingNotOnLadder { marking: String },
+    /// question 218: any [`av_label::LabelRefusal`] this crate's own `From` impl (below)
+    /// could not honestly fold into [`CatalogError::CallerMarkingNotOnLadder`] -- see that
+    /// impl's own doc for exactly which `LabelRefusal` variants land here and why they are
+    /// unreachable from `markings_at_or_below` today but still mapped honestly rather than
+    /// silently mis-typed as the caller case.
+    #[error("{0}")]
+    LabelRefusal(av_label::LabelRefusal),
 }
 
 impl From<openssl::error::ErrorStack> for CatalogError {
     fn from(e: openssl::error::ErrorStack) -> Self {
         CatalogError::Openssl(e.to_string())
+    }
+}
+
+/// Question 218: `crate::labels::ClearanceLadder` is now `av_label::ClearanceLadder`
+/// (re-exported, not reimplemented), so `crate::query::find_assets`'s own
+/// `ladder.markings_at_or_below(caller_clearance)?` line raises a bare
+/// [`av_label::LabelRefusal`], not a [`CatalogError`] directly -- this `From` impl is what
+/// the `?` operator uses to convert it, keeping that call site's own source text unchanged.
+///
+/// [`av_label::ClearanceLadder::markings_at_or_below`] only ever constructs
+/// [`av_label::LabelRefusal::MarkingNotOnLadder`] with `side: av_label::Side::Caller` (its
+/// own doc: it never even looks at a subject/object marking, only at the caller's) -- that
+/// is the ONLY arm this function can honestly claim maps to
+/// [`CatalogError::CallerMarkingNotOnLadder`]. The other two shapes
+/// (`MarkingNotOnLadder { side: Side::Subject, .. }` and `OverClearance { .. }`) can never
+/// actually be produced by `markings_at_or_below` as it exists today -- but `From` is a
+/// general-purpose conversion any future caller of this crate's API could invoke with a
+/// `LabelRefusal` from elsewhere, and silently mis-reporting those two shapes as "caller
+/// marking not on ladder" would be a wrong diagnosis the moment such a caller existed.
+/// [`CatalogError::LabelRefusal`] is the honest, additive fallback for exactly that case.
+impl From<av_label::LabelRefusal> for CatalogError {
+    fn from(e: av_label::LabelRefusal) -> Self {
+        match e {
+            av_label::LabelRefusal::MarkingNotOnLadder { side: av_label::Side::Caller, marking } => CatalogError::CallerMarkingNotOnLadder { marking },
+            other => CatalogError::LabelRefusal(other),
+        }
     }
 }
 

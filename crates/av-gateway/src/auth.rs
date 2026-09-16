@@ -195,64 +195,16 @@ pub enum GatewayAuthConfigLoadError {
     Overlap(#[from] GatewayAuthConfigError),
 }
 
-/// `group -> clearance marking`, deployment-configured (see the module doc's "Clearance is
-/// derived from the verified token" section). A thin `BTreeMap` wrapper, not a second
-/// `ClearanceLadder` -- this map does not itself rank markings against a product's own label
-/// (that is still entirely [`crate::labels::ClearanceLadder::classify`]'s own job, run
-/// afterward, unchanged); [`Self::clearance_for`] ranks a token's OWN mapped markings against
-/// each other only far enough to pick the single highest one, reusing [`crate::labels::
-/// ClearanceLadder::rank`] to do it -- never a second, independent ranking implementation.
-#[derive(Debug, Clone, Default)]
-pub struct GroupClearanceMap {
-    by_group: BTreeMap<String, String>,
-}
-
-/// The result of [`GroupClearanceMap::clearance_for`] -- see that method's own doc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GroupClearanceOutcome {
-    /// The highest-ranked (on this deployment's [`ClearanceLadder`]) marking among every one
-    /// of the principal's groups this map lists.
-    Marking(String),
-    /// None of the principal's groups appear in this map at all.
-    NoneMapped,
-    /// At least one of the principal's mapped groups names a marking absent from this
-    /// deployment's ladder -- a misconfiguration, never silently ranked as 0 and never
-    /// silently skipped over in favor of a lower mapped marking that IS on the ladder.
-    NotOnLadder(String),
-}
-
-impl GroupClearanceMap {
-    pub fn new(by_group: BTreeMap<String, String>) -> Self {
-        Self { by_group }
-    }
-
-    /// Ranks every one of `groups` that this map lists against `ladder` (the SAME ladder
-    /// instance this deployment's [`crate::gateway::GatewayCore`] itself ranks products
-    /// against) and returns the highest-ranked marking -- order-independent: the same set of
-    /// mapped markings always yields the same [`GroupClearanceOutcome::Marking`] regardless of
-    /// the order `groups` lists them in (R5.1b, defect 1). A group absent from this map is
-    /// simply skipped (it asserts no clearance); a group whose mapped marking is absent from
-    /// `ladder` short-circuits the whole call to [`GroupClearanceOutcome::NotOnLadder`]
-    /// immediately -- never silently dropped in favor of a lower, on-ladder marking found
-    /// elsewhere in `groups`. [`GroupClearanceOutcome::NoneMapped`] only when no group in
-    /// `groups` is in this map at all.
-    pub fn clearance_for(&self, groups: &[String], ladder: &ClearanceLadder) -> GroupClearanceOutcome {
-        let mut best: Option<(usize, &str)> = None;
-        for g in groups {
-            let Some(marking) = self.by_group.get(g) else { continue };
-            let Some(rank) = ladder.rank(marking) else {
-                return GroupClearanceOutcome::NotOnLadder(marking.clone());
-            };
-            if best.map(|(best_rank, _)| rank > best_rank).unwrap_or(true) {
-                best = Some((rank, marking.as_str()));
-            }
-        }
-        match best {
-            Some((_, marking)) => GroupClearanceOutcome::Marking(marking.to_string()),
-            None => GroupClearanceOutcome::NoneMapped,
-        }
-    }
-}
+/// H4/P0 (question 218, round 2): moved into `av-label`, unchanged in behaviour, and
+/// re-exported here under their original path so every call site in this crate (and its
+/// tests) keeps compiling unchanged -- `av-tiles` needs the identical group-to-clearance
+/// mapping this crate originated, and a second, independently-typed copy would be exactly
+/// the divergence question 218 already warns against. See `av-label`'s own module doc
+/// ("H4/P0") for the full reasoning and `av-label`'s own tests for direct unit coverage of
+/// [`GroupClearanceMap::clearance_for`]; this crate's own tests below continue to exercise
+/// the identical logic through [`AuthContext::authenticate_query`], an integration-level
+/// test of the re-exported type, not a duplicate of `av-label`'s unit tests.
+pub use av_label::{GroupClearanceMap, GroupClearanceOutcome};
 
 /// Every way [`AuthContext`] can refuse a caller. Distinct, greppable, `Counted` codes --
 /// classifiable by the CODE, never by message prose (round 4's decision 2, restated for this

@@ -53,7 +53,7 @@ use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use crate::claim_check::{asset_ref_for, verify_payload};
 use crate::error::StoreError;
 use crate::keys::{hex_encode, object_key};
-use crate::labels::ClearanceLadder;
+use crate::labels::{AuthorizeRead, ClearanceLadder};
 use crate::metadata::{self, ObjectMetadata};
 use crate::sigv4;
 
