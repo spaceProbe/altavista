@@ -73,6 +73,11 @@ pub mod admin;
 /// R5.1 (`docs/open-questions.md` question 208(b)): the one place every caller of this
 /// crate's four surfaces is authenticated -- see that module's own doc for the full contract.
 pub mod auth;
+/// H2c (`docs/heavy-plan.md` H2): `GATEWAY_SELECTOR_CATALOG`'s own handler,
+/// [`catalog_selector::query_catalog`] -- see that module's own doc for the full ordered
+/// refusal chain and why the catalog is a selector on `crate::gateway::GatewayCore`, never a
+/// second authentication path.
+pub mod catalog_selector;
 pub mod catalogue;
 /// R3.1: this module moved to `av_command::counters` unchanged in behaviour -- see that
 /// module's own doc for the full reasoning. Re-exported under this crate's own, pre-existing

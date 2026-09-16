@@ -264,6 +264,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
             selector: GatewaySelector::All as i32,
             caller_supplied_products_uri: String::new(),
             caller_token: String::new(), // GatewayCore::query itself is auth-agnostic; auth is crate::gateway::authenticated_query's own layer.
+            catalog_query: None,
         })
         .expect("first real query succeeds");
     // A second, real, SUCCEEDING query -- differs from q1 by config_hash ("" vs "hash-a"),
@@ -276,6 +277,7 @@ async fn evidence_round_trips_the_run_identity_and_query_ids_the_gateway_actuall
             selector: GatewaySelector::All as i32,
             caller_supplied_products_uri: String::new(),
             caller_token: String::new(),
+            catalog_query: None,
         })
         .expect("second real query succeeds");
 

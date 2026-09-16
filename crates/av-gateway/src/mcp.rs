@@ -343,12 +343,22 @@ impl McpHandler {
         };
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
         match tool {
-            GatewayTool::Query => self.handle_query(&arguments),
+            GatewayTool::Query => self.handle_query(&arguments).await,
             GatewayTool::ProposeCommand => self.handle_propose_command(&arguments).await,
         }
     }
 
-    fn handle_query(&self, args: &Value) -> Result<Value, McpRefusal> {
+    /// H2c scope note: this tool's own JSON schema is NOT extended with a `catalog_query`
+    /// argument this round -- every request this function builds carries `catalog_query:
+    /// None`, so a caller naming `"selector": "GATEWAY_SELECTOR_CATALOG"` here is refused
+    /// `crate::catalog_selector::CatalogRefusal::NoCatalogQuery` (mapped to `InvalidParams`
+    /// below, same as any other `RefusalReason`), never silently served or silently ignored.
+    /// This task's brief scoped H2c's deliverables to the gRPC `DataGatewayService` surface
+    /// and `proto/altavista/v1/heavy.proto`; wiring a JSON `catalog_query` shape through this
+    /// hand-rolled MCP tool schema is real, additional surface area this round did not ask
+    /// for and this function does not invent unasked -- named here, and in this task's own
+    /// final report, as a follow-up for the manager to schedule rather than silently omitted.
+    async fn handle_query(&self, args: &Value) -> Result<Value, McpRefusal> {
         if !args.is_object() {
             return Err(self.refuse(McpRefusal::InvalidParams { detail: "arguments must be an object".to_string() }));
         }
@@ -375,8 +385,11 @@ impl McpHandler {
             selector: selector as i32,
             caller_supplied_products_uri: caller_supplied_products_uri.to_string(),
             caller_token: caller_token.to_string(),
+            // H2c scope note (this function's own doc comment above): this tool's JSON schema
+            // carries no catalog_query argument this round.
+            catalog_query: None,
         };
-        let response = authenticated_query(&self.ctx.gateway, &self.ctx.auth, &self.ctx.counters, caller_token, request).map_err(|e| match e {
+        let response = authenticated_query(&self.ctx.gateway, &self.ctx.auth, &self.ctx.counters, caller_token, request).await.map_err(|e| match e {
             AuthenticatedQueryError::Auth(a) => auth_refusal_to_mcp(a),
             AuthenticatedQueryError::Refusal(r) => McpRefusal::InvalidParams { detail: r.to_string() },
         })?;

@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+// The heavy track's own proto file (`docs/heavy-plan.md`; question 216(f): "`heavy.proto` is
+// the track's; everything else additive under `buf breaking` and `buf lint`"). Unlike every
+// other file under `proto/altavista/v1/`, THIS file has no legacy wire compatibility to
+// protect yet -- nothing in it has shipped anywhere before this track existed -- so within
+// this file (and only this file) a message MAY be renamed or a field renumbered if a later
+// milestone in this same track needs to; `buf breaking proto --against
+// /Users/probe/code/AltaVista/proto` is still run every round regardless, so any such change
+// is still a deliberate, visible decision, never an accident. Once a round of THIS file ships
+// (i.e. the manager commits it), everything in it already committed becomes additive-only
+// exactly like every other file, by the same standing rule (`common.md` rule 10) -- "no legacy
+// wire compatibility to protect" describes this file's starting position, not a standing
+// exemption from the rule once something is on the wire.
+//
+// Scope of what this file defines, by milestone -- so the next worker does not invent a
+// second shape for something already planned here:
+//   - H2c (this task, as committed by this round): `CatalogQuery`, `CatalogRecord`, `GeoBbox`
+//     below -- the wire shapes `DataGatewayService.Query`'s new `GATEWAY_SELECTOR_CATALOG`
+//     selector (`authority.proto`, additive) carries. `CatalogQuery` is what a caller sends
+//     (a bounding box, a time window, a media type, a job id, a result-count limit);
+//     `CatalogRecord` is what one matched `crates/av-catalog` asset comes back as, reusing
+//     `entity.proto`'s own `AssetRef` for every field that message already carries rather
+//     than re-declaring a parallel asset shape (`crates/av-catalog/src/model.rs::
+//     CatalogAsset::to_asset_ref` is the identical conversion this selector's own response
+//     building reuses, never a second one). `TemporalExtent` is likewise `entity.proto`'s own
+//     message, not a second time-range shape -- `crates/av-catalog/src/query.rs::TimeRange`
+//     is that crate's own internal, half-open-interval-typed representation of the identical
+//     wire concept, converted at the boundary, never duplicated on the wire.
+//   - H3/H4 (job runner/tiler, tile gateway) will add their own message(s) to this file when
+//     that work starts -- deliberately NOT speculated here; this round adds only what H2c
+//     itself needs.
+package altavista.v1;
+
+import "altavista/v1/entity.proto";
+
+// A geodetic bounding box, WGS84 degrees, min/max on each axis -- the exact semantics
+// `crates/av-catalog/src/query.rs::GeoBbox`'s own module doc states for the bbox-query rule
+// this drives (`ST_Intersects` against a `NULL`-excluding, PostGIS `geography` footprint
+// column): `min_lon <= max_lon` and `min_lat <= max_lat` is this message's own well-formedness
+// rule -- `crate::catalog_selector` (`av-gateway`) refuses a `CatalogQuery.bbox` that
+// violates it before any query reaches the catalog tier at all, typed and counted.
+message GeoBbox {
+  double min_lon = 1;
+  double min_lat = 2;
+  double max_lon = 3;
+  double max_lat = 4;
+}
+
+// `DataGatewayService.Query`'s `GATEWAY_SELECTOR_CATALOG` payload (`authority.proto`'s
+// `GatewayQueryRequest.catalog_query`, additive field 6) -- every filter
+// `crates/av-catalog/src/query.rs::AssetQuery`/`find_assets` already implements, minus the
+// label filter itself (D2's own clearance-ladder comparison, never a caller-suppliable
+// field -- the caller's clearance comes from the verified token, `crate::auth::AuthContext::
+// authenticate_query`, exactly like every other selector; see `crate::catalog_selector`'s own
+// module doc for the full refusal chain, including how a `limit` of 0 or above
+// `av_catalog::MAX_QUERY_LIMIT`, a `bbox` with `min >= max`, or a `time` with
+// `end_tai_ns <= start_tai_ns` is refused rather than silently clamped or reinterpreted --
+// unlike `find_assets` itself, which is an internal library function other, already-reviewed
+// callers may legitimately want to clamp rather than refuse).
+message CatalogQuery {
+  // Unset (no `GeoBbox` at all) means "no extent filter" -- `crates/av-catalog/src/query.rs`'s
+  // own module doc, "Extent": an asset with a `NULL` footprint is excluded from a
+  // bbox-filtered query and included when no bbox filter is given at all.
+  GeoBbox bbox = 1;
+  // Unset means "no time filter" -- the identical NULL-handling rule as `bbox` above, for
+  // `start_tai_ns`/`end_tai_ns` (`crates/av-catalog/src/query.rs`'s module doc, "Time"):
+  // half-open `[start, end)` overlap.
+  TemporalExtent time = 2;
+  // Empty means "no media-type filter". Matched by exact equality against
+  // `crates/av-catalog`'s own `assets.media_type` column -- never a glob or prefix match.
+  string media_type = 3;
+  // Empty means "no job-id filter" -- matched against `assets.job_id` (H2's own job-lineage
+  // column, `crates/av-catalog/src/model.rs::CatalogAsset::job_id`).
+  string job_id = 4;
+  // The maximum number of `CatalogRecord`s this query may return. `crate::catalog_selector`
+  // refuses (never clamps) a `limit` of 0 or above `av_catalog::MAX_QUERY_LIMIT` -- see this
+  // message's own doc above.
+  uint32 limit = 5;
+}
+
+// One matched `crates/av-catalog` asset, as `GatewayQueryResponse.catalog_records`
+// (`authority.proto`, additive field 8) carries it.
+message CatalogRecord {
+  // `crates/av-catalog/src/model.rs::CatalogAsset::asset_id` -- this catalog's own identifier
+  // (NOT `asset.sha256`; that message's own doc comment explains why the two are distinct).
+  string asset_id = 1;
+  // Every other asset field (`uri`, `sha256`, `size_bytes`, `media_type`, `label`,
+  // `spatial_extent`, `temporal_extent`, `provenance`) as `entity.proto`'s own `AssetRef`
+  // already shapes them -- `crates/av-catalog/src/model.rs::CatalogAsset::to_asset_ref`'s
+  // exact, already-tested conversion, never a second, parallel asset shape declared here.
+  // `AssetRef.attributes` is always empty on a value built this way (`to_asset_ref`'s own doc
+  // comment: nothing in `crates/av-catalog`'s schema stores it today).
+  AssetRef asset = 2;
+  // `crates/av-catalog/src/model.rs::CatalogAsset::job_id` -- the job that produced this
+  // asset, empty when none (H2's own job-lineage column, output side).
+  string job_id = 3;
+  // `crates/av-catalog/src/model.rs::CatalogAsset::created_tai_ns` -- this catalog entry's own
+  // creation epoch, TAI nanoseconds.
+  int64 created_tai_ns = 4;
+  // `crates/av-catalog/src/model.rs::CatalogAsset::footprint_wkt` -- the geodetic footprint as
+  // WKT text (e.g. `"POLYGON((...))"`), empty when the asset has no geodetic meaning at all
+  // (mirrors that field's own `Option<String>` -- `None` renders as the empty string on this
+  // proto3 field, exactly like `job_id` above).
+  string footprint_wkt = 5;
+}
