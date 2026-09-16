@@ -8,11 +8,19 @@
 #
 # Usage:
 #   scripts/kit/install.sh <kit-dir> <target-dir>
+#   (or, more commonly now -- see below: <kit-dir>/installer/install.sh <kit-dir> <target-dir>)
 #
-# <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 2 -- the shape
+# <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 4 -- the shape
 # scripts/kit/build_kit.py writes). <target-dir> must not exist yet, or must exist and be empty
 # -- this installer refuses to write into a non-empty directory rather than silently merging
 # into (or clobbering) whatever is already there.
+#
+# Round 3 (question 217(c)): scripts/kit/build_kit.py now copies this file, install.py, and the
+# local modules install.py imports into every kit's own <kit-dir>/installer/ directory, so a real
+# install runs the COPY that shipped with the kit, never this repository's own scripts/kit/ --
+# see install.py's own module doc for what that bundling does, and does not, prove. This file's
+# path-relative "$SCRIPT_DIR" resolution (below) needs no change either way: it finds install.py
+# beside wherever it itself was invoked from, in this repository or inside a kit alike.
 #
 # Deliberately NOT bash, NOT zsh -- POSIX /bin/sh only, and nothing here assumes macOS. This
 # script (and install.py beside it) is run identically on the host that built the kit and inside

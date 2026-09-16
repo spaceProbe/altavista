@@ -500,17 +500,72 @@ def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_
 
 # =================================================================================================
 # 13. kit_format is bumped -- round 2 (P5 track round 2 task 3a, lead ruling 214(b)) moved it
-# 1 -> 2; round 3 (question 217(b)) moved it again, 2 -> 3, when the web/profiles packs were
-# removed (they now ship inside the altavista wheel instead -- manifest.py's own top doc, "P5
-# track round 3", has the full reasoning for why that counts as a real format change and not
+# 1 -> 2; round 3 moved it twice more: question 217(b) moved it 2 -> 3 when the web/profiles packs
+# were removed (they now ship inside the altavista wheel instead), then question 217(c) moved it
+# 3 -> 4 when the kit gained its own bundled installer (manifest.py's own top doc, "P5 track round
+# 3", has the full reasoning for both bumps -- why each counts as a real format change and not
 # merely an internal refactor).
 # =================================================================================================
 
 def test_kit_format_is_bumped_for_round_3(tmp_path):
     _kit_root, manifest_path, _digest = _build_kit(tmp_path)
     doc = json.loads(manifest_path.read_text())
-    assert doc["kit_format"] == 3
-    assert kmanifest.KIT_FORMAT == 3
+    assert doc["kit_format"] == 4
+    assert kmanifest.KIT_FORMAT == 4
+
+
+# =================================================================================================
+# 13b. The kit carries its own installer (question 217(c))
+# =================================================================================================
+
+def test_the_kit_carries_its_own_installer(tmp_path):
+    """Every kit now carries `installer/install.sh`, `installer/install.py`, and the local
+    modules `install.py` imports (`manifest.py`, `sbom.py`, `licences.py`) -- unconditionally, no
+    flag needed. They fall out of the ordinary `files` walk (role `installer`) with no special
+    manifest section, so `verify_manifest` already covers them with no extra code -- this test
+    proves that is really true, not merely claimed."""
+    kit_root, manifest_path, _digest = _build_kit(tmp_path)
+    doc = json.loads(manifest_path.read_text())
+
+    installer_paths = {f"installer/{name}" for name in build_kit.INSTALLER_SOURCE_FILES}
+    listed_installer_files = {f["path"] for f in doc["files"] if f["path"] in installer_paths}
+    assert listed_installer_files == installer_paths, (
+        f"expected every one of {installer_paths} in KIT_MANIFEST's files list, got "
+        f"{listed_installer_files}"
+    )
+    for entry in doc["files"]:
+        if entry["path"] in installer_paths:
+            assert entry["role"] == "installer", entry
+
+    for name in build_kit.INSTALLER_SOURCE_FILES:
+        on_disk = kit_root / "installer" / name
+        assert on_disk.is_file(), on_disk
+    assert os.access(kit_root / "installer" / "install.sh", os.X_OK), (
+        "installer/install.sh must keep its executable bit (shutil.copy2 preserves it, but this "
+        "asserts the real, on-disk result rather than trusting the copy call alone)"
+    )
+
+    findings = kmanifest.verify_manifest(kit_root)
+    assert findings == [], findings
+
+
+def test_a_tampered_installer_file_is_caught_by_verify_manifest(tmp_path):
+    """`verify_manifest` treats `installer/` exactly like every other section -- a byte changed
+    there after the kit was built is a `hash_mismatch`, not a silently-trusted "it's just the
+    installer" exemption. This is also the concrete proof behind the honesty comment in
+    `manifest.py`'s own top doc ("what a self-carried installer does and does not prove"):
+    `verify_manifest` catches a kit whose installer alone was tampered with -- what it structurally
+    CANNOT catch is a tamperer who also rewrites `KIT_MANIFEST` itself to match, which is exactly
+    why that hash must be checked independently, outside the kit, before this function is ever
+    trusted."""
+    kit_root, _manifest_path, _digest = _build_kit(tmp_path)
+    target = kit_root / "installer" / "manifest.py"
+    original = target.read_bytes()
+    target.write_bytes(original + b"\n# tampered\n")
+    findings = kmanifest.verify_manifest(kit_root)
+    assert any(
+        f.kind == "hash_mismatch" and f.path == "installer/manifest.py" for f in findings
+    ), findings
 
 
 # =================================================================================================

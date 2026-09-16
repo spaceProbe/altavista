@@ -97,11 +97,15 @@ Flags:
   and reused by every kit built from that same source state -- see "Reproducibility and a
   cross-built binary" below for why, and `build_kit.binary_cache_key` for why the key is not the
   commit alone. **This step uses the network** (the cross-build container installs its build
-  dependencies with apt before compiling); `KIT_MANIFEST`'s `binaries.network_used` records it. A binary that does
-  not cross-build (this round: `av-command`, pinned toolchain `rust:1.85-bookworm` is older than
-  `regorus` 0.12.0's own const-generics requirement -- see the real error in a built kit's own
-  `gaps` list) is never silently dropped: it becomes a named gap carrying the real compiler
-  error, and the other binary is still collected.
+  dependencies with apt before compiling); `KIT_MANIFEST`'s `binaries.network_used` records it. A
+  binary that does not cross-build is never silently dropped: it becomes a named gap carrying the
+  real compiler error, and the other binary is still collected. **Round 3 (question 217(a))**:
+  `PREBUILD_BASE_IMAGE` moved `rust:1.85-bookworm` -> `rust:1.90-bookworm` -- the workspace's own
+  `rust-version` floor is `1.87` (`regorus` 0.12.0's own MSRV), so 1.85 could not build EITHER
+  binary at all, not just `av-command`; every other cross-build pin in this workspace had already
+  moved to 1.90 (question 215), just not this file's own constant. `av-command` cross-builds
+  cleanly with the new pin -- see `tests/test_kit_zero_egress_install.py`'s own B.4e for the proof
+  that the resulting binary genuinely runs, not merely that it exists.
 
 Every default is repo-relative; no flag ever needs an absolute path.
 
@@ -133,8 +137,10 @@ byte-identical -- this is the test that would fail first if that rule were ever 
 JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trailing newline; see
 `scripts/kit/manifest.py`'s own module doc for the full field-by-field description):
 
-- `kit_format` -- an integer, bumped whenever this shape changes. **3 as of round 3** (question
-  217(b) removed the `web`/`profiles` packs -- see `scripts/kit/manifest.py`'s own top doc).
+- `kit_format` -- an integer, bumped whenever this shape changes. **4 as of round 3** (question
+  217(b) removed the `web`/`profiles` packs at 2 -> 3; question 217(c) then required the kit to
+  carry its own installer at 3 -> 4 -- see `scripts/kit/manifest.py`'s own top doc and "The kit
+  carries its own installer" below).
 - `git_commit` / `git_dirty` / `git_status` -- the full HEAD SHA, whether the tree that built the
   kit was clean, and the sorted, verbatim `git status --porcelain` lines. `git_dirty` alone is a
   permanently-`true` flag IN THIS WORKTREE specifically: it carries pre-existing, untracked
@@ -145,7 +151,8 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
 - `files` -- every real, non-symlink file in the kit, `{path, sha256, size, role}`, sorted by
   path. Round 2 adds five new roles: `pack-file` (a copied pack's own regular files), `vendor` /
   `vendor-config` (`--with-vendor`), `wheel` (`--with-wheels`), `binary` (`--with-binaries`),
-  `run-fixture` (the recorded kernel runs, always present).
+  `run-fixture` (the recorded kernel runs, always present). Round 3 adds a sixth, `installer`
+  (question 217(c)) -- every file under `installer/`, always present, unconditional.
 - `pack_symlinks` -- **new in round 2**: every symlink inside a COPIED pack (`packs/<name>/...`),
   `{path, pack, link_target}`, sorted by path -- see "Pack symlinks", below. A kit may contain
   ZERO symlinks anywhere else (round 1's original rule, unchanged).
@@ -205,6 +212,37 @@ anywhere (inside a pack or not) is caught (`unexpected_symlink`), and a declared
 disappeared is caught (`missing_symlink`). Round 1's original defence -- "a kit that carries a
 symlink to anywhere on the build host verifies clean" -- stays proven false: every one of round
 1's own symlink tests still passes unchanged, plus round 2's new ones for the pack case.
+
+## The kit carries its own installer (round 3, question 217(c))
+
+Every kit now includes `<kit>/installer/`: `install.sh`, `install.py`, and the exact local modules
+`install.py` imports -- `manifest.py`, `sbom.py`, `licences.py` -- copied verbatim
+(`build_kit.py::assemble_installer`, `build_kit.py::INSTALLER_SOURCE_FILES`), unconditionally,
+every kit, no flag. Before this round, the zero-egress install proof (`tests/
+test_kit_zero_egress_install.py`) bind-mounted THIS repository's own `scripts/kit/` (read-only)
+into the installing container alongside the kit itself -- round 2's own decision 9 recorded that
+as an open gap: a party holding only the kit, never this repository, could not have run that exact
+install. That test now runs `/kit/installer/install.sh /kit /target` from the read-only kit mount
+alone, and positively asserts (`_assert_no_repo_source_mounted`) that no container mount points
+anywhere inside this repository's own source tree.
+
+This is a real `kit_format` bump, 3 -> 4 (`manifest.py`'s own top doc, "P5 track round 3, question
+217(c)"): the installer's presence is now REQUIRED, not merely additive. `install.py` never
+imports `build_kit` (which pulls in `packaging`, a third-party dependency -- question 217(e)), so
+the bundled installer stays importable on a target machine with nothing but a Python interpreter
+and the standard library, exactly as it needs to be to run on a bare `python:3.13-slim` container
+that has never seen this worktree at all.
+
+**What this proves, and does not prove.** `install.py`'s own verify-first step re-hashes every
+file `KIT_MANIFEST` lists, including the installer's own bundled copy of itself, before trusting
+any of it -- that proves internal CONSISTENCY (nothing missing, nothing added, nothing corrupted
+in transit). It does NOT prove AUTHENTICITY: whoever can tamper with a kit's files can equally
+recompute `KIT_MANIFEST` (and the installer that checks it) to match, since both come from the
+same untrusted source -- a self-verifying installer cannot verify itself into legitimacy. The one
+real anchor of trust is `KIT_MANIFEST`'s own SHA-256, computed and recorded INDEPENDENTLY of the
+kit by whoever built or received it (this task's own report, and this test's own printed/asserted
+hash, are exactly that) -- comparing that independently-held hash before ever running the kit's
+installer is what a real deployment still needs to add on its own side.
 
 ## The recorded kernel run
 
@@ -328,9 +366,11 @@ the rest are unconditional, every kit, regardless of flags:
 - **`secdeploy-deploy-assets`** -- the base secdeploy manifest's own `deploy/` directory (the
   symlink `merge()` writes and this builder discards -- see round 1's own D3-1 finding). Those
   assets are the user's own secdeploy checkout, not ours to bundle.
-- **`<binary>-binary`** (e.g. `av-command-binary`) -- present only when `--with-binaries` was
-  passed and that specific binary did not cross-build; carries the REAL compiler error, never a
-  synthesized message.
+- **`<binary>-binary`** (e.g. `av-command-binary`, if some future toolchain/dependency change ever
+  breaks its cross-build again) -- present only when `--with-binaries` was passed and that
+  specific binary did not cross-build; carries the REAL compiler error, never a synthesized
+  message. As of round 3's `rust:1.90-bookworm` pin (question 217(a)) neither `av-ingest-server`
+  nor `av-command` hits this on this host.
 - **`wheel:<package>`** -- present only when `--with-wheels` was passed and no matching
   `linux/aarch64/cp313` wheel exists for that package at this worktree's installed version;
   carries what `pip download` actually reported. None of the viewer's own 21-package runtime

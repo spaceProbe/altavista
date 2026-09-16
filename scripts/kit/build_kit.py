@@ -24,7 +24,11 @@ Decision-K pack descriptors (`data/time` by default), the git commit/dirty state
 UNCONDITIONALLY, no flag. Round 3's packaging change (`pyproject.toml`/`setup.py`) now ships both
 INSIDE the `altavista` wheel itself, so the kit does not need to carry either separately any more
 -- see `manifest.py`'s own top doc, "P5 track round 3", for the full reasoning and the resulting
-`kit_format` bump (2 -> 3).
+`kit_format` bump (2 -> 3). **Also new, round 3 (question 217(c))**: the kit's OWN installer
+(`assemble_installer`, below) -- `install.sh`/`install.py` plus the exact local modules they
+import, copied into `<kit>/installer/`, unconditionally, no flag -- replacing the bind-mounted
+`scripts/kit/` the zero-egress proof used to reach into this repository for. Required, not
+additive: `kit_format` bumps again (3 -> 4, `manifest.py`'s own top doc, same section).
 
 GATED, opt-in, off by default:
 - `--with-images` -- `docker save` of the two recorded images.
@@ -161,6 +165,43 @@ def assemble_sboms(repo_root: Path, kit_root: Path) -> dict:
         component = Path(rel).stem.removesuffix(".cdx")
         sboms[component] = digest
     return sboms
+
+
+#: Question 217(c): the exact, recursively-checked import closure `scripts/kit/install.py` needs
+#: to run -- `install.py` imports `manifest`, which imports `sbom`, which imports `licences`; none
+#: of the four imports anything else outside the standard library (see `tests/
+#: test_kit_manifest.py::test_install_py_stays_importable_with_only_the_standard_library`, which
+#: proves this dynamically, not merely by reading the source). `build_kit.py` itself is
+#: DELIBERATELY excluded -- it imports `packaging` (question 217(e)), and the whole point of this
+#: list is that the installer never needs a third-party package on the target machine it runs on.
+INSTALLER_SOURCE_FILES: tuple[str, ...] = (
+    "install.sh", "install.py", "manifest.py", "sbom.py", "licences.py",
+)
+
+
+def assemble_installer(repo_root: Path, kit_root: Path) -> None:
+    """Question 217(c): copies `INSTALLER_SOURCE_FILES` (from this same `scripts/kit/` directory
+    -- this module's own `__file__`, never a hard-coded absolute path) into `<kit_root>/installer/`,
+    unconditionally, every kit. Before this, the zero-egress install proof bind-mounted THIS
+    repository's own `scripts/kit/` into the installing container read-only (round 2's decision 9,
+    recorded as an open gap); a kit now carries everything it needs to install itself, and the
+    proof mounts nothing from this repository at all -- see `tests/
+    test_kit_zero_egress_install.py`'s own module doc for the positive assertion, and `manifest.py`'s
+    own top doc ("P5 track round 3, question 217(c)") for what this does and does not prove about
+    the installer's trustworthiness.
+
+    `install.sh`'s executable bit is preserved (`shutil.copy2`, like every other copy in this
+    module); the four `.py` files are imported, never executed directly, so they keep the ordinary
+    `0o644` this worktree already has them at. These files fall out of the existing `files` walk in
+    `manifest.build_manifest` for free (role `"installer"`, `manifest._classify_role`) -- no
+    separate manifest section, no special-casing anywhere else in this module."""
+    installer_dir = kit_root / "installer"
+    installer_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = Path(__file__).resolve().parent
+    for name in INSTALLER_SOURCE_FILES:
+        src = source_dir / name
+        dest = installer_dir / name
+        shutil.copy2(src, dest)
 
 
 def assemble_image_digest_docs(repo_root: Path, kit_root: Path) -> None:
@@ -902,6 +943,7 @@ def build(
 
     assemble_suite_and_site(repo_root, kit_root, site)
     sboms = assemble_sboms(repo_root, kit_root)
+    assemble_installer(repo_root, kit_root)
     assemble_image_digest_docs(repo_root, kit_root)
     runs = assemble_runs(repo_root, kit_root)
 

@@ -1,10 +1,37 @@
 """scripts/kit/install.py -- D3's second half (docs/p5-plan.md, P5 track round 2 task 3b, round 3
-question 217(b)): the real logic behind scripts/kit/install.sh. Installs a kit
-(scripts/kit/build_kit.py's own output, `kit_format` 3) into a fresh, empty target directory,
+questions 217(b)/217(c)): the real logic behind scripts/kit/install.sh. Installs a kit
+(scripts/kit/build_kit.py's own output, `kit_format` 4) into a fresh, empty target directory,
 using nothing beyond the kit itself, a
 Python interpreter, and a shell -- no network, ever (question 154: "a kit is built with network
 once and installed with none" -- this half is the "installed with none" clause, proved for real
 by tests/test_kit_zero_egress_install.py).
+
+# This module now ships INSIDE every kit (round 3, question 217(c))
+
+Before this round, the zero-egress install proof bind-mounted THIS repository's own
+`scripts/kit/` (read-only) into the installing container alongside the kit itself, so the
+"nothing beyond the kit itself" claim two paragraphs up was not, in fact, true end to end -- round
+2's own decision 9 recorded that gap openly. `build_kit.py::assemble_installer` now copies this
+file, `install.sh`, and the exact local modules it imports (`manifest.py`, `sbom.py`,
+`licences.py` -- nothing else, checked recursively; see `build_kit.py::INSTALLER_SOURCE_FILES`'s
+own comment) into `<kit>/installer/`, unconditionally, every kit. The version of this file that
+actually runs during an install is therefore the COPY inside `installer/`, not this repository's
+own `scripts/kit/install.py` -- both start out byte-identical (the same source file, copied), but
+only the one bundled in the kit is ever executed by `tests/test_kit_zero_egress_install.py`'s real
+proof, or by any real install of that kit.
+
+**What that bundling proves, and does not prove** -- worth stating plainly rather than leaving
+implied: `_load_manifest_or_refuse`, below, re-hashes every file `KIT_MANIFEST` lists, including
+this file's own bundled copy and the other three modules it imports, before trusting any of them.
+That proves the kit has not been corrupted or partially transferred, and that `KIT_MANIFEST`
+accounts for everything present -- ordinary CONSISTENCY. It does not, and cannot, prove
+AUTHENTICITY: whoever can tamper with a kit's files can equally tamper with `KIT_MANIFEST` (and
+with this installer) to match, since both come from the same source and neither is trusted
+independently of the other -- an installer cannot verify itself into legitimacy. The one thing
+that anchors trust here is `KIT_MANIFEST`'s own SHA-256, computed and recorded OUTSIDE the kit, by
+whoever built or received it, and compared before this installer is ever run -- see
+`manifest.py`'s own top doc, "P5 track round 3, question 217(c)", for the fuller version of this
+same argument.
 
 # Why this is a separate module from install.sh
 
@@ -58,8 +85,9 @@ it").
    `KIT_MANIFEST` is missing/unparseable).
 2. The target directory exists and is not empty.
 3. `KIT_MANIFEST` is missing a top-level section this installer's own understanding of
-   `kit_format` 2 requires (`_REQUIRED_TOP_LEVEL_KEYS`) -- a structural gap, never guessed past.
-4. `kit_format` is not the one version (2) this installer understands.
+   `kit_format` requires (`_REQUIRED_TOP_LEVEL_KEYS`) -- a structural gap, never guessed past.
+4. `kit_format` is not the one version (`manifest.KIT_FORMAT`, `4` as of round 3 question 217(c))
+   this installer understands.
 5. A wheel the viewer actually needs is absent from the kit: either the whole `wheels` step was
    never collected (`wheels.collected` is `false`), or one of the viewer's own required
    distributions (`_REQUIRED_WHEEL_DIST_NAMES`, below -- the exact roots

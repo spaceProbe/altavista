@@ -42,11 +42,18 @@ scratch inside the enclave, not an already-built plugin image run directly).
       `runs/`), re-hashed INSIDE the installed tree and compared to what `KIT_MANIFEST` records,
       decoded far enough (`build_kit.read_run_provenance`, reused, not reimplemented) to assert
       each fixture's own `config_hash` field, not merely its file hash;
-   e. **`av-command` is a named gap of the kit itself** (its cross-build fails against the pinned
-      `rust:1.85-bookworm` toolchain -- `regorus` 0.12.0 needs a newer `const fn` feature; see the
-      kit's own `KIT_MANIFEST["gaps"]` entry `av-command-binary` for the real compiler error). This
-      test does not attempt to fix that (not this task's job) -- it reads and reports the kit's own
-      recorded reason, and does not start a command service.
+   e. **`av-command`, round 3 (question 217(a)): no longer a named gap.** It used to be -- its
+      cross-build failed against the pinned `rust:1.85-bookworm` toolchain (`regorus` 0.12.0's own
+      MSRV is 1.87). `scripts/kit/build_kit.py::PREBUILD_BASE_IMAGE` moved to `rust:1.90-bookworm`
+      this round (a review defect: every OTHER cross-build pin in this workspace had already moved
+      there, question 215) and `av-command` now cross-builds cleanly. This test proves the binary
+      genuinely RUNS -- invoked with no arguments inside the enclave, checked for its own
+      well-defined missing-OIDC-config refusal (`crates/av-command/src/bin/av-command.rs`, A2.1) --
+      never merely that it is present. It still does not stand up the full gRPC/admin service (that
+      needs a real OIDC issuer/public key this test does not have, and this task's own rules forbid
+      editing `crates/av-command` to add one) -- if the kit's own cross-build ever fails again for
+      some other reason, this section reads and reports the kit's own recorded gap instead, rather
+      than assuming success.
 6. **Two kits built from the same commit have the same manifest hash** -- a separate, UNGATED,
    fast test (`test_two_fast_kits_from_the_same_commit_have_the_same_manifest_hash`, below): builds
    two minimal kits (default pack only, no gated flags) into `tmp_path` and compares their
@@ -104,6 +111,29 @@ against nothing but the installed wheel.
 Nothing from this worktree, and nothing from `kit/packs/`, is bind-mounted or referenced for the
 viewer anywhere in this file any more -- every byte it serves, and every line of code that runs,
 is the installed wheel's own.
+
+# The kit now carries its own installer too (round 3, question 217(c)) -- what changed here
+
+Every task 3b/3c/round-3(b) revision of this file, up to and including this paragraph's own
+predecessor, bind-mounted THIS repository's own `scripts/kit/` (read-only) into the installing
+container alongside the kit itself, then ran `/repo/scripts/kit/install.sh /kit /target` --
+`scripts/kit` was never part of the kit, so a genuinely air-gapped party holding only the kit
+(never this repository) could not have run this exact install. Round 2's own decision 9 recorded
+that gap openly; question 217(c) closes it. `build_kit.py::assemble_installer` now copies
+`install.sh`/`install.py` and the local modules they import into `<kit>/installer/`,
+unconditionally, every kit (`kit_format` bumped 3 -> 4, `manifest.py`'s own top doc). This file's
+own install step below now runs `/kit/installer/install.sh /kit /target` from the read-only KIT
+MOUNT ALONE -- `scripts/kit/` (`KIT_DIR`) is never bind-mounted into the container at all any more
+(it is still used, exactly as before, to `sys.path.insert` this TEST's own host-side import of
+`build_kit`/`manifest`/`sbom`, which has nothing to do with what the container receives).
+`_assert_no_repo_source_mounted`, below, is the positive proof: it inspects the real `-v` argument
+list handed to `docker run` for that container and asserts no host path in it is this repository's
+own live source tree, with the kit artifact itself (`_PROOF_KIT_DIR`, already hash-verified before
+this point) the one named, deliberate exception. See `manifest.py`'s own top doc, "P5 track round
+3, question 217(c)", and `install.py`'s own module doc for exactly what a kit carrying its own
+installer proves (internal consistency) and does not prove (authenticity -- that anchor is
+`KIT_MANIFEST`'s own SHA-256, held independently of the kit, which is why this file always prints
+and cross-checks it rather than trusting anything the kit says about itself).
 
 # Gating (question 194) -- computed once, at import time
 
@@ -425,6 +455,38 @@ _EVIDENCE_FETCH_SCRIPT = (
 )
 
 
+def _assert_no_repo_source_mounted(mount_args: list[str]) -> None:
+    """Question 217(c)'s own positive assertion: `mount_args` is the exact list of `-v` arguments
+    about to be handed to `docker run` for the installing container, built in ONE place (the call
+    site, below) so this function is checking the real thing, never a description of it. Parses
+    every `-v <host>:<container>[:ro]` pair and asserts no HOST-side path is this repository's own
+    live source tree -- most importantly, that `scripts/kit/` (`KIT_DIR`) is never among them: task
+    3b's own harness used to bind-mount it read-only into this same container (round 2's decision
+    9, an openly recorded gap), which is exactly what question 217(c) closes.
+
+    `_PROOF_KIT_DIR` is the one deliberate exception, not a loophole: it is the already-built kit
+    ARTIFACT this test consumes (under this repo's own `.gitignore`d `out/` build-output directory
+    on disk, but not source this repository tracks or ships), already proven trustworthy by
+    `_load_and_verify_images` and by the kit's own `KIT_MANIFEST` SHA-256 before this ever runs --
+    see `manifest.py`'s own top doc, "P5 track round 3, question 217(c)", for exactly what that
+    proves and does not prove. A docker VOLUME name (e.g. the install target) is not a host
+    filesystem path at all and is skipped rather than mis-resolved against this process's own cwd."""
+    for i, arg in enumerate(mount_args):
+        if arg != "-v":
+            continue
+        host_spec = mount_args[i + 1].split(":")[0]
+        if not host_spec.startswith("/"):
+            continue  # a docker volume NAME, not a host filesystem path
+        host_path = Path(host_spec).resolve()
+        if host_path == _PROOF_KIT_DIR.resolve():
+            continue  # the one deliberate exception -- see this function's own doc
+        assert host_path != REPO_ROOT and REPO_ROOT not in host_path.parents, (
+            f"a container mount points inside this repository's own source tree ({host_path}) -- "
+            f"question 217(c): the installing container must get everything it needs from the "
+            f"kit alone, never a live bind-mount of this repo"
+        )
+
+
 def _run_egress_probe(guard: ResourceGuard, run_id: str, stage: str, network_name: str) -> list:
     probe_container = _labelled_id(run_id, f"egress-probe-{stage}")
     guard.track_container(probe_container)
@@ -523,15 +585,24 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         _docker("volume", "create", *guard.label_args(), install_volume)
         guard.track_volume(install_volume)
 
+        # Question 217(c): the kit now carries its own installer (`build_kit.py::
+        # assemble_installer`) -- built in ONE place so `_assert_no_repo_source_mounted` checks
+        # the real argument list, never a description of it. `scripts/kit/` (`KIT_DIR`) is no
+        # longer mounted at all; the container gets only the kit itself (read-only) and its own
+        # fresh install target volume.
+        install_mount_args = [
+            "-v", f"{_PROOF_KIT_DIR}:/kit:ro",
+            "-v", f"{install_volume}:/target",
+        ]
+        _assert_no_repo_source_mounted(install_mount_args)
+
         installer_container = _labelled_id(run_id, "installer")
         guard.track_container(installer_container)
         install_start = time.monotonic()
         install_run = _docker(
             "run", "--name", installer_container, "--network", network_name, *guard.label_args(),
-            "-v", f"{_PROOF_KIT_DIR}:/kit:ro",
-            "-v", f"{KIT_DIR}:/repo/scripts/kit:ro",
-            "-v", f"{install_volume}:/target",
-            PROBE_IMAGE, "/repo/scripts/kit/install.sh", "/kit", "/target",
+            *install_mount_args,
+            PROBE_IMAGE, "/kit/installer/install.sh", "/kit", "/target",
             timeout=180.0,
         )
         install_elapsed_s = time.monotonic() - install_start
@@ -604,11 +675,50 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         print(f"\n--- recorded kernel runs, re-hashed from the installed tree (question 148) ---\n{json.dumps(run_evidence, indent=2)}")
 
         # ---------------------------------------------------------------------------------
-        # B.4e -- av-command: a named gap of the KIT itself, read and reported, not fixed.
+        # B.4e -- av-command: reads the kit's own cross-build result, whichever it is. Round 3's
+        # question 217(a) fix (build_kit.py's PREBUILD_BASE_IMAGE moved rust:1.85-bookworm ->
+        # rust:1.90-bookworm) is expected to close the cross-build gap this section used to
+        # hard-assert -- if it does, this proves the binary actually RUNS (a real risk specific
+        # to cross-compiling: a corrupt or wrongly-linked binary would fail here, not merely be
+        # absent) by invoking it with NO arguments and checking for its own well-defined refusal
+        # (crates/av-command/src/bin/av-command.rs::parse_args: "--oidc-issuer, --oidc-audience
+        # and --oidc-public-key-path are all required" -- A2.1, no default issuer). This does NOT
+        # start the full gRPC/admin service end to end -- av-command needs a real OIDC issuer and
+        # public key this test does not have, and this task's own rules forbid editing
+        # crates/av-command to add one; "the binary this kit cross-built genuinely executes and
+        # reaches its own real argument-parsing logic" is the proportionate proof here, not "the
+        # service is live". If the gap is still present for some OTHER reason, it is read and
+        # reported, never silently ignored either way (question 148: an exit code/gap name alone
+        # is not evidence -- the real reason is always quoted).
         # ---------------------------------------------------------------------------------
         av_command_gap = next((g for g in manifest_doc["gaps"] if g["name"] == "av-command-binary"), None)
-        assert av_command_gap is not None, "expected the kit to record av-command-binary as a gap (its cross-build is known to fail against the pinned toolchain)"
-        print(f"\n--- av-command (named gap, not attempted -- question 148) ---\n{av_command_gap['reason'][-400:]}")
+        if av_command_gap is not None:
+            print(f"\n--- av-command (named gap, not attempted -- question 148) ---\n{av_command_gap['reason'][-400:]}")
+        else:
+            av_command_result = manifest_doc["binaries"]["results"].get("av-command", {})
+            assert av_command_result.get("included") is True, (
+                f"av-command is not in KIT_MANIFEST's gaps list, but binaries.results also does "
+                f"not show it included -- inconsistent kit: {av_command_result!r}"
+            )
+            av_command_run = _docker(
+                "run", "--rm", "--network", network_name, *guard.label_args(),
+                "-v", f"{install_volume}:/target:ro",
+                PROBE_IMAGE, "/target/kit/binaries/av-command",
+                check=False,
+            )
+            combined = av_command_run.stdout + av_command_run.stderr
+            assert av_command_run.returncode != 0, (
+                f"av-command with no arguments should refuse (no default OIDC config) -- "
+                f"unexpectedly exited 0, which would mean it silently started a real service "
+                f"with no auth configured:\n{combined}"
+            )
+            assert "oidc" in combined.lower(), (
+                f"av-command exited (rc={av_command_run.returncode}) but not with the expected "
+                f"missing-OIDC-config refusal -- possible cross-build/link problem, not simply a "
+                f"missing-config one:\n{combined}"
+            )
+            print(f"\n--- av-command, cross-built by this kit and genuinely RUNS (question 148) ---\n"
+                  f"rc={av_command_run.returncode}\n{combined[-800:]}")
 
         print(f"\n--- B.4 reached: {reached} ---")
 

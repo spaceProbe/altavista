@@ -71,6 +71,39 @@ changed and why:
   check reads the `altavista` wheel's own namelist instead (a wheel is a zip) -- see that module's
   own doc for why this is the load-bearing safety check `_check_required_viewer_assets` used to
   be, not simply deleted.
+- **P5 track round 3, question 217(c)**: the kit now carries its OWN installer. Before this, `tests/
+  test_kit_zero_egress_install.py` proved a zero-egress install by bind-mounting THIS repository's
+  `scripts/kit/` (read-only) into the installing container alongside the kit itself -- round 2's own
+  decision 9 recorded that gap openly, and 217(c) closes it. `build_kit.py::assemble_installer`
+  copies `install.sh`, `install.py`, `manifest.py`, `sbom.py`, and `licences.py` (the exact,
+  recursively-checked import closure `install.py` needs -- nothing more) into `<kit>/installer/`,
+  unconditionally, every kit; those files fall out of the existing `files` walk exactly like every
+  other file in the kit (role `"installer"`, `_classify_role` below), so `verify_manifest` covers
+  them with no special-casing at all. The zero-egress proof now runs `/kit/installer/install.sh
+  /kit /target` from the read-only KIT mount alone, mounting nothing else from this repository (see
+  that test's own module doc for the positive assertion).
+
+  This IS a real `kit_format` bump (3 -> 4): the installer's presence inside the kit is REQUIRED
+  going forward, not merely additive -- a kit built by this module without its own installer is no
+  longer the deliverable 217(c) describes (an operator with nothing but the kit, a Python
+  interpreter, and a shell), so a `kit_format` 3 kit (installer-less) and a `kit_format` 4 kit
+  (self-installing) are genuinely different shapes, exactly the same reasoning the 2 -> 3 bump above
+  already applied to the `web`/`profiles` packs' removal.
+
+  **What a kit carrying its own installer does, and does not, prove** (stated here rather than left
+  implied, because it is easy to overclaim): `install.py`'s own `_load_manifest_or_refuse` re-hashes
+  every file `KIT_MANIFEST` lists -- including the installer files themselves -- and refuses to
+  proceed if anything mismatches. That proves internal CONSISTENCY: the kit was not corrupted or
+  partially transferred, and nothing was added or removed without `KIT_MANIFEST` saying so. It does
+  NOT prove AUTHENTICITY: an attacker able to modify a kit's files is equally able to recompute
+  `KIT_MANIFEST` (and the installer that reads it) to match -- a self-verifying installer can verify
+  itself into legitimacy that way, trivially, since it and the content it checks come from the same
+  untrusted source. The ONE anchor of trust this design has is `KIT_MANIFEST`'s own SHA-256, recorded
+  INDEPENDENTLY, by whoever carried or received the kit, through a channel the kit itself does not
+  control (this task's own report is exactly that: the hash is printed and quoted outside the kit).
+  Comparing that independently-held hash against the kit's own `KIT_MANIFEST` before ever running its
+  installer is what a real deployment would need to add; nothing in `install.py`/`manifest.py` does
+  or could do that step on the kit's own behalf.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -140,8 +173,9 @@ ensure_ascii=False)` plus one trailing newline. It contains:
 - `files` -- every regular, non-symlink file actually present under the kit root at the moment
   `build_manifest` runs, EXCLUDING `KIT_MANIFEST` itself. Each entry is `{"path", "sha256",
   "size", "role"}`, sorted by path. Round 2 adds five new roles (`pack-file`, `vendor`,
-  `vendor-config`, `wheel`, `binary`, `run-fixture`) to the fixed set `_classify_role` recognises;
-  an unrecognised path shape still raises rather than silently guessing.
+  `vendor-config`, `wheel`, `binary`, `run-fixture`); round 3 (question 217(c)) adds a sixth,
+  `installer`, for every file under `installer/`. An unrecognised path shape still raises rather
+  than silently guessing.
 - `pack_symlinks` -- NEW in round 2: every symlink that lives inside a COPIED pack
   (`packs/<name>/...`), `{"path", "pack", "link_target"}`, sorted by path, `link_target` the raw,
   unresolved `os.readlink` string. This is the one place a kit is allowed to carry a symlink at
@@ -185,7 +219,10 @@ from typing import Optional
 # mutating sys.path itself.
 import sbom  # noqa: E402  (see comment above -- caller is responsible for sys.path)
 
-KIT_FORMAT = 3
+#: 4 as of round 3 (question 217(c)): the kit now carries its own installer (`installer/`), which
+#: this module's own top doc records as a REQUIRED shape change, not an additive one -- see "P5
+#: track round 3, question 217(c)" above for the full reasoning.
+KIT_FORMAT = 4
 
 # --- Round-1 fixed gap reasons, unchanged. Round-2 gaps that can be genuinely collected
 # (cargo-vendor, python-wheels) move to `build_gaps` below, which decides per-build whether they
@@ -621,6 +658,8 @@ def _classify_role(rel_posix: str) -> str:
         return "binary"
     if rel_posix.startswith("runs/") and rel_posix.endswith(".runproducts.bin"):
         return "run-fixture"
+    if rel_posix.startswith("installer/"):
+        return "installer"
     raise ValueError(
         f"build_manifest: kit file {rel_posix!r} does not match any known role shape -- "
         f"scripts/kit/build_kit.py wrote a file this classifier does not know about yet; teach "
