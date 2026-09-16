@@ -77,6 +77,7 @@ use av_edge::plugin::{BatchBuilder, BatchingRule, Pacing, PluginConfig, PortTraf
 use av_ingest::pb::edge_ingest_server::EdgeIngestServer;
 use av_ingest::service::{EdgeIngestConfig, EdgeIngestService};
 use av_ingest_client::EdgeIngestClient;
+use futures_util::stream::{self, StreamExt};
 use openssl::ec::EcKey;
 use openssl::pkey::Public;
 
@@ -96,7 +97,7 @@ pub const BASELINE_BATCHES: usize = 900;
 /// field here is a plain, non-heap value for `Mode::InProcess` specifically, so this is a
 /// `const`, not a `fn` -- the strongest available guarantee that "no arguments" has exactly
 /// one, fixed, compile-time-checked meaning.
-pub const BASELINE_CONFIG: HarnessConfig = HarnessConfig { mode: Mode::InProcess, batches: BASELINE_BATCHES, rate_per_sec: None };
+pub const BASELINE_CONFIG: HarnessConfig = HarnessConfig { mode: Mode::InProcess, batches: BASELINE_BATCHES, rate_per_sec: None, in_flight: 1 };
 
 /// One remote placement's own driving address, from `--target LABEL=ADDR`. `label` is
 /// whatever the caller chose (D5's own three placements: `edge-a`/`edge-b`/`edge-c`, from
@@ -140,9 +141,24 @@ pub struct HarnessConfig {
     /// batch is sent as fast as `submit_batches` returns, exactly as this binary always did
     /// before this module existed.
     pub rate_per_sec: Option<f64>,
+    /// Batches outstanding concurrently, per placement, sharing that placement's own
+    /// schedule (question 148's diagnosed apparatus limit: the driver used to send one batch
+    /// at a time per placement and await the response before sending the next, so the
+    /// maximum achievable offered rate per placement was `1 / round-trip` -- a property of
+    /// this measuring client, not of the platform under test). Default `1` -- **must
+    /// reproduce today's behaviour exactly**: [`drive_placement`] keeps the original,
+    /// unmodified sequential loop for `in_flight <= 1`, and only takes the concurrent
+    /// (`futures_util::stream::StreamExt::buffer_unordered`) path for `in_flight > 1`, so
+    /// the default path is not just behaviourally but *structurally* identical to the
+    /// pre-`--in-flight` code. The emit/accept instants stay exactly where they always were
+    /// -- immediately before `submit_batches` and immediately after its `Result` is
+    /// confirmed -- for every batch regardless of `in_flight`, so raising it changes only how
+    /// many batches are outstanding at once, never what a single batch's own latency sample
+    /// measures.
+    pub in_flight: usize,
 }
 
-const USAGE: &str = "usage: av-edge-latency [--target LABEL=ADDR]... [--rate MEASUREMENTS_PER_SEC] [--batches N]";
+const USAGE: &str = "usage: av-edge-latency [--target LABEL=ADDR]... [--rate MEASUREMENTS_PER_SEC] [--batches N] [--in-flight N]";
 
 /// Parses this binary's own argument vector (including `argv[0]`, discarded exactly like
 /// `av-ingest-server`'s own `parse_args` discards it) into a [`HarnessConfig`]. Pure: no I/O,
@@ -167,6 +183,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<HarnessConfi
     let mut targets: Vec<PlacementTarget> = Vec::new();
     let mut batches: Option<usize> = None;
     let mut rate: Option<f64> = None;
+    let mut in_flight: Option<usize> = None;
 
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} requires a value"));
@@ -201,13 +218,21 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<HarnessConfi
                 }
                 batches = Some(parsed);
             }
+            "--in-flight" => {
+                let raw = value()?;
+                let parsed: usize = raw.parse().map_err(|e| format!("--in-flight {raw:?} is not a valid positive integer: {e}"))?;
+                if parsed == 0 {
+                    return Err("--in-flight 0 is not valid -- at least one batch must be outstanding per placement".to_string());
+                }
+                in_flight = Some(parsed);
+            }
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unrecognized argument: {other}\n{USAGE}")),
         }
     }
 
     let mode = if targets.is_empty() { Mode::InProcess } else { Mode::Targets(targets) };
-    Ok(HarnessConfig { mode, batches: batches.unwrap_or(BASELINE_BATCHES), rate_per_sec: rate })
+    Ok(HarnessConfig { mode, batches: batches.unwrap_or(BASELINE_BATCHES), rate_per_sec: rate, in_flight: in_flight.unwrap_or(1) })
 }
 
 // -------------------------------------------------------------------------------------------
@@ -505,14 +530,55 @@ pub enum HarnessError {
     Rejected { label: String, addr: String, sequence: u64, detail: String },
 }
 
-/// Connects to `target`, announces `manifest`, then sends every one of `batches` in order --
-/// **the identical per-batch loop the original `src/bin/av-edge-latency.rs` always ran**,
-/// with exactly one addition: if `interval_ns` is `Some`, a batch's send waits for its own
-/// fixed-schedule due time first (this module's own doc, "Pacing," explains precisely how and
-/// why this cannot drift into a burst). The two `Instant::now()` reads around
-/// `submit_batches` are in the identical relative position the original binary always had
-/// them in.
-pub async fn drive_placement(target: PlacementTarget, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>) -> Result<PlacementRun, HarnessError> {
+/// Sends the batch at `index` (emit immediately before `submit_batches`, accept immediately
+/// after its `Result` is confirmed `accepted` -- the identical two instants and their
+/// identical relative position around `submit_batches` that this whole crate's own module
+/// doc pins), waiting first for that batch's own fixed-schedule due time when `interval_ns`
+/// is `Some` (this module's own doc, "Pacing"). Shared by both the `in_flight <= 1`
+/// sequential path and the `in_flight > 1` concurrent path in [`drive_placement`] below, so
+/// the two paths can never disagree about what a single batch's own send does.
+async fn send_one_batch(client: &mut EdgeIngestClient, label: &str, addr: &str, clock_zero: Instant, index: usize, batch: pb::MeasurementBatch, interval_ns: Option<u64>) -> Result<LatencySample, HarnessError> {
+    if let Some(interval) = interval_ns {
+        let due = clock_zero + Duration::from_nanos(scheduled_due_at_ns(index, interval));
+        let now = Instant::now();
+        if due > now {
+            tokio::time::sleep(due - now).await;
+        }
+        // else: this placement has already fallen behind its own declared schedule for this
+        // batch -- send immediately (no sleep), exactly as `AsFastAsPossible` would. The
+        // *next* batch's own due time stays anchored to `(index+1) * interval_ns` from this
+        // placement's original `clock_zero`, never to "now" -- so falling behind once can
+        // never compound into sending two batches back to back to "catch up."
+    }
+
+    // --- The one clock this whole placement's loop reads: per-batch emit/accept. ------
+    let sequence = batch.sequence;
+    let emit_ns = (Instant::now() - clock_zero).as_nanos() as u64;
+    let verdicts = client.submit_batches(vec![batch]).await.map_err(|source| HarnessError::Submit { label: label.to_string(), addr: addr.to_string(), source })?;
+    let accept_ns = (Instant::now() - clock_zero).as_nanos() as u64;
+
+    if verdicts.len() != 1 {
+        return Err(HarnessError::VerdictCount { label: label.to_string(), addr: addr.to_string(), actual: verdicts.len() });
+    }
+    if !verdicts[0].accepted {
+        return Err(HarnessError::Rejected { label: label.to_string(), addr: addr.to_string(), sequence, detail: format!("{:?}", verdicts[0]) });
+    }
+    Ok(LatencySample { emit_ns, accept_ns })
+}
+
+/// Connects to `target`, announces `manifest`, then sends every one of `batches` -- with
+/// `in_flight` batches outstanding concurrently, sharing this placement's own schedule
+/// (`interval_ns`/[`scheduled_due_at_ns`], both unchanged by `in_flight`). `in_flight <= 1`
+/// (the default -- see [`HarnessConfig::in_flight`]'s own doc) keeps **the identical,
+/// unmodified sequential per-batch loop the original `src/bin/av-edge-latency.rs` always
+/// ran**, so this default path stays structurally identical to the pre-`--in-flight` code,
+/// not merely behaviourally equivalent to it. `in_flight > 1` instead drives `batches`
+/// through [`send_one_batch`] with up to `in_flight` outstanding at once
+/// (`futures_util::stream::StreamExt::buffer_unordered` -- a sliding window: as soon as one
+/// outstanding send completes, the next batch in order starts, rather than waiting for a
+/// whole batch of `in_flight` sends to drain before starting the next group), so the
+/// concurrent path is a genuine pipeline, not a series of barriers.
+pub async fn drive_placement(target: PlacementTarget, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>, in_flight: usize) -> Result<PlacementRun, HarnessError> {
     let PlacementTarget { label, addr } = target;
 
     let mut client = EdgeIngestClient::connect_plaintext(&addr).await.map_err(|source| HarnessError::Connect { label: label.clone(), addr: addr.clone(), source })?;
@@ -522,34 +588,39 @@ pub async fn drive_placement(target: PlacementTarget, batches: Arc<Vec<pb::Measu
     }
 
     let clock_zero = Instant::now();
-    let mut samples: Vec<LatencySample> = Vec::with_capacity(batches.len());
-    for (i, batch) in batches.iter().enumerate() {
-        if let Some(interval) = interval_ns {
-            let due = clock_zero + Duration::from_nanos(scheduled_due_at_ns(i, interval));
-            let now = Instant::now();
-            if due > now {
-                tokio::time::sleep(due - now).await;
-            }
-            // else: this placement has already fallen behind its own declared schedule for
-            // this batch -- send immediately (no sleep), exactly as `AsFastAsPossible` would.
-            // The *next* batch's own due time stays anchored to `(i+1) * interval_ns` from
-            // this placement's original `clock_zero`, never to "now" -- so falling behind
-            // once can never compound into sending two batches back to back to "catch up."
+    let samples: Vec<LatencySample> = if in_flight <= 1 {
+        // --- The identical, unmodified sequential loop this function always ran. ----------
+        let mut samples: Vec<LatencySample> = Vec::with_capacity(batches.len());
+        for (i, batch) in batches.iter().enumerate() {
+            let sample = send_one_batch(&mut client, &label, &addr, clock_zero, i, batch.clone(), interval_ns).await?;
+            samples.push(sample);
         }
-
-        // --- The one clock this whole placement's loop reads: per-batch emit/accept. ------
-        let emit_ns = (Instant::now() - clock_zero).as_nanos() as u64;
-        let verdicts = client.submit_batches(vec![batch.clone()]).await.map_err(|source| HarnessError::Submit { label: label.clone(), addr: addr.clone(), source })?;
-        let accept_ns = (Instant::now() - clock_zero).as_nanos() as u64;
-
-        if verdicts.len() != 1 {
-            return Err(HarnessError::VerdictCount { label: label.clone(), addr: addr.clone(), actual: verdicts.len() });
+        samples
+    } else {
+        // --- Up to `in_flight` batches outstanding concurrently, sharing this placement's
+        // --- own schedule. `EdgeIngestClient` is `Clone` (a cloned `tonic::transport::
+        // Channel` multiplexes independent RPCs over the same HTTP/2 connection -- no new
+        // connection per clone), so every outstanding send below shares the one connection
+        // `connect_plaintext` opened above, never opening a second one. Each batch is cloned
+        // out of `batches` up front (`.cloned()`) into an owned item the spawned future can
+        // move without borrowing across an `.await` point -- the identical single clone per
+        // batch the sequential path above makes, just made once at a different place.
+        let results: Vec<Result<LatencySample, HarnessError>> = stream::iter(batches.iter().cloned().enumerate())
+            .map(|(i, batch)| {
+                let mut client = client.clone();
+                let label = label.clone();
+                let addr = addr.clone();
+                async move { send_one_batch(&mut client, &label, &addr, clock_zero, i, batch, interval_ns).await }
+            })
+            .buffer_unordered(in_flight)
+            .collect()
+            .await;
+        let mut samples = Vec::with_capacity(results.len());
+        for r in results {
+            samples.push(r?);
         }
-        if !verdicts[0].accepted {
-            return Err(HarnessError::Rejected { label: label.clone(), addr: addr.clone(), sequence: batch.sequence, detail: format!("{:?}", verdicts[0]) });
-        }
-        samples.push(LatencySample { emit_ns, accept_ns });
-    }
+        samples
+    };
     let wall_ns = (Instant::now() - clock_zero).as_nanos() as u64;
     let accepted_count = samples.len();
     let measurement_count: usize = batches.iter().map(|b| b.measurements.len()).sum();
@@ -559,16 +630,16 @@ pub async fn drive_placement(target: PlacementTarget, batches: Arc<Vec<pb::Measu
 
 /// Drives every one of `targets` **concurrently** -- one `tokio::spawn`ed task per placement,
 /// not a sequential loop (this module's own doc: "three sequential runs would measure nothing
-/// about three placements"). Every task shares the identical `batches`/`manifest` (an `Arc`
-/// clone per task, never a re-derivation), and every task's own result -- success or
-/// [`HarnessError`] -- is returned in `targets`' own order, so a caller can zip it back
-/// against the `targets` it passed in.
-pub async fn drive_all(targets: Vec<PlacementTarget>, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>) -> Vec<Result<PlacementRun, HarnessError>> {
+/// about three placements"). Every task shares the identical `batches`/`manifest`/`in_flight`
+/// (an `Arc` clone per task for `batches`, never a re-derivation), and every task's own
+/// result -- success or [`HarnessError`] -- is returned in `targets`' own order, so a caller
+/// can zip it back against the `targets` it passed in.
+pub async fn drive_all(targets: Vec<PlacementTarget>, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>, in_flight: usize) -> Vec<Result<PlacementRun, HarnessError>> {
     let mut handles = Vec::with_capacity(targets.len());
     for target in targets {
         let batches = Arc::clone(&batches);
         let manifest = manifest.clone();
-        handles.push(tokio::spawn(async move { drive_placement(target, batches, manifest, interval_ns).await }));
+        handles.push(tokio::spawn(async move { drive_placement(target, batches, manifest, interval_ns, in_flight).await }));
     }
     let mut results = Vec::with_capacity(handles.len());
     for handle in handles {
@@ -627,6 +698,7 @@ mod tests {
         assert_eq!(cfg.mode, Mode::InProcess);
         assert_eq!(cfg.batches, 900);
         assert_eq!(cfg.rate_per_sec, None);
+        assert_eq!(cfg.in_flight, 1, "question 148: zero arguments must default to in_flight=1, reproducing today's behaviour exactly");
     }
 
     // --- --target: repeated, labelled, ordered. ----------------------------------------
@@ -728,6 +800,54 @@ mod tests {
     fn a_flag_missing_its_value_is_refused() {
         let err = parse_args(strs(&["av-edge-latency", "--rate"])).unwrap_err();
         assert!(err.contains("requires a value"), "{err}");
+    }
+
+    // --- --in-flight (question 148: the measurement-apparatus ceiling). -------------------
+
+    #[test]
+    fn in_flight_defaults_to_one_when_omitted() {
+        let cfg = parse_args(strs(&["av-edge-latency"])).unwrap();
+        assert_eq!(cfg.in_flight, 1);
+    }
+
+    #[test]
+    fn explicit_in_flight_one_parses_identically_to_the_default() {
+        let cfg = parse_args(strs(&["av-edge-latency", "--in-flight", "1"])).unwrap();
+        assert_eq!(cfg.in_flight, 1);
+        assert_eq!(cfg, BASELINE_CONFIG, "--in-flight 1 must parse to the identical HarnessConfig the default (omitted) path parses to");
+    }
+
+    #[test]
+    fn in_flight_greater_than_one_parses_and_overrides_the_default() {
+        let cfg = parse_args(strs(&["av-edge-latency", "--in-flight", "8"])).unwrap();
+        assert_eq!(cfg.in_flight, 8);
+    }
+
+    #[test]
+    fn zero_in_flight_is_refused() {
+        let err = parse_args(strs(&["av-edge-latency", "--in-flight", "0"])).unwrap_err();
+        assert!(err.contains("at least one batch must be outstanding"), "{err}");
+    }
+
+    #[test]
+    fn negative_in_flight_is_refused() {
+        let err = parse_args(strs(&["av-edge-latency", "--in-flight", "-3"])).unwrap_err();
+        assert!(err.contains("not a valid positive integer"), "{err}");
+    }
+
+    #[test]
+    fn non_numeric_in_flight_is_refused() {
+        let err = parse_args(strs(&["av-edge-latency", "--in-flight", "many"])).unwrap_err();
+        assert!(err.contains("not a valid positive integer"), "{err}");
+    }
+
+    #[test]
+    fn in_flight_combines_with_target_rate_and_batches() {
+        let cfg = parse_args(strs(&["av-edge-latency", "--target", "a=127.0.0.1:1", "--rate", "10", "--batches", "5", "--in-flight", "4"])).unwrap();
+        assert!(matches!(cfg.mode, Mode::Targets(_)));
+        assert_eq!(cfg.batches, 5);
+        assert_eq!(cfg.rate_per_sec, Some(10.0));
+        assert_eq!(cfg.in_flight, 4);
     }
 
     // --- The mutual exclusion between in-process mode and targets. ------------------------

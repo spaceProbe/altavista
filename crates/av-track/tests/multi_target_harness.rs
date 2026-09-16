@@ -57,7 +57,7 @@ async fn three_in_process_placements_all_accept_every_batch_driven_concurrently(
     let target_addrs: Vec<String> = targets.iter().map(|t| t.addr.clone()).collect();
 
     let batches = Arc::new(batches);
-    let results = harness::drive_all(targets, Arc::clone(&batches), manifest, None).await;
+    let results = harness::drive_all(targets, Arc::clone(&batches), manifest, None, 1).await;
 
     assert_eq!(results.len(), 3, "one result per placement, in the order the targets were given");
 
@@ -83,7 +83,7 @@ async fn two_in_process_placements_each_get_their_own_independent_accepted_count
 
     let targets = spawn_placements(&["edge-a", "edge-b"], &fixture.cfg, fixture.verify_key.clone()).await;
     let batches = Arc::new(batches);
-    let results = harness::drive_all(targets, batches, manifest, None).await;
+    let results = harness::drive_all(targets, batches, manifest, None, 1).await;
 
     assert_eq!(results.len(), 2);
     let runs: Vec<_> = results.into_iter().map(|r| r.unwrap()).collect();
@@ -109,7 +109,7 @@ async fn multi_target_path_with_pacing_enabled_still_accepts_every_batch() {
 
     let targets = spawn_placements(&["edge-a", "edge-b"], &fixture.cfg, fixture.verify_key.clone()).await;
     let batches = Arc::new(batches);
-    let results = harness::drive_all(targets, batches, manifest, Some(interval_ns)).await;
+    let results = harness::drive_all(targets, batches, manifest, Some(interval_ns), 1).await;
 
     for result in results {
         let run = result.unwrap();
@@ -125,9 +125,69 @@ async fn a_placement_with_no_server_listening_fails_loudly_as_a_typed_error() {
     // Port 1 is a reserved/privileged port essentially never bound in a test sandbox --
     // mirrors `av-ingest-client`'s own identical-purpose test.
     let target = PlacementTarget { label: "nothing-listening".to_string(), addr: "127.0.0.1:1".to_string() };
-    let results = harness::drive_all(vec![target], Arc::new(batches), manifest, None).await;
+    let results = harness::drive_all(vec![target], Arc::new(batches), manifest, None, 1).await;
 
     assert_eq!(results.len(), 1);
     let err = results.into_iter().next().unwrap().unwrap_err();
     assert!(matches!(err, HarnessError::Connect { .. }), "{err:?}");
+}
+
+/// Question 148's own required proof, extended onto this file's existing docker-free
+/// multi-target integration test: `--in-flight N` (N>1) must still accept every batch, at
+/// every placement, with the per-placement counts exactly right -- the same assertions
+/// `three_in_process_placements_all_accept_every_batch_driven_concurrently` above makes for
+/// `in_flight=1`, just with `in_flight=6` (more outstanding than any one placement has
+/// batches at times, since `BATCHES_PER_PLACEMENT` is small here on purpose -- this test
+/// needs the pipelined path exercised, not a large measurement).
+#[tokio::test]
+async fn in_flight_greater_than_one_still_accepts_every_batch_at_every_placement() {
+    const BATCHES_PER_PLACEMENT: usize = 20;
+    const IN_FLIGHT: usize = 6;
+    let (batches, fixture) = small_batches(BATCHES_PER_PLACEMENT);
+    let manifest = fixture.cfg.manifest().unwrap();
+
+    // Distinct labels from `three_in_process_placements_all_accept_every_batch_driven_
+    // concurrently` above -- `tmp_dir` keys its directory only by label + this test binary's
+    // own pid (shared by every test in this file), so two tests reusing the same three
+    // labels concurrently would race on the identical directory path.
+    let targets = spawn_placements(&["edge-a-if", "edge-b-if", "edge-c-if"], &fixture.cfg, fixture.verify_key.clone()).await;
+    let target_addrs: Vec<String> = targets.iter().map(|t| t.addr.clone()).collect();
+
+    let batches = Arc::new(batches);
+    let results = harness::drive_all(targets, Arc::clone(&batches), manifest, None, IN_FLIGHT).await;
+
+    assert_eq!(results.len(), 3, "one result per placement, in the order the targets were given");
+    let expected_labels = ["edge-a-if", "edge-b-if", "edge-c-if"];
+    for (i, result) in results.into_iter().enumerate() {
+        let run = result.unwrap_or_else(|e| panic!("placement {}: {e}", expected_labels[i]));
+        assert_eq!(run.label, expected_labels[i]);
+        assert_eq!(run.addr, target_addrs[i]);
+        assert_eq!(run.batch_count, BATCHES_PER_PLACEMENT, "placement {}: batch_count", run.label);
+        assert_eq!(run.accepted_count, BATCHES_PER_PLACEMENT, "placement {}: every batch must have been accepted with in_flight={IN_FLIGHT}", run.label);
+        assert_eq!(run.measurement_count, BATCHES_PER_PLACEMENT);
+        assert_eq!(run.samples.len(), BATCHES_PER_PLACEMENT, "placement {}: one latency sample per accepted batch, regardless of completion order under buffer_unordered", run.label);
+    }
+}
+
+/// `--in-flight N` (N>1) combined with `--rate` (pacing enabled): every batch must still be
+/// accepted, exercising both branches (`interval_ns = Some(..)` and the concurrent
+/// `buffer_unordered` path) at once -- `drive_placement`'s own doc states `interval_ns` and
+/// `in_flight` are independent knobs (the schedule is unchanged by how many batches are
+/// outstanding), and this test is the proof.
+#[tokio::test]
+async fn in_flight_greater_than_one_with_pacing_enabled_still_accepts_every_batch() {
+    const BATCHES_PER_PLACEMENT: usize = 12;
+    const IN_FLIGHT: usize = 4;
+    let (batches, fixture) = small_batches(BATCHES_PER_PLACEMENT);
+    let manifest = fixture.cfg.manifest().unwrap();
+    let interval_ns = harness::batch_interval_ns(1_000_000_000.0, fixture.measurements_per_batch);
+
+    let targets = spawn_placements(&["edge-a-if-rate", "edge-b-if-rate"], &fixture.cfg, fixture.verify_key.clone()).await;
+    let batches = Arc::new(batches);
+    let results = harness::drive_all(targets, batches, manifest, Some(interval_ns), IN_FLIGHT).await;
+
+    for result in results {
+        let run = result.unwrap();
+        assert_eq!(run.accepted_count, BATCHES_PER_PLACEMENT);
+    }
 }

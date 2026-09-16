@@ -40,6 +40,13 @@
 //!   multi-placement run stays directly comparable to it per placement). Refused if `N`
 //!   exceeds the fixture's own total batch count (900) -- this binary truncates the fixture's
 //!   real batch sequence, it never fabricates additional batches to reach a larger `N`.
+//! - `--in-flight N`: batches outstanding concurrently, per placement (default `1`, which
+//!   **must reproduce today's behaviour exactly** -- see `crate::harness::HarnessConfig::
+//!   in_flight`'s own doc). D5a's own loopback smoke run found the offered rate capped at
+//!   about `1 / round-trip` per placement with `--in-flight` omitted/`1` -- a property of
+//!   this measuring client sending one batch at a time and awaiting its response, not of the
+//!   platform under test (question 148). Raising `N` lets up to `N` batches be outstanding
+//!   at once per placement, sharing that placement's own `--rate` schedule unchanged.
 //!
 //! # The two instants this measures, restated concretely
 //!
@@ -117,14 +124,28 @@ async fn main() {
     let interval_ns = config.rate_per_sec.map(|rate| harness::batch_interval_ns(rate, measurements_per_batch));
 
     let host = host_state_json();
+    let declared = RunDeclared { interval_ns, declared_rate_per_sec: config.rate_per_sec, in_flight: config.in_flight };
 
     match config.mode {
-        Mode::InProcess => run_in_process(fixture, batches, manifest, interval_ns, config.rate_per_sec, host).await,
-        Mode::Targets(targets) => run_targets(targets, batches, manifest, interval_ns, config.rate_per_sec, measurements_per_batch, host).await,
+        Mode::InProcess => run_in_process(fixture, batches, manifest, declared, host).await,
+        Mode::Targets(targets) => run_targets(targets, batches, manifest, declared, measurements_per_batch, host).await,
     }
 }
 
-async fn run_in_process(fixture: Fixture, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>, declared_rate_per_sec: Option<f64>, host: serde_json::Value) {
+/// The three D5a/D5b-era knobs `main` derives once and every report-building path below
+/// needs together -- bundled into one struct purely to keep `run_in_process`/`run_targets`
+/// under clippy's `too_many_arguments` threshold as `--in-flight` (question 148) joined
+/// `--rate`/`batch_interval_ns` as a third such knob; not a type with any behaviour of its
+/// own.
+#[derive(Debug, Clone, Copy)]
+struct RunDeclared {
+    interval_ns: Option<u64>,
+    declared_rate_per_sec: Option<f64>,
+    in_flight: usize,
+}
+
+async fn run_in_process(fixture: Fixture, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, declared: RunDeclared, host: serde_json::Value) {
+    let RunDeclared { interval_ns, declared_rate_per_sec, in_flight } = declared;
     let batch_count = batches.len();
     let measurement_count: usize = batches.iter().map(|b| b.measurements.len()).sum();
 
@@ -134,7 +155,7 @@ async fn run_in_process(fixture: Fixture, batches: Arc<Vec<pb::MeasurementBatch>
     let addr = harness::spawn_in_process_server(&dir, &fixture.cfg.producer_id, fixture.verify_key.clone()).await;
 
     let target = PlacementTarget { label: "in-process".to_string(), addr: addr.to_string() };
-    let run = harness::drive_placement(target, Arc::clone(&batches), manifest, interval_ns).await.unwrap_or_else(|e| panic!("{e}"));
+    let run = harness::drive_placement(target, Arc::clone(&batches), manifest, interval_ns, in_flight).await.unwrap_or_else(|e| panic!("{e}"));
 
     // --- The consumer, over the same durable log the wire just wrote. -------------------
     let (mut consumer, recovery) = LogPartitionConsumer::open(&dir, &fixture.cfg.shard_key, StartOffset::Earliest).expect("opening and chain-verifying the partition this run just wrote");
@@ -182,6 +203,7 @@ async fn run_in_process(fixture: Fixture, batches: Arc<Vec<pb::MeasurementBatch>
         "measurements_per_batch": fixture.measurements_per_batch,
         "declared_rate_measurements_per_sec_per_placement": declared_rate_per_sec,
         "batch_interval_ns": interval_ns,
+        "in_flight": in_flight,
         "placements": placements_json(&runs, declared_rate_per_sec),
         "aggregate": aggregate_json(&runs, declared_rate_per_sec),
         "budget": budget_json(),
@@ -197,9 +219,10 @@ async fn run_in_process(fixture: Fixture, batches: Arc<Vec<pb::MeasurementBatch>
 /// remote process), so this report carries no `chain_head_hex`/`track_config_hash_hex`/
 /// `track_comparison` -- see this module's own doc and `crate::harness`'s for why those three
 /// fields are in-process-only, never a nonsense value standing in for "not applicable."
-async fn run_targets(targets: Vec<PlacementTarget>, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, interval_ns: Option<u64>, declared_rate_per_sec: Option<f64>, measurements_per_batch: usize, host: serde_json::Value) {
+async fn run_targets(targets: Vec<PlacementTarget>, batches: Arc<Vec<pb::MeasurementBatch>>, manifest: pb::PluginManifest, declared: RunDeclared, measurements_per_batch: usize, host: serde_json::Value) {
+    let RunDeclared { interval_ns, declared_rate_per_sec, in_flight } = declared;
     let declared_batches_per_placement = batches.len();
-    let results = harness::drive_all(targets, batches, manifest, interval_ns).await;
+    let results = harness::drive_all(targets, batches, manifest, interval_ns, in_flight).await;
 
     let mut runs: Vec<PlacementRun> = Vec::with_capacity(results.len());
     for result in results {
@@ -215,6 +238,7 @@ async fn run_targets(targets: Vec<PlacementTarget>, batches: Arc<Vec<pb::Measure
         "measurements_per_batch": measurements_per_batch,
         "declared_rate_measurements_per_sec_per_placement": declared_rate_per_sec,
         "batch_interval_ns": interval_ns,
+        "in_flight": in_flight,
         "placements": placements_json(&runs, declared_rate_per_sec),
         "aggregate": aggregate_json(&runs, declared_rate_per_sec),
         "budget": budget_json(),
