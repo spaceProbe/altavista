@@ -57,14 +57,20 @@ Flags:
   mismatch is a hard error, never a tarball saved under the wrong name. Takes the host-wide
   Docker test lock (`altavista.docker_test_lock.lock_docker_tests`) for the whole step.
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
-  the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
-  (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
-  content hash, a file count, a byte count) is recorded.
+  the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`, `web`,
+  `profiles` (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it
+  resolves, a content hash, a file count, a byte count) is recorded.
 - `--copy-pack <name>` (repeatable) -- **round 2**: copy that pack's real BYTES into
   `<kit>/packs/<name>/`, not merely its descriptor (implies `--with-pack` for that name). The
   pack's own internal symlinks are carried verbatim (never dereferenced) when safe -- see "Pack
   symlinks: carried verbatim when safe, refused at build time when not" below -- and an unsafe
-  one is a hard build-time refusal, never a silent copy.
+  one is a hard build-time refusal, never a silent copy. **`web` and `profiles` (task 3c) are
+  copied this same way in EVERY kit, unconditionally -- no flag needed, not gated behind this
+  one** (`manifest.ALWAYS_COPY_PACKS`): the viewer's own static assets and profile/policy store,
+  without which an installed viewer cannot start at all (neither ships in the `altavista` wheel --
+  see `tests/test_kit_zero_egress_install.py`'s own top doc). Measured cost: `web/` is 3.7 MB /
+  117 files / 2 pack-internal symlinks, `profiles/` is 52 KB / 7 files -- trivial next to keeping
+  the default (no-flag) kit build fast.
 - `--max-pack-bytes <n>` -- refuse (never silently skip) any `--with-pack`/`--copy-pack` pack
   whose total size exceeds this. Default 50,000,000 bytes -- comfortably above the small in-tree
   `data-time` pack, well below the ~738 MB `gmat` pack, so a big pack needs an explicit larger
@@ -307,8 +313,15 @@ the rest are unconditional, every kit, regardless of flags:
   INSTALL, not of the kit. Generating one here to fill the slot would be inventing a new CA
   nobody asked for and no install would actually trust, so this stays a declared gap rather than
   a fabricated file.
-- **`install-path`** -- installing anything from a kit at all; P5 track round 2 task 3b's own job
-  (a separate worker), not this one's.
+- **`install-path`** -- **narrowed by task 3c** (`manifest.py`'s own `_INSTALL_PATH_REASON`,
+  rewritten): P5 track round 2 task 3b (`scripts/kit/install.sh`/`install.py`) already closed most
+  of this -- a kit genuinely installs, with zero network reachable, and
+  `tests/test_kit_zero_egress_install.py` proves the installed tree's own binaries and viewer run
+  the pinned demo end to end. What remains out of scope of a kit (and of `install.sh`) is turning
+  that installed tree into a STANDING, supervised deployment: no systemd unit or
+  process-supervisor definition, no application of `suite.merged.toml`/`secsite.merged.toml` to a
+  real secdeploy site (carried, and installed, purely as data), no TLS/seccert bring-up (see
+  `seccert-root`, above). That remains a deploy/secdeploy-level concern.
 - **`secdeploy-deploy-assets`** -- the base secdeploy manifest's own `deploy/` directory (the
   symlink `merge()` writes and this builder discards -- see round 1's own D3-1 finding). Those
   assets are the user's own secdeploy checkout, not ours to bundle.

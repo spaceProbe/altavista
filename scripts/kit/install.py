@@ -65,6 +65,13 @@ it").
    `scripts/kit/build_kit.py::VIEWER_RUNTIME_ROOTS` declares, plus `altavista` itself, the
    package `python -m altavista` actually is) never got a wheel (present instead in the kit's own
    `gaps` list as `wheel:<name>`).
+6. **(task 3c)** the viewer's own static/config assets are absent from the kit: either of
+   `_REQUIRED_VIEWER_ASSET_PACKS` (`web`, `profiles`) is missing `KIT_MANIFEST["packs"][name]
+   ["copied"]` -- true for `scripts/kit/build_kit.py`'s own output (`manifest.ALWAYS_COPY_PACKS`
+   copies both, unconditionally, in every kit it writes), so hitting this refusal means the kit
+   at hand was not produced by this worktree's own builder, or was tampered with after the fact.
+   Refused for the identical reason as (5): an installed viewer with no `web/` static root or no
+   `profiles/` store to read from cannot serve a single request.
 
 Every refusal exits 2 and prints one clearly-labelled line to stderr naming exactly what was
 wrong -- never a bare non-zero exit with no explanation (this task's own "an exit code is not
@@ -113,6 +120,14 @@ _REQUIRED_TOP_LEVEL_KEYS = (
 #: directly rather than dragging in a dependency it would then need a wheel for just to check
 #: whether it has wheels.
 _REQUIRED_WHEEL_DIST_NAMES = ("altavista", "fastapi", "uvicorn", "websockets", "numpy", "protobuf")
+
+#: (task 3c) The viewer's own static/config packs, WITHOUT which an installed viewer has no
+#: static root and no profile store to read from. Unlike `_REQUIRED_WHEEL_DIST_NAMES` (kept
+#: hard-coded because importing `build_kit` would drag in `packaging`, a dependency this
+#: installer's own bare-Python proof platform lacks), `manifest.py` is already this installer's
+#: own dependency (`kit_manifest`, imported above) and is stdlib-only itself, so this reuses
+#: `manifest.ALWAYS_COPY_PACKS` directly rather than restating the same two names a second time.
+_REQUIRED_VIEWER_ASSET_PACKS = kit_manifest.ALWAYS_COPY_PACKS
 
 
 class InstallRefused(RuntimeError):
@@ -184,6 +199,27 @@ def _check_required_wheels(doc: dict) -> None:
             f"the viewer needs a wheel for {missing!r}, but KIT_MANIFEST's wheels.fetched does "
             f"not name it -- check KIT_MANIFEST's own gaps list for a matching 'wheel:<name>' "
             f"entry naming why. Refusing to install a viewer that cannot import."
+        )
+
+
+def _check_required_viewer_assets(doc: dict) -> None:
+    """(task 3c) refusal (6) from this module's own top doc: every pack in
+    `_REQUIRED_VIEWER_ASSET_PACKS` must show `KIT_MANIFEST["packs"][name]["copied"]` true, or an
+    installed viewer would have no static root (`web`) or no profile/policy store (`profiles`)
+    to read from -- the identical failure mode `_check_required_wheels` refuses for a missing
+    wheel, one level up the same dependency chain."""
+    missing = [
+        name for name in _REQUIRED_VIEWER_ASSET_PACKS
+        if not doc.get("packs", {}).get(name, {}).get("copied")
+    ]
+    if missing:
+        raise InstallRefused(
+            f"the viewer needs its own static/config assets, but KIT_MANIFEST's packs section "
+            f"does not show {missing!r} as copied -- this kit was not built with "
+            f"manifest.ALWAYS_COPY_PACKS honoured (every kit scripts/kit/build_kit.py itself "
+            f"writes copies these unconditionally; a kit missing one either predates task 3c or "
+            f"was tampered with). Refusing to install a viewer with no web/ static root or no "
+            f"profiles/ store to read from."
         )
 
 
@@ -295,11 +331,20 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
     kit_manifest_sha256 = kit_manifest.sbom.sha256_file(kit_dir / "KIT_MANIFEST")
     _check_required_sections(doc)
     _check_required_wheels(doc)
+    _check_required_viewer_assets(doc)
     _check_target_dir(target_dir)
 
     installed_kit_dir = _copy_kit_tree(kit_dir, target_dir)
     binaries_made_executable = _make_binaries_executable(installed_kit_dir)
     wheels_info = _install_wheels_into_venv(kit_dir, target_dir)
+
+    # (task 3c) named explicitly, not merely implied by `"packs"` below -- these are the two
+    # paths (relative to `target_dir`) a caller starting the viewer from this install actually
+    # needs (`create_app(web_dir=...)`, `altavista.profile.PROFILES_DIR = ...`); see
+    # `_check_required_viewer_assets` for why both are guaranteed present at this point.
+    viewer_assets = {
+        name: f"kit/packs/{name}" for name in _REQUIRED_VIEWER_ASSET_PACKS
+    }
 
     record = {
         "kit_manifest_sha256": kit_manifest_sha256,
@@ -315,6 +360,10 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
             "sboms": sorted(doc["sboms"].keys()),
             "runs": sorted(doc["runs"].keys()),
             "suite_site_files": ["suite.merged.toml", "secsite.merged.toml"],
+            "viewer_assets": {
+                "web_dir": viewer_assets["web"],
+                "profiles_dir": viewer_assets["profiles"],
+            },
         },
         "gaps": doc["gaps"],
     }

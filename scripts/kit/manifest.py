@@ -46,6 +46,15 @@ changed and why:
   conditional on what happened" shape `images` already established). `runs` is a fourth new
   top-level section, always present, naming each recorded run fixture's own DRM/provenance hash
   where cheaply readable.
+- **P5 track round 2 task 3c**: two new named packs, `web` and `profiles` (the viewer's own
+  static assets and profile/policy store -- neither ships in the `altavista` wheel, see this
+  task's own defect report), added to `ALWAYS_COPY_PACKS` (below) so every kit copies their real
+  bytes unconditionally, never gated behind `--copy-pack` -- an installed viewer cannot start
+  without them. `install.py` refuses a kit that somehow lacks either (mirrors its existing
+  wheels refusal). `install-path`'s own gap reason (below) is rewritten: task 3b already closed
+  most of it (a kit genuinely installs and runs its demo now), so it names only what still
+  remains out of scope (standing up a supervised, persistent deployment) rather than the
+  now-false claim that installing anything from a kit was entirely someone else's job.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -178,10 +187,19 @@ _SECCERT_ROOT_REASON = (
     "declared gap with this reason rather than a fabricated file."
 )
 _INSTALL_PATH_REASON = (
-    "this task builds and verifies KIT_MANIFEST and carries the payload a zero-egress install "
-    "needs; it never installs anything from a kit itself. The zero-egress install proof -- "
-    "unpacking a kit with the network disabled, running install.sh, and confirming the result is "
-    "usable -- is P5 track round 2 task 3b's own job (a separate worker), not this one's."
+    "P5 track round 2 task 3b (scripts/kit/install.sh/install.py) closed the first half of this "
+    "gap: a kit now installs for real -- verify-first, wheels resolved into a fresh venv with "
+    "--no-index, every pack/binary/run copied byte-for-byte -- with zero network reachable, and "
+    "tests/test_kit_zero_egress_install.py proves the installed tree's own binaries and viewer "
+    "start and run the pinned demo end to end from nothing but the kit. What remains out of "
+    "scope of a kit (and of install.sh) is turning that installed tree into a STANDING, "
+    "supervised deployment: install.sh writes no systemd unit or process-supervisor definition, "
+    "never applies suite.merged.toml/secsite.merged.toml to a real secdeploy site (that TOML is "
+    "carried, and installed, purely as data -- install.sh never executes it), and brings up no "
+    "TLS/seccert root (see seccert-root, above) or reverse-proxy/network wiring. This test's own "
+    "demo path starts each service by hand, once, inside a throwaway container, to prove it CAN "
+    "run from the installed tree -- wiring that into a persistent, restart-on-failure production "
+    "deployment is a deploy/secdeploy-level concern, not a kit's or this installer's job."
 )
 _SECDEPLOY_DEPLOY_ASSETS_REASON = (
     "deploy/secdeploy/merge.py::merge also writes a `deploy` symlink alongside "
@@ -250,11 +268,30 @@ PACKS: dict[str, str] = {
     "mirrors": "third_party/mirrors",
     "cspice": "third_party/cspice",
     "cfs": "third_party/cfs",
+    # P5 track round 2 task 3c: the VIEWER's own static/config assets. Neither is part of the
+    # `altavista` wheel (`pyproject.toml`'s `[tool.setuptools.packages.find]` only ever includes
+    # `altavista*` -- a `pyproject.toml`/packaging-level gap this task does not own, see
+    # tests/test_kit_zero_egress_install.py's own top doc), so a kit must carry them itself as
+    # copied packs or an installed viewer has no static root and no profile store to read from.
+    "web": "web",
+    "profiles": "profiles",
 }
 
-#: The one pack every kit includes regardless of `--with-pack` (Decision K: "keep the default
-#: test set to the small in-tree pack (data/time) so the default gate stays fast").
+#: The one pack every kit DESCRIBES regardless of `--with-pack` (Decision K: "keep the default
+#: test set to the small in-tree pack (data/time) so the default gate stays fast"). Distinct from
+#: `ALWAYS_COPY_PACKS`, below -- `data-time` is a descriptor-only default, not copied unless
+#: `--copy-pack data-time` is also passed.
 DEFAULT_PACK = "data-time"
+
+#: Packs whose real BYTES every kit copies unconditionally -- no flag, never gated -- because an
+#: installed viewer cannot start without them (see the `"web"`/`"profiles"` entries in `PACKS`,
+#: above). Measured cost (task 3c): `web/` is 3.7 MB across 117 regular files and 2 pack-internal
+#: symlinks, `profiles/` is 52 KB across 7 files -- both trivial next to the ~738 MB `gmat` pack
+#: that DOES stay opt-in, so making these two unconditional does not compromise "the default kit
+#: build stays fast" (Decision K). `build_kit.build` unions this into whatever `--copy-pack` the
+#: caller also requested, so they cannot be disabled by omission -- only a kit that never runs
+#: `build_kit.build` at all (nothing in this repository) could ever lack them.
+ALWAYS_COPY_PACKS: tuple[str, ...] = ("web", "profiles")
 
 #: Generous for any small in-tree pack (data/time is ~16 KB), far short of the 738 MB GMAT
 #: pack -- so requesting a big pack needs an explicit, larger `--max-pack-bytes` alongside

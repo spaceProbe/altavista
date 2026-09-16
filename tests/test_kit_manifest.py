@@ -60,9 +60,21 @@ def test_a_kit_builds_and_verifies(tmp_path):
 
     # Review finding D3-1(a): an earlier cut of this builder let deploy/secdeploy/merge.py plant
     # a `deploy` symlink (an absolute path into the user's own secdeploy checkout) inside the
-    # kit. A freshly built kit must contain NO symlinks at all.
-    symlinks = kmanifest._walk_kit_symlinks(kit_root)
-    assert symlinks == [], f"a freshly built kit must contain no symlinks, found: {symlinks}"
+    # kit. A freshly built kit must contain NO symlinks OUTSIDE a copied pack's own
+    # `packs/<name>/...` tree -- unchanged since round 1. Task 3c's `web`/`profiles` packs are now
+    # copied unconditionally (`manifest.ALWAYS_COPY_PACKS`), even with no `--copy-pack` flag at
+    # all, so a freshly built kit is no longer symlink-free outright: it carries exactly the two
+    # pack-internal symlinks `web/`'s own `node_modules/three/` re-export requires (measured,
+    # task 3c's own report), both declared in `pack_symlinks` and both classified safe by
+    # `verify_manifest` above. Anywhere else in the kit must still be symlink-free.
+    symlink_rel_paths = {p.relative_to(kit_root).as_posix() for p in kmanifest._walk_kit_symlinks(kit_root)}
+    non_pack = {p for p in symlink_rel_paths if Path(p).parts[0] != "packs"}
+    assert non_pack == set(), f"a freshly built kit must contain no symlinks outside a copied pack, found: {non_pack}"
+    assert symlink_rel_paths == {e["path"] for e in doc["pack_symlinks"]}, (
+        f"every symlink found on disk inside a pack must be declared in KIT_MANIFEST's own "
+        f"pack_symlinks list, and vice versa -- found {symlink_rel_paths}, declared "
+        f"{ {e['path'] for e in doc['pack_symlinks']} }"
+    )
 
 
 # =================================================================================================

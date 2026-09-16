@@ -19,13 +19,17 @@ why "source state" is the commit AND the working tree on top of it, never the co
 IN, always: the merged suite/site files, the ten committed SBOMs + `SHA256SUMS`, the two
 `IMAGE_DIGEST.md` records, the recorded kernel runs (`tests/fixtures/*.runproducts.bin`), the
 Decision-K pack descriptors (`data/time` by default), the git commit/dirty state, and
-`KIT_MANIFEST` itself.
+`KIT_MANIFEST` itself. **Task 3c adds**: real BYTES for the `web` and `profiles` packs (the
+viewer's own static assets and profile/policy store), copied UNCONDITIONALLY, no flag -- see
+`manifest.ALWAYS_COPY_PACKS`'s own doc for why (an installed viewer cannot start without them,
+and both together measure to ~3.75 MB, trivial next to keeping the default build fast).
 
 GATED, opt-in, off by default:
 - `--with-images` -- `docker save` of the two recorded images.
 - `--with-pack <name>` (repeatable) -- an additional pack's DESCRIPTOR (content hash only).
 - `--copy-pack <name>` (repeatable) -- round 2: that pack's real BYTES, copied into the kit
-  (implies the descriptor too; `--max-pack-bytes` still gates it).
+  (implies the descriptor too; `--max-pack-bytes` still gates it). `web`/`profiles` are copied
+  this same way but are never gated behind this flag -- see above.
 - `--with-vendor` -- round 2: `cargo vendor --offline` (falling back to the network exactly once
   if genuinely necessary, question 154's one exception) into `<kit>/vendor/`.
 - `--with-wheels` -- round 2: the viewer's real runtime dependency wheels, pinned to this
@@ -35,9 +39,10 @@ GATED, opt-in, off by default:
   `av-command`) the zero-egress install proof will start inside a container.
 
 OUT, as `manifest.build_gaps` names explicitly (some conditionally, per the flags above):
-the seccert trust root (always -- see `manifest.py`'s own `_SECCERT_ROOT_REASON`), the whole
-install path, and secdeploy's own `deploy/` assets -- P5 track round 2 task 3b's job, a separate
-worker, not this one's.
+the seccert trust root (always -- see `manifest.py`'s own `_SECCERT_ROOT_REASON`), standing the
+installed tree up as a supervised, persistent deployment (see `manifest.py`'s own
+`_INSTALL_PATH_REASON`, rewritten by task 3c now that task 3b's install.sh/install.py exist), and
+secdeploy's own `deploy/` assets.
 
 # Question 199 (no test mutates the process environment)
 
@@ -836,7 +841,12 @@ def build(
     assemble_image_digest_docs(repo_root, kit_root)
     runs = assemble_runs(repo_root, kit_root)
 
-    copy_set = set(copy_pack_names or [])
+    # Task 3c: `web`/`profiles` are copied in EVERY kit, unconditionally -- unioned in here
+    # rather than requiring the caller to pass `--copy-pack web --copy-pack profiles` (see
+    # `manifest.ALWAYS_COPY_PACKS`'s own doc for why: an installed viewer cannot start without
+    # them, and the combined cost is trivial). A caller's own explicit `--copy-pack` request is
+    # still honoured for every other pack exactly as before.
+    copy_set = set(copy_pack_names or []) | set(kit_manifest.ALWAYS_COPY_PACKS)
     pack_names = list(dict.fromkeys([kit_manifest.DEFAULT_PACK, *(with_pack_names or []), *copy_set]))
     unknown_packs = [n for n in pack_names if n not in kit_manifest.PACKS]
     if unknown_packs:
@@ -926,7 +936,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--copy-pack", action="append", default=[], dest="copy_pack",
         help="repeatable: copy that pack's real BYTES into the kit (round 2), not merely its "
-             "descriptor -- implies --with-pack for that name. --max-pack-bytes still gates it.",
+             f"descriptor -- implies --with-pack for that name. --max-pack-bytes still gates it. "
+             f"{sorted(kit_manifest.ALWAYS_COPY_PACKS)} are copied unconditionally regardless of "
+             f"this flag (task 3c) -- pass it for any other pack.",
     )
     p.add_argument(
         "--max-pack-bytes", type=int, default=kit_manifest.DEFAULT_MAX_PACK_BYTES,
