@@ -201,6 +201,7 @@ from altavista.container_hardening import (
     prune_stale_labelled_resources,
 )
 from altavista.docker_test_lock import lock_docker_tests
+from altavista.test_env import missing_spoore_reason, spoore_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EDGE_PLUGIN_DIR = REPO_ROOT / "services" / "edge-plugin"
@@ -293,6 +294,9 @@ def _compute_skip_reason() -> "str | None":
             f"image itself (question 154: no network at test time). Run `docker pull {PROBE_IMAGE}` "
             f"once, on a host with network access, then re-run this test."
         )
+    spoore_reason = missing_spoore_reason()
+    if spoore_reason is not None:
+        return spoore_reason
     return None
 
 
@@ -424,7 +428,14 @@ def _cross_build_ingest_server_binary(dest_dir: Path) -> Path:
         [
             "docker", "run", "--rm",
             "-v", f"{REPO_ROOT}:/workspace",
-            "-v", "/Users/probe/code/spoore:/Users/probe/code/spoore:ro",
+            # HOST source resolved by altavista.test_env.spoore_dir() (AV_SPOORE_DIR, else a
+            # `spoore` checkout beside this repository's own root -- question 217(d), never a
+            # `/Users/probe` literal). The CONTAINER destination stays the literal
+            # `/Users/probe/code/spoore` -- the root Cargo.toml's own `spoore-cdm = { path =
+            # "/Users/probe/code/spoore/crates/spoore-cdm" }` bakes that exact path into every
+            # crate that depends on it, and Cargo.toml is out of this task's scope to change
+            # (it would stale the Rust SBOMs); see altavista/test_env.py::spoore_dir's own doc.
+            "-v", f"{spoore_dir()}:/Users/probe/code/spoore:ro",
             "-w", "/workspace",
             PREBUILD_BASE_IMAGE,
             "bash", "-c",

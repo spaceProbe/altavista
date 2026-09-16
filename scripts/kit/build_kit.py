@@ -667,7 +667,20 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
 #: replacement had the locally-cached digest ever gone missing. That comparison is now explicit
 #: and fails closed instead.
 PREBUILD_BASE_IMAGE = "rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
-SPOORE_MOUNT = "/Users/probe/code/spoore"
+
+#: Question 217(d) (round 3 task 2C): the CONTAINER destination for the `spoore-cdm` bind mount
+#: stays the literal `/Users/probe/code/spoore` on every host -- the root `Cargo.toml`'s own
+#: `spoore-cdm = { path = "/Users/probe/code/spoore/crates/spoore-cdm" }` bakes that exact path
+#: into every crate that depends on it, and `Cargo.toml` is out of this task's scope to change
+#: (it would stale the Rust SBOMs). The HOST source of that mount need not be a `/Users/probe`
+#: literal, though, since this builder is meant to run on a build host that is not this
+#: developer's own machine: `AV_SPOORE_DIR` if set, else a `spoore` checkout beside this
+#: repository's own root -- the identical convention `altavista/test_env.py::spoore_dir` uses
+#: for the test suite (kept inline, not imported, so this module -- copied standalone into
+#: `<kit>/installer/` by `assemble_installer` below -- never gains a dependency on the full
+#: `altavista` package being importable on whatever host runs it).
+SPOORE_MOUNT_DEST = "/Users/probe/code/spoore"
+SPOORE_MOUNT_SRC = os.environ.get("AV_SPOORE_DIR") or str(REPO_ROOT.parent / "spoore")
 
 
 def _verify_prebuild_base_image_digest(image_ref: str) -> None:
@@ -735,7 +748,7 @@ def _cross_build_one_binary(repo_root: Path, pkg: str, bin_name: str, run_id: st
             "docker", "run", "--rm", "--name", container_name,
             "--label", "av.test=1", "--label", f"av.test.run_id={run_id}",
             "-v", f"{repo_root}:/workspace",
-            "-v", f"{SPOORE_MOUNT}:{SPOORE_MOUNT}:ro",
+            "-v", f"{SPOORE_MOUNT_SRC}:{SPOORE_MOUNT_DEST}:ro",
             "-w", "/workspace",
             PREBUILD_BASE_IMAGE,
             "bash", "-c",
