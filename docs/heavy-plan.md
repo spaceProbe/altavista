@@ -263,9 +263,12 @@ untouched and pinned; the pinned digest was reproduced independently at review w
 `docker ps -a --filter label=av.test` and `docker volume ls --filter label=av.test` were both
 empty before the gate run and empty after it. Full outputs are in the manager's scratchpad.
 
-**The +186 tests** (876 → 1062) are this round's: 51 in `av-store` plus 5 against real MinIO,
-131 in `av-catalog` plus 9 against real PostGIS, 37 added to `av-gateway` including 7 catalog
-selector tests, and the split `flock` proof.
+**The +186 tests** (876 → 1062) are this round's, measured per binary in the
+`cargo test -p av-store -p av-catalog` run above: `av-store` 52 library + 3 claim-check +
+**5 against real MinIO** = 60; `av-catalog` 83 library + 8 fake-server wire + **9 against real
+PostGIS** = 100; plus `av-gateway`'s new catalog-selector tests (**7**, two of them against
+real PostGIS through the real gRPC rpc) and its new `query_id` pins, and the split `flock`
+proof in `av-lockstep`.
 
 ### Decisions taken this round (numbered for the lead's log)
 
