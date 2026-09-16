@@ -39,22 +39,23 @@
 # the resulting stripped binary into the image as a build artifact, never compiled by the
 # Dockerfile itself. This Dockerfile follows that SAME precedent, automated (not hand-run) by
 # services/proposer/build-image.sh's own "prebuild" step, which runs (SPOORE_ROOT defaults to
-# the sibling checkout `../spoore`, question 219(b); mounted TWICE -- once at the sibling of
-# the workspace mount, for spoore-cdm's own relative resolution, and once at the fixed
-# absolute path av-proposer's still-absolute dependencies expect, regardless of where
-# SPOORE_ROOT itself lives on the host):
+# the sibling checkout `../spoore`, question 219(b); mounted ONCE -- question 219(c) round 4
+# fix, see build-image.sh's own CONTAINER_WORKSPACE comment for the measured account of why a
+# second mount -- tried first -- does not work: the repository is mounted at a container path
+# whose PARENT is literally `/Users/probe/code`, which makes spoore's own sibling mount
+# destination equal the fixed absolute path av-proposer's still-absolute dependencies expect,
+# by construction, regardless of where SPOORE_ROOT itself lives on the host):
 #
 #   docker run --rm \
-#     -v "$(pwd)":/workspace \
-#     -v "${SPOORE_ROOT}":/spoore:ro \
-#     -v "${SPOORE_ROOT}":/Users/probe/code/spoore:ro \
-#     -w /workspace \
+#     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
+#     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
+#     -w /Users/probe/code/AltaVista-edge \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
 #     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-proposer --bin av-proposer \
-#         --target-dir /workspace/target-docker-linux && \
-#       strip /workspace/target-docker-linux/release/av-proposer'
+#         --target-dir target-docker-linux && \
+#       strip target-docker-linux/release/av-proposer'
 #
 # ------------------------------------------------------------------------------------------
 # SUPERSEDED: this section used to claim a "KNOWN, UNRESOLVED host defect" (a GPG-signature

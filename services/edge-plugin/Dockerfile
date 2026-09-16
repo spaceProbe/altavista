@@ -54,15 +54,28 @@
 # hand-run) by services/edge-plugin/build-image.sh's own "prebuild" step, which runs:
 #
 #   docker run --rm \
-#     -v "$(pwd)":/workspace \
-#     -v "${SPOORE_ROOT}":/spoore:ro \
-#     -w /workspace \
+#     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
+#     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
+#     -w /Users/probe/code/AltaVista-edge \
 #     rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f \
 #     bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 #         protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null && \
 #       cargo build --release -p av-ingest-client --bin av-edge-plugin \
-#         --target-dir /workspace/target-docker-linux && \
-#       strip /workspace/target-docker-linux/release/av-edge-plugin'
+#         --target-dir target-docker-linux && \
+#       strip target-docker-linux/release/av-edge-plugin'
+#
+# (the repository is mounted at a container path whose PARENT is literally `/Users/probe/code`,
+# not `/workspace` -- question 219(c) defect fix, round 4, `services/edge-plugin/
+# build-image.sh`'s own `CONTAINER_WORKSPACE` comment has the full, measured account: a
+# workspace mounted at plain `/workspace` needs spoore's relative-sibling mount at `/spoore`,
+# which satisfies THIS crate's own `spoore-cdm` dependency but NOT `crates/av-proposer/
+# Cargo.toml`'s still-absolute `spoore-models`/`spoore-ml` dependencies -- cargo has to load
+# av-proposer's manifest too to resolve the workspace at all, whichever `-p` target is actually
+# being built, and a second mount or an in-container symlink at the fixed absolute path does
+# not work either, measured directly: cargo then sees `spoore-cdm` as two different packages
+# and refuses to write the lockfile. Mounting the repo itself under `/Users/probe/code` makes
+# spoore's own relative-sibling destination equal that fixed absolute path by construction, so
+# one mount satisfies both.)
 #
 # (`protobuf-compiler`+`libprotobuf-dev` satisfy `crates/av-cdm/build.rs::resolve_protoc`'s
 # own PATH fallback plus its well-known-types include-dir search, which under Debian needs

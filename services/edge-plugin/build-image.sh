@@ -72,12 +72,27 @@ EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 # never left as a possibly-relative string a later `cd`/mount could misinterpret.
 SPOORE_ROOT="${SPOORE_ROOT:-${REPO_ROOT}/../spoore}"
 # The container mount destination for spoore matters (see the Dockerfile's own header
-# comment): with spoore-cdm now a RELATIVE sibling path dependency, `../spoore` is resolved
-# INSIDE the container relative to wherever this repository is mounted -- CONTAINER_WORKSPACE
-# below, `/workspace` -- so spoore's own mount destination is computed as that mount point's
-# sibling, in this one place, rather than hardcoded twice (once here, once implicitly by the
-# Dockerfile comment).
-CONTAINER_WORKSPACE="/workspace"
+# comment). Question 219(c) defect fix (round 4, this script never having been run for real
+# before -- commit d322f66 added SPOORE_ROOT but no real build ever exercised this shape):
+# mounting this repository at a plain `/workspace` and spoore at that mount point's sibling
+# (`/spoore`) is NOT enough -- cargo has to load EVERY workspace member's manifest to resolve
+# the workspace at all, `crates/av-proposer` included regardless of which `-p` target is
+# actually being built here, and that crate's own `spoore-models`/`spoore-ml` dependencies are
+# still absolute host paths outside this repository (off-limits to this track, the heavy
+# track's remaining half of question 219(b)/(c)) -- measured directly: `error: failed to load
+# manifest for workspace member .../crates/av-proposer ... failed to read` that same absolute
+# path's own `crates/spoore-models/Cargo.toml`. The fix (proven first in
+# `scripts/kit/build_kit.py`'s own `CONTAINER_WORKSPACE`, commit 7c70ac8, question 219(c) --
+# see that constant's own comment, and services/proposer/build-image.sh's own
+# CONTAINER_WORKSPACE comment, for the exact literal and the full measured account of why a
+# second mount/symlink was tried first and found broken -- "package collision in the
+# lockfile"): mount THIS repository at a container path whose PARENT directory is literally
+# the same fixed directory av-proposer's own manifest expects spoore's parent to be, not
+# `/workspace`. Spoore's own mount destination, still computed as that mount point's sibling
+# in this one place (never hardcoded twice), then equals that exact literal by construction --
+# so the ONE mount below satisfies both this workspace's own relative `spoore-cdm` dependency
+# and av-proposer's still-absolute ones, with no second mount and no symlink.
+CONTAINER_WORKSPACE="/Users/probe/code/AltaVista-edge"
 SPOORE_CONTAINER_PATH="$(dirname "${CONTAINER_WORKSPACE}")/spoore"
 # Pinned prebuild base -- see the Dockerfile's own header comment for how this digest was
 # resolved. R5.3 (question 208(a)): this was
@@ -205,8 +220,8 @@ docker run --rm \
     bash -c 'set -euo pipefail
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev libssl-dev pkg-config >/dev/null
-        cargo build --release -p av-ingest-client --bin av-edge-plugin --target-dir /workspace/target-docker-linux
-        strip /workspace/target-docker-linux/release/av-edge-plugin' \
+        cargo build --release -p av-ingest-client --bin av-edge-plugin --target-dir target-docker-linux
+        strip target-docker-linux/release/av-edge-plugin' \
     1>&2
 
 [ -f "${SCRATCH_TARGET_DIR}/release/av-edge-plugin" ] || die "prebuild finished but ${SCRATCH_TARGET_DIR}/release/av-edge-plugin does not exist"

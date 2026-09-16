@@ -227,6 +227,13 @@ _CONTAINER_MOUNT_FILES: tuple[str, ...] = (
     "scripts/kit/build_kit.py",
     "tests/test_edge_plugin_container.py",
     "tests/test_proposer_container.py",
+    # Round 4 defect (manager review): commit d322f66 gave these two scripts a SPOORE_ROOT
+    # override but never ran a real build against either, and both used a mount shape this
+    # same round's own 7c70ac8 investigation had already measured broken (a second mount at
+    # the fixed absolute path, or a single mount at the relative sibling alone) -- see each
+    # script's own CONTAINER_WORKSPACE comment for the full, measured account of the fix.
+    "services/edge-plugin/build-image.sh",
+    "services/proposer/build-image.sh",
 )
 
 
