@@ -1,0 +1,281 @@
+{
+  "body_positions": [
+    {
+      "dt_s": 0.0,
+      "epoch_a1mjd": 31041.500428638676,
+      "epoch_tai_ns": 1767225636999999868,
+      "index": 0,
+      "jupiter_position_km": [
+        -227346101.3175693,
+        542637088.4246192,
+        238113100.5309235
+      ],
+      "mars_position_km": [
+        77025885.67858154,
+        -320974969.58708537,
+        -145250995.37819517
+      ]
+    },
+    {
+      "dt_s": 9600.0,
+      "epoch_a1mjd": 31041.611539749785,
+      "epoch_tai_ns": 1767235236999999612,
+      "index": 1,
+      "jupiter_position_km": [
+        -227180363.1243597,
+        542651691.3584261,
+        238122516.1135444
+      ],
+      "mars_position_km": [
+        77546467.97318152,
+        -320856161.7113432,
+        -145204035.3727193
+      ]
+    },
+    {
+      "dt_s": 19200.0,
+      "epoch_a1mjd": 31041.7226508609,
+      "epoch_tai_ns": 1767244836999999868,
+      "index": 2,
+      "jupiter_position_km": [
+        -227014720.9552382,
+        542666784.2093737,
+        238132143.6573643
+      ],
+      "mars_position_km": [
+        78066883.55893482,
+        -320736610.8136524,
+        -145156745.9476083
+      ]
+    },
+    {
+      "dt_s": 28800.0,
+      "epoch_a1mjd": 31041.833761972008,
+      "epoch_tai_ns": 1767254436999999868,
+      "index": 3,
+      "jupiter_position_km": [
+        -226849175.81312233,
+        542682366.7607763,
+        238141983.06784272
+      ],
+      "mars_position_km": [
+        78587131.12044382,
+        -320616317.1444117,
+        -145109127.2044079
+      ]
+    },
+    {
+      "dt_s": 38400.0,
+      "epoch_a1mjd": 31041.94487308312,
+      "epoch_tai_ns": 1767264036999999868,
+      "index": 4,
+      "jupiter_position_km": [
+        -226683728.69914123,
+        542698438.7965103,
+        238152034.25100404
+      ],
+      "mars_position_km": [
+        79107209.34410568,
+        -320495280.95381206,
+        -145061179.24426198
+      ]
+    },
+    {
+      "dt_s": 48000.0,
+      "epoch_a1mjd": 31042.05598419423,
+      "epoch_tai_ns": 1767273636999999868,
+      "index": 5,
+      "jupiter_position_km": [
+        -226518380.61281073,
+        542715000.1010638,
+        238162297.1134594
+      ],
+      "mars_position_km": [
+        79627116.91779827,
+        -320373502.4918288,
+        -145012902.1679052
+      ]
+    },
+    {
+      "dt_s": 57600.0,
+      "epoch_a1mjd": 31042.167095305344,
+      "epoch_tai_ns": 1767283236999999868,
+      "index": 6,
+      "jupiter_position_km": [
+        -226353132.55207145,
+        542732050.4595956,
+        238172771.56243515
+      ],
+      "mars_position_km": [
+        80146852.5310055,
+        -320250982.00811416,
+        -144964296.07561767
+      ]
+    },
+    {
+      "dt_s": 67200.0,
+      "epoch_a1mjd": 31042.278206416453,
+      "epoch_tai_ns": 1767292836999999868,
+      "index": 7,
+      "jupiter_position_km": [
+        -226187985.51347074,
+        542749589.6579752,
+        238183457.50578982
+      ],
+      "mars_position_km": [
+        80666414.87449655,
+        -320127719.7519993,
+        -144915361.067223
+      ]
+    },
+    {
+      "dt_s": 76800.0,
+      "epoch_a1mjd": 31042.389317527566,
+      "epoch_tai_ns": 1767302437000000124,
+      "index": 8,
+      "jupiter_position_km": [
+        -226022940.49222857,
+        542767617.482829,
+        238194354.852035
+      ],
+      "mars_position_km": [
+        81185802.64037651,
+        -320003715.9724133,
+        -144866097.24205476
+      ]
+    },
+    {
+      "dt_s": 86400.0,
+      "epoch_a1mjd": 31042.500428638676,
+      "epoch_tai_ns": 1767312036999999868,
+      "index": 9,
+      "jupiter_position_km": [
+        -225857998.482425,
+        542786133.72157,
+        238205463.51034644
+      ],
+      "mars_position_km": [
+        81705014.52176043,
+        -319878970.91789603,
+        -144816504.6989609
+      ]
+    }
+  ],
+  "body_positions_note": "GMAT's own reported position of Mars/Jupiter relative to Earth in EarthMJ2000Eq, km, at 10 epochs evenly spread across the arc (index 0 = t0, index 9 = t0+duration_s). gmat.GetObject/GetRuntimeObject + .GetMJ2000Position(A1Mjd) was tried FIRST and raised a GMAT APIException ('ArrayTemplate error : out-of-bounds') for every body tried (body-independent -- see this script's own module doc and the worker's report for the probe transcript), so this uses gmat.CoordinateConverter().Convert instead: the SAME primitive crates/gmat-sys's own Gmat::convert/convert_with_rotation calls (ADR-002's fourth amendment). A CoordinateSystem is built per body (Origin=<body>, Axes=a freshly constructed MJ2000Eq object bound via SetReference -- exactly gmat_sys::Gmat::coordinate_system's own construction), and the null state [0,0,0,0,0,0] in that body's own frame is converted into EarthMJ2000Eq -- by construction, this IS the body's position relative to Earth in EarthMJ2000Eq (both geometric, no light-time/aberration, same as GetMJ2000Position or a ReportFile Mars.EarthMJ2000Eq.X parameter would report). The ReportFile-from-a-plain-script fallback this task names was not additionally exercised because this route already succeeded.",
+  "central_body_readback": {
+    "equatorial_radius_km": 6378.1363,
+    "flattening": 0.0033527,
+    "mu_km3_per_s2": 398600.4415
+  },
+  "de_file_name": "leDE1941.405",
+  "de_file_sha256": "f8695149bc54be449788f4d6007d1f6a7053f5be16eae60229dc89c661f6fe4d",
+  "duration_s": 86400.0,
+  "ephemeris_source": {
+    "body_pos_vel_source": {
+      "Jupiter": "DE405",
+      "Mars": "DE405"
+    },
+    "solar_system_de_filename": "/Users/probe/code/AltaVista/GMAT R2026a/data/planetary_ephem/de/leDE1941.405",
+    "solar_system_ephemeris_source": "DE405"
+  },
+  "epoch_a1mjd": 31041.500428638676,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "final_state": [
+    -1869.079755154201,
+    3841.829569102688,
+    5380.316950407258,
+    -6.873084998905324,
+    -3.2776056104784104,
+    -0.045065200994623134
+  ],
+  "force_model": {
+    "central_body": "Earth",
+    "drag": null,
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [
+      "Mars",
+      "Jupiter"
+    ],
+    "relativity": false,
+    "srp": false,
+    "tides": false
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-17T04:49:23+00:00",
+  "gmat_version": "R2026a",
+  "gravity_file_name": "JGM2.cof",
+  "gravity_file_readback": {
+    "body_name": "Earth",
+    "degree": 8,
+    "mu_km3_per_s2": 398600.4415,
+    "order": 8,
+    "potential_file": "JGM2.cof"
+  },
+  "gravity_file_sha256": "bf182b1208e33be3716c8292a3947c1f87d4041ad6663a0c9ae621f65cafc20d",
+  "initial_state": [
+    5950.56620450214,
+    3435.5609999999997,
+    0.0,
+    -2.366666364194521,
+    4.099186387349221,
+    5.971979629264225
+  ],
+  "name": "leo_1day_jgm2_8x8_mars_jupiter",
+  "point_mass_readback": {
+    "Jupiter": {
+      "body_name": "Jupiter"
+    },
+    "Mars": {
+      "body_name": "Mars"
+    }
+  },
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "propagator_readback": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0,
+    "note": "read from prop.GetPropagator() after PrepareInternals(), not the front-end Propagator or the bare integrator object -- see gen_leo_1day_jgm2_8x8.py's module doc"
+  },
+  "reason": "N2's remaining golden: Mars and Jupiter as third bodies, exercising the DE reader's barycentric planetary records (IPT entries 3/4 + the EMRAT split) the Sun/Moon golden cannot on its own. Regenerated with the MEASURED tolerance: crates/av-orbital/tests/thirdbody_mars_jupiter.rs::leo_1day_jgm2_8x8_mars_jupiter_trajectory_residual measured 4.559312e-3 m / 5.052095e-6 m/s (debug build, cargo test -p av-orbital --test thirdbody_mars_jupiter -- --nocapture), so tolerance_m=6e-3 (6e-3/4.559312e-3 = 1.32x margin, matching leo_1day_jgm2_8x8's own identical-order 6e-3 m tolerance and its own measured 4.557868e-3 m residual on the third-body-free arc -- this arc's residual is integrator-family disagreement, not a force-model defect, exactly as N2's Sun/Moon golden's own residual was)",
+  "sha256": "f7ef4e7210e0b8dad1b8394739235f2cceb11d0be548809a85a55bf0d1b349f5",
+  "solver_iterations": null,
+  "spacecraft": {
+    "AOP": 0.0,
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.001,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6878.0,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "spacecraft_ballistics_readback": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0,
+    "TotalMass": 500.0
+  },
+  "tolerance_m": 0.006,
+  "tolerance_mps": 6e-06,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  }
+}
