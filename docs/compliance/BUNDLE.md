@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e
+b40eceef1042740041a1a561ded18b77a9101c220db98d56196a34b9f042e016
 ```
 
 Recorded from the verification clone at the commit that regenerated the SBOMs (the bundle's
@@ -90,6 +90,26 @@ byte-for-byte -- confirmed with a real regeneration and `git status`/`diff` show
 so both files, and the bundle hash above, are already consistent with this worktree's real,
 current `.venv`; no component set, control matrix, or evidence content changed, only the two
 Python SBOMs' `.venv`-derived package list.
+
+It moved once more, to the number above, from
+`06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e`, at heavy round 3:
+`3f86b52` (the terrain and 3D Tiles tilers) gave `crates/av-jobs` a `serde_json` dependency
+edge for `tileset.json`, which touches the workspace manifest and so moved all six Rust SBOM
+epochs -- question 220's rule, and the seven tests it predicts failed exactly as described
+(`test_the_epoch_is_never_wall_clock` for each of the six components, plus
+`test_all_six_rust_components_share_exactly_one_epoch_from_git`, reporting the tree's
+`2026-09-17T04:42:19Z` against the recorded `2026-09-16T19:54:20Z`). The SBOMs were
+regenerated with the generator's own output in `41f0815` and this number was measured from
+the tree at that commit, before this record was written -- the two-step order the paragraph
+above describes, since the bundle's epoch is the last commit touching its inputs and this
+commit touches none of them.
+
+Question 224's interim rule was met and, in passing, evidenced: this worktree's `.venv` had
+no `setuptools` at the round's start and was repaired once with `pip install -e ".[dev]"`
+before any measurement; the round 3 regeneration then reproduced the two Python SBOMs
+(`av-viewer`, `gmat-service`) **byte-identically** to the ones the lead committed from the
+verification clone, so the repaired worktree venv and the clone's venv now write the same
+document.
 
 ## What the hash depends on
 
