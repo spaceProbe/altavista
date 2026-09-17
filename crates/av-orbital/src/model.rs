@@ -130,10 +130,30 @@ pub enum OrbitalModelError<E: std::fmt::Debug + std::fmt::Display> {
     /// below GMAT's own 100 km floor, or a degenerate hour-angle geometry).
     #[error("Jacchia-Roberts density failed: {0}")]
     JacchiaRoberts(#[source] crate::jacchia_roberts::JacchiaRobertsError),
+    /// [`crate::msise90::density_kg_m3`] failed (a non-finite state, or an altitude below this
+    /// crate's own MSISE90 floor -- see that module's own doc comment, "Altitude floor").
+    #[error("MSISE90 density failed: {0}")]
+    Msise90(#[source] crate::msise90::MsiseError),
     /// [`crate::drag::drag_acceleration`] failed (a non-finite state, or a non-positive
     /// mass/area -- see [`crate::drag::DragError`]'s own variants).
     #[error("drag acceleration failed: {0}")]
     Drag(#[source] crate::drag::DragError),
+}
+
+/// Task 3c (`docs/native-dynamics-plan.md`): which atmosphere [`EarthGravityModel::with_drag`]
+/// evaluates density with -- "wire it into `with_drag` as an atmosphere choice beside
+/// Jacchia-Roberts" (this task's own brief). Both variants share the SAME
+/// [`crate::jacchia_roberts::WeatherInputs`] (`f107`/`f107a`/`kp`) -- [`crate::msise90`]'s own
+/// module doc explains why MSISE90 needs no second weather type of its own (`Kp` is converted to
+/// `Ap` internally, matching GMAT's own `AtmosphereModel::ConvertKpToAp`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtmosphereChoice {
+    /// [`crate::jacchia_roberts`] -- ported from GMAT's own `JacchiaRobertsAtmosphere`.
+    JacchiaRoberts,
+    /// [`crate::msise90`] -- ported from GMAT's own `Msise90Atmosphere` (the model GMAT R2026a
+    /// actually ships; see that module's own doc comment for why NRLMSISE-00, the plan's own
+    /// original wording, was not built instead).
+    Msise90,
 }
 
 /// Caller-supplied, static description fields for an [`EarthGravityModel`], independent of the
@@ -204,6 +224,7 @@ struct SrpBinding {
 /// Task 3b's drag configuration: the weather inputs [`crate::jacchia_roberts::density_kg_m3`]
 /// needs and this vehicle's ballistic drag properties (see [`EarthGravityModel::with_drag`]).
 struct DragBinding {
+    atmosphere: AtmosphereChoice,
     weather: crate::jacchia_roberts::WeatherInputs,
     props: crate::drag::DragProperties,
 }
@@ -383,29 +404,35 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
     /// position the diurnal exospheric-temperature bulge needs comes from the SAME bound
     /// `DeEphemeris` handle, so this model has exactly one DE ephemeris source of truth.
     ///
-    /// `weather` is [`crate::jacchia_roberts::WeatherInputs`] -- either GMAT's own CONSTANT
-    /// defaults (`WeatherInputs::from(`[`crate::weather::ConstantWeather::gmat_defaults`]`())`,
-    /// what GMAT's `DragForce` actually uses unless a DRM configures a weather file -- see
-    /// [`crate::weather`]'s own module doc) or a caller-resolved, file-derived triple.
+    /// `atmosphere` selects [`crate::jacchia_roberts`] or [`crate::msise90`] -- task 3c's own
+    /// addition, "an atmosphere choice beside Jacchia-Roberts" (see [`AtmosphereChoice`]'s own
+    /// doc comment). `weather` is [`crate::jacchia_roberts::WeatherInputs`] -- either GMAT's own
+    /// CONSTANT defaults (`WeatherInputs::from(`[`crate::weather::ConstantWeather::
+    /// gmat_defaults`]`())`, what GMAT's `DragForce` actually uses unless a DRM configures a
+    /// weather file -- see [`crate::weather`]'s own module doc) or a caller-resolved,
+    /// file-derived triple -- the SAME triple regardless of `atmosphere` (see
+    /// [`AtmosphereChoice`]'s own doc comment for why MSISE90 needs no second weather type).
     /// `area_m2`/`cd`/`mass_kg` are the DRM's `DragArea`/`Cd`/total mass (question 81: "a seed
     /// is a vehicle") -- `mass_kg` should be the vehicle's TOTAL mass, matching
     /// `DragForce::BuildPrefactors`'s own `mass[i] = sc->GetRealParameter(massID)` (`TotalMass`
     /// in every golden this crate's tests use).
     ///
     /// A builder consumed by value, mirroring [`EarthGravityModel::with_srp`]'s own shape
-    /// exactly: `settings_hash` is recomputed to additionally cover every weather input and
-    /// ballistic property, so two models differing only in their drag configuration report
-    /// different hashes; a model that never calls this method behaves bit-for-bit as before
-    /// (`derivatives`'s own `if let Some(drag)` block is a complete no-op when `self.drag` is
-    /// `None`) -- see `tests::derivatives_without_drag_matches_gravity_plus_third_body_directly`
-    /// for the test that pins this.
-    pub fn with_drag(mut self, weather: crate::jacchia_roberts::WeatherInputs, area_m2: f64, cd: f64, mass_kg: f64) -> Result<Self, OrbitalModelError<R::Error>> {
+    /// exactly: `settings_hash` is recomputed to additionally cover the atmosphere choice, every
+    /// weather input and ballistic property, so two models differing only in their drag
+    /// configuration report different hashes; a model that never calls this method behaves
+    /// bit-for-bit as before (`derivatives`'s own `if let Some(drag)` block is a complete no-op
+    /// when `self.drag` is `None`) -- see
+    /// `tests::derivatives_without_drag_matches_gravity_plus_third_body_directly` for the test
+    /// that pins this.
+    pub fn with_drag(mut self, atmosphere: AtmosphereChoice, weather: crate::jacchia_roberts::WeatherInputs, area_m2: f64, cd: f64, mass_kg: f64) -> Result<Self, OrbitalModelError<R::Error>> {
         if self.third_bodies.is_none() {
             return Err(OrbitalModelError::DragRequiresThirdBodies);
         }
 
         let mut settings = BTreeMap::new();
         settings.insert("base_settings_hash".to_string(), self.settings_hash.clone());
+        settings.insert("drag_atmosphere".to_string(), format!("{atmosphere:?}"));
         settings.insert("drag_weather_f107".to_string(), format!("{:.17e}", weather.f107));
         settings.insert("drag_weather_f107a".to_string(), format!("{:.17e}", weather.f107a));
         settings.insert("drag_weather_kp".to_string(), format!("{:.17e}", weather.kp));
@@ -414,7 +441,7 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("drag_mass_kg".to_string(), format!("{:.17e}", mass_kg));
         self.settings_hash = av_dynamics::settings_hash(&settings);
 
-        self.drag = Some(DragBinding { weather, props: crate::drag::DragProperties { cd, area_m2, mass_kg } });
+        self.drag = Some(DragBinding { atmosphere, weather, props: crate::drag::DragProperties { cd, area_m2, mass_kg } });
         Ok(self)
     }
 }
@@ -487,17 +514,25 @@ impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
             accel_inertial[2] += a[2];
         }
 
-        // Task 3b: Jacchia-Roberts drag -- see crate::jacchia_roberts's and crate::drag's own
-        // module docs. `with_drag` refuses construction unless `third_bodies` is already
-        // `Some`, the identical invariant `with_srp` enforces (see that block's own comment,
-        // above, for why the `.expect` here is safe).
+        // Task 3b/3c: drag, either atmosphere -- see crate::jacchia_roberts's, crate::msise90's
+        // and crate::drag's own module docs. `with_drag` refuses construction unless
+        // `third_bodies` is already `Some`, the identical invariant `with_srp` enforces (see
+        // that block's own comment, above, for why the `.expect` here is safe) -- kept uniform
+        // across BOTH atmospheres even though MSISE90 itself needs no Sun position (see
+        // `AtmosphereChoice`'s own doc comment): one invariant, not a per-atmosphere special
+        // case.
         if let Some(drag) = &self.drag {
             let tb = self.third_bodies.as_ref().expect("with_drag requires with_third_bodies (enforced at construction)");
-            let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
-            let sun_km = tb.ephemeris.geocentric_position_km2(DeBody::Sun, jd1, jd2).map_err(OrbitalModelError::De)?;
-            let r_sun_m = [sun_km[0] * 1e3, sun_km[1] * 1e3, sun_km[2] * 1e3];
             let cb = crate::jacchia_roberts::CentralBodyGeodetics::earth_defaults();
-            let rho = crate::jacchia_roberts::density_kg_m3(pos_inertial, r_sun_m, &self.rotation, t_tai_ns, &drag.weather, &cb).map_err(OrbitalModelError::JacchiaRoberts)?;
+            let rho = match drag.atmosphere {
+                AtmosphereChoice::JacchiaRoberts => {
+                    let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
+                    let sun_km = tb.ephemeris.geocentric_position_km2(DeBody::Sun, jd1, jd2).map_err(OrbitalModelError::De)?;
+                    let r_sun_m = [sun_km[0] * 1e3, sun_km[1] * 1e3, sun_km[2] * 1e3];
+                    crate::jacchia_roberts::density_kg_m3(pos_inertial, r_sun_m, &self.rotation, t_tai_ns, &drag.weather, &cb).map_err(OrbitalModelError::JacchiaRoberts)?
+                }
+                AtmosphereChoice::Msise90 => crate::msise90::density_kg_m3(pos_inertial, &self.rotation, t_tai_ns, &drag.weather, &cb).map_err(OrbitalModelError::Msise90)?,
+            };
             let a = crate::drag::drag_acceleration(pos_inertial, vel_inertial, rho, crate::drag::EARTH_ANGULAR_VELOCITY_RAD_S, &drag.props).map_err(OrbitalModelError::Drag)?;
             accel_inertial[0] += a[0];
             accel_inertial[1] += a[1];
@@ -754,7 +789,7 @@ mod tests {
     #[test]
     fn with_drag_without_third_bodies_is_a_typed_error_not_a_panic() {
         let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
-        match point_mass_model().with_drag(weather, 5.0, 2.2, 500.0) {
+        match point_mass_model().with_drag(AtmosphereChoice::JacchiaRoberts, weather, 5.0, 2.2, 500.0) {
             Err(err) => assert!(matches!(err, OrbitalModelError::DragRequiresThirdBodies)),
             Ok(_) => panic!("expected with_drag to refuse a model with no third_bodies bound"),
         }
@@ -765,7 +800,7 @@ mod tests {
         let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
         let without_drag = point_mass_model_with_third_bodies();
         let hash_without = without_drag.describe().settings_hash;
-        let with_drag = point_mass_model_with_third_bodies().with_drag(weather, 5.0, 2.2, 500.0).expect("with_drag");
+        let with_drag = point_mass_model_with_third_bodies().with_drag(AtmosphereChoice::JacchiaRoberts, weather, 5.0, 2.2, 500.0).expect("with_drag");
         assert_ne!(hash_without, with_drag.describe().settings_hash);
     }
 
@@ -808,7 +843,7 @@ mod tests {
     fn derivatives_with_drag_differs_from_gravity_plus_third_body_alone() {
         let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
         let without_drag = point_mass_model_with_third_bodies();
-        let with_drag = point_mass_model_with_third_bodies().with_drag(weather, 5.0, 2.2, 500.0).expect("with_drag");
+        let with_drag = point_mass_model_with_third_bodies().with_drag(AtmosphereChoice::JacchiaRoberts, weather, 5.0, 2.2, 500.0).expect("with_drag");
         let pos = [7_000_000.0, 500_000.0, -200_000.0];
         let vel = [-1_200.0, 7_400.0, 300.0];
         let state = [pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]];

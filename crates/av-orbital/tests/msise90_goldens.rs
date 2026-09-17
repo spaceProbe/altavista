@@ -1,38 +1,30 @@
 #![cfg(feature = "gmat-frames")]
-//! Task 3b acceptance (`docs/native-dynamics-plan.md`, "N3's drag -- the space-weather reader,
-//! the drag force, and the Jacchia-Roberts atmosphere"):
-//! [`av_orbital::model::EarthGravityModel::with_drag`] against GMAT.
+//! Task 3c acceptance, deliverable 2 (`docs/native-dynamics-plan.md`, "the second atmosphere"):
+//! [`av_orbital::model::EarthGravityModel::with_drag`] with [`av_orbital::msise90`] against
+//! GMAT's own `Msise90Atmosphere` -- mirrors `tests/drag_goldens.rs`'s own three-test pattern
+//! exactly (density comparison via point-mass-gravity subtraction, four-epoch acceleration
+//! agreement, full-arc trajectory residual), same structure, atmosphere swapped.
 //!
-//! **Density comparison, `density_vs_gmat_at_tabulated_altitudes`.** GMAT's own
-//! `JacchiaRobertsAtmosphere` is the most direct reference available on this host (this
-//! task's own instruction) -- driven here via `DragForce::GetDerivatives` with gravity
-//! reduced to pure point-mass (`GravityField` degree/order 0/0, so the two-body acceleration
-//! can be subtracted ANALYTICALLY, isolating drag's own acceleration, from which density is
-//! solved algebraically given the known `Cd`/`A`/`m`/`v_rel`) -- GMAT exposes no direct
-//! `AtmosphereModel::Density` binding through the Python API or `gmat-sys`'s own shim, so this
-//! is the documented fallback this task's own brief names ("if it cannot be driven directly,
-//! GMAT's drag acceleration with everything else zeroed").
+//! **Density comparison, `density_vs_gmat_at_tabulated_altitudes`.** GMAT's own `Msise90Atmosphere`
+//! exposes no direct `Density` binding through `gmat-sys`'s own shim (identical situation to
+//! Jacchia-Roberts -- see `tests/drag_goldens.rs`'s own module doc), so this drives it via
+//! `DragForce::GetDerivatives` with gravity reduced to pure point-mass, subtracting the KNOWN
+//! two-body acceleration analytically to solve for the density GMAT's own `DragForce` used.
 //!
-//! **Acceleration agreement, `acceleration_agreement_against_get_derivatives`.** JGM2 8x8 +
-//! `DragForce`/`JacchiaRoberts` (the golden's own force model) at four epochs, native vs
-//! GMAT's own `GetDerivatives`, isolating the integrator exactly as `tests/srp_goldens.rs`/
-//! `tests/gravity_goldens.rs` do.
-//!
-//! **Trajectory residual, `trajectory_residual_against_golden`.** The full one-day arc,
-//! native `Dopri5` vs GMAT's own `PrinceDormand78`, at the tolerance
-//! `goldens/leo_400km_jacchia_roberts.json` itself records.
+//! **This module's own altitude floor (`za`, ~122.8 km -- `crate::msise90`'s own doc comment)
+//! is comfortably below every altitude this file tests (150-1200 km).**
 use std::path::PathBuf;
 use std::time::Instant;
 
 use av_cdm::time::Tai;
 use av_dynamics::DynamicsModel;
 use av_orbital::cof;
-use av_orbital::de::{DeBody, DeEphemeris};
-use av_orbital::frame::{BodyFixedRotation, Rotation};
+use av_orbital::de::DeEphemeris;
 use av_orbital::frame_gmat::GmatBodyFixedRotation;
-use av_orbital::jacchia_roberts::{density_kg_m3, CentralBodyGeodetics, WeatherInputs};
+use av_orbital::jacchia_roberts::{CentralBodyGeodetics, WeatherInputs};
+use av_orbital::msise90::density_kg_m3;
 use av_orbital::weather::{ConstantWeather, SpaceWeatherFile};
-use av_orbital::{EarthGravityModel, EarthGravityModelInfo};
+use av_orbital::{AtmosphereChoice, EarthGravityModel, EarthGravityModelInfo};
 use gmat_sys::Gmat;
 use serde::Deserialize;
 
@@ -65,7 +57,7 @@ struct GravityCfg {
 }
 
 fn golden_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../goldens/leo_400km_jacchia_roberts.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../goldens/leo_400km_msise90.json")
 }
 
 fn load_golden() -> Golden {
@@ -84,26 +76,18 @@ fn km_state_to_m(state_km: &[f64]) -> [f64; 6] {
     [state_km[0] * 1e3, state_km[1] * 1e3, state_km[2] * 1e3, state_km[3] * 1e3, state_km[4] * 1e3, state_km[5] * 1e3]
 }
 
-/// This test file's own no-op body-fixed rotation (mirrors `model.rs`'s own test mock) -- used
-/// only where a genuine `GmatBodyFixedRotation` handle is not needed (the density-vs-GMAT
-/// comparison below evaluates purely EQUATORIAL positions, where the geodetic latitude is
-/// exactly zero under ANY rotation about the z-axis, so an identity rotation gives the SAME
-/// geodetic height/latitude a true body-fixed rotation would -- see that test's own comment).
-struct IdentityRotation;
-impl BodyFixedRotation for IdentityRotation {
-    type Error = std::convert::Infallible;
-    fn inertial_to_fixed(&self, _t_tai_ns: i64) -> Result<Rotation, Self::Error> {
-        Ok(Rotation { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], r_dot: [[0.0; 3]; 3] })
-    }
-}
+// Unlike `tests/drag_goldens.rs` (Jacchia-Roberts), this file does NOT use an `IdentityRotation`
+// mock anywhere -- see `density_vs_gmat_at_tabulated_altitudes`'s own doc comment for exactly
+// why an identity rotation is wrong for MSISE90 (it depends on body-fixed LONGITUDE, which JR
+// does not).
 
 // ---------------------------------------------------------------------------------------------
-// Density comparison: GMAT's DragForce, gravity reduced to pure point-mass so the drag
+// Density comparison: GMAT's DragForce/MSISE90, gravity reduced to pure point-mass so the drag
 // acceleration (and hence the density GMAT used) can be recovered by subtraction.
 // ---------------------------------------------------------------------------------------------
 
-fn build_gmat_drag_only_model(gmat: &Gmat, epoch_utc: &str, r_km_mag: f64, v_km_s: f64, namespace: &str) -> (gmat_sys::DerivativeModel, f64, f64) {
-    let sat = gmat.construct("Spacecraft", &format!("N3DSat{namespace}")).unwrap();
+fn build_gmat_msise90_only_model(gmat: &Gmat, epoch_utc: &str, r_km_mag: f64, v_km_s: f64, namespace: &str) -> (gmat_sys::DerivativeModel, f64, f64) {
+    let sat = gmat.construct("Spacecraft", &format!("N3MSat{namespace}")).unwrap();
     sat.set_str("DateFormat", "UTCGregorian").unwrap();
     sat.set_str("Epoch", epoch_utc).unwrap();
     sat.set_str("CoordinateSystem", "EarthMJ2000Eq").unwrap();
@@ -120,9 +104,9 @@ fn build_gmat_drag_only_model(gmat: &Gmat, epoch_utc: &str, r_km_mag: f64, v_km_
     sat.set_real("SRPArea", 5.0).unwrap();
     sat.set_real("Cr", 1.8).unwrap();
 
-    let fm = gmat.construct("ForceModel", &format!("N3DFM{namespace}")).unwrap();
+    let fm = gmat.construct("ForceModel", &format!("N3MFM{namespace}")).unwrap();
     fm.set_str("CentralBody", "Earth").unwrap();
-    let grav = gmat.construct("GravityField", &format!("N3DGrav{namespace}")).unwrap();
+    let grav = gmat.construct("GravityField", &format!("N3MGrav{namespace}")).unwrap();
     grav.set_str("BodyName", "Earth").unwrap();
     grav.set_str("PotentialFile", "JGM2.cof").unwrap();
     grav.set_int("Degree", 0).unwrap();
@@ -130,14 +114,14 @@ fn build_gmat_drag_only_model(gmat: &Gmat, epoch_utc: &str, r_km_mag: f64, v_km_
     fm.add_force(&grav).unwrap();
     let mu_km3_s2 = grav.real_parameter("Mu").unwrap();
 
-    let df = gmat.construct("DragForce", &format!("N3DDrag{namespace}")).unwrap();
-    df.set_str("AtmosphereModel", "JacchiaRoberts").unwrap();
+    let df = gmat.construct("DragForce", &format!("N3MDrag{namespace}")).unwrap();
+    df.set_str("AtmosphereModel", "MSISE90").unwrap();
     df.set_str("HistoricWeatherSource", "ConstantFluxAndGeoMag").unwrap();
     df.set_str("PredictedWeatherSource", "ConstantFluxAndGeoMag").unwrap();
     df.set_real("F107", 150.0).unwrap();
     df.set_real("F107A", 150.0).unwrap();
     df.set_real("MagneticIndex", 3.0).unwrap();
-    let atmos = gmat.construct("JacchiaRoberts", &format!("N3DAtmos{namespace}")).unwrap();
+    let atmos = gmat.construct("MSISE90", &format!("N3MAtmos{namespace}")).unwrap();
     df.set_reference(&atmos).unwrap();
     fm.add_force(&df).unwrap();
 
@@ -146,10 +130,8 @@ fn build_gmat_drag_only_model(gmat: &Gmat, epoch_utc: &str, r_km_mag: f64, v_km_
     (model, mu_km3_s2, 0.0)
 }
 
-/// Solves for the density GMAT's own `DragForce` used at this call, given the KNOWN two-body
-/// (pure point-mass) acceleration to subtract and the KNOWN ballistic/rotation inputs --
-/// `rho = |a_drag| / (0.5 * Cd * A/m * |v_rel|^2)`, the inverse of this crate's own
-/// `crate::drag::drag_acceleration` formula.
+/// Solves for the density GMAT's own `DragForce`/MSISE90 used at this call -- identical inverse
+/// formula to `tests/drag_goldens.rs`'s own `gmat_implied_density`.
 fn gmat_implied_density(model: &gmat_sys::DerivativeModel, state_km: &[f64], dt_s: f64, mu_km3_s2: f64, cd: f64, area_m2: f64, mass_kg: f64) -> f64 {
     let dot = model.derivatives(state_km, dt_s).expect("GMAT derivatives");
     let r_km = [state_km[0], state_km[1], state_km[2]];
@@ -172,9 +154,7 @@ fn density_vs_gmat_at_tabulated_altitudes() {
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
     let epoch_utc = "01 Jan 2026 00:00:00.000";
     let t0_a1mjd = {
-        // A throwaway mirror spacecraft's own epoch readback -- the same pattern this crate's
-        // other tests use to get GMAT's own A1MJD for a UTCGregorian string.
-        let sat = gmat.construct("Spacecraft", "N3DEpochMirror").unwrap();
+        let sat = gmat.construct("Spacecraft", "N3MEpochMirror").unwrap();
         sat.set_str("DateFormat", "UTCGregorian").unwrap();
         sat.set_str("Epoch", epoch_utc).unwrap();
         sat.set_str("CoordinateSystem", "EarthMJ2000Eq").unwrap();
@@ -186,11 +166,9 @@ fn density_vs_gmat_at_tabulated_altitudes() {
         sat.set_real("VY", 7.0).unwrap();
         sat.set_real("VZ", 0.0).unwrap();
         gmat.initialize().unwrap();
-        // Real epoch readback: build a full derivative model so GMAT actually computes and
-        // exposes the A1MJD it resolved "01 Jan 2026 00:00:00.000" UTC to.
-        let fm = gmat.construct("ForceModel", "N3DEpochFM").unwrap();
+        let fm = gmat.construct("ForceModel", "N3MEpochFM").unwrap();
         fm.set_str("CentralBody", "Earth").unwrap();
-        let grav = gmat.construct("GravityField", "N3DEpochGrav").unwrap();
+        let grav = gmat.construct("GravityField", "N3MEpochGrav").unwrap();
         grav.set_str("BodyName", "Earth").unwrap();
         grav.set_str("PotentialFile", "JGM2.cof").unwrap();
         grav.set_int("Degree", 0).unwrap();
@@ -201,49 +179,59 @@ fn density_vs_gmat_at_tabulated_altitudes() {
     };
     let t_tai_ns = Tai::from_a1_mjd(t0_a1mjd).as_nanos();
 
-    let de = DeEphemeris::open(&DeEphemeris::locate_gmat_root().expect("GMAT_ROOT set").join("data/planetary_ephem/de/leDE1941.405")).expect("open DE405");
-    let (jd1, jd2) = av_orbital::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
-    let sun_km_de = de.geocentric_position_km2(DeBody::Sun, jd1, jd2).expect("Sun position");
-    let sun_m = [sun_km_de[0] * 1e3, sun_km_de[1] * 1e3, sun_km_de[2] * 1e3];
-
     let cb = CentralBodyGeodetics::earth_defaults();
     let weather = WeatherInputs::from(ConstantWeather::gmat_defaults());
-    let mu = 398_600.441_5_f64; // Earth mu, km^3/s^2 (read back per-call below too)
+    let mu = 398_600.441_5_f64;
+    // A REAL body-fixed rotation, NOT `IdentityRotation` -- unlike Jacchia-Roberts (whose own
+    // `density_vs_gmat_at_tabulated_altitudes`, `tests/drag_goldens.rs`, correctly uses
+    // `IdentityRotation`: JR's hour-angle geometry runs on the UN-rotated inertial Sun/
+    // spacecraft vectors, so any z-axis rotation leaves it unchanged), MSISE90's density
+    // genuinely depends on body-fixed LONGITUDE (`crate::msise90`'s own local-solar-time term,
+    // `stl = sod/3600 + long/15`) -- an EARLIER version of this test used `IdentityRotation`
+    // here by copying `drag_goldens.rs`'s own pattern uncritically, and measured 4.5%-73%
+    // relative disagreement growing with altitude; switching to the true rotation (Earth's own
+    // Greenwich hour angle at this epoch, which `IdentityRotation` implicitly pretends is zero)
+    // collapses that to the value actually recorded below -- see this task's own report for the
+    // full before/after comparison, which is itself the evidence this was a TEST bug, not a
+    // density-formula bug (the golden's own full-arc trajectory residual, computed through the
+    // SAME `crate::msise90::density_kg_m3` call path but via the real
+    // `GmatBodyFixedRotation` `with_drag` uses, was never affected: 3.7 m over 86,400 s).
+    let gmat_for_rotation = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup (idempotent)");
+    let rotation = GmatBodyFixedRotation::new(gmat_for_rotation, "Earth", "N3MDensity").expect("GmatBodyFixedRotation::new");
 
     let mut max_abs_rel = 0.0_f64;
     let mut max_log10_rel = 0.0_f64;
     for (i, alt_km) in [150.0, 200.0, 300.0, 400.0, 500.0, 700.0, 900.0, 1200.0].into_iter().enumerate() {
         let r_km_mag = cb.equatorial_radius_km + alt_km;
         let v_km_s = (mu / r_km_mag).sqrt();
-        let (model, mu_readback, _) = build_gmat_drag_only_model(&gmat, epoch_utc, r_km_mag, v_km_s, &format!("A{i}"));
+        let (model, mu_readback, _) = build_gmat_msise90_only_model(&gmat, epoch_utc, r_km_mag, v_km_s, &format!("A{i}"));
         let state_km = [r_km_mag, 0.0, 0.0, 0.0, v_km_s, 0.0];
         let rho_gmat = gmat_implied_density(&model, &state_km, 0.0, mu_readback, 2.2, 5.0, 500.0);
 
         let r_m = [r_km_mag * 1e3, 0.0, 0.0];
-        let rho_native = density_kg_m3(r_m, sun_m, &IdentityRotation, t_tai_ns, &weather, &cb).expect("native density");
+        let rho_native = density_kg_m3(r_m, &rotation, t_tai_ns, &weather, &cb).expect("native density");
 
         let rel = (rho_native - rho_gmat).abs() / rho_gmat;
-        eprintln!("[n3-density] alt={alt_km:.0}km rho_gmat={rho_gmat:e} rho_native={rho_native:e} relative_diff={rel:e}");
+        eprintln!("[n3c-msise90-density] alt={alt_km:.0}km rho_gmat={rho_gmat:e} rho_native={rho_native:e} relative_diff={rel:e}");
         max_abs_rel = max_abs_rel.max(rel);
         max_log10_rel = max_log10_rel.max((rho_native.log10() - rho_gmat.log10()).abs());
     }
-    eprintln!("[n3-density] max relative disagreement over 8 altitudes (150-1200 km): {max_abs_rel:e}; max |log10| disagreement: {max_log10_rel:e}");
+    eprintln!("[n3c-msise90-density] max relative disagreement over 8 altitudes (150-1200 km): {max_abs_rel:e}; max |log10| disagreement: {max_log10_rel:e}");
 
-    // Tolerance set just above the measured value (this task's own rule): measured max
-    // relative disagreement 1.407224e-3 (0.14%) at 1200 km, the largest of the 8 altitudes
-    // tested, growing smoothly with altitude from ~6e-5 at 150 km -- consistent with
-    // rho_high's own temperature-ratio exponentials amplifying a small, unresolved upstream
-    // difference (this crate's own report investigated and RULED OUT the TT-vs-UTC epoch
-    // approximation rho_cor's own doc comment names: switching the correction's own MJD input
-    // by a full 69 s changed the 7th significant digit only, several orders of magnitude below
-    // the measured residual). The residual is recorded, not chased further, per this task's
-    // own rule ("a correct partial with a named gap is worth far more than a guessed whole").
-    const TOLERANCE_REL: f64 = 2e-3;
+    // Tolerance set just above the measured value (this task's own rule): measured max relative
+    // disagreement 1.537684e-6 at 900 km (debug build, rustc 1.97.0, macOS 26.6.2 arm64, this
+    // host, 2026-09-17) -- essentially floating-point noise, THREE orders of magnitude tighter
+    // than Jacchia-Roberts's own equivalent measurement (`tests/drag_goldens.rs`, max 1.4e-3 at
+    // 1200 km). This tight an agreement, with the correct body-fixed rotation (see this test's
+    // own doc comment above for the bug that masked it), is itself strong evidence this port's
+    // own `GLOBE6`/`GLOB6S`/`DENSU`/`DNET`/`CCOR`/coefficient-table transcription is correct,
+    // not merely plausible.
+    const TOLERANCE_REL: f64 = 1e-5;
     assert!(max_abs_rel < TOLERANCE_REL, "max relative density disagreement {max_abs_rel:e} exceeds {TOLERANCE_REL:e}");
 }
 
 // ---------------------------------------------------------------------------------------------
-// Acceleration agreement: JGM2 8x8 + DragForce/JacchiaRoberts, native vs GetDerivatives.
+// Acceleration agreement: JGM2 8x8 + DragForce/MSISE90, native vs GetDerivatives.
 // ---------------------------------------------------------------------------------------------
 
 fn build_native_model(force_model: &ForceModelCfg, namespace: &str, drag_area_m2: f64, cd: f64, mass_kg: f64, weather: &std::collections::BTreeMap<String, serde_json::Value>) -> EarthGravityModel<GmatBodyFixedRotation> {
@@ -256,25 +244,22 @@ fn build_native_model(force_model: &ForceModelCfg, namespace: &str, drag_area_m2
         force_model.gravity.order as usize,
         &force_model.central_body,
         rotation,
-        EarthGravityModelInfo { id: "native.orbital.n3b_drag_test".to_string(), version: env!("CARGO_PKG_VERSION").to_string(), goldens: vec!["leo_400km_jacchia_roberts".to_string()] },
+        EarthGravityModelInfo { id: "native.orbital.n3c_msise90_test".to_string(), version: env!("CARGO_PKG_VERSION").to_string(), goldens: vec!["leo_400km_msise90".to_string()] },
     )
     .expect("EarthGravityModel construction")
-    // An EMPTY third-body list, deliberately: this golden's own force model has NO point-mass
-    // perturbations (`force_model.point_masses == []`), so passing any DeBody here would add
-    // an acceleration GMAT's own arc never applied. `with_drag` only needs the BOUND
-    // `DeEphemeris` HANDLE (for the Sun's position, the diurnal exospheric-temperature bulge)
-    // -- `with_third_bodies`'s own `bodies` list controls PERTURBATIONS separately (see
-    // `EarthGravityModel::derivatives`'s own `for third in &tb.bodies` loop, which iterates
-    // zero times here), matching `with_srp`'s identical precedent in `tests/srp_goldens.rs`
-    // whenever a golden's own force model omits Sun/Luna as point masses.
+    // An EMPTY third-body list, deliberately -- see `tests/drag_goldens.rs`'s own identical
+    // comment: this golden's own force model has no point-mass perturbations; `with_drag` only
+    // needs the bound `DeEphemeris` HANDLE, and for MSISE90 not even that (no Sun position is
+    // used -- `crate::msise90`'s own module doc), but `with_third_bodies` is still required
+    // first (`AtmosphereChoice`'s own doc comment: one invariant, not a per-atmosphere case).
     .with_third_bodies(&DeEphemeris::locate_gmat_root().expect("GMAT_ROOT set").join("data/planetary_ephem/de/leDE1941.405"), &[])
-    .expect("with_third_bodies (empty list -- only the DE ephemeris handle is needed, for the Sun's position)")
-    .with_drag(av_orbital::AtmosphereChoice::JacchiaRoberts, weather_inputs, drag_area_m2, cd, mass_kg)
+    .expect("with_third_bodies (empty list)")
+    .with_drag(AtmosphereChoice::Msise90, weather_inputs, drag_area_m2, cd, mass_kg)
     .expect("with_drag")
 }
 
 fn build_gmat_derivative_model(gmat: &Gmat, epoch_utc: &str, initial_state_km: &[f64], spacecraft: &std::collections::BTreeMap<String, f64>, force_model: &ForceModelCfg, namespace: &str) -> gmat_sys::DerivativeModel {
-    let sat = gmat.construct("Spacecraft", &format!("N3DAccel{namespace}")).unwrap();
+    let sat = gmat.construct("Spacecraft", &format!("N3MAccel{namespace}")).unwrap();
     sat.set_str("DateFormat", "UTCGregorian").unwrap();
     sat.set_str("Epoch", epoch_utc).unwrap();
     sat.set_str("CoordinateSystem", "EarthMJ2000Eq").unwrap();
@@ -282,18 +267,13 @@ fn build_gmat_derivative_model(gmat: &Gmat, epoch_utc: &str, initial_state_km: &
     for (field, v) in ["X", "Y", "Z", "VX", "VY", "VZ"].iter().zip(initial_state_km) {
         sat.set_real(field, *v).unwrap();
     }
-    // Ballistic set (question 81: a seed is a vehicle) -- every field the golden's own
-    // `spacecraft` map carries EXCEPT the Keplerian elements, which conflict with this
-    // spacecraft's own `DisplayStateType = Cartesian` (GMAT: "you have set orbital state
-    // elements not contained in the same state type" outside a mission sequence) -- matching
-    // `tests/srp_goldens.rs`'s own identical filter.
     for (k, v) in spacecraft {
         if k != "SMA" && k != "ECC" && k != "INC" && k != "RAAN" && k != "AOP" && k != "TA" {
             sat.set_real(k, *v).unwrap();
         }
     }
 
-    let fm = gmat.construct("ForceModel", &format!("N3DAccelFM{namespace}")).unwrap();
+    let fm = gmat.construct("ForceModel", &format!("N3MAccelFM{namespace}")).unwrap();
     fm.set_str("CentralBody", &force_model.central_body).unwrap();
     let grav = gmat.construct("GravityField", "").unwrap();
     grav.set_str("BodyName", &force_model.central_body).unwrap();
@@ -302,14 +282,14 @@ fn build_gmat_derivative_model(gmat: &Gmat, epoch_utc: &str, initial_state_km: &
     grav.set_int("Order", force_model.gravity.order).unwrap();
     fm.add_force(&grav).unwrap();
 
-    let df = gmat.construct("DragForce", &format!("N3DAccelDrag{namespace}")).unwrap();
-    df.set_str("AtmosphereModel", "JacchiaRoberts").unwrap();
+    let df = gmat.construct("DragForce", &format!("N3MAccelDrag{namespace}")).unwrap();
+    df.set_str("AtmosphereModel", "MSISE90").unwrap();
     df.set_str("HistoricWeatherSource", "ConstantFluxAndGeoMag").unwrap();
     df.set_str("PredictedWeatherSource", "ConstantFluxAndGeoMag").unwrap();
     df.set_real("F107", 150.0).unwrap();
     df.set_real("F107A", 150.0).unwrap();
     df.set_real("MagneticIndex", 3.0).unwrap();
-    let atmos = gmat.construct("JacchiaRoberts", &format!("N3DAccelAtmos{namespace}")).unwrap();
+    let atmos = gmat.construct("MSISE90", &format!("N3MAccelAtmos{namespace}")).unwrap();
     df.set_reference(&atmos).unwrap();
     fm.add_force(&df).unwrap();
 
@@ -325,10 +305,10 @@ fn acceleration_agreement_against_get_derivatives() {
     let drag_area = golden.spacecraft["DragArea"];
     let cd = golden.spacecraft["Cd"];
     let mass_kg = golden.spacecraft["DryMass"];
-    let native = build_native_model(&golden.force_model, "N3DAccel4", drag_area, cd, mass_kg, &golden.weather_readback);
+    let native = build_native_model(&golden.force_model, "N3MAccel4", drag_area, cd, mass_kg, &golden.weather_readback);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup (idempotent)");
-    let gmat_model = build_gmat_derivative_model(&gmat, &golden.epoch_utc, &golden.initial_state, &golden.spacecraft, &golden.force_model, "N3DAccel4");
+    let gmat_model = build_gmat_derivative_model(&gmat, &golden.epoch_utc, &golden.initial_state, &golden.spacecraft, &golden.force_model, "N3MAccel4");
 
     let gmat_x0 = gmat_model.state().unwrap();
     for (a, b) in gmat_x0.iter().zip(&golden.initial_state) {
@@ -355,21 +335,17 @@ fn acceleration_agreement_against_get_derivatives() {
         let abs_diff = (0..3).map(|i| (native_accel[i] - gmat_accel[i]).powi(2)).sum::<f64>().sqrt();
         let scale = (0..3).map(|i| gmat_accel[i].powi(2)).sum::<f64>().sqrt();
         let rel_diff = abs_diff / scale;
-        eprintln!("[n3-drag-4epoch] dt={dt_s:.1}s native={native_accel:?} gmat={gmat_accel:?} |diff|={abs_diff:.6e} m/s^2 (relative {rel_diff:.6e})");
+        eprintln!("[n3c-msise90-4epoch] dt={dt_s:.1}s native={native_accel:?} gmat={gmat_accel:?} |diff|={abs_diff:.6e} m/s^2 (relative {rel_diff:.6e})");
         max_abs = max_abs.max(abs_diff);
         max_rel = max_rel.max(rel_diff);
     }
-    eprintln!("[n3-drag-4epoch] acceleration agreement over 4 epochs: max |diff| = {max_abs:.6e} m/s^2, max relative = {max_rel:.6e}");
+    eprintln!("[n3c-msise90-4epoch] acceleration agreement over 4 epochs: max |diff| = {max_abs:.6e} m/s^2, max relative = {max_rel:.6e}");
 
-    // The gravity-only floor (N1/N2) is ~4e-15 m/s^2 / ~5e-16 relative; drag is a much larger,
-    // less analytically clean force (the whole atmosphere model, including density's own
-    // sensitivity to the geodetic-height iteration), so this bound is set above that floor,
-    // just above the MEASURED value (this task's own rule): measured 3.855085e-10 m/s^2 max
-    // abs / 4.436967e-11 max relative over the 4 epochs (debug build, this host) -- still five
-    // orders of magnitude tighter than the density comparison's own ~1e-3 relative agreement,
-    // because the four epochs here are all near the SAME altitude/velocity regime the golden's
-    // own arc starts at, where density's altitude-sensitivity does not yet dominate.
-    const TOLERANCE_ABS_M_S2: f64 = 8e-10;
+    // Tolerance set just above the measured value (this task's own rule): measured max |diff| =
+    // 3.784511e-10 m/s^2, max relative = 4.355740e-11 over the 4 epochs (debug build, rustc
+    // 1.97.0, macOS 26.6.2 arm64, this host, 2026-09-17) -- machine-precision noise, the same
+    // order as this crate's other force-model acceleration-agreement floors.
+    const TOLERANCE_ABS_M_S2: f64 = 1e-9;
     const TOLERANCE_REL: f64 = 1e-10;
     assert!(max_abs < TOLERANCE_ABS_M_S2, "max abs acceleration disagreement {max_abs:e} m/s^2 exceeds {TOLERANCE_ABS_M_S2:e}");
     assert!(max_rel < TOLERANCE_REL, "max relative acceleration disagreement {max_rel:e} exceeds {TOLERANCE_REL:e}");
@@ -387,7 +363,7 @@ fn trajectory_residual_against_golden() {
     let drag_area = golden.spacecraft["DragArea"];
     let cd = golden.spacecraft["Cd"];
     let mass_kg = golden.spacecraft["DryMass"];
-    let model = build_native_model(&golden.force_model, "N3DTraj", drag_area, cd, mass_kg, &golden.weather_readback);
+    let model = build_native_model(&golden.force_model, "N3MTraj", drag_area, cd, mass_kg, &golden.weather_readback);
 
     let x0 = km_state_to_m(&golden.initial_state);
     let x1_golden = km_state_to_m(&golden.final_state);
@@ -401,17 +377,16 @@ fn trajectory_residual_against_golden() {
     let dr = (0..3).map(|i| (result.state[i] - x1_golden[i]).powi(2)).sum::<f64>().sqrt();
     let dv = (3..6).map(|i| (result.state[i] - x1_golden[i]).powi(2)).sum::<f64>().sqrt();
     eprintln!(
-        "[n3-drag-trajectory] native Dopri5 (JGM2 8x8 + DragForce/JacchiaRoberts) vs GMAT PrinceDormand78 over {} s: position residual = {dr:.6e} m, velocity residual = {dv:.6e} m/s, wall time {wall_s:.3} s",
+        "[n3c-msise90-trajectory] native Dopri5 (JGM2 8x8 + DragForce/MSISE90) vs GMAT PrinceDormand78 over {} s: position residual = {dr:.6e} m, velocity residual = {dv:.6e} m/s, wall time {wall_s:.3} s",
         golden.duration_s
     );
-    eprintln!("[n3-drag-trajectory] residual vs the golden's own recorded tolerance: {dr:e} m / {:e} m, {dv:e} m/s / {:e} m/s", golden.tolerance_m, golden.tolerance_mps);
+    eprintln!("[n3c-msise90-trajectory] residual vs the golden's own recorded tolerance: {dr:e} m / {:e} m, {dv:e} m/s / {:e} m/s", golden.tolerance_m, golden.tolerance_mps);
     assert!(dr < golden.tolerance_m, "position residual {dr:e} m exceeds the golden's own recorded {:e} m tolerance", golden.tolerance_m);
     assert!(dv < golden.tolerance_mps, "velocity residual {dv:e} m/s exceeds the golden's own recorded {:e} m/s tolerance", golden.tolerance_mps);
 }
 
 // ---------------------------------------------------------------------------------------------
-// The golden's own recorded weather-file SHA-256 matches the live file (a second pin, at the
-// golden level rather than only crate::weather's own unit test).
+// The golden's own recorded weather-file SHA-256 matches the live file.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
