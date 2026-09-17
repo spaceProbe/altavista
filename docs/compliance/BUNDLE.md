@@ -40,10 +40,14 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e
+459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808
 ```
 
-Recorded from the verification clone at the commit that regenerated the SBOMs (the bundle's
+Recorded from the verification clone at the commit that regenerated the SBOMs for the merge
+of heavy round 2 into the native-dynamics branch (`7ea2d24`, question 220), following the same
+two-step the previous value used. The previous value,
+`06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e`, was recorded from the
+verification clone at the commit that regenerated the SBOMs (the bundle's
 epoch is the last commit touching its inputs, so the SBOM commit itself moved it, and this
 record is written in a following commit that touches no input). Moved here, in two steps,
 from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on

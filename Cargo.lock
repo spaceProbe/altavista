@@ -326,6 +326,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-orbital"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-dynamics",
+ "gmat-sys",
+ "openssl",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "av-proposer"
 version = "0.1.0"
 dependencies = [
