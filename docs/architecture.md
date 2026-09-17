@@ -282,7 +282,7 @@ disagree.
 | `gmat-service` (Python, ADR-002 depth 1) | `127.0.0.1:50061` | `127.0.0.1:50161` | `services/gmat-service/gmat_service/config.py::DEFAULT_PORT` / `::DEFAULT_ADMIN_PORT` |
 | `av-lockstep-shim` | `127.0.0.1:50080` | *(none)* | `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` |
 | `av-proposer` | `127.0.0.1:50063` | *(none)* | `crates/av-proposer/src/bin/av-proposer.rs::DEFAULT_MODEL_SERVICE_BIND` |
-| `av-tiles` | `127.0.0.1:50073` | *(none)* | `crates/av-tiles/src/bin/av-tiles.rs::DEFAULT_BIND` |
+| `av-tiles` | `127.0.0.1:50073` | `127.0.0.1:50173` | `crates/av-tiles/src/bin/av-tiles.rs::DEFAULT_BIND` / `crates/av-tiles/src/admin.rs::DEFAULT_ADMIN_BIND` |
 | `av-kernel` binding registry, `container.control_port` (container-internal only, never a host bind) | `50070` | *(none)* | `crates/av-kernel/src/drm/binding.rs::ContainerSpec::default` |
 
 The convention: gRPC default first, admin default `gRPC + 100` where an admin surface exists
@@ -295,8 +295,18 @@ the `5007x` authority plane (`av-command`, `av-gateway`), which is deliberately 
 this crate, not a bind, and is not in this table for that reason; `av-proposer` has no admin
 surface at all.
 
-Question 219(a): `av-ingest` gets a real default bind this round (the P5 team's crate);
-`av-proposer` stays a `gap` row (the heavy team's, next round). `50060` is the free slot
+`av-tiles` gained its admin row in heavy round 3, reversing that round's predecessor's "no
+admin surface, hence no `+100` counterpart" note: `GET /admin/api/counters` exists because a
+refusal counter has to be readable from outside the process for a refusal to be *provable*
+rather than asserted, which is what `tests/test_viewer_tiles_route.py`'s label-refusal test
+now does. It is off by default -- the gateway binds it only when `--admin-bind` is given --
+and it follows the same unauthenticated-on-loopback shape `av-command`'s own admin surface
+already has.
+
+Question 219(a) is closed for both crates it named. `av-ingest` got its real default bind
+from the P5 team and `av-proposer` got its own from the heavy team in the following round;
+**neither is a `gap` row any more**, and the paragraph above records `av-proposer`'s
+reasoning. `av-ingest`'s `50060` is the free slot
 immediately below `gmat-service` (`50061`) and `av-dynamics-service` (`50062`), so the three
 data-plane services sit adjacent in this table; grep-verified free across this worktree,
 `/Users/probe/code/spoore` and `/Users/probe/code/secdeploy` before being chosen (only

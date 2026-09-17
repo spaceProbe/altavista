@@ -149,9 +149,16 @@ def _real_constants() -> dict[str, dict[str, "str | None"]]:
     }
 
     tiles = _read("crates/av-tiles/src/bin/av-tiles.rs")
+    # `av-tiles` gained an admin surface in heavy round 3 (`GET /admin/api/counters`, on an
+    # optional, off-by-default `--admin-bind`), reversing round 2's "no admin surface" note:
+    # a refusal counter has to be readable from outside the process for a refusal to be
+    # provable rather than assumed. Its default is read from its own source, never copied
+    # here -- and `"admin": None` was left in place for a while after that constant existed,
+    # which is precisely the stale agreement this test exists to prevent.
+    tiles_admin = _read("crates/av-tiles/src/admin.rs")
     real["av-tiles"] = {
         "grpc": _extract(tiles, r'const DEFAULT_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-tiles/src/bin/av-tiles.rs"),
-        "admin": None,
+        "admin": _extract(tiles_admin, r'pub const DEFAULT_ADMIN_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-tiles/src/admin.rs"),
     }
 
     binding = _read("crates/av-kernel/src/drm/binding.rs")
