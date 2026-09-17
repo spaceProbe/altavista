@@ -60,12 +60,39 @@ test, be able to name the wrong implementation it would fail against"):
   -- caught by ``residentPayloadLookupWorks``, which exercises
   ``LayerManager.getResidentPayload()`` directly and would fail if that single
   lookup method did not work regardless of which layer's item it names.
+* ``test_max_concurrent_loads_makes_the_priority_queue_load_bearing`` (deliverable 1,
+  a manager review finding on H5a): a manager that still starts every wanted request
+  regardless of `maxConcurrentLoads` -- the priority order computed but never
+  actually enforced, "a sorted list, not a queue" -- fails
+  ``deferredKeyNotStartedFirstUpdate``; one that drops a deferred request forever
+  instead of starting it once a slot frees fails
+  ``deferredKeyStartedSecondUpdateAfterSlotsFreed``. See
+  ``web/js/layers_check.mjs``'s ``probeQueueIsLoadBearing`` for the isolated,
+  cap=2 proof this reads.
 * ``test_terrain_adapter_is_a_typed_named_refusal_not_a_silent_stub``: a terrain
   adapter that silently resolves with a fabricated payload (a silent stub) instead of
   rejecting with a specifically-named error type -- this test pins the exact string
   ``"TerrainLoaderNotImplementedError"``, not merely "some error was thrown", so a
   refactor that renames the class without updating this test is itself caught (the
   binding rule: "an exit code is not evidence, and a gap is recorded, never hidden").
+* ``test_a_permanently_failing_layer_does_not_starve_a_well_behaved_one`` (Finding 1,
+  corrective round 3, manager-root-caused starvation defect): a ``_onFailed`` with no
+  memory of a failed globalKey re-plans the same permanently-failing request every
+  single ``update()``, taking a concurrent-load slot and failing again forever -- when
+  it sorts ahead of everything else in priority order it alone can consume every slot,
+  every step, and a well-behaved lower-priority layer never gets to load anything at
+  all. This test reads ``starvationProbe`` (see
+  ``web/js/layers_check.mjs``'s ``probeStarvationDoesNotBlockGoodLayer``): the
+  load-bearing assertion is that the well-behaved ``good`` layer reaches full
+  residency (10/10) AND the always-failing ``bad`` layer's load-attempt count stays
+  bounded by 10 -- the number of distinct keys it ever plans, which is the correct
+  bound under the failure-memory policy this task's fix implements (a key is
+  blacklisted after its first failure for as long as it stays continuously wanted;
+  this probe's ``bad`` layer never drops any key out of its plan, so none is ever
+  retried). Run against today's unfixed ``layer.js`` (before this round's fix), this
+  probe measured ``goodResident=0`` (of 10) and ``badLoadAttempts=180`` over 30 steps
+  (6 slots x 30 steps, every one of them wasted on a request that had already failed
+  moments before) -- see this task's own report for that "before" output.
 """
 from __future__ import annotations
 
@@ -173,6 +200,19 @@ def test_byte_budget_is_respected_and_eviction_actually_ran(layers_data):
             f"the budget {layers_data['memoryBudgetBytes']} -- budget was not enforced "
             f"after every step"
         )
+    # softViolationCount must be exactly 0 for THIS run (deliverable 1's own review
+    # requirement: "the harness must report whether that branch was ever taken, so a
+    # green budget assertion can never be hiding it" -- see layer.js's
+    # `_evictIfNeeded` doc comment and layers_check.mjs's own module docstring for
+    # exactly how MEMORY_BUDGET_BYTES was picked with room to spare above the
+    # currently-wanted set). A nonzero count here would mean `budgetRespected` is
+    # only true because nothing was left evictable, not because eviction worked.
+    assert layers_data["softViolationCount"] == 0, (
+        f"expected the soft-violation branch of _evictIfNeeded to never fire on this "
+        f"run (got {layers_data['softViolationCount']}); a nonzero count would mean "
+        f"budgetRespected==True only because everything resident was protected, not "
+        f"because real eviction kept the byte total under budget"
+    )
 
 
 def test_byte_budget_accounts_real_per_layer_costs(layers_data):
@@ -205,6 +245,108 @@ def test_cancellation_on_view_jump(layers_data):
         "total) to have cancelled at least one in-flight request -- see the harness's "
         "module docstring for why this step is the deliberate large jump"
     )
+
+
+# --------------------------------------------------------------- concurrent-load cap
+def test_max_concurrent_loads_makes_the_priority_queue_load_bearing(layers_data):
+    """Deliverable 1 (manager review finding on H5a): before this round, `update()`
+    started a load for every wanted request unconditionally, so the priority sort
+    decided nothing observable -- a comparator bug that silently stopped sorting
+    (e.g. returned 0 for everything) would have produced a DIFFERENT `orderedKeys`
+    but an IDENTICAL set of what actually started loading. `queueIsLoadBearing` (see
+    web/js/layers_check.mjs's `probeQueueIsLoadBearing`) proves the fix on an
+    isolated manager/stub (a single imagery layer, `maxConcurrentLoads=2`, a camera
+    position selecting 14 imagery tiles): the top-2 by the stated priority rule are
+    exactly what started, a specific rank-3 request is observably absent from
+    `pending` while both slots are full, and that same request starts on the very
+    next `update()` once the two in-flight loads complete and free their slots.
+    """
+    q = layers_data["queueIsLoadBearing"]
+    assert q["planLength"] > q["maxConcurrentLoads"], (
+        "the probe's own camera position must select more requests than the cap, or "
+        "this test cannot distinguish a real cap from no cap at all"
+    )
+    assert q["startedFirstUpdateMatchesTopN"] is True, (
+        "expected exactly the top-maxConcurrentLoads requests (by descending "
+        "sseError, tie-broken by ascending viewDistanceM then globalKey) to have "
+        "started on the first update() -- a manager that starts every wanted "
+        "request regardless of the cap, or that starts the wrong subset, fails this"
+    )
+    assert q["startedFirstUpdateCount"] == q["maxConcurrentLoads"], (
+        f"expected exactly {q['maxConcurrentLoads']} requests to have started "
+        f"(pending.size == maxConcurrentLoads), got {q['startedFirstUpdateCount']}"
+    )
+    assert q["deferredKeyNotStartedFirstUpdate"] is True, (
+        "expected the 3rd-ranked request to be observably NOT started (neither "
+        "pending nor resident) while both slots are full -- proving the cap actually "
+        "held something back, not merely that this probe looked before it finished"
+    )
+    assert q["deferredKeyStartedSecondUpdateAfterSlotsFreed"] is True, (
+        "expected the previously-deferred request to start on the very next "
+        "update() once its two slot-holders completed -- a manager that drops a "
+        "deferred request forever (rather than reconsidering it once a slot frees) "
+        "fails this half"
+    )
+    assert q["ok"] is True
+
+
+# ------------------------------------------------------------------------ starvation
+def test_a_permanently_failing_layer_does_not_starve_a_well_behaved_one(layers_data):
+    """Finding 1 (corrective round 3): a permanently-failing request that sorts ahead
+    of everything else in priority order must not be able to consume every
+    concurrent-load slot forever, starving a well-behaved layer behind it. Reads
+    `starvationProbe` (see web/js/layers_check.mjs's own
+    `probeStarvationDoesNotBlockGoodLayer` for the full probe shape: a `bad` layer
+    whose `load()` always rejects and a `good` layer whose `load()` always resolves,
+    ten requests each, every one of the twenty tied on sseError/viewDistanceM so
+    `bad`'s ten requests occupy the entire top of the priority order ahead of every
+    `good` request, maxConcurrentLoads=6, 30 update() steps).
+
+    The load-bearing assertion is two-sided:
+      - `goodResident == goodRequestCount`: the well-behaved layer must reach FULL
+        residency despite the failing layer outranking it on every single step --
+        this is what a starved manager fails (measured against today's pre-fix
+        layer.js: goodResident stayed 0 the entire 30-step run).
+      - `badLoadAttempts <= badRequestCount`: bounded by 10, the number of DISTINCT
+        keys the bad layer ever plans -- this is the correct bound under the
+        failure-memory policy layer.js's constructor doc comment states (a key is
+        blacklisted after its first failure for as long as it stays continuously
+        wanted; this probe's bad layer never drops any key out of its own plan, so
+        none of the ten is ever retried a second time). A manager with no such memory
+        re-attempts a failing request every step it is still top-ranked -- measured
+        against today's pre-fix layer.js: badLoadAttempts reached 180 (roughly 6 per
+        step x 30 steps).
+    """
+    p = layers_data["starvationProbe"]
+    assert p["badRequestCount"] == 10 and p["goodRequestCount"] == 10, (
+        "probe setup invariant: this test's bound (badLoadAttempts <= 10) is only "
+        "meaningful if the bad layer really plans exactly 10 distinct keys"
+    )
+    assert p["goodResident"] == p["goodRequestCount"], (
+        f"expected the well-behaved 'good' layer to reach full residency "
+        f"({p['goodRequestCount']}/{p['goodRequestCount']}) despite the 'bad' layer "
+        f"outranking it on every step; got goodResident={p['goodResident']} -- a "
+        f"manager with no failure memory lets the always-failing layer occupy every "
+        f"concurrent-load slot forever, so 'good' never gets a turn at all"
+    )
+    assert p["badLoadAttempts"] <= p["badRequestCount"], (
+        f"expected the 'bad' layer's load-attempt count to stay bounded by "
+        f"{p['badRequestCount']} (one attempt per distinct key it ever plans, under "
+        f"the failure-memory policy -- see layer.js's constructor doc comment); got "
+        f"badLoadAttempts={p['badLoadAttempts']}, which grows without bound over the "
+        f"30-step run in a manager with no memory of a failed key"
+    )
+    assert p["badResident"] == 0, "the always-failing layer must never become resident"
+    assert p["pending"] == 0, "every load must have settled by the end of the 30-step run"
+    assert p["failedCount"] == p["badRequestCount"], (
+        f"expected exactly {p['badRequestCount']} recorded failures (one per distinct "
+        f"bad key, each blacklisted after its first failure), got {p['failedCount']}"
+    )
+    assert p["failureNames"] == ["AlwaysFailsError"], (
+        f"expected the one distinct, named rejection type this probe's 'bad' layer "
+        f"always throws to be recorded, got {p['failureNames']}"
+    )
+    assert p["ok"] is True
 
 
 # --------------------------------------------------------------------- priority order
@@ -292,7 +434,12 @@ def test_layers_report(layers_data, capsys):
         print(f"  memoryBudgetBytes={layers_data['memoryBudgetBytes']} "
               f"maxResidentBytesObserved={layers_data['maxResidentBytesObserved']} "
               f"budgetRespected={layers_data['budgetRespected']}")
-        print(f"  cancelledCount={layers_data['cancelledCount']} evictedCount={layers_data['evictedCount']}")
+        print(f"  cancelledCount={layers_data['cancelledCount']} evictedCount={layers_data['evictedCount']} "
+              f"softViolationCount={layers_data['softViolationCount']}")
+        print(f"  maxConcurrentLoads={layers_data['maxConcurrentLoads']} "
+              f"queueIsLoadBearing={layers_data['queueIsLoadBearing']}")
+        print(f"  failedCount={layers_data['failedCount']} failureNames={layers_data['failureNames']} "
+              f"starvationProbe={layers_data['starvationProbe']}")
         print(f"  perLayerCounts={layers_data['perLayerCounts']}")
         print(f"  terrainRefusalCount={layers_data['terrainRefusalCount']} "
               f"terrainRefusalName={layers_data['terrainRefusalName']}")
