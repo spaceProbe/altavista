@@ -1,7 +1,9 @@
 //! The runner: drains a [`crate::queue::JobQueue`], fetching and hash-verifying each job's
-//! inputs, dispatching to a registered [`Executor`] by `JobSpec.kind`, and storing outputs
-//! through an [`ObjectSink`] -- see [`Runner::run_one`]'s own doc for the fixed order of
-//! checks and why it never returns an `Err`.
+//! inputs, dispatching to a registered [`Executor`] (by `JobSpec.kind`, except a
+//! `JOB_EXECUTOR_KIND_CONTAINER` job, which always runs through [`Runner::
+//! register_container_executor`]'s own single executor instead -- see that method's own doc),
+//! and storing outputs through an [`ObjectSink`] -- see [`Runner::run_one`]'s own doc for the
+//! fixed order of checks and why it never returns an `Err`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -225,6 +227,15 @@ impl Executor for ProcessExecutor {
 pub struct Runner<'a> {
     queue: JobQueue,
     executors: HashMap<String, Box<dyn Executor>>,
+    /// The single [`Executor`] every `JOB_EXECUTOR_KIND_CONTAINER` job runs through, regardless
+    /// of `spec.kind` -- see [`Runner::register_container_executor`]'s own doc and
+    /// [`Runner::execute_spec`]'s Step 4 for why this is a separate slot from `executors` above,
+    /// not another entry keyed by some reserved `kind` string. `None` until a caller registers
+    /// one (production wiring, or a test, constructs a `crate::container::ContainerExecutor`
+    /// and calls `register_container_executor`); a `Runner` that never does refuses every
+    /// CONTAINER job as `EXECUTOR_UNAVAILABLE`, exactly as every `Runner` always did before this
+    /// round.
+    container_executor: Option<Box<dyn Executor>>,
     source: Box<dyn ObjectSource>,
     sink: Box<dyn ObjectSink>,
     ladder: av_label::ClearanceLadder,
@@ -233,14 +244,31 @@ pub struct Runner<'a> {
 
 impl<'a> Runner<'a> {
     pub fn new(queue: JobQueue, source: Box<dyn ObjectSource>, sink: Box<dyn ObjectSink>, ladder: av_label::ClearanceLadder, clock: &'a dyn Clock) -> Self {
-        Self { queue, executors: HashMap::new(), source, sink, ladder, clock }
+        Self { queue, executors: HashMap::new(), container_executor: None, source, sink, ladder, clock }
     }
 
     /// Registers `executor` to run every `JobSpec` whose `kind` equals `kind`. A second
     /// registration under the same `kind` replaces the first (this round has no caller that
     /// needs to detect that as an error; the tiler, H3b, registers exactly once at startup).
+    /// **Never consulted for a `JOB_EXECUTOR_KIND_CONTAINER` job** -- see
+    /// [`Runner::register_container_executor`]'s own doc.
     pub fn register_executor(&mut self, kind: impl Into<String>, executor: Box<dyn Executor>) {
         self.executors.insert(kind.into(), executor);
+    }
+
+    /// Registers the one [`Executor`] every `JOB_EXECUTOR_KIND_CONTAINER` job runs through --
+    /// in production, a `crate::container::ContainerExecutor`. Deliberately a single slot, not
+    /// keyed by `spec.kind` the way [`Runner::register_executor`]'s registry is: a CONTAINER
+    /// job's `kind` still must name a registered [`Executor`] in that registry too
+    /// ([`Runner::execute_spec`]'s Step 1 runs unconditionally), but that registered `Executor`
+    /// is never the one that actually runs the job -- only this one is, for every CONTAINER job
+    /// regardless of `kind`
+    /// (`crates/av-jobs/tests/runner.rs::executor_unavailable_for_the_container_kind_is_recorded_on_the_log`
+    /// proves exactly this: a real, working `ProcessExecutor` registered under the job's own
+    /// `kind` is never reached). A second call replaces the first, same convention as
+    /// `register_executor`.
+    pub fn register_container_executor(&mut self, executor: Box<dyn Executor>) {
+        self.container_executor = Some(executor);
     }
 
     pub fn queue(&self) -> &JobQueue {
@@ -261,13 +289,18 @@ impl<'a> Runner<'a> {
     ///    then its recomputed SHA-256 is compared (`openssl::memcmp::eq`) against
     ///    `asset.sha256` -> `INPUT_HASH_MISMATCH`. An executor is never handed unverified
     ///    bytes.
-    /// 4. If `spec.executor` is `JOB_EXECUTOR_KIND_CONTAINER`, refused right here as
-    ///    `EXECUTOR_UNAVAILABLE` -- the container executor is not implemented this round
-    ///    (deferred; see `crate`'s own crate doc), and this is a visible, typed, logged
-    ///    refusal, never a silent skip. Otherwise the registered [`Executor::execute`] runs,
-    ///    and whatever [`pb::JobFailure`] it returns (a [`ProcessExecutor`] maps a spawn
+    /// 4. If `spec.executor` is `JOB_EXECUTOR_KIND_CONTAINER`, the job runs through this
+    ///    `Runner`'s own configured [`Runner::register_container_executor`] executor instead of
+    ///    the `kind`-registered one from Step 1 -- `EXECUTOR_UNAVAILABLE` if none is configured
+    ///    (a visible, typed, logged refusal, never a silent skip; see
+    ///    [`Runner::register_container_executor`]'s own doc for why `spec.kind` plays no role
+    ///    here). Otherwise the (`kind`-registered, for a non-CONTAINER job) [`Executor::execute`]
+    ///    runs, and whatever [`pb::JobFailure`] it returns (a [`ProcessExecutor`] maps a spawn
     ///    failure to `EXECUTOR_START_FAILED` and a non-zero exit to `NONZERO_EXIT` with the
-    ///    code) becomes this completion's failure.
+    ///    code; `crate::container::ContainerExecutor` maps the same two kinds to "the container
+    ///    could not start" and "the containerized command exited non-zero", plus
+    ///    `EXECUTOR_UNAVAILABLE` for an absent or digest-mismatched image -- see that type's own
+    ///    module doc) becomes this completion's failure.
     /// 5. Each output is stored through [`ObjectSink::put`] -> `OUTPUT_REJECTED` on failure.
     ///    Exactly one output may have `manifest: true`; more than one, or a manifest output
     ///    from an executor whose [`Executor::declares_manifest`] is `false`, is also
@@ -340,8 +373,10 @@ impl<'a> Runner<'a> {
             failure: Some(pb::JobFailure { kind: kind as i32, detail, exit_code }),
         };
 
-        // Step 1: spec.kind has no registered Executor -> UNSUPPORTED_JOB_KIND.
-        let Some(executor) = self.executors.get(&spec.kind) else {
+        // Step 1: spec.kind has no registered Executor -> UNSUPPORTED_JOB_KIND. Looked up
+        // unconditionally, even for a CONTAINER job (see Step 4 below) -- kind_executor is not
+        // necessarily the Executor that actually runs this job.
+        let Some(kind_executor) = self.executors.get(&spec.kind) else {
             return make_failure(pb::JobFailureKind::UnsupportedJobKind, format!("no executor registered for job kind {:?}", spec.kind), 0, vec![], vec![]);
         };
 
@@ -382,19 +417,35 @@ impl<'a> Runner<'a> {
             inputs.push(JobInput { asset: asset.clone(), bytes });
         }
 
-        // Step 4: JOB_EXECUTOR_KIND_CONTAINER is refused here, unconditionally -- deferred
-        // this round (see this crate's own crate doc), never silently skipped. Otherwise
-        // the registered Executor runs.
-        if pb::JobExecutorKind::try_from(spec.executor).unwrap_or(pb::JobExecutorKind::Unspecified) == pb::JobExecutorKind::Container {
-            return make_failure(
-                pb::JobFailureKind::ExecutorUnavailable,
-                "the CONTAINER executor is not implemented this round (H3a) -- deferred to a later task".to_string(),
-                0,
-                input_sha256,
-                vec![],
-            );
-        }
-        let raw_outputs = match if streaming { executor.execute_streaming(spec, &inputs, self.sink.as_ref(), &label) } else { executor.execute(spec, &inputs) } {
+        // Step 4: JOB_EXECUTOR_KIND_CONTAINER runs through this Runner's own configured
+        // container executor (Runner::register_container_executor), entirely bypassing
+        // kind_executor from Step 1 above -- spec.kind plays no role in choosing HOW a
+        // CONTAINER job runs (crates/av-jobs/tests/runner.rs::
+        // executor_unavailable_for_the_container_kind_is_recorded_on_the_log proves this: a
+        // real, working ProcessExecutor registered under the job's own kind is never reached).
+        // A Runner with no container executor configured refuses every CONTAINER job as
+        // EXECUTOR_UNAVAILABLE -- the same typed, logged refusal this crate always gave
+        // CONTAINER jobs before this round, now scoped to "unconfigured" rather than
+        // "unimplemented". Otherwise the active executor (kind_executor for a non-CONTAINER
+        // job, the configured container executor for a CONTAINER one) runs.
+        let is_container = pb::JobExecutorKind::try_from(spec.executor).unwrap_or(pb::JobExecutorKind::Unspecified) == pb::JobExecutorKind::Container;
+        let active_executor: &dyn Executor = if is_container {
+            match &self.container_executor {
+                Some(executor) => executor.as_ref(),
+                None => {
+                    return make_failure(
+                        pb::JobFailureKind::ExecutorUnavailable,
+                        "JOB_EXECUTOR_KIND_CONTAINER: no container executor is configured on this Runner -- register one with Runner::register_container_executor before submitting a CONTAINER job".to_string(),
+                        0,
+                        input_sha256,
+                        vec![],
+                    );
+                }
+            }
+        } else {
+            kind_executor.as_ref()
+        };
+        let raw_outputs = match if streaming { active_executor.execute_streaming(spec, &inputs, self.sink.as_ref(), &label) } else { active_executor.execute(spec, &inputs) } {
             Ok(outputs) => outputs,
             Err(failure) => return make_failure(job_failure_kind(&failure), failure.detail, failure.exit_code, input_sha256, vec![]),
         };
@@ -405,7 +456,7 @@ impl<'a> Runner<'a> {
         if manifest_count > 1 {
             return make_failure(pb::JobFailureKind::OutputRejected, format!("job produced {manifest_count} manifest outputs; at most one is allowed"), 0, input_sha256, vec![]);
         }
-        if manifest_count == 1 && !executor.declares_manifest() {
+        if manifest_count == 1 && !active_executor.declares_manifest() {
             return make_failure(
                 pb::JobFailureKind::OutputRejected,
                 format!("job kind {:?} produced a manifest output, but its executor declares it produces none", spec.kind),

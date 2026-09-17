@@ -67,8 +67,17 @@
 //!   `Clock` trait and its own `SystemClock`/`TestClock`, mirroring that convention rather
 //!   than pulling a job-queue crate into a hot-path crate's dependency tree for the sake of
 //!   one trait and two small structs.
+//! - **`av-lockstep`**: round 3's `crate::container::ContainerExecutor` (H3's last open item,
+//!   the `JOB_EXECUTOR_KIND_CONTAINER` executor) shells out to the `docker` CLI directly with
+//!   its own handful of `std::process::Command` calls rather than depend on `av-lockstep`'s
+//!   own (larger, tonic/gRPC-shaped) `docker` module, which exists to manage a
+//!   `BINDING_KIND_CONTAINER` DRM instance -- a different domain entirely. See
+//!   `crate::container`'s own module doc, "Why this crate shells out to `docker` itself", for
+//!   the full reasoning. `av-lockstep` stays a **dev**-dependency only (`tests/store_tiler.rs`,
+//!   `tests/container.rs`), exactly as it already was before this round.
 
 pub mod clock;
+pub mod container;
 pub mod hash;
 pub mod log;
 pub mod png;
