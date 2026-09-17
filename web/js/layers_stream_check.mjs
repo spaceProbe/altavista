@@ -95,7 +95,7 @@ import { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError } from
 import { selectTiles, geodeticToEcef } from './globe_lod.js';
 
 // ------------------------------------------------------------------------ arguments
-const [origin, manifestSha256, frameBudgetMsRaw, memoryBudgetBytesRaw] = process.argv.slice(2);
+const [origin, manifestSha256, frameBudgetMsRaw, memoryBudgetBytesRaw, maxLevelRaw, tileBytesRaw, maxConcurrentLoadsRaw, dwellRoundTripsRaw] = process.argv.slice(2);
 
 function fail(message) {
   process.stdout.write(JSON.stringify({ error: message }));
@@ -104,11 +104,36 @@ function fail(message) {
 
 if (!origin || !manifestSha256 || !frameBudgetMsRaw || !memoryBudgetBytesRaw) {
   fail(
-    'usage: node web/js/layers_stream_check.mjs <origin> <manifestSha256> <frameBudgetMs> <memoryBudgetBytes>',
+    'usage: node web/js/layers_stream_check.mjs <origin> <manifestSha256> <frameBudgetMs> <memoryBudgetBytes> [maxLevel] [tileBytes] [maxConcurrentLoads] [dwellRoundTrips]',
   );
 }
 const frameBudgetMs = Number(frameBudgetMsRaw);
 const memoryBudgetBytes = Number(memoryBudgetBytesRaw);
+// `maxLevel` and `tileBytes` (round 3, the scale proof) are optional and default to
+// exactly what this harness used before they existed, so `tests/
+// test_viewer_layers_stream.py` is unaffected byte for byte. They exist because the
+// tile set a caller points this harness at is not obliged to be the small fixture:
+// the ten-gigabyte proof's own set runs to level 6 with 1024-pixel RGB8 tiles of
+// 3147060 bytes each, twelve times `IMAGERY_TILE_BYTES`. A memory budget accounted in
+// the wrong units is not a memory budget, and a `maxLevel` that stops at 2 would
+// stream the coarse corner of a set and call it the set -- so both are declared by
+// the caller that knows the tile set, and `tileBytes` is then CHECKED against the
+// real length of every tile the gateway returns (`byteCostMismatchCount` below).
+const maxLevel = maxLevelRaw === undefined ? 2 : Number(maxLevelRaw);
+const declaredTileBytes = tileBytesRaw === undefined ? undefined : Number(tileBytesRaw);
+if (!(Number.isInteger(maxLevel) && maxLevel >= 0)) fail(`maxLevel must be a non-negative integer, got ${JSON.stringify(maxLevelRaw)}`);
+if (declaredTileBytes !== undefined && !(Number.isFinite(declaredTileBytes) && declaredTileBytes > 0)) fail(`tileBytes must be a positive number, got ${JSON.stringify(tileBytesRaw)}`);
+// Also optional, also defaulting to exactly what this file used before they existed
+// (see `STREAM_MAX_CONCURRENT_LOADS` and `DWELL_ROUND_TRIPS_PER_POSITION` below for
+// why those two numbers are what they are for the SMALL fixture). A caller pointing
+// this harness at a large tile set needs both: a 3147060-byte tile takes far longer
+// to cross the wire than the fixture's 1 KB one, so at two concurrent slots and one
+// round trip of dwell only a handful of tiles ever complete, and "streamed at scale"
+// would be five tiles wearing a large tile set's name.
+const cliMaxConcurrentLoads = maxConcurrentLoadsRaw === undefined ? undefined : Number(maxConcurrentLoadsRaw);
+const cliDwellRoundTrips = dwellRoundTripsRaw === undefined ? undefined : Number(dwellRoundTripsRaw);
+if (cliMaxConcurrentLoads !== undefined && !(Number.isInteger(cliMaxConcurrentLoads) && cliMaxConcurrentLoads > 0)) fail(`maxConcurrentLoads must be a positive integer, got ${JSON.stringify(maxConcurrentLoadsRaw)}`);
+if (cliDwellRoundTrips !== undefined && !(Number.isFinite(cliDwellRoundTrips) && cliDwellRoundTrips > 0)) fail(`dwellRoundTrips must be a positive number, got ${JSON.stringify(dwellRoundTripsRaw)}`);
 if (!(Number.isFinite(frameBudgetMs) && frameBudgetMs > 0)) fail(`frameBudgetMs must be a positive number, got ${JSON.stringify(frameBudgetMsRaw)}`);
 if (!(Number.isFinite(memoryBudgetBytes) && memoryBudgetBytes > 0)) fail(`memoryBudgetBytes must be a positive number, got ${memoryBudgetBytesRaw}`);
 if (!/^[0-9a-f]{64}$/.test(manifestSha256)) fail(`manifestSha256 must be 64 lowercase hex characters, got ${JSON.stringify(manifestSha256)}`);
@@ -123,7 +148,7 @@ if (!/^[0-9a-f]{64}$/.test(manifestSha256)) fail(`manifestSha256 must be 64 lowe
 // keeps `selectTiles()` from ever choosing a level-3+ address this fixture never
 // generated (which would 404, a setup bug this harness would rather fail loudly on
 // than silently tolerate as a "real" HTTP status).
-const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, maxLevel: 2, maxTiles: 64 };
+const SCREEN = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, maxLevel, maxTiles: 64 };
 
 function cameraEcef(lonDeg, latDeg, heightM) {
   return geodeticToEcef(lonDeg, latDeg, heightM);
@@ -172,14 +197,23 @@ const CAMERA_PATH = [
 // enough for a LOW-demand position (e.g. the 'far' root-tile view, 2 tiles) to
 // settle well inside its own window, while leaving a genuine backlog at a
 // HIGH-demand position for the next jump to cancel.
-const DWELL_ROUND_TRIPS_PER_POSITION = 1;
+const DWELL_ROUND_TRIPS_PER_POSITION = cliDwellRoundTrips === undefined ? 1 : cliDwellRoundTrips;
 const MIN_DWELL_MS = 25; // floor, in case the calibration round trip was implausibly fast (e.g. warm keep-alive)
 const MAX_DWELL_MS = 3000; // ceiling, in case the calibration round trip was implausibly slow
 // Hard safety cap on total frames (module docstring: "a real, polled condition,
 // never a fixed sleep-then-assume") -- large enough that a healthy real gateway on
 // this host never comes close to it, small enough that a genuinely hung gateway does
 // not make this harness hang forever either.
-const MAX_FRAMES = 60_000;
+// The global safety cap. It must be large enough that the per-position wall-clock
+// dwell, not this number, is what ends each position -- otherwise the first position
+// eats the whole budget and the camera never jumps, which is exactly what a run at
+// `dwellRoundTrips` 40 did once `PER_POSITION_MAX_FRAMES` stopped being the binding
+// bound (measured: 60000 frames, all of them at position one, cancelledCount 0).
+// This loop yields with a bare `setImmediate`, which costs about 0.01 ms here, so it
+// runs on the order of 60000 frames a second: budget accordingly. Scaled from the
+// dwell rather than fixed, with the old 60000 as a floor so a default run is exactly
+// what it was.
+const MAX_FRAMES = Math.max(60_000, Math.ceil(DWELL_ROUND_TRIPS_PER_POSITION * CAMERA_PATH.length * 4000));
 
 // Per-frame commit cap (module docstring, "What a frame is") -- deliberately small
 // (well below this fixture's own total distinct-tile count, 42) so that a burst of
@@ -219,14 +253,27 @@ let tilesFetched = 0;
 let bytesFetched = 0;
 let etagVerifiedCount = 0;
 let etagMismatchCount = 0;
+// The memory budget is accounted against each request's DECLARED `byteCost`, which is
+// necessarily an estimate: `plan()` runs before the fetch, so nothing knows a tile's
+// real length yet. That makes the declaration worth checking rather than trusting --
+// every tile this harness actually receives has its real `byteLength` compared to the
+// `byteCost` the budget was charged, and a mismatch is counted. A budget assertion
+// that holds only because the estimate was small is not a budget assertion.
+let byteCostCheckedCount = 0;
+let byteCostMismatchCount = 0;
+let maxByteCostErrorBytes = 0;
 
-const layer = new GatewayImageryLayerAdapter({ manifestSha256, origin });
+const layer = new GatewayImageryLayerAdapter({ manifestSha256, origin, tileBytes: declaredTileBytes });
 const realLoad = layer.load.bind(layer);
 layer.load = async (request, signal) => {
   try {
     const payload = await realLoad(request, signal);
     tilesFetched += 1;
     bytesFetched += payload.bytes.byteLength;
+    byteCostCheckedCount += 1;
+    const err = Math.abs(payload.bytes.byteLength - request.byteCost);
+    if (err > maxByteCostErrorBytes) maxByteCostErrorBytes = err;
+    if (err !== 0) byteCostMismatchCount += 1;
     etagVerifiedCount += 1;
     httpStatusCounts['200'] = (httpStatusCounts['200'] || 0) + 1;
     return payload;
@@ -278,7 +325,7 @@ layer.load = async (request, signal) => {
 // re-confirmed with STREAM_MAX_CONCURRENT_LOADS reverted to 2: five consecutive runs,
 // see this task's own report for the five evictedCount/cancelledCount/maxFrameMs
 // values).
-const STREAM_MAX_CONCURRENT_LOADS = 2;
+const STREAM_MAX_CONCURRENT_LOADS = cliMaxConcurrentLoads === undefined ? 2 : cliMaxConcurrentLoads;
 const manager = new LayerManager({ memoryBudgetBytes, maxConcurrentLoads: STREAM_MAX_CONCURRENT_LOADS }); // now() defaults to performance.now() -- see layer.js
 manager.addLayer(layer);
 
@@ -375,7 +422,17 @@ const dwellMsPerPosition = Math.min(
 // so a real backlog survives into the next position's camera jump -- see
 // `DWELL_ROUND_TRIPS_PER_POSITION`'s own comment for why that dwell is kept short
 // rather than generous).
-const PER_POSITION_MAX_FRAMES = 2000;
+// Measured, round 3: 2000 was NOT large enough to leave the wall-clock bound in
+// charge, and the comment above was wrong about it. A bare `setImmediate` round trip
+// on this host costs about 0.01 ms, so 2000 ticks is roughly 20 ms of wall clock --
+// shorter than a single real tile round trip (measured through the viewer-server
+// proxy against a real gateway: about 40 ms for a 3147060-byte tile). Every position
+// therefore ended on the tick ceiling before `dwellMsPerPosition` had any effect at
+// all, and a run against a large tile set streamed three to five tiles no matter what
+// dwell it was given. 200000 ticks is about two seconds of pure spinning, so the
+// wall-clock bound below is now genuinely the binding one and this constant is the
+// safety cap it was always documented to be.
+const PER_POSITION_MAX_FRAMES = 200_000;
 
 let frame = 0;
 for (const cam of CAMERA_PATH) {
@@ -462,6 +519,15 @@ const result = {
   bytesFetched,
   etagVerifiedCount,
   etagMismatchCount,
+  // See the `byteCostCheckedCount` declaration above: the budget is charged the
+  // DECLARED per-tile cost, so these three say whether that declaration matched the
+  // bytes that actually arrived. `byteCostMismatchCount == 0` is what makes
+  // `budgetRespected` a statement about real memory rather than about an estimate.
+  maxLevel,
+  declaredTileBytes: layer.tileBytes,
+  byteCostCheckedCount,
+  byteCostMismatchCount,
+  maxByteCostErrorBytes,
   cancelledCount: manager.cancelledCount,
   evictedCount: manager.evictedCount,
   // Failure-memory policy (Finding 1, corrective round 3 -- see layer.js's

@@ -104,7 +104,7 @@ export class GatewayImageryLayerAdapter extends ImageryLayerAdapter {
    *   inject a stub response for the ETag-mismatch proof
    *   (`gateway_imagery_layer_check.mjs`) without a real network call.
    */
-  constructor({ id = 'gateway-imagery', manifestSha256, origin = '', fetchImpl = defaultFetch } = {}) {
+  constructor({ id = 'gateway-imagery', manifestSha256, origin = '', fetchImpl = defaultFetch, tileBytes } = {}) {
     if (!manifestSha256) {
       throw new TypeError('GatewayImageryLayerAdapter: manifestSha256 is required');
     }
@@ -113,7 +113,12 @@ export class GatewayImageryLayerAdapter extends ImageryLayerAdapter {
     // below), and plan() below overwrites every url this template would have
     // produced with this adapter's own gateway address -- see this file's module
     // docstring, "plan(view) does NOT reimplement...".
-    super({ id, imageryUrl: '', loader: { load: NEVER_CALLED_LOADER } });
+    // `tileBytes` is forwarded, not defaulted here, so `ImageryLayerAdapter`'s own
+    // default (`IMAGERY_TILE_BYTES`) stays the single place that number lives: a
+    // caller streaming a tile set whose `tile_size` is not 256 declares the real
+    // per-tile cost (the manifest carries it), and this harness then checks that
+    // declaration against the length of every tile the gateway actually returns.
+    super({ id, imageryUrl: '', loader: { load: NEVER_CALLED_LOADER }, ...(tileBytes === undefined ? {} : { tileBytes }) });
     this._manifestSha256 = manifestSha256;
     this._origin = origin;
     this._fetch = fetchImpl;

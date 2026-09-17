@@ -35,10 +35,23 @@ export class ImageryLayerAdapter {
    *   or `web/js/layers_check.mjs`'s network-free stub in this task's headless
    *   harness, per design constraint f).
    */
-  constructor({ id = 'imagery', imageryUrl, loader } = {}) {
+  /**
+   * `tileBytes` (round 3, the ten-gigabyte proof) is the per-tile byte cost this
+   * adapter declares to `LayerManager`. It defaults to [`IMAGERY_TILE_BYTES`], the
+   * 256x256 RGBA estimate every existing caller and fixture assumes, so no existing
+   * call site moves. It is a constructor option because a tile set is not obliged to
+   * be 256x256: the tile sets `crates/av-jobs`' tiler produces carry their own
+   * `tile_size` in their manifest, and a 1024-pixel RGB8 PNG tile is 3147060 bytes,
+   * twelve times this default. A memory budget accounted in the wrong units is not a
+   * memory budget, so a caller that knows its tile set's real size declares it --
+   * and `web/js/layers_stream_check.mjs` goes further and checks the declared number
+   * against the length of every tile it actually receives.
+   */
+  constructor({ id = 'imagery', imageryUrl, loader, tileBytes = IMAGERY_TILE_BYTES } = {}) {
     this.id = id;
     this.imageryUrl = imageryUrl;
     this._loader = loader;
+    this.tileBytes = tileBytes;
   }
 
   /**
@@ -57,7 +70,7 @@ export class ImageryLayerAdapter {
         key: tileKey(tile),
         sseError: screenSpaceErrorPx(tile, cameraEcef, screenHeightPx, fovYRad),
         viewDistanceM: dist(cameraEcef, center),
-        byteCost: IMAGERY_TILE_BYTES,
+        byteCost: this.tileBytes,
         url: urlForTile(this.imageryUrl, tile),
         tile,
       };
