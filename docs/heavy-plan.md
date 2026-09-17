@@ -770,3 +770,238 @@ high threshold (questions 196(d)/205). Host state, not this round.
     collector has evicted `alpine:latest`, `av-edge-plugin:local` and `av-proposer:local`. Each
     skip is visible and named, but a suite that silently loses coverage to a disk-pressure
     collector between rounds is worth a standing decision.
+
+## Status (heavy manager, 2026-09-17) — round 3 — **PAUSED**
+
+**The round was paused by the user part-way through its verification phase.** H5 is
+delivered including the proof at scale, H3's two deferred halves (terrain and 3D Tiles
+tiling, the container executor) are delivered, and the `av-tiles` image and its
+docker-gated test are built and committed but **have not been observed green on this
+host** — three attempts were defeated by host state, recorded below rather than implied.
+H6 was not started. The end-of-round gates were not run: the last two commits are
+therefore unverified against the full workspace and the full Python suite.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `dfb5ce1` | H5a: `web/js/layers/`, the streaming-layer module — one interface over the globe's imagery and terrain loaders and the vendored 3DTilesRendererJS, a priority order by screen-space error and view distance, a memory budget declared in bytes, cancellation on a view move |
+| `fd9fc15` | H5b-1: `av-tile-fixture`, the committed tile-set generator; the viewer server's same-origin `/api/tiles/*` proxy with the gateway's authentication; `av-tiles`' admin counters surface |
+| `8d2146c` | H5b-2: frame time measured while a tile set streams from a real gateway; the priority queue made load-bearing; a starvation defect found and fixed |
+| `fd9778d` | The tiler streams to the sink (bounded memory), and `scripts/heavy/ten_gigabyte_proof.py`, the re-runnable measurement |
+| `3f86b52` | The terrain and 3D Tiles tilers, which round 2 left as typed refusals |
+| `41f0815` | The six Rust SBOMs regenerated for this round's workspace-manifest epoch move (question 220) |
+| `892e511` | The evidence bundle's hash re-recorded after that epoch move |
+| `9213fc8` | The streaming harness measures a real tile set, not a fixture-shaped one (three defects found while taking the scale measurement) |
+| `435e266` | The container executor, H3's last deferred half |
+| `dcb6265` | The owned port map: `av-tiles`' admin row, and the stale question 219 prose |
+| `d43d9b7` | The `av-tiles` gateway as a digest-recorded image, and its docker-gated proof (**test not yet observed green — see below**) |
+
+### The proof at scale
+
+Taken by the manager with no worker active, on this host, and **it was not a quiet
+window**: an unrelated Supabase stack and a k3s control plane run in the same Docker
+daemon, and the other track was building intermittently. Host: Mac14,6, 12 cores, 64 GB
+RAM, swap 6.85 GB of 8 GB in use throughout.
+
+| | |
+| --- | --- |
+| Tile-set manifest SHA-256 | `4d01ddd62d61e1891637f30cbb3d80b2e0ccc963af0b0ea2635225d26391fe27` |
+| Tiles | 10 922 (levels 0..6, tile size 1024, whole-globe plate-carrée) |
+| Stored bytes | **34 374 176 645** (34.4 GB), in a real MinIO by content hash |
+| Source raster SHA-256 | `c6c17eea3528f07368a380815ddb913c282f2dc6d3fe568637f294b060e88ffb` |
+| Generation wall clock | 393.2 s (≈ 87 MB/s) |
+| Generator peak RSS | **67 747 840 bytes** (64.6 MiB) — 34.4 GB of tiles through 65 MB of memory |
+| Verification | manifest re-fetched with an independent signed S3 GET, the stored total independently recomputed from it (34 374 176 645 = 34 374 176 645), host bind-mount usage cross-checked, tile 0/0/0 re-fetched and hash-verified |
+
+**Ten gigabytes exactly is not reachable on this scheme, and that is arithmetic, not a
+choice.** The PNG encoder writes RGB8, so a 1024 tile is 3 147 060 bytes; a level costs
+four times the one below it and halving the tile size quarters a tile, so every
+whole-pyramid total is 8.59 GB times a power of four. 8.59 GB is the largest shape below
+ten gigabytes and 34.4 GB the smallest full pyramid above it. A full pyramid is what the
+viewer needs — it refines from level 0 — so 34.4 GB is what was generated.
+
+Streamed through the gateway into the viewer, three runs, memory budget 200 000 000 bytes,
+frame budget 16.7 ms (one frame at 60 Hz):
+
+| run | max frame ms | max resident bytes | tiles | bytes streamed | ETag-verified | cancelled | evicted |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 3.82 | 179 382 420 | 57 | 179 382 420 | 57 | 12 | 0 |
+| 2 | 5.84 | 198 264 780 | 70 | 220 294 200 | 70 | 11 | 7 |
+| 3 | 3.48 | 198 264 780 | 70 | 220 294 200 | 70 | 12 | 7 |
+
+`everyFrameWithinBudget` true in all three; `budgetRespected` true; the soft-violation
+branch never taken; zero ETag mismatches; and the declared per-tile byte cost matched the
+real received length **exactly** on every tile (`byteCostMismatchCount` 0,
+`maxByteCostErrorBytes` 0), which is what makes the memory number a statement about real
+bytes rather than an estimate. Run 1's `evictedCount` of 0 is host-load variance and is
+reported rather than hidden.
+
+The 34.4 GB tile set was removed after the measurement (`--teardown`); `out/` and the
+host's labelled containers and volumes are clean.
+
+### The command that stands the stack up for the lead's browser drive
+
+Full, copy-pasteable, in `scripts/heavy/README.md`, verified end to end at a small shape
+with its real response headers pasted in. In outline, from the worktree root:
+
+```
+.venv/bin/python scripts/heavy/ten_gigabyte_proof.py --synthetic-source 2048x1024 \
+    --out-dir out/heavy-10g            # prints manifest_sha256 and leaves MinIO up
+# mint an RS256 token with the system openssl CLI (the exact four steps are in the README)
+target/release/av-tiles --oidc-issuer https://sso.test.example/ --oidc-audience av-tiles \
+    --oidc-public-key-path "$W/issuer_public.pem" --ladder UNCLASSIFIED,CUI,SECRET \
+    --key-prefix heavy-ten-gb-proof --store-endpoint http://127.0.0.1:<MINIO_PORT> \
+    --store-region us-east-1 --store-access-key-id <USER> --store-secret-access-key <PASS> \
+    --store-bucket av-heavy-ten-gigabyte-proof --store-path-style \
+    --group-clearance tile-readers=CUI --bind 127.0.0.1:18080 --admin-bind 127.0.0.1:18081 &
+.venv/bin/python -m altavista serve --host 127.0.0.1 --port 18090 \
+    --tiles-endpoint 127.0.0.1:18080 --tiles-token-path "$W/token.txt" &
+# then open http://127.0.0.1:18090/ ; teardown:
+.venv/bin/python scripts/heavy/ten_gigabyte_proof.py --teardown --out-dir out/heavy-10g
+```
+
+Measured through that stack against the 34.4 GB set: `GET /api/tiles/<manifest>/tiles/0/0/0`
+answered `200`, `content-length: 3147060`, `content-type: image/png`,
+`cache-control: public, max-age=31536000, immutable`, `etag:
+"3a1c61fd481ab77180c15b40149058f60ccc2feb4601bd615ce185247689caba"` — and `shasum -a 256`
+on the body reproduces that ETag exactly.
+
+### Defects found in review, and their root causes
+
+1. **The priority queue decided nothing** (H5a). `update()` computed a priority order and
+   then started a load for every wanted request, with no in-flight cap — a sorted list, not
+   a queue. Root cause: "queue" read as "ordered list". Fixed with a declared
+   `maxConcurrentLoads`, proved by showing both that the started set is the top-N and that a
+   named lower-priority request starts later once a slot frees.
+2. **A permanently-failing layer starved the queue** (H5b-2). `LayerManager` had no memory
+   of a failed load, so the next `update()` re-planned it, took a slot, failed, and repeated
+   forever. Root cause: `_onFailed` dropped the pending entry and recorded nothing. Measured
+   on the unfixed code with two tied-priority layers of ten requests each at a cap of six,
+   over thirty frames: the failing layer was attempted 180 times and the well-behaved layer
+   reached **0** of its 10 tiles. With a documented failure memory: 10 attempts, 10 of 10.
+   The first response had been to raise the harness's own cap until the symptom disappeared;
+   that was reverted.
+3. **The frame budget could not fail.** 250 ms was asserted against a measured 1.8 ms.
+   Tightened to 16.7 ms, one frame at 60 Hz, and earned over five consecutive real-stack
+   runs (1.7563, 1.7548, 1.9488, 1.7863, 1.8330).
+4. **The harness's documented dwell was never the one it used** (found while taking the
+   scale measurement). Each camera position was bounded by a 2000-tick ceiling alongside a
+   wall-clock dwell, with a comment claiming the ceiling could never be the binding bound. A
+   bare `setImmediate` costs about 0.01 ms here, so 2000 ticks is ~20 ms — shorter than one
+   real 40 ms tile round trip. Every position ended on the ceiling and a run against a large
+   tile set streamed three to five tiles whatever dwell it was given.
+5. **The per-tile byte cost was a fixed 262 144-byte estimate** whatever the tile set, so
+   the memory budget was accounted in the wrong units for any tile set that is not 256×256.
+   Now declared by the caller and checked against every tile actually received.
+6. **`tests/test_port_map.py` asserted `"admin": None` for `av-tiles` as a hardcoded
+   literal**, so the table and the test agreed with each other while both disagreed with
+   `crates/av-tiles/src/admin.rs`. A stale agreement is what that test exists to prevent.
+7. **The workspace clippy gate is blind to `av-tile-fixture`** (`required-features`), so the
+   round's gate gains `cargo clippy -p av-jobs --all-targets --features store-fixture`.
+8. **A pre-existing dead-code warning in `crates/av-command/src/audit.rs`**
+   (`from_line_sink` is never used outside tests) is invisible to `cargo clippy
+   --all-targets`, which compiles the tests, and appears only in a plain release build. Not
+   introduced this round and not this track's file; recorded for its owner.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **`LayerManager` supersedes `TileLoadScheduler` for anything routed through
+   `web/js/layers/`**, rather than reusing it: a tile *count* stops being a byte-budget proxy
+   once imagery, terrain and 3D Tiles share one budget. `globe_lod.js` is untouched and both
+   of its existing headless checks still pass byte for byte.
+2. **The viewer server holds the gateway credential; the browser never supplies one.** The
+   token is read from a configured file at request time and never taken from a query
+   parameter, header, cookie or body — a caller-supplied credential would let a browser
+   choose its own clearance.
+3. **`av-tiles` gains an admin surface** (`GET /admin/api/counters`, off by default),
+   reversing round 2's decision 15: a refusal counter must be readable from outside the
+   process for a refusal to be provable rather than asserted.
+4. **`av-store`, `tokio` and `bytes` are optional dependencies of `av-jobs` behind a
+   non-default `store-fixture` feature.** A `[[bin]]` cannot see `[dev-dependencies]`, so a
+   binary that talks to a real store forces a real dependency; gating it keeps the crate's
+   default graph exactly what it was and preserves round 2's decision 7 by construction.
+5. **Streaming is reached through a new `Executor::execute_streaming` with a default body
+   that delegates to `execute`**, not by changing `execute`'s signature, so every existing
+   executor and test is untouched. On that path `JobCompletion.outputs` carries only the
+   manifest, which itself lists every tile's key, hash and size.
+6. **A tile set's identity must not depend on how it was written**, the second form of
+   question 223's rule: the streaming and buffered paths produce a byte-identical manifest
+   and byte-identical tiles, asserted over two independent sinks.
+7. **The terrain payload is an explicit binary heightmap**, not a second image format, and
+   its heights are packed from the source raster's own R and G bytes — a disclosed shortcut:
+   this round gives terrain a layout, an encoding and a determinism proof, not a DEM reader.
+8. **`.pnts` over `.b3dm`** for 3D Tiles, because `.b3dm` content is a glTF binary and this
+   track would have had to write a second from-scratch geometry encoder.
+9. **`serde_json` enters `av-jobs` for `tileset.json` alone**, never for this crate's own
+   wire format. One line in `Cargo.lock`, no new package.
+10. **The container executor reuses the existing failure kinds** — no new
+    `JobFailureKind`, no proto wire change — and delivers inputs and outputs by bind mount
+    because a job's inputs and outputs are both plural and Colima supports no other host
+    path. The container never touches the object store.
+11. **The hardening list is declared twice (Python and Rust) and kept honest by a test that
+    parses the Python source at test time**, because production Rust cannot import a Python
+    list.
+12. **The ten-gigabyte tile set lives on the host filesystem through a bind mount, never in
+    a Docker volume**: the VM overlay has 10.8 GB free and Colima's image collector evicts
+    images once that disk crosses its threshold.
+13. **The scale shape is 34.4 GB, not "about ten"**, for the quadtree-quantisation reason
+    above.
+14. **788 anonymous Docker volumes holding 40.2 GB were NOT pruned.** They are the measured
+    reason the image collector keeps firing, but this daemon is shared with an unrelated
+    Supabase stack and none of them carries an `av.test` label, so the decision is a
+    human's.
+15. **`docs/heavy-plan.md`'s H6 was not started**, and is recorded as not started rather
+    than attempted badly.
+
+### What was in flight when the round paused
+
+`tests/test_tiles_container.py` — the docker-gated proof of the containerised gateway. The
+image is built and present (`sha256:e20f1c36b39d…`), its digest and both base digests are
+recorded in `services/tiles/IMAGE_DIGEST.md`, the test collects, and the three images it
+needs were re-pulled by recorded digest. It has not been observed green: the first attempt
+lost `av-tiles:local` to the image collector, the second lost `quay.io/minio/minio` to the
+same collector, and the third blocked for over twenty minutes on question 207's host-wide
+lock, held by the other track's `minio_store` test in `/Users/probe/code/AltaVista-edge`.
+
+### What remains
+
+1. Run `tests/test_tiles_container.py` alone, with the host quiet, and record the result.
+2. Run the round's gates, which were not run: `cargo test -p av-jobs -p av-tiles -p av-store
+   -p av-label`, `cargo test -p av-jobs --features store-fixture`, `cargo test --workspace
+   --exclude av-kernel --no-fail-fast`, `cargo clippy --workspace --all-targets -- -D
+   warnings`, `cargo clippy -p av-jobs --all-targets --features store-fixture -- -D
+   warnings`, `cargo deny check`, `.venv/bin/python -m pytest -q -rs`, `buf lint proto`, and
+   `buf breaking proto` against develop's tree. The round's own baselines, measured before
+   any work: **1269 passed / 0 failed / 3 ignored** on the workspace gate, clippy clean,
+   `cargo deny` ok with the six accepted spoore wildcards, and **761 passed / 4 failed / 18
+   skipped / 4 errors** on the full Python suite — all eight non-passing pre-existing host
+   artefacts (cold Rust build timeouts, and `rust:1.90-bookworm`,
+   `altavista-cfs-lockstep:local`, `av-edge-plugin:local` and `av-proposer:local` evicted by
+   the image collector; the first of those was restored by re-pulling it by digest).
+3. H6 (`web/js/entities/`): covariance ellipsoids and keep-out volumes, glTF asset models
+   with attitude, and the RIC jitter test extended to a ten-metre RPO model.
+4. The terrain layer in the viewer is still a typed, named refusal
+   (`TerrainLoaderNotImplementedError`) — the terrain tiler now exists to feed it.
+5. `web/js/globe.js` and `web/js/tiles_layer.js` still drive `TileLoadScheduler` directly;
+   only the gateway-backed imagery layer goes through `web/js/layers/` today.
+6. The generated 3D Tiles tileset is proved against the spec by independent Python
+   re-derivation, not by loading it through the vendored 3DTilesRendererJS.
+
+### Open items for the lead
+
+1. **788 anonymous Docker volumes, 40.21 GB, 40.08 GB reclaimable**, on a VM with 10.8 GB
+   free. This is the measured cause of the image evictions that cost this round three
+   docker-gated attempts and cost round 2 six skips. `docker volume prune` would reclaim it
+   but the daemon is shared with an unrelated Supabase stack; a human should decide.
+2. **Cross-track docker contention is now costing results, not just time.** The other
+   track's `minio_store` test held the host-wide lock for over twenty minutes while this
+   track's last proof waited behind it. Question 207's serialisation needs a scheduler, not
+   a convention.
+3. **`crates/av-command/src/audit.rs::from_line_sink` is dead outside tests** and the
+   warning is invisible to `cargo clippy --all-targets`. One line, another team's file.
+4. **The round's gates are unrun**, so `dcb6265` and `d43d9b7` are unverified against the
+   full workspace and the full Python suite.
+5. **`docs/compliance/` still owes a control-matrix row** for `av-store`'s and
+   `av-catalog`'s hand-rolled protocol clients (round 2's open item 8), and now for
+   `av-jobs`' container executor and `av-tiles`' image.
