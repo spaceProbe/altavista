@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6
+f06f95873387176faca4b7d6354ca4c7585b1987b7254f23d2bf157409d5bfb9
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
@@ -51,12 +51,18 @@ regenerates the bundle from the current tree and asserts its `bundle_sha256` equ
 number, parsed out of this file for real -- so this number is load-bearing, not decorative: if it
 ever drifts from what the current tree actually regenerates, CI fails until this file is updated.
 
-This number moved from the commit-1 value (`4d55fe50888b...`) because of D4b (commit 2, this
-task's live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new top-level
-`secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
-committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content --
-exactly the "the hash moves when the EVIDENCE moves" rule this section states below, not a
-regression of the round-3 `git_commit` fix (see "What the hash depends on").
+This number moved from `19992e76e393...` (the D4b commit-2 value) because the native-dynamics
+track added the `crates/av-orbital` workspace member, which moved `RUST_EPOCH_PATHS` and so all
+six Rust SBOM epochs (question 220); regenerating those rewrote `docs/compliance/sbom/SHA256SUMS`,
+whose ten hashes the bundle carries in `sbom_hashes`. That is evidence content moving, exactly the
+rule this section states below -- a new crate in the workspace is a real change to what the Rust
+SBOMs describe -- not a regression of the round-3 `git_commit` fix (see "What the hash depends
+on"). Regenerated with the documented command, nothing edited by hand but this recorded number.
+
+`19992e76e393...` in turn moved from the commit-1 value (`4d55fe50888b...`) because of D4b
+(commit 2, the live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new
+top-level `secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
+committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content.
 
 ## What the hash depends on
 
