@@ -1,0 +1,100 @@
+[package]
+name = "av-tiles"
+publish = false
+description = "H4 (docs/heavy-plan.md, round 2, question 216): the tile gateway -- serves tiles from av-store by manifest hash and tile address, enforcing labels per layer and per request through the shared av_command::oidc verifier and av_label::ClearanceLadder, with every refusal typed and counted (ADR-004)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1::pb::{TileSetManifest, TileEntry, Label, AssetRef, Principal} -- the shared
+# prost build (av_cdm::pb), never a second, independently-compiled copy of a wire type
+# av-cdm already compiles. Mirrors every other tier's (av-store, av-catalog, av-gateway)
+# identical av-cdm dependency comment.
+av-cdm = { path = "../av-cdm" }
+# Question 218: the one shared home for the clearance-ladder convention -- this crate's own
+# clearance derivation (a verified token's groups -> a marking, via GroupClearanceMap, P0 of
+# this round) and its label enforcement (ClearanceLadder::classify, per layer and per
+# request -- see src/refusal.rs's own module doc) both reuse it directly, never a second,
+# independently-typed copy. This is exactly the crate question 218 was extracted for:
+# av-gateway already had GroupClearanceMap; this crate needs the identical mapping, so it
+# moved to av-label instead of being copied a second time (P0 of this round).
+av-label = { path = "../av-label" }
+# Question 216(f): TileSetManifest/TileEntry/GeoBbox/TileSetKind live in this track's own
+# proto file (heavy.proto), compiled into av-cdm's own generated module -- not a second,
+# crate-local prost build. See av-cdm's dependency comment above.
+prost.workspace = true
+thiserror.workspace = true
+# ADR-004's crypto rule: SHA-256 only, the system OpenSSL only. This crate recomputes
+# SHA-256 over fetched manifest and tile bytes (openssl::sha::sha256) to verify them against
+# the requested/recorded hash before ever returning a byte -- never `sha2`, never `ring`.
+openssl = "0.10"
+# This crate's own HTTP surface is the plain `tokio::net::TcpListener` + manual
+# request-line/header parsing pattern `crates/av-command/src/admin.rs` already establishes
+# for this workspace (see that module's own doc: "no axum/hyper direct dependency ... even
+# less reason here"). "net"/"io-util" for the listener and manual header parsing;
+# "rt-multi-thread"/"macros" for `#[tokio::main]`/`#[tokio::test]`; "signal" for the shipped
+# binary's graceful shutdown, mirroring crates/av-gateway's identical feature set for the
+# identical reason. No "time": every clock reading this crate needs is injected
+# (`now_tai_ns: i64`, the same rule `av_command::oidc::verify` itself follows -- clocks
+# injected, never slept on), so no test here needs `tokio::time` for anything.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "signal"] }
+
+# av-command: this crate's own `crates/av-gateway/src/auth.rs` module doc already establishes
+# the precedent this crate follows verbatim -- `av_command::oidc::verify` is the ONE shared
+# OIDC verifier in this workspace (never a second copy of JWS/claims parsing), and
+# `av_command::counters::{Counted, Counters}` is the ONE shared counting primitive (ADR-004:
+# "everything rejected is counted", one type, not ad hoc per-module counters). av-gateway
+# already depends on av-command for exactly these two things, so this is not a new pattern
+# this crate invents -- it is the same one every authenticated read-path service in this
+# workspace already uses.
+av-command = { path = "../av-command" }
+# H1's own store tier: `av_store::StoreClient`/`av_store::object_key` -- this crate's real
+# `ObjectSource` adapter (src/source.rs) is a thin, small wrapper over it (the trait seam
+# itself, mirroring crates/av-jobs::runner::ObjectSource, is what makes the rest of this
+# crate testable without a container -- see src/source.rs's own module doc).
+av-store = { path = "../av-store" }
+
+# Deliberately NOT a dependency:
+#
+# - `av-gateway`: H4's own milestone text calls this crate "the tile gateway" but it is a
+#   SIBLING read-path service to av-gateway, not something layered under it -- av-gateway
+#   serves product/catalog data over gRPC+MCP+admin; av-tiles serves tile bytes over plain
+#   HTTP by manifest hash and tile address. Neither has any reason to call into the other's
+#   API, and depending on av-gateway here would pull its entire gRPC/MCP/propose-flow surface
+#   into a crate that needs none of it. Both independently depend on av-command/av-label/
+#   av-store, which is the correct shared-foundation shape, not a layering relationship.
+# - `av-jobs`: a tile gateway READS a manifest and its tiles off the wire; it does not run
+#   jobs, does not know what a `JobSpec`/`Executor`/`Runner` is, and has no reason to depend
+#   on the crate that produces the very objects it reads. `crates/av-jobs::tiler` WRITES
+#   `TileSetManifest`/`TileEntry` (via `av-cdm`'s own generated types, which this crate reads
+#   right back out of the same `av-cdm::pb` module) -- the two crates share a wire format
+#   through `av-cdm`, never a Rust-level dependency edge between them.
+# - `tonic`/`axum`/`hyper` (a framework): this crate's own HTTP surface is two fixed routes
+#   over the plain `tokio::net::TcpListener` pattern `crates/av-command/src/admin.rs`
+#   establishes -- see that module's own doc for why a framework buys nothing here.
+# - `sha2`/`ring`/`hmac` (ADR-004): SHA-256 is `openssl::sha::sha256` alone, exactly like
+#   every other crate on this track.
+# - `serde`/`serde_json` in `[dependencies]`: this crate's wire format is `prost`-encoded
+#   protobuf (`TileSetManifest`) in, raw tile bytes out -- no JSON anywhere on this crate's
+#   own request path. (`serde_json` DOES appear below, but only in `[dev-dependencies]`, to
+#   build test claims for `TestIssuer::mint` -- never reachable from production code.)
+# - `av-catalog`: a tile gateway resolves a manifest hash to tiles; it has no reason to query
+#   the catalog's extent/time/media-type index at all.
+
+[dev-dependencies]
+# This crate's own tests mint real, signed tokens through `av_command::test_support::
+# TestIssuer` -- the standard, already-reviewed way this workspace builds one for a test
+# (`crates/av-gateway/Cargo.toml`'s identical comment on its own dev-dependency block),
+# gated behind `features = ["test-support"]` so `src/test_support.rs` is compiled for
+# `cargo test` only, never linked into this crate's own production binary.
+av-command = { path = "../av-command", features = ["test-support"] }
+# This crate's own tests build claims JSON to mint through `TestIssuer::mint` (its own
+# signature: `fn mint(&self, claims: &serde_json::Value)`) -- already resolved in this
+# workspace's Cargo.lock (rule 2: no new registry crate), and dev-only: no production code
+# path in this crate (`src/**`, excluding `#[cfg(test)]`) ever touches JSON at all -- see
+# this file's own "Deliberately NOT a dependency" block above.
+serde_json.workspace = true
+

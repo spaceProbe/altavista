@@ -1343,7 +1343,11 @@ different moments under different loads, so container overhead is *not* cleanly 
    it only worked because neither was running. Moved to `50063`/`50064` (verified against the parsed
    map, not eyeballed) and guarded by `tests/test_d5_placement_ports.py`, which also asserts
    positively that `edge-a` *is* `av-ingest`'s owned row so the placement cannot drift off the
-   default it exists to demonstrate.
+   default it exists to demonstrate. (Later note, aiplane merge: the heavy track's `av-proposer`
+   grew a real owned default at exactly `50063`, so `tests/test_d5_placement_ports.py` caught the
+   same class of collision again -- `edge-b`/`edge-c` moved a second time, to `50065`/`50165` and
+   `50066`/`50166`; see `scripts/kit/d5_three_placements.py`'s own module doc for the current
+   values.)
 8. **D5 runs `--network host`, and no labelled docker network is created.** Measured, not chosen:
    `av-ingest-server` refuses a non-loopback bind, and Docker's `-p` publishing does not reach a
    loopback-only bind inside the container. `--network host` was measured to work through Colima's

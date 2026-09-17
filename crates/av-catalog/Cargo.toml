@@ -26,6 +26,9 @@ repository.workspace = true
 # speaks the wire protocol itself: see `src/lib.rs`'s crate doc for the full "why hand-rolled"
 # reasoning and `src/scram.rs`'s module doc for the OpenSSL primitives SCRAM-SHA-256 needs.
 av-cdm = { path = "../av-cdm" }
+# Question 218: the shared clearance-ladder crate -- crate::labels is now a thin adapter
+# over av_label::ClearanceLadder (an in-workspace path dependency, not a registry crate).
+av-label = { path = "../av-label" }
 # `av_cdm::pb` generated `altavista.v1` wire types -- NOT referenced by this round's transport
 # code (protocol.rs/scram.rs/client.rs move only PostgreSQL wire bytes and this crate's own
 # `Param`/`Row` text-format types, never an `altavista.v1` message). Declared now, not added

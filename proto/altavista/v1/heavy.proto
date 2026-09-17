@@ -27,12 +27,19 @@ syntax = "proto3";
 //     message, not a second time-range shape -- `crates/av-catalog/src/query.rs::TimeRange`
 //     is that crate's own internal, half-open-interval-typed representation of the identical
 //     wire concept, converted at the boundary, never duplicated on the wire.
-//   - H3/H4 (job runner/tiler, tile gateway) will add their own message(s) to this file when
-//     that work starts -- deliberately NOT speculated here; this round adds only what H2c
-//     itself needs.
+//   - H3a (this task, docs/heavy-plan.md H3 first half): `JobExecutorKind`, `JobFailureKind`,
+//     `JobSpec`, `JobFailure`, `JobCompletion`, `JobLogRecord` below -- the durable job queue's
+//     own wire shapes (`crates/av-jobs`'s hash-chained log; one `JobLogRecord` per record, a
+//     `oneof submitted`/`completed`). `JobSpec.inputs`/`JobCompletion.outputs` reuse
+//     `entity.proto`'s own `AssetRef` for every input/output asset reference, never a second,
+//     parallel asset shape -- the same reuse discipline H2c's own `CatalogRecord` already
+//     established in this file. H3b (the tiler) and H4 (the tile gateway) will add their own
+//     message(s) to this file when that work starts -- deliberately NOT speculated here; this
+//     round adds only what H3a itself needs.
 package altavista.v1;
 
 import "altavista/v1/entity.proto";
+import "altavista/v1/envelope.proto";
 
 // A geodetic bounding box, WGS84 degrees, min/max on each axis -- the exact semantics
 // `crates/av-catalog/src/query.rs::GeoBbox`'s own module doc states for the bbox-query rule
@@ -103,4 +110,298 @@ message CatalogRecord {
   // (mirrors that field's own `Option<String>` -- `None` renders as the empty string on this
   // proto3 field, exactly like `job_id` above).
   string footprint_wkt = 5;
+}
+
+// H3a (`docs/heavy-plan.md`): the job runner's own wire shapes. `crates/av-jobs` is this
+// track's durable, hash-chained job queue plus the runner that drains it -- see that crate's
+// own module doc for why the queue is a file-backed hash chain (the `av-ingest`/`av-edge`
+// pattern, reimplemented rather than depended on) rather than a broker this round.
+
+// What kind of executor a `JobSpec.executor` names -- how `crates/av-jobs::runner::Runner`
+// actually runs the job, once every input has been fetched and hash-verified. See
+// `JobSpec.executor`'s own doc comment.
+enum JobExecutorKind {
+  JOB_EXECUTOR_KIND_UNSPECIFIED = 0;
+  // A local subprocess, argv in `JobSpec.command` -- `crates/av-jobs::runner::ProcessExecutor`.
+  JOB_EXECUTOR_KIND_PROCESS = 1;
+  // A labelled container, `JobSpec.container_image`/`container_image_digest`. Deferred this
+  // round: `crates/av-jobs::runner::Runner::run_one` refuses this kind with a typed, recorded
+  // `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`, never a silent skip -- see that crate's own module
+  // doc.
+  JOB_EXECUTOR_KIND_CONTAINER = 2;
+}
+
+// Why `crates/av-jobs::runner::Runner::run_one` produced a `JobCompletion` with `ok == false`.
+// Every variant names the single step of the run that refused -- see `JobCompletion.failure`
+// and `Runner::run_one`'s own doc for the fixed order these are checked in (unsupported kind,
+// then label, then each input, then the executor, then each output).
+enum JobFailureKind {
+  JOB_FAILURE_KIND_UNSPECIFIED = 0;
+  // No `AssetRef` named by `JobSpec.inputs` could be fetched from the configured
+  // `ObjectSource`.
+  JOB_FAILURE_KIND_INPUT_MISSING = 1;
+  // An input was fetched, but its recomputed SHA-256 does not match the `AssetRef`'s own
+  // `sha256` -- never handed to the executor (`Runner::run_one`'s own doc, the input-fetch
+  // step).
+  JOB_FAILURE_KIND_INPUT_HASH_MISMATCH = 2;
+  // `JobSpec.executor` names an executor kind this round's `Runner` has no implementation for
+  // (`JOB_EXECUTOR_KIND_CONTAINER` only, this round).
+  JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE = 3;
+  // `JOB_EXECUTOR_KIND_PROCESS`'s own command could not even be spawned (e.g. the executable
+  // named by `JobSpec.command[0]` does not exist).
+  JOB_FAILURE_KIND_EXECUTOR_START_FAILED = 4;
+  // `JOB_EXECUTOR_KIND_PROCESS`'s own command exited with a non-zero status --
+  // `JobFailure.exit_code` names it.
+  JOB_FAILURE_KIND_NONZERO_EXIT = 5;
+  // An `Executor`-produced output was refused by the configured `ObjectSink` -- including the
+  // "more than one manifest output" and "a manifest output on a job kind that declares none"
+  // refusals (`crates/av-jobs::runner::Runner::run_one`'s own doc, the output-sink step).
+  JOB_FAILURE_KIND_OUTPUT_REJECTED = 6;
+  // `JobSpec.label` is not on the configured `av_label::ClearanceLadder`.
+  JOB_FAILURE_KIND_LABEL_REFUSED = 7;
+  // `JobSpec.kind` names no registered `Executor`.
+  JOB_FAILURE_KIND_UNSUPPORTED_JOB_KIND = 8;
+  // H3b (`crates/av-jobs::tiler::TilerExecutor`): `JobSpec.parameters` failed this job
+  // kind's own typed validation -- an unparseable `min_level`/`max_level`, `min_level >
+  // max_level`, a `max_level` above the documented ceiling, a `tile_size` that is not a
+  // bounded power of two, or an `output` value this round recognises as neither
+  // implemented nor a documented future kind (see `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`
+  // for the latter).
+  JOB_FAILURE_KIND_INVALID_PARAMETERS = 9;
+  // H3b: an input was fetched and hash-verified (so this is never
+  // `JOB_FAILURE_KIND_INPUT_HASH_MISMATCH`'s job), but its *content* is invalid for this
+  // job kind -- the wrong number of inputs, or a raster that does not decode per
+  // `crates/av-jobs::raster`'s own typed `RasterError`.
+  JOB_FAILURE_KIND_INVALID_INPUT = 10;
+}
+
+// One job as submitted to the durable queue (`crates/av-jobs::queue::JobQueue::submit`) -- the
+// caller's own request, recorded byte for byte on the log before the runner ever sees it.
+message JobSpec {
+  // The queue's own identity for this job -- caller-supplied, stable, and unique for the life
+  // of the queue (`crates/av-jobs::queue::JobQueue::submit` typed-refuses a second `JobSpec`
+  // submitted under a `job_id` already on the log, rather than silently accepting a second
+  // entry).
+  string job_id = 1;
+  // What `crates/av-jobs::runner::Runner` dispatches on -- looked up in the runner's own
+  // `kind -> Executor` registry. Not an enum: this track's own tiler (`"tiler"`, H3b) is the
+  // only kind this round names, and a future job kind is additive data, not a wire change.
+  string kind = 2;
+  // Every input this job reads, by hash -- `entity.proto`'s own `AssetRef`, never a second,
+  // parallel asset shape. `crates/av-jobs::runner::Runner::run_one` fetches each one through
+  // the configured `ObjectSource` and hash-verifies it (`JOB_FAILURE_KIND_INPUT_HASH_MISMATCH`
+  // on a mismatch) before ever handing its bytes to an `Executor`.
+  repeated AssetRef inputs = 3;
+  // Job-kind-specific parameters, e.g. the tiler's zoom range or output format. Generated as a
+  // `BTreeMap` (`crates/av-cdm/build.rs`'s `.btree_map(["."])`), so this field's own encoding
+  // is a deterministic function of its key/value pairs regardless of insertion order -- the
+  // property `JobCompletion.spec_sha256`'s whole design rests on (a `HashMap`-backed map would
+  // make the identical logical `JobSpec` hash differently run to run, which would make
+  // `spec_sha256` useless as a record of "which spec produced this completion").
+  map<string, string> parameters = 4;
+  // The label every output this job produces inherits. Checked against the configured
+  // `av_label::ClearanceLadder` before the job ever runs (`JOB_FAILURE_KIND_LABEL_REFUSED` on
+  // a label not on that ladder).
+  Label label = 5;
+  // When this job was submitted, TAI nanoseconds -- from the submitter's own injected
+  // `crates/av-jobs::clock::Clock`, never read from the system clock inside library code.
+  int64 requested_tai_ns = 6;
+  // How `crates/av-jobs::runner::Runner` runs this job -- see `JobExecutorKind`'s own doc.
+  JobExecutorKind executor = 7;
+  // `JOB_EXECUTOR_KIND_PROCESS`: the argv `crates/av-jobs::runner::ProcessExecutor` spawns,
+  // `command[0]` the executable. Empty for an in-process job kind (none registered this
+  // round).
+  repeated string command = 8;
+  // `JOB_EXECUTOR_KIND_CONTAINER` only: the image reference. Unused this round -- see
+  // `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`.
+  string container_image = 9;
+  // `JOB_EXECUTOR_KIND_CONTAINER` only: the recorded digest of `container_image` (question
+  // 212's "a test trusts an image only after comparing it to its recorded digest" rule,
+  // carried onto this field for the round that implements the container executor). Unused
+  // this round.
+  string container_image_digest = 10;
+}
+
+// Why `crates/av-jobs::runner::Runner::run_one` produced `ok == false` -- set iff
+// `JobCompletion.ok` is false (`JobCompletion.failure`'s own doc).
+message JobFailure {
+  JobFailureKind kind = 1;
+  // Human-readable detail: which input, which command's exit code, which output was rejected
+  // and why.
+  string detail = 2;
+  // The failed process's exit code. Meaningful only when `kind ==
+  // JOB_FAILURE_KIND_NONZERO_EXIT`; 0 otherwise (proto3's own `int32` default, not a sentinel
+  // this message invents).
+  int32 exit_code = 3;
+}
+
+// `crates/av-jobs::runner::Runner::run_one`'s own result, appended to the log
+// (`crates/av-jobs::queue::JobQueue::complete`) whether the job succeeded or not -- `run_one`
+// itself never returns an `Err`; every failure path becomes a `JobCompletion` with
+// `ok == false` and `failure` set, because a job that fails must leave a durable record, not
+// an error a caller might drop (`crates/av-jobs`'s own crate doc explains why).
+message JobCompletion {
+  // The `JobSpec.job_id` this completes.
+  string job_id = 1;
+  // Hex SHA-256 of the submitted `JobSpec`'s own `prost::Message::encode_to_vec` --
+  // recomputed by the runner itself from the `JobSpec` it actually ran, never carried forward
+  // from whatever the submitter claimed (`crates/av-jobs::runner::Runner::run_one`'s own doc).
+  string spec_sha256 = 2;
+  // The inputs as actually used, by hash, in `JobSpec.inputs`' own order -- hex SHA-256, one
+  // per input, recorded once `JOB_FAILURE_KIND_INPUT_HASH_MISMATCH`'s own verification has
+  // passed for that input.
+  repeated string input_sha256 = 3;
+  // Every asset this job produced, as stored by the configured `ObjectSink`.
+  repeated AssetRef outputs = 4;
+  // H3b's tile-set identity: the `sha256` of whichever `outputs` entry has `manifest == true`
+  // (`crates/av-jobs::runner::JobOutput::manifest`) -- empty when this job's kind has no
+  // manifest output at all. Exactly one output may be the manifest;
+  // `crates/av-jobs::runner::Runner::run_one` refuses (`JOB_FAILURE_KIND_OUTPUT_REJECTED`) a
+  // job that tries to produce more than one, or a manifest output on a job kind that declares
+  // none.
+  string manifest_sha256 = 5;
+  // When the runner began executing this job, TAI nanoseconds, from the runner's own injected
+  // `Clock`.
+  int64 started_tai_ns = 6;
+  // When the runner finished (successfully or not), TAI nanoseconds, from the same `Clock`.
+  int64 finished_tai_ns = 7;
+  bool ok = 8;
+  // Set iff `ok == false` -- see this message's own doc.
+  JobFailure failure = 9;
+}
+
+// One record of `crates/av-jobs::log::JobLog`'s durable, hash-chained queue file -- the
+// payload that crate's record framing hashes and appends (`crates/av-jobs/src/log.rs`'s own
+// module doc has the exact on-disk byte layout; this message is only ever the framed
+// payload, never the frame's own length/hash header).
+message JobLogRecord {
+  oneof event {
+    // Appended by `crates/av-jobs::queue::JobQueue::submit`.
+    JobSpec submitted = 1;
+    // Appended by `crates/av-jobs::queue::JobQueue::complete`.
+    JobCompletion completed = 2;
+  }
+}
+
+// H3b (`docs/heavy-plan.md` H3, second half; task 3b): the tiler's own wire shapes.
+// `crates/av-jobs::tiler::TilerExecutor` is the `JobExecutorKind`-independent `Executor`
+// (`kind == "tiler"`) that turns one raw raster/point-cloud input into a tile set matching
+// `web/js/globe_lod.js`'s geographic (EPSG:4326, plate-carree) tiling scheme --
+// `crates/av-jobs::scheme` is that scheme's Rust twin, pinned against that file by test.
+
+// Which family of tile a `TileSetManifest` describes -- `crates/av-jobs::tiler`'s
+// `JobSpec.parameters["output"]` (`"imagery"`, `"terrain"`, `"tiles3d"`) decides this,
+// never a caller-suppliable enum field on the request itself (the tiler's own typed
+// refusal covers an unknown `output` string; this enum only ever appears on the *result*).
+enum TileSetKind {
+  TILE_SET_KIND_UNSPECIFIED = 0;
+  // `image/png` tiles, `crates/av-jobs::png`'s hand-written encoder, RGB8.
+  TILE_SET_KIND_IMAGERY = 1;
+  // `application/vnd.altavista.terrain-tile+raw` tiles (P2) -- `crates/av-jobs::tiler`'s
+  // own module doc has the exact on-disk layout.
+  TILE_SET_KIND_TERRAIN = 2;
+  // 3D Tiles 1.0 (P3): a `tileset.json` root plus `.pnts` point-cloud tiles.
+  TILE_SET_KIND_TILES3D = 3;
+}
+
+// One tile in a `TileSetManifest.tiles` list -- `(level, x, y)` addressed exactly the way
+// `crates/av-jobs::scheme::Tile` and `web/js/globe_lod.js`'s `tileKey`/`compareTiles`
+// address a tile; this message never invents a second addressing scheme.
+message TileEntry {
+  uint32 level = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+  // Hex SHA-256 of this tile's own encoded bytes (`openssl::sha::sha256`, ADR-004) -- the
+  // tile object's own content hash, identical to what the configured `ObjectSink` derives
+  // when it stores those same bytes (`crates/av-jobs::runner::MemoryObjectSink::put`'s own
+  // `sha256_hex` -- see `TileSetManifest`'s own doc for why the tiler computes this itself
+  // rather than reading it back off the `AssetRef` the sink returns).
+  string sha256 = 4;
+  uint64 size_bytes = 5;
+  // **Always empty, deliberately** -- reserved, not removed (this file's own additive-only
+  // rule once a round has shipped). The tiler runs BEFORE the `ObjectSink` that stores its
+  // outputs and cannot know that sink's URI scheme, so the first implementation of this
+  // field hard-coded `"memory://"` and was simply wrong against a real object store
+  // (`crates/av-jobs/tests/store_tiler.rs` measured exactly that: every tile named
+  // `memory://tiles/...` while the object really lived at `s3://<bucket>/tiles/...`).
+  // Filling it correctly would be worse, not better: a fully-qualified URI names a bucket
+  // and an endpoint, so the manifest's own encoded bytes -- and therefore the tile set's
+  // identity, which is the SHA-256 of exactly those bytes -- would change depending on
+  // which store happened to hold the tiles. A tile set that has two identities because it
+  // was copied between buckets is not content-addressed at all. `object_key` below carries
+  // the part that is genuinely backend-independent; a consumer joins it with its own
+  // bucket and endpoint.
+  string uri = 6;
+  string media_type = 7;
+  // The backend-independent, content-addressed key this tile is stored under:
+  // `"<prefix>/<hex[0..2]>/<hex[2..4]>/<hex>"`, exactly the layout
+  // `av_store::keys::object_key` produces, via the one shared helper
+  // `crates/av-jobs::runner::content_addressed_key` that both `MemoryObjectSink` and
+  // `TilerExecutor` call -- never a second, independently-written key scheme
+  // (`crates/av-jobs/tests/store_tiler.rs` asserts the two derive the identical key for a
+  // real hash, so the mirror cannot drift silently). No scheme, no bucket, no endpoint: a
+  // reader resolves a tile by joining this with whatever store it is reading from, which is
+  // what keeps `TileSetManifest`'s own hash the same for the same tiles no matter where
+  // they live. `TileSetManifest.object_key_prefix` names the `<prefix>` these were built
+  // under.
+  string object_key = 8;
+}
+
+// H3b's tile-set identity, `crates/av-jobs::tiler::TilerExecutor`'s one manifest output
+// (`JobOutput::manifest == true`) -- `JobCompletion.manifest_sha256` is this message's own
+// SHA-256 once the configured `ObjectSink` stores its encoded bytes.
+//
+// **This manifest's own SHA-256 is the tile set's identity.** What makes that hash
+// reproducible run to run, over the same input raster and the same `JobSpec.parameters`:
+//   - `tiles` is always built and emitted in `(level, x, y)` ascending order (`crates/
+//     av-jobs::scheme::tiles_covering`'s own documented order, walked level by level,
+//     never a `HashMap`/`HashSet` iteration order that could vary run to run).
+//   - `parameters` mirrors `JobSpec.parameters` verbatim, and (like every `map<..>` field
+//     in this package) is generated as a `BTreeMap` (`crates/av-cdm/build.rs`'s
+//     `.btree_map(["."])`), so its own wire encoding is a deterministic function of its
+//     key/value pairs regardless of insertion order.
+//   - every `TileEntry.sha256` is a content hash of bytes `crates/av-jobs::tiler` produced
+//     deterministically (nearest-neighbour resampling with no filter-kernel ambiguity, a
+//     PNG encoder with no compressor entropy -- see that module's own doc).
+//
+// **The ordering constraint this creates, and how it is resolved:** this manifest must
+// name each tile's `uri` and `sha256`, but the configured `ObjectSink` is what actually
+// assigns a stored object's `uri`, and `crates/av-jobs::runner::Runner::run_one` only calls
+// the sink *after* `Executor::execute` has already returned every `JobOutput`. Rather than
+// have the manifest carry placeholder URIs the executor cannot know yet,
+// `crates/av-jobs::tiler::TilerExecutor` computes each tile's `sha256` itself
+// (`openssl::sha::sha256` of the encoded tile bytes -- the identical content hash the sink
+// will separately derive from the same bytes) and its `uri` through the same
+// `content_addressed_key` helper `MemoryObjectSink::put` calls, **configured with the same
+// `prefix` string** -- whoever wires up a `Runner` (production code or a test) is
+// responsible for constructing `TilerExecutor` and the `ObjectSink` with matching prefixes,
+// exactly the way a job kind's registration and its executor implementation must already
+// agree out of band. This is an honest, visible coupling (documented here and in
+// `crates/av-jobs::tiler`'s own module doc), not a second, independently-computed key
+// scheme -- the two call sites share one function.
+message TileSetManifest {
+  TileSetKind kind = 1;
+  // `crates/av-jobs::scheme::SCHEME_ID`.
+  string scheme = 2;
+  uint32 min_level = 3;
+  uint32 max_level = 4;
+  uint32 tile_size = 5;
+  GeoBbox bounds = 6;
+  // `(level, x, y)` ascending, always -- see this message's own doc.
+  repeated TileEntry tiles = 7;
+  // The `JobSpec.inputs`' own hex SHA-256, in that same order -- this manifest's own record
+  // of exactly which input bytes it was built from.
+  repeated string source_sha256 = 8;
+  // `JobSpec.parameters`, verbatim -- a `BTreeMap` (see this message's own doc).
+  map<string, string> parameters = 9;
+  // TILES3D only: the `tileset.json` entry's own `uri` (P3). Empty for every other `kind`.
+  string root_uri = 10;
+  string job_id = 11;
+  // The `<prefix>` every `TileEntry.object_key` above was built under, so this manifest is
+  // self-describing: a reader that has the manifest has everything it needs to turn a tile
+  // address into a key without being told the tiler's configuration out of band. Part of
+  // the hashed bytes on purpose -- two tile sets of the identical tiles laid out under
+  // different key prefixes are genuinely different tile sets to a reader, and should not
+  // share an identity.
+  string object_key_prefix = 12;
 }

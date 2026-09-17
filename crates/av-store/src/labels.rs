@@ -1,69 +1,64 @@
-//! The clearance-ladder convention -- rank = index into a configured, deployment-ordered
-//! list of markings, and a marking absent from the ladder is its own refusal, never a
-//! default rank -- applied to this crate's own comparison: a reading principal's claimed
-//! clearance against the object's own stored [`Label`].
+//! The clearance-ladder convention, adapted to this crate's own comparison: a reading
+//! principal's claimed clearance against the object's own stored [`Label`].
 //!
-//! **This is the THIRD copy of this convention in the workspace**, not the first:
-//! `crates/av-edge/src/policy.rs::ProducerPolicy` originated it (a producer's declared
-//! clearance against its own ladder), and `crates/av-gateway/src/labels.rs::ClearanceLadder`
-//! is the second, near-identical copy (a caller's clearance against a run product's label --
-//! this module's own shape is closest to that one, including the name). This crate cannot
-//! depend on either existing copy to avoid a third reimplementation: `av-edge` is off-limits
-//! to this track entirely (`docs/heavy-plan.md`'s "Isolation" section: "It does not edit ...
-//! the edge crates", and this crate must not even *depend on* one it cannot edit, since a
-//! future edge-side change to `ProducerPolicy` would then silently reach into this store's
-//! own read authorization with no review path this track owns); depending on `av-gateway`
-//! would invert this workspace's intended layering (`av-gateway` is the read-path *consumer*
-//! sitting above services like this one, per `docs/heavy-plan.md`'s own architecture
-//! reference -- a store crate depending on a gateway crate would be the dependency arrow
-//! pointing backwards).
+//! **This is an ADAPTER, not a copy.** Before question 218's extraction, this module held
+//! its own full reimplementation of the ladder (this crate's own third copy of the
+//! convention in the workspace, after `av-edge` and `av-gateway`). It now re-exports
+//! [`av_label::ClearanceLadder`] directly -- so `crate::labels::ClearanceLadder` and
+//! `av_store::ClearanceLadder` both still resolve, and `src/client.rs`'s own
+//! `use crate::labels::ClearanceLadder;` needed no change at all -- and adds exactly one
+//! thing this crate still needs of its own: [`AuthorizeRead::authorize_read`], mapping the
+//! shared crate's [`av_label::LabelRefusal`] onto this crate's own [`StoreError`] variants,
+//! whose names and `#[error(...)]` messages predate this extraction and are unchanged by
+//! it (`crate::error`'s own `StoreError::MarkingNotOnLadder`/`StoreError::OverClearance`,
+//! with THIS crate's own `Side::Caller`/`Side::Object` -- `av_label::Side::Subject` maps to
+//! `Side::Object` here, this crate's own outward-facing spelling for "the thing being
+//! checked against the caller").
 //!
-//! A shared home for this convention (a small `av-labels`-shaped crate the other two, and
-//! this one, all depend on) is a real opportunity, but it is **a proposal for the manager**,
-//! not something this task creates unilaterally -- extracting shared code across three
-//! crates this task is not otherwise touching (`av-edge`, `av-gateway`) is exactly the kind
-//! of workspace-wide refactor a single task brief should not decide on its own recognizance.
-//! This task's own report names the proposal explicitly.
+//! Mislabeling (either side absent from the ladder) is checked before over-clearance, and
+//! the caller's own side is checked before the object's -- both exactly
+//! [`av_label::ClearanceLadder::classify`]'s own documented, fixed order, unchanged by this
+//! adapter.
 
 use av_cdm::pb::Label;
+pub use av_label::ClearanceLadder;
 
 use crate::error::{Side, StoreError};
 
-/// This deployment's ordered clearance ladder: `ladder[i]` outranks `ladder[j]` for every
-/// `i > j`. Configured, never hardcoded -- see this module's own doc for why (one handling
-/// scheme per deployment, spelled however that deployment's customer spells it).
-#[derive(Debug, Clone)]
-pub struct ClearanceLadder {
-    ladder: Vec<String>,
-}
-
-impl ClearanceLadder {
-    pub fn new(ladder: Vec<String>) -> Self {
-        Self { ladder }
-    }
-
-    fn rank(&self, marking: &str) -> Option<usize> {
-        self.ladder.iter().position(|m| m == marking)
-    }
-
+/// This crate's own entry point onto the shared [`ClearanceLadder`] -- an extension trait,
+/// not a wrapper type, so `ladder.authorize_read(caller_clearance, label)` at
+/// `src/client.rs`'s own call site stays character for character the same call it always
+/// was. (A same-named INHERENT method on `ClearanceLadder` itself would always win method
+/// resolution over a trait method of the same name; this trait's own name,
+/// `authorize_read`, does not collide with any of `av_label::ClearanceLadder`'s own
+/// methods -- `rank`/`markings`/`classify`/`markings_at_or_below` -- so there is nothing to
+/// shadow here.)
+pub trait AuthorizeRead {
     /// Refuses a read of an object labelled `object_label` by a principal claiming
     /// `caller_clearance`, unless `caller_clearance`'s rank is at or above `object_label`'s
-    /// rank on this ladder. Mislabeling (either side absent from the ladder) is checked
-    /// before over-clearance, and the caller's own side is checked before the object's --
-    /// both exactly matching `crates/av-gateway/src/labels.rs::ClearanceLadder::classify`'s
-    /// documented order, which this module's own doc explains this crate could not reuse by
-    /// dependency but still copies by convention.
-    pub fn authorize_read(&self, caller_clearance: &str, object_label: &Label) -> Result<(), StoreError> {
-        let Some(caller_rank) = self.rank(caller_clearance) else {
-            return Err(StoreError::MarkingNotOnLadder { side: Side::Caller, marking: caller_clearance.to_string() });
-        };
-        let Some(object_rank) = self.rank(&object_label.marking) else {
-            return Err(StoreError::MarkingNotOnLadder { side: Side::Object, marking: object_label.marking.clone() });
-        };
-        if object_rank > caller_rank {
-            return Err(StoreError::OverClearance { object_marking: object_label.marking.clone(), caller_clearance: caller_clearance.to_string() });
+    /// rank on this ladder. See this module's own doc for the refusal order and the
+    /// `av_label::LabelRefusal` -> `StoreError` mapping.
+    fn authorize_read(&self, caller_clearance: &str, object_label: &Label) -> Result<(), StoreError>;
+}
+
+impl AuthorizeRead for ClearanceLadder {
+    fn authorize_read(&self, caller_clearance: &str, object_label: &Label) -> Result<(), StoreError> {
+        match self.classify(caller_clearance, object_label) {
+            None => Ok(()),
+            Some(av_label::LabelRefusal::MarkingNotOnLadder { side: av_label::Side::Caller, marking }) => {
+                Err(StoreError::MarkingNotOnLadder { side: Side::Caller, marking })
+            }
+            Some(av_label::LabelRefusal::MarkingNotOnLadder { side: av_label::Side::Subject, marking }) => {
+                // av_label::Side::Subject is the shared crate's neutral name; this crate's
+                // own outward-facing spelling for the same fact is `Side::Object` (this
+                // module's own doc explains why) -- the StoreError variant name and message
+                // are unchanged by this extraction.
+                Err(StoreError::MarkingNotOnLadder { side: Side::Object, marking })
+            }
+            Some(av_label::LabelRefusal::OverClearance { subject_marking, caller_clearance }) => {
+                Err(StoreError::OverClearance { object_marking: subject_marking, caller_clearance })
+            }
         }
-        Ok(())
     }
 }
 
@@ -107,9 +102,8 @@ mod tests {
         assert!(matches!(err, StoreError::MarkingNotOnLadder { side: Side::Caller, marking } if marking == "TOP-SECRET"), "{repr}");
     }
 
-    /// Pins the order (caller checked before object), the way
-    /// `crates/av-gateway/src/labels.rs`'s own identically-named test does: both sides are
-    /// off-ladder, so only checking the caller side first can produce this specific refusal.
+    /// Pins the order (caller checked before object): both sides are off-ladder, so only
+    /// checking the caller side first can produce this specific refusal.
     #[test]
     fn authorize_read_checks_caller_marking_before_object_marking() {
         let err = ladder().authorize_read("NOT-ON-LADDER-CALLER", &label("ALSO-NOT-ON-LADDER-OBJECT")).unwrap_err();

@@ -67,11 +67,12 @@
 //! `AuthContext::authenticate_query` itself -- exactly as documented there -- before this
 //! function is ever reached; this function's own job is only to pass the (already-verified)
 //! `req.caller_clearance` on to [`av_catalog::query::find_assets`]'s own `caller_clearance`
-//! parameter, which independently ranks it against [`av_catalog::labels::ClearanceLadder`] (H2's
-//! OWN copy of the clearance-ladder convention, not `crate::labels::ClearanceLadder` --
-//! `crate::catalog_selector::CatalogHandle::ladder`'s own doc explains why a second, structurally
-//! distinct instance of an otherwise-identical configured list is correct here, not a violation
-//! of "one ladder").
+//! parameter, which independently ranks it against [`crate::catalog_selector::CatalogHandle::
+//! ladder`] -- question 218's extraction collapsed what used to be a second, structurally
+//! distinct `ClearanceLadder` type into the SAME shared `av_label::ClearanceLadder` this
+//! crate's own [`crate::gateway::GatewayCore`] already holds (`CatalogHandle::ladder`'s own
+//! doc has the detail); `crates/av-gateway/src/bin/av-gateway.rs` now builds that one ladder
+//! once and passes it to both.
 //!
 //! # Run identity: never required for this selector, unlike every other one
 //!
@@ -110,24 +111,23 @@ use crate::query_id::compute_catalog_query_id;
 /// av-catalog`'s own PostgreSQL+PostGIS wire client, and this deployment's own clearance
 /// ladder FOR THE CATALOG specifically.
 ///
-/// `ladder` is [`av_catalog::labels::ClearanceLadder`] -- a STRUCTURALLY DIFFERENT type from
+/// `ladder` is [`av_label::ClearanceLadder`] -- question 218's extraction: before it, this
+/// field was `av_catalog::labels::ClearanceLadder`, a STRUCTURALLY DIFFERENT type from
 /// `crate::labels::ClearanceLadder` (the one [`GatewayCore`] itself already holds, for
-/// ranking a caller against a run's own `product_label`), even though a correctly-configured
-/// deployment gives both the identical ordered marking list. This is not a missed
-/// deduplication: `av-catalog`'s own `src/labels.rs` module doc names this explicitly as the
-/// fourth, deliberate copy of the clearance-ladder convention in this workspace (after
-/// `av-edge`, `av-gateway`, `av-store`) -- `av-catalog` must not depend on `av-gateway` (this
-/// crate is the read-path CONSUMER sitting above the catalog tier; a dependency the other way
-/// would be backwards), so it cannot reuse `crate::labels::ClearanceLadder` even though the
-/// two types are near-identical. A shared `av-labels`-shaped crate both could depend on
-/// remains a real opportunity (`av-catalog`'s own module doc already names it as a proposal
-/// for the manager) -- this task's own final report repeats that proposal, not invents a
-/// second one, since extracting shared code across four crates this task did not open is not
-/// this task's call to make unilaterally.
+/// ranking a caller against a run's own `product_label`) even though a correctly-configured
+/// deployment gave both the identical ordered marking list -- two ladders built from one
+/// configured list, tracked as two separate types purely because `av-catalog` could not
+/// depend on `av-gateway` to reuse the other one. Question 218 extracted the ONE shared
+/// `av-label` crate both `av-catalog` and this crate now depend on directly, so
+/// `crate::labels::ClearanceLadder` and `av_catalog::labels::ClearanceLadder` are now both
+/// re-exports of the exact same `av_label::ClearanceLadder` type -- this field's own type
+/// changed accordingly, and `crates/av-gateway/src/bin/av-gateway.rs` now builds that ONE
+/// ladder once and passes it to both [`GatewayCore::new`] and this struct, never a second,
+/// independently-configured instance.
 #[derive(Debug, Clone)]
 pub struct CatalogHandle {
     pub pg_config: PgConfig,
-    pub ladder: av_catalog::labels::ClearanceLadder,
+    pub ladder: av_label::ClearanceLadder,
 }
 
 /// Every NEW way [`query_catalog`] can refuse a `GATEWAY_SELECTOR_CATALOG` request -- see this
@@ -314,7 +314,10 @@ mod tests {
     }
 
     fn core_with_catalog() -> GatewayCore {
-        empty_core().with_catalog(CatalogHandle { pg_config: dummy_pg_config(), ladder: av_catalog::labels::ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string()]) })
+        // Question 218: av_label::ClearanceLadder is the SAME type crate::labels::ClearanceLadder
+        // re-exports (used by empty_core() above) -- two separately-constructed instances here,
+        // same as production's binary passes one clone to both, never two independent types.
+        empty_core().with_catalog(CatalogHandle { pg_config: dummy_pg_config(), ladder: av_label::ClearanceLadder::new(vec!["UNCLASSIFIED".to_string(), "CUI".to_string()]) })
     }
 
     fn catalog_req(catalog_query: Option<CatalogQuery>, caller_clearance: &str) -> GatewayQueryRequest {

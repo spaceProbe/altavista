@@ -8,10 +8,14 @@
 //! Two modes, mutually exclusive:
 //! - The default (propose-only) mode: everything below `--serve-model-service`'s own
 //!   description. Opens NO listening socket at all.
-//! - `--serve-model-service <addr>`: serves spoore's `ModelService` (D2) on a real loopback
+//! - `--serve-model-service [addr]`: serves spoore's `ModelService` (D2) on a real loopback
 //!   socket, printing `MODEL_SERVICE_LISTENING <addr>` (flushed) before accepting, mirroring
 //!   `crates/av-ingest/src/bin/av-ingest-server.rs`'s own `GRPC_LISTENING` convention -- the
 //!   other named precedent this task's brief points at. No propose-run happens in this mode.
+//!   `addr` is optional (question 219(a)): omitted, or immediately followed by another `--`
+//!   flag, it defaults to `DEFAULT_MODEL_SERVICE_BIND`, `av-proposer`'s own row in
+//!   `docs/architecture.md` section 4's "Default ports" table; given, it is used verbatim
+//!   (the existing, unchanged behaviour). See `parse_args` for the peek rule.
 
 use std::process::ExitCode;
 
@@ -21,6 +25,14 @@ use av_proposer::model_service::{ModelIdentity, ModelServiceImpl};
 use av_proposer::model_service_pb::model_service_server::ModelServiceServer;
 use av_proposer::proposer::{run, ProposerConfig, RunOutcome};
 use av_proposer::rule::RuleConfig;
+
+/// Question 208(c)/219(a): `docs/architecture.md` section 4, "Default ports", is the one owned
+/// port map for every service's default bind in this workspace -- this constant is
+/// `av-proposer`'s own entry, the address `--serve-model-service` binds spoore's `ModelService`
+/// (D2) to when no explicit address is given (see `parse_args` below). `av-proposer` has no
+/// admin surface, so there is no `+100` admin counterpart, the same shape as
+/// `crates/av-lockstep-shim/src/bin/av-lockstep-shim.rs::DEFAULT_GRPC_ADDR`.
+const DEFAULT_MODEL_SERVICE_BIND: &str = "127.0.0.1:50063";
 
 struct ProposeArgs {
     gateway_endpoint: String,
@@ -56,9 +68,14 @@ enum Mode {
     ServeModelService(ServeModelServiceArgs),
 }
 
-const USAGE: &str = "usage:\n  av-proposer --gateway-endpoint URL --run-id ID --caller-clearance MARKING \\\n    --entity-id ID --command-class CLASS --score-name NAME \\\n    --reference-radius-m N --threshold-m N --gain-per-s N --max-burn-mps N \\\n    --model-node-id ID --model-version VERSION --service-token-file PATH [--config-hash HASH]\n  av-proposer --serve-model-service HOST:PORT --model-node-id ID --model-version VERSION \\\n    --process-noise-density N --sensor-id ID";
+const USAGE: &str = "usage:\n  av-proposer --gateway-endpoint URL --run-id ID --caller-clearance MARKING \\\n    --entity-id ID --command-class CLASS --score-name NAME \\\n    --reference-radius-m N --threshold-m N --gain-per-s N --max-burn-mps N \\\n    --model-node-id ID --model-version VERSION --service-token-file PATH [--config-hash HASH]\n  av-proposer --serve-model-service [HOST:PORT] --model-node-id ID --model-version VERSION \\\n    --process-noise-density N --sensor-id ID\n  (--serve-model-service's value is optional: omitted, or immediately followed by another\n   --flag, it defaults to 127.0.0.1:50063 -- av-proposer's row in docs/architecture.md\n   section 4's \"Default ports\" table; given, that address is used verbatim.)";
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Mode, String> {
+    // Peekable so `--serve-model-service` can look at, without yet consuming, the next token
+    // before deciding whether it is that flag's own (optional) value or the next flag --
+    // question 219(a)'s rule, implemented as a minimal change that leaves every other flag's
+    // parsing (all of which still call plain `args.next()`) byte for byte the same.
+    let mut args = args.peekable();
     let _argv0 = args.next();
     let mut serve_model_service: Option<String> = None;
     let (mut gateway_endpoint, mut run_id, mut config_hash, mut caller_clearance, mut entity_id, mut command_class) = (None, None, None, None::<String>, None, None);
@@ -67,9 +84,21 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Mode, String> {
     let mut service_token_file: Option<String> = None;
 
     while let Some(flag) = args.next() {
+        if flag == "--serve-model-service" {
+            // Question 219(a): the next token is this flag's value ONLY if it is present and
+            // does not itself begin with `--` -- otherwise (absent, or the next flag) this
+            // flag takes `DEFAULT_MODEL_SERVICE_BIND` and, in the "next flag" case, that token
+            // is left in the iterator for the loop's next turn to parse normally (this is what
+            // makes the peek load-bearing: a plain `args.next()` here would have swallowed it).
+            let bind = match args.peek() {
+                Some(next) if !next.starts_with("--") => args.next().expect("peeked Some"),
+                _ => DEFAULT_MODEL_SERVICE_BIND.to_string(),
+            };
+            serve_model_service = Some(bind);
+            continue;
+        }
         let mut value = || args.next().ok_or_else(|| format!("{flag} requires a value"));
         match flag.as_str() {
-            "--serve-model-service" => serve_model_service = Some(value()?),
             "--gateway-endpoint" => gateway_endpoint = Some(value()?),
             "--run-id" => run_id = Some(value()?),
             "--config-hash" => config_hash = Some(value()?),
@@ -213,5 +242,148 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Question 219(a): unit tests for `--serve-model-service`'s optional-value rule
+    //! (`parse_args`'s `Peekable` peek, above). A `#[cfg(test)] mod` in a bin target is
+    //! compiled into that binary's own test harness, so `cargo test -p av-proposer` runs
+    //! these with no separate test binary needed.
+    use super::*;
+
+    /// Builds the `args` iterator `parse_args` expects: argv[0] (discarded by `parse_args`
+    /// itself, mirroring `std::env::args()`), then the given flags/values.
+    fn argv<'a>(tail: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
+        std::iter::once("av-proposer".to_string()).chain(tail.iter().map(|s| s.to_string()))
+    }
+
+    /// A `--service-token-file`-able temp file, written once per instance and removed on
+    /// `Drop` (success or panic) so a failing assertion still leaves no litter behind. Plain
+    /// file I/O only -- nothing here touches the process environment (question 199 forbids
+    /// `std::env::set_var` in tests; this needs it for nothing).
+    struct TempTokenFile {
+        path: std::path::PathBuf,
+    }
+
+    impl TempTokenFile {
+        fn new(token: &str) -> Self {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "av-proposer-test-token-{}-{n}-{nanos}.txt",
+                std::process::id(),
+            ));
+            std::fs::write(&path, token).expect("writing temp service-token file");
+            Self { path }
+        }
+
+        fn path_str(&self) -> String {
+            self.path.to_str().expect("temp path is valid UTF-8").to_string()
+        }
+    }
+
+    impl Drop for TempTokenFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn propose_flags(token_path: &str) -> Vec<String> {
+        [
+            "--gateway-endpoint", "http://127.0.0.1:0",
+            "--run-id", "run-1",
+            "--caller-clearance", "UNCLASSIFIED",
+            "--entity-id", "entity-1",
+            "--command-class", "station-keeping",
+            "--score-name", "drift_m",
+            "--reference-radius-m", "1.0",
+            "--threshold-m", "1.0",
+            "--gain-per-s", "0.1",
+            "--max-burn-mps", "0.01",
+            "--model-node-id", "node-1",
+            "--model-version", "v1",
+            "--service-token-file", token_path,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    #[test]
+    fn serve_model_service_with_no_following_token_defaults() {
+        let args = argv(&[
+            "--model-node-id", "node-1",
+            "--model-version", "v1",
+            "--process-noise-density", "0.001",
+            "--sensor-id", "sensor-1",
+            "--serve-model-service",
+        ]);
+        let mode = parse_args(args).expect("parses");
+        match mode {
+            Mode::ServeModelService(a) => assert_eq!(a.bind, DEFAULT_MODEL_SERVICE_BIND),
+            Mode::Propose(_) => panic!("expected Mode::ServeModelService"),
+        }
+    }
+
+    #[test]
+    fn serve_model_service_with_explicit_address_is_unchanged() {
+        let args = argv(&[
+            "--serve-model-service", "127.0.0.1:0",
+            "--model-node-id", "node-1",
+            "--model-version", "v1",
+            "--process-noise-density", "0.001",
+            "--sensor-id", "sensor-1",
+        ]);
+        let mode = parse_args(args).expect("parses");
+        match mode {
+            Mode::ServeModelService(a) => assert_eq!(a.bind, "127.0.0.1:0"),
+            Mode::Propose(_) => panic!("expected Mode::ServeModelService"),
+        }
+    }
+
+    #[test]
+    fn serve_model_service_immediately_followed_by_another_flag_defaults_and_still_parses_it() {
+        // The load-bearing case: `--serve-model-service` has no value token of its own here --
+        // the very next thing on the line is `--model-node-id`, a different flag. A plain
+        // `args.next()` (the pre-219(a) behaviour) would have swallowed "--model-node-id" as
+        // this flag's bind address, corrupting both. The peek rule must default the bind AND
+        // leave "--model-node-id" for the loop's next turn to parse normally.
+        let args = argv(&[
+            "--serve-model-service",
+            "--model-node-id", "node-1",
+            "--model-version", "v1",
+            "--process-noise-density", "0.001",
+            "--sensor-id", "sensor-1",
+        ]);
+        let mode = parse_args(args).expect("parses");
+        match mode {
+            Mode::ServeModelService(a) => {
+                assert_eq!(a.bind, DEFAULT_MODEL_SERVICE_BIND);
+                assert_eq!(a.model_node_id, "node-1");
+            }
+            Mode::Propose(_) => panic!("expected Mode::ServeModelService"),
+        }
+    }
+
+    #[test]
+    fn propose_mode_without_serve_model_service_is_unaffected() {
+        let token_file = TempTokenFile::new("test-service-token");
+        let flags = propose_flags(&token_file.path_str());
+        let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let args = argv(&flag_refs);
+        let mode = parse_args(args).expect("parses");
+        match mode {
+            Mode::Propose(a) => {
+                assert_eq!(a.gateway_endpoint, "http://127.0.0.1:0");
+                assert_eq!(a.service_token, "test-service-token");
+            }
+            Mode::ServeModelService(_) => panic!("expected Mode::Propose"),
+        }
     }
 }

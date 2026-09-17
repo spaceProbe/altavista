@@ -14,9 +14,10 @@
 //!   duplicating the type. Still ADR-004's "everything rejected is counted" rule,
 //!   mechanically enforced by having exactly one counting type rather than ad hoc counters
 //!   per module, now shared by both crates instead of owned by this one alone.
-//! - [`labels`] -- [`labels::ClearanceLadder`] (D2): an explicit, deployment-configured,
-//!   ordered clearance ladder (rank = index), copied from `crates/av-edge/src/policy.rs`'s
-//!   `ProducerPolicy` convention verbatim -- never a hardcoded enum or a numeric level. A
+//! - [`labels`] -- [`labels::ClearanceLadder`] (D2): now question 218's shared `av-label`
+//!   crate, re-exported here as a thin adapter (own counting mapping only -- see that
+//!   module's own doc for exactly what adapts and why). An explicit, deployment-configured,
+//!   ordered clearance ladder (rank = index) -- never a hardcoded enum or a numeric level. A
 //!   marking absent from the ladder is always refused, on either side of the comparison
 //!   (the caller's claimed clearance or the product's own label), never defaulted to a
 //!   rank; mislabeling is checked before over-clearance.

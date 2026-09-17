@@ -84,10 +84,12 @@ repo = "spaceProbe/altavista"
 ref = "develop"  # D3's kit manifest pins the exact commit
 kind = "service"
 tier = "gateway"
-# GAP, not a real 0: crates/av-proposer/src/bin/av-proposer.rs has no default bind — the
-# propose-only mode never listens at all, and the serve mode's address comes entirely from
-# --serve-model-service HOST:PORT (question 208(c)). See [ports.av-proposer] below.
-port = 0
+# Question 219(a) closed this gap: crates/av-proposer/src/bin/av-proposer.rs now declares a
+# real default bind for --serve-model-service (DEFAULT_MODEL_SERVICE_BIND, 127.0.0.1:50063),
+# matching its row in docs/architecture.md's "### Default ports" table. See
+# [ports.av-proposer] below (kind = "const"); ports.py's three-way check cross-checks this
+# value against the source constant AND the owned port map.
+port = 50063
 runtime = "rust"
 role = "model proposer — propose-only by default; --serve-model-service serves spoore's ModelService (D2)"
 
@@ -146,7 +148,7 @@ role = "Three.js viewer — python -m altavista serve"
 kind = "const"
 file = "crates/av-ingest/src/bin/av-ingest-server.rs"
 pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
-note = "question 219(a): the gap question 217(g) recorded is now closed -- av-ingest owns a real default bind (docs/architecture.md '### Default ports', 127.0.0.1:50060 / admin 127.0.0.1:50160) checked three ways by ports.py's check_ports(): this fragment's declared port, the DEFAULT_BIND constant in the source file above, and the owned port map row. av-proposer (see [ports.av-proposer] below) stays a \"gap\" row -- that crate is the heavy team's, next round."
+note = "question 219(a): the gap question 217(g) recorded is now closed -- av-ingest owns a real default bind (docs/architecture.md '### Default ports', 127.0.0.1:50060 / admin 127.0.0.1:50160) checked three ways by ports.py's check_ports(): this fragment's declared port, the DEFAULT_BIND constant in the source file above, and the owned port map row. av-proposer's own gap (see [ports.av-proposer] below) closed the same way this round, once the heavy track's crate landed its own default bind."
 
 [ports.av-command]
 kind = "const"
@@ -165,10 +167,10 @@ file = "crates/av-gateway/src/bin/av-gateway.rs"
 pattern = 'DEFAULT_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
 
 [ports.av-proposer]
-kind = "gap"
+kind = "const"
 file = "crates/av-proposer/src/bin/av-proposer.rs"
-flag = '--serve-model-service'
-note = "question 217(g): the owned port map (docs/architecture.md '### Default ports') is now the single source ports.py's check_ports() cross-checks every kind = \"const\" row against, but the map as merged carries no row for av-proposer — there is nothing to fill this gap from, and inventing a number is exactly what round 1's decision 4 refused. kind stays \"gap\", checked two ways: the existing flag-marker check above (the serve mode's address comes only from --serve-model-service), AND a check that av-proposer is still absent from the owned port map. The day av-proposer's serve mode grows a default bind, OR the owned port map itself gains an av-proposer row, either check goes stale (fails) and forces this row to become kind = \"const\" with a real port."
+pattern = 'DEFAULT_MODEL_SERVICE_BIND:\s*&str\s*=\s*"[\d.]+:(\d+)"'
+note = "question 219(a) closed this gap: the heavy track's crates/av-proposer/src/bin/av-proposer.rs now declares a real default bind for --serve-model-service, DEFAULT_MODEL_SERVICE_BIND = 127.0.0.1:50063, matching its row in docs/architecture.md's '### Default ports' table. kind moves from \"gap\" to \"const\", checked three ways by ports.py's check_ports() exactly as the av-ingest row above: this fragment's declared port, the DEFAULT_MODEL_SERVICE_BIND constant in the source file above, and the owned port map row."
 
 [ports.av-dynamics-service]
 kind = "const"

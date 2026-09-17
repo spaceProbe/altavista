@@ -1,0 +1,23 @@
+[package]
+name = "av-label"
+publish = false
+description = "Question 218: the one shared home for the clearance-ladder convention (ClearanceLadder, with the set-valued markings_at_or_below) -- extracted this round out of av-gateway/av-store/av-catalog's three near-identical copies (av-edge's ProducerPolicy stays its own fourth copy, adopted by the P5 team separately) so a store tier, a catalog tier and a gateway all rank markings through exactly one implementation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# altavista.v1::pb::Label -- the shared prost build (av_cdm::pb), not a second,
+# independently-generated copy. This crate's ClearanceLadder::classify compares a caller's
+# claimed clearance against a subject's own configured Label.
+av-cdm = { path = "../av-cdm" }
+thiserror.workspace = true
+
+# Deliberately NOT a dependency, and why this matters more here than in most crates: this
+# crate is depended on by a store tier (av-store), a catalog tier (av-catalog) and a
+# gateway (av-gateway), so its own dependency set IS a security surface every one of those
+# three inherits. Nothing beyond av-cdm (the one wire type this crate's public API needs)
+# and thiserror (LabelRefusal's Display/Error impl) is ever added here without the manager
+# naming it -- see question 218.

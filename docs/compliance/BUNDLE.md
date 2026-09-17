@@ -40,8 +40,20 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-f06f95873387176faca4b7d6354ca4c7585b1987b7254f23d2bf157409d5bfb9
+06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e
 ```
+
+Recorded from the verification clone at the commit that regenerated the SBOMs (the bundle's
+epoch is the last commit touching its inputs, so the SBOM commit itself moved it, and this
+record is written in a following commit that touches no input). Moved here, in two steps,
+from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
+2026-09-16 by the lead at the heavy round 2 merge: the two Python SBOMs (`av-viewer`,
+`gmat-service`) had been regenerated from a worktree venv that lacks `setuptools` and carries
+a stale `altavista` dist-info, so they recorded `setuptools:no-longer-there` and
+`altavista:no-licence-metadata`; regenerated from a venv installed with `pip install -e
+".[dev]"` (the verification clone's), which is what the committed documents describe. The
+finding that a Python SBOM records the live venv rather than the declared dependency set is
+question 224.
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
 slots) and reading `bundle_sha256` from the written `out/evidence/bundle.json` -- the same value
@@ -51,18 +63,33 @@ regenerates the bundle from the current tree and asserts its `bundle_sha256` equ
 number, parsed out of this file for real -- so this number is load-bearing, not decorative: if it
 ever drifts from what the current tree actually regenerates, CI fails until this file is updated.
 
-This number moved from `19992e76e393...` (the D4b commit-2 value) because the native-dynamics
-track added the `crates/av-orbital` workspace member, which moved `RUST_EPOCH_PATHS` and so all
-six Rust SBOM epochs (question 220); regenerating those rewrote `docs/compliance/sbom/SHA256SUMS`,
-whose ten hashes the bundle carries in `sbom_hashes`. That is evidence content moving, exactly the
-rule this section states below -- a new crate in the workspace is a real change to what the Rust
-SBOMs describe -- not a regression of the round-3 `git_commit` fix (see "What the hash depends
-on"). Regenerated with the documented command, nothing edited by hand but this recorded number.
+This number moved from the commit-1 value (`4d55fe50888b...`) because of D4b (commit 2, this
+task's live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new top-level
+`secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
+committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content --
+exactly the "the hash moves when the EVIDENCE moves" rule this section states below, not a
+regression of the round-3 `git_commit` fix (see "What the hash depends on").
 
-`19992e76e393...` in turn moved from the commit-1 value (`4d55fe50888b...`) because of D4b
-(commit 2, the live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new
-top-level `secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
-committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content.
+It moved again, to the number above, from `19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6`,
+because of the aiplane merge's own SBOM regeneration (commit `4f559a9`, "Regenerate the SBOMs for
+the merge's workspace-manifest epoch move (question 220)"): that commit's real content change
+(confirmed with `git show --stat`, not assumed from its message alone) was `docs/compliance/sbom/
+av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json` losing stale distribution
+entries the two Python SBOMs no longer install in the shared worktree `.venv` (`setuptools` is no
+longer an installed distribution there at all, and `altavista` itself now carries no captured
+licence metadata rather than the `Apache-2.0` an earlier, differently-provisioned `.venv` once
+reported) -- `docs/compliance/sbom/SHA256SUMS` changed as a direct result, `SHA256SUMS` is one of
+`epoch_paths` above, and `sbom_hashes` is one of the evidence-dependent inputs `bundle_sha256`
+hashes (see "What the hash depends on" below): the bundle regenerated from the current tree no
+longer matched this file's previously recorded number, caught by
+`test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed by re-running the documented
+command and recording what it actually printed. Re-running `scripts/kit/sbom.py --out docs/
+compliance/sbom` for `av-viewer`/`gmat-service` against this same tree reproduces
+`docs/compliance/sbom/av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json`
+byte-for-byte -- confirmed with a real regeneration and `git status`/`diff` showing no change --
+so both files, and the bundle hash above, are already consistent with this worktree's real,
+current `.venv`; no component set, control matrix, or evidence content changed, only the two
+Python SBOMs' `.venv`-derived package list.
 
 ## What the hash depends on
 

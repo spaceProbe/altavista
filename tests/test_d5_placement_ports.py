@@ -16,10 +16,17 @@ asserts, against `scripts/kit/d5_three_placements.py`'s own real, committed `PLA
 1. `edge-a`'s ports are exactly `av-ingest`'s owned row -- positively, so this placement can
    never silently drift off the very default it exists to demonstrate.
 2. Every OTHER placement port (`edge-b`/`edge-c`'s gRPC and admin ports) is absent from every
-   row of the owned map -- so the day the map grows a `50063`/`50064` row (or is edited to
+   row of the owned map -- so the day the map grows a `50065`/`50066` row (or is edited to
    reuse any of D5's chosen ports for any reason), this test fails and forces D5 to move,
    instead of D5 quietly re-squatting on a real service's default the way it did before this
    fix.
+
+Round 4's fix moved `edge-b`/`edge-c` to `50063`/`50163` and `50064`/`50164`. The aiplane
+merge (this round) landed the heavy track's real owned default for `av-proposer`,
+`127.0.0.1:50063` (`docs/architecture.md` "### Default ports", question 219(a)), which this
+test then caught as a genuine collision with `edge-b`'s gRPC port -- exactly the regression
+class this file exists to catch, this time from a row the owned map *grew* rather than from a
+row D5 never checked. `edge-b`/`edge-c` moved again, to `50065`/`50165` and `50066`/`50166`.
 """
 from __future__ import annotations
 

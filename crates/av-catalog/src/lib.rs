@@ -51,9 +51,8 @@
 //!   conversions to/from `av_cdm::pb::AssetRef`.
 //! - [`query`] -- [`query::find_assets`] (extent/time/label-filtered, the label filter always
 //!   evaluated IN SQL) and the job-lineage read/write pair.
-//! - [`labels`] -- [`labels::ClearanceLadder`], this crate's own copy of the workspace's
-//!   clearance-ladder convention (see that module's own doc for why it is a copy, not a shared
-//!   dependency).
+//! - [`labels`] -- [`labels::ClearanceLadder`], now question 218's shared `av-label` crate,
+//!   re-exported here as a thin adapter (see that module's own doc for exactly what adapts).
 //! - [`pgtext`] -- pure PostgreSQL TEXT-format array/`bytea` encode/decode, shared by
 //!   [`model`] and [`query`].
 //!

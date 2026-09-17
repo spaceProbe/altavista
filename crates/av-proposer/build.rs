@@ -2,7 +2,10 @@
 //! output files:
 //!
 //! 1. **spoore's `ModelService` contract (D2), server only.** Compiles
-//!    `/Users/probe/code/spoore/proto/spoore/v0/model_service.proto` with
+//!    `<spoore root>/proto/spoore/v0/model_service.proto` with (question 219(b): the spoore
+//!    root is `SPOORE_ROOT` if set, else the `../spoore` sibling-checkout default -- question
+//!    12's convention; resolution logic in `spoore_root.rs`, `include!`d below, replacing this
+//!    crate's former hardcoded `/Users/probe/code/spoore/proto`)
 //!    `build_server(true)`, `build_client(false)`, `.extern_path(".spoore.v0",
 //!    "::spoore_cdm::proto")` -- byte-for-byte the same three choices as `spoore-ml/build.rs`
 //!    (that crate's own doc: "the load-bearing line... a belief that arrives from a sidecar
@@ -44,10 +47,29 @@
 use std::env;
 use std::path::PathBuf;
 
-const SPOORE_PROTO_ROOT: &str = "/Users/probe/code/spoore/proto";
+// Question 219(b): the spoore checkout root moved from a hardcoded constant to a `SPOORE_ROOT`
+// environment override with a sibling-checkout default (question 12's convention). The
+// resolution logic lives in its own file, `include!`d here, so `crates/av-proposer/tests/
+// spoore_root.rs` can `#[path]`-include the identical source text under test rather than
+// duplicating or re-implementing it.
+include!("spoore_root.rs");
 
-fn compile_model_service_server() {
-    let proto_dir = PathBuf::from(SPOORE_PROTO_ROOT);
+/// Resolves the spoore `proto/` directory this build compiles `model_service.proto` from, and
+/// prints the `SPOORE_ROOT` rerun-if-env-changed line (question 219(b)) -- see
+/// `resolve_spoore_root` in `spoore_root.rs` for the actual `SPOORE_ROOT`-or-`../spoore`
+/// logic. This is this file's one call site for it, so `compile_model_service_server`'s
+/// `proto_dir.join(...)` calls below are unchanged from before this task.
+fn resolve_spoore_proto_dir() -> PathBuf {
+    println!("cargo:rerun-if-env-changed=SPOORE_ROOT");
+    let manifest_dir = PathBuf::from(
+        env::var("CARGO_MANIFEST_DIR").expect("cargo always sets CARGO_MANIFEST_DIR for a build script"),
+    );
+    let spoore_root = resolve_spoore_root(env::var("SPOORE_ROOT").ok(), &manifest_dir)
+        .unwrap_or_else(|e| panic!("av-proposer build.rs: {e}"));
+    spoore_root.join("proto")
+}
+
+fn compile_model_service_server(proto_dir: PathBuf) {
     let model_service = proto_dir.join("spoore/v0/model_service.proto");
     let cdm = proto_dir.join("spoore/v0/cdm.proto");
     println!("cargo:rerun-if-changed={}", model_service.display());
@@ -107,15 +129,19 @@ fn compile_gateway_client() {
     // file's bytes at all (the whole point -- see the module doc). The service descriptors
     // above are declared in THIS file, so ordinary `cargo:rerun-if-changed=build.rs` (which
     // cargo emits by default whenever no `rerun-if-changed` line is printed at all -- but
-    // this build.rs DOES print one, above, for the spoore protos, which suppresses that
-    // default) would otherwise miss a change to this file's own hand-declared shapes.
+    // this build.rs DOES print rerun-if-changed lines, above, for the spoore protos and for
+    // `SPOORE_ROOT`, which suppresses that default) would otherwise miss a change to this
+    // file's own hand-declared shapes. `spoore_root.rs` is `include!`d into this same file
+    // (top of file), so a change to IT is a change to this file's own compiled text too --
+    // one more explicit `rerun-if-changed` line rather than relying on that fact silently.
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=spoore_root.rs");
 
     tonic_build::manual::Builder::new().build_client(true).build_server(false).compile(&manual_gateway_client_services());
 }
 
 fn main() {
     let _out_dir = env::var("OUT_DIR").expect("cargo always sets OUT_DIR for a build script");
-    compile_model_service_server();
+    compile_model_service_server(resolve_spoore_proto_dir());
     compile_gateway_client();
 }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-codec", "crates/av-kernel", "crates/av-grpc", "crates/av-dynamics-service", "crates/av-lockstep", "crates/av-lockstep-shim", "crates/av-run", "crates/av-sweep", "crates/av-command", "crates/av-edge", "crates/av-ingest", "crates/av-ingest-client", "crates/av-track", "crates/av-gateway", "crates/av-proposer", "crates/av-store", "crates/av-catalog", "crates/av-orbital"]
+members = ["crates/gmat-sys", "crates/av-cdm", "crates/av-dynamics", "crates/av-codec", "crates/av-kernel", "crates/av-grpc", "crates/av-dynamics-service", "crates/av-lockstep", "crates/av-lockstep-shim", "crates/av-run", "crates/av-sweep", "crates/av-command", "crates/av-edge", "crates/av-ingest", "crates/av-ingest-client", "crates/av-track", "crates/av-gateway", "crates/av-proposer", "crates/av-store", "crates/av-catalog", "crates/av-label", "crates/av-jobs", "crates/av-tiles", "crates/av-orbital"]
 
 [workspace.package]
 version = "0.1.0"
