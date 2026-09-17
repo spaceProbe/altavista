@@ -1,0 +1,116 @@
+{
+  "central_body_readback": {
+    "equatorial_radius_km": 6378.1363,
+    "flattening": 0.0033527,
+    "mu_km3_per_s2": 398600.4415,
+    "polar_radius_km": 6356.75232242699
+  },
+  "drag_summary": {
+    "elapsed_s": 86400.0,
+    "note": "the L2 distance between this golden's own drag-arc end state and a SEPARATE gravity-only propagation of the identical initial state over the identical elapsed time -- the measured perturbation attributable to drag alone, never used to derive x0/x1 above",
+    "position_drift_from_gravity_only_m": 28726.574666449673,
+    "velocity_drift_from_gravity_only_m_s": 32.514337335625626
+  },
+  "duration_s": 86400.0,
+  "epoch_a1mjd": 31041.500428638676,
+  "epoch_utc": "01 Jan 2026 00:00:00.000",
+  "final_state": [
+    -4192.30122451377,
+    -4468.309737129931,
+    -2871.7377635920648,
+    5.464953230281156,
+    -1.8784363242534965,
+    -5.057417787857547
+  ],
+  "force_model": {
+    "central_body": "Earth",
+    "drag": "JacchiaRoberts",
+    "gravity": {
+      "degree": 8,
+      "file": "JGM2.cof",
+      "order": 8
+    },
+    "point_masses": [],
+    "relativity": false,
+    "srp": false,
+    "tides": false
+  },
+  "frame": "EarthMJ2000Eq",
+  "generated": "2026-09-17T07:36:40+00:00",
+  "gmat_version": "R2026a",
+  "gravity_file_name": "JGM2.cof",
+  "gravity_file_readback": {
+    "body_name": "Earth",
+    "degree": 8,
+    "mu_km3_per_s2": 398600.4415,
+    "order": 8,
+    "potential_file": "JGM2.cof"
+  },
+  "gravity_file_sha256": "bf182b1208e33be3716c8292a3947c1f87d4041ad6663a0c9ae621f65cafc20d",
+  "initial_state": [
+    5870.038226113462,
+    3389.0681499999996,
+    0.0,
+    -2.3816540663788737,
+    4.12514584902123,
+    6.009799177253151
+  ],
+  "name": "leo_400km_jacchia_roberts",
+  "propagator": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0
+  },
+  "propagator_readback": {
+    "accuracy": 1e-13,
+    "initial_step_s": 60.0,
+    "integrator": "PrinceDormand78",
+    "max_step_s": 600.0,
+    "min_step_s": 0.0,
+    "note": "read from prop.GetPropagator() after PrepareInternals(), not the front-end Propagator or the bare integrator object -- see gen_leo_1day_jgm2_8x8.py's module doc"
+  },
+  "reason": "N3 task 3b: drag-only golden, JGM2 8x8 + DragForce/JacchiaRoberts at GMAT's own constant-weather defaults, isolating drag from every other force; tolerance measured from crates/av-orbital/tests/drag_goldens.rs's trajectory_residual_against_golden (3.490744 m / 3.951549e-3 m/s over 86400 s), recorded here at roughly 3x margin",
+  "requested_duration_s": 86400.0,
+  "sha256": "71065bb7466cfb2ca656281149a52a6ee31ba2e7e5ce30941f8da514d7e58e8e",
+  "solver_iterations": null,
+  "spacecraft": {
+    "AOP": 0.0,
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "ECC": 0.0,
+    "INC": 51.6,
+    "RAAN": 30.0,
+    "SMA": 6778.1363,
+    "SRPArea": 5.0,
+    "TA": 0.0
+  },
+  "spacecraft_ballistics_readback": {
+    "Cd": 2.2,
+    "Cr": 1.8,
+    "DragArea": 5.0,
+    "DryMass": 500.0,
+    "SRPArea": 5.0,
+    "TotalMass": 500.0
+  },
+  "tolerance_m": 10.0,
+  "tolerance_mps": 0.01,
+  "units": {
+    "position": "km",
+    "velocity": "km/s"
+  },
+  "weather_file_name": "SpaceWeather-All-v1.2.txt",
+  "weather_file_sha256": "47aef46938f4b639965cd73d9406c9580f4042fbd938467b40a26ff0d4b354cf",
+  "weather_readback": {
+    "CSSISpaceWeatherFile": "SpaceWeather-All-v1.2.txt",
+    "F107": 150.0,
+    "F107A": 150.0,
+    "HistoricWeatherSource": "ConstantFluxAndGeoMag",
+    "MagneticIndex": 3.0,
+    "PredictedWeatherSource": "ConstantFluxAndGeoMag",
+    "SchattenFile": "SchattenPredict.txt"
+  }
+}

@@ -119,6 +119,21 @@ pub enum OrbitalModelError<E: std::fmt::Debug + std::fmt::Display> {
     /// zero-distance geometry -- see [`crate::srp::SrpError`]'s own variants).
     #[error("SRP acceleration failed: {0}")]
     Srp(#[source] crate::srp::SrpError),
+    /// [`EarthGravityModel::with_drag`] was called before [`EarthGravityModel::
+    /// with_third_bodies`] -- task 3b's drag binding reuses that method's own bound
+    /// `DeEphemeris` handle for the Sun's position (the diurnal exospheric-temperature bulge
+    /// `crate::jacchia_roberts::exotherm` needs), mirroring [`EarthGravityModel::with_srp`]'s
+    /// own identical requirement and identical reasoning.
+    #[error("with_drag requires with_third_bodies to be configured first (the Sun's position comes from that bound DE ephemeris)")]
+    DragRequiresThirdBodies,
+    /// [`crate::jacchia_roberts::density_kg_m3`] failed (a non-finite state, an altitude at or
+    /// below GMAT's own 100 km floor, or a degenerate hour-angle geometry).
+    #[error("Jacchia-Roberts density failed: {0}")]
+    JacchiaRoberts(#[source] crate::jacchia_roberts::JacchiaRobertsError),
+    /// [`crate::drag::drag_acceleration`] failed (a non-finite state, or a non-positive
+    /// mass/area -- see [`crate::drag::DragError`]'s own variants).
+    #[error("drag acceleration failed: {0}")]
+    Drag(#[source] crate::drag::DragError),
 }
 
 /// Caller-supplied, static description fields for an [`EarthGravityModel`], independent of the
@@ -176,6 +191,7 @@ pub struct EarthGravityModel<R: BodyFixedRotation> {
     settings_hash: String,
     third_bodies: Option<ThirdBodies>,
     srp: Option<SrpBinding>,
+    drag: Option<DragBinding>,
 }
 
 /// N3's SRP configuration: the constants GMAT's own `SolarRadiationPressure` force uses and
@@ -183,6 +199,13 @@ pub struct EarthGravityModel<R: BodyFixedRotation> {
 struct SrpBinding {
     constants: crate::srp::SrpConstants,
     props: crate::srp::SrpProperties,
+}
+
+/// Task 3b's drag configuration: the weather inputs [`crate::jacchia_roberts::density_kg_m3`]
+/// needs and this vehicle's ballistic drag properties (see [`EarthGravityModel::with_drag`]).
+struct DragBinding {
+    weather: crate::jacchia_roberts::WeatherInputs,
+    props: crate::drag::DragProperties,
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -243,7 +266,7 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("integrator_max_step_s".to_string(), format!("{:.17e}", integrator.max_step));
         let settings_hash = av_dynamics::settings_hash(&settings);
 
-        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None, srp: None })
+        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None, srp: None, drag: None })
     }
 
     /// The bound gravity model (degree, order, `mu`, reference radius, coefficients) -- for a
@@ -345,6 +368,55 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         self.srp = Some(SrpBinding { constants, props: crate::srp::SrpProperties { cr, area_m2, mass_kg } });
         Ok(self)
     }
+
+    /// Task 3b (`docs/native-dynamics-plan.md` milestone N3): adds Jacchia-Roberts atmospheric
+    /// drag -- see [`crate::jacchia_roberts`]'s own module doc for the density model
+    /// (ported from GMAT's own `JacchiaRobertsAtmosphere`) and [`crate::drag`]'s own module doc
+    /// for the acceleration formula and the rotating-atmosphere relative velocity (read from
+    /// GMAT's `DragForce.cpp`, term for term). Central body is always Earth, matching
+    /// [`EarthGravityModel::with_srp`]'s identical "Earth as sole occulter/atmosphere" scope
+    /// this round.
+    ///
+    /// **Requires [`EarthGravityModel::with_third_bodies`] to already be configured** --
+    /// `Err(OrbitalModelError::DragRequiresThirdBodies)` otherwise -- for the identical reason
+    /// [`EarthGravityModel::with_srp`] does (see that method's own doc comment): the Sun's
+    /// position the diurnal exospheric-temperature bulge needs comes from the SAME bound
+    /// `DeEphemeris` handle, so this model has exactly one DE ephemeris source of truth.
+    ///
+    /// `weather` is [`crate::jacchia_roberts::WeatherInputs`] -- either GMAT's own CONSTANT
+    /// defaults (`WeatherInputs::from(`[`crate::weather::ConstantWeather::gmat_defaults`]`())`,
+    /// what GMAT's `DragForce` actually uses unless a DRM configures a weather file -- see
+    /// [`crate::weather`]'s own module doc) or a caller-resolved, file-derived triple.
+    /// `area_m2`/`cd`/`mass_kg` are the DRM's `DragArea`/`Cd`/total mass (question 81: "a seed
+    /// is a vehicle") -- `mass_kg` should be the vehicle's TOTAL mass, matching
+    /// `DragForce::BuildPrefactors`'s own `mass[i] = sc->GetRealParameter(massID)` (`TotalMass`
+    /// in every golden this crate's tests use).
+    ///
+    /// A builder consumed by value, mirroring [`EarthGravityModel::with_srp`]'s own shape
+    /// exactly: `settings_hash` is recomputed to additionally cover every weather input and
+    /// ballistic property, so two models differing only in their drag configuration report
+    /// different hashes; a model that never calls this method behaves bit-for-bit as before
+    /// (`derivatives`'s own `if let Some(drag)` block is a complete no-op when `self.drag` is
+    /// `None`) -- see `tests::derivatives_without_drag_matches_gravity_plus_third_body_directly`
+    /// for the test that pins this.
+    pub fn with_drag(mut self, weather: crate::jacchia_roberts::WeatherInputs, area_m2: f64, cd: f64, mass_kg: f64) -> Result<Self, OrbitalModelError<R::Error>> {
+        if self.third_bodies.is_none() {
+            return Err(OrbitalModelError::DragRequiresThirdBodies);
+        }
+
+        let mut settings = BTreeMap::new();
+        settings.insert("base_settings_hash".to_string(), self.settings_hash.clone());
+        settings.insert("drag_weather_f107".to_string(), format!("{:.17e}", weather.f107));
+        settings.insert("drag_weather_f107a".to_string(), format!("{:.17e}", weather.f107a));
+        settings.insert("drag_weather_kp".to_string(), format!("{:.17e}", weather.kp));
+        settings.insert("drag_area_m2".to_string(), format!("{:.17e}", area_m2));
+        settings.insert("drag_cd".to_string(), format!("{:.17e}", cd));
+        settings.insert("drag_mass_kg".to_string(), format!("{:.17e}", mass_kg));
+        self.settings_hash = av_dynamics::settings_hash(&settings);
+
+        self.drag = Some(DragBinding { weather, props: crate::drag::DragProperties { cd, area_m2, mass_kg } });
+        Ok(self)
+    }
 }
 
 impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
@@ -410,6 +482,23 @@ impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
             let sun_km = tb.ephemeris.geocentric_position_km2(DeBody::Sun, jd1, jd2).map_err(OrbitalModelError::De)?;
             let r_sun_m = [sun_km[0] * 1e3, sun_km[1] * 1e3, sun_km[2] * 1e3];
             let a = crate::srp::srp_acceleration(pos_inertial, r_sun_m, &srp.constants, &srp.props).map_err(OrbitalModelError::Srp)?;
+            accel_inertial[0] += a[0];
+            accel_inertial[1] += a[1];
+            accel_inertial[2] += a[2];
+        }
+
+        // Task 3b: Jacchia-Roberts drag -- see crate::jacchia_roberts's and crate::drag's own
+        // module docs. `with_drag` refuses construction unless `third_bodies` is already
+        // `Some`, the identical invariant `with_srp` enforces (see that block's own comment,
+        // above, for why the `.expect` here is safe).
+        if let Some(drag) = &self.drag {
+            let tb = self.third_bodies.as_ref().expect("with_drag requires with_third_bodies (enforced at construction)");
+            let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
+            let sun_km = tb.ephemeris.geocentric_position_km2(DeBody::Sun, jd1, jd2).map_err(OrbitalModelError::De)?;
+            let r_sun_m = [sun_km[0] * 1e3, sun_km[1] * 1e3, sun_km[2] * 1e3];
+            let cb = crate::jacchia_roberts::CentralBodyGeodetics::earth_defaults();
+            let rho = crate::jacchia_roberts::density_kg_m3(pos_inertial, r_sun_m, &self.rotation, t_tai_ns, &drag.weather, &cb).map_err(OrbitalModelError::JacchiaRoberts)?;
+            let a = crate::drag::drag_acceleration(pos_inertial, vel_inertial, rho, crate::drag::EARTH_ANGULAR_VELOCITY_RAD_S, &drag.props).map_err(OrbitalModelError::Drag)?;
             accel_inertial[0] += a[0];
             accel_inertial[1] += a[1];
             accel_inertial[2] += a[2];
@@ -657,5 +746,77 @@ mod tests {
         without_srp.derivatives(&state, t_tai_ns, &[], &mut dot_without).unwrap();
         with_srp.derivatives(&state, t_tai_ns, &[], &mut dot_with).unwrap();
         assert_ne!(&dot_without[3..6], &dot_with[3..6], "with_srp must actually change the acceleration");
+    }
+
+    /// [`EarthGravityModel::with_drag`]'s own documented invariant: it refuses construction
+    /// unless [`EarthGravityModel::with_third_bodies`] was already called -- mirrors
+    /// `with_srp_without_third_bodies_is_a_typed_error_not_a_panic`, above.
+    #[test]
+    fn with_drag_without_third_bodies_is_a_typed_error_not_a_panic() {
+        let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
+        match point_mass_model().with_drag(weather, 5.0, 2.2, 500.0) {
+            Err(err) => assert!(matches!(err, OrbitalModelError::DragRequiresThirdBodies)),
+            Ok(_) => panic!("expected with_drag to refuse a model with no third_bodies bound"),
+        }
+    }
+
+    #[test]
+    fn settings_hash_changes_when_drag_is_added() {
+        let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
+        let without_drag = point_mass_model_with_third_bodies();
+        let hash_without = without_drag.describe().settings_hash;
+        let with_drag = point_mass_model_with_third_bodies().with_drag(weather, 5.0, 2.2, 500.0).expect("with_drag");
+        assert_ne!(hash_without, with_drag.describe().settings_hash);
+    }
+
+    /// Task 3b's own required test: "a model built without drag is bit-for-bit unchanged." A
+    /// model with `third_bodies` bound but `with_drag` NEVER called must produce EXACTLY the
+    /// same `derivatives` output as gravity + third-body acceleration computed directly --
+    /// mirrors `derivatives_without_srp_matches_gravity_plus_third_body_directly`'s own
+    /// pattern exactly (the new `if let Some(drag)` block in `derivatives` is a complete no-op
+    /// when `self.drag` is `None`).
+    #[test]
+    fn derivatives_without_drag_matches_gravity_plus_third_body_directly() {
+        let model = point_mass_model_with_third_bodies();
+        let pos = [7_000_000.0, 500_000.0, -200_000.0];
+        let vel = [-1_200.0, 7_400.0, 300.0];
+        let state = [pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]];
+        let t_tai_ns = 1_800_000_000_000_000_000_i64;
+        let mut dot = [0.0; 6];
+        model.derivatives(&state, t_tai_ns, &[], &mut dot).unwrap();
+
+        let (accel_gravity, _) = gravity::spherical_harmonic_gravity(pos, model.gravity_model());
+        let de = crate::de::DeEphemeris::open(&de_path()).expect("open DE405");
+        let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
+        let mut expect = accel_gravity;
+        for body in [DeBody::Moon, DeBody::Sun] {
+            let d_km = de.geocentric_position_km2(body, jd1, jd2).expect("geocentric_position_km2");
+            let d_m = [d_km[0] * 1e3, d_km[1] * 1e3, d_km[2] * 1e3];
+            let mu = de.mu_si(body).expect("mu_si");
+            let a = third_body_acceleration(pos, d_m, mu);
+            expect[0] += a[0];
+            expect[1] += a[1];
+            expect[2] += a[2];
+        }
+
+        assert_eq!(&dot[3..6], &expect[..], "a model with no drag bound must be bit-for-bit gravity + third-body acceleration alone");
+    }
+
+    /// The SAME comparison, but WITH `with_drag` bound, confirms drag actually changes the
+    /// output -- the counterpart to the bit-for-bit test above.
+    #[test]
+    fn derivatives_with_drag_differs_from_gravity_plus_third_body_alone() {
+        let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
+        let without_drag = point_mass_model_with_third_bodies();
+        let with_drag = point_mass_model_with_third_bodies().with_drag(weather, 5.0, 2.2, 500.0).expect("with_drag");
+        let pos = [7_000_000.0, 500_000.0, -200_000.0];
+        let vel = [-1_200.0, 7_400.0, 300.0];
+        let state = [pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]];
+        let t_tai_ns = 1_800_000_000_000_000_000_i64;
+        let mut dot_without = [0.0; 6];
+        let mut dot_with = [0.0; 6];
+        without_drag.derivatives(&state, t_tai_ns, &[], &mut dot_without).unwrap();
+        with_drag.derivatives(&state, t_tai_ns, &[], &mut dot_with).unwrap();
+        assert_ne!(&dot_without[3..6], &dot_with[3..6], "with_drag must actually change the acceleration");
     }
 }
