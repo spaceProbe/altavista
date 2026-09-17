@@ -1,0 +1,39 @@
+Live gmat.TimeSystemConverter.Instance() constants:
+  TDB_COEFF1  = 0.001658
+  TDB_COEFF2  = 1.385e-05
+  M_E_OFFSET  = 357.5277233
+  M_E_COEFF1  = 35999.05034
+  T_TT_OFFSET = 2451545.0
+  T_TT_COEFF1 = 36525.0
+
+Derivation of the suspected phase shift (arithmetic, from the constants above):
+  rate = M_E_COEFF1 / T_TT_COEFF1                    = 0.985600283094 deg/day
+  2430000 days x rate                       = 2395008.687918 deg
+  mod 360                                             = 288.6879178644 deg
+  M_E_OFFSET - phase_shift_deg (mod 360)              = 68.8398054356 deg
+
+epoch (UTC)                GMAT TDB-TT (s)  correct series (s)    |diff| (s)   GMAT-phase series (s)    |diff| (s)
+01 Jan 2020 00:00:00.000  -9.335344657e-05    -9.275116726e-05     6.023e-07         1.548542228e-03     1.642e-03
+01 Jan 2023 00:00:00.000  -8.643837646e-05    -8.634952912e-05     8.885e-08         1.550800705e-03     1.637e-03
+01 Jan 2026 00:00:00.000  -8.046627045e-05    -7.994658047e-05     5.197e-07         1.553036337e-03     1.634e-03
+01 Jan 2029 00:00:00.000  -7.355120033e-05    -7.354241847e-05     8.782e-09         1.555249098e-03     1.629e-03
+01 Jan 2033 00:00:00.000  -7.480848581e-05    -7.465888333e-05     1.496e-07         1.554865014e-03     1.630e-03
+
+max |GMAT report - correct series|    over 5 epochs = 6.023e-07 s
+min |GMAT report - GMAT-phase series| over 5 epochs = 1.629e-03 s
+
+Direct TimeSystemConverter.Instance().Convert() calls, explicit refJd argument:
+epoch (UTC)               refJd=2430000.0 (TC default)    refJd=0.0 (goldens/gen_tdb_check.py)
+01 Jan 2020 00:00:00.000              -9.272480384e-05                         1.548661385e-03
+01 Jan 2023 00:00:00.000              -8.643837646e-05                         1.550861634e-03
+01 Jan 2026 00:00:00.000              -7.983762771e-05                         1.553061884e-03
+01 Jan 2029 00:00:00.000              -7.355120033e-05                         1.555262133e-03
+01 Jan 2033 00:00:00.000              -7.480848581e-05                         1.554633491e-03
+
+Where the phase shift comes from: passing refJd=0.0 to TimeSystemConverter::Convert()
+(the default is GmatTimeConstants::JD_JAN_5_1941 = 2,430,000.0) leaves the periodic
+term's T_TT computed from an origValue still on GMAT's internal MJD scale, short by
+exactly the 2430000-day offset derived above -- reproducing the GMAT-phase series
+to sub-microsecond precision, and reproducing GMAT's own Sat.TDBModJulian nowhere.
+
+NOT A GMAT DEFECT: Sat.TDBModJulian - Sat.TTModJulian matches the correct (undisplaced) series at every epoch and disagrees with the GMAT-phase series by 1.629e-03 s or more; the GMAT-phase series is reproduced only by passing refJd=0.0 explicitly, which is not TimeSystemConverter::Convert()'s own default and not what any call site read in GMAT's own R2026a source passes.

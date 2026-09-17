@@ -1,0 +1,51 @@
+% Reproduction attempt for a suspected TDB periodic-term phase defect in GMAT's
+% TimeSystemConverter (see this directory's REPORT.md). A trivial two-body force model and
+% five widely-separated one-second propagations, one per epoch, so the report gets one clean
+% row per epoch spanning 13 years -- enough to tell a constant phase error (which this script
+% does NOT find) from anything epoch-dependent.
+Create Spacecraft Sat;
+Sat.DateFormat = UTCGregorian;
+Sat.CoordinateSystem = EarthMJ2000Eq;
+Sat.DisplayStateType = Cartesian;
+Sat.X = 6878.137;
+Sat.Y = 0;
+Sat.Z = 0;
+Sat.VX = 0;
+Sat.VY = 7.6;
+Sat.VZ = 0;
+
+Create ForceModel FM;
+FM.CentralBody = Earth;
+FM.PrimaryBodies = {Earth};
+FM.GravityField.Earth.Degree = 0;
+FM.GravityField.Earth.Order = 0;
+FM.Drag = None;
+FM.SRP = Off;
+Create Propagator Prop;
+Prop.FM = FM;
+Prop.Type = RungeKutta89;
+
+Create ReportFile Rep;
+Rep.Filename = '/Users/probe/code/AltaVista-edge/docs/reports/gmat-tdb-phase/repro.rpt';
+Rep.Precision = 16;
+Rep.WriteHeaders = false;
+Rep.Delimiter = ',';
+Rep.SolverIterations = Current;
+Rep.Add = {Sat.A1ModJulian, Sat.TTModJulian, Sat.TDBModJulian};
+
+BeginMissionSequence;
+
+Sat.Epoch = '01 Jan 2020 00:00:00.000';
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};
+
+Sat.Epoch = '01 Jan 2023 00:00:00.000';
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};
+
+Sat.Epoch = '01 Jan 2026 00:00:00.000';
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};
+
+Sat.Epoch = '01 Jan 2029 00:00:00.000';
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};
+
+Sat.Epoch = '01 Jan 2033 00:00:00.000';
+Propagate Prop(Sat) {Sat.ElapsedSecs = 1};
