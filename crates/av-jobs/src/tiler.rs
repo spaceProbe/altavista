@@ -1,6 +1,22 @@
 //! H3b (task 3b, `docs/heavy-plan.md` H3 second half): the tiler [`crate::runner::Executor`]
 //! for `JobSpec.kind == "tiler"`.
 //!
+//! # `output` kinds
+//!
+//! `JobSpec.parameters["output"]` selects one of three [`pb::TileSetKind`]s, all sharing the
+//! same [`crate::scheme`] tile addressing, the same [`sample_nearest`] resampling, and the
+//! same [`build_tileset_manifest`] manifest shape -- only the per-tile payload (and, for
+//! `tiles3d`, one extra `tileset.json` output) differs by kind:
+//!   - `"imagery"`: RGB8 PNG tiles ([`crate::png`]) -- the only kind this crate implemented
+//!     before this round.
+//!   - `"terrain"` (P3a, this round): a self-describing binary heightmap -- see
+//!     [`crate::terrain`]'s own module doc for the exact payload layout and how a sample is
+//!     derived from the input raster.
+//!   - `"tiles3d"` (P3a, this round): a real 3D Tiles 1.0 tileset -- `tileset.json` plus
+//!     `.pnts` point-cloud content tiles, geo-referenced by a real `root.transform` -- see
+//!     [`crate::tiles3d`]'s own module doc for the exact shape, the choice of `.pnts` over
+//!     `.b3dm`, and the geo-referencing.
+//!
 //! # Resampling: nearest-neighbour, exactly specified
 //!
 //! **Nearest-neighbour is chosen because it is exactly reproducible in integer/`f64`
@@ -76,6 +92,17 @@ use crate::runner::{content_addressed_key, Executor, JobInput, JobOutput};
 pub const MANIFEST_MEDIA_TYPE: &str = "application/vnd.altavista.tileset-manifest+pb";
 /// The media type an imagery tile's own PNG bytes are stored under.
 pub const IMAGERY_TILE_MEDIA_TYPE: &str = "image/png";
+/// The media type a terrain tile's own bytes are stored under -- `crate::terrain`'s own
+/// self-describing binary heightmap; this exact string is also `heavy.proto`'s own
+/// `TileSetKind::TILE_SET_KIND_TERRAIN` doc comment, which named it before this round's
+/// implementation existed.
+pub const TERRAIN_TILE_MEDIA_TYPE: &str = "application/vnd.altavista.terrain-tile+raw";
+/// The media type a `tiles3d` `.pnts` content tile's own bytes are stored under --
+/// `crate::tiles3d`'s own module doc.
+pub const TILES3D_TILE_MEDIA_TYPE: &str = crate::tiles3d::PNTS_TILE_MEDIA_TYPE;
+/// The media type the `tiles3d` output's `tileset.json` blob is stored under --
+/// `crate::tiles3d`'s own module doc.
+pub const TILES3D_TILESET_JSON_MEDIA_TYPE: &str = crate::tiles3d::TILESET_JSON_MEDIA_TYPE;
 
 /// `tile_size` must be a power of two in `[MIN_TILE_SIZE, MAX_TILE_SIZE]`.
 pub const MIN_TILE_SIZE: u32 = 16;
@@ -95,13 +122,11 @@ fn invalid_input(detail: impl Into<String>) -> pb::JobFailure {
     pb::JobFailure { kind: pb::JobFailureKind::InvalidInput as i32, detail: detail.into(), exit_code: 0 }
 }
 
-fn executor_unavailable(detail: impl Into<String>) -> pb::JobFailure {
-    pb::JobFailure { kind: pb::JobFailureKind::ExecutorUnavailable as i32, detail: detail.into(), exit_code: 0 }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputKind {
     Imagery,
+    Terrain,
+    Tiles3d,
 }
 
 #[derive(Debug, Clone)]
@@ -140,20 +165,34 @@ fn parse_params(spec: &pb::JobSpec) -> Result<TilerParams, pb::JobFailure> {
     let output_raw = parameters.get("output").map(String::as_str).unwrap_or("imagery");
     let output = match output_raw {
         "imagery" => OutputKind::Imagery,
-        "terrain" | "tiles3d" => {
-            return Err(executor_unavailable(format!("output kind {output_raw:?} is a recognised future kind (P2/P3) not implemented by this round's TilerExecutor")));
-        }
+        // P3a (this round): both are now implemented -- see `crate::terrain`/`crate::
+        // tiles3d`'s own module docs. Neither is `executor_unavailable` any more; the test
+        // that used to pin both as refused (`parse_params_refuses_terrain_and_tiles3d_as_
+        // not_implemented_this_round`) is replaced by
+        // `parse_params_accepts_terrain_and_tiles3d_as_implemented_output_kinds` below.
+        "terrain" => OutputKind::Terrain,
+        "tiles3d" => OutputKind::Tiles3d,
         other => return Err(invalid_parameters(format!("unrecognised \"output\" value {other:?}: expected \"imagery\", \"terrain\", or \"tiles3d\""))),
     };
 
     Ok(TilerParams { min_level, max_level, tile_size, output })
 }
 
-/// Nearest-neighbour sample of `raster` at tile-local pixel `(px, py)` within `tile_bounds`
-/// -- see this module's own doc for the exact formula.
-fn sample_nearest(raster: &crate::raster::Raster, tile_bounds: &crate::scheme::BoundsDeg, tile_size: u32, px: u32, py: u32) -> [u8; 3] {
+/// The geodetic point sampled at tile-local pixel `(px, py)` within `tile_bounds` -- this
+/// module's own doc's `(lon, lat)` formula, factored out so [`sample_nearest`] (imagery/
+/// terrain resampling) and [`crate::tiles3d::render_tiles3d_tile`] (each point's own
+/// position) compute the identical geodetic point for the identical `(px, py)`, never two
+/// independently-maintained copies of the same formula.
+pub(crate) fn tile_pixel_center_lonlat(tile_bounds: &crate::scheme::BoundsDeg, tile_size: u32, px: u32, py: u32) -> (f64, f64) {
     let lon = tile_bounds.west + (px as f64 + 0.5) / tile_size as f64 * (tile_bounds.east - tile_bounds.west);
     let lat = tile_bounds.north - (py as f64 + 0.5) / tile_size as f64 * (tile_bounds.north - tile_bounds.south);
+    (lon, lat)
+}
+
+/// Nearest-neighbour sample of `raster` at tile-local pixel `(px, py)` within `tile_bounds`
+/// -- see this module's own doc for the exact formula.
+pub(crate) fn sample_nearest(raster: &crate::raster::Raster, tile_bounds: &crate::scheme::BoundsDeg, tile_size: u32, px: u32, py: u32) -> [u8; 3] {
+    let (lon, lat) = tile_pixel_center_lonlat(tile_bounds, tile_size, px, py);
 
     let col_f = (lon - raster.west) / (raster.east - raster.west) * raster.width as f64;
     let row_f = (raster.north - lat) / (raster.north - raster.south) * raster.height as f64;
@@ -256,13 +295,26 @@ fn render_and_describe_tile(raster: &crate::raster::Raster, tile: crate::scheme:
     (png_bytes, entry)
 }
 
-/// Builds the `TileSetManifest` both `run_imagery` and `run_imagery_streaming` produce --
-/// factored out for the identical reason as [`render_and_describe_tile`]: one place that
-/// decides the manifest's encoded bytes, so the streaming and buffered paths cannot drift
-/// apart on field order, defaulting, or a forgotten field.
-fn build_tileset_manifest(params: &TilerParams, raster: &crate::raster::Raster, spec: &pb::JobSpec, input: &JobInput, tile_entries: Vec<pb::TileEntry>, key_prefix: &str) -> pb::TileSetManifest {
+/// Builds the `TileSetManifest` every `run_*`/`run_*_streaming` pair produces -- factored out
+/// for the identical reason as [`render_and_describe_tile`]: one place that decides the
+/// manifest's encoded bytes, so a streaming and buffered path for the same `kind` cannot
+/// drift apart on field order, defaulting, or a forgotten field. `kind` is now a parameter
+/// (P3a: previously hard-coded to `Imagery`, the only kind that existed); `root_object_key`
+/// is non-empty only for `Tiles3d` (see [`TileSetManifest::root_object_key`]'s own doc in
+/// `heavy.proto`) and empty (proto3's own default) for every other kind, mirroring
+/// `TileEntry.uri`'s identical "empty unless this kind needs it" shape. `kind_info` bundles
+/// `kind`/`root_object_key` into one argument (clippy's `too_many_arguments` budget -- eight
+/// independent scalar/reference parameters would exceed it; grouping the two P3a-added
+/// fields that always travel together, rather than an `#[allow(...)]` this workspace's own
+/// binding rule forbids, is the fix).
+struct ManifestKind<'a> {
+    kind: pb::TileSetKind,
+    root_object_key: &'a str,
+}
+
+fn build_tileset_manifest(params: &TilerParams, raster: &crate::raster::Raster, spec: &pb::JobSpec, input: &JobInput, tile_entries: Vec<pb::TileEntry>, key_prefix: &str, kind_info: ManifestKind) -> pb::TileSetManifest {
     pb::TileSetManifest {
-        kind: pb::TileSetKind::Imagery as i32,
+        kind: kind_info.kind as i32,
         scheme: crate::scheme::SCHEME_ID.to_string(),
         min_level: params.min_level,
         max_level: params.max_level,
@@ -271,9 +323,14 @@ fn build_tileset_manifest(params: &TilerParams, raster: &crate::raster::Raster, 
         tiles: tile_entries,
         source_sha256: vec![input.asset.sha256.clone()],
         parameters: spec.parameters.clone(),
+        // Deliberately always empty -- see `TileEntry.uri`'s own doc comment in `heavy.proto`
+        // (the identical ordering-constraint reasoning applies to this field: this executor
+        // cannot know a real URI before the `ObjectSink` runs). `root_object_key` below
+        // carries the backend-independent equivalent for `Tiles3d`.
         root_uri: String::new(),
         job_id: spec.job_id.clone(),
         object_key_prefix: key_prefix.to_string(),
+        root_object_key: kind_info.root_object_key.to_string(),
     }
 }
 
@@ -288,6 +345,8 @@ impl Executor for TilerExecutor {
 
         match params.output {
             OutputKind::Imagery => self.run_imagery(spec, &raster, &inputs[0], &params),
+            OutputKind::Terrain => self.run_terrain(spec, &raster, &inputs[0], &params),
+            OutputKind::Tiles3d => self.run_tiles3d(spec, &raster, &inputs[0], &params),
         }
     }
 
@@ -309,6 +368,8 @@ impl Executor for TilerExecutor {
 
         match params.output {
             OutputKind::Imagery => self.run_imagery_streaming(spec, &raster, &inputs[0], &params, sink, label),
+            OutputKind::Terrain => self.run_terrain_streaming(spec, &raster, &inputs[0], &params, sink, label),
+            OutputKind::Tiles3d => self.run_tiles3d_streaming(spec, &raster, &inputs[0], &params, sink, label),
         }
     }
 }
@@ -338,7 +399,7 @@ impl TilerExecutor {
             }
         }
 
-        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix);
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Imagery, root_object_key: "" });
         let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
         outputs.push(JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true });
 
@@ -409,7 +470,199 @@ impl TilerExecutor {
             }
         }
 
-        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix);
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Imagery, root_object_key: "" });
+        let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
+        Ok(vec![JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true }])
+    }
+
+    // -- P3a: terrain (`output == "terrain"`) -- see `crate::terrain`'s own module doc for
+    // the payload layout and the RGB8->i16 derivation. Structurally identical to `run_imagery`/
+    // `run_imagery_streaming` above (same level/tile loop, same progress-callback contract,
+    // same manifest-building call), only the per-tile render/describe step and the tile
+    // media type differ -- deliberately not factored into one generic-over-OutputKind method,
+    // since `run_tiles3d`/`run_tiles3d_streaming` below are NOT this shape (an extra
+    // tileset.json output, a shared anchor computed once per run) and forcing all three into
+    // one abstraction would cost more clarity than the ~15 duplicated lines save.
+
+    /// Renders tile `tile` as a terrain heightmap (`crate::terrain::encode`), and returns the
+    /// finished bytes alongside the `pb::TileEntry` describing them -- the terrain analogue of
+    /// [`render_and_describe_tile`], called by both `run_terrain` and `run_terrain_streaming`
+    /// for the identical "one code path decides a tile's bytes" reason that function's own doc
+    /// gives.
+    fn render_and_describe_terrain_tile(raster: &crate::raster::Raster, tile: crate::scheme::Tile, tile_size: u32, key_prefix: &str) -> (Vec<u8>, pb::TileEntry) {
+        let bounds = crate::scheme::tile_bounds_deg(tile);
+        let mut samples: Vec<i16> = Vec::with_capacity(tile_size as usize * tile_size as usize);
+        for py in 0..tile_size {
+            for px in 0..tile_size {
+                let [r, g, _b] = sample_nearest(raster, &bounds, tile_size, px, py);
+                // `crate::terrain`'s own module doc, "How the sample value is derived": r is
+                // the high byte, g the low byte, b unused.
+                samples.push((((r as u16) << 8) | g as u16) as i16);
+            }
+        }
+        let terrain_bytes = crate::terrain::encode(tile_size, &samples);
+        let sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&terrain_bytes));
+        let object_key = content_addressed_key(key_prefix, &sha256_hex);
+        let entry = pb::TileEntry {
+            level: tile.level,
+            x: tile.x,
+            y: tile.y,
+            sha256: sha256_hex,
+            size_bytes: terrain_bytes.len() as u64,
+            uri: String::new(),
+            media_type: TERRAIN_TILE_MEDIA_TYPE.to_string(),
+            object_key,
+        };
+        (terrain_bytes, entry)
+    }
+
+    fn run_terrain(&self, spec: &pb::JobSpec, raster: &crate::raster::Raster, input: &JobInput, params: &TilerParams) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let mut outputs: Vec<JobOutput> = Vec::new();
+        let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
+
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
+        for level in params.min_level..=params.max_level {
+            let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
+            for tile in tiles {
+                let (terrain_bytes, entry) = Self::render_and_describe_terrain_tile(raster, tile, params.tile_size, &self.key_prefix);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
+                tile_entries.push(entry);
+                outputs.push(JobOutput { bytes: terrain_bytes, media_type: TERRAIN_TILE_MEDIA_TYPE.to_string(), manifest: false });
+            }
+        }
+
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Terrain, root_object_key: "" });
+        let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
+        outputs.push(JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true });
+
+        Ok(outputs)
+    }
+
+    /// The streaming twin of `run_terrain` -- see [`TilerExecutor::run_imagery_streaming`]'s
+    /// own doc for what "streaming" changes about peak memory and the job's recorded outputs;
+    /// identical reasoning, applied to terrain tiles instead of PNG tiles.
+    fn run_terrain_streaming(&self, spec: &pb::JobSpec, raster: &crate::raster::Raster, input: &JobInput, params: &TilerParams, sink: &dyn crate::runner::ObjectSink, label: &pb::Label) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
+
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
+        for level in params.min_level..=params.max_level {
+            let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
+            for tile in tiles {
+                let (terrain_bytes, entry) = Self::render_and_describe_terrain_tile(raster, tile, params.tile_size, &self.key_prefix);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
+                let stored = sink.put(&terrain_bytes, TERRAIN_TILE_MEDIA_TYPE, label)?;
+                debug_assert_eq!(stored.sha256, entry.sha256, "an ObjectSink must content-address a tile's bytes to the same sha256 this executor independently computed");
+                tile_entries.push(entry);
+            }
+        }
+
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Terrain, root_object_key: "" });
+        let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
+        Ok(vec![JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true }])
+    }
+
+    // -- P3a: tiles3d (`output == "tiles3d"`) -- see `crate::tiles3d`'s own module doc for the
+    // tileset.json/`.pnts` shape and the geo-referencing. Unlike imagery/terrain, this output
+    // also produces a `tileset.json` blob (stored as its own, non-manifest `JobOutput`, its
+    // object key recorded on `TileSetManifest.root_object_key`), and needs one shared anchor
+    // point (the source raster's own bounds centre) computed once per run, not per tile.
+
+    /// The anchor `(lon_deg, lat_deg, height_m)` every `tiles3d` run in this executor uses --
+    /// `crate::tiles3d`'s own module doc, "Geo-referencing": the source raster's own bounds
+    /// centre, height 0.
+    fn tiles3d_anchor(raster: &crate::raster::Raster) -> (f64, f64, f64) {
+        ((raster.west + raster.east) / 2.0, (raster.south + raster.north) / 2.0, 0.0)
+    }
+
+    fn run_tiles3d(&self, spec: &pb::JobSpec, raster: &crate::raster::Raster, input: &JobInput, params: &TilerParams) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let mut outputs: Vec<JobOutput> = Vec::new();
+        let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
+        let mut tiles3d_entries: Vec<crate::tiles3d::Tiles3dEntry> = Vec::new();
+
+        let (anchor_lon, anchor_lat, anchor_height) = Self::tiles3d_anchor(raster);
+        let anchor_ecef = crate::tiles3d::geodetic_to_ecef(anchor_lon, anchor_lat, anchor_height);
+        let (east, north, up) = crate::tiles3d::enu_basis(anchor_lon, anchor_lat);
+
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
+        for level in params.min_level..=params.max_level {
+            let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
+            for tile in tiles {
+                let pnts_bytes = crate::tiles3d::render_tiles3d_tile(raster, tile, params.tile_size, anchor_ecef, east, north, up);
+                let entry = crate::tiles3d::describe_tile(tile, &pnts_bytes, &self.key_prefix);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
+                tiles3d_entries.push(crate::tiles3d::Tiles3dEntry { tile, object_key: entry.object_key.clone() });
+                tile_entries.push(entry);
+                outputs.push(JobOutput { bytes: pnts_bytes, media_type: TILES3D_TILE_MEDIA_TYPE.to_string(), manifest: false });
+            }
+        }
+
+        let tileset_json = crate::tiles3d::build_tileset_json(&raster.bounds(), crate::tiles3d::Tiles3dLevels { min_level: params.min_level, max_level: params.max_level, tile_size: params.tile_size }, &tiles3d_entries, (anchor_lon, anchor_lat, anchor_height));
+        let tileset_json_bytes = serde_json::to_vec_pretty(&tileset_json).expect("a serde_json::Value built from only strings/numbers/arrays always encodes");
+        let root_sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&tileset_json_bytes));
+        let root_object_key = content_addressed_key(&self.key_prefix, &root_sha256_hex);
+        outputs.push(JobOutput { bytes: tileset_json_bytes, media_type: TILES3D_TILESET_JSON_MEDIA_TYPE.to_string(), manifest: false });
+
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Tiles3d, root_object_key: &root_object_key });
+        let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
+        outputs.push(JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true });
+
+        Ok(outputs)
+    }
+
+    /// The streaming twin of `run_tiles3d` -- every `.pnts` tile AND the `tileset.json` blob
+    /// are stored through `sink` as they are produced and dropped immediately, exactly
+    /// [`TilerExecutor::run_imagery_streaming`]'s own peak-memory argument, extended to cover
+    /// the one extra (`tileset.json`) output this `kind` has.
+    fn run_tiles3d_streaming(&self, spec: &pb::JobSpec, raster: &crate::raster::Raster, input: &JobInput, params: &TilerParams, sink: &dyn crate::runner::ObjectSink, label: &pb::Label) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
+        let mut tiles3d_entries: Vec<crate::tiles3d::Tiles3dEntry> = Vec::new();
+
+        let (anchor_lon, anchor_lat, anchor_height) = Self::tiles3d_anchor(raster);
+        let anchor_ecef = crate::tiles3d::geodetic_to_ecef(anchor_lon, anchor_lat, anchor_height);
+        let (east, north, up) = crate::tiles3d::enu_basis(anchor_lon, anchor_lat);
+
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
+        for level in params.min_level..=params.max_level {
+            let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
+            for tile in tiles {
+                let pnts_bytes = crate::tiles3d::render_tiles3d_tile(raster, tile, params.tile_size, anchor_ecef, east, north, up);
+                let entry = crate::tiles3d::describe_tile(tile, &pnts_bytes, &self.key_prefix);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
+                let stored = sink.put(&pnts_bytes, TILES3D_TILE_MEDIA_TYPE, label)?;
+                debug_assert_eq!(stored.sha256, entry.sha256, "an ObjectSink must content-address a tile's bytes to the same sha256 this executor independently computed");
+                tiles3d_entries.push(crate::tiles3d::Tiles3dEntry { tile, object_key: entry.object_key.clone() });
+                tile_entries.push(entry);
+            }
+        }
+
+        let tileset_json = crate::tiles3d::build_tileset_json(&raster.bounds(), crate::tiles3d::Tiles3dLevels { min_level: params.min_level, max_level: params.max_level, tile_size: params.tile_size }, &tiles3d_entries, (anchor_lon, anchor_lat, anchor_height));
+        let tileset_json_bytes = serde_json::to_vec_pretty(&tileset_json).expect("a serde_json::Value built from only strings/numbers/arrays always encodes");
+        let root_sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&tileset_json_bytes));
+        let root_object_key = content_addressed_key(&self.key_prefix, &root_sha256_hex);
+        let stored_root = sink.put(&tileset_json_bytes, TILES3D_TILESET_JSON_MEDIA_TYPE, label)?;
+        debug_assert_eq!(stored_root.sha256, root_sha256_hex, "an ObjectSink must content-address tileset.json's bytes to the same sha256 this executor independently computed");
+
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix, ManifestKind { kind: pb::TileSetKind::Tiles3d, root_object_key: &root_object_key });
         let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
         Ok(vec![JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true }])
     }
@@ -489,12 +742,19 @@ mod tests {
         assert_eq!(err.kind, pb::JobFailureKind::InvalidParameters as i32);
     }
 
+    // P3a: replaces `parse_params_refuses_terrain_and_tiles3d_as_not_implemented_this_round`
+    // (round 2's pin, when both were `executor_unavailable`) with a real proof that both now
+    // parse -- what would fail against: `parse_params` still routing either string to a
+    // refusal, or routing it to the wrong `OutputKind` variant (e.g. swapping terrain and
+    // tiles3d). `crates/av-jobs/tests/tiler_terrain.rs`/`tiler_tiles3d.rs` are the full,
+    // end-to-end proofs (real runs, real manifests, anchored goldens); this unit test only
+    // proves parameter parsing itself no longer refuses these two strings.
     #[test]
-    fn parse_params_refuses_terrain_and_tiles3d_as_not_implemented_this_round() {
+    fn parse_params_accepts_terrain_and_tiles3d_as_implemented_output_kinds() {
         let spec = spec_with_params(&[("min_level", "0"), ("max_level", "0"), ("output", "terrain")]);
-        assert_eq!(parse_params(&spec).unwrap_err().kind, pb::JobFailureKind::ExecutorUnavailable as i32);
+        assert_eq!(parse_params(&spec).unwrap().output, OutputKind::Terrain);
         let spec = spec_with_params(&[("min_level", "0"), ("max_level", "0"), ("output", "tiles3d")]);
-        assert_eq!(parse_params(&spec).unwrap_err().kind, pb::JobFailureKind::ExecutorUnavailable as i32);
+        assert_eq!(parse_params(&spec).unwrap().output, OutputKind::Tiles3d);
     }
 
     // -- sample_nearest / render_imagery_tile ---------------------------------------------

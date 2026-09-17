@@ -76,4 +76,6 @@ pub mod queue;
 pub mod raster;
 pub mod runner;
 pub mod scheme;
+pub mod terrain;
 pub mod tiler;
+pub mod tiles3d;

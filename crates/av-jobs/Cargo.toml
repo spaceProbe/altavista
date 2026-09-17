@@ -23,6 +23,17 @@ av-cdm = { path = "../av-cdm" }
 av-label = { path = "../av-label" }
 prost.workspace = true
 thiserror.workspace = true
+# P3a (docs/heavy-plan.md H3, this round's own open item 5): crate::tiles3d's tileset.json
+# output is a real, externally-consumed 3D Tiles 1.0 document -- an EXTERNAL spec's own wire
+# format, unlike every other shape this crate reads or writes (JobLogRecord's protobuf
+# encoding), which stays exactly as JSON-free as before. Already resolved in this workspace's
+# Cargo.lock at 1.0.151 (crates/av-cdm, av-command, av-gateway, av-tiles, and others already
+# depend on it) -- this crate adds no new registry dependency at all (rule 2). Its default
+# (non-"preserve_order") Map is BTreeMap-backed -- crate::tiles3d's own module doc checks this
+# directly against Cargo.lock's own serde_json dependency list (no indexmap entry anywhere)
+# rather than assuming it -- so tileset.json's object-key order is deterministic for a fixed
+# key set, the same determinism bar this crate's protobuf encoding already holds itself to.
+serde_json.workspace = true
 
 # ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate
 # (`openssl::sha::sha256` for src/hash.rs's chain_hash, `openssl::memcmp::eq` for
@@ -89,8 +100,11 @@ required-features = ["store-fixture"]
 #   no business anywhere in its dependency tree.
 # - av-catalog: this round's runner never queries the catalog; H3b/H4 may need it, not H3a.
 # - sha2/hmac/ring: ADR-004 (see openssl above).
-# - serde/serde_json: every wire shape this crate reads or writes is the JobLogRecord
-#   protobuf encoding (src/log.rs); nothing here is ever serialized as JSON.
+# - serde: this crate's own wire shapes are still exactly the JobLogRecord protobuf encoding
+#   (src/log.rs) -- serde_json IS now a real [dependencies] entry (above), but only for
+#   crate::tiles3d's tileset.json, an external spec's own JSON document this crate WRITES,
+#   never something it round-trips back through `serde::Deserialize`; no type in this crate
+#   derives Serialize/Deserialize, and `serde` itself is not named here at all.
 # - anyhow: every error is one of this crate's own typed enums (JobLogError, JobError).
 # - tokio/async-anything, UNCONDITIONALLY: crates/av-jobs::runner::Runner::run_one is
 #   synchronous -- ProcessExecutor blocks on std::process::Child::wait, and nothing in H3a

@@ -394,7 +394,14 @@ message TileSetManifest {
   repeated string source_sha256 = 8;
   // `JobSpec.parameters`, verbatim -- a `BTreeMap` (see this message's own doc).
   map<string, string> parameters = 9;
-  // TILES3D only: the `tileset.json` entry's own `uri` (P3). Empty for every other `kind`.
+  // **Always empty, deliberately (P3a).** This field was reserved, before P3a implemented
+  // TILES3D, for "the `tileset.json` entry's own `uri`" -- but `crates/av-jobs::tiler` runs
+  // before the `ObjectSink` that stores its outputs, exactly the ordering constraint
+  // `TileEntry.uri`'s own doc comment above already explains, and for the identical reason: a
+  // fully-qualified URI would make this manifest's own hash -- the tile set's identity --
+  // depend on which store happened to hold `tileset.json`. `root_object_key` below (added by
+  // P3a) carries the backend-independent equivalent instead, the same "object_key, not uri"
+  // resolution `TileEntry` already established. Empty for every `kind` other than TILES3D.
   string root_uri = 10;
   string job_id = 11;
   // The `<prefix>` every `TileEntry.object_key` above was built under, so this manifest is
@@ -404,4 +411,10 @@ message TileSetManifest {
   // different key prefixes are genuinely different tile sets to a reader, and should not
   // share an identity.
   string object_key_prefix = 12;
+  // TILES3D only (P3a): the content-addressed object key (`crates/av-jobs::runner::
+  // content_addressed_key`, joined with `object_key_prefix` above exactly like every
+  // `TileEntry.object_key`) that `tileset.json`'s own encoded bytes are stored under -- the
+  // backend-independent equivalent `root_uri` above could never carry (see that field's own
+  // doc). Empty for every `kind` other than TILES3D.
+  string root_object_key = 13;
 }
