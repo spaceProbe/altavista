@@ -15,20 +15,24 @@ name its source precisely (these are GMAT's own values, not independently typed 
 textbook) and a future change to GMAT's own constants would be caught by this file changing
 under regeneration.
 
-**Measured finding, recorded here because it changes what `tdb.rs` actually does**: applying
-the exposed `M_E_OFFSET` directly in the standard formula (`M_E = M_E_OFFSET + M_E_COEFF1 *
+**Finding, recorded here because it changes what `tdb.rs` actually does**: applying the
+exposed `M_E_OFFSET` directly in the standard formula (`M_E = M_E_OFFSET + M_E_COEFF1 *
 T_TT_centuries`, `T_TT_centuries` from `T_TT_OFFSET`/`T_TT_COEFF1`) does NOT reproduce GMAT's
 own `Convert(..., TDBMJD, ...)` output -- measured disagreement ~1.6 ms (roughly the full
-series amplitude), a ~288-degree phase error, not floating-point noise. `M_E_OFFSET` as
-exposed is evidently used differently inside GMAT's own C++ (or against a `T` this reader
-could not reproduce from the exposed constants alone). Rather than guess further, this
-script's own `--fit-offset` mode empirically recalibrates the ONE unknown (the additive
-phase `M_E_OFFSET`, holding `M_E_COEFF1`/`TDB_COEFF1`/`TDB_COEFF2`/`T_TT_OFFSET`/
-`T_TT_COEFF1` at GMAT's own reported values) by least-squares fit against 522 GMAT samples
-spanning 10 years (one point every 7 days) -- the `year_scan` section below. Fitted value:
-`68.8398465155` degrees (RMS residual 1.535e-07 s = 153.5 ns over the whole 10-year span).
-`crates/av-orbital/src/tdb.rs` uses this fitted value, documented there as measured, not the
-raw `M_E_OFFSET` property.
+series amplitude), a ~288-degree phase error, not floating-point noise.
+
+**Root-caused (not merely fit): GMAT computes the periodic term's `T_TT` from its own internal
+Modified Julian Date convention (`GMAT_MJD = JD - 2_430_000.0`) while subtracting the J2000
+*Julian* Date constant `T_TT_OFFSET = 2451545.0`, leaving its mean-anomaly argument short by
+exactly 2,430,000 days of the `M_E_COEFF1` rate -- a pure constant phase error.** This lands at
+a derived offset of `68.8398054354` degrees, `4.108e-5` degrees (~1.2 ns of `TDB-TT`) from an
+earlier version's least-squares fit against this file's own 522-point, 10-year `year_scan`
+(`68.8398465155` degrees, RMS residual 1.535e-07 s = 153.5 ns) -- the fit and the derivation
+were measuring the same effect. `crates/av-orbital/src/tdb.rs` now derives GMAT's phase from
+its own constants (see that module's doc, "Root cause") rather than carrying a fitted literal,
+and deliberately uses the CORRECT (undisplaced) series in production, keeping GMAT's own phase
+available under its own name specifically so the disagreement can be measured and asserted
+(`crates/av-orbital/tests/tdb_check.rs`) rather than silently matched.
 """
 import argparse
 import datetime
@@ -112,7 +116,7 @@ def main():
         "duration_s": DURATION_S,
         "gmat_tdb_series_coefficients": coeffs,
         "epochs": epochs,
-        "year_scan_note": "one point every 7 days for 10 years (522 points) of GMAT's own TT/TDB conversion, tdb_minus_tt_s only -- this crate's N2 report used this exact set (regenerated identically by this script) to empirically fit the M_E_OFFSET phase crates/av-orbital/src/tdb.rs actually uses (68.8398465155 degrees, RMS 1.535e-07 s over the whole span), because the raw M_E_OFFSET GMAT exposes does not reproduce GMAT's own Convert() output when used directly -- see this module's own doc comment, 'Measured finding'.",
+        "year_scan_note": "one point every 7 days for 10 years (522 points) of GMAT's own TT/TDB conversion, tdb_minus_tt_s only -- this crate's N2 report used this exact set (regenerated identically by this script) both to originally empirically fit, and now to confirm the root-caused, derived replacement for, the M_E_OFFSET phase GMAT's own Convert() actually applies internally (68.8398054354 degrees derived, vs the earlier fit's 68.8398465155 degrees, both because the raw M_E_OFFSET GMAT exposes does not reproduce GMAT's own Convert() output when used directly) -- see crates/av-orbital/src/tdb.rs's own module doc, 'Root cause', and this script's own module doc above.",
         "year_scan": year_scan,
     }
     body = json.dumps(doc, indent=2, sort_keys=True)

@@ -191,12 +191,20 @@ fn measure_trajectory_residual(namespace: &str) -> (f64, f64, f64) {
 
 /// Acceleration-level agreement -- run first, per this task's own rule ("by far the fastest
 /// way to find the cause" of any large trajectory residual). **Measured** (debug build,
-/// `--nocapture`): max abs disagreement 1.206205e-14 m/s^2, max relative 1.426677e-15 over
-/// the four epochs -- machine-precision agreement, the same order N1's own point-mass-only
-/// acceleration checks measured (`leo_1day_jgm2_8x8_acceleration_agreement`'s own
-/// 3.972066e-15 m/s^2 / 4.698088e-16). This is the evidence the third-body force model (DE
-/// ephemeris reader, TAI->TDB conversion, Battin third-body formula, and each body's `mu`) is
-/// correct to the last bit that matters -- no root-cause hunt was needed for this golden.
+/// `--nocapture`), ORIGINALLY (fitted `M_E_OFFSET`, `crate::tdb`'s own now-deleted constant):
+/// max abs disagreement 1.206205e-14 m/s^2, max relative 1.426677e-15 over the four epochs.
+/// **Re-measured after `crate::tdb` switched to the correct TDB series** (GMAT's own exposed
+/// `M_E_OFFSET`, deliberately disagreeing with GMAT's own epoch by up to ~1.96 ms, moving the
+/// Moon by ~2 m and the Sun by ~59 m at DE-lookup time -- `crate::tdb`'s own module doc, "Root
+/// cause"): max abs disagreement 3.972128e-15 m/s^2, max relative 4.698162e-16 -- if anything
+/// slightly SMALLER than before, confirming that a ~2 m / ~59 m position shift at lunar/solar
+/// distance is many orders of magnitude below what this acceleration comparison can resolve
+/// (the same order N1's own point-mass-only acceleration checks measured,
+/// `leo_1day_jgm2_8x8_acceleration_agreement`'s own 3.972066e-15 m/s^2 / 4.698088e-16). This
+/// is the evidence the third-body force model (DE ephemeris reader, TAI->TDB conversion,
+/// Battin third-body formula, and each body's `mu`) is correct to the last bit that matters,
+/// UNCHANGED by the TDB series correction -- no root-cause hunt was needed for this golden,
+/// before or after.
 #[test]
 fn leo_1day_jgm2_8x8_sunmoon_acceleration_agreement() {
     let (max_abs, max_rel) = measure_acceleration_agreement("N2AccelA");
@@ -212,21 +220,28 @@ fn leo_1day_jgm2_8x8_sunmoon_acceleration_agreement() {
 /// Trajectory residual against the EXISTING P0 golden's `final_state` -- the golden file and
 /// its own `tolerance_m`/`tolerance_mps` are read only for `initial_state`/`final_state`/
 /// `epoch_a1mjd`/`duration_s` (never for a tolerance: this test's tolerance is its own,
-/// declared below, measured, and never the golden's `gmat-sys`-path 0.05 m). **Measured**:
-/// position residual 4.542078e-3 m, velocity residual 5.032951e-6 m/s over one day --
-/// essentially IDENTICAL to N1's own no-third-body residual on the same arc
-/// (`leo_1day_jgm2_8x8`'s own 4.557868e-3 m / 5.050580e-6 m/s, actually very slightly
-/// SMALLER), confirming the acceleration-agreement test's own conclusion: this residual is
-/// integrator-family disagreement (this model's `Dopri5` default vs GMAT's `PrinceDormand78`
-/// at `Accuracy=1e-13`), not a force-model defect -- adding the Sun and Moon changed the
-/// trajectory residual by less than its own epoch-to-epoch noise. No further root-cause chain
-/// was needed (see this crate's N2 report).
+/// declared below, measured, and never the golden's `gmat-sys`-path 0.05 m). **Measured**,
+/// ORIGINALLY (fitted `M_E_OFFSET`): position residual 4.542078e-3 m, velocity residual
+/// 5.032951e-6 m/s over one day -- essentially IDENTICAL to N1's own no-third-body residual on
+/// the same arc (`leo_1day_jgm2_8x8`'s own 4.557868e-3 m / 5.050580e-6 m/s, actually very
+/// slightly SMALLER). **Re-measured after `crate::tdb` switched to the correct TDB series**
+/// (see the acceleration-agreement test above for why the ~2 m / ~59 m Moon/Sun position shift
+/// this causes is expected to be undetectable here too): position residual 4.547920e-3 m,
+/// velocity residual 5.039387e-6 m/s -- a ~0.13% change, still comfortably inside this test's
+/// own tolerance below and still the same order as N1's own no-third-body residual, confirming
+/// the acceleration-agreement test's own conclusion: this residual is integrator-family
+/// disagreement (this model's `Dopri5` default vs GMAT's `PrinceDormand78` at
+/// `Accuracy=1e-13`), not a force-model defect, UNCHANGED in kind by the TDB series
+/// correction. No further root-cause chain was needed (see this crate's N2 report), and this
+/// test's own tolerance (below) did not need to move.
 #[test]
 fn leo_1day_jgm2_8x8_sunmoon_trajectory_residual() {
     let (dr, dv, _wall_s) = measure_trajectory_residual("N2TrajA");
     // This test's OWN tolerance (never goldens/leo_1day_jgm2_8x8_sunmoon.json's 0.05 m, which
-    // pins the gmat-sys depth-2 path) -- set just above the measured native residual
-    // (4.542078e-3 m / 5.032951e-6 m/s), matching N1's own leo_1day_jgm2_8x8 golden's
+    // pins the gmat-sys depth-2 path) -- originally set just above the measured native
+    // residual with the fitted M_E_OFFSET (4.542078e-3 m / 5.032951e-6 m/s); re-measured after
+    // the TDB series correction at 4.547920e-3 m / 5.039387e-6 m/s, still comfortably under
+    // this same tolerance, so it was NOT moved -- matching N1's own leo_1day_jgm2_8x8 golden's
     // identical-order recorded tolerance (6e-3 m / 6e-6 m/s).
     const TOLERANCE_M: f64 = 6e-3;
     const TOLERANCE_MPS: f64 = 6e-6;

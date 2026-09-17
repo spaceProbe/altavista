@@ -34,14 +34,30 @@
 //! a = -mu / |d|^3 * [ r / (1+q)^1.5 + F(q) d ]
 //! ```
 //!
-//! **The `F(q)` identity was re-derived here, not copied from a reference, because a widely
-//! circulated closed form for it (`q(3+3q+q^2)/(1+(1+q)^1.5)`) was checked numerically against
-//! `1 - (1+q)^-1.5` and found to disagree by ~1% at `q ~ 0.01` -- a genuinely different
-//! function, not a precision artifact (this crate's N2 report has the numeric check). The
-//! form above was derived by factoring `x^3 - 1 = (x-1)(x^2+x+1)` with `x = sqrt(1+q)`, and
-//! verified to agree with the direct `1-(1+q)^-1.5` to machine precision from `q=1e-4` up
-//! (and to the *expected*, precision-limited direct value below that -- see this crate's N2
-//! report for the printed sweep) before this Rust code was written.
+//! **The `F(q)` identity was re-derived here, not copied from a reference.** A widely
+//! circulated closed form, `q(3+3q+q^2)/(1+(1+q)^1.5)`, disagrees numerically with
+//! `1 - (1+q)^-1.5` by ~1% at `q ~ 0.01` (this crate's N2 report has the numeric check) --
+//! but the two are not meant to be equal in the first place, so this is not evidence either
+//! one is wrong. Let `u = (1+q)^1.5`. Expanding `(1+q)^3 - 1 = q(3+3q+q^2)` and factoring the
+//! difference of squares `u^2 - 1 = (u-1)(u+1)` gives, exactly:
+//!
+//! ```text
+//! q(3+3q+q^2) / (1 + u) = (u-1)(u+1) / (1+u) = u - 1 = (1+q)^1.5 - 1
+//! 1 - (1+q)^-1.5                              = (u-1) / u
+//! ```
+//!
+//! The widely circulated form computes `u - 1`; `F(q)` here is `(u-1)/u`. They differ by
+//! exactly the factor `u = (1+q)^1.5` -- a genuinely different quantity, not a wrong one:
+//! which of the two belongs in a given third-body formula depends entirely on how that
+//! formula distributes the `(1+q)^1.5` factor between `F(q)` and the rest of the bracket (a
+//! formula that already divides its `r` term by a bare `1` instead of `(1+q)^1.5` would want
+//! `u - 1` there instead of this module's `F(q)`). This module's own bracket, `r / (1+q)^1.5 +
+//! F(q) d`, needs `F(q) = 1 - (1+q)^-1.5` exactly, so the widely circulated form is not usable
+//! here unmodified -- hence the re-derivation below, not a correction of "wrong" math
+//! elsewhere. The form below was derived by factoring `x^3 - 1 = (x-1)(x^2+x+1)` with
+//! `x = sqrt(1+q)`, and verified to agree with the direct `1-(1+q)^-1.5` to machine precision
+//! from `q=1e-4` up (and to the *expected*, precision-limited direct value below that -- see
+//! this crate's N2 report for the printed sweep) before this Rust code was written.
 //!
 //! `d3()`, below, is `|d|^3`, and the whole bracket is scaled by `-mu/|d|^3` as shown.
 
