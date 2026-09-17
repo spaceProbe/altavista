@@ -129,20 +129,26 @@ RUST_BINARIES: dict[str, tuple[str, str]] = {
 #: reason, the moment such a commit lands without one.
 RUST_EPOCH_PATHS = ["Cargo.lock", "Cargo.toml", "crates/*/Cargo.toml"]
 
-#: Python components. Both read the IDENTICAL installed-distribution set from the one shared
-#: worktree `.venv` (D2-4: there is no per-component venv) -- so, unlike a Rust binary's linked
-#: package set, a Python SBOM's *content* cannot be changed by editing `altavista/**` or
-#: `services/gmat-service/**`; only `pyproject.toml` (the file that actually declares the
-#: installed dependency set) can. `PYTHON_EPOCH_PATHS` below reflects that directly (D2-1): a
-#: component's own source paths are deliberately NOT part of the epoch -- including them made
-#: the committed SBOM go stale the instant a later, unrelated commit touched `altavista/server.py`
-#: or similar, which is a gate failure nobody caused, since it can never change which distribution
-#: is installed.
+#: Python components. Both read the IDENTICAL declared package set -- question 224's own fix:
+#: `scripts/kit/python-lock.json` (`scripts/kit/python_lock.py`'s committed output), never the
+#: live worktree `.venv` directly any more (D2-4's original text described the venv itself as
+#: the source; that was the defect question 224 found and this fixes -- see `python_dist_sbom`'s
+#: own doc below). A Python SBOM's *content* still cannot be changed by editing `altavista/**` or
+#: `services/gmat-service/**`; now it is `pyproject.toml` (which declares the roots
+#: `python_lock.py` resolves from) AND `scripts/kit/python-lock.json` (the resolved, pinned,
+#: licence-bearing result) that can change it. `PYTHON_EPOCH_PATHS` below reflects that directly
+#: (D2-1): a component's own source paths are deliberately NOT part of the epoch -- including
+#: them made the committed SBOM go stale the instant a later, unrelated commit touched
+#: `altavista/server.py` or similar, which is a gate failure nobody caused, since it can never
+#: change which distribution is installed.
 PYTHON_COMPONENTS: tuple[str, ...] = ("av-viewer", "gmat-service")
 
-#: D2-1: every Python component's epoch is `pyproject.toml` alone -- see `PYTHON_COMPONENTS`'s
-#: own comment for why per-component source paths were removed from this list.
-PYTHON_EPOCH_PATHS: list[str] = ["pyproject.toml"]
+#: D2-1: every Python component's epoch is `pyproject.toml` (the declared roots) plus
+#: `scripts/kit/python-lock.json` (the resolved, pinned, committed declared set question 224's
+#: fix reads instead of the live venv) -- see `PYTHON_COMPONENTS`'s own comment for why
+#: per-component source paths were removed from this list, and `scripts/kit/python_lock.py`'s
+#: own module doc for why the lock file is a real SBOM input now, not merely a cache of the venv.
+PYTHON_EPOCH_PATHS: list[str] = ["pyproject.toml", "scripts/kit/python-lock.json"]
 
 #: The two recorded container images (Decision G/D2 deliverable 6's "declared in one place").
 IMAGE_COMPONENTS: tuple[str, ...] = ("edge-plugin-image", "cfs-image")
@@ -383,22 +389,57 @@ def rust_binary_sbom(component: str, pkg: str, bin_name: str) -> dict:
 
 
 # =================================================================================================
-# 2. Python distributions -- importlib.metadata over the running interpreter's own .venv
+# 2. Python distributions -- the committed declared set (scripts/kit/python-lock.json), the live
+#    .venv used only as a cross-check (question 224)
 # =================================================================================================
+#
+# Question 224's finding: a prior revision of this generator called
+# `importlib.metadata.distributions()` directly over the running interpreter's own `.venv`, so a
+# Python SBOM's package list, versions, and licences were a property of THAT MACHINE's venv --
+# the reconciliation worker's worktree venv lacked `setuptools` and carried a stale `altavista`
+# dist-info with no licence metadata, so it wrote `setuptools:no-longer-there` and
+# `altavista:no-licence-metadata`, while the verification clone's healthy venv regenerated the
+# SAME two files differently. A document that changes with the machine it is generated on is not
+# the reproducible SBOM D2 promised.
+#
+# The fix: `python_dist_sbom` below reads `scripts/kit/python-lock.json`
+# (`scripts/kit/python_lock.py`'s committed output -- see that module's own doc for what it is
+# and how it is refreshed) for the package list, version, and licence every Python SBOM records.
+# The live `.venv` is still read (`_venv_representative_versions`), but ONLY to cross-check: if
+# a declared package is missing from the venv, or a version disagrees, `python_dist_sbom` raises
+# `PythonSbomCrossCheckError` naming exactly what differs, rather than silently writing whichever
+# it found (this is the fix for BOTH shapes of the venv the lead found broken: a venv missing
+# `setuptools` now fails loudly instead of silently omitting it; a stale extra `altavista`
+# dist-info/egg-info -- same name and version either way -- is tolerated, because the SBOM's
+# `altavista` entry no longer comes from that dist-info at all).
 
 PROP_LICENCE_RAW = PROP_PREFIX + "licence-raw"
 PROP_PYTHON_PACKAGES_SOURCE = PROP_PREFIX + "python-packages-source"
 
-#: D2-4: every Python component's `metadata.component` carries this verbatim, so a reader of
-#: one SBOM file alone (not this module's source) learns that the package list is the shared
-#: worktree venv's, not a per-component resolution -- av-viewer and gmat-service enumerate the
-#: identical 34 distributions today, by construction, because there is one `.venv` for both.
+#: D2-4, updated for question 224: every Python component's `metadata.component` carries this
+#: verbatim, so a reader of one SBOM file alone (not this module's source) learns that the
+#: package list is the committed lock file's declared set, cross-checked against (never sourced
+#: from) the live venv -- av-viewer and gmat-service enumerate the identical declared set today,
+#: by construction, because there is one `scripts/kit/python-lock.json` for both.
 PYTHON_PACKAGES_SOURCE_NOTE = (
-    "this component's package list is importlib.metadata over the one shared worktree .venv -- "
-    "there is no per-component venv in this repository, so every Python component's SBOM "
-    "enumerates the identical installed-distribution set; it is not resolved independently "
-    "per component"
+    "this component's package list is the committed declared set in "
+    "scripts/kit/python-lock.json (pyproject.toml's [project].dependencies and "
+    "[project.optional-dependencies].dev, resolved and pinned by scripts/kit/python_lock.py) -- "
+    "the live worktree .venv is read only to cross-check the declared set against what is "
+    "actually installed (a disagreement raises PythonSbomCrossCheckError rather than silently "
+    "writing whichever was found); there is no per-component venv or lock file in this "
+    "repository, so every Python component's SBOM enumerates the identical declared set"
 )
+
+#: Question 224: packages a venv always carries as installer/bootstrap tooling, never as a
+#: consequence of anything `pyproject.toml` declares (confirmed directly: `pip show pip` in this
+#: worktree's own healthy `.venv` reports no `Required-by` at all -- nothing in this project's
+#: dependency graph, runtime or `dev`, depends on `pip` itself; `python -m venv`/`pip install`
+#: put it there regardless). Present in the live venv but absent from the declared set is
+#: EXPECTED for exactly this name, not a cross-check disagreement -- everything else absent from
+#: the declared set (including every `dev`-only package, which the declared set already includes
+#: via `python_lock.declared_roots`'s own `dev` extra roots) still disagrees.
+PYTHON_CROSS_CHECK_IGNORED: frozenset[str] = frozenset({"pip"})
 
 
 class DuplicatePythonDistributionError(RuntimeError):
@@ -409,6 +450,19 @@ class DuplicatePythonDistributionError(RuntimeError):
     texts ever differ in meaning (not just presence), picking one arbitrarily would be a silent,
     machine-dependent choice. Refusing is the right answer; the caller decides what to do about
     a real conflict, which none has been found to be through this task's own generation runs."""
+
+
+class PythonSbomCrossCheckError(RuntimeError):
+    """Question 224's typed failure: raised by `_cross_check_python_packages` when the committed
+    declared set (`scripts/kit/python-lock.json`) and the live worktree `.venv` disagree -- a
+    declared package missing from the venv, a version mismatch, or an installed package the
+    declared set does not name (`PYTHON_CROSS_CHECK_IGNORED` is the one named exception: venv
+    bootstrap tooling no declared dependency ever pulls in). The message lists every
+    disagreement found, each naming the exact package, which side, and which version(s) --
+    never just "the venv is wrong" -- so it is directly actionable: either the lock file is
+    stale (refresh it: `python scripts/kit/python_lock.py --refresh`, on a venv you have
+    checked is healthy) or this venv is missing something `pip install -e ".[dev]"` should have
+    installed."""
 
 
 def _dist_license_text(dist: importlib_metadata.Distribution) -> Optional[str]:
@@ -446,17 +500,115 @@ def _dedupe_python_distributions(
     return components
 
 
-def python_dist_sbom(component: str) -> dict:
+def _normalize_python_dist_name(name: str) -> str:
+    """Same normalisation `scripts/kit/python_lock.py::_normalize_dist_name` applies when
+    grouping the lock file's roots -- used here only to compare a declared name against an
+    installed name for the cross-check (`typing_extensions` vs `typing-extensions`-shaped
+    differences must not read as a disagreement); the SBOM itself always emits the name exactly
+    as recorded (lock file for the declared package list, live dist metadata for nothing --
+    the live venv is never a naming source any more)."""
+    return name.lower().replace("_", "-")
+
+
+@lru_cache()
+def _load_python_lock() -> list[dict]:
+    """Reads `scripts/kit/python-lock.json` (`scripts/kit/python_lock.py`'s committed output --
+    see that module's own doc). This is the ONLY place `python_dist_sbom` gets its package list,
+    versions, and licences from now (question 224) -- no network, no live venv scan; a plain,
+    already-committed file read, identical on any machine that has checked out this repository."""
+    lock_path = REPO_ROOT / "scripts" / "kit" / "python-lock.json"
+    if not lock_path.is_file():
+        raise RuntimeError(
+            f"{lock_path} is missing -- run `python scripts/kit/python_lock.py --refresh` "
+            f"first (on a venv installed with `pip install -e \".[dev]\"`), then commit the "
+            f"result; scripts/kit/sbom.py no longer reads the live venv for the Python "
+            f"components' package list directly (question 224)"
+        )
+    data = json.loads(lock_path.read_text(encoding="utf-8"))
+    return data["packages"]
+
+
+def _venv_representative_versions() -> dict[str, tuple[str, str]]:
+    """Normalised package name -> (name as installed, version), over the live worktree venv,
+    deduplicated with the EXACT SAME logic `_dedupe_python_distributions` already applies for
+    the SBOM's own package list (D2-3: the known `altavista` dist-info/egg-info duplicate, and
+    the same refusal if two installed records for one `(name, version)` genuinely disagree on
+    licence text) -- reused, not re-implemented, so this cross-check's notion of "what is
+    installed" can never silently drift from the generator's own. Used only by
+    `_cross_check_python_packages`; never a source for the SBOM's own components."""
     records = []
     for dist in importlib_metadata.distributions():
         name = dist.metadata.get("Name")
         if not name:
             continue
-        # `dist._path` is CPython's own PathDistribution implementation detail -- used only to
-        # name a source in a `DuplicatePythonDistributionError` message (D2-3), never to break a
-        # tie between two disagreeing licence texts, and never emitted into the SBOM itself.
         path_str = str(getattr(dist, "_path", id(dist)))
         records.append((name, dist.version, _dist_license_text(dist), path_str))
+    components = _dedupe_python_distributions(records)
+    return {
+        _normalize_python_dist_name(c["name"]): (c["name"], c["version"]) for c in components
+    }
+
+
+def _cross_check_python_packages(component: str, declared: list[dict]) -> None:
+    """Question 224's typed cross-check: compares the committed declared set (`declared`, from
+    `_load_python_lock`) against the live worktree `.venv`
+    (`_venv_representative_versions`) and raises `PythonSbomCrossCheckError`, naming every
+    disagreement, if they do not match exactly (modulo `PYTHON_CROSS_CHECK_IGNORED`). Two
+    directions, both checked: a declared package missing from the venv (or installed at a
+    different version) -- this is the `setuptools`-shaped defect question 224 found, now a loud,
+    named failure instead of a silently short SBOM; and a venv package the declared set never
+    names at all (dev-only packages are NOT this case -- they are part of the declared set via
+    `python_lock.declared_roots`'s own `dev` extra roots, so their presence is expected, not a
+    disagreement to report)."""
+    declared_by_key = {_normalize_python_dist_name(p["name"]): p for p in declared}
+    installed = _venv_representative_versions()
+
+    problems: list[str] = []
+    for key, pkg in sorted(declared_by_key.items()):
+        name, version = pkg["name"], pkg["version"]
+        if key not in installed:
+            problems.append(
+                f"{name} {version}: declared in scripts/kit/python-lock.json but not installed "
+                f"in this .venv"
+            )
+            continue
+        installed_name, installed_version = installed[key]
+        if installed_version != version:
+            problems.append(
+                f"{name}: scripts/kit/python-lock.json declares {version}, but this .venv has "
+                f"{installed_name} {installed_version} installed"
+            )
+    for key, (installed_name, installed_version) in sorted(installed.items()):
+        if key in PYTHON_CROSS_CHECK_IGNORED:
+            continue
+        if key not in declared_by_key:
+            problems.append(
+                f"{installed_name} {installed_version}: installed in this .venv but not "
+                f"declared in scripts/kit/python-lock.json"
+            )
+
+    if problems:
+        raise PythonSbomCrossCheckError(
+            f"{component}: the declared Python package set (scripts/kit/python-lock.json) "
+            f"disagrees with the live .venv -- refusing to generate an SBOM whose content would "
+            f"depend on which machine generated it:\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+
+
+def python_dist_sbom(component: str) -> dict:
+    """Question 224: the package list, versions, and licences come from the committed
+    `scripts/kit/python-lock.json` (`_load_python_lock`), never from scanning the live venv --
+    the live venv (`_cross_check_python_packages`) is read only to confirm it agrees with that
+    declared set, and raises a typed, named `PythonSbomCrossCheckError` if it does not, rather
+    than silently writing whichever the venv happened to have."""
+    declared = _load_python_lock()
+    _cross_check_python_packages(component, declared)
+
+    records = [
+        (pkg["name"], pkg["version"], pkg["license"], "scripts/kit/python-lock.json")
+        for pkg in declared
+    ]
     components = _dedupe_python_distributions(records)
 
     epoch = git_epoch(PYTHON_EPOCH_PATHS)
@@ -657,7 +809,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error(f"unknown component(s): {unknown!r}; known components: {sorted(known)}")
 
     for component in wanted:
-        doc = generate_one(component)
+        try:
+            doc = generate_one(component)
+        except PythonSbomCrossCheckError as exc:
+            # Question 224: a clean, one-shot CLI failure naming exactly what disagreed --
+            # never a bare traceback -- so this is directly actionable from the command line,
+            # not just from a caught-in-a-test exception message.
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         write_document(doc, out_dir / f"{component}.cdx.json")
         print(f"wrote {out_dir / f'{component}.cdx.json'}", file=sys.stderr)
 

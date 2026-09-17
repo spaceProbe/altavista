@@ -26,16 +26,56 @@ components (`av-ingest`, `av-command`, `av-gateway`, `av-proposer`, `av-dynamics
 `av-edge-plugin`) each run `cargo auditable build --offline` first — set `CARGO_TARGET_DIR` to a
 scratch directory first if you don't want that build to land in this repo's own `target/`. The
 Python (`av-viewer`, `gmat-service`) and image (`edge-plugin-image`, `cfs-image`) components
-build nothing; they read `importlib.metadata` over the venv `.venv/bin/python` is running from,
-and the two images' own committed `IMAGE_DIGEST.md`/`IMAGE_CONTEXT_MANIFEST.txt` files,
-respectively.
+build nothing; they read the committed `scripts/kit/python-lock.json`
+(`scripts/kit/python_lock.py`'s own output — question 224) and the two images' own committed
+`IMAGE_DIGEST.md`/`IMAGE_CONTEXT_MANIFEST.txt` files, respectively. The venv `.venv/bin/python`
+is running from is still read for the Python components, but ONLY to cross-check the declared
+set in `python-lock.json` against what is actually installed — a disagreement (a declared
+package missing from the venv, or installed at a different version) raises
+`sbom.PythonSbomCrossCheckError`, naming exactly what differs, rather than silently writing
+whatever the venv happened to have. **Before running the command above, run `pip install -e
+".[dev]"` in this venv** so the cross-check has something correct to agree with; see "Why the
+Python SBOMs read a lock file, not the venv, directly" below for why, and
+`tests/test_sbom.py`'s own question-224 section (`test_two_different_venvs_produce_one_byte_
+identical_python_sbom`, `test_a_venv_missing_a_declared_package_fails_the_cross_check_loudly`)
+for the proof.
 
 **The two Python SBOMs enumerate the identical package list, on purpose.** There is one
 `.venv` for this whole worktree — not one per component — so `av-viewer.cdx.json` and
-`gmat-service.cdx.json` both read `importlib.metadata` over the same installed-distribution set
-rather than resolving each component's own dependencies separately. Each file's own
+`gmat-service.cdx.json` both read the same `scripts/kit/python-lock.json` declared set rather
+than resolving each component's own dependencies separately. Each file's own
 `metadata.component` carries an `altavista:sbom:python-packages-source` property saying so, so
 this is visible from the SBOM file alone, not only from this README.
+
+## Why the Python SBOMs read a lock file, not the venv, directly (question 224)
+
+A prior revision of `python_dist_sbom` called `importlib.metadata.distributions()` directly over
+the running interpreter's own `.venv` — so a Python SBOM's package list, versions, and licences
+were a property of THAT MACHINE's venv, not of anything committed. Measured for real: the
+reconciliation worker's worktree venv lacked `setuptools` and carried a stale `altavista`
+dist-info with no licence metadata, so its generated SBOMs recorded
+`setuptools:no-longer-there` and `altavista:no-licence-metadata`, while the verification clone's
+healthy venv regenerated the SAME two files differently (`docs/compliance/BUNDLE.md`'s own
+history records both moves). A document that changes with the machine it is generated on is not
+the reproducible SBOM this directory's own first section promises.
+
+The fix: `scripts/kit/python_lock.py` resolves `pyproject.toml`'s declared dependency set
+(`[project].dependencies` **and** `[project.optional-dependencies].dev` — the `dev` extra is
+included deliberately, because this task's own standing instruction is that a committed Python
+SBOM is regenerated only from a venv installed with `pip install -e ".[dev]"`, and narrowing to
+runtime-only would make every dev-only package look like a permanent cross-check disagreement)
+against a healthy venv's own `importlib.metadata`, captures each package's exact version and raw
+licence text, and writes `scripts/kit/python-lock.json` — a small, committed, sorted JSON file.
+`python_dist_sbom` reads THAT file for the SBOM's content; the live venv is read only by
+`_cross_check_python_packages`, to confirm it agrees. `pip` itself is the one named exception
+(`sbom.PYTHON_CROSS_CHECK_IGNORED`): no declared dependency, runtime or `dev`, ever requires it,
+yet `python -m venv`/`pip install` always put it there, so its presence without a matching
+`python-lock.json` entry is expected, not a disagreement.
+
+`scripts/kit/python-lock.json` is refreshed only by hand — `python scripts/kit/python_lock.py
+--refresh`, on a venv you have checked is healthy (`pip install -e ".[dev]"`, nothing missing,
+nothing stale), then commit the result — exactly the same discipline the `*.cdx.json` files
+themselves already follow.
 
 ## Determinism: why the epoch and serial number come from git, not the clock
 
@@ -44,7 +84,8 @@ this is visible from the SBOM file alone, not only from this README.
 that touched that component's own **inputs**: a Rust component's `Cargo.lock`, the workspace
 `Cargo.toml`, and every crate's own `Cargo.toml` (the pathspec `crates/*/Cargo.toml`); an
 image's `IMAGE_DIGEST.md` and, where one exists, `IMAGE_CONTEXT_MANIFEST.txt`; a Python
-component's `pyproject.toml` **alone**. `serialNumber` is likewise derived — a SHA-256 over the
+component's `pyproject.toml` **and** `scripts/kit/python-lock.json` (question 224 — see below).
+`serialNumber` is likewise derived — a SHA-256 over the
 component's name and its own epoch, reformatted into a UUID's canonical hex grouping — rather
 than a real random `uuid.uuid4()`.
 
@@ -91,17 +132,20 @@ each component's epoch straight from git and fails the moment a manifest edit la
 matching regeneration, exactly what happened (for real, not hypothetically) when `db1e858`
 merged into `edge` without one — the six failures this task's commit fixed.
 
-**Why the Python epoch is `pyproject.toml` alone, not a component source path too.** A Python
-SBOM's content is `importlib.metadata` over the shared worktree `.venv` — the set of *installed
-distributions*, not this repository's own source. `pyproject.toml` is the file that declares
-that set (`[project.dependencies]`/`[project.optional-dependencies]`); editing
-`altavista/server.py` or anything under `services/gmat-service/` cannot add, remove, or change
-the version of a single package in the SBOM, so an earlier revision that included those paths in
-the epoch made the *committed* SBOM go stale the instant an unrelated later commit touched them
-— a gate failure nobody caused, the identical shape of defect the Rust epoch had. Now the only
-commit that can invalidate a Python SBOM is one that changes `pyproject.toml`, which is exactly
-when the installed dependency set is capable of having changed, and is a drift signal worth
-acting on. (Confirmed safe for the other two kinds too: a commit that only adds
+**Why the Python epoch is `pyproject.toml` + `scripts/kit/python-lock.json`, not a component
+source path too.** A Python SBOM's content is the declared set in `scripts/kit/python-lock.json`
+(question 224 — that file's own doc, and this README's "Why the Python SBOMs read a lock file,
+not the venv, directly" section above), not this repository's own source. `pyproject.toml` is
+the file that declares the ROOTS `python_lock.py` resolves from
+(`[project.dependencies]`/`[project.optional-dependencies].dev`); `python-lock.json` is the
+resolved, pinned, licence-bearing RESULT. Editing `altavista/server.py` or anything under
+`services/gmat-service/` cannot add, remove, or change the version of a single package in the
+SBOM, so an earlier revision that included those paths in the epoch made the *committed* SBOM go
+stale the instant an unrelated later commit touched them — a gate failure nobody caused, the
+identical shape of defect the Rust epoch had. Now the only commits that can invalidate a Python
+SBOM are ones that change `pyproject.toml` or `python-lock.json`, which is exactly when the
+declared dependency set is capable of having changed, and is a drift signal worth acting on.
+(Confirmed safe for the other two kinds too: a commit that only adds
 `pyproject.toml`'s licence field, for example, touches none of `Cargo.lock`/`Cargo.toml`/
 `crates/*/Cargo.toml` or either image's `IMAGE_DIGEST.md`, so it cannot silently invalidate a
 Rust or image SBOM the same way.)
