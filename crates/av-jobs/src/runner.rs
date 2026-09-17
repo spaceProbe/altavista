@@ -49,6 +49,24 @@ pub trait Executor: fmt::Debug {
     fn declares_manifest(&self) -> bool {
         false
     }
+
+    /// Like [`Executor::execute`], but given direct access to `sink` (the same
+    /// [`ObjectSink`] [`Runner::run_one_streaming`] would otherwise store this call's
+    /// returned outputs through) and `label` (the job's own, already-ladder-checked label),
+    /// so an executor whose job produces many large outputs can store each one as it is
+    /// produced instead of returning every output's bytes in one `Vec` for the caller to
+    /// store afterward -- see `crate::tiler::TilerExecutor::run_imagery_streaming`'s own doc
+    /// for why that matters at a multi-gigabyte tile set.
+    ///
+    /// **The default implementation delegates to [`Executor::execute`] and ignores `sink`/
+    /// `label` entirely** -- exactly today's buffered behaviour, byte-for-byte unchanged, for
+    /// every executor (this crate's own [`ProcessExecutor`] included) that does not override
+    /// this method. [`Runner::run_one`] never calls this method at all; only
+    /// [`Runner::run_one_streaming`] does.
+    fn execute_streaming(&self, spec: &pb::JobSpec, inputs: &[JobInput], sink: &dyn ObjectSink, label: &pb::Label) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let _ = (sink, label);
+        self.execute(spec, inputs)
+    }
 }
 
 /// How the runner gets an input's bytes, by its [`pb::AssetRef`]. `av-jobs` must not depend
@@ -268,7 +286,7 @@ impl<'a> Runner<'a> {
     /// refusal a caller handles, and aborting a long-running runner process because one
     /// append hit `ENOSPC` would destroy the very evidence the caller needs to act on.
     pub fn run_one(&self, spec: &pb::JobSpec) -> Result<pb::JobCompletion, crate::queue::JobError> {
-        let completion = self.execute_spec(spec);
+        let completion = self.execute_spec(spec, false);
         self.queue.complete(&completion)?;
         Ok(completion)
     }
@@ -280,10 +298,33 @@ impl<'a> Runner<'a> {
         pending.iter().map(|spec| self.run_one(spec)).collect()
     }
 
+    /// Like [`Runner::run_one`], but calls the registered [`Executor::execute_streaming`]
+    /// instead of [`Executor::execute`] -- every other step (label check, input fetch/
+    /// verify, the manifest-count/`declares_manifest` checks, storing whatever the executor
+    /// returns through [`ObjectSink::put`], `started_tai_ns`/`finished_tai_ns`, appending to
+    /// the log) is [`Runner::run_one`]'s own fixed order, unchanged: this is
+    /// [`Runner::execute_spec`] run with `streaming: true` instead of `false`, sharing every
+    /// line of that logic rather than a second, independently-drifting copy of it.
+    ///
+    /// For [`crate::tiler::TilerExecutor`] specifically, this is what makes tile storage
+    /// actually stream -- see that type's own `run_imagery_streaming` doc for what changes
+    /// about the returned [`pb::JobCompletion::outputs`] on this path (only the manifest, not
+    /// one entry per tile) and why nothing about the job's real outputs goes unrecorded by
+    /// that. An executor that does not override `execute_streaming` behaves identically to
+    /// [`Runner::run_one`] here -- the default implementation only delegates.
+    pub fn run_one_streaming(&self, spec: &pb::JobSpec) -> Result<pb::JobCompletion, crate::queue::JobError> {
+        let completion = self.execute_spec(spec, true);
+        self.queue.complete(&completion)?;
+        Ok(completion)
+    }
+
     /// The actual step-by-step run -- see [`Runner::run_one`]'s own doc for the fixed order.
-    /// Split out from `run_one` only so `run_one` alone is responsible for appending the
-    /// result to the log; this function itself never touches the log.
-    fn execute_spec(&self, spec: &pb::JobSpec) -> pb::JobCompletion {
+    /// Split out from `run_one`/`run_one_streaming` only so those two alone are responsible
+    /// for appending the result to the log; this function itself never touches the log.
+    /// `streaming` selects [`Executor::execute_streaming`] (`true`, [`Runner::
+    /// run_one_streaming`]'s own call) over [`Executor::execute`] (`false`, [`Runner::
+    /// run_one`]'s own call) at step 4 below -- the one line the two callers differ on.
+    fn execute_spec(&self, spec: &pb::JobSpec, streaming: bool) -> pb::JobCompletion {
         let started_tai_ns = self.clock.now_tai_ns();
         let spec_sha256 = hash::hex_encode(&openssl::sha::sha256(&prost::Message::encode_to_vec(spec)));
 
@@ -353,7 +394,7 @@ impl<'a> Runner<'a> {
                 vec![],
             );
         }
-        let raw_outputs = match executor.execute(spec, &inputs) {
+        let raw_outputs = match if streaming { executor.execute_streaming(spec, &inputs, self.sink.as_ref(), &label) } else { executor.execute(spec, &inputs) } {
             Ok(outputs) => outputs,
             Err(failure) => return make_failure(job_failure_kind(&failure), failure.detail, failure.exit_code, input_sha256, vec![]),
         };

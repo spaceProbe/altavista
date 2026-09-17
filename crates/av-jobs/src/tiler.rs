@@ -227,6 +227,56 @@ impl TilerExecutor {
     }
 }
 
+/// Renders tile `tile`, PNG-encodes it, and returns the finished bytes alongside the
+/// `pb::TileEntry` describing them -- the one piece of per-tile logic both the buffered
+/// (`TilerExecutor::run_imagery`) and streaming (`TilerExecutor::run_imagery_streaming`)
+/// code paths call, so the two paths can never disagree about a tile's bytes, hash, or
+/// manifest entry: this function, not two independently-written copies of it, is why the
+/// load-bearing manifest-equality test (`crates/av-jobs/tests/tiler.rs`) is expected to pass
+/// rather than merely hoped to.
+fn render_and_describe_tile(raster: &crate::raster::Raster, tile: crate::scheme::Tile, tile_size: u32, key_prefix: &str) -> (Vec<u8>, pb::TileEntry) {
+    let png_bytes = render_imagery_tile(raster, tile, tile_size);
+    let sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&png_bytes));
+    let object_key = content_addressed_key(key_prefix, &sha256_hex);
+    let entry = pb::TileEntry {
+        level: tile.level,
+        x: tile.x,
+        y: tile.y,
+        sha256: sha256_hex,
+        size_bytes: png_bytes.len() as u64,
+        // Deliberately empty -- see `TileEntry.uri`'s own doc comment in `heavy.proto`. This
+        // executor runs before the `ObjectSink` and cannot know its URI scheme; the first
+        // version hard-coded `"memory://"` and was measurably wrong against a real store. A
+        // fully-qualified URI would also make this manifest's hash -- the tile set's
+        // identity -- depend on which bucket happened to hold the tiles.
+        uri: String::new(),
+        media_type: IMAGERY_TILE_MEDIA_TYPE.to_string(),
+        object_key,
+    };
+    (png_bytes, entry)
+}
+
+/// Builds the `TileSetManifest` both `run_imagery` and `run_imagery_streaming` produce --
+/// factored out for the identical reason as [`render_and_describe_tile`]: one place that
+/// decides the manifest's encoded bytes, so the streaming and buffered paths cannot drift
+/// apart on field order, defaulting, or a forgotten field.
+fn build_tileset_manifest(params: &TilerParams, raster: &crate::raster::Raster, spec: &pb::JobSpec, input: &JobInput, tile_entries: Vec<pb::TileEntry>, key_prefix: &str) -> pb::TileSetManifest {
+    pb::TileSetManifest {
+        kind: pb::TileSetKind::Imagery as i32,
+        scheme: crate::scheme::SCHEME_ID.to_string(),
+        min_level: params.min_level,
+        max_level: params.max_level,
+        tile_size: params.tile_size,
+        bounds: Some(pb::GeoBbox { min_lon: raster.west, min_lat: raster.south, max_lon: raster.east, max_lat: raster.north }),
+        tiles: tile_entries,
+        source_sha256: vec![input.asset.sha256.clone()],
+        parameters: spec.parameters.clone(),
+        root_uri: String::new(),
+        job_id: spec.job_id.clone(),
+        object_key_prefix: key_prefix.to_string(),
+    }
+}
+
 impl Executor for TilerExecutor {
     fn execute(&self, spec: &pb::JobSpec, inputs: &[JobInput]) -> Result<Vec<JobOutput>, pb::JobFailure> {
         let params = parse_params(spec)?;
@@ -243,6 +293,23 @@ impl Executor for TilerExecutor {
 
     fn declares_manifest(&self) -> bool {
         true
+    }
+
+    /// See [`TilerExecutor::run_imagery_streaming`]'s own doc for what this changes about
+    /// the job's recorded outputs and why peak memory drops from "the whole tile set" to
+    /// "one tile". Parameter parsing, input-count checking and raster decoding are identical
+    /// to [`Executor::execute`]'s own -- only which per-output-kind method runs differs.
+    fn execute_streaming(&self, spec: &pb::JobSpec, inputs: &[JobInput], sink: &dyn crate::runner::ObjectSink, label: &pb::Label) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let params = parse_params(spec)?;
+
+        if inputs.len() != 1 {
+            return Err(invalid_input(format!("tiler requires exactly one input (the raster); got {}", inputs.len())));
+        }
+        let raster = crate::raster::decode(&inputs[0].bytes).map_err(|e| invalid_input(format!("input raster does not decode: {e}")))?;
+
+        match params.output {
+            OutputKind::Imagery => self.run_imagery_streaming(spec, &raster, &inputs[0], &params, sink, label),
+        }
     }
 }
 
@@ -261,52 +328,90 @@ impl TilerExecutor {
         for level in params.min_level..=params.max_level {
             let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
             for tile in tiles {
-                let png_bytes = render_imagery_tile(raster, tile, params.tile_size);
+                let (png_bytes, entry) = render_and_describe_tile(raster, tile, params.tile_size, &self.key_prefix);
                 tiles_done += 1;
                 if let Some(cb) = &self.progress {
                     cb(level, tiles_done, total_tiles);
                 }
-                let sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&png_bytes));
-                let object_key = content_addressed_key(&self.key_prefix, &sha256_hex);
-
-                tile_entries.push(pb::TileEntry {
-                    level: tile.level,
-                    x: tile.x,
-                    y: tile.y,
-                    sha256: sha256_hex,
-                    size_bytes: png_bytes.len() as u64,
-                    // Deliberately empty -- see `TileEntry.uri`'s own doc comment in
-                    // `heavy.proto`. This executor runs before the `ObjectSink` and cannot
-                    // know its URI scheme; the first version hard-coded `"memory://"` and
-                    // was measurably wrong against a real store. A fully-qualified URI
-                    // would also make this manifest's hash -- the tile set's identity --
-                    // depend on which bucket happened to hold the tiles.
-                    uri: String::new(),
-                    media_type: IMAGERY_TILE_MEDIA_TYPE.to_string(),
-                    object_key,
-                });
+                tile_entries.push(entry);
                 outputs.push(JobOutput { bytes: png_bytes, media_type: IMAGERY_TILE_MEDIA_TYPE.to_string(), manifest: false });
             }
         }
 
-        let manifest = pb::TileSetManifest {
-            kind: pb::TileSetKind::Imagery as i32,
-            scheme: crate::scheme::SCHEME_ID.to_string(),
-            min_level: params.min_level,
-            max_level: params.max_level,
-            tile_size: params.tile_size,
-            bounds: Some(pb::GeoBbox { min_lon: raster.west, min_lat: raster.south, max_lon: raster.east, max_lat: raster.north }),
-            tiles: tile_entries,
-            source_sha256: vec![input.asset.sha256.clone()],
-            parameters: spec.parameters.clone(),
-            root_uri: String::new(),
-            job_id: spec.job_id.clone(),
-            object_key_prefix: self.key_prefix.clone(),
-        };
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix);
         let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
         outputs.push(JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true });
 
         Ok(outputs)
+    }
+
+    /// **The fix for the finding this round opened with**: `run_imagery` (above) renders
+    /// every tile across every requested level into one `Vec<JobOutput>` before returning
+    /// it, so a ten-gigabyte tile set is ten gigabytes of resident memory at that `Vec`'s
+    /// peak -- unreachable on an 8 GB VM host, and the exact gap `crates/av-jobs/src/bin/
+    /// av-tile-fixture.rs`'s own module doc recorded as an open item. This method closes it:
+    /// each tile is rendered, hashed, stored through `sink` (`ObjectSink::put`, the same
+    /// trait [`crate::runner::Runner`] itself stores every output through), and then
+    /// **dropped** before the next tile is rendered. Peak memory for this method is one
+    /// tile's PNG bytes plus the already-decoded source `raster` plus the manifest's own
+    /// small, bytes-free `TileEntry` list (`level`/`x`/`y`/`sha256`/`size_bytes`/
+    /// `media_type`/`object_key` -- at most a few hundred bytes per tile, not the tile's own
+    /// pixels) -- never the whole tile set at once, regardless of `--tile-size`/level range.
+    ///
+    /// **What this changes about the job's recorded outputs**: this method returns exactly
+    /// ONE [`JobOutput`] -- the manifest, `manifest: true` -- because every tile was already
+    /// stored, directly, above; there is nothing left for [`crate::runner::Runner::
+    /// run_one_streaming`]'s own step 5 (`ObjectSink::put` over whatever the executor
+    /// returned) to do except store that one manifest. So `JobCompletion.outputs` on this
+    /// path carries one entry, not one entry per tile the way `run_imagery`'s
+    /// `JobCompletion.outputs` does. **Nothing about the job's real outputs becomes
+    /// unrecorded by that**: the manifest's own encoded bytes list every tile's
+    /// `object_key` and `sha256` (`pb::TileEntry`, `heavy.proto`) under
+    /// `TileSetManifest.object_key_prefix` -- a reader that has the manifest already has
+    /// everything a per-tile `JobCompletion.outputs` entry would have named, because the
+    /// manifest is not a summary of the job's outputs, it already IS their durable index
+    /// (this module's own doc, "The manifest-vs-sink ordering constraint").
+    ///
+    /// **Byte-identical to `run_imagery` for the same input** -- both call
+    /// [`render_and_describe_tile`] for every tile, in the identical `(level, tile)` order,
+    /// and [`build_tileset_manifest`] with the identical arguments; the manifest's own
+    /// SHA-256 (the tile set's identity) does not depend on which of the two produced it.
+    /// `crates/av-jobs/tests/tiler.rs` proves this by running both paths over the same
+    /// fixture and asserting `manifest_sha256` equality AND that every stored tile's bytes
+    /// (not just its hash) are the same across both paths' own sinks.
+    fn run_imagery_streaming(
+        &self,
+        spec: &pb::JobSpec,
+        raster: &crate::raster::Raster,
+        input: &JobInput,
+        params: &TilerParams,
+        sink: &dyn crate::runner::ObjectSink,
+        label: &pb::Label,
+    ) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
+
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
+        for level in params.min_level..=params.max_level {
+            let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
+            for tile in tiles {
+                let (png_bytes, entry) = render_and_describe_tile(raster, tile, params.tile_size, &self.key_prefix);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
+                // Stored immediately, then `png_bytes` goes out of scope at the end of this
+                // block and is freed -- this loop never holds more than one tile's bytes.
+                let stored = sink.put(&png_bytes, IMAGERY_TILE_MEDIA_TYPE, label)?;
+                debug_assert_eq!(stored.sha256, entry.sha256, "an ObjectSink must content-address a tile's bytes to the same sha256 this executor independently computed");
+                tile_entries.push(entry);
+            }
+        }
+
+        let manifest = build_tileset_manifest(params, raster, spec, input, tile_entries, &self.key_prefix);
+        let manifest_bytes: Vec<u8> = prost::Message::encode_to_vec(&manifest);
+        Ok(vec![JobOutput { bytes: manifest_bytes, media_type: MANIFEST_MEDIA_TYPE.to_string(), manifest: true }])
     }
 }
 

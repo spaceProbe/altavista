@@ -57,22 +57,50 @@
 //! `TilerExecutor`'s own documented ceilings) command-line arguments specifically so an
 //! operator can choose a level range and tile size that together produce many gigabytes.
 //!
-//! **What this binary does NOT achieve, and why, recorded rather than silently claimed:** the
-//! current `Runner::run_one`/`Executor::execute` pipeline is not internally streaming --
-//! `TilerExecutor::run_imagery` renders and PNG-encodes every tile across every requested
-//! level into one `Vec<JobOutput>` before returning it, and `Runner::execute_spec` only begins
-//! storing outputs (calling `ObjectSink::put`) once that whole `Vec` has come back. A single
-//! `av-tile-fixture` run therefore holds one job's whole raw, uncompressed tile set in memory
-//! at its peak, regardless of `--tile-size`/level range -- this binary adds no *additional*
-//! buffering of its own on top of that (it never copies a tile's bytes a second time before
-//! handing them to the `Runner`), but it cannot make the underlying pipeline hold less than
-//! `Runner`/`TilerExecutor` already do. Making `Executor::execute` itself incremental (an
-//! output callback instead of one returned `Vec`) would touch that trait's signature and every
-//! existing `Executor`/test in this crate (`ProcessExecutor`, `tests/runner.rs`, `tests/
-//! tiler.rs`, `tests/store_tiler.rs`) -- out of this task's own scope, and left as an open item
-//! for whoever drives the next task's real ten-gigabyte run: a level range and tile size whose
-//! *rendered* tile set fits in the host's available memory is required until that redesign
-//! happens, not merely recommended.
+//! # `--streaming`: the open item from H5b-1 closed, round 3 task P2a
+//!
+//! H5b-1's own first version of this doc recorded an open item here: `Runner::run_one`/
+//! `Executor::execute` render every tile across every requested level into one
+//! `Vec<JobOutput>` before storing any of it, so a single run held one job's whole raw,
+//! uncompressed tile set in memory at its peak, regardless of `--tile-size`/level range --
+//! unreachable at a genuine ten-gigabyte shape on an 8 GB VM host. That is now closed:
+//! `--streaming` (default off, so every existing `--dry-run` test below that does not pass it
+//! is byte-for-byte unaffected) makes this binary call `Runner::run_one_streaming` instead of
+//! `Runner::run_one`, reaching `av_jobs::tiler::TilerExecutor::run_imagery_streaming` --
+//! see that method's own doc comment (`src/tiler.rs`) for exactly how it stores each tile
+//! through the configured `ObjectSink` as it is rendered, drops it, and why the manifest's own
+//! SHA-256 is proven byte-identical to the buffered path's for the same input
+//! (`crates/av-jobs/tests/tiler.rs`). Peak memory with `--streaming` is one tile's PNG bytes
+//! plus the decoded source raster plus the manifest's own small `TileEntry` list -- not the
+//! whole tile set.
+//!
+//! **What `--streaming` changes about this binary's own `total_stored_bytes`/`tile_count`
+//! accounting**: on the buffered path, `JobCompletion.outputs` carries one `AssetRef` per
+//! tile plus the manifest, so summing `outputs[].size_bytes` is exactly the real total. On
+//! the streaming path `JobCompletion.outputs` carries only the manifest's own `AssetRef`
+//! (`run_imagery_streaming`'s own doc: nothing about the job's real outputs goes unrecorded
+//! by that, because the manifest's own encoded bytes already list every tile's `object_key`
+//! and `sha256`/`size_bytes`) -- so this binary fetches that one manifest back (through the
+//! same `ObjectSource`/store handle it already built, never a second connection) and sums
+//! `TileSetManifest.tiles[].size_bytes` itself, plus the manifest's own `size_bytes`, to
+//! report the identical *meaning* of `total_stored_bytes` on both paths. `tile_count` is
+//! `manifest.tiles.len()` on the streaming path, `outputs[].media_type == IMAGERY_TILE_MEDIA_TYPE`
+//! count on the buffered path -- provably the same number for the same job (the manifest
+//! names exactly the tiles that were stored).
+//!
+//! # `peak_rss_bytes`: what makes "it streamed" a measured claim
+//!
+//! This binary's own JSON output ([`FixtureResult::peak_rss_bytes`]) reports this process's
+//! peak resident set size at the moment the job completes, read from the operating system
+//! itself via `getrusage(RUSAGE_SELF, ..)` (declared here by raw `extern "C"` FFI -- no `libc`
+//! crate, no new dependency at all, this workspace's own "no new crate in `Cargo.lock`" rule).
+//! **On macOS (the only platform this binary is built/run on this round -- Colima, GMAT R2026a,
+//! this whole track's own host), `ru_maxrss` is already in BYTES** (unlike Linux, where the
+//! same field is kilobytes -- see [`ru_maxrss_to_bytes`]'s own doc for the `cfg`-gated
+//! conversion, kept correct for both rather than silently assuming one). An assertion that
+//! peak memory stayed low is a claim; a number read from the kernel's own accounting of this
+//! exact process is a measurement -- `scripts/heavy/ten_gigabyte_proof.py` is the caller that
+//! turns this field into the round's actual ten-gigabyte evidence.
 //!
 //! # Progress on stderr ([`av_jobs::tiler::TilerExecutor::with_progress`])
 //!
@@ -105,7 +133,7 @@ const MEMORY_RASTER_URI: &str = "memory://av-tile-fixture-source-raster";
 const USAGE: &str = "usage: av-tile-fixture --key-prefix PREFIX --ladder MARKING[,MARKING...] \
                       --label-marking MARKING --job-id ID --min-level N --max-level N \
                       [--tile-size N] (--source-path PATH | --synthetic-source WxH) \
-                      [--queue-dir PATH] [--dry-run] \
+                      [--queue-dir PATH] [--dry-run] [--streaming] \
                       [--store-endpoint URL --store-region REGION --store-access-key-id ID \
                        --store-secret-access-key KEY --store-bucket BUCKET \
                        [--store-path-style] [--store-ca-file PATH]]";
@@ -127,6 +155,11 @@ struct CliArgs {
     tile_size: u32,
     source: Option<Source>,
     dry_run: bool,
+    /// `--streaming`: see this binary's own module doc, "`--streaming`: the open item from
+    /// H5b-1 closed". Orthogonal to `dry_run` -- both a `--dry-run --streaming` combination
+    /// (this binary's own `mod tests` uses it, no store/container/network needed) and a
+    /// real-store `--streaming` run are valid.
+    streaming: bool,
     queue_dir: Option<PathBuf>,
     store_endpoint: Option<String>,
     store_region: Option<String>,
@@ -160,6 +193,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
         tile_size: av_jobs::tiler::DEFAULT_TILE_SIZE,
         source: None,
         dry_run: false,
+        streaming: false,
         queue_dir: None,
         store_endpoint: None,
         store_region: None,
@@ -196,6 +230,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
             }
             "--queue-dir" => out.queue_dir = Some(PathBuf::from(value()?)),
             "--dry-run" => out.dry_run = true,
+            "--streaming" => out.streaming = true,
             "--store-endpoint" => out.store_endpoint = Some(value()?),
             "--store-region" => out.store_region = Some(value()?),
             "--store-access-key-id" => out.store_access_key_id = Some(value()?),
@@ -355,6 +390,122 @@ impl ObjectSink for StoreSink {
     }
 }
 
+/// Wraps an `Arc<MemoryObjectSink>` so this binary can hand the `Runner` a `Box<dyn
+/// ObjectSink>` it owns while keeping its own read handle on the same store -- needed on
+/// `--streaming --dry-run` to fetch the manifest back afterward (this binary's own module
+/// doc, "`--streaming`: the open item from H5b-1 closed", "What `--streaming` changes about
+/// this binary's own `total_stored_bytes`/`tile_count` accounting"). Byte-for-byte
+/// `crates/av-jobs/tests/tiler.rs::SharedSink`'s own shape.
+#[derive(Debug, Clone)]
+struct SharedMemorySink(Arc<MemoryObjectSink>);
+impl ObjectSink for SharedMemorySink {
+    fn put(&self, bytes: &[u8], media_type: &str, label: &pb::Label) -> Result<pb::AssetRef, pb::JobFailure> {
+        self.0.put(bytes, media_type, label)
+    }
+}
+
+/// A read handle back onto whichever store this run wrote through -- the in-memory sink
+/// (`--dry-run`) or the real store bridge -- kept alongside `source_obj`/`sink_obj` (which
+/// are moved into the `Runner`) so `run` can fetch the manifest back after the job completes
+/// on `--streaming` (this binary's own module doc, "What `--streaming` changes about this
+/// binary's own `total_stored_bytes`/`tile_count` accounting"). Not used at all on the
+/// buffered path -- `JobCompletion.outputs` already has everything that path needs.
+enum Fetcher {
+    Memory(Arc<MemoryObjectSink>),
+    Store(Arc<StoreBridge>),
+}
+
+impl Fetcher {
+    fn fetch(&self, asset: &pb::AssetRef) -> Result<Vec<u8>, String> {
+        match self {
+            Fetcher::Memory(sink) => sink.get(&asset.sha256).ok_or_else(|| format!("no object stored under sha256 {:?} in the in-memory sink", asset.sha256)),
+            Fetcher::Store(bridge) => bridge.fetch(asset).map_err(|e| format!("fetching {:?} back from the store: {e:?}", asset.uri)),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------------------
+// Peak RSS -- see this binary's own module doc, "peak_rss_bytes: what makes 'it streamed' a
+// measured claim". Raw `extern "C"` FFI, no `libc` crate: this workspace's "no new crate in
+// Cargo.lock" rule (question 199's sibling rule for this task) applies to a JSON-reporting
+// binary exactly as much as to a library.
+// -----------------------------------------------------------------------------------------
+
+/// `struct timeval` (`<sys/time.h>`), 64-bit Darwin/Linux layout: `tv_sec` 8 bytes, `tv_usec`
+/// a 4-byte `i32` padded to 8 -- the padding is declared explicitly (`_pad`) rather than left
+/// to `#[repr(C)]` to infer, so this struct's `size_of` is checked against the platform's own
+/// `sizeof(struct timeval)` by this module's own test rather than merely assumed.
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i32,
+    _pad: i32,
+}
+
+/// `struct rusage` (`<sys/resource.h>`), the fields `getrusage` fills -- every field present
+/// (not just `ru_maxrss`) so this struct's layout matches the real one field-for-field; only
+/// `ru_maxrss` is ever read.
+#[repr(C)]
+struct RUsage {
+    ru_utime: Timeval,
+    ru_stime: Timeval,
+    ru_maxrss: i64,
+    ru_ixrss: i64,
+    ru_idrss: i64,
+    ru_isrss: i64,
+    ru_minflt: i64,
+    ru_majflt: i64,
+    ru_nswap: i64,
+    ru_inblock: i64,
+    ru_oublock: i64,
+    ru_msgsnd: i64,
+    ru_msgrcv: i64,
+    ru_nsignals: i64,
+    ru_nvcsw: i64,
+    ru_nivcsw: i64,
+}
+
+const RUSAGE_SELF: i32 = 0;
+
+#[cfg(unix)]
+extern "C" {
+    fn getrusage(who: i32, usage: *mut RUsage) -> i32;
+}
+
+/// `ru_maxrss`'s own unit is platform-specific: **bytes on macOS/Darwin**, **kilobytes on
+/// Linux** -- the same field name, two different units, a well-known `getrusage(2)` wart.
+/// This binary's own module doc states which one this task measured against (macOS); this
+/// function is the one place that distinction is applied, so a Linux build of this same
+/// binary (not this round's target host, but not refused at compile time either) still
+/// reports real bytes rather than silently mislabelled kilobytes.
+#[cfg(target_os = "macos")]
+fn ru_maxrss_to_bytes(raw: i64) -> u64 {
+    raw.max(0) as u64
+}
+#[cfg(target_os = "linux")]
+fn ru_maxrss_to_bytes(raw: i64) -> u64 {
+    (raw.max(0) as u64).saturating_mul(1024)
+}
+
+/// This process's own peak resident set size in bytes, read from the kernel via
+/// `getrusage(RUSAGE_SELF, ..)` -- `None` on a platform this binary has no `ru_maxrss` unit
+/// conversion for, or if the call itself fails (never observed in practice; `getrusage` with
+/// a valid pointer and `RUSAGE_SELF` does not fail on a real POSIX system, but this function
+/// does not assume that).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn peak_rss_bytes() -> Option<u64> {
+    let mut usage: RUsage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { getrusage(RUSAGE_SELF, &mut usage as *mut RUsage) };
+    if rc != 0 {
+        return None;
+    }
+    Some(ru_maxrss_to_bytes(usage.ru_maxrss))
+}
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn peak_rss_bytes() -> Option<u64> {
+    None
+}
+
 /// This run's own JSON stdout shape -- see this binary's own module doc, "Byte accounting is
 /// real". Field declaration order here is also [`FixtureResult::to_json`]'s own output order
 /// (hand-rolled, see that method's own doc for why no JSON library is pulled in for it) --
@@ -371,6 +522,16 @@ struct FixtureResult {
     tile_size: u32,
     job_id: String,
     dry_run: bool,
+    /// Whether `Runner::run_one_streaming`/`TilerExecutor::run_imagery_streaming` ran this
+    /// job instead of the buffered `Runner::run_one`/`TilerExecutor::run_imagery` -- see this
+    /// binary's own module doc, "`--streaming`: the open item from H5b-1 closed".
+    streaming: bool,
+    /// This process's own peak resident set size, in BYTES, at job completion --
+    /// `getrusage(RUSAGE_SELF, ..).ru_maxrss`, converted to bytes for the platform this ran
+    /// on (macOS: already bytes; Linux: kilobytes x 1024 -- see [`ru_maxrss_to_bytes`]'s own
+    /// doc). `null` only if this platform has no conversion this binary knows (`peak_rss_bytes`'s
+    /// own doc) -- never a silently wrong unit.
+    peak_rss_bytes: Option<u64>,
 }
 
 impl FixtureResult {
@@ -398,8 +559,12 @@ impl FixtureResult {
             }
             out
         }
+        let peak_rss_json = match self.peak_rss_bytes {
+            Some(v) => v.to_string(),
+            None => "null".to_string(),
+        };
         format!(
-            "{{\"manifest_sha256\":\"{}\",\"tile_count\":{},\"total_stored_bytes\":{},\"source_sha256\":\"{}\",\"object_key_prefix\":\"{}\",\"min_level\":{},\"max_level\":{},\"tile_size\":{},\"job_id\":\"{}\",\"dry_run\":{}}}",
+            "{{\"manifest_sha256\":\"{}\",\"tile_count\":{},\"total_stored_bytes\":{},\"source_sha256\":\"{}\",\"object_key_prefix\":\"{}\",\"min_level\":{},\"max_level\":{},\"tile_size\":{},\"job_id\":\"{}\",\"dry_run\":{},\"streaming\":{},\"peak_rss_bytes\":{}}}",
             esc(&self.manifest_sha256),
             self.tile_count,
             self.total_stored_bytes,
@@ -410,6 +575,8 @@ impl FixtureResult {
             self.tile_size,
             esc(&self.job_id),
             self.dry_run,
+            self.streaming,
+            peak_rss_json,
         )
     }
 }
@@ -444,7 +611,7 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
         eprintln!("av-tile-fixture: NOTE queue recovery discarded {} byte(s): {:?}", report.discarded_bytes, report.reason);
     }
 
-    let (source_obj, sink_obj, raster_asset): (Box<dyn ObjectSource>, Box<dyn ObjectSink>, pb::AssetRef) = if cli.dry_run {
+    let (source_obj, sink_obj, raster_asset, fetcher): (Box<dyn ObjectSource>, Box<dyn ObjectSink>, pb::AssetRef, Fetcher) = if cli.dry_run {
         eprintln!("av-tile-fixture: --dry-run -- using the in-memory ObjectSource/ObjectSink, no store, no container, no network");
         let mem_source = MemoryObjectSource::new();
         mem_source.insert(MEMORY_RASTER_URI, raster_bytes.clone());
@@ -456,7 +623,12 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
             label: Some(label.clone()),
             ..Default::default()
         };
-        (Box::new(mem_source), Box::new(MemoryObjectSink::new(key_prefix.clone())), asset)
+        // Arc'd and cloned, not owned solely by `sink_obj` -- `--streaming` needs a read
+        // handle on the SAME sink after the run, to fetch the manifest back (this binary's
+        // own module doc, "What `--streaming` changes about this binary's own
+        // `total_stored_bytes`/`tile_count` accounting").
+        let mem_sink = Arc::new(MemoryObjectSink::new(key_prefix.clone()));
+        (Box::new(mem_source), Box::new(SharedMemorySink(mem_sink.clone())), asset, Fetcher::Memory(mem_sink))
     } else {
         let endpoint = cli.store_endpoint.clone().expect("parse_cli_args checked this");
         eprintln!("av-tile-fixture: connecting to the store at {endpoint} (bucket {:?}) ...", cli.store_bucket);
@@ -488,7 +660,7 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
         // real clearance.
         let caller_clearance = cli.ladder.clone().expect("parse_cli_args checked this").last().cloned().unwrap_or_else(|| label_marking.clone());
         let bridge = Arc::new(StoreBridge { runtime, client, ladder: ladder.clone(), caller_clearance });
-        (Box::new(StoreSource(bridge.clone())), Box::new(StoreSink(bridge.clone())), raster_asset)
+        (Box::new(StoreSource(bridge.clone())), Box::new(StoreSink(bridge.clone())), raster_asset, Fetcher::Store(bridge))
     };
 
     let tile_size = cli.tile_size;
@@ -536,7 +708,12 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
     runner.register_executor("tiler", Box::new(executor));
 
     runner.queue().submit(&spec).map_err(|e| format!("submit: {e}"))?;
-    let completion = runner.run_one(&spec).map_err(|e| format!("run_one (queue append failed -- infrastructure, not a job failure): {e}"))?;
+    let completion = if cli.streaming {
+        eprintln!("av-tile-fixture: --streaming -- storing each tile through the sink as it is rendered (Runner::run_one_streaming)");
+        runner.run_one_streaming(&spec).map_err(|e| format!("run_one_streaming (queue append failed -- infrastructure, not a job failure): {e}"))?
+    } else {
+        runner.run_one(&spec).map_err(|e| format!("run_one (queue append failed -- infrastructure, not a job failure): {e}"))?
+    };
 
     if !completion.ok {
         let failure = completion.failure.unwrap_or_default();
@@ -546,9 +723,37 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
         return Err("the job completed ok but produced no manifest_sha256 -- this should be impossible for a successful \"tiler\" job".to_string());
     }
 
-    let tile_count = completion.outputs.iter().filter(|a| a.media_type == av_jobs::tiler::IMAGERY_TILE_MEDIA_TYPE).count();
-    let total_stored_bytes: u64 = completion.outputs.iter().map(|a| a.size_bytes).sum();
-    eprintln!("av-tile-fixture: job complete: {tile_count} tile(s), {total_stored_bytes} byte(s) stored, manifest_sha256={}", completion.manifest_sha256);
+    // -- tile_count / total_stored_bytes: see this binary's own module doc, "What
+    // `--streaming` changes about this binary's own `total_stored_bytes`/`tile_count`
+    // accounting". Buffered: JobCompletion.outputs already names every tile. Streaming:
+    // JobCompletion.outputs names only the manifest (TilerExecutor::run_imagery_streaming's
+    // own doc), so this binary fetches that manifest back through `fetcher` and sums its own
+    // TileSetManifest.tiles[].size_bytes instead. ---------------------------------------
+    let (tile_count, total_stored_bytes) = if cli.streaming {
+        let manifest_asset = completion
+            .outputs
+            .iter()
+            .find(|a| a.media_type == av_jobs::tiler::MANIFEST_MEDIA_TYPE)
+            .ok_or_else(|| format!("streaming completion carried no manifest output at all: {completion:?}"))?;
+        let manifest_bytes = fetcher.fetch(manifest_asset)?;
+        let manifest_bytes_sha256 = hex_encode(&sha256(&manifest_bytes));
+        if manifest_bytes_sha256 != completion.manifest_sha256 {
+            return Err(format!("fetched manifest bytes hash to {manifest_bytes_sha256}, not JobCompletion.manifest_sha256 {}", completion.manifest_sha256));
+        }
+        let manifest: pb::TileSetManifest = prost::Message::decode(manifest_bytes.as_slice()).map_err(|e| format!("decoding the fetched manifest bytes as TileSetManifest: {e}"))?;
+        let tiles_total: u64 = manifest.tiles.iter().map(|t| t.size_bytes).sum();
+        (manifest.tiles.len(), tiles_total + manifest_asset.size_bytes)
+    } else {
+        let tile_count = completion.outputs.iter().filter(|a| a.media_type == av_jobs::tiler::IMAGERY_TILE_MEDIA_TYPE).count();
+        let total_stored_bytes: u64 = completion.outputs.iter().map(|a| a.size_bytes).sum();
+        (tile_count, total_stored_bytes)
+    };
+
+    let peak_rss_bytes = peak_rss_bytes();
+    match peak_rss_bytes {
+        Some(v) => eprintln!("av-tile-fixture: job complete: {tile_count} tile(s), {total_stored_bytes} byte(s) stored, peak_rss_bytes={v}, manifest_sha256={}", completion.manifest_sha256),
+        None => eprintln!("av-tile-fixture: job complete: {tile_count} tile(s), {total_stored_bytes} byte(s) stored, peak RSS unavailable on this platform, manifest_sha256={}", completion.manifest_sha256),
+    }
 
     Ok(FixtureResult {
         manifest_sha256: completion.manifest_sha256,
@@ -561,6 +766,8 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
         tile_size,
         job_id,
         dry_run: cli.dry_run,
+        streaming: cli.streaming,
+        peak_rss_bytes,
     })
 }
 
@@ -768,6 +975,65 @@ mod tests {
         let result_b = run(parse_cli_args(args(&[])).unwrap()).unwrap();
         assert_eq!(result_a.manifest_sha256, result_b.manifest_sha256, "identical flags must produce the identical tile-set identity");
         assert_eq!(result_a.source_sha256, result_b.source_sha256);
+    }
+
+    // -- --streaming: this binary's own wiring of Runner::run_one_streaming ----------------
+
+    #[test]
+    fn a_streaming_dry_run_produces_the_identical_manifest_hash_and_byte_total_as_the_buffered_dry_run() {
+        // The crate-level proof (`crates/av-jobs/tests/tiler.rs::
+        // the_streaming_path_produces_a_byte_identical_manifest_and_byte_identical_tiles_to_the_buffered_path`)
+        // is the load-bearing one; this test only checks that THIS BINARY's own `--streaming`
+        // flag actually reaches `Runner::run_one_streaming` and that its own
+        // `total_stored_bytes`/`tile_count` re-accounting (fetching the manifest back and
+        // summing `TileEntry.size_bytes`) agrees with the buffered path's own direct sum --
+        // see this binary's own module doc, "What `--streaming` changes about this binary's
+        // own `total_stored_bytes`/`tile_count` accounting".
+        let buffered = run(parse_cli_args(args(&[])).unwrap()).expect("buffered dry run");
+        let streaming = run(parse_cli_args(args(&["--streaming"])).unwrap()).expect("streaming dry run");
+
+        assert!(!buffered.streaming);
+        assert!(streaming.streaming);
+        assert_eq!(streaming.manifest_sha256, buffered.manifest_sha256, "--streaming must reproduce the identical manifest hash as the buffered path for identical flags");
+        assert_eq!(streaming.tile_count, buffered.tile_count, "tile_count must agree whether it came from JobCompletion.outputs (buffered) or the fetched-back manifest (streaming)");
+        assert_eq!(streaming.total_stored_bytes, buffered.total_stored_bytes, "total_stored_bytes must agree whether it came from JobCompletion.outputs (buffered) or manifest + tiles (streaming)");
+        assert!(streaming.tile_count > 0);
+        assert!(streaming.total_stored_bytes > 0);
+    }
+
+    #[test]
+    fn streaming_and_dry_run_are_not_mutually_exclusive() {
+        // Unlike --store-*, --streaming has nothing store-specific about it (it only picks
+        // Runner::run_one_streaming over Runner::run_one) -- this is what lets this binary's
+        // own test suite exercise the streaming wiring with no docker/store/network at all.
+        let cli = parse_cli_args(args(&["--streaming"])).expect("--streaming must be accepted alongside --dry-run");
+        assert!(cli.streaming);
+        assert!(cli.dry_run);
+    }
+
+    // -- peak_rss_bytes: getrusage(RUSAGE_SELF, ..) is really read, and really in bytes ------
+
+    #[test]
+    fn peak_rss_bytes_is_reported_and_plausible_for_a_running_process() {
+        let rss = peak_rss_bytes().expect("this test binary itself is built for macOS or Linux in this workspace's own CI/dev hosts");
+        // A real macOS/Linux process that has parsed CLI args, decoded a raster and run a
+        // tiler job has allocated at least a few hundred KB by construction; comparing
+        // against an intentionally loose floor (not an exact value, which would be flaky
+        // across allocator/OS versions) catches the specific defect this test exists to
+        // catch: `ru_maxrss` misread as kilobytes when it is actually bytes (or vice versa)
+        // would be off by a factor of 1024, landing far outside this floor either way.
+        assert!(rss > 100_000, "peak_rss_bytes() = {rss} is implausibly small for a running process -- likely a unit-conversion defect (KB vs bytes)");
+        // And not implausibly large either -- catches the opposite direction (bytes misread
+        // as needing *1024 when the platform already reports bytes).
+        assert!(rss < 50_000_000_000, "peak_rss_bytes() = {rss} is implausibly large for this test's own tiny fixture -- likely a unit-conversion defect");
+    }
+
+    #[test]
+    fn to_json_includes_the_streaming_flag_and_a_positive_peak_rss() {
+        let result = run(parse_cli_args(args(&["--streaming"])).unwrap()).expect("streaming dry run");
+        let json = result.to_json();
+        assert!(json.contains("\"streaming\":true"), "{json}");
+        assert!(!json.contains("\"peak_rss_bytes\":null"), "peak RSS must be a real number on this test host, got: {json}");
     }
 
     #[test]
