@@ -87,6 +87,18 @@
 //! with no drag bound behaves bit-for-bit as before) and REQUIRES [`model::EarthGravityModel::
 //! with_third_bodies`] to already be configured, for the identical reason `with_srp` does.
 //!
+//! N4 (`docs/native-dynamics-plan.md`, the state transition matrix) adds:
+//!
+//! - [`stm`]: the pure 6x6 variational-equations math (`A = [[0, I], [da_dr, da_dv]]`,
+//!   `d(Phi)/dt = A Phi`) and the body-fixed-to-inertial gradient rotation `R^T G R`, kept
+//!   independent of any one force model -- see that module's own doc for the derivation.
+//!
+//! [`model::EarthGravityModel::stm_derivatives`]/`stm_capable`/`describe` wire it in: every
+//! configured force's own analytic (gravity, third bodies, SRP position block, drag velocity
+//! block) or finite-differenced (drag position block, matching ADR-002's third amendment's own
+//! finding that GMAT does the same for that block) position/velocity partial feeds
+//! [`stm::stm_rate`].
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -127,6 +139,7 @@ pub mod model;
 pub mod msise90;
 mod msise90_data;
 pub mod srp;
+pub mod stm;
 pub mod tdb;
 pub mod third_body;
 pub mod weather;

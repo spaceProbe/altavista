@@ -389,12 +389,21 @@ pub fn srp_acceleration(r_sc_m: [f64; 3], r_sun_m: [f64; 3], constants: &SrpCons
     }
 
     let nu = illumination_fraction(r_sc_m, r_sun_m, constants.sun_radius_m, constants.body_radius_m)?;
-    let k = constants.flux_pressure_n_m2 * props.cr * props.area_m2 / props.mass_kg * constants.reference_distance_m * constants.reference_distance_m;
+    let k = srp_k(constants, props);
     let accel = cannonball_acceleration::<f64>(r_sc_m, r_sun_m, nu, k);
     if !check_finite_point(accel) {
         return Err(SrpError::NonFiniteResult(accel));
     }
     Ok(accel)
+}
+
+/// `K = flux_pressure_n_m2 * Cr * Area / mass * reference_distance_m^2` -- the scale factor
+/// [`cannonball_acceleration`] takes, factored out of [`srp_acceleration`] (N4,
+/// `crate::stm`'s own position-partial computation needs the identical `k` that produced a
+/// given acceleration, not a second, independently-written copy of this formula that could
+/// drift from it).
+pub fn srp_k(constants: &SrpConstants, props: &SrpProperties) -> f64 {
+    constants.flux_pressure_n_m2 * props.cr * props.area_m2 / props.mass_kg * constants.reference_distance_m * constants.reference_distance_m
 }
 
 #[cfg(test)]
