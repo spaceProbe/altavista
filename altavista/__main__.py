@@ -37,6 +37,16 @@ def main(argv=None) -> int:
     s.add_argument("--command-entity", dest="command_entities", action="append", default=None,
                     help="entity id GET /api/command/proposals sweeps when no ?entity_id= is "
                          "given (repeatable)")
+    # H5b-1 (docs/heavy-plan.md H5, round 3; question 199): configuration for the
+    # /api/tiles/* routes (altavista/tiles_client.py) -- a real, already-running av-tiles
+    # gateway's plain-HTTP endpoint, plus a file holding the bearer token this server
+    # presents to it. Read once here, as ordinary CLI flags -- never the process
+    # environment -- and passed straight through to altavista.server.serve/create_app.
+    s.add_argument("--tiles-endpoint", default=None,
+                    help="host:port of a running av-tiles gateway (enables /api/tiles/*)")
+    s.add_argument("--tiles-token-path", default=None,
+                    help="path to a file holding the bearer token this server presents to "
+                         "the av-tiles gateway (read fresh on every proxied request)")
 
     r = sub.add_parser("run", help="run a GMAT script and publish it to the viewer")
     r.add_argument("script")
@@ -52,7 +62,8 @@ def main(argv=None) -> int:
               profile=args.profile, command_endpoint=args.command_endpoint,
               command_admin_endpoint=args.command_admin_endpoint,
               command_entities=args.command_entities or [],
-              profiles_dir=args.profiles_dir)
+              profiles_dir=args.profiles_dir,
+              tiles_endpoint=args.tiles_endpoint, tiles_token_path=args.tiles_token_path)
         return 0
     if args.cmd == "run":
         from .scenario import Scenario

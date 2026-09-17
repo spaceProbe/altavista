@@ -32,7 +32,10 @@
 //!   `crates/av-command/src/admin.rs`'s own hand-rolled pattern (that module's own doc: no
 //!   `axum`/`hyper` direct dependency, manual request-line/header parsing) -- see that
 //!   module's own doc for why a framework buys nothing here either.
+//! - [`admin`] -- H5b-1: an OPTIONAL, separately-bound `GET /admin/api/counters` surface (see
+//!   that module's own doc for why round 2's "no admin surface" decision is revisited here).
 
+pub mod admin;
 pub mod config;
 pub mod core;
 pub mod range;

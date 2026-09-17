@@ -177,18 +177,53 @@ fn render_imagery_tile(raster: &crate::raster::Raster, tile: crate::scheme::Tile
     crate::png::encode_rgb8(tile_size, tile_size, &pixels).expect("pixels length matches width*height*3 by construction")
 }
 
+/// `(level, tiles_done_so_far_in_this_run, tiles_total_in_this_run)` -- [`TilerExecutor`]'s
+/// own progress-callback shape, factored into a named alias (clippy's `type_complexity` lint,
+/// `-D warnings`, refuses the bare `Option<Box<dyn Fn(..) + Send + Sync>>` field type inline;
+/// naming it is the fix the lint itself suggests, never `#[allow(...)]`, which this
+/// workspace's own binding rule forbids).
+type TileProgressCallback = Box<dyn Fn(u32, usize, usize) + Send + Sync>;
+
 /// The tiler `Executor`, `kind == "tiler"`. `key_prefix` must equal the `prefix` the
 /// `Runner`'s own configured `ObjectSink` (this round: always a `MemoryObjectSink`) is
 /// constructed with -- see this module's own doc, "The manifest-vs-sink ordering
 /// constraint".
-#[derive(Debug)]
 pub struct TilerExecutor {
     key_prefix: String,
+    /// H5b-1 (`docs/heavy-plan.md` H5, round 3): an optional per-tile progress callback --
+    /// see [`TileProgressCallback`]'s own doc for its exact signature. Called immediately
+    /// after each tile is rendered and PNG-encoded, before ANY tile in this run is handed to
+    /// the `ObjectSink` (this executor runs entirely before the sink -- this module's own
+    /// doc, "The manifest-vs-sink ordering constraint"; a progress callback cannot change
+    /// that, so it reports rendering progress, not storing progress). `None` (what
+    /// [`TilerExecutor::new`] sets) costs nothing beyond one `Option` check per tile --
+    /// `crates/av-jobs/src/bin/av-tile-fixture.rs` is the one caller that sets it (via
+    /// [`TilerExecutor::with_progress`]), to print stderr progress for a large run (that
+    /// task's own brief: "must print, on stderr, enough progress that a ten-gigabyte run is
+    /// observable").
+    progress: Option<TileProgressCallback>,
+}
+
+impl std::fmt::Debug for TilerExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A `Box<dyn Fn(..)>` has no `Debug` impl of its own (no closure does) -- named and
+        // acknowledged rather than silently omitted, mirroring `crates/av-jobs/tests/
+        // store_tiler.rs::StoreBridge`'s identical `finish_non_exhaustive` shape for the
+        // identical reason (a field this crate cannot meaningfully print).
+        f.debug_struct("TilerExecutor").field("key_prefix", &self.key_prefix).finish_non_exhaustive()
+    }
 }
 
 impl TilerExecutor {
     pub fn new(key_prefix: impl Into<String>) -> Self {
-        Self { key_prefix: key_prefix.into() }
+        Self { key_prefix: key_prefix.into(), progress: None }
+    }
+
+    /// Like [`TilerExecutor::new`], but `progress` is called after every tile this run
+    /// renders -- see [`TilerExecutor`]'s own field doc for the exact contract and why it
+    /// exists.
+    pub fn with_progress(key_prefix: impl Into<String>, progress: impl Fn(u32, usize, usize) + Send + Sync + 'static) -> Self {
+        Self { key_prefix: key_prefix.into(), progress: Some(Box::new(progress)) }
     }
 }
 
@@ -216,10 +251,21 @@ impl TilerExecutor {
         let mut outputs: Vec<JobOutput> = Vec::new();
         let mut tile_entries: Vec<pb::TileEntry> = Vec::new();
 
+        // Precomputed once, purely so a progress callback can report "N of TOTAL" -- cheap
+        // (`tiles_covering` is pure arithmetic over `raster.bounds()`, no I/O), and computed
+        // the identical way the real loop below computes it level by level, never a separate
+        // formula that could disagree with what actually gets rendered.
+        let total_tiles: usize = (params.min_level..=params.max_level).map(|level| crate::scheme::tiles_covering(&raster.bounds(), level).len()).sum();
+        let mut tiles_done: usize = 0;
+
         for level in params.min_level..=params.max_level {
             let tiles = crate::scheme::tiles_covering(&raster.bounds(), level);
             for tile in tiles {
                 let png_bytes = render_imagery_tile(raster, tile, params.tile_size);
+                tiles_done += 1;
+                if let Some(cb) = &self.progress {
+                    cb(level, tiles_done, total_tiles);
+                }
                 let sha256_hex = crate::hash::hex_encode(&openssl::sha::sha256(&png_bytes));
                 let object_key = content_addressed_key(&self.key_prefix, &sha256_hex);
 
