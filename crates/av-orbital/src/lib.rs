@@ -35,6 +35,27 @@
 //! - [`model`]: [`model::EarthGravityModel`], the `av_dynamics::DynamicsModel` implementation
 //!   for one spacecraft under Earth point-mass/spherical-harmonic gravity.
 //!
+//! N2 (`docs/native-dynamics-plan.md`, third bodies) adds three more, all GMAT-free (no
+//! `gmat-frames` gate, so `--no-default-features` still carries them):
+//!
+//! - [`de`]: [`de::DeEphemeris`], a reader for GMAT's own JPL DE binary planetary/lunar
+//!   ephemeris files (`$GMAT_ROOT/data/planetary_ephem/de/leDE*.4xx`) -- Chebyshev evaluation
+//!   of a body's position relative to Earth at a TDB epoch, and each body's `mu` from the
+//!   file's own constants. See that module's doc for which file GMAT actually uses (measured,
+//!   not assumed) and every header cross-check.
+//! - [`tdb`]: TAI -> TDB (Barycentric Dynamical Time, the scale DE ephemerides are tabulated
+//!   in), sourced from GMAT's own `TimeSystemConverter` constants and measured against GMAT's
+//!   own conversion -- see that module's doc. Deliberately NOT added to `av_cdm::time::Tai`
+//!   (this crate's own brief: `av-cdm` is shared with other tracks and not this round's to
+//!   extend).
+//! - [`third_body`]: [`third_body::third_body_acceleration`], the numerically robust
+//!   ("Battin") form of the third-body point-mass perturbation, derived and verified in that
+//!   module's own doc comment rather than quoted from memory.
+//!
+//! [`model::EarthGravityModel::with_third_bodies`] wires all three together: additive to N1
+//! (a model with no third bodies bound behaves bit-for-bit as before -- see that method's own
+//! doc comment).
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -62,6 +83,7 @@
 //! cleanly without it -- see this crate's own N1 report for the verified command and output.
 
 pub mod cof;
+pub mod de;
 pub mod dual;
 pub mod frame;
 #[cfg(feature = "gmat-frames")]
@@ -69,11 +91,15 @@ pub mod frame_gmat;
 pub mod gravity;
 pub mod legendre;
 pub mod model;
+pub mod tdb;
+pub mod third_body;
 
 pub use cof::{CofError, GravityModel};
+pub use de::{DeBody, DeEphemeris, DeError};
 pub use frame::{BodyFixedRotation, Rotation};
 #[cfg(feature = "gmat-frames")]
 pub use frame_gmat::GmatBodyFixedRotation;
 pub use gravity::{point_mass_acceleration, point_mass_partials, spherical_harmonic_gravity};
 pub use legendre::NormalizedLegendre;
 pub use model::{EarthGravityModel, EarthGravityModelInfo, OrbitalModelError};
+pub use third_body::third_body_acceleration;

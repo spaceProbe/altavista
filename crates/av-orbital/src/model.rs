@@ -56,8 +56,10 @@ use av_cdm::pb::{ModelCapability, ModelInfo};
 use av_dynamics::{integrate::Dopri5, DecodeErrorOccurrence, DynamicsModel, SensorFaultEffectDrain};
 
 use crate::cof::{self, CofError, GravityModel};
+use crate::de::{DeBody, DeEphemeris, DeError};
 use crate::frame::BodyFixedRotation;
 use crate::gravity;
+use crate::third_body::third_body_acceleration;
 
 /// Every way [`EarthGravityModel::new`]/[`EarthGravityModel::derivatives`] can fail. Typed
 /// throughout -- no panic on any input a DRM could supply (this task's own rule).
@@ -92,6 +94,21 @@ pub enum OrbitalModelError<E: std::fmt::Debug + std::fmt::Display> {
     /// coordinate system, propagated from [`crate::frame_gmat::GmatBodyFixedRotation`]).
     #[error("body-fixed rotation failed: {0}")]
     Rotation(E),
+    /// The DE ephemeris file could not be read (for the SHA-256 that goes into
+    /// `settings_hash`, mirroring [`OrbitalModelError::GravityFileIo`]) -- N2's third-body
+    /// support, [`EarthGravityModel::with_third_bodies`].
+    #[error("could not read DE ephemeris file {path} to compute its settings-hash digest: {source}")]
+    DeFileIo {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A [`crate::de::DeEphemeris`] lookup failed (a malformed file, an out-of-range epoch, or
+    /// an unknown `mu` constant -- see [`DeError`]'s own variants) -- either while building a
+    /// third-body configuration or while evaluating `derivatives` at an epoch the bound DE
+    /// file does not cover.
+    #[error("third-body ephemeris lookup failed: {0}")]
+    De(#[source] DeError),
 }
 
 /// Caller-supplied, static description fields for an [`EarthGravityModel`], independent of the
@@ -113,14 +130,41 @@ pub struct EarthGravityModelInfo {
     pub goldens: Vec<String>,
 }
 
+/// One resolved third body: which DE body it is and its standard gravitational parameter
+/// (m^3/s^2, read from the DE file's own `GM*`/`GMB`/`EMRAT` constants -- see [`crate::de`]'s
+/// module doc), precomputed once at [`EarthGravityModel::with_third_bodies`] time rather than
+/// re-read from the ephemeris on every `derivatives` call.
+struct ThirdBody {
+    body: DeBody,
+    name: String,
+    mu: f64,
+}
+
+/// N2's third-body configuration: the DE ephemeris this model reads Sun/Moon/planet
+/// positions from, and the resolved bodies to perturb by (see [`EarthGravityModel::
+/// with_third_bodies`]).
+struct ThirdBodies {
+    ephemeris: DeEphemeris,
+    bodies: Vec<ThirdBody>,
+}
+
 /// A [`DynamicsModel`] for one spacecraft under Earth point-mass/spherical-harmonic gravity,
 /// generic over its own body-fixed rotation source `R` -- see this module's own doc comment.
+///
+/// **N2 addition (`docs/native-dynamics-plan.md`):** optionally, third-body point-mass
+/// perturbations from [`EarthGravityModel::with_third_bodies`] -- entirely additive
+/// (`third_bodies: None` reproduces N1's exact behaviour bit-for-bit, since `derivatives`
+/// below only touches the extra term when it is `Some`), and GMAT-free (the DE reader
+/// [`crate::de`] and the TAI->TDB conversion [`crate::tdb`] both have no `gmat-sys`
+/// dependency -- see this crate's own `lib.rs` module doc, "Dependencies"), so this addition
+/// does not change the `--no-default-features` build's own scope at all.
 pub struct EarthGravityModel<R: BodyFixedRotation> {
     gravity: GravityModel,
     rotation: R,
     frame_id: String,
     info: EarthGravityModelInfo,
     settings_hash: String,
+    third_bodies: Option<ThirdBodies>,
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -181,13 +225,53 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("integrator_max_step_s".to_string(), format!("{:.17e}", integrator.max_step));
         let settings_hash = av_dynamics::settings_hash(&settings);
 
-        Ok(Self { gravity, rotation, frame_id, info, settings_hash })
+        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None })
     }
 
     /// The bound gravity model (degree, order, `mu`, reference radius, coefficients) -- for a
     /// caller (or test) that wants to inspect what this model actually loaded.
     pub fn gravity_model(&self) -> &GravityModel {
         &self.gravity
+    }
+
+    /// N2: adds third-body point-mass perturbations (Sun, Moon, or any other
+    /// [`DeBody`]) from the DE ephemeris file at `de_ephemeris_path`, evaluated at TDB (via
+    /// [`crate::tdb::tai_ns_to_tdb_jd`]) on every `derivatives` call. Each body's `mu` is
+    /// resolved once here (from the DE file's own constants -- see [`crate::de::DeEphemeris::
+    /// mu_si`]), not re-read per call. `settings_hash` is recomputed to additionally cover the
+    /// DE file's own name and SHA-256 digest and the bound body list, so two models that
+    /// differ only in their third-body configuration report different hashes (the identical
+    /// rule [`EarthGravityModel::new`]'s own doc states for the gravity file).
+    ///
+    /// A builder consumed by value (`self -> Self`) rather than `&mut self`, matching this
+    /// type's other construction-time-only configuration (there is no `without_third_bodies`
+    /// -- a model is built once, per `av_dynamics::DynamicsModel`'s own contract, and never
+    /// reconfigured after that).
+    pub fn with_third_bodies(mut self, de_ephemeris_path: &Path, bodies: &[DeBody]) -> Result<Self, OrbitalModelError<R::Error>> {
+        let de_bytes = std::fs::read(de_ephemeris_path)
+            .map_err(|source| OrbitalModelError::DeFileIo { path: de_ephemeris_path.to_path_buf(), source })?;
+        let de_sha256 = hex_sha256(&de_bytes);
+        let de_file_name = de_ephemeris_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| de_ephemeris_path.display().to_string());
+
+        let ephemeris = DeEphemeris::open(de_ephemeris_path).map_err(OrbitalModelError::De)?;
+        let mut resolved = Vec::with_capacity(bodies.len());
+        for &body in bodies {
+            let mu = ephemeris.mu_si(body).map_err(OrbitalModelError::De)?;
+            resolved.push(ThirdBody { body, name: format!("{body:?}"), mu });
+        }
+
+        let mut settings = BTreeMap::new();
+        settings.insert("base_settings_hash".to_string(), self.settings_hash.clone());
+        settings.insert("de_file_name".to_string(), de_file_name);
+        settings.insert("de_file_sha256".to_string(), de_sha256);
+        settings.insert("third_bodies".to_string(), resolved.iter().map(|b| b.name.clone()).collect::<Vec<_>>().join(","));
+        self.settings_hash = av_dynamics::settings_hash(&settings);
+
+        self.third_bodies = Some(ThirdBodies { ephemeris, bodies: resolved });
+        Ok(self)
     }
 }
 
@@ -219,7 +303,21 @@ impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
         let rotation = self.rotation.inertial_to_fixed(t_tai_ns).map_err(OrbitalModelError::Rotation)?;
         let pos_fixed = rotation.apply(pos_inertial);
         let (accel_fixed, _partials_fixed) = gravity::spherical_harmonic_gravity(pos_fixed, &self.gravity);
-        let accel_inertial = rotation.apply_transpose(accel_fixed);
+        let mut accel_inertial = rotation.apply_transpose(accel_fixed);
+
+        // N2: third-body point-mass perturbations, evaluated directly in the inertial frame
+        // (no rotation involved -- see crate::third_body's own module doc for the formula).
+        if let Some(tb) = &self.third_bodies {
+            let jd_tdb = crate::tdb::tai_ns_to_tdb_jd(t_tai_ns);
+            for third in &tb.bodies {
+                let d_km = tb.ephemeris.geocentric_position_km(third.body, jd_tdb).map_err(OrbitalModelError::De)?;
+                let d_m = [d_km[0] * 1e3, d_km[1] * 1e3, d_km[2] * 1e3];
+                let a = third_body_acceleration(pos_inertial, d_m, third.mu);
+                accel_inertial[0] += a[0];
+                accel_inertial[1] += a[1];
+                accel_inertial[2] += a[2];
+            }
+        }
 
         state_dot[0..3].copy_from_slice(&vel_inertial);
         state_dot[3..6].copy_from_slice(&accel_inertial);
