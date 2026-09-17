@@ -307,10 +307,16 @@ impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
 
         // N2: third-body point-mass perturbations, evaluated directly in the inertial frame
         // (no rotation involved -- see crate::third_body's own module doc for the formula).
+        //
+        // Round 2 (task 2b): uses the two-part TDB epoch (`crate::tdb::tai_ns_to_tdb_jd2`) and
+        // `DeEphemeris::geocentric_position_km2`, not the single-`f64` `tai_ns_to_tdb_jd`/
+        // `geocentric_position_km` this call used through round 1 -- root-caused as the
+        // source of the ten-epoch Mars/Jupiter ephemeris disagreement (`crate::tdb`'s module
+        // doc, "Precision"; `crate::de`'s `geocentric_position_km2` doc comment).
         if let Some(tb) = &self.third_bodies {
-            let jd_tdb = crate::tdb::tai_ns_to_tdb_jd(t_tai_ns);
+            let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
             for third in &tb.bodies {
-                let d_km = tb.ephemeris.geocentric_position_km(third.body, jd_tdb).map_err(OrbitalModelError::De)?;
+                let d_km = tb.ephemeris.geocentric_position_km2(third.body, jd1, jd2).map_err(OrbitalModelError::De)?;
                 let d_m = [d_km[0] * 1e3, d_km[1] * 1e3, d_km[2] * 1e3];
                 let a = third_body_acceleration(pos_inertial, d_m, third.mu);
                 accel_inertial[0] += a[0];

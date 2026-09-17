@@ -50,6 +50,13 @@ struct Golden {
     final_state: Vec<f64>,
     tolerance_m: f64,
     tolerance_mps: f64,
+    /// Round 2 (task 2b): the ten-epoch ephemeris check's own tolerances, moved out of this
+    /// test's `const TOLERANCE_ABS_M`/`TOLERANCE_REL` (round 1's decision 3 -- the tolerance
+    /// committed with a golden is the tolerance in force, read from the file). Written by
+    /// `gen_leo_1day_jgm2_8x8_mars_jupiter.py --tolerance-ephemeris-abs-m --tolerance-
+    /// ephemeris-rel`.
+    tolerance_ephemeris_abs_m: f64,
+    tolerance_ephemeris_rel: f64,
     de_file_sha256: String,
     ephemeris_source: EphemerisSource,
     body_positions: Vec<BodyPositionEntry>,
@@ -162,17 +169,35 @@ fn build_gmat_derivative_model(gmat: &Gmat, golden: &Golden, namespace: &str) ->
 }
 
 /// N2's own explicit ask: "ephemeris positions against GMAT's reported values at ten epochs to
-/// the file's own precision." Compares `DeEphemeris::geocentric_position_km` (the native
-/// reader) against `goldens/leo_1day_jgm2_8x8_mars_jupiter.json`'s `body_positions` (GMAT's own
-/// reported position, via `gmat.CoordinateConverter().Convert` -- see that golden's own `note`
-/// field / generator module doc for the route and why). No GMAT call needed IN THIS TEST (the
-/// golden already carries GMAT's answer); the whole file still gates on `gmat-frames` for
-/// consistency with the other tests here, and because the golden's own generator needed GMAT.
+/// the file's own precision." Compares `DeEphemeris::geocentric_position_km2` (the native
+/// reader's round-2 two-part-epoch entry point) against
+/// `goldens/leo_1day_jgm2_8x8_mars_jupiter.json`'s `body_positions` (GMAT's own reported
+/// position, via `gmat.CoordinateConverter().Convert` -- see that golden's own `note` field /
+/// generator module doc for the route and why). No GMAT call needed IN THIS TEST (the golden
+/// already carries GMAT's answer); the whole file still gates on `gmat-frames` for consistency
+/// with the other tests here, and because the golden's own generator needed GMAT.
 ///
-/// Uses [`crate::tdb::tai_ns_to_tdb_jd`] indirectly through nothing -- this test converts the
-/// golden's OWN recorded `epoch_a1mjd` to TDB via `av_orbital::tdb`, exactly as
-/// `EarthGravityModel::derivatives` does internally, so the epoch scale used for the lookup
-/// matches production code exactly (root-cause suspect #1 in this task's own brief).
+/// Uses [`crate::tdb::tai_ns_to_tdb_jd2`] -- this test converts the golden's OWN recorded
+/// `epoch_a1mjd`-derived `epoch_tai_ns` to a two-part TDB epoch via `av_orbital::tdb`, exactly
+/// as `EarthGravityModel::derivatives` does internally as of round 2, so the epoch scale AND
+/// resolution used for the lookup matches production code exactly.
+///
+/// **Round 2 root cause (task 2b): the single-`f64` `tai_ns_to_tdb_jd`/`geocentric_position_km`
+/// path this test used through round 1 was confirmed, not assumed, as the cause of the
+/// meter-scale disagreement round 1 measured here** -- see `crate::tdb`'s module doc
+/// ("Precision") for the full per-epoch `dt_implied`/cosine table. In summary: at every one of
+/// the golden's 10 epochs, the (native - GMAT) disagreement vector is parallel to the body's
+/// own geocentric velocity (measured cosine `+/-1.000000` at all 10 epochs, both bodies), and
+/// the implied time offset agrees between Mars and Jupiter at the same epoch to within a few
+/// nanoseconds (e.g. epoch 1767225636999999868: Mars 1.383026513e-5 s, Jupiter 1.383083342e-5
+/// s) -- a property of the EPOCH, not the body, exactly as an epoch-quantization bug predicts,
+/// and ruling out a body-specific cause (the Earth-Moon-barycenter split, or light-time/
+/// aberration, both of which would scale with each body's own distance and therefore disagree
+/// between Mars and Jupiter, not agree). Round 1's `crate::tdb` doc had already measured this
+/// exact ~40-47 microsecond ceiling and concluded it "does not matter for what this module is
+/// actually used for" -- true for the ACCELERATION sensitivity that doc measured, not for a
+/// POSITION comparison at Mars/Jupiter's own (faster-than-the-Moon's, at this arc's geometry)
+/// relative velocity; see that module's corrected doc.
 #[test]
 fn ten_epoch_ephemeris_agreement_with_gmat_reported_positions() {
     let golden = load_golden();
@@ -204,10 +229,10 @@ fn ten_epoch_ephemeris_agreement_with_gmat_reported_positions() {
 
     for entry in &golden.body_positions {
         let t_tai_ns = entry.epoch_tai_ns;
-        let jd_tdb = av_orbital::tdb::tai_ns_to_tdb_jd(t_tai_ns);
+        let (jd1, jd2) = av_orbital::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
 
         for (name, gmat_pos_km) in [("Mars", entry.mars_position_km), ("Jupiter", entry.jupiter_position_km)] {
-            let native_km = de.geocentric_position_km(de_body_for(name), jd_tdb).expect("geocentric_position_km");
+            let native_km = de.geocentric_position_km2(de_body_for(name), jd1, jd2).expect("geocentric_position_km2");
             let diff_km = (0..3).map(|i| (native_km[i] - gmat_pos_km[i]).powi(2)).sum::<f64>().sqrt();
             let scale_km = (0..3).map(|i| gmat_pos_km[i].powi(2)).sum::<f64>().sqrt();
             let diff_m = diff_km * 1e3;
@@ -224,27 +249,35 @@ fn ten_epoch_ephemeris_agreement_with_gmat_reported_positions() {
     eprintln!("[n2-mars-jupiter] ten-epoch ephemeris agreement: Mars max |diff| = {:.6e} m, max relative = {:.6e}", max_abs_m["Mars"], max_rel["Mars"]);
     eprintln!("[n2-mars-jupiter] ten-epoch ephemeris agreement: Jupiter max |diff| = {:.6e} m, max relative = {:.6e}", max_abs_m["Jupiter"], max_rel["Jupiter"]);
 
-    // Measured first (this task's own rule), then asserted at a bound just above the measured
-    // value. **Measured** (debug build, `cargo test -p av-orbital --test thirdbody_mars_jupiter
-    // -- --nocapture`): Mars max |diff| = 1.404740 m / max relative = 3.896496e-12; Jupiter max
-    // |diff| = 0.4356596 m / max relative = 6.868062e-13 (see this test's own printed output
-    // for every epoch, both bodies). This IS near machine precision for the arithmetic actually
-    // performed: at Mars/Jupiter's ~3.6e8-7.3e8 km distance from Earth, a relative error of
-    // ~4e-12 is consistent with accumulated cancellation over the several large-magnitude
-    // subtractions BOTH routes perform independently to reach a geocentric vector (this reader's
-    // own EMRAT barycentric-to-geocentric split, `crate::de`'s module doc; GMAT's own
-    // `CoordinateConverter::Convert` axis/origin chain) -- not a sign of disagreement on WHICH
-    // ephemeris record is read (both routes read/report DE405, confirmed by this file's own
-    // `ephemeris_source_matches_the_golden...` test and the golden's `ephemeris_source` block).
-    // So no further root-cause hunt was needed on this arc; had the bound instead landed at, say,
-    // km-scale or worse, the ordered suspects would have been: the epoch scale used for the
-    // lookup (TDB vs TT vs A.1), barycentric vs. geocentric records, the Earth-Moon-barycenter
-    // split, and light-time/aberration GMAT may apply that this reader never does.
-    const TOLERANCE_ABS_M: f64 = 2.0;
-    const TOLERANCE_REL: f64 = 1e-11;
+    // Measured first (this task's own rule), then asserted against the tolerance READ FROM THE
+    // GOLDEN (round 1's decision 3: never a copy kept in the test -- this replaces round 1's
+    // own `const TOLERANCE_ABS_M`/`TOLERANCE_REL`, moved into
+    // `goldens/leo_1day_jgm2_8x8_mars_jupiter.json`'s `tolerance_ephemeris_abs_m`/
+    // `tolerance_ephemeris_rel` fields by round 2, task 2b). **Measured after the round-2 fix**
+    // (debug build, `cargo test -p av-orbital --test thirdbody_mars_jupiter -- --nocapture`):
+    // Mars max |diff| = 1.757690e-2 m / max relative = 4.874442e-14; Jupiter max |diff| =
+    // 5.438822e-3 m / max relative = 8.572570e-15 -- roughly 80x smaller than round 1's own
+    // measured 1.404740 m / 0.4356596 m (see this test's own printed output for every epoch,
+    // both bodies, and `crate::tdb`'s module doc, "Precision", for the root cause: round 1's
+    // disagreement was the ~40-47 microsecond epoch-quantization ceiling in the single-`f64`
+    // `tai_ns_to_tdb_jd`, not accumulated cancellation). What remains at the millimeter-to-
+    // centimeter scale measured here is consistent with `av_cdm::time::Tai::to_a1_mjd`'s own
+    // ~600 ns resolution ceiling (this crate does not extend `av_cdm` this round -- see
+    // `crate::tdb::tai_ns_to_tdb_jd2`'s own doc comment) propagated through each body's own
+    // geocentric velocity, the same mechanism at ~65-80x better resolution.
     for name in ["Mars", "Jupiter"] {
-        assert!(max_abs_m[name] < TOLERANCE_ABS_M, "{name}: max abs ephemeris disagreement {:e} m exceeds {TOLERANCE_ABS_M:e} m", max_abs_m[name]);
-        assert!(max_rel[name] < TOLERANCE_REL, "{name}: max relative ephemeris disagreement {:e} exceeds {TOLERANCE_REL:e}", max_rel[name]);
+        assert!(
+            max_abs_m[name] < golden.tolerance_ephemeris_abs_m,
+            "{name}: max abs ephemeris disagreement {:e} m exceeds the golden's own recorded {:e} m tolerance",
+            max_abs_m[name],
+            golden.tolerance_ephemeris_abs_m
+        );
+        assert!(
+            max_rel[name] < golden.tolerance_ephemeris_rel,
+            "{name}: max relative ephemeris disagreement {:e} exceeds the golden's own recorded {:e} tolerance",
+            max_rel[name],
+            golden.tolerance_ephemeris_rel
+        );
     }
 }
 

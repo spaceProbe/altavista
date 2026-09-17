@@ -1,5 +1,12 @@
 # GMAT R2026a `TimeSystemConverter`: a suspected TDB periodic-term phase error does not reproduce
 
+> **This bundle is a negative result and is kept as one.** Question 225 commissioned an upstream
+> bug report about GMAT's TDB periodic-term phase; the reproduction was written, run, and found
+> no defect in GMAT. Nothing here is proposed for submission to the GMAT project. The directory
+> stays so the claim, the reproduction that tested it, and the reason it failed remain on the
+> record; the repository's own artifacts that produced the false finding were corrected in the
+> commit after this one. The lead corrected question 225 accordingly.
+
 ## Summary
 
 This repository's own N2 work (`crates/av-orbital/src/tdb.rs`, `goldens/gen_tdb_check.py`,

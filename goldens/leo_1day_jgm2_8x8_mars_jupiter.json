@@ -205,7 +205,7 @@
     "tides": false
   },
   "frame": "EarthMJ2000Eq",
-  "generated": "2026-09-17T04:49:23+00:00",
+  "generated": "2026-09-17T05:11:25+00:00",
   "gmat_version": "R2026a",
   "gravity_file_name": "JGM2.cof",
   "gravity_file_readback": {
@@ -248,8 +248,8 @@
     "min_step_s": 0.0,
     "note": "read from prop.GetPropagator() after PrepareInternals(), not the front-end Propagator or the bare integrator object -- see gen_leo_1day_jgm2_8x8.py's module doc"
   },
-  "reason": "N2's remaining golden: Mars and Jupiter as third bodies, exercising the DE reader's barycentric planetary records (IPT entries 3/4 + the EMRAT split) the Sun/Moon golden cannot on its own. Regenerated with the MEASURED tolerance: crates/av-orbital/tests/thirdbody_mars_jupiter.rs::leo_1day_jgm2_8x8_mars_jupiter_trajectory_residual measured 4.559312e-3 m / 5.052095e-6 m/s (debug build, cargo test -p av-orbital --test thirdbody_mars_jupiter -- --nocapture), so tolerance_m=6e-3 (6e-3/4.559312e-3 = 1.32x margin, matching leo_1day_jgm2_8x8's own identical-order 6e-3 m tolerance and its own measured 4.557868e-3 m residual on the third-body-free arc -- this arc's residual is integrator-family disagreement, not a force-model defect, exactly as N2's Sun/Moon golden's own residual was)",
-  "sha256": "f7ef4e7210e0b8dad1b8394739235f2cceb11d0be548809a85a55bf0d1b349f5",
+  "reason": "Round 2, task 2b: root-caused the round-1 1.404740 m (Mars) / 0.4356596 m (Jupiter) ten-epoch ephemeris disagreement to av_orbital::tdb::tai_ns_to_tdb_jd's single-f64 full-JD return (measured ~40 microsecond ULP at these epochs), confirmed by dt_implied/cosine agreement between Mars and Jupiter at each epoch (see crate::tdb's module doc). Fixed with a two-part TDB epoch (tai_ns_to_tdb_jd2 / DeEphemeris::geocentric_position_km2), which EarthGravityModel::derivatives now uses for its third-body path. Re-measured (cargo test -p av-orbital --test thirdbody_mars_jupiter -- --nocapture): ten-epoch ephemeris max |diff| = 1.757690e-2 m (Mars) / 5.438822e-3 m (Jupiter), max relative = 4.874442e-14 (Mars) / 8.572570e-15 (Jupiter), about 80x smaller than round 1. Also, per round 1's decision 3, the ten-epoch check's tolerance now lives in this file (tolerance_ephemeris_abs_m/tolerance_ephemeris_rel) instead of thirdbody_mars_jupiter.rs's own const TOLERANCE_ABS_M/TOLERANCE_REL. tolerance_ephemeris_abs_m=0.03 (1.7x margin over the measured 1.757690e-2 m), tolerance_ephemeris_rel=1e-13 (2.05x margin over the measured 4.874442e-14). tolerance_m/tolerance_mps (the trajectory residual) are UNCHANGED at 6e-3/6e-6: the trajectory residual re-measured at 4.559312e-3 m / 5.052095e-6 m/s, identical to round 1 (this fix only affects third-body position precision at the sub-meter level, invisible to the trajectory integrator's own residual, as crate::tdb's corrected doc explains).",
+  "sha256": "71182c5df98b85b4b5ac94848424fd16e0be6a8a3dad6759e605ccde74e48231",
   "solver_iterations": null,
   "spacecraft": {
     "AOP": 0.0,
@@ -272,6 +272,8 @@
     "SRPArea": 5.0,
     "TotalMass": 500.0
   },
+  "tolerance_ephemeris_abs_m": 0.03,
+  "tolerance_ephemeris_rel": 1e-13,
   "tolerance_m": 0.006,
   "tolerance_mps": 6e-06,
   "units": {

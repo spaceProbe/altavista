@@ -32,6 +32,14 @@ own module doc names the measured wrinkle (`propagator_readback` must come from
 `prop.GetPropagator()`'s return value, not the front-end `Propagator` or the bare integrator
 object) that this script follows identically.
 
+**Round 2 (task 2b) addendum.** `--tolerance-ephemeris-abs-m`/`--tolerance-ephemeris-rel` were
+added when the round-2 root-cause task moved the ten-epoch ephemeris check's own tolerance out
+of `crates/av-orbital/tests/thirdbody_mars_jupiter.rs`'s `const TOLERANCE_ABS_M`/`TOLERANCE_REL`
+into this file (round 1's decision 3, applied here for the first time to this particular
+check): that test's own `ten_epoch_ephemeris_agreement_with_gmat_reported_positions` now reads
+`tolerance_ephemeris_abs_m`/`tolerance_ephemeris_rel` from this golden instead. Same rule as
+`--tolerance-m`: no default, measure the test's own printed value first.
+
 **The tolerance is measured, not assumed (`--tolerance-m` has no default -- deliberately, unlike
 this repository's OLDER generators, which inherited a 0.05 m default from `gen_leo_1day.py` and
 were later found, in round 1's own review, to have pinned nothing: "A default tolerance pins
@@ -160,6 +168,29 @@ def main():
             "nothing'). Measure the actual trajectory residual first (run the test, read its "
             "printed value), then pass that measured value here plus a stated margin; never a "
             "value copied from another golden or left at a script default."
+        ),
+    )
+    ap.add_argument(
+        "--tolerance-ephemeris-abs-m",
+        type=float,
+        required=True,
+        help=(
+            "round 2 (task 2b): the ten-epoch ephemeris check's own absolute position "
+            "tolerance (m), moved into this file out of "
+            "thirdbody_mars_jupiter.rs's own const TOLERANCE_ABS_M (round 1's decision 3). NO "
+            "DEFAULT -- measure ten_epoch_ephemeris_agreement_with_gmat_reported_positions's "
+            "printed max |diff| first, then pass that plus a stated margin."
+        ),
+    )
+    ap.add_argument(
+        "--tolerance-ephemeris-rel",
+        type=float,
+        required=True,
+        help=(
+            "round 2 (task 2b): the ten-epoch ephemeris check's own relative position "
+            "tolerance, moved into this file out of thirdbody_mars_jupiter.rs's own const "
+            "TOLERANCE_REL. NO DEFAULT -- measure the same test's printed max relative first, "
+            "then pass that plus a stated margin."
         ),
     )
     args = ap.parse_args()
@@ -310,6 +341,8 @@ def main():
         "initial_state": x0, "final_state": x1,
         "tolerance_m": args.tolerance_m,
         "tolerance_mps": args.tolerance_m * 1e-3,
+        "tolerance_ephemeris_abs_m": args.tolerance_ephemeris_abs_m,
+        "tolerance_ephemeris_rel": args.tolerance_ephemeris_rel,
         "body_positions": body_positions,
         "body_positions_note": (
             "GMAT's own reported position of Mars/Jupiter relative to Earth in EarthMJ2000Eq, km, "
