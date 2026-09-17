@@ -109,6 +109,16 @@ pub enum OrbitalModelError<E: std::fmt::Debug + std::fmt::Display> {
     /// file does not cover.
     #[error("third-body ephemeris lookup failed: {0}")]
     De(#[source] DeError),
+    /// [`EarthGravityModel::with_srp`] was called before [`EarthGravityModel::
+    /// with_third_bodies`] -- N3's SRP binding reuses that method's own bound `DeEphemeris`
+    /// handle for the Sun's position (see [`EarthGravityModel::with_srp`]'s own doc comment for
+    /// why), so it requires third bodies to already be configured.
+    #[error("with_srp requires with_third_bodies to be configured first (the Sun's position comes from that bound DE ephemeris)")]
+    SrpRequiresThirdBodies,
+    /// N3's [`crate::srp::srp_acceleration`] failed (a non-finite state, or a degenerate
+    /// zero-distance geometry -- see [`crate::srp::SrpError`]'s own variants).
+    #[error("SRP acceleration failed: {0}")]
+    Srp(#[source] crate::srp::SrpError),
 }
 
 /// Caller-supplied, static description fields for an [`EarthGravityModel`], independent of the
@@ -165,6 +175,14 @@ pub struct EarthGravityModel<R: BodyFixedRotation> {
     info: EarthGravityModelInfo,
     settings_hash: String,
     third_bodies: Option<ThirdBodies>,
+    srp: Option<SrpBinding>,
+}
+
+/// N3's SRP configuration: the constants GMAT's own `SolarRadiationPressure` force uses and
+/// this vehicle's ballistic properties (see [`EarthGravityModel::with_srp`]).
+struct SrpBinding {
+    constants: crate::srp::SrpConstants,
+    props: crate::srp::SrpProperties,
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -225,7 +243,7 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("integrator_max_step_s".to_string(), format!("{:.17e}", integrator.max_step));
         let settings_hash = av_dynamics::settings_hash(&settings);
 
-        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None })
+        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None, srp: None })
     }
 
     /// The bound gravity model (degree, order, `mu`, reference radius, coefficients) -- for a
@@ -271,6 +289,60 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         self.settings_hash = av_dynamics::settings_hash(&settings);
 
         self.third_bodies = Some(ThirdBodies { ephemeris, bodies: resolved });
+        Ok(self)
+    }
+
+    /// N3 (`docs/native-dynamics-plan.md`): adds cannonball solar-radiation-pressure
+    /// acceleration with a conical (umbra + penumbra) shadow -- see [`crate::srp`]'s own module
+    /// doc for the exact formula, the shadow model, and every constant `constants` should carry
+    /// (read off a live GMAT instance; [`crate::srp::SrpConstants::gmat_earth_defaults`]
+    /// supplies the measured values this crate's own goldens use). Central body is always
+    /// Earth, the sole occulter this round.
+    ///
+    /// **Requires [`EarthGravityModel::with_third_bodies`] to already be configured** --
+    /// `Err(OrbitalModelError::SrpRequiresThirdBodies)` otherwise. This is a deliberate choice
+    /// between two options the task brief left open ("`with_srp` requires third bodies to have
+    /// been configured, or it carries its own ephemeris handle; pick one, and say in the doc
+    /// comment why"): reusing [`EarthGravityModel::with_third_bodies`]'s own bound
+    /// `DeEphemeris` handle means this model has exactly ONE DE ephemeris source of truth --
+    /// one file, one SHA-256 in `settings_hash` -- rather than opening a second, independent DE
+    /// file handle that could (in principle, if a caller pointed the two calls at different
+    /// paths) silently diverge from the third-body path's own ephemeris. The Sun's position for
+    /// SRP is looked up independently of WHICH bodies are in the third-body list (a DRM asking
+    /// for gravity + SRP with no Sun third-body perturbation is not forbidden), but through the
+    /// SAME [`crate::de::DeEphemeris`] handle.
+    ///
+    /// `area_m2`/`cr`/`mass_kg` are the DRM's `SRPArea`/`Cr`/total mass (question 81: "a seed
+    /// is a vehicle") -- `mass_kg` should be the vehicle's TOTAL mass (GMAT's own `TotalMass`,
+    /// which equals `DryMass` when there is no fuel tank), matching `SolarRadiationPressure::
+    /// GetDerivatives`'s own `mass = sc->GetRealParameter("TotalMass")`
+    /// (`third_party/gmat-src/src/base/forcemodel/SolarRadiationPressure.cpp`) -- see
+    /// [`crate::srp`]'s own module doc for the full term-by-term correspondence.
+    ///
+    /// A builder consumed by value, mirroring [`EarthGravityModel::with_third_bodies`]'s own
+    /// shape exactly: `settings_hash` is recomputed to additionally cover every SRP constant
+    /// and ballistic property, so two models differing only in their SRP configuration report
+    /// different hashes; a model that never calls this method behaves bit-for-bit as before
+    /// (`derivatives`'s own `if let Some(srp)` block is a complete no-op when `self.srp` is
+    /// `None`) -- see `tests::derivatives_without_srp_matches_gravity_plus_third_body_directly`
+    /// for the test that pins this.
+    pub fn with_srp(mut self, constants: crate::srp::SrpConstants, area_m2: f64, cr: f64, mass_kg: f64) -> Result<Self, OrbitalModelError<R::Error>> {
+        if self.third_bodies.is_none() {
+            return Err(OrbitalModelError::SrpRequiresThirdBodies);
+        }
+
+        let mut settings = BTreeMap::new();
+        settings.insert("base_settings_hash".to_string(), self.settings_hash.clone());
+        settings.insert("srp_flux_pressure_n_m2".to_string(), format!("{:.17e}", constants.flux_pressure_n_m2));
+        settings.insert("srp_reference_distance_m".to_string(), format!("{:.17e}", constants.reference_distance_m));
+        settings.insert("srp_sun_radius_m".to_string(), format!("{:.17e}", constants.sun_radius_m));
+        settings.insert("srp_body_radius_m".to_string(), format!("{:.17e}", constants.body_radius_m));
+        settings.insert("srp_area_m2".to_string(), format!("{:.17e}", area_m2));
+        settings.insert("srp_cr".to_string(), format!("{:.17e}", cr));
+        settings.insert("srp_mass_kg".to_string(), format!("{:.17e}", mass_kg));
+        self.settings_hash = av_dynamics::settings_hash(&settings);
+
+        self.srp = Some(SrpBinding { constants, props: crate::srp::SrpProperties { cr, area_m2, mass_kg } });
         Ok(self)
     }
 }
@@ -323,6 +395,24 @@ impl<R: BodyFixedRotation> DynamicsModel for EarthGravityModel<R> {
                 accel_inertial[1] += a[1];
                 accel_inertial[2] += a[2];
             }
+        }
+
+        // N3: cannonball SRP with a conical shadow -- see crate::srp's own module doc.
+        // `with_srp` refuses construction unless `third_bodies` is already `Some` (this
+        // module's own invariant, enforced only at `with_srp` time -- see that method's own
+        // doc comment for why), so `self.third_bodies` is guaranteed `Some` here whenever
+        // `self.srp` is; the `.expect` below documents that invariant rather than trusting
+        // caller input (mirrors this crate's existing structural-invariant `.expect`s, e.g.
+        // `crate::de`'s `"checked length"`).
+        if let Some(srp) = &self.srp {
+            let tb = self.third_bodies.as_ref().expect("with_srp requires with_third_bodies (enforced at construction)");
+            let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
+            let sun_km = tb.ephemeris.geocentric_position_km2(DeBody::Sun, jd1, jd2).map_err(OrbitalModelError::De)?;
+            let r_sun_m = [sun_km[0] * 1e3, sun_km[1] * 1e3, sun_km[2] * 1e3];
+            let a = crate::srp::srp_acceleration(pos_inertial, r_sun_m, &srp.constants, &srp.props).map_err(OrbitalModelError::Srp)?;
+            accel_inertial[0] += a[0];
+            accel_inertial[1] += a[1];
+            accel_inertial[2] += a[2];
         }
 
         state_dot[0..3].copy_from_slice(&vel_inertial);
@@ -478,5 +568,94 @@ mod tests {
         )
         .unwrap();
         assert_ne!(model0.describe().settings_hash, model2.describe().settings_hash);
+    }
+
+    fn de_path() -> std::path::PathBuf {
+        crate::de::DeEphemeris::locate_gmat_root().expect("GMAT_ROOT set").join("data/planetary_ephem/de/leDE1941.405")
+    }
+
+    fn point_mass_model_with_third_bodies() -> EarthGravityModel<IdentityRotation> {
+        point_mass_model().with_third_bodies(&de_path(), &[DeBody::Moon, DeBody::Sun]).expect("with_third_bodies")
+    }
+
+    /// [`EarthGravityModel::with_srp`]'s own documented invariant: it refuses construction
+    /// unless [`EarthGravityModel::with_third_bodies`] was already called.
+    #[test]
+    fn with_srp_without_third_bodies_is_a_typed_error_not_a_panic() {
+        // `.unwrap_err()` needs `Self: Debug` on the `Ok` side, which `EarthGravityModel<R>`
+        // does not implement (it carries a `GravityModel` with no meaningful `Debug` of its
+        // own -- see this crate's other tests' identical avoidance of `.unwrap()`/`.expect()`
+        // on a `Result<EarthGravityModel<_>, _>`'s `Ok` side); match directly instead.
+        match point_mass_model().with_srp(crate::srp::SrpConstants::gmat_earth_defaults(), 5.0, 1.8, 500.0) {
+            Err(err) => assert!(matches!(err, OrbitalModelError::SrpRequiresThirdBodies)),
+            Ok(_) => panic!("expected with_srp to refuse a model with no third_bodies bound"),
+        }
+    }
+
+    #[test]
+    fn settings_hash_changes_when_srp_is_added() {
+        let without_srp = point_mass_model_with_third_bodies();
+        let hash_without = without_srp.describe().settings_hash;
+        let with_srp = point_mass_model_with_third_bodies()
+            .with_srp(crate::srp::SrpConstants::gmat_earth_defaults(), 5.0, 1.8, 500.0)
+            .expect("with_srp");
+        assert_ne!(hash_without, with_srp.describe().settings_hash);
+    }
+
+    /// N3's own required test: "a model built without SRP is bit-for-bit unchanged." A model
+    /// with `third_bodies` bound but `with_srp` NEVER called must produce EXACTLY the same
+    /// `derivatives` output as gravity + third-body acceleration computed directly (bypassing
+    /// `EarthGravityModel` entirely) -- i.e. the new `if let Some(srp)` block in `derivatives`
+    /// is a complete no-op when `self.srp` is `None`, proven by recomputing the expected answer
+    /// through an entirely independent code path (mirrors `degree_zero_matches_the_closed_
+    /// form_point_mass_acceleration_through_the_full_model`'s own pattern, above).
+    #[test]
+    fn derivatives_without_srp_matches_gravity_plus_third_body_directly() {
+        let model = point_mass_model_with_third_bodies();
+        let pos = [7_000_000.0, 500_000.0, -200_000.0];
+        let vel = [-1_200.0, 7_400.0, 300.0];
+        let state = [pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]];
+        let t_tai_ns = 1_800_000_000_000_000_000_i64;
+        let mut dot = [0.0; 6];
+        model.derivatives(&state, t_tai_ns, &[], &mut dot).unwrap();
+
+        // Independently: gravity (IdentityRotation, so body-fixed == inertial) + third-body
+        // Moon/Sun, computed directly against the SAME DE file/TDB conversion this model uses
+        // internally, never through EarthGravityModel.
+        let (accel_gravity, _) = gravity::spherical_harmonic_gravity(pos, model.gravity_model());
+        let de = crate::de::DeEphemeris::open(&de_path()).expect("open DE405");
+        let (jd1, jd2) = crate::tdb::tai_ns_to_tdb_jd2(t_tai_ns);
+        let mut expect = accel_gravity;
+        for body in [DeBody::Moon, DeBody::Sun] {
+            let d_km = de.geocentric_position_km2(body, jd1, jd2).expect("geocentric_position_km2");
+            let d_m = [d_km[0] * 1e3, d_km[1] * 1e3, d_km[2] * 1e3];
+            let mu = de.mu_si(body).expect("mu_si");
+            let a = third_body_acceleration(pos, d_m, mu);
+            expect[0] += a[0];
+            expect[1] += a[1];
+            expect[2] += a[2];
+        }
+
+        assert_eq!(&dot[3..6], &expect[..], "a model with no SRP bound must be bit-for-bit gravity + third-body acceleration alone");
+    }
+
+    /// The SAME comparison, but WITH `with_srp` bound, confirms SRP actually changes the
+    /// output (a sanity check that the wiring above is not silently inert) -- the counterpart
+    /// to the bit-for-bit test above.
+    #[test]
+    fn derivatives_with_srp_differs_from_gravity_plus_third_body_alone() {
+        let without_srp = point_mass_model_with_third_bodies();
+        let with_srp = point_mass_model_with_third_bodies()
+            .with_srp(crate::srp::SrpConstants::gmat_earth_defaults(), 5.0, 1.8, 500.0)
+            .expect("with_srp");
+        let pos = [7_000_000.0, 500_000.0, -200_000.0];
+        let vel = [-1_200.0, 7_400.0, 300.0];
+        let state = [pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]];
+        let t_tai_ns = 1_800_000_000_000_000_000_i64;
+        let mut dot_without = [0.0; 6];
+        let mut dot_with = [0.0; 6];
+        without_srp.derivatives(&state, t_tai_ns, &[], &mut dot_without).unwrap();
+        with_srp.derivatives(&state, t_tai_ns, &[], &mut dot_with).unwrap();
+        assert_ne!(&dot_without[3..6], &dot_with[3..6], "with_srp must actually change the acceleration");
     }
 }

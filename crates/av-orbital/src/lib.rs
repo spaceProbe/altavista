@@ -56,6 +56,16 @@
 //! (a model with no third bodies bound behaves bit-for-bit as before -- see that method's own
 //! doc comment).
 //!
+//! N3 (`docs/native-dynamics-plan.md`, solar radiation pressure) adds one more, also GMAT-free:
+//!
+//! - [`srp`]: cannonball SRP with a conical (umbra + penumbra) shadow model, Earth as the sole
+//!   occulting body -- see that module's own doc for the formula, every constant and where it
+//!   was read off a live GMAT instance, and the shape it leaves for N4's partials.
+//!
+//! [`model::EarthGravityModel::with_srp`] wires it in, additive to N1/N2 (a model with no SRP
+//! bound behaves bit-for-bit as before) and REQUIRES [`model::EarthGravityModel::
+//! with_third_bodies`] to already be configured -- see that method's own doc comment for why.
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -91,6 +101,7 @@ pub mod frame_gmat;
 pub mod gravity;
 pub mod legendre;
 pub mod model;
+pub mod srp;
 pub mod tdb;
 pub mod third_body;
 
@@ -102,4 +113,5 @@ pub use frame_gmat::GmatBodyFixedRotation;
 pub use gravity::{point_mass_acceleration, point_mass_partials, spherical_harmonic_gravity};
 pub use legendre::NormalizedLegendre;
 pub use model::{EarthGravityModel, EarthGravityModelInfo, OrbitalModelError};
+pub use srp::{SrpConstants, SrpError, SrpProperties};
 pub use third_body::third_body_acceleration;
