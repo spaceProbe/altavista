@@ -56,6 +56,49 @@
 //! (a model with no third bodies bound behaves bit-for-bit as before -- see that method's own
 //! doc comment).
 //!
+//! N3 (`docs/native-dynamics-plan.md`, solar radiation pressure) adds one more, also GMAT-free:
+//!
+//! - [`srp`]: cannonball SRP with a conical (umbra + penumbra) shadow model, Earth as the sole
+//!   occulting body -- see that module's own doc for the formula, every constant and where it
+//!   was read off a live GMAT instance, and the shape it leaves for N4's partials.
+//!
+//! [`model::EarthGravityModel::with_srp`] wires it in, additive to N1/N2 (a model with no SRP
+//! bound behaves bit-for-bit as before) and REQUIRES [`model::EarthGravityModel::
+//! with_third_bodies`] to already be configured -- see that method's own doc comment for why.
+//!
+//! N3's task 3b (drag) adds three more, all GMAT-free:
+//!
+//! - [`weather`]: a reader for GMAT's own CSSI space-weather file
+//!   (`$GMAT_ROOT/data/atmosphere/earth/SpaceWeather-All-v1.2.txt`), plus
+//!   [`weather::ConstantWeather`], GMAT's own `DragForce` CONSTANT-flux defaults (which is
+//!   what GMAT's `DragForce` actually uses unless a DRM configures a weather file -- see that
+//!   module's own doc for the measured evidence).
+//! - [`drag`]: the drag acceleration itself, `a = -0.5*(Cd*A/m)*rho*|v_rel|*v_rel` with the
+//!   rotating-atmosphere relative velocity `v_rel = v - omega x r` -- see that module's own
+//!   doc for exactly how GMAT forms `omega x r` (a scalar z-axis rate, not the full body-fixed
+//!   rotation) and the shape left for N4.
+//! - [`jacchia_roberts`]: the Jacchia-Roberts atmosphere density model, ported from GMAT's own
+//!   `JacchiaRobertsAtmosphere`/`AtmosphereModel` C++ source term for term -- see that
+//!   module's own doc for the full account, including the one documented gap (file-based
+//!   weather day/slot selection, `crate::weather`'s own job and its own documented
+//!   approximation).
+//!
+//! [`model::EarthGravityModel::with_drag`] wires them together, additive to N1/N2/N3 (a model
+//! with no drag bound behaves bit-for-bit as before) and REQUIRES [`model::EarthGravityModel::
+//! with_third_bodies`] to already be configured, for the identical reason `with_srp` does.
+//!
+//! N4 (`docs/native-dynamics-plan.md`, the state transition matrix) adds:
+//!
+//! - [`stm`]: the pure 6x6 variational-equations math (`A = [[0, I], [da_dr, da_dv]]`,
+//!   `d(Phi)/dt = A Phi`) and the body-fixed-to-inertial gradient rotation `R^T G R`, kept
+//!   independent of any one force model -- see that module's own doc for the derivation.
+//!
+//! [`model::EarthGravityModel::stm_derivatives`]/`stm_capable`/`describe` wire it in: every
+//! configured force's own analytic (gravity, third bodies, SRP position block, drag velocity
+//! block) or finite-differenced (drag position block, matching ADR-002's third amendment's own
+//! finding that GMAT does the same for that block) position/velocity partial feeds
+//! [`stm::stm_rate`].
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -84,22 +127,34 @@
 
 pub mod cof;
 pub mod de;
+pub mod drag;
 pub mod dual;
 pub mod frame;
 #[cfg(feature = "gmat-frames")]
 pub mod frame_gmat;
 pub mod gravity;
+pub mod jacchia_roberts;
 pub mod legendre;
 pub mod model;
+pub mod msise90;
+mod msise90_data;
+pub mod srp;
+pub mod stm;
 pub mod tdb;
 pub mod third_body;
+pub mod weather;
 
 pub use cof::{CofError, GravityModel};
 pub use de::{DeBody, DeEphemeris, DeError};
+pub use drag::{drag_acceleration, DragError, DragProperties};
 pub use frame::{BodyFixedRotation, Rotation};
 #[cfg(feature = "gmat-frames")]
 pub use frame_gmat::GmatBodyFixedRotation;
 pub use gravity::{point_mass_acceleration, point_mass_partials, spherical_harmonic_gravity};
+pub use jacchia_roberts::{JacchiaRobertsError, WeatherInputs};
 pub use legendre::NormalizedLegendre;
-pub use model::{EarthGravityModel, EarthGravityModelInfo, OrbitalModelError};
+pub use model::{AtmosphereChoice, EarthGravityModel, EarthGravityModelInfo, OrbitalModelError};
+pub use msise90::MsiseError;
+pub use srp::{SrpConstants, SrpError, SrpProperties};
 pub use third_body::third_body_acceleration;
+pub use weather::{ConstantWeather, SpaceWeatherFile, WeatherError};

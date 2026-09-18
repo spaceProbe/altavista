@@ -40,8 +40,30 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808
+ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa
 ```
+
+Recorded by the lead from the verification clone on 2026-09-18 at `2aced3e`, which
+regenerated the two Python SBOMs: the commit that introduced `scripts/kit/python-lock.json`
+(an epoch input) also carried SBOMs generated before it existed, so their epoch was stale on
+landing and the previous number, `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32`,
+with it. That number had been moved from `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` by the
+native-dynamics track's own round 2 task 5 (question 224, the task this section's own last
+paragraph named as still open): `scripts/kit/sbom.py::python_dist_sbom` no longer reads the live
+worktree `.venv` directly for the two Python SBOMs' package list -- it reads the new committed
+`scripts/kit/python-lock.json` (`scripts/kit/python_lock.py`'s output), cross-checking the live
+venv rather than sourcing from it. Regenerating `av-viewer.cdx.json`/`gmat-service.cdx.json`
+through the generator with this fix applied dropped `pip` from both (the venv-bootstrap tool
+`pip install -e ".[dev]"` always adds regardless of what `pyproject.toml` declares -- nothing in
+this project's own dependency graph names it, so the declared set this task's fix reads never
+did either) and updated both files' `altavista:sbom:python-packages-source` property text to
+describe the new source; `docs/compliance/sbom/SHA256SUMS` changed as a direct result for
+exactly those two files, `SHA256SUMS` is one of `epoch_paths` above, and `sbom_hashes` is one of
+the evidence-dependent inputs `bundle_sha256` hashes (see "What the hash depends on" below) --
+so the bundle regenerated from the current tree no longer matched the previous recorded number,
+caught by `test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed the same way
+every prior move in this section was: re-running the documented command and recording what it
+actually printed. No control matrix, component set, or non-Python evidence content changed.
 
 Recorded from the verification clone at the commit that regenerated the SBOMs for the merge
 of heavy round 2 into the native-dynamics branch (`7ea2d24`, question 220), following the same

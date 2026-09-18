@@ -7,36 +7,36 @@
       "epoch_a1mjd": 31041.500428638676,
       "fraction_of_arc": 0.0,
       "tai_mjd": 31041.50042824074,
-      "tdb_minus_tt_s": 0.0015530618838965893,
-      "tdb_mjd": 31041.500800758713,
+      "tdb_minus_tt_s": -7.98376277089119e-05,
+      "tdb_mjd": 31041.500800739814,
       "tt_mjd": 31041.500800740738
     },
     {
       "epoch_a1mjd": 31041.833761972008,
       "fraction_of_arc": 0.3333333333333333,
       "tai_mjd": 31041.83376157407,
-      "tdb_minus_tt_s": 0.0015562050975859165,
-      "tdb_mjd": 31041.83413409208,
+      "tdb_minus_tt_s": -7.040798664093018e-05,
+      "tdb_mjd": 31041.834134073255,
       "tt_mjd": 31041.83413407407
     },
     {
       "epoch_a1mjd": 31042.167095305344,
       "fraction_of_arc": 0.6666666666666666,
       "tai_mjd": 31042.167094907407,
-      "tdb_minus_tt_s": 0.0015596626326441765,
-      "tdb_mjd": 31042.167467425457,
+      "tdb_minus_tt_s": -6.066402420401573e-05,
+      "tdb_mjd": 31042.167467406704,
       "tt_mjd": 31042.167467407406
     },
     {
       "epoch_a1mjd": 31042.500428638676,
       "fraction_of_arc": 1.0,
       "tai_mjd": 31042.50042824074,
-      "tdb_minus_tt_s": 0.0015628058463335037,
-      "tdb_mjd": 31042.500800758826,
+      "tdb_minus_tt_s": -5.092006176710129e-05,
+      "tdb_mjd": 31042.50080074015,
       "tt_mjd": 31042.500800740738
     }
   ],
-  "generated": "2026-09-17T00:09:29+00:00",
+  "generated": "2026-09-17T03:52:45+00:00",
   "gmat_tdb_series_coefficients": {
     "L_B": 1.550505e-08,
     "M_E_COEFF1": 35999.05034,
@@ -48,2620 +48,2622 @@
   },
   "gmat_version": "R2026a",
   "name": "tdb_check",
-  "reason": "N2 step 3: pin GMAT's own TAI(A.1)->TT->TDB conversion, both at four epochs across the P0 golden's one-day arc AND a 10-year, 522-point year_scan used to empirically calibrate the M_E_OFFSET phase crates/av-orbital/src/tdb.rs actually uses (the raw GMAT-exposed M_E_OFFSET constant does not reproduce GMAT's own Convert() output directly -- see this script's own module doc, 'Measured finding')",
-  "sha256": "80adea0b0b29d822704abbf34a1aa22415445784606354008e39fc6ce796e7fb",
-  "source": "gmat.TimeSystemConverter.Instance() -- Convert(A1MJD -> TAIMJD/TTMJD/TDBMJD) at each epoch, and the singleton's own TDB series coefficients",
+  "reason": "docs/reports/gmat-tdb-phase/REPORT.md: regenerate with refJd=2430000.0 (GmatTimeConstants::JD_JAN_5_1941, Convert()'s own default) instead of the previous revision's refJd=0.0 artifact; tolerance_s=5e-7 measured from crates/av-orbital/tests/tdb_check.rs (native_tdb_matches_the_regenerated_golden: combined max 3.218e-7 s over 4 epochs + 522 year_scan points, comfortably below this bound)",
+  "ref_jd": 2430000.0,
+  "sha256": "e01e68a7a825abce04df04013d971d543d2321cf5a906157cc79a076ba72369c",
+  "source": "gmat.TimeSystemConverter.Instance() -- Convert(A1MJD -> TAIMJD/TTMJD/TDBMJD, refJd=2430000.0) at each epoch, and the singleton's own TDB series coefficients",
+  "tolerance_s": 5e-07,
   "year_scan": [
     {
       "days_from_epoch_a1mjd_0": 0,
       "epoch_a1mjd": 31041.500428638676,
-      "tdb_minus_tt_s": 0.0015530618838965893
+      "tdb_minus_tt_s": -7.98376277089119e-05
     },
     {
       "days_from_epoch_a1mjd_0": 7,
       "epoch_a1mjd": 31048.500428638676,
-      "tdb_minus_tt_s": 0.0016118399798870087
+      "tdb_minus_tt_s": 0.00012289965525269508
     },
     {
       "days_from_epoch_a1mjd_0": 14,
       "epoch_a1mjd": 31055.500428638676,
-      "tdb_minus_tt_s": 0.0016470439732074738
+      "tdb_minus_tt_s": 0.0003237510100007057
     },
     {
       "days_from_epoch_a1mjd_0": 21,
       "epoch_a1mjd": 31062.500428638676,
-      "tdb_minus_tt_s": 0.0016583595424890518
+      "tdb_minus_tt_s": 0.0005198875442147255
     },
     {
       "days_from_epoch_a1mjd_0": 28,
       "epoch_a1mjd": 31069.500428638676,
-      "tdb_minus_tt_s": 0.0016454723663628101
+      "tdb_minus_tt_s": 0.0007081660442054272
     },
     {
       "days_from_epoch_a1mjd_0": 35,
       "epoch_a1mjd": 31076.500428638676,
-      "tdb_minus_tt_s": 0.0016086967661976814
+      "tdb_minus_tt_s": 0.0008854432962834835
     },
     {
       "days_from_epoch_a1mjd_0": 42,
       "epoch_a1mjd": 31083.500428638676,
-      "tdb_minus_tt_s": 0.0015492900274693966
+      "tdb_minus_tt_s": 0.0010495190508663654
     },
     {
       "days_from_epoch_a1mjd_0": 49,
       "epoch_a1mjd": 31090.500428638676,
-      "tdb_minus_tt_s": 0.0014675664715468884
+      "tdb_minus_tt_s": 0.0011978787370026112
     },
     {
       "days_from_epoch_a1mjd_0": 56,
       "epoch_a1mjd": 31097.500428638676,
-      "tdb_minus_tt_s": 0.0013650977052748203
+      "tdb_minus_tt_s": 0.0013283221051096916
     },
     {
       "days_from_epoch_a1mjd_0": 63,
       "epoch_a1mjd": 31104.500428638676,
-      "tdb_minus_tt_s": 0.0012434553354978561
+      "tdb_minus_tt_s": 0.0014389632269740105
     },
     {
       "days_from_epoch_a1mjd_0": 70,
       "epoch_a1mjd": 31111.500428638676,
-      "tdb_minus_tt_s": 0.0011045252904295921
+      "tdb_minus_tt_s": 0.0015279161743819714
     },
     {
       "days_from_epoch_a1mjd_0": 77,
       "epoch_a1mjd": 31118.500428638676,
-      "tdb_minus_tt_s": 0.0009501934982836246
+      "tdb_minus_tt_s": 0.0015945523045957088
     },
     {
       "days_from_epoch_a1mjd_0": 84,
       "epoch_a1mjd": 31125.500428638676,
-      "tdb_minus_tt_s": 0.00078234588727355
+      "tdb_minus_tt_s": 0.0016379286535084248
     },
     {
       "days_from_epoch_a1mjd_0": 91,
       "epoch_a1mjd": 31132.500428638676,
-      "tdb_minus_tt_s": 0.0006041256710886955
+      "tdb_minus_tt_s": 0.001657102257013321
     },
     {
       "days_from_epoch_a1mjd_0": 98,
       "epoch_a1mjd": 31139.500428638676,
-      "tdb_minus_tt_s": 0.00041710445657372475
+      "tdb_minus_tt_s": 0.00165238743647933
     },
     {
       "days_from_epoch_a1mjd_0": 105,
       "epoch_a1mjd": 31146.500428638676,
-      "tdb_minus_tt_s": 0.00022473977878689766
+      "tdb_minus_tt_s": 0.0016237841919064522
     },
     {
       "days_from_epoch_a1mjd_0": 112,
       "epoch_a1mjd": 31153.500428638676,
-      "tdb_minus_tt_s": 2.8917565941810608e-05
+      "tdb_minus_tt_s": 0.0015719211660325527
     },
     {
       "days_from_epoch_a1mjd_0": 119,
       "epoch_a1mjd": 31160.500428638676,
-      "tdb_minus_tt_s": -0.00016690464690327644
+      "tdb_minus_tt_s": 0.0014974270015954971
     },
     {
       "days_from_epoch_a1mjd_0": 126,
       "epoch_a1mjd": 31167.500428638676,
-      "tdb_minus_tt_s": -0.00036084093153476715
+      "tdb_minus_tt_s": 0.001401873305439949
     },
     {
       "days_from_epoch_a1mjd_0": 133,
       "epoch_a1mjd": 31174.500428638676,
-      "tdb_minus_tt_s": -0.0005494337528944016
+      "tdb_minus_tt_s": 0.0012865173630416393
     },
     {
       "days_from_epoch_a1mjd_0": 140,
       "epoch_a1mjd": 31181.500428638676,
-      "tdb_minus_tt_s": -0.0007307971827685833
+      "tdb_minus_tt_s": 0.0011532451026141644
     },
     {
       "days_from_epoch_a1mjd_0": 147,
       "epoch_a1mjd": 31188.500428638676,
-      "tdb_minus_tt_s": -0.0009017880074679852
+      "tdb_minus_tt_s": 0.0010036281310021877
     },
     {
       "days_from_epoch_a1mjd_0": 154,
       "epoch_a1mjd": 31195.500428638676,
-      "tdb_minus_tt_s": -0.0010605202987790108
+      "tdb_minus_tt_s": 0.0008401810191571712
     },
     {
       "days_from_epoch_a1mjd_0": 161,
       "epoch_a1mjd": 31202.500428638676,
-      "tdb_minus_tt_s": -0.0012041651643812656
+      "tdb_minus_tt_s": 0.000665104016661644
     },
     {
       "days_from_epoch_a1mjd_0": 168,
       "epoch_a1mjd": 31209.500428638676,
-      "tdb_minus_tt_s": -0.0013311509974300861
+      "tdb_minus_tt_s": 0.0004809116944670677
     },
     {
       "days_from_epoch_a1mjd_0": 175,
       "epoch_a1mjd": 31216.500428638676,
-      "tdb_minus_tt_s": -0.0014392775483429432
+      "tdb_minus_tt_s": 0.0002898043021559715
     },
     {
       "days_from_epoch_a1mjd_0": 182,
       "epoch_a1mjd": 31223.500428638676,
-      "tdb_minus_tt_s": -0.001527287531644106
+      "tdb_minus_tt_s": 9.492505341768265e-05
     },
     {
       "days_from_epoch_a1mjd_0": 189,
       "epoch_a1mjd": 31230.500428638676,
-      "tdb_minus_tt_s": -0.0015936093404889107
+      "tdb_minus_tt_s": -0.00010121148079633713
     },
     {
       "days_from_epoch_a1mjd_0": 196,
       "epoch_a1mjd": 31237.500428638676,
-      "tdb_minus_tt_s": -0.0016369856894016266
+      "tdb_minus_tt_s": -0.000296090729534626
     },
     {
       "days_from_epoch_a1mjd_0": 203,
       "epoch_a1mjd": 31244.500428638676,
-      "tdb_minus_tt_s": -0.0016567879356443882
+      "tdb_minus_tt_s": -0.0004868838004767895
     },
     {
       "days_from_epoch_a1mjd_0": 210,
       "epoch_a1mjd": 31251.500428638676,
-      "tdb_minus_tt_s": -0.0016527017578482628
+      "tdb_minus_tt_s": -0.000670761801302433
     },
     {
       "days_from_epoch_a1mjd_0": 217,
       "epoch_a1mjd": 31258.500428638676,
-      "tdb_minus_tt_s": -0.0016247271560132504
+      "tdb_minus_tt_s": -0.0008455244824290276
     },
     {
       "days_from_epoch_a1mjd_0": 224,
       "epoch_a1mjd": 31265.500428638676,
-      "tdb_minus_tt_s": -0.0015728641301393509
+      "tdb_minus_tt_s": -0.0010086572729051113
     },
     {
       "days_from_epoch_a1mjd_0": 231,
       "epoch_a1mjd": 31272.500428638676,
-      "tdb_minus_tt_s": -0.0014977413229644299
+      "tdb_minus_tt_s": -0.0011576456017792225
     },
     {
       "days_from_epoch_a1mjd_0": 238,
       "epoch_a1mjd": 31279.500428638676,
-      "tdb_minus_tt_s": -0.0014006160199642181
+      "tdb_minus_tt_s": -0.0012906035408377647
     },
     {
       "days_from_epoch_a1mjd_0": 245,
       "epoch_a1mjd": 31286.500428638676,
-      "tdb_minus_tt_s": -0.001282431185245514
+      "tdb_minus_tt_s": -0.001405330840498209
     },
     {
       "days_from_epoch_a1mjd_0": 252,
       "epoch_a1mjd": 31293.500428638676,
-      "tdb_minus_tt_s": -0.0011453870683908463
+      "tdb_minus_tt_s": -0.0015002558939158916
     },
     {
       "days_from_epoch_a1mjd_0": 259,
       "epoch_a1mjd": 31300.500428638676,
-      "tdb_minus_tt_s": -0.0009910552762448788
+      "tdb_minus_tt_s": -0.001573807094246149
     },
     {
       "days_from_epoch_a1mjd_0": 266,
       "epoch_a1mjd": 31307.500428638676,
-      "tdb_minus_tt_s": -0.0008216360583901405
+      "tdb_minus_tt_s": -0.001625041477382183
     },
     {
       "days_from_epoch_a1mjd_0": 273,
       "epoch_a1mjd": 31314.500428638676,
-      "tdb_minus_tt_s": -0.0006399583071470261
+      "tdb_minus_tt_s": -0.0016530160792171955
     },
     {
       "days_from_epoch_a1mjd_0": 280,
       "epoch_a1mjd": 31321.500428638676,
-      "tdb_minus_tt_s": -0.00044853659346699715
+      "tdb_minus_tt_s": -0.0016567879356443882
     },
     {
       "days_from_epoch_a1mjd_0": 287,
       "epoch_a1mjd": 31328.500428638676,
-      "tdb_minus_tt_s": -0.0002501998096704483
+      "tdb_minus_tt_s": -0.0016369856894016266
     },
     {
       "days_from_epoch_a1mjd_0": 294,
       "epoch_a1mjd": 31335.500428638676,
-      "tdb_minus_tt_s": -4.8405490815639496e-05
+      "tdb_minus_tt_s": -0.0015929806977510452
     },
     {
       "days_from_epoch_a1mjd_0": 301,
       "epoch_a1mjd": 31342.500428638676,
-      "tdb_minus_tt_s": 0.0001546461135149002
+      "tdb_minus_tt_s": -0.0015254016034305096
     },
     {
       "days_from_epoch_a1mjd_0": 308,
       "epoch_a1mjd": 31349.500428638676,
-      "tdb_minus_tt_s": 0.0003548688255250454
+      "tdb_minus_tt_s": -0.0014358200132846832
     },
     {
       "days_from_epoch_a1mjd_0": 315,
       "epoch_a1mjd": 31356.500428638676,
-      "tdb_minus_tt_s": 0.000550062395632267
+      "tdb_minus_tt_s": -0.001324550248682499
     },
     {
       "days_from_epoch_a1mjd_0": 322,
       "epoch_a1mjd": 31363.500428638676,
-      "tdb_minus_tt_s": 0.0007364549674093723
+      "tdb_minus_tt_s": -0.001193478237837553
     },
     {
       "days_from_epoch_a1mjd_0": 329,
       "epoch_a1mjd": 31370.500428638676,
-      "tdb_minus_tt_s": 0.000912160612642765
+      "tdb_minus_tt_s": -0.0010444899089634418
     },
     {
       "days_from_epoch_a1mjd_0": 336,
       "epoch_a1mjd": 31377.500428638676,
-      "tdb_minus_tt_s": 0.001074036117643118
+      "tdb_minus_tt_s": -0.0008800998330116272
     },
     {
       "days_from_epoch_a1mjd_0": 343,
       "epoch_a1mjd": 31384.500428638676,
-      "tdb_minus_tt_s": 0.0012195669114589691
+      "tdb_minus_tt_s": -0.0007021939381957054
     },
     {
       "days_from_epoch_a1mjd_0": 350,
       "epoch_a1mjd": 31391.500428638676,
-      "tdb_minus_tt_s": 0.0013468670658767223
+      "tdb_minus_tt_s": -0.000513601116836071
     },
     {
       "days_from_epoch_a1mjd_0": 357,
       "epoch_a1mjd": 31398.500428638676,
-      "tdb_minus_tt_s": 0.001454364974051714
+      "tdb_minus_tt_s": -0.00031746458262205124
     },
     {
       "days_from_epoch_a1mjd_0": 364,
       "epoch_a1mjd": 31405.500428638676,
-      "tdb_minus_tt_s": 0.0015398603864014149
+      "tdb_minus_tt_s": -0.00011629890650510788
     },
     {
       "days_from_epoch_a1mjd_0": 371,
       "epoch_a1mjd": 31412.500428638676,
-      "tdb_minus_tt_s": 0.0016030389815568924
+      "tdb_minus_tt_s": 8.64383764564991e-05
     },
     {
       "days_from_epoch_a1mjd_0": 378,
       "epoch_a1mjd": 31419.500428638676,
-      "tdb_minus_tt_s": 0.001642329152673483
+      "tdb_minus_tt_s": 0.0002879183739423752
     },
     {
       "days_from_epoch_a1mjd_0": 385,
       "epoch_a1mjd": 31426.500428638676,
-      "tdb_minus_tt_s": 0.001658045221120119
+      "tdb_minus_tt_s": 0.00048499787226319313
     },
     {
       "days_from_epoch_a1mjd_0": 392,
       "epoch_a1mjd": 31433.500428638676,
-      "tdb_minus_tt_s": 0.0016495585441589355
+      "tdb_minus_tt_s": 0.0006748479790985584
     },
     {
       "days_from_epoch_a1mjd_0": 399,
       "epoch_a1mjd": 31440.500428638676,
-      "tdb_minus_tt_s": 0.001617183443158865
+      "tdb_minus_tt_s": 0.0008546398021280766
     },
     {
       "days_from_epoch_a1mjd_0": 406,
       "epoch_a1mjd": 31447.500428638676,
-      "tdb_minus_tt_s": 0.0015615485608577728
+      "tdb_minus_tt_s": 0.0010212301276624203
     },
     {
       "days_from_epoch_a1mjd_0": 413,
       "epoch_a1mjd": 31454.500428638676,
-      "tdb_minus_tt_s": 0.00148391118273139
+      "tdb_minus_tt_s": 0.0011724187061190605
     },
     {
       "days_from_epoch_a1mjd_0": 420,
       "epoch_a1mjd": 31461.500428638676,
-      "tdb_minus_tt_s": 0.0013852142728865147
+      "tdb_minus_tt_s": 0.001306319609284401
     },
     {
       "days_from_epoch_a1mjd_0": 427,
       "epoch_a1mjd": 31468.500428638676,
-      "tdb_minus_tt_s": 0.0012667151167988777
+      "tdb_minus_tt_s": 0.0014204182662069798
     },
     {
       "days_from_epoch_a1mjd_0": 434,
       "epoch_a1mjd": 31475.500428638676,
-      "tdb_minus_tt_s": 0.0011306139640510082
+      "tdb_minus_tt_s": 0.0015137717127799988
     },
     {
       "days_from_epoch_a1mjd_0": 441,
       "epoch_a1mjd": 31482.500428638676,
-      "tdb_minus_tt_s": 0.0009787967428565025
+      "tdb_minus_tt_s": 0.0015844940207898617
     },
     {
       "days_from_epoch_a1mjd_0": 448,
       "epoch_a1mjd": 31489.500428638676,
-      "tdb_minus_tt_s": 0.0008134637027978897
+      "tdb_minus_tt_s": 0.001631956547498703
     },
     {
       "days_from_epoch_a1mjd_0": 455,
       "epoch_a1mjd": 31496.500428638676,
-      "tdb_minus_tt_s": 0.0006368150934576988
+      "tdb_minus_tt_s": 0.0016555306501686573
     },
     {
       "days_from_epoch_a1mjd_0": 462,
       "epoch_a1mjd": 31503.500428638676,
-      "tdb_minus_tt_s": 0.00045136548578739166
+      "tdb_minus_tt_s": 0.0016549020074307919
     },
     {
       "days_from_epoch_a1mjd_0": 469,
       "epoch_a1mjd": 31510.500428638676,
-      "tdb_minus_tt_s": 0.00025962945073843
+      "tdb_minus_tt_s": 0.001630699262022972
     },
     {
       "days_from_epoch_a1mjd_0": 476,
       "epoch_a1mjd": 31517.500428638676,
-      "tdb_minus_tt_s": 6.443588063120842e-05
+      "tdb_minus_tt_s": 0.001582922413945198
     },
     {
       "days_from_epoch_a1mjd_0": 483,
       "epoch_a1mjd": 31524.500428638676,
-      "tdb_minus_tt_s": -0.00013170065358281136
+      "tdb_minus_tt_s": 0.0015125144273042679
     },
     {
       "days_from_epoch_a1mjd_0": 490,
       "epoch_a1mjd": 31531.500428638676,
-      "tdb_minus_tt_s": -0.0003262655809521675
+      "tdb_minus_tt_s": 0.0014204182662069798
     },
     {
       "days_from_epoch_a1mjd_0": 497,
       "epoch_a1mjd": 31538.500428638676,
-      "tdb_minus_tt_s": -0.0005161156877875328
+      "tdb_minus_tt_s": 0.00130851985886693
     },
     {
       "days_from_epoch_a1mjd_0": 504,
       "epoch_a1mjd": 31545.500428638676,
-      "tdb_minus_tt_s": -0.0006987364031374454
+      "tdb_minus_tt_s": 0.0011783908121287823
     },
     {
       "days_from_epoch_a1mjd_0": 511,
       "epoch_a1mjd": 31552.500428638676,
-      "tdb_minus_tt_s": -0.0008719274774193764
+      "tdb_minus_tt_s": 0.0010316027328372002
     },
     {
       "days_from_epoch_a1mjd_0": 518,
       "epoch_a1mjd": 31559.500428638676,
-      "tdb_minus_tt_s": -0.001032860018312931
+      "tdb_minus_tt_s": 0.0008703558705747128
     },
     {
       "days_from_epoch_a1mjd_0": 525,
       "epoch_a1mjd": 31566.500428638676,
-      "tdb_minus_tt_s": -0.0011796480976045132
+      "tdb_minus_tt_s": 0.0006971647962927818
     },
     {
       "days_from_epoch_a1mjd_0": 532,
       "epoch_a1mjd": 31573.500428638676,
-      "tdb_minus_tt_s": -0.001309777144342661
+      "tdb_minus_tt_s": 0.0005145440809428692
     },
     {
       "days_from_epoch_a1mjd_0": 539,
       "epoch_a1mjd": 31580.500428638676,
-      "tdb_minus_tt_s": -0.001421361230313778
+      "tdb_minus_tt_s": 0.0003246939741075039
     },
     {
       "days_from_epoch_a1mjd_0": 546,
       "epoch_a1mjd": 31587.500428638676,
-      "tdb_minus_tt_s": -0.0015131430700421333
+      "tdb_minus_tt_s": 0.00013012904673814774
     },
     {
       "days_from_epoch_a1mjd_0": 553,
       "epoch_a1mjd": 31594.500428638676,
-      "tdb_minus_tt_s": -0.0015832367353141308
+      "tdb_minus_tt_s": -6.600748747587204e-05
     },
     {
       "days_from_epoch_a1mjd_0": 560,
       "epoch_a1mjd": 31601.500428638676,
-      "tdb_minus_tt_s": -0.0016310135833919048
+      "tdb_minus_tt_s": -0.00026120105758309364
     },
     {
       "days_from_epoch_a1mjd_0": 567,
       "epoch_a1mjd": 31608.500428638676,
-      "tdb_minus_tt_s": -0.0016552163287997246
+      "tdb_minus_tt_s": -0.0004529370926320553
     },
     {
       "days_from_epoch_a1mjd_0": 574,
       "epoch_a1mjd": 31615.500428638676,
-      "tdb_minus_tt_s": -0.0016552163287997246
+      "tdb_minus_tt_s": -0.0006383867003023624
     },
     {
       "days_from_epoch_a1mjd_0": 581,
       "epoch_a1mjd": 31622.500428638676,
-      "tdb_minus_tt_s": -0.0016316422261297703
+      "tdb_minus_tt_s": -0.0008150353096425533
     },
     {
       "days_from_epoch_a1mjd_0": 588,
       "epoch_a1mjd": 31629.500428638676,
-      "tdb_minus_tt_s": -0.0015838653780519962
+      "tdb_minus_tt_s": -0.0009803683497011662
     },
     {
       "days_from_epoch_a1mjd_0": 595,
       "epoch_a1mjd": 31636.500428638676,
-      "tdb_minus_tt_s": -0.0015128287486732006
+      "tdb_minus_tt_s": -0.0011318712495267391
     },
     {
       "days_from_epoch_a1mjd_0": 602,
       "epoch_a1mjd": 31643.500428638676,
-      "tdb_minus_tt_s": -0.0014197896234691143
+      "tdb_minus_tt_s": -0.0012679724022746086
     },
     {
       "days_from_epoch_a1mjd_0": 609,
       "epoch_a1mjd": 31650.500428638676,
-      "tdb_minus_tt_s": -0.0013053766451776028
+      "tdb_minus_tt_s": -0.0013858429156243801
     },
     {
       "days_from_epoch_a1mjd_0": 616,
       "epoch_a1mjd": 31657.500428638676,
-      "tdb_minus_tt_s": -0.0011714757420122623
+      "tdb_minus_tt_s": -0.0014845398254692554
     },
     {
       "days_from_epoch_a1mjd_0": 623,
       "epoch_a1mjd": 31664.500428638676,
-      "tdb_minus_tt_s": -0.0010199728421866894
+      "tdb_minus_tt_s": -0.0015621772035956383
     },
     {
       "days_from_epoch_a1mjd_0": 630,
       "epoch_a1mjd": 31671.500428638676,
-      "tdb_minus_tt_s": -0.0008530681952834129
+      "tdb_minus_tt_s": -0.0016174977645277977
     },
     {
       "days_from_epoch_a1mjd_0": 637,
       "epoch_a1mjd": 31678.500428638676,
-      "tdb_minus_tt_s": -0.0006732763722538948
+      "tdb_minus_tt_s": -0.0016495585441589355
     },
     {
       "days_from_epoch_a1mjd_0": 644,
       "epoch_a1mjd": 31685.500428638676,
-      "tdb_minus_tt_s": -0.0004834262654185295
+      "tdb_minus_tt_s": -0.001658045221120119
     },
     {
       "days_from_epoch_a1mjd_0": 651,
       "epoch_a1mjd": 31692.500428638676,
-      "tdb_minus_tt_s": -0.00028634676709771156
+      "tdb_minus_tt_s": -0.001642329152673483
     },
     {
       "days_from_epoch_a1mjd_0": 658,
       "epoch_a1mjd": 31699.500428638676,
-      "tdb_minus_tt_s": -8.486676961183548e-05
+      "tdb_minus_tt_s": -0.0016027246601879597
     },
     {
       "days_from_epoch_a1mjd_0": 665,
       "epoch_a1mjd": 31706.500428638676,
-      "tdb_minus_tt_s": 0.00011818483471870422
+      "tdb_minus_tt_s": -0.0015392317436635494
     },
     {
       "days_from_epoch_a1mjd_0": 672,
       "epoch_a1mjd": 31713.500428638676,
-      "tdb_minus_tt_s": 0.00031903618946671486
+      "tdb_minus_tt_s": -0.0014534220099449158
     },
     {
       "days_from_epoch_a1mjd_0": 679,
       "epoch_a1mjd": 31720.500428638676,
-      "tdb_minus_tt_s": 0.0005154870450496674
+      "tdb_minus_tt_s": -0.0013459241017699242
     },
     {
       "days_from_epoch_a1mjd_0": 686,
       "epoch_a1mjd": 31727.500428638676,
-      "tdb_minus_tt_s": 0.000703765545040369
+      "tdb_minus_tt_s": -0.0012183096259832382
     },
     {
       "days_from_epoch_a1mjd_0": 693,
       "epoch_a1mjd": 31734.500428638676,
-      "tdb_minus_tt_s": 0.0008813571184873581
+      "tdb_minus_tt_s": -0.001072778832167387
     },
     {
       "days_from_epoch_a1mjd_0": 700,
       "epoch_a1mjd": 31741.500428638676,
-      "tdb_minus_tt_s": 0.0010460615158081055
+      "tdb_minus_tt_s": -0.0009105890057981014
     },
     {
       "days_from_epoch_a1mjd_0": 707,
       "epoch_a1mjd": 31748.500428638676,
-      "tdb_minus_tt_s": 0.001194735523313284
+      "tdb_minus_tt_s": -0.0007351976819336414
     },
     {
       "days_from_epoch_a1mjd_0": 714,
       "epoch_a1mjd": 31755.500428638676,
-      "tdb_minus_tt_s": 0.001325493212789297
+      "tdb_minus_tt_s": -0.0005481764674186707
     },
     {
       "days_from_epoch_a1mjd_0": 721,
       "epoch_a1mjd": 31762.500428638676,
-      "tdb_minus_tt_s": 0.0014364486560225487
+      "tdb_minus_tt_s": -0.0003532972186803818
     },
     {
       "days_from_epoch_a1mjd_0": 728,
       "epoch_a1mjd": 31769.500428638676,
-      "tdb_minus_tt_s": 0.0015263445675373077
+      "tdb_minus_tt_s": -0.00015276018530130386
     },
     {
       "days_from_epoch_a1mjd_0": 735,
       "epoch_a1mjd": 31776.500428638676,
-      "tdb_minus_tt_s": 0.001593295019119978
+      "tdb_minus_tt_s": 4.9977097660303116e-05
     },
     {
       "days_from_epoch_a1mjd_0": 742,
       "epoch_a1mjd": 31783.500428638676,
-      "tdb_minus_tt_s": 0.0016369856894016266
+      "tdb_minus_tt_s": 0.0002517714165151119
     },
     {
       "days_from_epoch_a1mjd_0": 749,
       "epoch_a1mjd": 31790.500428638676,
-      "tdb_minus_tt_s": 0.001657102257013321
+      "tdb_minus_tt_s": 0.00045010820031166077
     },
     {
       "days_from_epoch_a1mjd_0": 756,
       "epoch_a1mjd": 31797.500428638676,
-      "tdb_minus_tt_s": 0.0016527017578482628
+      "tdb_minus_tt_s": 0.0006415299139916897
     },
     {
       "days_from_epoch_a1mjd_0": 763,
       "epoch_a1mjd": 31804.500428638676,
-      "tdb_minus_tt_s": 0.0016247271560132504
+      "tdb_minus_tt_s": 0.0008232076652348042
     },
     {
       "days_from_epoch_a1mjd_0": 770,
       "epoch_a1mjd": 31811.500428638676,
-      "tdb_minus_tt_s": 0.0015731784515082836
+      "tdb_minus_tt_s": 0.0009923125617206097
     },
     {
       "days_from_epoch_a1mjd_0": 777,
       "epoch_a1mjd": 31818.500428638676,
-      "tdb_minus_tt_s": 0.0014993129298090935
+      "tdb_minus_tt_s": 0.0011466443538665771
     },
     {
       "days_from_epoch_a1mjd_0": 784,
       "epoch_a1mjd": 31825.500428638676,
-      "tdb_minus_tt_s": 0.0014043878763914108
+      "tdb_minus_tt_s": 0.0012836884707212448
     },
     {
       "days_from_epoch_a1mjd_0": 791,
       "epoch_a1mjd": 31832.500428638676,
-      "tdb_minus_tt_s": 0.0012893462553620338
+      "tdb_minus_tt_s": 0.0014015589840710163
     },
     {
       "days_from_epoch_a1mjd_0": 798,
       "epoch_a1mjd": 31839.500428638676,
-      "tdb_minus_tt_s": 0.0011563883163034916
+      "tdb_minus_tt_s": 0.0014983699657022953
     },
     {
       "days_from_epoch_a1mjd_0": 805,
       "epoch_a1mjd": 31846.500428638676,
-      "tdb_minus_tt_s": 0.0010073999874293804
+      "tdb_minus_tt_s": 0.0015734927728772163
     },
     {
       "days_from_epoch_a1mjd_0": 812,
       "epoch_a1mjd": 31853.500428638676,
-      "tdb_minus_tt_s": 0.0008442671969532967
+      "tdb_minus_tt_s": 0.001625041477382183
     },
     {
       "days_from_epoch_a1mjd_0": 819,
       "epoch_a1mjd": 31860.500428638676,
-      "tdb_minus_tt_s": 0.0006691901944577694
+      "tdb_minus_tt_s": 0.0016530160792171955
     },
     {
       "days_from_epoch_a1mjd_0": 826,
       "epoch_a1mjd": 31867.500428638676,
-      "tdb_minus_tt_s": 0.00048531219363212585
+      "tdb_minus_tt_s": 0.0016567879356443882
     },
     {
       "days_from_epoch_a1mjd_0": 833,
       "epoch_a1mjd": 31874.500428638676,
-      "tdb_minus_tt_s": 0.0002945191226899624
+      "tdb_minus_tt_s": 0.0016366713680326939
     },
     {
       "days_from_epoch_a1mjd_0": 840,
       "epoch_a1mjd": 31881.500428638676,
-      "tdb_minus_tt_s": 9.963987395167351e-05
+      "tdb_minus_tt_s": 0.0015929806977510452
     },
     {
       "days_from_epoch_a1mjd_0": 847,
       "epoch_a1mjd": 31888.500428638676,
-      "tdb_minus_tt_s": -9.649666026234627e-05
+      "tdb_minus_tt_s": 0.0015266588889062405
     },
     {
       "days_from_epoch_a1mjd_0": 854,
       "epoch_a1mjd": 31895.500428638676,
-      "tdb_minus_tt_s": -0.00029137590900063515
+      "tdb_minus_tt_s": 0.0014386489056050777
     },
     {
       "days_from_epoch_a1mjd_0": 861,
       "epoch_a1mjd": 31902.500428638676,
-      "tdb_minus_tt_s": -0.00048248330131173134
+      "tdb_minus_tt_s": 0.001330208033323288
     },
     {
       "days_from_epoch_a1mjd_0": 868,
       "epoch_a1mjd": 31909.500428638676,
-      "tdb_minus_tt_s": -0.0006666756235063076
+      "tdb_minus_tt_s": 0.0012029078789055347
     },
     {
       "days_from_epoch_a1mjd_0": 875,
       "epoch_a1mjd": 31916.500428638676,
-      "tdb_minus_tt_s": -0.0008414383046329021
+      "tdb_minus_tt_s": 0.0010592630133032799
     },
     {
       "days_from_epoch_a1mjd_0": 882,
       "epoch_a1mjd": 31923.500428638676,
-      "tdb_minus_tt_s": -0.0010048854164779186
+      "tdb_minus_tt_s": 0.0009005307219922543
     },
     {
       "days_from_epoch_a1mjd_0": 889,
       "epoch_a1mjd": 31930.500428638676,
-      "tdb_minus_tt_s": -0.0011541880667209625
+      "tdb_minus_tt_s": 0.0007292255759239197
     },
     {
       "days_from_epoch_a1mjd_0": 896,
       "epoch_a1mjd": 31937.500428638676,
-      "tdb_minus_tt_s": -0.0012874603271484375
+      "tdb_minus_tt_s": 0.0005478621460497379
     },
     {
       "days_from_epoch_a1mjd_0": 903,
       "epoch_a1mjd": 31944.500428638676,
-      "tdb_minus_tt_s": -0.0014028162695467472
+      "tdb_minus_tt_s": 0.00035926932469010353
     },
     {
       "days_from_epoch_a1mjd_0": 910,
       "epoch_a1mjd": 31951.500428638676,
-      "tdb_minus_tt_s": -0.0014980556443333626
+      "tdb_minus_tt_s": 0.00016533304005861282
     },
     {
       "days_from_epoch_a1mjd_0": 917,
       "epoch_a1mjd": 31958.500428638676,
-      "tdb_minus_tt_s": -0.0015722354874014854
+      "tdb_minus_tt_s": -3.0489172786474228e-05
     },
     {
       "days_from_epoch_a1mjd_0": 924,
       "epoch_a1mjd": 31965.500428638676,
-      "tdb_minus_tt_s": -0.001624098513275385
+      "tdb_minus_tt_s": -0.00022631138563156128
     },
     {
       "days_from_epoch_a1mjd_0": 931,
       "epoch_a1mjd": 31972.500428638676,
-      "tdb_minus_tt_s": -0.00165238743647933
+      "tdb_minus_tt_s": -0.00041867606341838837
     },
     {
       "days_from_epoch_a1mjd_0": 938,
       "epoch_a1mjd": 31979.500428638676,
-      "tdb_minus_tt_s": -0.001657102257013321
+      "tdb_minus_tt_s": -0.0006053829565644264
     },
     {
       "days_from_epoch_a1mjd_0": 945,
       "epoch_a1mjd": 31986.500428638676,
-      "tdb_minus_tt_s": -0.001637614332139492
+      "tdb_minus_tt_s": -0.0007839174941182137
     },
     {
       "days_from_epoch_a1mjd_0": 952,
       "epoch_a1mjd": 31993.500428638676,
-      "tdb_minus_tt_s": -0.0015942379832267761
+      "tdb_minus_tt_s": -0.0009514507837593555
     },
     {
       "days_from_epoch_a1mjd_0": 959,
       "epoch_a1mjd": 32000.500428638676,
-      "tdb_minus_tt_s": -0.001527287531644106
+      "tdb_minus_tt_s": -0.001105782575905323
     },
     {
       "days_from_epoch_a1mjd_0": 966,
       "epoch_a1mjd": 32007.500428638676,
-      "tdb_minus_tt_s": -0.0014380202628672123
+      "tdb_minus_tt_s": -0.001244712620973587
     },
     {
       "days_from_epoch_a1mjd_0": 973,
       "epoch_a1mjd": 32014.500428638676,
-      "tdb_minus_tt_s": -0.0013273791410028934
+      "tdb_minus_tt_s": -0.0013660406693816185
     },
     {
       "days_from_epoch_a1mjd_0": 980,
       "epoch_a1mjd": 32021.500428638676,
-      "tdb_minus_tt_s": -0.001196935772895813
+      "tdb_minus_tt_s": -0.0014685094356536865
     },
     {
       "days_from_epoch_a1mjd_0": 987,
       "epoch_a1mjd": 32028.500428638676,
-      "tdb_minus_tt_s": -0.0010482617653906345
+      "tdb_minus_tt_s": -0.001549918670207262
     },
     {
       "days_from_epoch_a1mjd_0": 994,
       "epoch_a1mjd": 32035.500428638676,
-      "tdb_minus_tt_s": -0.0008841860108077526
+      "tdb_minus_tt_s": -0.0016093254089355469
     },
     {
       "days_from_epoch_a1mjd_0": 1001,
       "epoch_a1mjd": 32042.500428638676,
-      "tdb_minus_tt_s": -0.0007065944373607635
+      "tdb_minus_tt_s": -0.0016454723663628101
     },
     {
       "days_from_epoch_a1mjd_0": 1008,
       "epoch_a1mjd": 32049.500428638676,
-      "tdb_minus_tt_s": -0.0005183159373700619
+      "tdb_minus_tt_s": -0.0016583595424890518
     },
     {
       "days_from_epoch_a1mjd_0": 1015,
       "epoch_a1mjd": 32056.500428638676,
-      "tdb_minus_tt_s": -0.0003221794031560421
+      "tdb_minus_tt_s": -0.001646729651838541
     },
     {
       "days_from_epoch_a1mjd_0": 1022,
       "epoch_a1mjd": 32063.500428638676,
-      "tdb_minus_tt_s": -0.00012132804840803146
+      "tdb_minus_tt_s": -0.001611525658518076
     },
     {
       "days_from_epoch_a1mjd_0": 1029,
       "epoch_a1mjd": 32070.500428638676,
-      "tdb_minus_tt_s": 8.172355592250824e-05
+      "tdb_minus_tt_s": -0.0015524332411587238
     },
     {
       "days_from_epoch_a1mjd_0": 1036,
       "epoch_a1mjd": 32077.500428638676,
-      "tdb_minus_tt_s": 0.0002832035534083843
+      "tdb_minus_tt_s": -0.0014703953638672829
     },
     {
       "days_from_epoch_a1mjd_0": 1043,
       "epoch_a1mjd": 32084.500428638676,
-      "tdb_minus_tt_s": 0.000480597373098135
+      "tdb_minus_tt_s": -0.0013669836334884167
     },
     {
       "days_from_epoch_a1mjd_0": 1050,
       "epoch_a1mjd": 32091.500428638676,
-      "tdb_minus_tt_s": 0.0006704474799335003
+      "tdb_minus_tt_s": -0.0012428266927599907
     },
     {
       "days_from_epoch_a1mjd_0": 1057,
       "epoch_a1mjd": 32098.500428638676,
-      "tdb_minus_tt_s": 0.0008505536243319511
+      "tdb_minus_tt_s": -0.001100124791264534
     },
     {
       "days_from_epoch_a1mjd_0": 1064,
       "epoch_a1mjd": 32105.500428638676,
-      "tdb_minus_tt_s": 0.0010174582712352276
+      "tdb_minus_tt_s": -0.0009410781785845757
     },
     {
       "days_from_epoch_a1mjd_0": 1071,
       "epoch_a1mjd": 32112.500428638676,
-      "tdb_minus_tt_s": 0.0011692754924297333
+      "tdb_minus_tt_s": -0.000767572782933712
     },
     {
       "days_from_epoch_a1mjd_0": 1078,
       "epoch_a1mjd": 32119.500428638676,
-      "tdb_minus_tt_s": 0.0013031763955950737
+      "tdb_minus_tt_s": -0.0005827518180012703
     },
     {
       "days_from_epoch_a1mjd_0": 1085,
       "epoch_a1mjd": 32126.500428638676,
-      "tdb_minus_tt_s": 0.001417903695255518
+      "tdb_minus_tt_s": -0.0003888155333697796
     },
     {
       "days_from_epoch_a1mjd_0": 1092,
       "epoch_a1mjd": 32133.500428638676,
-      "tdb_minus_tt_s": 0.0015115714631974697
+      "tdb_minus_tt_s": -0.00018922146409749985
     },
     {
       "days_from_epoch_a1mjd_0": 1099,
       "epoch_a1mjd": 32140.500428638676,
-      "tdb_minus_tt_s": 0.001582922413945198
+      "tdb_minus_tt_s": 1.3515818864107132e-05
     },
     {
       "days_from_epoch_a1mjd_0": 1106,
       "epoch_a1mjd": 32147.500428638676,
-      "tdb_minus_tt_s": 0.0016310135833919048
+      "tdb_minus_tt_s": 0.00021562445908784866
     },
     {
       "days_from_epoch_a1mjd_0": 1113,
       "epoch_a1mjd": 32154.500428638676,
-      "tdb_minus_tt_s": 0.0016552163287997246
+      "tdb_minus_tt_s": 0.0004149042069911957
     },
     {
       "days_from_epoch_a1mjd_0": 1120,
       "epoch_a1mjd": 32161.500428638676,
-      "tdb_minus_tt_s": 0.0016552163287997246
+      "tdb_minus_tt_s": 0.0006075832061469555
     },
     {
       "days_from_epoch_a1mjd_0": 1127,
       "epoch_a1mjd": 32168.500428638676,
-      "tdb_minus_tt_s": 0.0016313279047608376
+      "tdb_minus_tt_s": 0.0007911468856036663
     },
     {
       "days_from_epoch_a1mjd_0": 1134,
       "epoch_a1mjd": 32175.500428638676,
-      "tdb_minus_tt_s": 0.001584179699420929
+      "tdb_minus_tt_s": 0.0009627663530409336
     },
     {
       "days_from_epoch_a1mjd_0": 1141,
       "epoch_a1mjd": 32182.500428638676,
-      "tdb_minus_tt_s": 0.0015144003555178642
+      "tdb_minus_tt_s": 0.0011199270375072956
     },
     {
       "days_from_epoch_a1mjd_0": 1148,
       "epoch_a1mjd": 32189.500428638676,
-      "tdb_minus_tt_s": 0.0014229328371584415
+      "tdb_minus_tt_s": 0.0012604286894202232
     },
     {
       "days_from_epoch_a1mjd_0": 1155,
       "epoch_a1mjd": 32196.500428638676,
-      "tdb_minus_tt_s": 0.0013113487511873245
+      "tdb_minus_tt_s": 0.0013817567378282547
     },
     {
       "days_from_epoch_a1mjd_0": 1162,
       "epoch_a1mjd": 32203.500428638676,
-      "tdb_minus_tt_s": 0.0011815340258181095
+      "tdb_minus_tt_s": 0.001482653897255659
     },
     {
       "days_from_epoch_a1mjd_0": 1169,
       "epoch_a1mjd": 32210.500428638676,
-      "tdb_minus_tt_s": 0.0010353745892643929
+      "tdb_minus_tt_s": 0.0015615485608577728
     },
     {
       "days_from_epoch_a1mjd_0": 1176,
       "epoch_a1mjd": 32217.500428638676,
-      "tdb_minus_tt_s": 0.0008744420483708382
+      "tdb_minus_tt_s": 0.0016174977645277977
     },
     {
       "days_from_epoch_a1mjd_0": 1183,
       "epoch_a1mjd": 32224.500428638676,
-      "tdb_minus_tt_s": 0.00070156529545784
+      "tdb_minus_tt_s": 0.0016498728655278683
     },
     {
       "days_from_epoch_a1mjd_0": 1190,
       "epoch_a1mjd": 32231.500428638676,
-      "tdb_minus_tt_s": 0.0005189445801079273
+      "tdb_minus_tt_s": 0.001658045221120119
     },
     {
       "days_from_epoch_a1mjd_0": 1197,
       "epoch_a1mjd": 32238.500428638676,
-      "tdb_minus_tt_s": 0.000329094473272562
+      "tdb_minus_tt_s": 0.0016420148313045502
     },
     {
       "days_from_epoch_a1mjd_0": 1204,
       "epoch_a1mjd": 32245.500428638676,
-      "tdb_minus_tt_s": 0.0001348438672721386
+      "tdb_minus_tt_s": 0.0016027246601879597
     },
     {
       "days_from_epoch_a1mjd_0": 1211,
       "epoch_a1mjd": 32252.500428638676,
-      "tdb_minus_tt_s": -6.129266694188118e-05
+      "tdb_minus_tt_s": 0.0015401747077703476
     },
     {
       "days_from_epoch_a1mjd_0": 1218,
       "epoch_a1mjd": 32259.500428638676,
-      "tdb_minus_tt_s": -0.0002564862370491028
+      "tdb_minus_tt_s": 0.0014559365808963776
     },
     {
       "days_from_epoch_a1mjd_0": 1225,
       "epoch_a1mjd": 32266.500428638676,
-      "tdb_minus_tt_s": -0.00044853659346699715
+      "tdb_minus_tt_s": 0.0013512675650417805
     },
     {
       "days_from_epoch_a1mjd_0": 1232,
       "epoch_a1mjd": 32273.500428638676,
-      "tdb_minus_tt_s": -0.0006339862011373043
+      "tdb_minus_tt_s": 0.0012271106243133545
     },
     {
       "days_from_epoch_a1mjd_0": 1239,
       "epoch_a1mjd": 32280.500428638676,
-      "tdb_minus_tt_s": -0.0008109491318464279
+      "tdb_minus_tt_s": 0.0010862946510314941
     },
     {
       "days_from_epoch_a1mjd_0": 1246,
       "epoch_a1mjd": 32287.500428638676,
-      "tdb_minus_tt_s": -0.0009765964932739735
+      "tdb_minus_tt_s": 0.0009300769306719303
     },
     {
       "days_from_epoch_a1mjd_0": 1253,
       "epoch_a1mjd": 32294.500428638676,
-      "tdb_minus_tt_s": -0.0011284137144684792
+      "tdb_minus_tt_s": 0.0007609720341861248
     },
     {
       "days_from_epoch_a1mjd_0": 1260,
       "epoch_a1mjd": 32301.500428638676,
-      "tdb_minus_tt_s": -0.0012648291885852814
+      "tdb_minus_tt_s": 0.0005811802111566067
     },
     {
       "days_from_epoch_a1mjd_0": 1267,
       "epoch_a1mjd": 32308.500428638676,
-      "tdb_minus_tt_s": -0.0013833283446729183
+      "tdb_minus_tt_s": 0.00039353035390377045
     },
     {
       "days_from_epoch_a1mjd_0": 1274,
       "epoch_a1mjd": 32315.500428638676,
-      "tdb_minus_tt_s": -0.0014823395758867264
+      "tdb_minus_tt_s": 0.0002005370333790779
     },
     {
       "days_from_epoch_a1mjd_0": 1281,
       "epoch_a1mjd": 32322.500428638676,
-      "tdb_minus_tt_s": -0.0015606055967509747
+      "tdb_minus_tt_s": 4.71482053399086e-06
     },
     {
       "days_from_epoch_a1mjd_0": 1288,
       "epoch_a1mjd": 32329.500428638676,
-      "tdb_minus_tt_s": -0.0016165548004209995
+      "tdb_minus_tt_s": -0.0001911073923110962
     },
     {
       "days_from_epoch_a1mjd_0": 1295,
       "epoch_a1mjd": 32336.500428638676,
-      "tdb_minus_tt_s": -0.0016492442227900028
+      "tdb_minus_tt_s": -0.00038441503420472145
     },
     {
       "days_from_epoch_a1mjd_0": 1302,
       "epoch_a1mjd": 32343.500428638676,
-      "tdb_minus_tt_s": -0.001658045221120119
+      "tdb_minus_tt_s": -0.0005723792128264904
     },
     {
       "days_from_epoch_a1mjd_0": 1309,
       "epoch_a1mjd": 32350.500428638676,
-      "tdb_minus_tt_s": -0.0016429577954113483
+      "tdb_minus_tt_s": -0.0007524853572249413
     },
     {
       "days_from_epoch_a1mjd_0": 1316,
       "epoch_a1mjd": 32357.500428638676,
-      "tdb_minus_tt_s": -0.0016036676242947578
+      "tdb_minus_tt_s": -0.0009222188964486122
     },
     {
       "days_from_epoch_a1mjd_0": 1323,
       "epoch_a1mjd": 32364.500428638676,
-      "tdb_minus_tt_s": -0.0015411176718771458
+      "tdb_minus_tt_s": -0.0010790652595460415
     },
     {
       "days_from_epoch_a1mjd_0": 1330,
       "epoch_a1mjd": 32371.500428638676,
-      "tdb_minus_tt_s": -0.0014556222595274448
+      "tdb_minus_tt_s": -0.0012208241969347
     },
     {
       "days_from_epoch_a1mjd_0": 1337,
       "epoch_a1mjd": 32378.500428638676,
-      "tdb_minus_tt_s": -0.0013487529940903187
+      "tdb_minus_tt_s": -0.0013456097804009914
     },
     {
       "days_from_epoch_a1mjd_0": 1344,
       "epoch_a1mjd": 32385.500428638676,
-      "tdb_minus_tt_s": -0.0012217671610414982
+      "tdb_minus_tt_s": -0.0014515360817313194
     },
     {
       "days_from_epoch_a1mjd_0": 1351,
       "epoch_a1mjd": 32392.500428638676,
-      "tdb_minus_tt_s": -0.001076236367225647
+      "tdb_minus_tt_s": -0.0015367171727120876
     },
     {
       "days_from_epoch_a1mjd_0": 1358,
       "epoch_a1mjd": 32399.500428638676,
-      "tdb_minus_tt_s": -0.0009146751835942268
+      "tdb_minus_tt_s": -0.0016002100892364979
     },
     {
       "days_from_epoch_a1mjd_0": 1365,
       "epoch_a1mjd": 32406.500428638676,
-      "tdb_minus_tt_s": -0.0007392838597297668
+      "tdb_minus_tt_s": -0.0016407575458288193
     },
     {
       "days_from_epoch_a1mjd_0": 1372,
       "epoch_a1mjd": 32413.500428638676,
-      "tdb_minus_tt_s": -0.0005528912879526615
+      "tdb_minus_tt_s": -0.0016577308997511864
     },
     {
       "days_from_epoch_a1mjd_0": 1379,
       "epoch_a1mjd": 32420.500428638676,
-      "tdb_minus_tt_s": -0.00035801203921437263
+      "tdb_minus_tt_s": -0.0016508158296346664
     },
     {
       "days_from_epoch_a1mjd_0": 1386,
       "epoch_a1mjd": 32427.500428638676,
-      "tdb_minus_tt_s": -0.00015747500583529472
+      "tdb_minus_tt_s": -0.0016196980141103268
     },
     {
       "days_from_epoch_a1mjd_0": 1393,
       "epoch_a1mjd": 32434.500428638676,
-      "tdb_minus_tt_s": 4.5262277126312256e-05
+      "tdb_minus_tt_s": -0.0015646917745471
     },
     {
       "days_from_epoch_a1mjd_0": 1400,
       "epoch_a1mjd": 32441.500428638676,
-      "tdb_minus_tt_s": 0.00024705659598112106
+      "tdb_minus_tt_s": -0.0014870543964207172
     },
     {
       "days_from_epoch_a1mjd_0": 1407,
       "epoch_a1mjd": 32448.500428638676,
-      "tdb_minus_tt_s": 0.0004453933797776699
+      "tdb_minus_tt_s": -0.001387100201100111
     },
     {
       "days_from_epoch_a1mjd_0": 1414,
       "epoch_a1mjd": 32455.500428638676,
-      "tdb_minus_tt_s": 0.0006371294148266315
+      "tdb_minus_tt_s": -0.001266400795429945
     },
     {
       "days_from_epoch_a1mjd_0": 1421,
       "epoch_a1mjd": 32462.500428638676,
-      "tdb_minus_tt_s": 0.000818807166069746
+      "tdb_minus_tt_s": -0.0011271564289927483
     },
     {
       "days_from_epoch_a1mjd_0": 1428,
       "epoch_a1mjd": 32469.500428638676,
-      "tdb_minus_tt_s": 0.000988540705293417
+      "tdb_minus_tt_s": -0.0009706243872642517
     },
     {
       "days_from_epoch_a1mjd_0": 1435,
       "epoch_a1mjd": 32476.500428638676,
-      "tdb_minus_tt_s": 0.0011431868188083172
+      "tdb_minus_tt_s": -0.0007996335625648499
     },
     {
       "days_from_epoch_a1mjd_0": 1442,
       "epoch_a1mjd": 32483.500428638676,
-      "tdb_minus_tt_s": 0.0012805452570319176
+      "tdb_minus_tt_s": -0.0006166985258460045
     },
     {
       "days_from_epoch_a1mjd_0": 1449,
       "epoch_a1mjd": 32490.500428638676,
-      "tdb_minus_tt_s": 0.0013990444131195545
+      "tdb_minus_tt_s": -0.0004243338480591774
     },
     {
       "days_from_epoch_a1mjd_0": 1456,
       "epoch_a1mjd": 32497.500428638676,
-      "tdb_minus_tt_s": 0.001496484037488699
+      "tdb_minus_tt_s": -0.0002253684215247631
     },
     {
       "days_from_epoch_a1mjd_0": 1463,
       "epoch_a1mjd": 32504.500428638676,
-      "tdb_minus_tt_s": 0.0015719211660325527
+      "tdb_minus_tt_s": -2.3259781301021576e-05
     },
     {
       "days_from_epoch_a1mjd_0": 1470,
       "epoch_a1mjd": 32511.500428638676,
-      "tdb_minus_tt_s": 0.001624098513275385
+      "tdb_minus_tt_s": 0.0001794775016605854
     },
     {
       "days_from_epoch_a1mjd_0": 1477,
       "epoch_a1mjd": 32518.500428638676,
-      "tdb_minus_tt_s": 0.0016527017578482628
+      "tdb_minus_tt_s": 0.00037938589230179787
     },
     {
       "days_from_epoch_a1mjd_0": 1484,
       "epoch_a1mjd": 32525.500428638676,
-      "tdb_minus_tt_s": 0.001657102257013321
+      "tdb_minus_tt_s": 0.0005736364983022213
     },
     {
       "days_from_epoch_a1mjd_0": 1491,
       "epoch_a1mjd": 32532.500428638676,
-      "tdb_minus_tt_s": 0.001637614332139492
+      "tdb_minus_tt_s": 0.0007590861059725285
     },
     {
       "days_from_epoch_a1mjd_0": 1498,
       "epoch_a1mjd": 32539.500428638676,
-      "tdb_minus_tt_s": 0.0015945523045957088
+      "tdb_minus_tt_s": 0.0009329058229923248
     },
     {
       "days_from_epoch_a1mjd_0": 1505,
       "epoch_a1mjd": 32546.500428638676,
-      "tdb_minus_tt_s": 0.0015285448171198368
+      "tdb_minus_tt_s": 0.0010928953997790813
     },
     {
       "days_from_epoch_a1mjd_0": 1512,
       "epoch_a1mjd": 32553.500428638676,
-      "tdb_minus_tt_s": 0.0014408491551876068
+      "tdb_minus_tt_s": 0.0012362259440124035
     },
     {
       "days_from_epoch_a1mjd_0": 1519,
       "epoch_a1mjd": 32560.500428638676,
-      "tdb_minus_tt_s": 0.0013330369256436825
+      "tdb_minus_tt_s": 0.0013613258488476276
     },
     {
       "days_from_epoch_a1mjd_0": 1526,
       "epoch_a1mjd": 32567.500428638676,
-      "tdb_minus_tt_s": 0.0012063654139637947
+      "tdb_minus_tt_s": 0.0014659948647022247
     },
     {
       "days_from_epoch_a1mjd_0": 1533,
       "epoch_a1mjd": 32574.500428638676,
-      "tdb_minus_tt_s": 0.0010627205483615398
+      "tdb_minus_tt_s": 0.0015489757061004639
     },
     {
       "days_from_epoch_a1mjd_0": 1540,
       "epoch_a1mjd": 32581.500428638676,
-      "tdb_minus_tt_s": 0.0009043025784194469
+      "tdb_minus_tt_s": 0.0016093254089355469
     },
     {
       "days_from_epoch_a1mjd_0": 1547,
       "epoch_a1mjd": 32588.500428638676,
-      "tdb_minus_tt_s": 0.0007333117537200451
+      "tdb_minus_tt_s": 0.0016457866877317429
     },
     {
       "days_from_epoch_a1mjd_0": 1554,
       "epoch_a1mjd": 32595.500428638676,
-      "tdb_minus_tt_s": 0.0005522626452147961
+      "tdb_minus_tt_s": 0.0016583595424890518
     },
     {
       "days_from_epoch_a1mjd_0": 1561,
       "epoch_a1mjd": 32602.500428638676,
-      "tdb_minus_tt_s": 0.00036366982385516167
+      "tdb_minus_tt_s": 0.001646729651838541
     },
     {
       "days_from_epoch_a1mjd_0": 1568,
       "epoch_a1mjd": 32609.500428638676,
-      "tdb_minus_tt_s": 0.00017004786059260368
+      "tdb_minus_tt_s": 0.001611525658518076
     },
     {
       "days_from_epoch_a1mjd_0": 1575,
       "epoch_a1mjd": 32616.500428638676,
-      "tdb_minus_tt_s": -2.6088673621416092e-05
+      "tdb_minus_tt_s": 0.0015530618838965893
     },
     {
       "days_from_epoch_a1mjd_0": 1582,
       "epoch_a1mjd": 32623.500428638676,
-      "tdb_minus_tt_s": -0.00022159656509757042
+      "tdb_minus_tt_s": 0.001472595613449812
     },
     {
       "days_from_epoch_a1mjd_0": 1589,
       "epoch_a1mjd": 32630.500428638676,
-      "tdb_minus_tt_s": -0.00041427556425333023
+      "tdb_minus_tt_s": 0.0013713841326534748
     },
     {
       "days_from_epoch_a1mjd_0": 1596,
       "epoch_a1mjd": 32637.500428638676,
-      "tdb_minus_tt_s": -0.000601296778768301
+      "tdb_minus_tt_s": 0.0012509990483522415
     },
     {
       "days_from_epoch_a1mjd_0": 1603,
       "epoch_a1mjd": 32644.500428638676,
-      "tdb_minus_tt_s": -0.0007798313163220882
+      "tdb_minus_tt_s": 0.001112697646021843
     },
     {
       "days_from_epoch_a1mjd_0": 1610,
       "epoch_a1mjd": 32651.500428638676,
-      "tdb_minus_tt_s": -0.0009476789273321629
+      "tdb_minus_tt_s": 0.0009589944966137409
     },
     {
       "days_from_epoch_a1mjd_0": 1617,
       "epoch_a1mjd": 32658.500428638676,
-      "tdb_minus_tt_s": -0.001102325040847063
+      "tdb_minus_tt_s": 0.0007920898497104645
     },
     {
       "days_from_epoch_a1mjd_0": 1624,
       "epoch_a1mjd": 32665.500428638676,
-      "tdb_minus_tt_s": -0.0012415694072842598
+      "tdb_minus_tt_s": 0.0006141839548945427
     },
     {
       "days_from_epoch_a1mjd_0": 1631,
       "epoch_a1mjd": 32672.500428638676,
-      "tdb_minus_tt_s": -0.0013635260984301567
+      "tdb_minus_tt_s": 0.00042779138311743736
     },
     {
       "days_from_epoch_a1mjd_0": 1638,
       "epoch_a1mjd": 32679.500428638676,
-      "tdb_minus_tt_s": -0.0014663091860711575
+      "tdb_minus_tt_s": 0.00023542670533061028
     },
     {
       "days_from_epoch_a1mjd_0": 1645,
       "epoch_a1mjd": 32686.500428638676,
-      "tdb_minus_tt_s": -0.0015480327419936657
+      "tdb_minus_tt_s": 3.991881385445595e-05
     },
     {
       "days_from_epoch_a1mjd_0": 1652,
       "epoch_a1mjd": 32693.500428638676,
-      "tdb_minus_tt_s": -0.001608068123459816
+      "tdb_minus_tt_s": -0.00015621772035956383
     },
     {
       "days_from_epoch_a1mjd_0": 1659,
       "epoch_a1mjd": 32700.500428638676,
-      "tdb_minus_tt_s": -0.0016448437236249447
+      "tdb_minus_tt_s": -0.00035015400499105453
     },
     {
       "days_from_epoch_a1mjd_0": 1666,
       "epoch_a1mjd": 32707.500428638676,
-      "tdb_minus_tt_s": -0.001658045221120119
+      "tdb_minus_tt_s": -0.0005390611477196217
     },
     {
       "days_from_epoch_a1mjd_0": 1673,
       "epoch_a1mjd": 32714.500428638676,
-      "tdb_minus_tt_s": -0.0016473582945764065
+      "tdb_minus_tt_s": -0.0007207388989627361
     },
     {
       "days_from_epoch_a1mjd_0": 1680,
       "epoch_a1mjd": 32721.500428638676,
-      "tdb_minus_tt_s": -0.0016124686226248741
+      "tdb_minus_tt_s": -0.0008926726877689362
     },
     {
       "days_from_epoch_a1mjd_0": 1687,
       "epoch_a1mjd": 32728.500428638676,
-      "tdb_minus_tt_s": -0.0015540048480033875
+      "tdb_minus_tt_s": -0.0010517193004488945
     },
     {
       "days_from_epoch_a1mjd_0": 1694,
       "epoch_a1mjd": 32735.500428638676,
-      "tdb_minus_tt_s": -0.001472595613449812
+      "tdb_minus_tt_s": -0.0011966214515268803
     },
     {
       "days_from_epoch_a1mjd_0": 1701,
       "epoch_a1mjd": 32742.500428638676,
-      "tdb_minus_tt_s": -0.0013694982044398785
+      "tdb_minus_tt_s": -0.001324550248682499
     },
     {
       "days_from_epoch_a1mjd_0": 1708,
       "epoch_a1mjd": 32749.500428638676,
-      "tdb_minus_tt_s": -0.001245969906449318
+      "tdb_minus_tt_s": -0.0014339340850710869
     },
     {
       "days_from_epoch_a1mjd_0": 1715,
       "epoch_a1mjd": 32756.500428638676,
-      "tdb_minus_tt_s": -0.001103582326322794
+      "tdb_minus_tt_s": -0.0015228870324790478
     },
     {
       "days_from_epoch_a1mjd_0": 1722,
       "epoch_a1mjd": 32763.500428638676,
-      "tdb_minus_tt_s": -0.0009448500350117683
+      "tdb_minus_tt_s": -0.0015904661267995834
     },
     {
       "days_from_epoch_a1mjd_0": 1729,
       "epoch_a1mjd": 32770.500428638676,
-      "tdb_minus_tt_s": -0.0007719732820987701
+      "tdb_minus_tt_s": -0.0016350997611880302
     },
     {
       "days_from_epoch_a1mjd_0": 1736,
       "epoch_a1mjd": 32777.500428638676,
-      "tdb_minus_tt_s": -0.0005871523171663284
+      "tdb_minus_tt_s": -0.0016564736142754555
     },
     {
       "days_from_epoch_a1mjd_0": 1743,
       "epoch_a1mjd": 32784.500428638676,
-      "tdb_minus_tt_s": -0.00039353035390377045
+      "tdb_minus_tt_s": -0.0016539590433239937
     },
     {
       "days_from_epoch_a1mjd_0": 1750,
       "epoch_a1mjd": 32791.500428638676,
-      "tdb_minus_tt_s": -0.00019362196326255798
+      "tdb_minus_tt_s": -0.0016269274055957794
     },
     {
       "days_from_epoch_a1mjd_0": 1757,
       "epoch_a1mjd": 32798.500428638676,
-      "tdb_minus_tt_s": 8.800998330116272e-06
+      "tdb_minus_tt_s": -0.0015766359865665436
     },
     {
       "days_from_epoch_a1mjd_0": 1764,
       "epoch_a1mjd": 32805.500428638676,
-      "tdb_minus_tt_s": 0.00021122395992279053
+      "tdb_minus_tt_s": -0.0015024561434984207
     },
     {
       "days_from_epoch_a1mjd_0": 1771,
       "epoch_a1mjd": 32812.500428638676,
-      "tdb_minus_tt_s": 0.00041050370782613754
+      "tdb_minus_tt_s": -0.0014069024473428726
     },
     {
       "days_from_epoch_a1mjd_0": 1778,
       "epoch_a1mjd": 32819.500428638676,
-      "tdb_minus_tt_s": 0.0006034970283508301
+      "tdb_minus_tt_s": -0.0012899748980998993
     },
     {
       "days_from_epoch_a1mjd_0": 1785,
       "epoch_a1mjd": 32826.500428638676,
-      "tdb_minus_tt_s": 0.0007870607078075409
+      "tdb_minus_tt_s": -0.001153559423983097
     },
     {
       "days_from_epoch_a1mjd_0": 1792,
       "epoch_a1mjd": 32833.500428638676,
-      "tdb_minus_tt_s": 0.0009586801752448082
+      "tdb_minus_tt_s": -0.0010001705959439278
     },
     {
       "days_from_epoch_a1mjd_0": 1799,
       "epoch_a1mjd": 32840.500428638676,
-      "tdb_minus_tt_s": 0.0011164695024490356
+      "tdb_minus_tt_s": -0.0008316943421959877
     },
     {
       "days_from_epoch_a1mjd_0": 1806,
       "epoch_a1mjd": 32847.500428638676,
-      "tdb_minus_tt_s": 0.001257285475730896
+      "tdb_minus_tt_s": -0.0006506452336907387
     },
     {
       "days_from_epoch_a1mjd_0": 1813,
       "epoch_a1mjd": 32854.500428638676,
-      "tdb_minus_tt_s": 0.001379242166876793
+      "tdb_minus_tt_s": -0.0004595378413796425
     },
     {
       "days_from_epoch_a1mjd_0": 1820,
       "epoch_a1mjd": 32861.500428638676,
-      "tdb_minus_tt_s": 0.00148045364767313
+      "tdb_minus_tt_s": -0.00026151537895202637
     },
     {
       "days_from_epoch_a1mjd_0": 1827,
       "epoch_a1mjd": 32868.500428638676,
-      "tdb_minus_tt_s": 0.001560291275382042
+      "tdb_minus_tt_s": -5.972106009721756e-05
     },
     {
       "days_from_epoch_a1mjd_0": 1834,
       "epoch_a1mjd": 32875.500428638676,
-      "tdb_minus_tt_s": 0.0016162404790520668
+      "tdb_minus_tt_s": 0.00014333054423332214
     },
     {
       "days_from_epoch_a1mjd_0": 1841,
       "epoch_a1mjd": 32882.500428638676,
-      "tdb_minus_tt_s": 0.0016495585441589355
+      "tdb_minus_tt_s": 0.00034386757761240005
     },
     {
       "days_from_epoch_a1mjd_0": 1848,
       "epoch_a1mjd": 32889.500428638676,
-      "tdb_minus_tt_s": 0.0016577308997511864
+      "tdb_minus_tt_s": 0.0005393754690885544
     },
     {
       "days_from_epoch_a1mjd_0": 1855,
       "epoch_a1mjd": 32896.500428638676,
-      "tdb_minus_tt_s": 0.0016426434740424156
+      "tdb_minus_tt_s": 0.0007260823622345924
     },
     {
       "days_from_epoch_a1mjd_0": 1862,
       "epoch_a1mjd": 32903.500428638676,
-      "tdb_minus_tt_s": 0.0016036676242947578
+      "tdb_minus_tt_s": 0.0009027309715747833
     },
     {
       "days_from_epoch_a1mjd_0": 1869,
       "epoch_a1mjd": 32910.500428638676,
-      "tdb_minus_tt_s": 0.001542060635983944
+      "tdb_minus_tt_s": 0.0010655494406819344
     },
     {
       "days_from_epoch_a1mjd_0": 1876,
       "epoch_a1mjd": 32917.500428638676,
-      "tdb_minus_tt_s": 0.0014584511518478394
+      "tdb_minus_tt_s": 0.0012120231986045837
     },
     {
       "days_from_epoch_a1mjd_0": 1883,
       "epoch_a1mjd": 32924.500428638676,
-      "tdb_minus_tt_s": 0.001354096457362175
+      "tdb_minus_tt_s": 0.0013402663171291351
     },
     {
       "days_from_epoch_a1mjd_0": 1890,
       "epoch_a1mjd": 32931.500428638676,
-      "tdb_minus_tt_s": 0.0012302538380026817
+      "tdb_minus_tt_s": 0.0014490215107798576
     },
     {
       "days_from_epoch_a1mjd_0": 1897,
       "epoch_a1mjd": 32938.500428638676,
-      "tdb_minus_tt_s": 0.0010894378647208214
+      "tdb_minus_tt_s": 0.0015357742086052895
     },
     {
       "days_from_epoch_a1mjd_0": 1904,
       "epoch_a1mjd": 32945.500428638676,
-      "tdb_minus_tt_s": 0.0009335344657301903
+      "tdb_minus_tt_s": 0.0015998957678675652
     },
     {
       "days_from_epoch_a1mjd_0": 1911,
       "epoch_a1mjd": 32952.500428638676,
-      "tdb_minus_tt_s": 0.0007650582119822502
+      "tdb_minus_tt_s": 0.0016407575458288193
     },
     {
       "days_from_epoch_a1mjd_0": 1918,
       "epoch_a1mjd": 32959.500428638676,
-      "tdb_minus_tt_s": 0.0005858950316905975
+      "tdb_minus_tt_s": 0.0016577308997511864
     },
     {
       "days_from_epoch_a1mjd_0": 1925,
       "epoch_a1mjd": 32966.500428638676,
-      "tdb_minus_tt_s": 0.0003979308530688286
+      "tdb_minus_tt_s": 0.0016508158296346664
     },
     {
       "days_from_epoch_a1mjd_0": 1932,
       "epoch_a1mjd": 32973.500428638676,
-      "tdb_minus_tt_s": 0.00020493753254413605
+      "tdb_minus_tt_s": 0.001619383692741394
     },
     {
       "days_from_epoch_a1mjd_0": 1939,
       "epoch_a1mjd": 32980.500428638676,
-      "tdb_minus_tt_s": 9.42964106798172e-06
+      "tdb_minus_tt_s": 0.0015653204172849655
     },
     {
       "days_from_epoch_a1mjd_0": 1946,
       "epoch_a1mjd": 32987.500428638676,
-      "tdb_minus_tt_s": -0.00018670689314603806
+      "tdb_minus_tt_s": 0.0014886260032653809
     },
     {
       "days_from_epoch_a1mjd_0": 1953,
       "epoch_a1mjd": 32994.500428638676,
-      "tdb_minus_tt_s": -0.0003797002136707306
+      "tdb_minus_tt_s": 0.0013911863788962364
     },
     {
       "days_from_epoch_a1mjd_0": 1960,
       "epoch_a1mjd": 33001.500428638676,
-      "tdb_minus_tt_s": -0.000568293035030365
+      "tdb_minus_tt_s": 0.0012736301869153976
     },
     {
       "days_from_epoch_a1mjd_0": 1967,
       "epoch_a1mjd": 33008.500428638676,
-      "tdb_minus_tt_s": -0.0007480848580598831
+      "tdb_minus_tt_s": 0.0011391006410121918
     },
     {
       "days_from_epoch_a1mjd_0": 1974,
       "epoch_a1mjd": 33015.500428638676,
-      "tdb_minus_tt_s": -0.0009184470400214195
+      "tdb_minus_tt_s": 0.0009875977411866188
     },
     {
       "days_from_epoch_a1mjd_0": 1981,
       "epoch_a1mjd": 33022.500428638676,
-      "tdb_minus_tt_s": -0.0010756077244877815
+      "tdb_minus_tt_s": 0.0008228933438658714
     },
     {
       "days_from_epoch_a1mjd_0": 1988,
       "epoch_a1mjd": 33029.500428638676,
-      "tdb_minus_tt_s": -0.0012176809832453728
+      "tdb_minus_tt_s": 0.000646873377263546
     },
     {
       "days_from_epoch_a1mjd_0": 1995,
       "epoch_a1mjd": 33036.500428638676,
-      "tdb_minus_tt_s": -0.001342780888080597
+      "tdb_minus_tt_s": 0.0004620524123311043
     },
     {
       "days_from_epoch_a1mjd_0": 2002,
       "epoch_a1mjd": 33043.500428638676,
-      "tdb_minus_tt_s": -0.0014490215107798576
+      "tdb_minus_tt_s": 0.00027031637728214264
     },
     {
       "days_from_epoch_a1mjd_0": 2009,
       "epoch_a1mjd": 33050.500428638676,
-      "tdb_minus_tt_s": -0.001535145565867424
+      "tdb_minus_tt_s": 7.543712854385376e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2016,
       "epoch_a1mjd": 33057.500428638676,
-      "tdb_minus_tt_s": -0.0015992671251296997
+      "tdb_minus_tt_s": -0.00012069940567016602
     },
     {
       "days_from_epoch_a1mjd_0": 2023,
       "epoch_a1mjd": 33064.500428638676,
-      "tdb_minus_tt_s": -0.0016401289030909538
+      "tdb_minus_tt_s": -0.0003155786544084549
     },
     {
       "days_from_epoch_a1mjd_0": 2030,
       "epoch_a1mjd": 33071.500428638676,
-      "tdb_minus_tt_s": -0.0016577308997511864
+      "tdb_minus_tt_s": -0.0005054287612438202
     },
     {
       "days_from_epoch_a1mjd_0": 2037,
       "epoch_a1mjd": 33078.500428638676,
-      "tdb_minus_tt_s": -0.0016508158296346664
+      "tdb_minus_tt_s": -0.000688992440700531
     },
     {
       "days_from_epoch_a1mjd_0": 2044,
       "epoch_a1mjd": 33085.500428638676,
-      "tdb_minus_tt_s": -0.001620640978217125
+      "tdb_minus_tt_s": -0.0008624978363513947
     },
     {
       "days_from_epoch_a1mjd_0": 2051,
       "epoch_a1mjd": 33092.500428638676,
-      "tdb_minus_tt_s": -0.0015665777027606964
+      "tdb_minus_tt_s": -0.0010240590199828148
     },
     {
       "days_from_epoch_a1mjd_0": 2058,
       "epoch_a1mjd": 33099.500428638676,
-      "tdb_minus_tt_s": -0.0014892546460032463
+      "tdb_minus_tt_s": -0.001171790063381195
     },
     {
       "days_from_epoch_a1mjd_0": 2065,
       "epoch_a1mjd": 33106.500428638676,
-      "tdb_minus_tt_s": -0.0013899290934205055
+      "tdb_minus_tt_s": -0.0013025477528572083
     },
     {
       "days_from_epoch_a1mjd_0": 2072,
       "epoch_a1mjd": 33113.500428638676,
-      "tdb_minus_tt_s": -0.001269858330488205
+      "tdb_minus_tt_s": -0.001415703445672989
     },
     {
       "days_from_epoch_a1mjd_0": 2079,
       "epoch_a1mjd": 33120.500428638676,
-      "tdb_minus_tt_s": -0.0011302996426820755
+      "tdb_minus_tt_s": -0.0015087425708770752
     },
     {
       "days_from_epoch_a1mjd_0": 2086,
       "epoch_a1mjd": 33127.500428638676,
-      "tdb_minus_tt_s": -0.0009743962436914444
+      "tdb_minus_tt_s": -0.0015797792002558708
     },
     {
       "days_from_epoch_a1mjd_0": 2093,
       "epoch_a1mjd": 33134.500428638676,
-      "tdb_minus_tt_s": -0.000804034061729908
+      "tdb_minus_tt_s": -0.0016288133338093758
     },
     {
       "days_from_epoch_a1mjd_0": 2100,
       "epoch_a1mjd": 33141.500428638676,
-      "tdb_minus_tt_s": -0.0006210990250110626
+      "tdb_minus_tt_s": -0.0016545876860618591
     },
     {
       "days_from_epoch_a1mjd_0": 2107,
       "epoch_a1mjd": 33148.500428638676,
-      "tdb_minus_tt_s": -0.00042873434722423553
+      "tdb_minus_tt_s": -0.00165584497153759
     },
     {
       "days_from_epoch_a1mjd_0": 2114,
       "epoch_a1mjd": 33155.500428638676,
-      "tdb_minus_tt_s": -0.00023008324205875397
+      "tdb_minus_tt_s": -0.0016338424757122993
     },
     {
       "days_from_epoch_a1mjd_0": 2121,
       "epoch_a1mjd": 33162.500428638676,
-      "tdb_minus_tt_s": -2.7660280466079712e-05
+      "tdb_minus_tt_s": -0.0015873229131102562
     },
     {
       "days_from_epoch_a1mjd_0": 2128,
       "epoch_a1mjd": 33169.500428638676,
-      "tdb_minus_tt_s": 0.00017476268112659454
+      "tdb_minus_tt_s": -0.0015175435692071915
     },
     {
       "days_from_epoch_a1mjd_0": 2135,
       "epoch_a1mjd": 33176.500428638676,
-      "tdb_minus_tt_s": 0.000374671071767807
+      "tdb_minus_tt_s": -0.001425761729478836
     },
     {
       "days_from_epoch_a1mjd_0": 2142,
       "epoch_a1mjd": 33183.500428638676,
-      "tdb_minus_tt_s": 0.0005689216777682304
+      "tdb_minus_tt_s": -0.00131197739392519
     },
     {
       "days_from_epoch_a1mjd_0": 2149,
       "epoch_a1mjd": 33190.500428638676,
-      "tdb_minus_tt_s": 0.000754999928176403
+      "tdb_minus_tt_s": -0.0011793337762355804
     },
     {
       "days_from_epoch_a1mjd_0": 2156,
       "epoch_a1mjd": 33197.500428638676,
-      "tdb_minus_tt_s": 0.0009291339665651321
+      "tdb_minus_tt_s": -0.0010290881618857384
     },
     {
       "days_from_epoch_a1mjd_0": 2163,
       "epoch_a1mjd": 33204.500428638676,
-      "tdb_minus_tt_s": 0.0010894378647208214
+      "tdb_minus_tt_s": -0.0008624978363513947
     },
     {
       "days_from_epoch_a1mjd_0": 2170,
       "epoch_a1mjd": 33211.500428638676,
-      "tdb_minus_tt_s": 0.001233397051692009
+      "tdb_minus_tt_s": -0.0006839632987976074
     },
     {
       "days_from_epoch_a1mjd_0": 2177,
       "epoch_a1mjd": 33218.500428638676,
-      "tdb_minus_tt_s": 0.0013584969565272331
+      "tdb_minus_tt_s": -0.0004941131919622421
     },
     {
       "days_from_epoch_a1mjd_0": 2184,
       "epoch_a1mjd": 33225.500428638676,
-      "tdb_minus_tt_s": 0.0014641089364886284
+      "tdb_minus_tt_s": -0.0002973480150103569
     },
     {
       "days_from_epoch_a1mjd_0": 2191,
       "epoch_a1mjd": 33232.500428638676,
-      "tdb_minus_tt_s": 0.0015470897778868675
+      "tdb_minus_tt_s": -9.618233889341354e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2198,
       "epoch_a1mjd": 33239.500428638676,
-      "tdb_minus_tt_s": 0.001608068123459816
+      "tdb_minus_tt_s": 0.00010686926543712616
     },
     {
       "days_from_epoch_a1mjd_0": 2205,
       "epoch_a1mjd": 33246.500428638676,
-      "tdb_minus_tt_s": 0.0016451580449938774
+      "tdb_minus_tt_s": 0.0003080349415540695
     },
     {
       "days_from_epoch_a1mjd_0": 2212,
       "epoch_a1mjd": 33253.500428638676,
-      "tdb_minus_tt_s": 0.0016583595424890518
+      "tdb_minus_tt_s": 0.0005048001185059547
     },
     {
       "days_from_epoch_a1mjd_0": 2219,
       "epoch_a1mjd": 33260.500428638676,
-      "tdb_minus_tt_s": 0.0016470439732074738
+      "tdb_minus_tt_s": 0.0006933929398655891
     },
     {
       "days_from_epoch_a1mjd_0": 2226,
       "epoch_a1mjd": 33267.500428638676,
-      "tdb_minus_tt_s": 0.0016124686226248741
+      "tdb_minus_tt_s": 0.0008719274774193764
     },
     {
       "days_from_epoch_a1mjd_0": 2233,
       "epoch_a1mjd": 33274.500428638676,
-      "tdb_minus_tt_s": 0.001554633490741253
+      "tdb_minus_tt_s": 0.0010372605174779892
     },
     {
       "days_from_epoch_a1mjd_0": 2240,
       "epoch_a1mjd": 33281.500428638676,
-      "tdb_minus_tt_s": 0.001474795863032341
+      "tdb_minus_tt_s": 0.0011868774890899658
     },
     {
       "days_from_epoch_a1mjd_0": 2247,
       "epoch_a1mjd": 33288.500428638676,
-      "tdb_minus_tt_s": 0.0013742130249738693
+      "tdb_minus_tt_s": 0.00131889246404171
     },
     {
       "days_from_epoch_a1mjd_0": 2254,
       "epoch_a1mjd": 33295.500428638676,
-      "tdb_minus_tt_s": 0.0012541422620415688
+      "tdb_minus_tt_s": 0.0014307908713817596
     },
     {
       "days_from_epoch_a1mjd_0": 2261,
       "epoch_a1mjd": 33302.500428638676,
-      "tdb_minus_tt_s": 0.0011164695024490356
+      "tdb_minus_tt_s": 0.0015219440683722496
     },
     {
       "days_from_epoch_a1mjd_0": 2268,
       "epoch_a1mjd": 33309.500428638676,
-      "tdb_minus_tt_s": 0.0009630806744098663
+      "tdb_minus_tt_s": 0.0015904661267995834
     },
     {
       "days_from_epoch_a1mjd_0": 2275,
       "epoch_a1mjd": 33316.500428638676,
-      "tdb_minus_tt_s": 0.0007964903488755226
+      "tdb_minus_tt_s": 0.0016350997611880302
     },
     {
       "days_from_epoch_a1mjd_0": 2282,
       "epoch_a1mjd": 33323.500428638676,
-      "tdb_minus_tt_s": 0.0006185844540596008
+      "tdb_minus_tt_s": 0.0016564736142754555
     },
     {
       "days_from_epoch_a1mjd_0": 2289,
       "epoch_a1mjd": 33330.500428638676,
-      "tdb_minus_tt_s": 0.0004325062036514282
+      "tdb_minus_tt_s": 0.0016533304005861282
     },
     {
       "days_from_epoch_a1mjd_0": 2296,
       "epoch_a1mjd": 33337.500428638676,
-      "tdb_minus_tt_s": 0.00024014152586460114
+      "tdb_minus_tt_s": 0.0016269274055957794
     },
     {
       "days_from_epoch_a1mjd_0": 2303,
       "epoch_a1mjd": 33344.500428638676,
-      "tdb_minus_tt_s": 4.463363438844681e-05
+      "tdb_minus_tt_s": 0.0015766359865665436
     },
     {
       "days_from_epoch_a1mjd_0": 2310,
       "epoch_a1mjd": 33351.500428638676,
-      "tdb_minus_tt_s": -0.00015150289982557297
+      "tdb_minus_tt_s": 0.001504342071712017
     },
     {
       "days_from_epoch_a1mjd_0": 2317,
       "epoch_a1mjd": 33358.500428638676,
-      "tdb_minus_tt_s": -0.0003457535058259964
+      "tdb_minus_tt_s": 0.0014100456610321999
     },
     {
       "days_from_epoch_a1mjd_0": 2324,
       "epoch_a1mjd": 33365.500428638676,
-      "tdb_minus_tt_s": -0.0005349749699234962
+      "tdb_minus_tt_s": 0.0012962613254785538
     },
     {
       "days_from_epoch_a1mjd_0": 2331,
       "epoch_a1mjd": 33372.500428638676,
-      "tdb_minus_tt_s": -0.0007166527211666107
+      "tdb_minus_tt_s": 0.0011642463505268097
     },
     {
       "days_from_epoch_a1mjd_0": 2338,
       "epoch_a1mjd": 33379.500428638676,
-      "tdb_minus_tt_s": -0.0008889008313417435
+      "tdb_minus_tt_s": 0.001015886664390564
     },
     {
       "days_from_epoch_a1mjd_0": 2345,
       "epoch_a1mjd": 33386.500428638676,
-      "tdb_minus_tt_s": -0.0010479474440217018
+      "tdb_minus_tt_s": 0.0008536968380212784
     },
     {
       "days_from_epoch_a1mjd_0": 2352,
       "epoch_a1mjd": 33393.500428638676,
-      "tdb_minus_tt_s": -0.0011931639164686203
+      "tdb_minus_tt_s": 0.0006795627996325493
     },
     {
       "days_from_epoch_a1mjd_0": 2359,
       "epoch_a1mjd": 33400.500428638676,
-      "tdb_minus_tt_s": -0.0013214070349931717
+      "tdb_minus_tt_s": 0.0004959991201758385
     },
     {
       "days_from_epoch_a1mjd_0": 2366,
       "epoch_a1mjd": 33407.500428638676,
-      "tdb_minus_tt_s": -0.001431419514119625
+      "tdb_minus_tt_s": 0.0003055203706026077
     },
     {
       "days_from_epoch_a1mjd_0": 2373,
       "epoch_a1mjd": 33414.500428638676,
-      "tdb_minus_tt_s": -0.0015213154256343842
+      "tdb_minus_tt_s": 0.00011064112186431885
     },
     {
       "days_from_epoch_a1mjd_0": 2380,
       "epoch_a1mjd": 33421.500428638676,
-      "tdb_minus_tt_s": -0.0015892088413238525
+      "tdb_minus_tt_s": -8.549541234970093e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2387,
       "epoch_a1mjd": 33428.500428638676,
-      "tdb_minus_tt_s": -0.0016344711184501648
+      "tdb_minus_tt_s": -0.0002803746610879898
     },
     {
       "days_from_epoch_a1mjd_0": 2394,
       "epoch_a1mjd": 33435.500428638676,
-      "tdb_minus_tt_s": -0.0016564736142754555
+      "tdb_minus_tt_s": -0.000471482053399086
     },
     {
       "days_from_epoch_a1mjd_0": 2401,
       "epoch_a1mjd": 33442.500428638676,
-      "tdb_minus_tt_s": -0.0016539590433239937
+      "tdb_minus_tt_s": -0.0006563030183315277
     },
     {
       "days_from_epoch_a1mjd_0": 2408,
       "epoch_a1mjd": 33449.500428638676,
-      "tdb_minus_tt_s": -0.0016275560483336449
+      "tdb_minus_tt_s": -0.0008323229849338531
     },
     {
       "days_from_epoch_a1mjd_0": 2415,
       "epoch_a1mjd": 33456.500428638676,
-      "tdb_minus_tt_s": -0.0015778932720422745
+      "tdb_minus_tt_s": -0.0009957700967788696
     },
     {
       "days_from_epoch_a1mjd_0": 2422,
       "epoch_a1mjd": 33463.500428638676,
-      "tdb_minus_tt_s": -0.001504342071712017
+      "tdb_minus_tt_s": -0.0011460157111287117
     },
     {
       "days_from_epoch_a1mjd_0": 2429,
       "epoch_a1mjd": 33470.500428638676,
-      "tdb_minus_tt_s": -0.0014094170182943344
+      "tdb_minus_tt_s": -0.0012805452570319176
     },
     {
       "days_from_epoch_a1mjd_0": 2436,
       "epoch_a1mjd": 33477.500428638676,
-      "tdb_minus_tt_s": -0.001292489469051361
+      "tdb_minus_tt_s": -0.0013968441635370255
     },
     {
       "days_from_epoch_a1mjd_0": 2443,
       "epoch_a1mjd": 33484.500428638676,
-      "tdb_minus_tt_s": -0.0011567026376724243
+      "tdb_minus_tt_s": -0.001493026502430439
     },
     {
       "days_from_epoch_a1mjd_0": 2450,
       "epoch_a1mjd": 33491.500428638676,
-      "tdb_minus_tt_s": -0.0010039424523711205
+      "tdb_minus_tt_s": -0.0015684636309742928
     },
     {
       "days_from_epoch_a1mjd_0": 2457,
       "epoch_a1mjd": 33498.500428638676,
-      "tdb_minus_tt_s": -0.0008354661986231804
+      "tdb_minus_tt_s": -0.0016218982636928558
     },
     {
       "days_from_epoch_a1mjd_0": 2464,
       "epoch_a1mjd": 33505.500428638676,
-      "tdb_minus_tt_s": -0.0006550457328557968
+      "tdb_minus_tt_s": -0.0016514444723725319
     },
     {
       "days_from_epoch_a1mjd_0": 2471,
       "epoch_a1mjd": 33512.500428638676,
-      "tdb_minus_tt_s": -0.0004639383405447006
+      "tdb_minus_tt_s": -0.0016577308997511864
     },
     {
       "days_from_epoch_a1mjd_0": 2478,
       "epoch_a1mjd": 33519.500428638676,
-      "tdb_minus_tt_s": -0.00026654452085494995
+      "tdb_minus_tt_s": -0.0016395002603530884
     },
     {
       "days_from_epoch_a1mjd_0": 2485,
       "epoch_a1mjd": 33526.500428638676,
-      "tdb_minus_tt_s": -6.41215592622757e-05
+      "tdb_minus_tt_s": -0.0015973811969161034
     },
     {
       "days_from_epoch_a1mjd_0": 2492,
       "epoch_a1mjd": 33533.500428638676,
-      "tdb_minus_tt_s": 0.00013830140233039856
+      "tdb_minus_tt_s": -0.0015320023521780968
     },
     {
       "days_from_epoch_a1mjd_0": 2499,
       "epoch_a1mjd": 33540.500428638676,
-      "tdb_minus_tt_s": 0.00033883843570947647
+      "tdb_minus_tt_s": -0.0014433637261390686
     },
     {
       "days_from_epoch_a1mjd_0": 2506,
       "epoch_a1mjd": 33547.500428638676,
-      "tdb_minus_tt_s": 0.0005343463271856308
+      "tdb_minus_tt_s": -0.0013339798897504807
     },
     {
       "days_from_epoch_a1mjd_0": 2513,
       "epoch_a1mjd": 33554.500428638676,
-      "tdb_minus_tt_s": 0.0007223105058073997
+      "tdb_minus_tt_s": -0.0012044794857501984
     },
     {
       "days_from_epoch_a1mjd_0": 2520,
       "epoch_a1mjd": 33561.500428638676,
-      "tdb_minus_tt_s": 0.0008983304724097252
+      "tdb_minus_tt_s": -0.0010573770850896835
     },
     {
       "days_from_epoch_a1mjd_0": 2527,
       "epoch_a1mjd": 33568.500428638676,
-      "tdb_minus_tt_s": 0.0010617775842547417
+      "tdb_minus_tt_s": -0.000893929973244667
     },
     {
       "days_from_epoch_a1mjd_0": 2534,
       "epoch_a1mjd": 33575.500428638676,
-      "tdb_minus_tt_s": 0.0012088799849152565
+      "tdb_minus_tt_s": -0.0007166527211666107
     },
     {
       "days_from_epoch_a1mjd_0": 2541,
       "epoch_a1mjd": 33582.500428638676,
-      "tdb_minus_tt_s": 0.0013377517461776733
+      "tdb_minus_tt_s": -0.0005293171852827072
     },
     {
       "days_from_epoch_a1mjd_0": 2548,
       "epoch_a1mjd": 33589.500428638676,
-      "tdb_minus_tt_s": 0.0014465069398283958
+      "tdb_minus_tt_s": -0.00033318065106868744
     },
     {
       "days_from_epoch_a1mjd_0": 2555,
       "epoch_a1mjd": 33596.500428638676,
-      "tdb_minus_tt_s": 0.0015338882803916931
+      "tdb_minus_tt_s": -0.00013264361768960953
     },
     {
       "days_from_epoch_a1mjd_0": 2562,
       "epoch_a1mjd": 33603.500428638676,
-      "tdb_minus_tt_s": 0.0015986384823918343
+      "tdb_minus_tt_s": 7.040798664093018e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2569,
       "epoch_a1mjd": 33610.500428638676,
-      "tdb_minus_tt_s": 0.0016401289030909538
+      "tdb_minus_tt_s": 0.000272202305495739
     },
     {
       "days_from_epoch_a1mjd_0": 2576,
       "epoch_a1mjd": 33617.500428638676,
-      "tdb_minus_tt_s": 0.0016577308997511864
+      "tdb_minus_tt_s": 0.00046959612518548965
     },
     {
       "days_from_epoch_a1mjd_0": 2583,
       "epoch_a1mjd": 33624.500428638676,
-      "tdb_minus_tt_s": 0.0016508158296346664
+      "tdb_minus_tt_s": 0.0006600748747587204
     },
     {
       "days_from_epoch_a1mjd_0": 2590,
       "epoch_a1mjd": 33631.500428638676,
-      "tdb_minus_tt_s": 0.001620640978217125
+      "tdb_minus_tt_s": 0.000840495340526104
     },
     {
       "days_from_epoch_a1mjd_0": 2597,
       "epoch_a1mjd": 33638.500428638676,
-      "tdb_minus_tt_s": 0.0015665777027606964
+      "tdb_minus_tt_s": 0.0010083429515361786
     },
     {
       "days_from_epoch_a1mjd_0": 2604,
       "epoch_a1mjd": 33645.500428638676,
-      "tdb_minus_tt_s": 0.0014911405742168427
+      "tdb_minus_tt_s": 0.0011611031368374825
     },
     {
       "days_from_epoch_a1mjd_0": 2611,
       "epoch_a1mjd": 33652.500428638676,
-      "tdb_minus_tt_s": 0.0013937009498476982
+      "tdb_minus_tt_s": 0.0012962613254785538
     },
     {
       "days_from_epoch_a1mjd_0": 2618,
       "epoch_a1mjd": 33659.500428638676,
-      "tdb_minus_tt_s": 0.0012767734006047249
+      "tdb_minus_tt_s": 0.0014119315892457962
     },
     {
       "days_from_epoch_a1mjd_0": 2625,
       "epoch_a1mjd": 33666.500428638676,
-      "tdb_minus_tt_s": 0.001142243854701519
+      "tdb_minus_tt_s": 0.0015068566426634789
     },
     {
       "days_from_epoch_a1mjd_0": 2632,
       "epoch_a1mjd": 33673.500428638676,
-      "tdb_minus_tt_s": 0.0009913695976138115
+      "tdb_minus_tt_s": 0.0015797792002558708
     },
     {
       "days_from_epoch_a1mjd_0": 2639,
       "epoch_a1mjd": 33680.500428638676,
-      "tdb_minus_tt_s": 0.0008272938430309296
+      "tdb_minus_tt_s": 0.0016288133338093758
     },
     {
       "days_from_epoch_a1mjd_0": 2646,
       "epoch_a1mjd": 33687.500428638676,
-      "tdb_minus_tt_s": 0.0006512738764286041
+      "tdb_minus_tt_s": 0.0016545876860618591
     },
     {
       "days_from_epoch_a1mjd_0": 2653,
       "epoch_a1mjd": 33694.500428638676,
-      "tdb_minus_tt_s": 0.0004664529114961624
+      "tdb_minus_tt_s": 0.00165584497153759
     },
     {
       "days_from_epoch_a1mjd_0": 2660,
       "epoch_a1mjd": 33701.500428638676,
-      "tdb_minus_tt_s": 0.0002753455191850662
+      "tdb_minus_tt_s": 0.001633213832974434
     },
     {
       "days_from_epoch_a1mjd_0": 2667,
       "epoch_a1mjd": 33708.500428638676,
-      "tdb_minus_tt_s": 7.98376277089119e-05
+      "tdb_minus_tt_s": 0.0015873229131102562
     },
     {
       "days_from_epoch_a1mjd_0": 2674,
       "epoch_a1mjd": 33715.500428638676,
-      "tdb_minus_tt_s": -0.00011629890650510788
+      "tdb_minus_tt_s": 0.0015188008546829224
     },
     {
       "days_from_epoch_a1mjd_0": 2681,
       "epoch_a1mjd": 33722.500428638676,
-      "tdb_minus_tt_s": -0.0003105495125055313
+      "tdb_minus_tt_s": 0.0014289049431681633
     },
     {
       "days_from_epoch_a1mjd_0": 2688,
       "epoch_a1mjd": 33729.500428638676,
-      "tdb_minus_tt_s": -0.0005010282620787621
+      "tdb_minus_tt_s": 0.0013182638213038445
     },
     {
       "days_from_epoch_a1mjd_0": 2695,
       "epoch_a1mjd": 33736.500428638676,
-      "tdb_minus_tt_s": -0.0006845919415354729
+      "tdb_minus_tt_s": 0.0011893920600414276
     },
     {
       "days_from_epoch_a1mjd_0": 2702,
       "epoch_a1mjd": 33743.500428638676,
-      "tdb_minus_tt_s": -0.000858725979924202
+      "tdb_minus_tt_s": 0.0010435469448566437
     },
     {
       "days_from_epoch_a1mjd_0": 2709,
       "epoch_a1mjd": 33750.500428638676,
-      "tdb_minus_tt_s": -0.001020287163555622
+      "tdb_minus_tt_s": 0.0008838716894388199
     },
     {
       "days_from_epoch_a1mjd_0": 2716,
       "epoch_a1mjd": 33757.500428638676,
-      "tdb_minus_tt_s": -0.0011686468496918678
+      "tdb_minus_tt_s": 0.0007116235792636871
     },
     {
       "days_from_epoch_a1mjd_0": 2723,
       "epoch_a1mjd": 33764.500428638676,
-      "tdb_minus_tt_s": -0.0013000331819057465
+      "tdb_minus_tt_s": 0.0005293171852827072
     },
     {
       "days_from_epoch_a1mjd_0": 2730,
       "epoch_a1mjd": 33771.500428638676,
-      "tdb_minus_tt_s": -0.001413188874721527
+      "tdb_minus_tt_s": 0.00034009572118520737
     },
     {
       "days_from_epoch_a1mjd_0": 2737,
       "epoch_a1mjd": 33778.500428638676,
-      "tdb_minus_tt_s": -0.0015068566426634789
+      "tdb_minus_tt_s": 0.00014584511518478394
     },
     {
       "days_from_epoch_a1mjd_0": 2744,
       "epoch_a1mjd": 33785.500428638676,
-      "tdb_minus_tt_s": -0.00157852191478014
+      "tdb_minus_tt_s": -5.029141902923584e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2751,
       "epoch_a1mjd": 33792.500428638676,
-      "tdb_minus_tt_s": -0.0016281846910715103
+      "tdb_minus_tt_s": -0.00024579931050539017
     },
     {
       "days_from_epoch_a1mjd_0": 2758,
       "epoch_a1mjd": 33799.500428638676,
-      "tdb_minus_tt_s": -0.0016539590433239937
+      "tdb_minus_tt_s": -0.0004375353455543518
     },
     {
       "days_from_epoch_a1mjd_0": 2765,
       "epoch_a1mjd": 33806.500428638676,
-      "tdb_minus_tt_s": -0.0016564736142754555
+      "tdb_minus_tt_s": -0.0006236135959625244
     },
     {
       "days_from_epoch_a1mjd_0": 2772,
       "epoch_a1mjd": 33813.500428638676,
-      "tdb_minus_tt_s": -0.0016344711184501648
+      "tdb_minus_tt_s": -0.0008008908480405807
     },
     {
       "days_from_epoch_a1mjd_0": 2779,
       "epoch_a1mjd": 33820.500428638676,
-      "tdb_minus_tt_s": -0.001588580198585987
+      "tdb_minus_tt_s": -0.0009674811735749245
     },
     {
       "days_from_epoch_a1mjd_0": 2786,
       "epoch_a1mjd": 33827.500428638676,
-      "tdb_minus_tt_s": -0.0015194294974207878
+      "tdb_minus_tt_s": -0.0011202413588762283
     },
     {
       "days_from_epoch_a1mjd_0": 2793,
       "epoch_a1mjd": 33834.500428638676,
-      "tdb_minus_tt_s": -0.0014276476576924324
+      "tdb_minus_tt_s": -0.0012579141184687614
     },
     {
       "days_from_epoch_a1mjd_0": 2800,
       "epoch_a1mjd": 33841.500428638676,
-      "tdb_minus_tt_s": -0.0013151206076145172
+      "tdb_minus_tt_s": -0.0013773562386631966
     },
     {
       "days_from_epoch_a1mjd_0": 2807,
       "epoch_a1mjd": 33848.500428638676,
-      "tdb_minus_tt_s": -0.0011824769899249077
+      "tdb_minus_tt_s": -0.0014773104339838028
     },
     {
       "days_from_epoch_a1mjd_0": 2814,
       "epoch_a1mjd": 33855.500428638676,
-      "tdb_minus_tt_s": -0.0010322313755750656
+      "tdb_minus_tt_s": -0.0015565194189548492
     },
     {
       "days_from_epoch_a1mjd_0": 2821,
       "epoch_a1mjd": 33862.500428638676,
-      "tdb_minus_tt_s": -0.0008668983355164528
+      "tdb_minus_tt_s": -0.001613725908100605
     },
     {
       "days_from_epoch_a1mjd_0": 2828,
       "epoch_a1mjd": 33869.500428638676,
-      "tdb_minus_tt_s": -0.0006883637979626656
+      "tdb_minus_tt_s": -0.0016476726159453392
     },
     {
       "days_from_epoch_a1mjd_0": 2835,
       "epoch_a1mjd": 33876.500428638676,
-      "tdb_minus_tt_s": -0.0004991423338651657
+      "tdb_minus_tt_s": -0.0016583595424890518
     },
     {
       "days_from_epoch_a1mjd_0": 2842,
       "epoch_a1mjd": 33883.500428638676,
-      "tdb_minus_tt_s": -0.0003023771569132805
+      "tdb_minus_tt_s": -0.001644529402256012
     },
     {
       "days_from_epoch_a1mjd_0": 2849,
       "epoch_a1mjd": 33890.500428638676,
-      "tdb_minus_tt_s": -0.00010058283805847168
+      "tdb_minus_tt_s": -0.001606810837984085
     },
     {
       "days_from_epoch_a1mjd_0": 2856,
       "epoch_a1mjd": 33897.500428638676,
-      "tdb_minus_tt_s": 0.00010184012353420258
+      "tdb_minus_tt_s": -0.0015452038496732712
     },
     {
       "days_from_epoch_a1mjd_0": 2863,
       "epoch_a1mjd": 33904.500428638676,
-      "tdb_minus_tt_s": 0.00030300579965114594
+      "tdb_minus_tt_s": -0.0014609657227993011
     },
     {
       "days_from_epoch_a1mjd_0": 2870,
       "epoch_a1mjd": 33911.500428638676,
-      "tdb_minus_tt_s": 0.0004997709766030312
+      "tdb_minus_tt_s": -0.0013553537428379059
     },
     {
       "days_from_epoch_a1mjd_0": 2877,
       "epoch_a1mjd": 33918.500428638676,
-      "tdb_minus_tt_s": 0.000688992440700531
+      "tdb_minus_tt_s": -0.0012289965525269508
     },
     {
       "days_from_epoch_a1mjd_0": 2884,
       "epoch_a1mjd": 33925.500428638676,
-      "tdb_minus_tt_s": 0.0008675269782543182
+      "tdb_minus_tt_s": -0.0010850373655557632
     },
     {
       "days_from_epoch_a1mjd_0": 2891,
       "epoch_a1mjd": 33932.500428638676,
-      "tdb_minus_tt_s": 0.0010334886610507965
+      "tdb_minus_tt_s": -0.0009241048246622086
     },
     {
       "days_from_epoch_a1mjd_0": 2898,
       "epoch_a1mjd": 33939.500428638676,
-      "tdb_minus_tt_s": 0.0011837342754006386
+      "tdb_minus_tt_s": -0.000749342143535614
     },
     {
       "days_from_epoch_a1mjd_0": 2905,
       "epoch_a1mjd": 33946.500428638676,
-      "tdb_minus_tt_s": 0.0013157492503523827
+      "tdb_minus_tt_s": -0.0005632638931274414
     },
     {
       "days_from_epoch_a1mjd_0": 2912,
       "epoch_a1mjd": 33953.500428638676,
-      "tdb_minus_tt_s": 0.0014282763004302979
+      "tdb_minus_tt_s": -0.000369013287127018
     },
     {
       "days_from_epoch_a1mjd_0": 2919,
       "epoch_a1mjd": 33960.500428638676,
-      "tdb_minus_tt_s": 0.0015200581401586533
+      "tdb_minus_tt_s": -0.0001691048964858055
     },
     {
       "days_from_epoch_a1mjd_0": 2926,
       "epoch_a1mjd": 33967.500428638676,
-      "tdb_minus_tt_s": 0.001588580198585987
+      "tdb_minus_tt_s": 3.394670784473419e-05
     },
     {
       "days_from_epoch_a1mjd_0": 2933,
       "epoch_a1mjd": 33974.500428638676,
-      "tdb_minus_tt_s": 0.0016344711184501648
+      "tdb_minus_tt_s": 0.000235741026699543
     },
     {
       "days_from_epoch_a1mjd_0": 2940,
       "epoch_a1mjd": 33981.500428638676,
-      "tdb_minus_tt_s": 0.0016564736142754555
+      "tdb_minus_tt_s": 0.00043439213186502457
     },
     {
       "days_from_epoch_a1mjd_0": 2947,
       "epoch_a1mjd": 33988.500428638676,
-      "tdb_minus_tt_s": 0.0016539590433239937
+      "tdb_minus_tt_s": 0.0006267568096518517
     },
     {
       "days_from_epoch_a1mjd_0": 2954,
       "epoch_a1mjd": 33995.500428638676,
-      "tdb_minus_tt_s": 0.0016275560483336449
+      "tdb_minus_tt_s": 0.0008090632036328316
     },
     {
       "days_from_epoch_a1mjd_0": 2961,
       "epoch_a1mjd": 34002.500428638676,
-      "tdb_minus_tt_s": 0.0015778932720422745
+      "tdb_minus_tt_s": 0.000979425385594368
     },
     {
       "days_from_epoch_a1mjd_0": 2968,
       "epoch_a1mjd": 34009.500428638676,
-      "tdb_minus_tt_s": 0.0015062279999256134
+      "tdb_minus_tt_s": 0.0011347001418471336
     },
     {
       "days_from_epoch_a1mjd_0": 2975,
       "epoch_a1mjd": 34016.500428638676,
-      "tdb_minus_tt_s": 0.0014125602319836617
+      "tdb_minus_tt_s": 0.0012736301869153976
     },
     {
       "days_from_epoch_a1mjd_0": 2982,
       "epoch_a1mjd": 34023.500428638676,
-      "tdb_minus_tt_s": 0.001299404539167881
+      "tdb_minus_tt_s": 0.0013930723071098328
     },
     {
       "days_from_epoch_a1mjd_0": 2989,
       "epoch_a1mjd": 34030.500428638676,
-      "tdb_minus_tt_s": 0.001167389564216137
+      "tdb_minus_tt_s": 0.001491769216954708
     },
     {
       "days_from_epoch_a1mjd_0": 2996,
       "epoch_a1mjd": 34037.500428638676,
-      "tdb_minus_tt_s": 0.0010196585208177567
+      "tdb_minus_tt_s": 0.0015684636309742928
     },
     {
       "days_from_epoch_a1mjd_0": 3003,
       "epoch_a1mjd": 34044.500428638676,
-      "tdb_minus_tt_s": 0.0008574686944484711
+      "tdb_minus_tt_s": 0.0016218982636928558
     },
     {
       "days_from_epoch_a1mjd_0": 3010,
       "epoch_a1mjd": 34051.500428638676,
-      "tdb_minus_tt_s": 0.000683334656059742
+      "tdb_minus_tt_s": 0.0016514444723725319
     },
     {
       "days_from_epoch_a1mjd_0": 3017,
       "epoch_a1mjd": 34058.500428638676,
-      "tdb_minus_tt_s": 0.0005003996193408966
+      "tdb_minus_tt_s": 0.0016577308997511864
     },
     {
       "days_from_epoch_a1mjd_0": 3024,
       "epoch_a1mjd": 34065.500428638676,
-      "tdb_minus_tt_s": 0.00030992086976766586
+      "tdb_minus_tt_s": 0.0016395002603530884
     },
     {
       "days_from_epoch_a1mjd_0": 3031,
       "epoch_a1mjd": 34072.500428638676,
-      "tdb_minus_tt_s": 0.00011504162102937698
+      "tdb_minus_tt_s": 0.0015973811969161034
     },
     {
       "days_from_epoch_a1mjd_0": 3038,
       "epoch_a1mjd": 34079.500428638676,
-      "tdb_minus_tt_s": -8.109491318464279e-05
+      "tdb_minus_tt_s": 0.0015326309949159622
     },
     {
       "days_from_epoch_a1mjd_0": 3045,
       "epoch_a1mjd": 34086.500428638676,
-      "tdb_minus_tt_s": -0.00027597416192293167
+      "tdb_minus_tt_s": 0.0014465069398283958
     },
     {
       "days_from_epoch_a1mjd_0": 3052,
       "epoch_a1mjd": 34093.500428638676,
-      "tdb_minus_tt_s": -0.00046708155423402786
+      "tdb_minus_tt_s": 0.0013396376743912697
     },
     {
       "days_from_epoch_a1mjd_0": 3059,
       "epoch_a1mjd": 34100.500428638676,
-      "tdb_minus_tt_s": -0.0006519025191664696
+      "tdb_minus_tt_s": 0.00121390912681818
     },
     {
       "days_from_epoch_a1mjd_0": 3066,
       "epoch_a1mjd": 34107.500428638676,
-      "tdb_minus_tt_s": -0.000827922485768795
+      "tdb_minus_tt_s": 0.0010712072253227234
     },
     {
       "days_from_epoch_a1mjd_0": 3073,
       "epoch_a1mjd": 34114.500428638676,
-      "tdb_minus_tt_s": -0.0009926268830895424
+      "tdb_minus_tt_s": 0.0009134178981184959
     },
     {
       "days_from_epoch_a1mjd_0": 3080,
       "epoch_a1mjd": 34121.500428638676,
-      "tdb_minus_tt_s": -0.0011428724974393845
+      "tdb_minus_tt_s": 0.0007430557161569595
     },
     {
       "days_from_epoch_a1mjd_0": 3087,
       "epoch_a1mjd": 34128.500428638676,
-      "tdb_minus_tt_s": -0.0012774020433425903
+      "tdb_minus_tt_s": 0.000562635250389576
     },
     {
       "days_from_epoch_a1mjd_0": 3094,
       "epoch_a1mjd": 34135.500428638676,
-      "tdb_minus_tt_s": -0.0013943295925855637
+      "tdb_minus_tt_s": 0.000374671071767807
     },
     {
       "days_from_epoch_a1mjd_0": 3101,
       "epoch_a1mjd": 34142.500428638676,
-      "tdb_minus_tt_s": -0.0014911405742168427
+      "tdb_minus_tt_s": 0.00018104910850524902
     },
     {
       "days_from_epoch_a1mjd_0": 3108,
       "epoch_a1mjd": 34149.500428638676,
-      "tdb_minus_tt_s": -0.0015672063454985619
+      "tdb_minus_tt_s": -1.5087425708770752e-05
     },
     {
       "days_from_epoch_a1mjd_0": 3115,
       "epoch_a1mjd": 34156.500428638676,
-      "tdb_minus_tt_s": -0.001620640978217125
+      "tdb_minus_tt_s": -0.00021059531718492508
     },
     {
       "days_from_epoch_a1mjd_0": 3122,
       "epoch_a1mjd": 34163.500428638676,
-      "tdb_minus_tt_s": -0.0016508158296346664
+      "tdb_minus_tt_s": -0.0004035886377096176
     },
     {
       "days_from_epoch_a1mjd_0": 3129,
       "epoch_a1mjd": 34170.500428638676,
-      "tdb_minus_tt_s": -0.0016577308997511864
+      "tdb_minus_tt_s": -0.0005909241735935211
     },
     {
       "days_from_epoch_a1mjd_0": 3136,
       "epoch_a1mjd": 34177.500428638676,
-      "tdb_minus_tt_s": -0.0016401289030909538
+      "tdb_minus_tt_s": -0.0007700873538851738
     },
     {
       "days_from_epoch_a1mjd_0": 3143,
       "epoch_a1mjd": 34184.500428638676,
-      "tdb_minus_tt_s": -0.0015986384823918343
+      "tdb_minus_tt_s": -0.0009385636076331139
     },
     {
       "days_from_epoch_a1mjd_0": 3150,
       "epoch_a1mjd": 34191.500428638676,
-      "tdb_minus_tt_s": -0.0015338882803916931
+      "tdb_minus_tt_s": -0.0010938383638858795
     },
     {
       "days_from_epoch_a1mjd_0": 3157,
       "epoch_a1mjd": 34198.500428638676,
-      "tdb_minus_tt_s": -0.0014458782970905304
+      "tdb_minus_tt_s": -0.0012340256944298744
     },
     {
       "days_from_epoch_a1mjd_0": 3164,
       "epoch_a1mjd": 34205.500428638676,
-      "tdb_minus_tt_s": -0.001337123103439808
+      "tdb_minus_tt_s": -0.0013572396710515022
     },
     {
       "days_from_epoch_a1mjd_0": 3171,
       "epoch_a1mjd": 34212.500428638676,
-      "tdb_minus_tt_s": -0.0012076226994395256
+      "tdb_minus_tt_s": -0.0014609657227993011
     },
     {
       "days_from_epoch_a1mjd_0": 3178,
       "epoch_a1mjd": 34219.500428638676,
-      "tdb_minus_tt_s": -0.0010605202987790108
+      "tdb_minus_tt_s": -0.0015439465641975403
     },
     {
       "days_from_epoch_a1mjd_0": 3185,
       "epoch_a1mjd": 34226.500428638676,
-      "tdb_minus_tt_s": -0.0008977018296718597
+      "tdb_minus_tt_s": -0.0016055535525083542
     },
     {
       "days_from_epoch_a1mjd_0": 3192,
       "epoch_a1mjd": 34233.500428638676,
-      "tdb_minus_tt_s": -0.0007210532203316689
+      "tdb_minus_tt_s": -0.001643272116780281
     },
     {
       "days_from_epoch_a1mjd_0": 3199,
       "epoch_a1mjd": 34240.500428638676,
-      "tdb_minus_tt_s": -0.0005337176844477654
+      "tdb_minus_tt_s": -0.0016583595424890518
     },
     {
       "days_from_epoch_a1mjd_0": 3206,
       "epoch_a1mjd": 34247.500428638676,
-      "tdb_minus_tt_s": -0.000338209792971611
+      "tdb_minus_tt_s": -0.00164892990142107
     },
     {
       "days_from_epoch_a1mjd_0": 3213,
       "epoch_a1mjd": 34254.500428638676,
-      "tdb_minus_tt_s": -0.00013704411685466766
+      "tdb_minus_tt_s": -0.001614983193576336
     },
     {
       "days_from_epoch_a1mjd_0": 3220,
       "epoch_a1mjd": 34261.500428638676,
-      "tdb_minus_tt_s": 6.537884473800659e-05
+      "tdb_minus_tt_s": -0.0015577767044305801
     },
     {
       "days_from_epoch_a1mjd_0": 3227,
       "epoch_a1mjd": 34268.500428638676,
-      "tdb_minus_tt_s": 0.0002671731635928154
+      "tdb_minus_tt_s": -0.0014779390767216682
     },
     {
       "days_from_epoch_a1mjd_0": 3234,
       "epoch_a1mjd": 34275.500428638676,
-      "tdb_minus_tt_s": 0.0004651956260204315
+      "tdb_minus_tt_s": -0.0013760989531874657
     },
     {
       "days_from_epoch_a1mjd_0": 3241,
       "epoch_a1mjd": 34282.500428638676,
-      "tdb_minus_tt_s": 0.0006556743755936623
+      "tdb_minus_tt_s": -0.0012535136193037033
     },
     {
       "days_from_epoch_a1mjd_0": 3248,
       "epoch_a1mjd": 34289.500428638676,
-      "tdb_minus_tt_s": 0.0008367234840989113
+      "tdb_minus_tt_s": -0.0011120690032839775
     },
     {
       "days_from_epoch_a1mjd_0": 3255,
       "epoch_a1mjd": 34296.500428638676,
-      "tdb_minus_tt_s": 0.001004571095108986
+      "tdb_minus_tt_s": -0.0009542796760797501
     },
     {
       "days_from_epoch_a1mjd_0": 3262,
       "epoch_a1mjd": 34303.500428638676,
-      "tdb_minus_tt_s": 0.0011579599231481552
+      "tdb_minus_tt_s": -0.0007820315659046173
     },
     {
       "days_from_epoch_a1mjd_0": 3269,
       "epoch_a1mjd": 34310.500428638676,
-      "tdb_minus_tt_s": 0.0012931181117892265
+      "tdb_minus_tt_s": -0.000597839243710041
     },
     {
       "days_from_epoch_a1mjd_0": 3276,
       "epoch_a1mjd": 34317.500428638676,
-      "tdb_minus_tt_s": 0.0014094170182943344
+      "tdb_minus_tt_s": -0.0004048459231853485
     },
     {
       "days_from_epoch_a1mjd_0": 3283,
       "epoch_a1mjd": 34324.500428638676,
-      "tdb_minus_tt_s": 0.0015049707144498825
+      "tdb_minus_tt_s": -0.00020493753254413605
     },
     {
       "days_from_epoch_a1mjd_0": 3290,
       "epoch_a1mjd": 34331.500428638676,
-      "tdb_minus_tt_s": 0.0015778932720422745
+      "tdb_minus_tt_s": -2.514570951461792e-06
     },
     {
       "days_from_epoch_a1mjd_0": 3297,
       "epoch_a1mjd": 34338.500428638676,
-      "tdb_minus_tt_s": 0.0016281846910715103
+      "tdb_minus_tt_s": 0.00019990839064121246
     },
     {
       "days_from_epoch_a1mjd_0": 3304,
       "epoch_a1mjd": 34345.500428638676,
-      "tdb_minus_tt_s": 0.0016539590433239937
+      "tdb_minus_tt_s": 0.0003991881385445595
     },
     {
       "days_from_epoch_a1mjd_0": 3311,
       "epoch_a1mjd": 34352.500428638676,
-      "tdb_minus_tt_s": 0.00165584497153759
+      "tdb_minus_tt_s": 0.0005928101018071175
     },
     {
       "days_from_epoch_a1mjd_0": 3318,
       "epoch_a1mjd": 34359.500428638676,
-      "tdb_minus_tt_s": 0.0016344711184501648
+      "tdb_minus_tt_s": 0.0007770024240016937
     },
     {
       "days_from_epoch_a1mjd_0": 3325,
       "epoch_a1mjd": 34366.500428638676,
-      "tdb_minus_tt_s": 0.001588580198585987
+      "tdb_minus_tt_s": 0.0009498791769146919
     },
     {
       "days_from_epoch_a1mjd_0": 3332,
       "epoch_a1mjd": 34373.500428638676,
-      "tdb_minus_tt_s": 0.0015206867828965187
+      "tdb_minus_tt_s": 0.0011082971468567848
     },
     {
       "days_from_epoch_a1mjd_0": 3339,
       "epoch_a1mjd": 34380.500428638676,
-      "tdb_minus_tt_s": 0.0014307908713817596
+      "tdb_minus_tt_s": 0.0012497417628765106
     },
     {
       "days_from_epoch_a1mjd_0": 3346,
       "epoch_a1mjd": 34387.500428638676,
-      "tdb_minus_tt_s": 0.0013207783922553062
+      "tdb_minus_tt_s": 0.0013729557394981384
     },
     {
       "days_from_epoch_a1mjd_0": 3353,
       "epoch_a1mjd": 34394.500428638676,
-      "tdb_minus_tt_s": 0.0011925352737307549
+      "tdb_minus_tt_s": 0.0014754245057702065
     },
     {
       "days_from_epoch_a1mjd_0": 3360,
       "epoch_a1mjd": 34401.500428638676,
-      "tdb_minus_tt_s": 0.0010473188012838364
+      "tdb_minus_tt_s": 0.0015558907762169838
     },
     {
       "days_from_epoch_a1mjd_0": 3367,
       "epoch_a1mjd": 34408.500428638676,
-      "tdb_minus_tt_s": 0.0008876435458660126
+      "tdb_minus_tt_s": 0.001613725908100605
     },
     {
       "days_from_epoch_a1mjd_0": 3374,
       "epoch_a1mjd": 34415.500428638676,
-      "tdb_minus_tt_s": 0.0007153954356908798
+      "tdb_minus_tt_s": 0.0016483012586832047
     },
     {
       "days_from_epoch_a1mjd_0": 3381,
       "epoch_a1mjd": 34422.500428638676,
-      "tdb_minus_tt_s": 0.0005337176844477654
+      "tdb_minus_tt_s": 0.0016583595424890518
     },
     {
       "days_from_epoch_a1mjd_0": 3388,
       "epoch_a1mjd": 34429.500428638676,
-      "tdb_minus_tt_s": 0.0003444962203502655
+      "tdb_minus_tt_s": 0.001644529402256012
     },
     {
       "days_from_epoch_a1mjd_0": 3395,
       "epoch_a1mjd": 34436.500428638676,
-      "tdb_minus_tt_s": 0.00015024561434984207
+      "tdb_minus_tt_s": 0.001606810837984085
     },
     {
       "days_from_epoch_a1mjd_0": 3402,
       "epoch_a1mjd": 34443.500428638676,
-      "tdb_minus_tt_s": -4.5890919864177704e-05
+      "tdb_minus_tt_s": 0.0015458324924111366
     },
     {
       "days_from_epoch_a1mjd_0": 3409,
       "epoch_a1mjd": 34450.500428638676,
-      "tdb_minus_tt_s": -0.00024139881134033203
+      "tdb_minus_tt_s": 0.001463480293750763
     },
     {
       "days_from_epoch_a1mjd_0": 3416,
       "epoch_a1mjd": 34457.500428638676,
-      "tdb_minus_tt_s": -0.00043313484638929367
+      "tdb_minus_tt_s": 0.0013603828847408295
     },
     {
       "days_from_epoch_a1mjd_0": 3423,
       "epoch_a1mjd": 34464.500428638676,
-      "tdb_minus_tt_s": -0.0006192130967974663
+      "tdb_minus_tt_s": 0.001237797550857067
     },
     {
       "days_from_epoch_a1mjd_0": 3430,
       "epoch_a1mjd": 34471.500428638676,
-      "tdb_minus_tt_s": -0.0007971189916133881
+      "tdb_minus_tt_s": 0.0010982388630509377
     },
     {
       "days_from_epoch_a1mjd_0": 3437,
       "epoch_a1mjd": 34478.500428638676,
-      "tdb_minus_tt_s": -0.0009637093171477318
+      "tdb_minus_tt_s": 0.000942964106798172
     },
     {
       "days_from_epoch_a1mjd_0": 3444,
       "epoch_a1mjd": 34485.500428638676,
-      "tdb_minus_tt_s": -0.001117098145186901
+      "tdb_minus_tt_s": 0.0007744878530502319
     },
     {
       "days_from_epoch_a1mjd_0": 3451,
       "epoch_a1mjd": 34492.500428638676,
-      "tdb_minus_tt_s": -0.0012547709047794342
+      "tdb_minus_tt_s": 0.0005959533154964447
     },
     {
       "days_from_epoch_a1mjd_0": 3458,
       "epoch_a1mjd": 34499.500428638676,
-      "tdb_minus_tt_s": -0.0013748416677117348
+      "tdb_minus_tt_s": 0.0004086177796125412
     },
     {
       "days_from_epoch_a1mjd_0": 3465,
       "epoch_a1mjd": 34506.500428638676,
-      "tdb_minus_tt_s": -0.0014754245057702065
+      "tdb_minus_tt_s": 0.0002162531018257141
     },
     {
       "days_from_epoch_a1mjd_0": 3472,
       "epoch_a1mjd": 34513.500428638676,
-      "tdb_minus_tt_s": -0.0015552621334791183
+      "tdb_minus_tt_s": 2.0116567611694336e-05
     },
     {
       "days_from_epoch_a1mjd_0": 3479,
       "epoch_a1mjd": 34520.500428638676,
-      "tdb_minus_tt_s": -0.0016130972653627396
+      "tdb_minus_tt_s": -0.00017539132386446
     },
     {
       "days_from_epoch_a1mjd_0": 3486,
       "epoch_a1mjd": 34527.500428638676,
-      "tdb_minus_tt_s": -0.0016476726159453392
+      "tdb_minus_tt_s": -0.000369013287127018
     },
     {
       "days_from_epoch_a1mjd_0": 3493,
       "epoch_a1mjd": 34534.500428638676,
-      "tdb_minus_tt_s": -0.0016583595424890518
+      "tdb_minus_tt_s": -0.0005576061084866524
     },
     {
       "days_from_epoch_a1mjd_0": 3500,
       "epoch_a1mjd": 34541.500428638676,
-      "tdb_minus_tt_s": -0.0016451580449938774
+      "tdb_minus_tt_s": -0.0007386552169919014
     },
     {
       "days_from_epoch_a1mjd_0": 3507,
       "epoch_a1mjd": 34548.500428638676,
-      "tdb_minus_tt_s": -0.001608068123459816
+      "tdb_minus_tt_s": -0.0009090173989534378
     },
     {
       "days_from_epoch_a1mjd_0": 3514,
       "epoch_a1mjd": 34555.500428638676,
-      "tdb_minus_tt_s": -0.0015470897778868675
+      "tdb_minus_tt_s": -0.0010668067261576653
     },
     {
       "days_from_epoch_a1mjd_0": 3521,
       "epoch_a1mjd": 34562.500428638676,
-      "tdb_minus_tt_s": -0.001463480293750763
+      "tdb_minus_tt_s": -0.0012101372703909874
     },
     {
       "days_from_epoch_a1mjd_0": 3528,
       "epoch_a1mjd": 34569.500428638676,
-      "tdb_minus_tt_s": -0.0013578683137893677
+      "tdb_minus_tt_s": -0.0013364944607019424
     },
     {
       "days_from_epoch_a1mjd_0": 3535,
       "epoch_a1mjd": 34576.500428638676,
-      "tdb_minus_tt_s": -0.0012327684089541435
+      "tdb_minus_tt_s": -0.001443992368876934
     },
     {
       "days_from_epoch_a1mjd_0": 3542,
       "epoch_a1mjd": 34583.500428638676,
-      "tdb_minus_tt_s": -0.0010881805792450905
+      "tdb_minus_tt_s": -0.0015307450667023659
     },
     {
       "days_from_epoch_a1mjd_0": 3549,
       "epoch_a1mjd": 34590.500428638676,
-      "tdb_minus_tt_s": -0.0009278766810894012
+      "tdb_minus_tt_s": -0.0015961239114403725
     },
     {
       "days_from_epoch_a1mjd_0": 3556,
       "epoch_a1mjd": 34597.500428638676,
-      "tdb_minus_tt_s": -0.0007537426427006721
+      "tdb_minus_tt_s": -0.0016382429748773575
     },
     {
       "days_from_epoch_a1mjd_0": 3563,
       "epoch_a1mjd": 34604.500428638676,
-      "tdb_minus_tt_s": -0.000568293035030365
+      "tdb_minus_tt_s": -0.001657102257013321
     },
     {
       "days_from_epoch_a1mjd_0": 3570,
       "epoch_a1mjd": 34611.500428638676,
-      "tdb_minus_tt_s": -0.0003734137862920761
+      "tdb_minus_tt_s": -0.0016520731151103973
     },
     {
       "days_from_epoch_a1mjd_0": 3577,
       "epoch_a1mjd": 34618.500428638676,
-      "tdb_minus_tt_s": -0.00017350539565086365
+      "tdb_minus_tt_s": -0.0016231555491685867
     },
     {
       "days_from_epoch_a1mjd_0": 3584,
       "epoch_a1mjd": 34625.500428638676,
-      "tdb_minus_tt_s": 2.8917565941810608e-05
+      "tdb_minus_tt_s": -0.0015697209164500237
     },
     {
       "days_from_epoch_a1mjd_0": 3591,
       "epoch_a1mjd": 34632.500428638676,
-      "tdb_minus_tt_s": 0.00023134052753448486
+      "tdb_minus_tt_s": -0.0014936551451683044
     },
     {
       "days_from_epoch_a1mjd_0": 3598,
       "epoch_a1mjd": 34639.500428638676,
-      "tdb_minus_tt_s": 0.00042999163269996643
+      "tdb_minus_tt_s": -0.0013955868780612946
     },
     {
       "days_from_epoch_a1mjd_0": 3605,
       "epoch_a1mjd": 34646.500428638676,
-      "tdb_minus_tt_s": 0.0006223563104867935
+      "tdb_minus_tt_s": -0.0012767734006047249
     },
     {
       "days_from_epoch_a1mjd_0": 3612,
       "epoch_a1mjd": 34653.500428638676,
-      "tdb_minus_tt_s": 0.0008046627044677734
+      "tdb_minus_tt_s": -0.0011391006410121918
     },
     {
       "days_from_epoch_a1mjd_0": 3619,
       "epoch_a1mjd": 34660.500428638676,
-      "tdb_minus_tt_s": 0.0009756535291671753
+      "tdb_minus_tt_s": -0.0009838258847594261
     },
     {
       "days_from_epoch_a1mjd_0": 3626,
       "epoch_a1mjd": 34667.500428638676,
-      "tdb_minus_tt_s": 0.0011315569281578064
+      "tdb_minus_tt_s": -0.0008140923455357552
     },
     {
       "days_from_epoch_a1mjd_0": 3633,
       "epoch_a1mjd": 34674.500428638676,
-      "tdb_minus_tt_s": 0.0012704869732260704
+      "tdb_minus_tt_s": -0.0006317859515547752
     },
     {
       "days_from_epoch_a1mjd_0": 3640,
       "epoch_a1mjd": 34681.500428638676,
-      "tdb_minus_tt_s": 0.0013899290934205055
+      "tdb_minus_tt_s": -0.0004400499165058136
     },
     {
       "days_from_epoch_a1mjd_0": 3647,
       "epoch_a1mjd": 34688.500428638676,
-      "tdb_minus_tt_s": 0.0014892546460032463
+      "tdb_minus_tt_s": -0.00024139881134033203
     }
   ],
-  "year_scan_note": "one point every 7 days for 10 years (522 points) of GMAT's own TT/TDB conversion, tdb_minus_tt_s only -- this crate's N2 report used this exact set (regenerated identically by this script) to empirically fit the M_E_OFFSET phase crates/av-orbital/src/tdb.rs actually uses (68.8398465155 degrees, RMS 1.535e-07 s over the whole span), because the raw M_E_OFFSET GMAT exposes does not reproduce GMAT's own Convert() output when used directly -- see this module's own doc comment, 'Measured finding'."
+  "year_scan_note": "one point every 7 days for 10 years (522 points) of GMAT's own TT/TDB conversion, tdb_minus_tt_s only, all with refJd=2430000.0 (GmatTimeConstants::JD_JAN_5_1941, Convert()'s own default) -- see docs/reports/gmat-tdb-phase/REPORT.md and this script's own module doc."
 }

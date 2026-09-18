@@ -27,104 +27,118 @@
 //! T_TT_COEFF1 = 36525.0             (days / Julian century)
 //! ```
 //!
-//! # Root cause: why GMAT's own `Convert()` disagrees with its own exposed constants
-//!
-//! Plugging `M_E_OFFSET = 357.5277233` straight into the formula above, with `T_TT` computed
-//! from `T_TT_OFFSET`/`T_TT_COEFF1` exactly as GMAT exposes them, disagrees with GMAT's own
-//! `Convert(..., TDBMJD, ...)` output by up to ~1.6 ms -- essentially the whole series
-//! amplitude, i.e. a phase error of roughly 289 degrees, not floating-point noise.
-//!
-//! **Root cause (definitive, not a fit): GMAT computes the periodic term's `T_TT` from its own
-//! internal Modified Julian Date convention (`GMAT_MJD = JD - 2_430_000.0`,
-//! `GmatTimeConstants::JD_JAN_5_1941`) while subtracting the J2000 *Julian* Date constant
-//! `T_TT_OFFSET = 2451545.0` -- so GMAT's mean-anomaly argument is short by exactly 2,430,000
-//! days of the `M_E_COEFF1` rate.** Because the rate term is untouched, this is a pure
-//! constant phase error, which is exactly why a constant offset absorbs it perfectly:
-//!
-//! ```text
-//! rate                    = M_E_COEFF1 / T_TT_COEFF1               = 0.985600283094 deg/day
-//! phase of 2,430,000 days = 2_430_000 * rate                       = 2_395_008.687918 deg
-//!             mod 360     = GMAT_M_E_PHASE_SHIFT_DEG (this module) = 288.6879178644 deg
-//! GMAT's own effective offset = (M_E_OFFSET - GMAT_M_E_PHASE_SHIFT_DEG) mod 360
-//!                                                                  = 68.8398054354 deg
-//! ```
-//!
-//! An earlier version of this module carried a *fitted* replacement for `M_E_OFFSET_DEG`
-//! (`68.8398465155` degrees, a least-squares fit over 522 GMAT samples spanning 10 years,
-//! RMS residual 153.5 ns) because the disagreement above was, at the time, unexplained. It is
-//! no longer: the root cause derived above lands at `68.8398054354` degrees, `4.108e-5`
-//! degrees away from that old fit -- about 1.2 ns of `TDB-TT` (`TDB_COEFF1`'s own derivative
-//! near this phase times that angular error), fully inside the fit's own 153.5 ns RMS / 324 ns
-//! max. The fit was measuring the same effect this module now derives from first principles;
-//! "empirically recalibrated" and "least-squares fit" described a symptom, not the cause, and
-//! neither term nor the fitted literal remain in this module.
-//!
-//! # This module deliberately uses the CORRECT series, not GMAT's phase-shifted one
+//! # This module reproduces GMAT's own `TimeSystemConverter` output
 //!
 //! `M_E_OFFSET_DEG` below is GMAT's own exposed, standard value (`357.5277233`), used with the
-//! `T_TT` this module already computes correctly from the JD-based `T_TT_OFFSET`. That is the
-//! textbook Fairhead & Bretagnon / Vallado series, evaluated correctly -- not the series GMAT's
-//! own `Convert()` actually returns, which carries the 2,430,000-day phase shift derived above
-//! baked in as an accident of GMAT's internal MJD bookkeeping, not a deliberate modeling choice.
+//! `T_TT` this module computes from the JD-based `T_TT_OFFSET` -- the textbook Fairhead &
+//! Bretagnon / Vallado series, evaluated as GMAT itself evaluates it. `tests/tdb_check.rs`
+//! measures this module's output against `goldens/tdb_check.json` (regenerated GMAT
+//! `TimeSystemConverter::Convert()` output, `refJd=2_430_000.0`) at the golden's 4 epochs and
+//! its 522-point `year_scan`; see that test file's own doc comments for the measured RMS and
+//! max, and the golden's own `tolerance_s` field for the tolerance in force.
 //!
-//! This is ADR-002's fifth amendment's own precedent (`docs/adr/002-dynamics-contract.md`):
-//! the platform may be deliberately more complete -- here, more *correct* -- than GMAT's own
-//! report, provided the disagreement is pinned by a test so it cannot go unnoticed. GMAT's
-//! phase is kept available, under its own clearly-named function
-//! ([`tai_ns_to_tdb_minus_tt_seconds_gmat_phase`]) and constant ([`GMAT_M_E_PHASE_SHIFT_DEG`],
-//! derived from the other constants in code, never pasted as a literal), specifically so
-//! `tests/tdb_check.rs` can assert both: that the GMAT-phase path still reproduces GMAT's own
-//! golden (proving the root cause is exactly right), and that the correct series measurably
-//! disagrees with it (proving the platform's choice is deliberate, not silent).
+//! What is left of the disagreement is the GOLDEN'S resolution, not a model difference, and
+//! that was root-caused rather than described: the golden records `tdb_minus_tt_s` as the
+//! difference of two MJD-magnitude doubles GMAT returns, whose own ULP is `2^-38` days
+//! (3.1432e-7 s) below the 32768-day binade and twice that above it, and **every one of the
+//! 526 fixture residuals is at most 0.531 of its own epoch's ULP** -- a single rounding of a
+//! quantity that is otherwise exact, asserted as such by that test. The one genuine difference
+//! between this module and GMAT is smaller still: GMAT forms the series argument from the TAI
+//! modified Julian date (`ConvertFromTaiMjd`'s `origValue`) and this module from the TT one,
+//! worth at most **10.80 ns** of `TDB - TT` (computed directly from `TT - A.1` and the
+//! `M_E_COEFF1` rate, not fitted). TT is the argument the series is defined on, so this module
+//! keeps it.
 //!
-//! Theoretical maximum disagreement between the two series, over a full 360-degree cycle of
-//! `M_E`, on an idealized pure two-phase-shifted-sine model (i.e. the largest this specific
-//! ~288.6879-degree phase shift can ever cost, not the worst-case 3.344 ms an arbitrary phase
-//! error of this series' amplitude could cost in general): **1.959195 ms** (root-cause
-//! script). `tests/tdb_check.rs` measures the actual disagreement against the golden's 4
-//! epochs + 522 `year_scan` points directly: **1.959386844e-3 s**, a hair above the idealized
-//! number because GMAT's own phase, as derived here, still carries its own tiny residual
-//! against GMAT's true `Convert()` output (max 3.23e-7 s, measured by that same test file) on
-//! top of the phase-shift bound -- not a second, unexplained effect.
+//! # An earlier revision believed GMAT's converter carried a phase error -- it did not
+//!
+//! An earlier revision of this module carried a "Root cause" narrative claiming GMAT's own
+//! `Convert(..., TDBMJD, ...)` computes the periodic term's `T_TT` from its own internal
+//! Modified Julian Date convention while subtracting the J2000 *Julian* Date constant,
+//! producing a ~288.6879-degree phase error, and kept a second function
+//! (`tai_ns_to_tdb_minus_tt_seconds_gmat_phase`) and constant (`GMAT_M_E_PHASE_SHIFT_DEG`) that
+//! reproduced that phase-shifted series so the "disagreement" could be asserted by a test.
+//!
+//! That was wrong, and it was our own bug, not GMAT's: `docs/reports/gmat-tdb-phase/REPORT.md`
+//! reproduces `TimeSystemConverter::Convert()` directly against a live GMAT (`Sat.TDBModJulian`
+//! read from a plain GMAT script, and GMAT R2026a's own source at `third_party/gmat-src`) and
+//! finds that the 288.6879178644-degree phase shift is produced only by calling
+//! `Convert(origValue, fromType, toType, refJd=0.0)` -- not `Convert()`'s own default
+//! (`GmatTimeConstants::JD_JAN_5_1941` = 2,430,000.0) and not anything any call site inside
+//! GMAT's own R2026a source passes. `goldens/gen_tdb_check.py`'s previous revision passed that
+//! `0.0` explicitly; this module's "Root cause" section, the `_gmat_phase` function and
+//! constant it kept alive, and the golden and test built on that call, all encoded the same
+//! artifact. `tai_ns_to_tdb_jd`, the function this crate's production code actually calls, was
+//! never affected: it always used GMAT's own exposed `M_E_OFFSET` with a correctly-formed
+//! `T_TT` (see below), the same computation GMAT's own `Sat.TDBModJulian` and
+//! `DeFile::GetPosVel()` perform.
 //!
 //! # Magnitude
 //!
 //! `TDB_COEFF1` alone bounds the correction at 1.658 ms; measured over the golden arc's four
-//! sample epochs (`goldens/tdb_check.json`), GMAT's own `TDB - TT` ranges `1.553062e-3` to
-//! `1.562806e-3` s -- a ~9.7 microsecond swing over one day.
+//! sample epochs (`goldens/tdb_check.json`), GMAT's own `TDB - TT` ranges from about
+//! `-7.98e-5` to `-5.09e-5` s over that one day -- see that file for the exact recorded values.
 //!
-//! # Measured agreement against GMAT
-//!
-//! `tests/tdb_check.rs` calls [`tai_ns_to_tdb_minus_tt_seconds_gmat_phase`] (NOT the correct
-//! series, and NOT a difference of two `tai_ns_to_tdb_jd`-scale numbers -- see that function's
-//! own doc, "why a full JD caps resolution") at the four TAI instants `goldens/tdb_check.json`
-//! records (derived from the file's own `epoch_a1mjd` via
-//! `av_cdm::time::Tai::from_a1_mjd(...).as_nanos()`) and at the whole 522-point `year_scan`,
-//! to prove the root cause derived above fully accounts for GMAT's own behaviour; it separately
-//! calls [`tai_ns_to_tdb_minus_tt_seconds`] (the correct series this module actually uses) over
-//! the same fixture to record how far the deliberate correction departs from GMAT's golden. See
-//! that test's own doc comments for the measured numbers.
-//!
-//! # Precision: why a full JD caps resolution, and why that is fine here
+//! # Precision: why a full JD caps resolution, and why that DOES matter for a position
+//! comparison (round 2, task 2b -- this section corrects round 1's own conclusion)
 //!
 //! [`tai_ns_to_tdb_jd`] returns a ~2.46e6-magnitude `f64`. At that magnitude, `f64`'s own
 //! representable resolution (its ULP, `2.46e6 * 2^-52`) is ~5.46e-10 days = **~47
-//! microseconds** -- a hard ceiling on how precisely the periodic correction (never larger
-//! than 1.7 ms) can actually be RECOVERED from the returned value, no matter how carefully
-//! the addition that produced it was ordered (this was discovered, not assumed: an early
-//! version of `tests/tdb_check.rs` differenced two `tai_ns_to_tdb_jd`-scale numbers directly
-//! and measured exactly this ~10-30 microsecond noise floor against GMAT's own MJD-scale
-//! report, which has ~500x better resolution at its own, ~31,000-magnitude, scale). Measured
-//! impact on this crate's actual use ([`crate::de::DeEphemeris::geocentric_position_km`]'s
-//! `jd_tdb` argument): the Moon moves at ~1 km/s, so a 47-microsecond epoch uncertainty is a
-//! ~5 cm position uncertainty; propagated through the third-body acceleration formula's own
-//! sensitivity (`d(accel)/d(distance) ~ 2*accel/distance`, `accel ~ 3e-6` m/s^2 at lunar
-//! distance `~3.844e8` m), a 5 cm position error contributes on the order of `1e-16` m/s^2 of
-//! acceleration error -- seven orders of magnitude below this crate's own N2 acceleration
-//! tolerance. So the ceiling is real, measured, and does not matter for what this module is
-//! actually used for; [`tai_ns_to_tdb_minus_tt_seconds`] exists as the escape hatch for a
-//! caller (this module's own tests) that needs the correction at its own, much better,
-//! resolution.
+//! microseconds** (measured directly off the returned value at the round-2 golden's epochs:
+//! `f64::next_up() - self` gives ~40.2 microseconds there, the same order -- the "~47
+//! microseconds" bound above is the conservative `value * 2^-52` estimate, not rounded down
+//! to the enclosing power-of-two binade) -- a hard ceiling on how precisely the periodic
+//! correction (never larger than 1.7 ms) can actually be RECOVERED from the returned value,
+//! no matter how carefully the addition that produced it was ordered (this was discovered,
+//! not assumed: an early version of `tests/tdb_check.rs` differenced two `tai_ns_to_tdb_jd`-
+//! scale numbers directly and measured exactly this ~10-30 microsecond noise floor against
+//! GMAT's own MJD-scale report, which has ~500x better resolution at its own, ~31,000-
+//! magnitude, scale).
+//!
+//! **Round 1's conclusion here was incomplete.** It measured the ceiling's impact on
+//! *acceleration* alone: the Moon moves at ~1 km/s, so a 47-microsecond epoch uncertainty is
+//! a ~5 cm position uncertainty, which propagates through the third-body acceleration
+//! formula's own sensitivity (`d(accel)/d(distance) ~ 2*accel/distance`, `accel ~ 3e-6` m/s^2
+//! at lunar distance `~3.844e8` m) to `~1e-16` m/s^2 of acceleration error -- seven orders of
+//! magnitude below this crate's own N2 acceleration tolerance, and that conclusion is still
+//! correct AS FAR AS IT GOES. It is NOT true for a *position* comparison -- which is what N2's
+//! ten-epoch ephemeris check (`tests/thirdbody_mars_jupiter.rs`) actually measures: round 2's
+//! own root-cause task found the SAME 47-microsecond epoch ceiling directly responsible for
+//! that test's measured 1.404740 m (Mars) / 0.4356596 m (Jupiter) disagreement against GMAT's
+//! reported positions -- Mars' geocentric velocity there is ~55.85 km/s (faster than the
+//! Moon's ~1 km/s used in round 1's own estimate; at 01 Jan 2026 the two bodies are on
+//! opposite sides of their orbits from Earth's, so the *relative* geocentric velocity is
+//! larger than either body's own heliocentric speed), so the identical epoch uncertainty that
+//! is a 5 cm problem for the Moon is a ~1.1-2.5 m problem for Mars.
+//!
+//! Proven, not assumed (per-epoch numbers, both bodies, from the round-2 diagnostic): at
+//! every one of the golden's 10 epochs, the disagreement vector (native minus GMAT) is
+//! parallel to the body's own geocentric velocity (measured `cos(theta)` between the two:
+//! `1.000000` or `-1.000000` at all 10 epochs, both bodies -- never anything in between), and
+//! the implied time offset `dt_implied = (disagreement . v_hat) / |v|` AGREES between Mars and
+//! Jupiter at the same epoch to within a few nanoseconds (e.g. epoch `1767225636999999868`:
+//! Mars `dt_implied = 1.383026513e-5` s, Jupiter `dt_implied = 1.383083342e-5` s -- a property
+//! of the EPOCH, not of the body, which is exactly what an epoch-quantization bug predicts and
+//! what neither a body-specific EMRAT/barycenter defect nor light-time/aberration -- which
+//! would scale with each body's own distance, not agree across bodies of very different
+//! distance -- could produce). The largest `|dt_implied|` measured is 2.514537977e-05 s
+//! (25.145 microseconds), below the ~40.2-microsecond ULP measured at that same epoch,
+//! consistent with rounding in the addition that forms the returned full JD. See
+//! `tests/thirdbody_mars_jupiter.rs`'s own doc comment and this crate's round-2 report for the
+//! full per-epoch table.
+//!
+//! **The fix:** [`tai_ns_to_tdb_jd2`], below, returns the same epoch as a two-part `(jd1,
+//! jd2)` Julian Date (the standard SOFA/ERFA convention) instead of a single lossy `f64`; see
+//! that function's own doc for how it avoids ever adding the sub-day fraction to the full,
+//! ~2.46e6-magnitude JD before use, and [`crate::de::DeEphemeris::geocentric_position_km2`]
+//! for the DE-reader entry point built on it. `crate::model::EarthGravityModel::derivatives`'s
+//! third-body path now calls the two-part entry point; [`tai_ns_to_tdb_jd`] is
+//! UNCHANGED and kept (other code, and this module's own doc above, still refer to it) --
+//! only its DOCUMENTED ceiling is corrected here to say what it actually costs a position
+//! comparison, not only an acceleration one.
+//!
+//! [`tai_ns_to_tdb_minus_tt_seconds`] still exists, unchanged, as the escape hatch for a
+//! caller (this module's own tests) that needs the correction itself at its own, much better,
+//! resolution, independent of either JD form.
 //!
 //! # TT, from TAI, without touching `av_cdm::time`
 //!
@@ -143,32 +157,20 @@ const TT_MINUS_A1_SECONDS: f64 = 32.184 - 0.034_381_7;
 
 /// GMAT's own `GMAT_MJD = JD - 2_430_000.0` convention (`av_cdm::time`'s own doc comment
 /// names the identical constant; restated here rather than imported because `av_cdm::time`
-/// does not export it). Also the exact size of the phase error root-caused in this module's
-/// doc: GMAT's periodic-term `T_TT` is computed from this MJD convention while subtracting
-/// the J2000 *Julian* Date constant, leaving the mean-anomaly argument short by this many days
-/// of the `M_E_COEFF1` rate.
+/// does not export it), and also `TimeSystemConverter::Convert`'s own default `refJd`
+/// (`GmatTimeConstants::JD_JAN_5_1941`, see this module's doc).
 const GMAT_MJD_TO_JD_OFFSET: f64 = 2_430_000.0;
 
 /// GMAT's own live `TimeSystemConverter::Instance()` constants (see this module's doc for how
 /// they were read, and the exact values).
 const TDB_COEFF1_S: f64 = 0.001_658;
 const TDB_COEFF2_S: f64 = 0.000_013_85;
-/// GMAT's own exposed `M_E_OFFSET`, the standard value -- this module deliberately uses this,
-/// not the phase-shifted value GMAT's own `Convert()` actually applies internally; see this
-/// module's doc, "This module deliberately uses the CORRECT series".
+/// GMAT's own exposed `M_E_OFFSET`, the standard value; see this module's doc, "This module
+/// reproduces GMAT's own `TimeSystemConverter` output".
 const M_E_OFFSET_DEG: f64 = 357.527_723_3;
 const M_E_COEFF1_DEG_PER_CENTURY: f64 = 35_999.050_34;
 const T_TT_OFFSET_JD: f64 = 2_451_545.0;
 const T_TT_COEFF1_DAYS_PER_CENTURY: f64 = 36_525.0;
-
-/// The exact phase (degrees, reduced mod 360) that GMAT's `2_430_000`-day MJD/JD mismatch
-/// (see this module's doc, "Root cause") adds to the mean-anomaly argument -- **derived from
-/// the other constants in this module, never pasted as a literal**, so a change to
-/// `M_E_COEFF1_DEG_PER_CENTURY` or `T_TT_COEFF1_DAYS_PER_CENTURY` above keeps this in sync
-/// automatically. Used only by [`tai_ns_to_tdb_minus_tt_seconds_gmat_phase`], GMAT's own phase
-/// kept available specifically so the disagreement with the correct series (this module's
-/// own, used everywhere else) can be measured and asserted, not merely described.
-const GMAT_M_E_PHASE_SHIFT_DEG: f64 = (GMAT_MJD_TO_JD_OFFSET * M_E_COEFF1_DEG_PER_CENTURY / T_TT_COEFF1_DAYS_PER_CENTURY) % 360.0;
 
 /// This TAI instant as a GMAT-style Modified Julian Date on the TT scale
 /// (`JD_TT - 2_430_000.0`) -- see this module's doc, "TT, from TAI, without touching
@@ -178,58 +180,72 @@ pub fn tai_ns_to_tt_mjd(t_tai_ns: i64) -> f64 {
     a1_mjd + TT_MINUS_A1_SECONDS / 86_400.0
 }
 
-/// The two-term periodic series (`TDB_COEFF1 sin(M_E) + TDB_COEFF2 sin(2 M_E)`) at the given
-/// `M_E` additive offset (degrees) -- the one piece of arithmetic [`tai_ns_to_tdb_minus_tt_seconds`]
-/// and [`tai_ns_to_tdb_minus_tt_seconds_gmat_phase`] share, differing only in which offset they
-/// pass.
-fn tdb_minus_tt_seconds_with_offset(t_tai_ns: i64, m_e_offset_deg: f64) -> f64 {
+/// The periodic correction alone, `TDB - TT` in SECONDS -- the two-term periodic series
+/// (`TDB_COEFF1 sin(M_E) + TDB_COEFF2 sin(2 M_E)`) using GMAT's own `M_E_OFFSET` and a
+/// correctly-formed JD-based `T_TT` -- see this module's doc, "This module reproduces GMAT's
+/// own `TimeSystemConverter` output". Kept as its own small-magnitude (never more than ~1.7
+/// ms) function, separate from [`tai_ns_to_tdb_jd`], for exactly one reason: **a full Julian
+/// Date is a ~2.46e6-magnitude `f64`, whose own representable resolution at that magnitude is
+/// capped at its ULP (`2.46e6 * 2^-52 ~= 5.46e-10` days `~= 4.7e-5` s = 47 microseconds) --
+/// REGARDLESS of how carefully the arithmetic that produced it was ordered.** Adding this
+/// function's own small, well-resolved result to a full JD (as `tai_ns_to_tdb_jd` does) is
+/// therefore lossy by construction, not a bug to fix by reordering additions -- see this
+/// module's doc, "Precision: why a full JD caps resolution, and why that is fine here", for
+/// the measured impact (it turns out to be negligible for this crate's actual use, third-body
+/// ephemeris lookups) and why callers that want the correction itself at full precision (this
+/// module's own tests, comparing against GMAT's small-magnitude MJD reports) should call this
+/// function directly rather than difference two `tai_ns_to_tdb_jd`-scale numbers.
+pub fn tai_ns_to_tdb_minus_tt_seconds(t_tai_ns: i64) -> f64 {
     let jd_tt = tai_ns_to_tt_mjd(t_tai_ns) + GMAT_MJD_TO_JD_OFFSET;
     let t_tt_centuries = (jd_tt - T_TT_OFFSET_JD) / T_TT_COEFF1_DAYS_PER_CENTURY;
-    let m_e_deg = m_e_offset_deg + M_E_COEFF1_DEG_PER_CENTURY * t_tt_centuries;
+    let m_e_deg = M_E_OFFSET_DEG + M_E_COEFF1_DEG_PER_CENTURY * t_tt_centuries;
     let m_e_rad = m_e_deg.to_radians();
     TDB_COEFF1_S * m_e_rad.sin() + TDB_COEFF2_S * (2.0 * m_e_rad).sin()
 }
 
-/// The periodic correction alone, `TDB - TT` in SECONDS, using the CORRECT (standard
-/// Fairhead & Bretagnon / Vallado) series -- this module's own deliberate choice; see this
-/// module's doc, "This module deliberately uses the CORRECT series". Kept as its own
-/// small-magnitude (never more than ~1.7 ms) function, separate from [`tai_ns_to_tdb_jd`], for
-/// exactly one reason: **a full Julian Date is a ~2.46e6-magnitude `f64`, whose own
-/// representable resolution at that magnitude is capped at its ULP (`2.46e6 * 2^-52 ~=
-/// 5.46e-10` days `~= 4.7e-5` s = 47 microseconds) -- REGARDLESS of how carefully the
-/// arithmetic that produced it was ordered.** Adding this function's own small, well-resolved
-/// result to a full JD (as `tai_ns_to_tdb_jd` does) is therefore lossy by construction, not a
-/// bug to fix by reordering additions -- see this module's doc, "Precision: why a full JD caps
-/// resolution, and why that is fine here", for the measured impact (it turns out to be
-/// negligible for this crate's actual use, third-body ephemeris lookups) and why callers that
-/// want the correction itself at full precision (this module's own tests, comparing against
-/// GMAT's small-magnitude MJD reports) should call this function directly rather than
-/// difference two `tai_ns_to_tdb_jd`-scale numbers.
-pub fn tai_ns_to_tdb_minus_tt_seconds(t_tai_ns: i64) -> f64 {
-    tdb_minus_tt_seconds_with_offset(t_tai_ns, M_E_OFFSET_DEG)
-}
-
-/// The same periodic correction, but reproducing GMAT's own `TimeSystemConverter::Convert()`
-/// output exactly (to the fit's former precision, now derived rather than fit -- see this
-/// module's doc, "Root cause") by using GMAT's own effective phase
-/// (`M_E_OFFSET_DEG - GMAT_M_E_PHASE_SHIFT_DEG`) instead of the correct one. Exists ONLY so the
-/// disagreement between GMAT's phase-shifted series and the correct series this module
-/// actually uses can be measured and asserted (`tests/tdb_check.rs`) rather than merely
-/// described -- no production caller in this crate uses this function.
-pub fn tai_ns_to_tdb_minus_tt_seconds_gmat_phase(t_tai_ns: i64) -> f64 {
-    tdb_minus_tt_seconds_with_offset(t_tai_ns, M_E_OFFSET_DEG - GMAT_M_E_PHASE_SHIFT_DEG)
-}
-
 /// This TAI instant as a full Julian Date on the TDB scale (Barycentric Dynamical Time --
-/// the scale [`crate::de::DeEphemeris`] expects), via the CORRECT series
-/// ([`tai_ns_to_tdb_minus_tt_seconds`], not GMAT's phase-shifted one -- see this module's doc
-/// for why) added to TT. See [`tai_ns_to_tdb_minus_tt_seconds`]'s own doc for why the
-/// RETURNED full-JD value is capped to ~47 microsecond resolution no matter how this addition
-/// is ordered.
+/// the scale [`crate::de::DeEphemeris`] expects), via [`tai_ns_to_tdb_minus_tt_seconds`] added
+/// to TT. See that function's own doc for why the RETURNED full-JD value is capped to ~47
+/// microsecond resolution no matter how this addition is ordered.
 pub fn tai_ns_to_tdb_jd(t_tai_ns: i64) -> f64 {
     let jd_tt = tai_ns_to_tt_mjd(t_tai_ns) + GMAT_MJD_TO_JD_OFFSET;
     let tdb_minus_tt_s = tai_ns_to_tdb_minus_tt_seconds(t_tai_ns);
     jd_tt + tdb_minus_tt_s / 86_400.0
+}
+
+/// This TAI instant as a TWO-PART Julian Date on the TDB scale, `(jd1, jd2)` with `jd1 + jd2
+/// == ` the same quantity [`tai_ns_to_tdb_jd`] returns -- the standard SOFA/ERFA `jd1 + jd2`
+/// convention, and the fix for the resolution ceiling [`tai_ns_to_tdb_jd`]'s own doc (and this
+/// module's "Precision" section) describe: `jd1` is a whole-day, EXACTLY-representable `f64`
+/// (`floor(A.1 MJD) + GMAT_MJD_TO_JD_OFFSET`, both integers far below `f64`'s `2^52` exact-
+/// integer bound, so their sum has no rounding at all); `jd2` is everything else -- the
+/// fractional day, the fixed `TT - A.1` offset, and the TDB-TT periodic correction -- summed
+/// together while EVERY term is still small in magnitude (`jd2` itself always lands in
+/// `[0, 2)` days), never combined with `jd1`'s own ~2.46e6 magnitude before a caller uses it.
+///
+/// This recovers precision down to what [`av_cdm::time::Tai::to_a1_mjd`] itself carries at
+/// its own, much smaller (~3.1e4), magnitude -- measured at ~600 ns (`to_a1_mjd`'s own ULP
+/// there), not the sub-nanosecond floor a from-scratch two-part epoch could reach, because
+/// this function deliberately does not re-derive `to_a1_mjd`'s own TAI-nanoseconds-to-days
+/// division (`av_cdm` is shared with other tracks and not this round's to extend -- see this
+/// module's doc, "TT, from TAI, without touching `av_cdm::time`"). ~600 ns is still a ~65x
+/// improvement over the ~40 microsecond ULP [`tai_ns_to_tdb_jd`] measures at the same
+/// magnitude, and -- per this module's "Precision" section -- was enough to move the round-2
+/// ten-epoch ephemeris disagreement from meter-scale to millimeter-scale or below; see
+/// [`crate::de::DeEphemeris::geocentric_position_km2`] and this crate's round-2 report for the
+/// measured before/after.
+///
+/// [`tai_ns_to_tdb_jd`] is UNCHANGED and kept: other code, and this module's own doc, refer to
+/// it, and it remains correct for any caller that only needs its documented ~47-microsecond-
+/// class resolution (e.g. a human-readable epoch log).
+pub fn tai_ns_to_tdb_jd2(t_tai_ns: i64) -> (f64, f64) {
+    let a1_mjd = Tai::from_nanos(t_tai_ns).to_a1_mjd();
+    let whole_days = a1_mjd.floor();
+    let frac_days = a1_mjd - whole_days; // in [0, 1); exact given a1_mjd and its own floor (Sterbenz)
+    let jd1 = whole_days + GMAT_MJD_TO_JD_OFFSET; // exact: sum of two exactly-representable integers
+    let tdb_minus_tt_s = tai_ns_to_tdb_minus_tt_seconds(t_tai_ns);
+    let jd2 = frac_days + TT_MINUS_A1_SECONDS / 86_400.0 + tdb_minus_tt_s / 86_400.0;
+    (jd1, jd2)
 }
 
 #[cfg(test)]
@@ -238,19 +254,15 @@ mod tests {
 
     /// The periodic term's own bound: `TDB - TT` must never exceed `TDB_COEFF1 +
     /// TDB_COEFF2` in magnitude (this module's own doc: "Magnitude" -- ~1.67 ms), for any
-    /// epoch, since the series is a sum of two bounded sinusoids. Checked for both the
-    /// correct series and GMAT's phase-shifted one -- the bound is a property of the series'
-    /// amplitude, not of which phase is used.
+    /// epoch, since the series is a sum of two bounded sinusoids.
     #[test]
     fn tdb_minus_tt_is_bounded_by_the_series_amplitude() {
         for t_tai_ns in [0_i64, 1_700_000_000_000_000_000, -500_000_000_000_000_000, 5_000_000_000_000_000_000] {
             let jd_tdb = tai_ns_to_tdb_jd(t_tai_ns);
             let jd_tt = tai_ns_to_tt_mjd(t_tai_ns) + GMAT_MJD_TO_JD_OFFSET;
             let diff_s = (jd_tdb - jd_tt) * 86_400.0;
-            let diff_gmat_phase_s = tai_ns_to_tdb_minus_tt_seconds_gmat_phase(t_tai_ns);
-            println!("n2-tdb-bound: t_tai_ns={t_tai_ns} tdb-tt={diff_s:e} s tdb-tt(gmat_phase)={diff_gmat_phase_s:e} s");
+            println!("n2-tdb-bound: t_tai_ns={t_tai_ns} tdb-tt={diff_s:e} s");
             assert!(diff_s.abs() <= TDB_COEFF1_S + TDB_COEFF2_S + 1e-12, "TDB-TT {diff_s} exceeds the series' own amplitude bound");
-            assert!(diff_gmat_phase_s.abs() <= TDB_COEFF1_S + TDB_COEFF2_S + 1e-12, "GMAT-phase TDB-TT {diff_gmat_phase_s} exceeds the series' own amplitude bound");
         }
     }
 
@@ -282,19 +294,36 @@ mod tests {
         assert!((delta_days - 1.0).abs() < 1e-4);
     }
 
-    /// The derived phase shift itself: must land at `288.6879178644` degrees (this module's
-    /// doc, "Root cause"), and the correct offset minus it must land at `68.8398054354`
-    /// degrees -- within the old fitted constant's own residual (~4.108e-5 degrees, ~1.2 ns of
-    /// `TDB-TT`) of the value that constant used to be. Guards the derivation itself, not a
-    /// GMAT fixture.
+    /// [`tai_ns_to_tdb_jd2`]'s `jd1` must be a whole day (fractional part exactly zero) --
+    /// a direct restatement of its own construction (`floor(a1_mjd) + a fixed integer
+    /// offset`), guarding against a future edit accidentally folding any sub-day quantity
+    /// into it.
     #[test]
-    fn gmat_phase_shift_matches_the_derived_root_cause() {
-        println!("n2-tdb-phase-shift: derived={GMAT_M_E_PHASE_SHIFT_DEG:.10} deg");
-        assert!((GMAT_M_E_PHASE_SHIFT_DEG - 288.687_917_864_4).abs() < 1e-8, "derived phase shift {GMAT_M_E_PHASE_SHIFT_DEG} deg drifted from the root-caused 288.6879178644 deg");
-        let gmat_effective_offset_deg = M_E_OFFSET_DEG - GMAT_M_E_PHASE_SHIFT_DEG;
-        let old_fitted_offset_deg = 68.839_846_515_5;
-        let residual_deg = (gmat_effective_offset_deg - old_fitted_offset_deg).abs();
-        println!("n2-tdb-phase-shift: gmat_effective_offset={gmat_effective_offset_deg:.10} deg, old fit={old_fitted_offset_deg} deg, residual={residual_deg:e} deg");
-        assert!(residual_deg < 1e-3, "derived GMAT offset {gmat_effective_offset_deg} deg disagrees with the old fitted value {old_fitted_offset_deg} deg by {residual_deg:e} deg, more than the fit's own tiny residual");
+    fn jd2_jd1_is_a_whole_day() {
+        for t_tai_ns in [0_i64, 1_700_000_000_000_000_000, -500_000_000_000_000_000, 5_000_000_000_000_000_000] {
+            let (jd1, jd2) = tai_ns_to_tdb_jd2(t_tai_ns);
+            println!("n2-tdb-jd2-split: t_tai_ns={t_tai_ns} jd1={jd1} jd2={jd2:e}");
+            assert_eq!(jd1.fract(), 0.0, "jd1 must be a whole day, got {jd1}");
+            assert!(jd2.abs() < 2.0, "jd2 must stay small in magnitude (fractional day + a few small corrections), got {jd2}");
+        }
+    }
+
+    /// `jd1 + jd2` must agree with the single-`f64` [`tai_ns_to_tdb_jd`] to within THAT
+    /// function's own documented ~47-microsecond-class ULP (the two are the same quantity,
+    /// split two different ways -- see this module's doc, "Precision"). This is a coarse
+    /// cross-check, not a precision claim for the split form (the split form's whole point is
+    /// to be RESOLVABLE past that ULP when consumed without re-forming the sum, which is what
+    /// `crate::de::DeEphemeris::geocentric_position_km2` does).
+    #[test]
+    fn jd2_split_agrees_with_the_single_f64_form_within_its_own_ulp() {
+        for t_tai_ns in [0_i64, 1_700_000_000_000_000_000, -500_000_000_000_000_000, 5_000_000_000_000_000_000] {
+            let single = tai_ns_to_tdb_jd(t_tai_ns);
+            let (jd1, jd2) = tai_ns_to_tdb_jd2(t_tai_ns);
+            let recombined = jd1 + jd2;
+            let ulp = single.next_up() - single;
+            let diff_days = (recombined - single).abs();
+            println!("n2-tdb-jd2-crosscheck: t_tai_ns={t_tai_ns} single={single} recombined={recombined} diff_days={diff_days:e} ulp={ulp:e}");
+            assert!(diff_days <= 2.0 * ulp, "split (jd1={jd1}, jd2={jd2}) recombines to {recombined}, {diff_days:e} days from the single-f64 form {single} -- more than 2 ULP ({ulp:e}) apart");
+        }
     }
 }

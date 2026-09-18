@@ -441,8 +441,32 @@ impl DeEphemeris {
     /// [`DeEphemeris::geocentric_position_km`] for the Earth-relative position every caller
     /// outside this module actually wants.
     fn raw_state(&self, body: DeBody, jd_tdb: f64) -> Result<[f64; 6], DeError> {
-        if jd_tdb < self.jd_start || jd_tdb >= self.jd_end {
-            return Err(DeError::EpochOutOfRange { jd: jd_tdb, jd_start: self.jd_start, jd_end: self.jd_end });
+        self.raw_state_from_offset(body, jd_tdb - self.jd_start)
+    }
+
+    /// The two-part-epoch twin of [`DeEphemeris::raw_state`] -- see
+    /// [`DeEphemeris::geocentric_position_km2`] and `crate::tdb`'s module doc ("Precision")
+    /// for why this entry point exists. `jd1 + jd2 == ` the single-`f64` epoch
+    /// [`DeEphemeris::raw_state`] takes, but the two are never combined into that
+    /// ~2.46e6-magnitude sum here: `jd1 - self.jd_start` (both whole-or-half-integer-day `f64`
+    /// values, far below `f64`'s exact-integer bound) is exact, and `jd2` (always `< 2` in
+    /// magnitude) is added to THAT much-smaller-magnitude quantity instead, preserving `jd2`'s
+    /// own resolution rather than losing it to `jd1`'s magnitude the way a pre-formed
+    /// `jd1 + jd2` would.
+    fn raw_state2(&self, body: DeBody, jd1: f64, jd2: f64) -> Result<[f64; 6], DeError> {
+        let offset_from_start_days = (jd1 - self.jd_start) + jd2;
+        self.raw_state_from_offset(body, offset_from_start_days)
+    }
+
+    /// Shared block/sub-index/Chebyshev evaluation for [`DeEphemeris::raw_state`] and
+    /// [`DeEphemeris::raw_state2`], given the epoch already expressed as an offset (days) from
+    /// `self.jd_start` -- each caller forms that offset at its own achievable precision (see
+    /// their own doc comments); this function does not care which path produced it.
+    fn raw_state_from_offset(&self, body: DeBody, offset_from_start_days: f64) -> Result<[f64; 6], DeError> {
+        let span_days = self.jd_end - self.jd_start;
+        if offset_from_start_days < 0.0 || offset_from_start_days >= span_days {
+            let jd_approx = self.jd_start + offset_from_start_days;
+            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
         }
         let pointer = match body {
             DeBody::Libration => self.lpt,
@@ -453,13 +477,14 @@ impl DeEphemeris {
             // file with no libration block) -- report as an out-of-range epoch is the wrong
             // error; treat it as "no data for this body" via the same variant with jd bounds
             // both set to the requested epoch, which reads unambiguously in the error text.
-            return Err(DeError::EpochOutOfRange { jd: jd_tdb, jd_start: jd_tdb, jd_end: jd_tdb });
+            let jd_approx = self.jd_start + offset_from_start_days;
+            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: jd_approx, jd_end: jd_approx });
         }
         let components = body.components();
 
-        let block_index = ((jd_tdb - self.jd_start) / self.block_days).floor();
-        let block_start_jd = self.jd_start + block_index * self.block_days;
-        let t_in_block_days = jd_tdb - block_start_jd;
+        let block_index = (offset_from_start_days / self.block_days).floor();
+        let block_start_days = block_index * self.block_days;
+        let t_in_block_days = offset_from_start_days - block_start_days;
         let sub_len_days = self.block_days / pointer.nsub as f64;
         let mut sub_index = (t_in_block_days / sub_len_days).floor() as i64;
         if sub_index < 0 {
@@ -475,7 +500,8 @@ impl DeEphemeris {
         let record_index = 2 + block_index as usize; // 0-based: record 0 = header1, 1 = header2 (CVAL)
         let record_off = record_index * self.ksize_bytes;
         if record_off + self.ksize_bytes > self.data.len() {
-            return Err(DeError::EpochOutOfRange { jd: jd_tdb, jd_start: self.jd_start, jd_end: self.jd_end });
+            let jd_approx = self.jd_start + offset_from_start_days;
+            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
         }
         let record = &self.data[record_off..record_off + self.ksize_bytes];
 
@@ -497,6 +523,12 @@ impl DeEphemeris {
     /// entry already is geocentric), every other body via the barycentric-to-geocentric
     /// conversion this module's doc names (`r_Earth(SSB) = r_EMB(SSB) - r_Moon(geo) /
     /// (1+EMRAT)`, then `r_body(geo) = r_body(SSB) - r_Earth(SSB)`).
+    ///
+    /// Takes the epoch as a single full-precision-looking `f64`, which is exactly the
+    /// resolution ceiling `crate::tdb`'s module doc ("Precision") describes -- see
+    /// [`DeEphemeris::geocentric_position_km2`] for the two-part epoch entry point that avoids
+    /// it. Kept unchanged (not removed, not repointed): callers that only need this ceiling's
+    /// class of resolution (or that predate the round-2 fix) still work exactly as before.
     pub fn geocentric_position_km(&self, body: DeBody, jd_tdb: f64) -> Result<[f64; 3], DeError> {
         let moon_geo = self.raw_state(DeBody::Moon, jd_tdb)?;
         if body == DeBody::Moon {
@@ -515,6 +547,34 @@ impl DeEphemeris {
             return Ok([moon_geo[0] * earth_frac, moon_geo[1] * earth_frac, moon_geo[2] * earth_frac]);
         }
         let body_ssb = self.raw_state(body, jd_tdb)?;
+        Ok([body_ssb[0] - earth_ssb[0], body_ssb[1] - earth_ssb[1], body_ssb[2] - earth_ssb[2]])
+    }
+
+    /// The two-part-epoch twin of [`DeEphemeris::geocentric_position_km`] -- takes `(jd1,
+    /// jd2)` from [`crate::tdb::tai_ns_to_tdb_jd2`] (or any other SOFA/ERFA-style split with
+    /// `jd1 + jd2 == ` the TDB Julian Date) instead of a single lossy `f64`, and never forms
+    /// their sum before it is needed (each [`DeEphemeris::raw_state2`] call keeps `jd1` and
+    /// `jd2` separate all the way to [`DeEphemeris::raw_state_from_offset`] -- see that
+    /// function's own doc comment). Added alongside [`DeEphemeris::geocentric_position_km`]
+    /// rather than changing that function's signature, per this task's own instruction; every
+    /// production caller in this crate ([`crate::model::EarthGravityModel::derivatives`]'s
+    /// third-body path) uses this entry point as of round 2.
+    pub fn geocentric_position_km2(&self, body: DeBody, jd1: f64, jd2: f64) -> Result<[f64; 3], DeError> {
+        let moon_geo = self.raw_state2(DeBody::Moon, jd1, jd2)?;
+        if body == DeBody::Moon {
+            return Ok([moon_geo[0], moon_geo[1], moon_geo[2]]);
+        }
+        let emb_ssb = self.raw_state2(DeBody::EarthMoonBarycenter, jd1, jd2)?;
+        let earth_frac = 1.0 / (1.0 + self.emrat);
+        let earth_ssb = [
+            emb_ssb[0] - moon_geo[0] * earth_frac,
+            emb_ssb[1] - moon_geo[1] * earth_frac,
+            emb_ssb[2] - moon_geo[2] * earth_frac,
+        ];
+        if body == DeBody::EarthMoonBarycenter {
+            return Ok([moon_geo[0] * earth_frac, moon_geo[1] * earth_frac, moon_geo[2] * earth_frac]);
+        }
+        let body_ssb = self.raw_state2(body, jd1, jd2)?;
         Ok([body_ssb[0] - earth_ssb[0], body_ssb[1] - earth_ssb[1], body_ssb[2] - earth_ssb[2]])
     }
 }
@@ -662,5 +722,43 @@ mod tests {
         let de = DeEphemeris::open(&de405_path()).expect("parse leDE1941.405");
         let err = de.constant("NOT_A_REAL_CONSTANT").unwrap_err();
         assert!(matches!(err, DeError::UnknownConstant(_)), "{err:?}");
+    }
+
+    /// [`DeEphemeris::geocentric_position_km2`] (the round-2 two-part-epoch entry point) must
+    /// agree closely with [`DeEphemeris::geocentric_position_km`] (the original single-`f64`
+    /// entry point) at the SAME instant, split two different ways -- both read the identical
+    /// Chebyshev record, so any real disagreement here would be a bug in the offset arithmetic,
+    /// not a physical difference. A loose bound (1 km) is deliberate: this is a structural
+    /// sanity check on the split arithmetic, not the precision measurement itself (that is
+    /// `tests/thirdbody_mars_jupiter.rs`'s ten-epoch check, against GMAT).
+    #[test]
+    fn km2_agrees_with_km_at_the_same_instant() {
+        let de = DeEphemeris::open(&de405_path()).expect("parse leDE1941.405");
+        let jd_tdb = de.jd_start() + 100.25;
+        let jd1 = jd_tdb.floor();
+        let jd2 = jd_tdb - jd1;
+        let via_single = de.geocentric_position_km(DeBody::Mars, jd_tdb).unwrap();
+        let via_split = de.geocentric_position_km2(DeBody::Mars, jd1, jd2).unwrap();
+        let gap_km = (0..3).map(|i| (via_single[i] - via_split[i]).powi(2)).sum::<f64>().sqrt();
+        println!("n2-de405-km2-vs-km: gap_km={gap_km:e}");
+        assert!(gap_km < 1e-3, "geocentric_position_km2 disagrees with geocentric_position_km by {gap_km} km at the same instant");
+    }
+
+    /// The two-part epoch's own block-boundary continuity check -- the round-2 twin of
+    /// `moon_position_is_continuous_across_a_block_boundary`, using
+    /// [`DeEphemeris::geocentric_position_km2`] instead, so the new offset-based arithmetic in
+    /// [`DeEphemeris::raw_state_from_offset`] is proven not to introduce a discontinuity at a
+    /// block boundary either.
+    #[test]
+    fn km2_moon_position_is_continuous_across_a_block_boundary() {
+        let de = DeEphemeris::open(&de405_path()).expect("parse leDE1941.405");
+        let boundary = de.jd_start() + de.block_days();
+        let one_ms = 0.001 / 86_400.0;
+        let jd1 = boundary.floor();
+        let before = de.geocentric_position_km2(DeBody::Moon, jd1, boundary - jd1 - one_ms).unwrap();
+        let after = de.geocentric_position_km2(DeBody::Moon, jd1, boundary - jd1 + one_ms).unwrap();
+        let gap_km = ((before[0] - after[0]).powi(2) + (before[1] - after[1]).powi(2) + (before[2] - after[2]).powi(2)).sqrt();
+        println!("n2-de405-km2-block-boundary-gap-km (2ms apart, straddling the boundary): {gap_km:e}");
+        assert!(gap_km < 0.01, "Moon position (km2 path) jumped {gap_km} km across a 2-millisecond span straddling a block boundary");
     }
 }

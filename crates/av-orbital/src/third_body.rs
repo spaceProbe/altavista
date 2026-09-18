@@ -60,6 +60,58 @@
 //! this crate's N2 report for the printed sweep) before this Rust code was written.
 //!
 //! `d3()`, below, is `|d|^3`, and the whole bracket is scaled by `-mu/|d|^3` as shown.
+//!
+//! # N4: the analytic position partial
+//!
+//! [`third_body_acceleration_generic`] is the exact same Battin-form formula above, generic
+//! over `T: `[`crate::dual::GravScalar`] **only in `r`** (`d`/`mu_third` stay plain `f64`
+//! constants, lifted via `T::constant`) -- mirrors `gravity.rs`'s own `sh_acceleration<T:
+//! GravScalar>` shape. The one change from [`third_body_acceleration`] above:
+//! `GravScalar` has no `powf`, so `(1+q)^1.5` is written as `(1+q) * sqrt(1+q)` instead --
+//! algebraically identical (and [`tests::generic_f64_matches_the_hand_specialised_form`]
+//! below pins the two to agree to machine precision), not a different formula. Seeding `r`
+//! with [`crate::dual::Dual3`] gives `d(a)/d(r)`, the third-body block of the STM's A-matrix,
+//! analytically -- see [`third_body_partials`].
+use crate::dual::{Dual3, GravScalar};
+
+/// `d(third_body_acceleration)/d(r)` at `r`, analytically, via [`third_body_acceleration_generic`]
+/// seeded with [`Dual3`] -- see this module's own doc, "N4: the analytic position partial".
+/// Returned row-major: `partials[i][j] = d(a_i)/d(r_j)`.
+pub fn third_body_partials(r: [f64; 3], d: [f64; 3], mu_third: f64) -> [[f64; 3]; 3] {
+    let dual_r = [Dual3::variable(r[0], 0), Dual3::variable(r[1], 1), Dual3::variable(r[2], 2)];
+    let a = third_body_acceleration_generic(dual_r, d, mu_third);
+    let mut out = [[0.0_f64; 3]; 3];
+    for i in 0..3 {
+        out[i] = a[i].d;
+    }
+    out
+}
+
+/// Generic (differentiable-in-`r`) form of [`third_body_acceleration`] -- see this module's
+/// own doc, "N4: the analytic position partial", for why this is a faithful, not merely
+/// approximate, restatement of the same formula.
+pub fn third_body_acceleration_generic<T: GravScalar>(r: [T; 3], d: [f64; 3], mu_third: f64) -> [T; 3] {
+    let d_dot_d = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let d3 = d_dot_d * d_dot_d.sqrt();
+    let dt = [T::constant(d[0]), T::constant(d[1]), T::constant(d[2])];
+    let d2 = T::constant(d_dot_d);
+    let two = T::constant(2.0);
+    let one = T::constant(1.0);
+
+    let rr = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+    let rd = r[0] * dt[0] + r[1] * dt[1] + r[2] * dt[2];
+    let q = (rr - two * rd) / d2;
+    let one_plus_q = one + q;
+    let x = one_plus_q.sqrt();
+    let one_plus_q_15 = one_plus_q * x;
+    let f_q = q * (two + q + x) / (one_plus_q_15 * (one + x));
+    let scale = T::constant(-mu_third / d3);
+    [
+        (r[0] / one_plus_q_15 + f_q * dt[0]) * scale,
+        (r[1] / one_plus_q_15 + f_q * dt[1]) * scale,
+        (r[2] / one_plus_q_15 + f_q * dt[2]) * scale,
+    ]
+}
 
 /// The third-body perturbation acceleration on a spacecraft at `r` (m, relative to the
 /// central body) from a point mass of standard gravitational parameter `mu_third` (m^3/s^2)
@@ -140,5 +192,54 @@ mod tests {
     fn zero_mu_gives_zero_acceleration() {
         let a = third_body_acceleration([7e6, 0.0, 0.0], [1e11, 0.0, 0.0], 0.0);
         assert_eq!(a, [0.0, 0.0, 0.0]);
+    }
+
+    // -- N4: the generic (differentiable) form and its analytic partial ---------------------
+
+    /// [`third_body_acceleration_generic::<f64>`] must agree with the hand-specialised
+    /// [`third_body_acceleration`] to machine precision -- the two differ only in HOW
+    /// `(1+q)^1.5` is evaluated (`powf(1.5)` vs `(1+q)*sqrt(1+q)`, algebraically identical, see
+    /// this module's own doc), so a real disagreement here would mean the rewrite is not
+    /// actually the same formula.
+    #[test]
+    fn generic_f64_matches_the_hand_specialised_form() {
+        let r = [6_878_000.0, 1_200_000.0, -300_000.0];
+        let d = [200_000_000.0, 300_000_000.0, 50_000_000.0];
+        let mu = 4.9028e12;
+        let specialised = third_body_acceleration(r, d, mu);
+        let generic = third_body_acceleration_generic::<f64>(r, d, mu);
+        for i in 0..3 {
+            let rel = (specialised[i] - generic[i]).abs() / specialised[i].abs().max(1e-30);
+            assert!(rel < 1e-12, "component {i}: specialised={} generic={} rel={rel:e}", specialised[i], generic[i]);
+        }
+    }
+
+    /// [`third_body_partials`] (analytic, via `Dual3`) against a central finite difference of
+    /// [`third_body_acceleration`] -- at Moon distance/mass scale, the regime N4's own goldens
+    /// exercise.
+    #[test]
+    fn third_body_partials_match_central_finite_difference_at_moon_scale() {
+        let r = [6_878_000.0, 1_200_000.0, -300_000.0];
+        let d = [200_000_000.0, 300_000_000.0, 50_000_000.0];
+        let mu = 4.9028e12;
+        let analytic = third_body_partials(r, d, mu);
+
+        let h = 1.0; // metres; |r| ~ 7e6 m, relative step ~1.4e-7
+        let mut max_rel_err = 0.0_f64;
+        for j in 0..3 {
+            let mut plus = r;
+            let mut minus = r;
+            plus[j] += h;
+            minus[j] -= h;
+            let a_plus = third_body_acceleration(plus, d, mu);
+            let a_minus = third_body_acceleration(minus, d, mu);
+            for i in 0..3 {
+                let fd = (a_plus[i] - a_minus[i]) / (2.0 * h);
+                let rel = (fd - analytic[i][j]).abs() / analytic[i][j].abs().max(1e-20);
+                max_rel_err = max_rel_err.max(rel);
+            }
+        }
+        println!("n4-third-body-partials-fd: max_relative_err={max_rel_err:e} h={h}");
+        assert!(max_rel_err < 1e-6, "{max_rel_err:e}");
     }
 }

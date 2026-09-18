@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -663,3 +664,217 @@ def test_all_six_rust_components_share_exactly_one_epoch_from_git():
         f"all six Rust components must share exactly one committed epoch, equal to git's own "
         f"committer date for RUST_EPOCH_PATHS ({independent_epoch!r}); got {epochs}"
     )
+
+
+# =================================================================================================
+# 13. Question 224's own proof: two different venvs now give one Python SBOM -- the declared set
+#     (scripts/kit/python-lock.json) is the input, the live venv is only a cross-check, and a
+#     disagreement (a venv missing a declared package) fails loudly and by name instead of
+#     silently writing a different SBOM.
+# =================================================================================================
+#
+# Every venv built below is METADATA-ONLY: a real, bare `python -m venv --without-pip` (no
+# network -- `--without-pip` skips even the bundled-wheel pip bootstrap) with real
+# `*.dist-info`/`*.egg-info` directories copied in from this worktree's own healthy `.venv`, but
+# none of the actual package code. This is sufficient and exact for what is under test:
+# `scripts/kit/sbom.py` never imports a Python component's own dependencies -- it only reads
+# `importlib.metadata` over them (`_venv_representative_versions`) -- so a metadata-only venv is
+# indistinguishable from a fully `pip install -e ".[dev]"`-provisioned one for this generator's
+# own purposes, and building one this way touches no network and needs no real package downloads
+# at all.
+
+def _real_site_packages() -> Path:
+    result = subprocess.run(
+        [sys.executable, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _site_packages_of(venv_python: Path) -> Path:
+    result = subprocess.run(
+        [str(venv_python), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _make_metadata_only_venv(
+    dest: Path, *, exclude: frozenset = frozenset(), extra_egg_info: bool = False,
+) -> Path:
+    """Creates a real, bare virtualenv at `dest` and copies real `*.dist-info` directories from
+    this worktree's own healthy `.venv` into its (empty) site-packages -- every one EXCEPT any
+    name in `exclude` (a dist-info directory name prefix, e.g. `"setuptools"` excludes
+    `setuptools-84.0.0.dist-info`), plus the repository's own root-level `altavista.egg-info`
+    when `extra_egg_info` is True (the historical "stale altavista dist-info" duplicate
+    question 224 names -- D2-3's own case). Returns the venv's own python executable path.
+    Raises on any failure; callers decide whether that means "skip visibly"."""
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(dest)],
+        check=True, capture_output=True, text=True,
+    )
+    venv_python = dest / "bin" / "python3"
+    if not venv_python.is_file():
+        venv_python = dest / "bin" / "python"
+    assert venv_python.is_file(), f"venv created at {dest} has no bin/python(3)"
+
+    site_packages = _site_packages_of(venv_python)
+    site_packages.mkdir(parents=True, exist_ok=True)
+
+    real_site = _real_site_packages()
+    for entry in sorted(real_site.iterdir()):
+        if not (entry.name.endswith(".dist-info") or entry.name.endswith(".egg-info")):
+            continue
+        if any(entry.name.lower().startswith(f"{ex.lower()}-") for ex in exclude):
+            continue
+        shutil.copytree(entry, site_packages / entry.name)
+
+    if extra_egg_info:
+        egg_info = REPO_ROOT / "altavista.egg-info"
+        assert egg_info.is_dir(), (
+            f"{egg_info} not found -- this worktree's own editable-install layout changed"
+        )
+        shutil.copytree(egg_info, site_packages / "altavista.egg-info")
+
+    return venv_python
+
+
+def _installed_names(venv_python: Path) -> set:
+    result = subprocess.run(
+        [str(venv_python), "-c",
+         "import importlib.metadata as im, json; "
+         "print(json.dumps(sorted({d.metadata['Name'] for d in im.distributions() "
+         "if d.metadata.get('Name')})))"],
+        capture_output=True, text=True, check=True,
+    )
+    return set(json.loads(result.stdout))
+
+
+def _build_two_venvs_or_skip(tmp_path, **kwargs):
+    try:
+        return (
+            _make_metadata_only_venv(tmp_path / "venv_1", **kwargs.get("first", {})),
+            _make_metadata_only_venv(tmp_path / "venv_2", **kwargs.get("second", {})),
+        )
+    except (subprocess.CalledProcessError, OSError, AssertionError) as exc:
+        pytest.skip(
+            f"cannot build a bare venv in this sandbox (`python -m venv --without-pip` failed: "
+            f"{exc}) -- skipping visibly rather than silently, per question 154's own pattern; "
+            f"no network was attempted"
+        )
+
+
+def test_two_different_venvs_produce_one_byte_identical_python_sbom(tmp_path):
+    """Question 224's own deliverable, proven directly: two GENUINELY different `.venv`s --
+    different filesystem paths, different `sys.prefix`, and one carrying the exact historical
+    "stale altavista dist-info" duplicate (D2-3's own case) that the other does not -- now
+    produce a BYTE-IDENTICAL `av-viewer.cdx.json`, because `python_dist_sbom` reads
+    `scripts/kit/python-lock.json` (the committed declared set) for its content, never either
+    venv directly; the venv is read only to cross-check.
+
+    Skips visibly (question 154's own pattern -- named, never silent) if this sandbox cannot
+    build a bare venv at all; no network is used either way."""
+    venv_a, venv_b = _build_two_venvs_or_skip(tmp_path, second={"extra_egg_info": True})
+
+    # Sanity: the two venvs really are different. Both report the same distribution NAME set
+    # (egg-info and dist-info both declare Name=altavista, so the name set alone can't tell them
+    # apart)...
+    names_a = _installed_names(venv_a)
+    names_b = _installed_names(venv_b)
+    assert names_a == names_b == {
+        p["name"] for p in sbom._load_python_lock()
+    } | {"pip"}, f"unexpected installed-name set: a={names_a!r} b={names_b!r}"
+    # ...but venv_b's site-packages genuinely has an extra metadata directory venv_a does not.
+    altavista_dirs_a = sorted(p.name for p in _site_packages_of(venv_a).glob("altavista*"))
+    altavista_dirs_b = sorted(p.name for p in _site_packages_of(venv_b).glob("altavista*"))
+    assert altavista_dirs_b == altavista_dirs_a + ["altavista.egg-info"], (
+        f"expected venv_b to carry exactly one extra altavista metadata dir: "
+        f"a={altavista_dirs_a!r} b={altavista_dirs_b!r}"
+    )
+
+    out_a, out_b = tmp_path / "out_a", tmp_path / "out_b"
+    for venv_python, out_dir in [(venv_a, out_a), (venv_b, out_b)]:
+        result = subprocess.run(
+            [str(venv_python), str(REPO_ROOT / "scripts" / "kit" / "sbom.py"),
+             "--out", str(out_dir), "--component", "av-viewer"],
+            cwd=REPO_ROOT, capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"sbom.py failed under {venv_python}: rc={result.returncode}\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+    bytes_a = (out_a / "av-viewer.cdx.json").read_bytes()
+    bytes_b = (out_b / "av-viewer.cdx.json").read_bytes()
+    sha_a, sha_b = sbom.sha256_file(out_a / "av-viewer.cdx.json"), sbom.sha256_file(out_b / "av-viewer.cdx.json")
+    print(f"\nvenv_a (clean altavista metadata)       av-viewer.cdx.json sha256={sha_a}")
+    print(f"venv_b (+ stale altavista.egg-info dupe) av-viewer.cdx.json sha256={sha_b}")
+    assert sha_a == sha_b, "two genuinely different venvs produced DIFFERENT Python SBOMs"
+    assert bytes_a == bytes_b
+
+    committed = (SBOM_DIR / "av-viewer.cdx.json").read_bytes()
+    assert bytes_a == committed, (
+        "the two venvs' regenerated SBOM differs from the committed "
+        "docs/compliance/sbom/av-viewer.cdx.json -- it is stale, see "
+        "docs/compliance/sbom/README.md's 'Regenerating' section"
+    )
+
+
+def test_a_venv_missing_a_declared_package_fails_the_cross_check_loudly(tmp_path):
+    """The other half of question 224's proof. BEFORE this task, a venv missing `setuptools`
+    (the reconciliation worker's own real defect, named verbatim in question 224's text) made
+    `python_dist_sbom` silently write an SBOM without it -- concretely demonstrated below: the
+    two venvs' own live `importlib.metadata` scans already differ by exactly `{"setuptools"}`,
+    which is precisely what the OLD (live-venv-scanning) generator would have read straight into
+    two DIFFERENT SBOMs, no error, no warning, just a shorter `components` array. AFTER this
+    task, the same missing-`setuptools` venv makes `python_dist_sbom` raise
+    `sbom.PythonSbomCrossCheckError`, naming the package by name, and `scripts/kit/sbom.py`'s own
+    CLI turns that into a clean one-line failure -- no file written -- rather than a silent,
+    shorter SBOM."""
+    venv_good, venv_broken = _build_two_venvs_or_skip(
+        tmp_path, second={"exclude": frozenset({"setuptools"})},
+    )
+
+    # Concrete "before this task" demonstration: the OLD generator scanned exactly this.
+    names_good = _installed_names(venv_good)
+    names_broken = _installed_names(venv_broken)
+    assert names_good - names_broken == {"setuptools"}, (
+        f"expected the broken venv to be missing exactly 'setuptools'; "
+        f"good-only={names_good - names_broken!r} broken-only={names_broken - names_good!r}"
+    )
+
+    out_broken = tmp_path / "out_broken"
+    result = subprocess.run(
+        [str(venv_broken), str(REPO_ROOT / "scripts" / "kit" / "sbom.py"),
+         "--out", str(out_broken), "--component", "av-viewer"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    print(f"\nbroken-venv (no setuptools) sbom.py stderr:\n{result.stderr}")
+    assert result.returncode != 0, "the cross-check must fail this generation, not succeed silently"
+    assert not (out_broken / "av-viewer.cdx.json").exists(), (
+        "no SBOM file should be written when the cross-check fails"
+    )
+    assert "error: av-viewer:" in result.stderr, (
+        "scripts/kit/sbom.py::main must turn PythonSbomCrossCheckError into a clean one-line "
+        f"CLI failure, not a raw traceback -- got stderr={result.stderr!r}"
+    )
+    assert "Traceback" not in result.stderr
+    assert "setuptools" in result.stderr
+    assert (
+        "declared in scripts/kit/python-lock.json but not installed in this .venv"
+        in result.stderr
+    )
+
+    # The good venv (same construction, nothing excluded) generates cleanly -- proving the
+    # failure above is really about the missing package, not this venv-construction technique.
+    out_good = tmp_path / "out_good"
+    result_good = subprocess.run(
+        [str(venv_good), str(REPO_ROOT / "scripts" / "kit" / "sbom.py"),
+         "--out", str(out_good), "--component", "av-viewer"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    assert result_good.returncode == 0, (
+        f"the good venv must generate cleanly: rc={result_good.returncode}\n"
+        f"stdout={result_good.stdout}\nstderr={result_good.stderr}"
+    )
+    assert (out_good / "av-viewer.cdx.json").read_bytes() == (SBOM_DIR / "av-viewer.cdx.json").read_bytes()
