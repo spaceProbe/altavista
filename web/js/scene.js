@@ -44,6 +44,10 @@ import { FrameGraph, orderFrameDefsByParent } from './frames.js';
 import { FloatingOrigin } from './origin.js';
 import { GlobeLayer } from './globe.js';
 import { TilesOverlayLayer, placeOverlayInBodyFixedFrame } from './tiles_layer.js';
+// Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe through
+// the LayerManager"): imported from the barrel (`./layers/index.js`), per that
+// module's own convention -- see `Viewer`'s constructor and `enableGlobe()`, below.
+import { LayerManager } from './layers/index.js';
 // M26.3 (docs/ui-rework-plan.md): the multiple-3D-viewports data model. See viewport.js's
 // own module docstring for the full design (per-viewport camera/frame/focus/floating
 // origin/line-clones, THREE.Layers instead of a second THREE.Scene) -- this file is the
@@ -83,6 +87,19 @@ const ENTITIES_MAX_DISTANCE = 1e8;
 // rotates itself for (RIC/VNB/VVLH). Every other axes kind (MJ2000Eq, BodyFixed, ...)
 // maps to `undefined` -- no client-side rotation for those, unchanged from M4.1.
 const AXES_KIND_MAP = { AXES_KIND_RIC: 'ric', AXES_KIND_VNB: 'vnb', AXES_KIND_VVLH: 'vvlh' };
+// Round 4 (question 228 finding 2): the ONE budget every registered streaming layer
+// (today: the globe's imagery and terrain adapters, registered by `enableGlobe()`,
+// below; `web/js/layers/layer.js`'s own module docstring names the 3D Tiles overlay
+// as a future registrant too -- NOT wired live by this task, see `loadTilesOverlay()`'s
+// own docstring for why) shares -- "the whole point of a byte budget is that three
+// layers with per-item costs differing by orders of magnitude share it" (that file's
+// words). 64 MiB is generous headroom over this module's own worst-case DEMO demand
+// (`GlobeLayer`'s own default `maxTiles=128` imagery tiles * 262,144 bytes/tile,
+// `web/js/layers/imagery_layer.js`'s `IMAGERY_TILE_BYTES`, = 33,554,432 bytes) so the
+// declared budget never actually binds for the offline fixture/demo path this viewer
+// ships with today -- not a claim that 64 MiB is enough for a real ten-gigabyte tile
+// set (H5's own full exit criterion, explicitly out of this task's scope).
+const DEFAULT_LAYER_MEMORY_BUDGET_BYTES = 64 * 1024 * 1024;
 
 export class Viewer {
   constructor(canvas, labelLayer) {
@@ -174,6 +191,14 @@ export class Viewer {
     this.globeLayer = null;
     this.globeBodyName = null;
     this.tilesOverlay = null;
+    // Round 4 (question 228 finding 2, "the wiring half"): ONE LayerManager per
+    // viewer, created here alongside the scene/frame graph -- never one per layer
+    // (`web/js/layers/layer.js`'s own module docstring, quoted above at
+    // `DEFAULT_LAYER_MEMORY_BUDGET_BYTES`). `enableGlobe()` (below) hands this SAME
+    // instance to every `GlobeLayer` it constructs, under stable adapter ids, so a
+    // scenario reload (which calls `enableGlobe()` again) never creates a second
+    // manager or a second budget.
+    this.layerManager = new LayerManager({ memoryBudgetBytes: DEFAULT_LAYER_MEMORY_BUDGET_BYTES });
     this.options = { labels: true, trail: 'full', stars: true };
     this.focus = null;             // object name or null (= frame origin)
     this._focusPrev = new THREE.Vector3();
@@ -1266,7 +1291,13 @@ export class Viewer {
     const b = this.bodies.get(bodyName);
     if (!b) { console.warn(`altavista: enableGlobe('${bodyName}') -- no such body in the current scenario`); return false; }
     if (this.globeLayer) { this.globeLayer.dispose(); this._entitiesGroup.remove(this.globeLayer.group); }
-    this.globeLayer = new GlobeLayer(opts);
+    // Round 4: `layerManager` is always THIS viewer's own single, shared manager --
+    // "one manager per viewer" is a hard invariant, not a per-call choice, so it is
+    // applied AFTER `...opts` and always wins over anything a caller passes there.
+    // `GlobeLayer.dispose()` (called just above, for whatever globe was live before
+    // this call) already unregistered its own adapters from this same manager, so
+    // this registration can never collide with a stale one.
+    this.globeLayer = new GlobeLayer({ ...opts, layerManager: this.layerManager });
     this.globeBodyName = bodyName;
     this._entitiesGroup.add(this.globeLayer.group);
     b.mesh.visible = false;

@@ -373,6 +373,53 @@ export class LayerManager {
   }
 
   /**
+   * Unregister a layer previously added under `id` -- `addLayer`'s own lifecycle
+   * counterpart, added by the round-4 wiring task (question 228 finding 2:
+   * "wire the globe through the LayerManager") the moment a REAL caller needed it.
+   * `web/js/scene.js`'s `Viewer` creates exactly ONE `LayerManager` per viewer ("one
+   * manager, one budget", this file's own module docstring) and keeps it for the
+   * viewer's whole lifetime, but `enableGlobe()`/`disableGlobe()` construct and
+   * dispose a FRESH `GlobeLayer` instance on every call -- each of which registers
+   * its own imagery/terrain adapters on that SAME long-lived manager, under the SAME
+   * stable ids (`'imagery'`/`'terrain'`). Without a way to unregister the OLD
+   * adapters first, a second `enableGlobe()` call would throw on `addLayer`'s own
+   * already-registered guard above, and worse, an old, disposed `GlobeLayer`'s stale
+   * `textureLoader` would stay silently registered forever, still declaring demand
+   * (`plan()`) and consuming shared budget for content nothing renders any more --
+   * exactly the zombie-registration failure mode this method exists to make
+   * impossible. This is an ADDITIVE lifecycle method: no existing caller/check/test
+   * ever calls it, so every one of them is unaffected -- proven by re-running
+   * `web/js/layers_check.mjs`/`web/js/layers_budget_check.mjs` byte-for-byte
+   * unchanged after adding it (see this task's own report).
+   *
+   * Cancels every pending load this layer owns (identical abort()/pendingBytes/
+   * cancelledCount bookkeeping to `update()`'s own cancellation loop, above), evicts
+   * every resident entry this layer owns (via `_evictEntry`, so `release(localKey)`
+   * and `evictedCount` get the same treatment any other eviction gets), drops any
+   * `_failed`-blacklisted globalKeys belonging to it (so a FUTURE layer registered
+   * under the same id starts with a clean slate, never inheriting a stale
+   * blacklist), and removes it from `_layers`. No-op if `id` is not registered.
+   */
+  removeLayer(id) {
+    if (!this._layers.has(id)) return;
+    for (const [globalKey, p] of this.pending) {
+      if (p.layerId !== id) continue;
+      p.controller.abort();
+      this.pending.delete(globalKey);
+      this.pendingBytes -= p.byteCost; // see constructor's own doc comment on pendingBytes
+      this.cancelledCount += 1;
+    }
+    for (const [globalKey, entry] of this.resident) {
+      if (entry.layerId === id) this._evictEntry(globalKey, entry);
+    }
+    const prefix = `${id} `; // globalKeyFor's own join -- see that function's doc comment
+    for (const globalKey of this._failed.keys()) {
+      if (globalKey.startsWith(prefix)) this._failed.delete(globalKey);
+    }
+    this._layers.delete(id);
+  }
+
+  /**
    * One "frame"/tick: ask every registered layer what it wants for `view`, merge
    * and priority-sort the result (`comparePriority`), cancel any in-flight request
    * that fell out of the new plan, admit (start a load for) anything newly wanted
