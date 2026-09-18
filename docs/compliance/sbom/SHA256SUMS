@@ -1,9 +1,9 @@
-68cc8c008a0ef5d88621481887ec229a4aa6399b3266171f90f85563e2a5dc17  docs/compliance/sbom/av-command.cdx.json
-4a6434671bb87d49d7a62a9813c8fc5cf43ca3cc4578cb9210cb15fe91fb0e5b  docs/compliance/sbom/av-dynamics-service.cdx.json
-63044ebe88617e904cb5d8d4e6bfc807cc6f765f913473875b3f51bbf4a3d47a  docs/compliance/sbom/av-edge-plugin.cdx.json
-9257f206715f10f4e313bf8f82f696f216233ef19292321f34cd9ce8f1149fcf  docs/compliance/sbom/av-gateway.cdx.json
-2fd0450cdd67c2adf90a41e167a00b7fd5319f939765d660b54ac436f2bbba7b  docs/compliance/sbom/av-ingest.cdx.json
-a45fd78b01ddaac8573de14464f8bb785bfeb3d9cb74f6d64f0fdff3910a2369  docs/compliance/sbom/av-proposer.cdx.json
+7833f26226b3b7a55ce05c4b8240445ed4a2bd8183decd2c29a22189f87c41f8  docs/compliance/sbom/av-command.cdx.json
+2ef30648e379b12b3bb61a41482572c8befd9886bed9ba0dd43d31090d4a1651  docs/compliance/sbom/av-dynamics-service.cdx.json
+323761fe4a14ee2a128710ff2010d6026b2c57b0d73158423414f032a749451a  docs/compliance/sbom/av-edge-plugin.cdx.json
+8b990951f08ad5abb2a9aa8e51e07c30850fba0e0f2d05b9644c99947c59d95d  docs/compliance/sbom/av-gateway.cdx.json
+88b262695bae98ceea1ac421a0d1914c9a37649c90a7faaa17ac57394abb5647  docs/compliance/sbom/av-ingest.cdx.json
+60772478eca8bba9a2f572ffd9c787d79b4adf8a8eb1613c2a2f3b634842284e  docs/compliance/sbom/av-proposer.cdx.json
 5dfff84ebf2abb8bb394d446ecf3975ebf2f53e2aa2cd36ff32244beda42ba6e  docs/compliance/sbom/av-viewer.cdx.json
 f87b43584d000030f9dcde8065d89f2d503dbc7e251eac232eedee0dbcfae9e4  docs/compliance/sbom/cfs-image.cdx.json
 105bc7e343f8707da1c51f29acd7300c13ed14095b6ccc2bb642bdd27d92f557  docs/compliance/sbom/edge-plugin-image.cdx.json
