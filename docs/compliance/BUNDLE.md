@@ -40,9 +40,14 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa
+b97e3b2b27f80df15f791fa90037335152ec14dd77e944778c929aff131fa00c
 ```
 
+
+Recorded by the lead from the verification clone on 2026-09-18 at `6599211`, the SBOM
+regeneration for the merge of native-dynamics rounds 1 and 2 into the heavy branch (question
+220); the value it replaces, `ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa`,
+is described next.
 Recorded by the lead from the verification clone on 2026-09-18 at `2aced3e`, which
 regenerated the two Python SBOMs: the commit that introduced `scripts/kit/python-lock.json`
 (an epoch input) also carried SBOMs generated before it existed, so their epoch was stale on
