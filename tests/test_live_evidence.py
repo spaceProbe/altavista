@@ -274,12 +274,12 @@ def test_av_ingest_server_returns_a_real_verify_result_from_the_kit():
 # =================================================================================================
 
 def test_not_collected_components_are_named_with_a_reason():
-    assert set(live_evidence.NOT_COLLECTED_COMPONENTS) == {"av-command", "av-edge-plugin", "av-gateway"}
+    assert set(live_evidence.NOT_COLLECTED_COMPONENTS) == {"av-command", "av-edge-plugin", "av-gateway", "av-jobs", "av-tiles"}
     for name, reason in live_evidence.NOT_COLLECTED_COMPONENTS.items():
         assert isinstance(reason, str) and len(reason) > 20, f"{name}: reason too thin to be a real explanation"
 
 
-def test_the_six_control_matrix_components_are_all_accounted_for_in_the_live_section():
+def test_the_control_matrix_components_are_all_accounted_for_in_the_live_section():
     """Every component `scripts/kit/evidence.py::discover_components` finds a control matrix for
     appears SOMEWHERE in `live_evidence.py`'s own accounting -- either brought up for real
     (`av-dynamics-service`, `gmat-service`, `av-ingest`) or named as not-collected
