@@ -28,26 +28,43 @@
 //!
 //! # Which omega, and whether it is the full body-fixed rotation
 //!
-//! **A single SCALAR rate about the z-axis, `angVel = [0, 0, 7.292115855e-5]` rad/s -- NOT
-//! the full 3x3 body-fixed rotation [`crate::frame::BodyFixedRotation`] uses for gravity.**
-//! `AtmosphereModel`'s own constructor (`third_party/gmat-src/src/base/solarsys/
-//! AtmosphereModel.cpp`) hardcodes exactly this: `angVel[0] = 0.0; angVel[1] = 0.0; angVel[2]
-//! = 7.29211585530e-5;` ("Default to nominal Earth angular velocity") and `DragForce` reads
-//! this SAME three-element array (`atmos->GetAngularVelocity()`) as its own `angVel` pointer
-//! -- there is no further update anywhere in `DragForce::Accelerate`'s own call path that
-//! would replace it with a true (precessing/nutating/polar-motion-corrected) body angular
-//! velocity vector. **And the cross product is formed directly on `theState[0..3]`, the
-//! spacecraft's INERTIAL (central-body MJ2000Eq) position -- never a body-fixed one.** This
-//! is the classic "rotating atmosphere" approximation (a uniformly-rotating Earth with a
-//! fixed axis and fixed rate, applied directly in the inertial frame, exactly as if
-//! `EarthMJ2000Eq` and `EarthFixed` shared the same z-axis and differed only by
-//! Greenwich-hour-angle-rate rotation) -- distinct from, and simpler than, the true
-//! [`crate::frame::BodyFixedRotation`] this crate's gravity term uses (which the density
-//! evaluation itself DOES need, for the geodetic height/latitude that determines the
-//! atmosphere's height-banded density profile -- see [`crate::jacchia_roberts`]'s own doc
-//! comment, "Geodetic height and latitude"). [`EARTH_ANGULAR_VELOCITY_RAD_S`] below is this
-//! same GMAT constant, and [`relative_velocity`] forms the cross product on the caller's
-//! inertial position/velocity directly, matching this reading exactly.
+//! **A single SCALAR rate about the z-axis, `angVel = [0, 0, 7.292115855e-5]` rad/s ONLY AS A
+//! CONSTRUCTOR DEFAULT -- corrected, question 227/N3 round 3: an earlier version of this doc
+//! comment claimed `DragForce::Accelerate`'s own call path never replaces this default with a
+//! true rotation-derived angular velocity vector. Re-reading `AtmosphereModel.cpp` (not just
+//! `DragForce.cpp`) shows that claim is WRONG.** `AtmosphereModel`'s own constructor
+//! (`third_party/gmat-src/src/base/solarsys/AtmosphereModel.cpp`) does hardcode `angVel[0] =
+//! 0.0; angVel[1] = 0.0; angVel[2] = 7.29211585530e-5;` ("Default to nominal Earth angular
+//! velocity"), and `DragForce::Initialize` reads this SAME three-element array
+//! (`atmos->GetAngularVelocity()`, called with no epoch argument, so it returns whatever
+//! `angVel` currently holds without updating it) into its own `angVel` POINTER -- but a
+//! pointer, not a copy, into the SAME array `AtmosphereModel` owns. Every `DragForce::Accelerate`/
+//! `GetDerivatives`/`GetDerivativesForSpacecraft` call FIRST calls `GetDensity`, which calls
+//! `atmos->Density(...)`, and `JacchiaRobertsAtmosphere::Density`'s own body (`third_party/
+//! gmat-src/src/base/solarsys/JacchiaRobertsAtmosphere.cpp`, `Density()`) calls
+//! `AtmosphereModel::BuildAngularVelocity(epoch)` whenever `epoch != wUpdateEpoch` (true on
+//! essentially every call) -- and `BuildAngularVelocity` OVERWRITES the SAME `angVel` array,
+//! IN PLACE, with the angular velocity actually implied by the current body-fixed rotation
+//! matrix and its time derivative (`R^T * Rdot`, extracted from `cbFixed->GetLastRotationMatrix
+//! /GetLastRotationDotMatrix()`, both freshly computed for this epoch by the
+//! `CoordinateConverter::Convert` call `CalculateGeodetics` makes just before it, for the SAME
+//! epoch) -- so by the time `DragForce::Accelerate`'s own `vRelative` formation (lines ~3423-3428
+//! of `DragForce.cpp`) reads `angVel`, it is NOT the constructor default: it is the TRUE,
+//! epoch-specific angular velocity of the true (precessing/nutating/polar-motion-corrected)
+//! `EarthFixed` frame, expressed in the inertial frame, even though the cross product itself is
+//! still formed directly on `theState[0..3]` (the spacecraft's INERTIAL position, never rotated
+//! to body-fixed). [`EARTH_ANGULAR_VELOCITY_RAD_S`]/[`relative_velocity`] below still use ONLY
+//! the constant scalar (this module's own, deliberate simplification, not GMAT's) -- measured
+//! impact: at this crate's own LEO test altitudes the correction `BuildAngularVelocity` applies
+//! over the constant-scalar default is of order `1e-5`-`1e-6` RELATIVE (LOD-driven UT1 rate
+//! variation plus small nutation/polar-motion terms, all tiny next to the dominant ~7.29e-5
+//! rad/s sidereal rate), several orders of magnitude below the `~1e-3`-`~6e-4` Jacchia-Roberts
+//! density disagreement this task's own report root-causes -- confirmed NOT the dominant driver
+//! of that residual, but a real, previously-undocumented divergence from GMAT worth recording
+//! (not implemented here: doing so needs the SAME `R`/`Rdot` this crate's own
+//! [`crate::frame::BodyFixedRotation`] already carries for gravity, extracted into a 3-vector
+//! via GMAT's own `R^T * Rdot` construction -- a real, scoped follow-up, not a fix this task's
+//! own effort budget reaches given its measured sub-1e-5 impact).
 //!
 //! # Whether density is evaluated at the body-fixed position
 //!

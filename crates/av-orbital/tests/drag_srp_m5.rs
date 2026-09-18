@@ -28,6 +28,23 @@
 //! the position residual is explained this way; the remainder is recorded as an open gap, not
 //! chased further within this task's own effort budget.
 //!
+//! **Round 3 (question 227) root-caused the Jacchia-Roberts disagreement further** --
+//! `tests/drag_goldens.rs`'s own module doc now records the full investigation: the
+//! disagreement is NOT a monotonic amplification but a smoothly SIGN-FLIPPING function of
+//! altitude, tightly correlated with the Atomic-Oxygen-to-Helium composition crossover
+//! (independently confirmed, O dominant below ~900 km, He dominant above ~1000 km) -- this
+//! golden's own ~250 km altitude sits deep in the O-dominant, single-signed-bias regime, so the
+//! ~2e-4-relative estimate above (and this arc's own 68.3 m/0.0803 m/s residual) is UNCHANGED
+//! by that finding. The code itself (`exotherm`/`rho_high`/`rho_cor`) was re-verified
+//! line-for-line against GMAT's own source and independently re-derived in Python with
+//! identical results; a definitive single-line attribution of the sign-flip's own origin was
+//! NOT reached within round 3's effort budget (see `tests/drag_goldens.rs` for exactly what was
+//! ruled out and the remaining path). One fix DID land from this round:
+//! `crate::jacchia_roberts::exotherm`/`raw_density_g_cm3` now thread the caller's own
+//! `CentralBodyGeodetics` through instead of hardcoding Earth's defaults internally -- a real
+//! correctness gap, but numerically a no-op for this (Earth-default) golden, so it does not
+//! move this arc's own measured residual either.
+//!
 //! **Weather.** This golden's own generator (`goldens/gen_leo_1day.py`, `_add_forces`) never
 //! calls `SetField("F107", ...)` etc. on the `DragForce` it builds -- so the arc was flown at
 //! GMAT's own `DragForce` CONSTANT-flux defaults (F10.7=F10.7A=150, Kp=3 --

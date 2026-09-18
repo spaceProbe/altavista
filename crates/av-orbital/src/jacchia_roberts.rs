@@ -237,6 +237,17 @@ impl CentralBodyGeodetics {
     }
 }
 
+/// The Sun-declination/geodetic-latitude pair GMAT's own `JacchiaRoberts()` computes ONCE per
+/// `Density()` call and passes UNCHANGED into every downstream `exotherm`/`rho_high`/`rho_cor`
+/// call (see [`exotherm`]'s own doc comment) -- bundled here so [`exotherm`]/
+/// [`raw_density_g_cm3`] stay at or under clippy's `too_many_arguments` threshold without an
+/// `#[allow]` (this crate's own rule: fix the lint, never silence it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SunGeometry {
+    pub sun_dec_rad: f64,
+    pub geo_lat_rad: f64,
+}
+
 /// The resolved F10.7/F10.7A/Kp triple [`density_kg_m3`] needs -- either GMAT's own CONSTANT
 /// defaults ([`crate::weather::ConstantWeather::gmat_defaults`]) or a caller-resolved,
 /// file-derived triple (see this module's own doc comment, "What this module does NOT do").
@@ -359,8 +370,11 @@ fn deflate_polynomial(c: &[f64], root: f64) -> Vec<f64> {
 /// from [`WeatherInputs`] via the SAME `379.0 + 3.24*F107A + 1.3*(F107-F107A)` formula
 /// `JacchiaRobertsAtmosphere.cpp`'s own weather-selection `switch` uses for every branch).
 ///
-/// `sun_dec_rad`/`geo_lat_rad` are GMAT's own `exotherm` PARAMETERS (its real C++ signature
-/// is `exotherm(space_craft, sun, geo, height, sun_dec, geo_lat)` -- the caller,
+/// `geom` (`sun_dec_rad`/`geo_lat_rad`, bundled as [`SunGeometry`] -- round 3's own change,
+/// question 227, purely to keep this function's own argument count under clippy's
+/// `too_many_arguments` threshold without an `#[allow]`; not a behavior change) are GMAT's own
+/// `exotherm` PARAMETERS (its real C++ signature is `exotherm(space_craft, sun, geo, height,
+/// sun_dec, geo_lat)` -- the caller,
 /// `JacchiaRoberts()`, computes both ONCE per `Density()` call and passes the SAME values into
 /// every `exotherm` invocation that call makes (both the `height=500` and the actual-height
 /// calls [`rho_high`] needs) -- `sun_dec` from the un-rotated Sun vector, `geo_lat` from the
@@ -370,7 +384,18 @@ fn deflate_polynomial(c: &[f64], root: f64) -> Vec<f64> {
 /// "geodetic latitude" spin with Earth's rotation in the inertial frame -- caught before
 /// being exercised by any test, by re-reading GMAT's own `exotherm` signature rather than
 /// trusting a first draft).
-pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, height_km: f64, sun_dec_rad: f64, geo_lat_rad: f64) -> Result<ExothermResult, JacchiaRobertsError> {
+///
+/// `cb` is the central body's own polar radius (`cbPolarRadius`, GMAT's own member, set once by
+/// `SetCentralBody` and read here for the `(height - 125.0)/35.0 * sum/(cbPolarRadius + height)`
+/// term) -- **round 3's own fix** (question 227): an earlier version of this function hardcoded
+/// [`CentralBodyGeodetics::earth_defaults`] here instead of threading the caller's own `cb`
+/// through, silently ignoring a non-Earth-default central body for exactly this one term (every
+/// OTHER caller of a central-body-shaped quantity in this module -- [`geodetic_height_lat_km`],
+/// [`rho_100`], [`rho_125`], [`rho_high`] -- already took `cb: &CentralBodyGeodetics`
+/// correctly). Numerically identical for every golden this crate flies (all Earth, at
+/// [`CentralBodyGeodetics::earth_defaults`]), so this fix does not move any measured residual --
+/// it closes a correctness gap a non-Earth or non-default central body would have hit silently.
+pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, height_km: f64, geom: SunGeometry, cb: &CentralBodyGeodetics) -> Result<ExothermResult, JacchiaRobertsError> {
     let sun_denom = (r_sun_km[0] * r_sun_km[0] + r_sun_km[1] * r_sun_km[1]).sqrt();
     let cross_denom = (r_sun_km[0] * r_sc_km[1] - r_sun_km[1] * r_sc_km[0]).abs();
     let cos_denom = (r_sc_km[0] * r_sc_km[0] + r_sc_km[1] * r_sc_km[1]).sqrt();
@@ -389,8 +414,8 @@ pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, he
         ((r_sun_km[0] * r_sc_km[1] - r_sun_km[1] * r_sc_km[0]) / cross_denom) * cos_alpha.clamp(-1.0, 1.0).acos()
     };
 
-    let sun_dec = sun_dec_rad;
-    let geo_lat = geo_lat_rad;
+    let sun_dec = geom.sun_dec_rad;
+    let geo_lat = geom.geo_lat_rad;
 
     let theta = 0.5 * (geo_lat + sun_dec).abs();
     let eta = 0.5 * (geo_lat - sun_dec).abs();
@@ -421,7 +446,7 @@ pub fn exotherm(r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, he
             sum = CON_L[i] + sum * t_infinity;
         }
         sum_con_l = sum;
-        exotemp = t_infinity - (t_infinity - tx) * (-(tx - TZERO) / (t_infinity - tx) * (height_km - 125.0) / 35.0 * sum / (CentralBodyGeodetics::earth_defaults().polar_radius_km() + height_km)).exp();
+        exotemp = t_infinity - (t_infinity - tx) * (-(tx - TZERO) / (t_infinity - tx) * (height_km - 125.0) / 35.0 * sum / (cb.polar_radius_km() + height_km)).exp();
     } else {
         exotemp = tx;
     }
@@ -565,13 +590,19 @@ pub fn rho_cor(height_km: f64, gmat_mjd_days: f64, geo_lat_rad: f64, kp: f64) ->
     10.0_f64.powf(geo_cor + semian_cor + slat_cor)
 }
 
-/// `JacchiaRobertsAtmosphere::rho_high`: raw density (g/cm^3) between 125 and 2500 km, ported
-/// unchanged. `exo` is [`exotherm`] evaluated at `height_km` itself (its own `t_infinity`/
-/// `tx`/`sum_con_l` are what this needs); `t_500_k` is the exospheric temperature at 500 km
-/// (a SEPARATE [`exotherm`] call, GMAT's own `t_500 = exotherm(..., 500.0, ...)`).
-pub fn rho_high(height_km: f64, exo: &ExothermResult, t_500_k: f64, sun_dec_rad: f64, geo_lat_rad: f64, cb: &CentralBodyGeodetics) -> f64 {
+/// `JacchiaRobertsAtmosphere::rho_high`'s own SIX per-constituent partial densities (g/cm^3,
+/// N2/Ar/He/O2/O/H, `i=0..5`, GMAT's own `rho_out += r` loop with the sum deferred to the
+/// caller) -- round 3's own addition (question 227): exposed as its own `pub` function, rather
+/// than folded silently into [`rho_high`]'s summation, specifically so a species-differential
+/// root-cause investigation (per-species weight `w_i(h) = rho_i(h) / rho_total(h)`, fit against
+/// the measured native-vs-GMAT disagreement) can be driven from an integration test without
+/// duplicating this formula a second time (this crate's own `cof.rs`-precedent rule: one
+/// definition, reused, not copy-pasted). Arguments and every term are IDENTICAL to
+/// [`rho_high`]'s own (see that function's doc comment); [`rho_high`] itself is now this
+/// function's sum.
+pub fn rho_high_species_terms(height_km: f64, exo: &ExothermResult, t_500_k: f64, sun_dec_rad: f64, geo_lat_rad: f64, cb: &CentralBodyGeodetics) -> [f64; 6] {
     let cb_polar_km = cb.polar_radius_km();
-    let mut rho_out = 0.0;
+    let mut terms = [0.0_f64; 6];
     for i in 0..=5 {
         let mut di = 0.0;
         if i <= 4 {
@@ -589,14 +620,21 @@ pub fn rho_high(height_km: f64, exo: &ExothermResult, t_500_k: f64, sun_dec_rad:
             f = 10.0_f64.powf(f);
         }
         if height_km > 500.0 && i == 5 {
-            let r = MOL_MASS[5] * 10.0_f64.powf(73.13 - (39.4 - 5.5 * t_500_k.log10()) * t_500_k.log10()) * (t_500_k / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - t_500_k)).powf(gamma) / AVOGADRO;
-            rho_out += r;
+            terms[i] = MOL_MASS[5] * 10.0_f64.powf(73.13 - (39.4 - 5.5 * t_500_k.log10()) * t_500_k.log10()) * (t_500_k / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - t_500_k)).powf(gamma) / AVOGADRO;
         } else if i <= 4 {
-            let r = f * MOL_MASS[i] * di * (exo.tx / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - exo.tx)).powf(gamma);
-            rho_out += r;
+            terms[i] = f * MOL_MASS[i] * di * (exo.tx / exo.exotemp).powf(exp1) * ((exo.t_infinity - exo.exotemp) / (exo.t_infinity - exo.tx)).powf(gamma);
         }
     }
-    rho_out
+    terms
+}
+
+/// `JacchiaRobertsAtmosphere::rho_high`: raw density (g/cm^3) between 125 and 2500 km, ported
+/// unchanged. `exo` is [`exotherm`] evaluated at `height_km` itself (its own `t_infinity`/
+/// `tx`/`sum_con_l` are what this needs); `t_500_k` is the exospheric temperature at 500 km
+/// (a SEPARATE [`exotherm`] call, GMAT's own `t_500 = exotherm(..., 500.0, ...)`). The sum of
+/// [`rho_high_species_terms`]'s own six per-constituent terms.
+pub fn rho_high(height_km: f64, exo: &ExothermResult, t_500_k: f64, sun_dec_rad: f64, geo_lat_rad: f64, cb: &CentralBodyGeodetics) -> f64 {
+    rho_high_species_terms(height_km, exo, t_500_k, sun_dec_rad, geo_lat_rad, cb).iter().sum()
 }
 
 /// The raw (pre-[`rho_cor`]) density in g/cm^3 at `height_km`, dispatching to the four
@@ -604,25 +642,29 @@ pub fn rho_high(height_km: f64, exo: &ExothermResult, t_500_k: f64, sun_dec_rad:
 /// a SECOND [`exotherm`] call at 500 km when `height_km > 125.0` (for [`rho_high`]'s own
 /// `t_500`), exactly as GMAT computes it. `sun_dec_rad`/`geo_lat_rad` are computed ONCE by the
 /// caller ([`density_kg_m3`]) and passed through unchanged to every `exotherm` call, matching
-/// GMAT's own `JacchiaRoberts()` (see [`exotherm`]'s own doc comment).
-fn raw_density_g_cm3(height_km: f64, r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, sun_dec_rad: f64, geo_lat_rad: f64) -> Result<f64, JacchiaRobertsError> {
-    let cb = CentralBodyGeodetics::earth_defaults();
+/// GMAT's own `JacchiaRoberts()` (see [`exotherm`]'s own doc comment). `cb` is the CALLER's own
+/// central-body shape (round 3's own fix, question 227: this function used to construct its own
+/// `CentralBodyGeodetics::earth_defaults()` here, silently ignoring [`density_kg_m3`]'s own `cb`
+/// parameter for every quantity this function and [`exotherm`] compute -- numerically identical
+/// for every golden this crate flies, all Earth-default, but a real correctness gap for anything
+/// else).
+fn raw_density_g_cm3(height_km: f64, r_sc_km: [f64; 3], r_sun_km: [f64; 3], kp: f64, xtemp_k: f64, geom: SunGeometry, cb: &CentralBodyGeodetics) -> Result<f64, JacchiaRobertsError> {
     if height_km <= 90.0 {
         return Ok(RHO_ZERO);
     }
     if height_km < 100.0 {
-        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, sun_dec_rad, geo_lat_rad)?;
-        return Ok(rho_100(height_km, &exo, &cb));
+        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, geom, cb)?;
+        return Ok(rho_100(height_km, &exo, cb));
     }
     if height_km <= 125.0 {
-        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, sun_dec_rad, geo_lat_rad)?;
-        return Ok(rho_125(height_km, &exo, &cb));
+        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, geom, cb)?;
+        return Ok(rho_125(height_km, &exo, cb));
     }
     if height_km <= 2500.0 {
-        let exo_500 = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, 500.0, sun_dec_rad, geo_lat_rad)?;
+        let exo_500 = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, 500.0, geom, cb)?;
         let t_500_k = exo_500.exotemp;
-        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, sun_dec_rad, geo_lat_rad)?;
-        return Ok(rho_high(height_km, &exo, t_500_k, sun_dec_rad, geo_lat_rad, &cb));
+        let exo = exotherm(r_sc_km, r_sun_km, kp, xtemp_k, height_km, geom, cb)?;
+        return Ok(rho_high(height_km, &exo, t_500_k, geom.sun_dec_rad, geom.geo_lat_rad, cb));
     }
     Ok(0.0)
 }
@@ -676,7 +718,7 @@ pub fn density_kg_m3<R: BodyFixedRotation>(r_sc_m: [f64; 3], r_sun_m: [f64; 3], 
     // from the un-rotated Sun vector.
     let sun_dec_rad = r_sun_km[2].atan2((r_sun_km[0] * r_sun_km[0] + r_sun_km[1] * r_sun_km[1]).sqrt());
 
-    let raw_g_cm3 = raw_density_g_cm3(height_km, r_sc_km, r_sun_km, kp, xtemp_k, sun_dec_rad, geo_lat_rad)?;
+    let raw_g_cm3 = raw_density_g_cm3(height_km, r_sc_km, r_sun_km, kp, xtemp_k, SunGeometry { sun_dec_rad, geo_lat_rad }, cb)?;
 
     let gmat_mjd_days = crate::tdb::tai_ns_to_tt_mjd(t_tai_ns);
     let corrected_g_cm3 = raw_g_cm3 * rho_cor(height_km, gmat_mjd_days, geo_lat_rad, kp);
