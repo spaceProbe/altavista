@@ -403,3 +403,113 @@ fn an_unknown_output_value_is_a_typed_failure() {
     spec.parameters.insert("output".to_string(), "bogus-output-kind".to_string());
     run_and_assert_failure_kind(spec, pb::JobFailureKind::InvalidParameters, "unknown-output");
 }
+
+// -- item 5: the streaming path (Runner::run_one_streaming / TilerExecutor::
+// run_imagery_streaming) produces the SAME tile set identity as the buffered path -------
+
+/// **The load-bearing test for round 3's streaming finding.** `crate::tiler::TilerExecutor::
+/// run_imagery` (the buffered path every other test in this file exercises) accumulates
+/// every tile's bytes in one `Vec<JobOutput>` before `Runner` stores any of them --
+/// unreachable at a ten-gigabyte tile set on an 8 GB host. `TilerExecutor::
+/// run_imagery_streaming`, reached through `Runner::run_one_streaming`, stores each tile
+/// through the `ObjectSink` as it is rendered and drops it immediately, so peak memory is one
+/// tile plus the source raster plus the manifest's own small `TileEntry` list.
+///
+/// That streaming rewrite is only a real substitute for the buffered path if a tile set's
+/// identity does not depend on which of the two produced it -- exactly the platform rule
+/// question 223 recorded when `TileEntry.uri` was emptied (`crate::tiler`'s own module doc,
+/// "The manifest-vs-sink ordering constraint": "a manifest that changes with the backend
+/// holding it is not an identity"). This test is that equality, proved rather than assumed:
+///
+/// 1. the same fixture/params run through BOTH `Runner::run_one` (buffered) and
+///    `Runner::run_one_streaming` (streaming), each against its own fresh `MemoryObjectSink`;
+/// 2. `manifest_sha256` must be byte-identical across the two completions;
+/// 3. the streaming completion's `outputs` must carry exactly one entry -- the manifest --
+///    per `run_imagery_streaming`'s own doc comment on what the streaming path's recorded
+///    outputs become; the buffered completion's `outputs` still carries one entry per tile
+///    plus the manifest, unchanged;
+/// 4. the two runs' MANIFEST bytes, fetched back from each run's own sink, must be
+///    byte-identical, not merely hash-equal;
+/// 5. EVERY tile the (decoded) manifest names must resolve, byte-identical, in BOTH sinks --
+///    not just one sampled tile -- because "the stored objects are identical between the two
+///    paths" is this test's own second claim, independent of the manifest hash matching.
+#[test]
+fn the_streaming_path_produces_a_byte_identical_manifest_and_byte_identical_tiles_to_the_buffered_path() {
+    const JOB_ID: &str = "job-stream-equality"; // shared: job_id is an encoded TileSetManifest field.
+
+    // -- buffered run: Runner::run_one, crate::tiler::TilerExecutor::run_imagery. ----------
+    let dir_buffered = TempDir::new("stream-equality-buffered");
+    let clock_buffered = TestClock::new(5_000);
+    let (runner_buffered, sink_buffered) = fresh_runner_with_shared_sink(dir_buffered.path(), &clock_buffered, fixture_raster_bytes());
+    let spec = tiler_spec(JOB_ID);
+    runner_buffered.queue().submit(&spec).unwrap();
+    let completion_buffered = runner_buffered.run_one(&spec).unwrap();
+    assert!(completion_buffered.ok, "{completion_buffered:?}");
+
+    // -- streaming run: Runner::run_one_streaming, crate::tiler::TilerExecutor::
+    // run_imagery_streaming -- identical fixture/params/job_id, its own fresh queue dir and
+    // its own fresh sink, so nothing but the code path differs. -------------------------
+    let dir_streaming = TempDir::new("stream-equality-streaming");
+    let clock_streaming = TestClock::new(5_000);
+    let (runner_streaming, sink_streaming) = fresh_runner_with_shared_sink(dir_streaming.path(), &clock_streaming, fixture_raster_bytes());
+    runner_streaming.queue().submit(&spec).unwrap();
+    let completion_streaming = runner_streaming.run_one_streaming(&spec).unwrap();
+    assert!(completion_streaming.ok, "{completion_streaming:?}");
+
+    // -- claim 2: manifest_sha256 byte-identical across the two paths. ---------------------
+    assert_eq!(
+        completion_streaming.manifest_sha256, completion_buffered.manifest_sha256,
+        "the streaming path's manifest_sha256 must be byte-identical to the buffered path's, for the identical spec -- a tile set's identity must not depend on how it was written (question 223)"
+    );
+
+    // -- claim 3: the streaming completion's outputs carry exactly one entry (the manifest)
+    // -- see TilerExecutor::run_imagery_streaming's own doc comment on this. ---------------
+    assert_eq!(completion_streaming.outputs.len(), 1, "the streaming path must record exactly one output (the manifest) -- every tile was already stored directly through the sink: {completion_streaming:?}");
+    assert_eq!(completion_streaming.outputs[0].media_type, av_jobs::tiler::MANIFEST_MEDIA_TYPE);
+    assert_eq!(completion_streaming.outputs[0].sha256, completion_streaming.manifest_sha256);
+    // The buffered completion, unchanged: one entry per tile plus the manifest.
+    let buffered_tile_outputs = completion_buffered.outputs.iter().filter(|a| a.media_type == av_jobs::tiler::IMAGERY_TILE_MEDIA_TYPE).count();
+    assert_eq!(buffered_tile_outputs, 10, "sanity: the fixture's own documented tile count (2 at level 0, 8 at level 1)");
+    assert_eq!(completion_buffered.outputs.len(), buffered_tile_outputs + 1, "the buffered path must still record one output per tile plus the manifest, unchanged");
+
+    // -- claim 4: the manifest bytes themselves, fetched back from EACH run's own sink, are
+    // byte-identical -- not merely hash-equal. ---------------------------------------------
+    let manifest_bytes_buffered = sink_buffered.get(&completion_buffered.manifest_sha256).expect("the buffered run's sink must have actually stored the manifest");
+    let manifest_bytes_streaming = sink_streaming.get(&completion_streaming.manifest_sha256).expect("the streaming run's sink must have actually stored the manifest");
+    assert_eq!(manifest_bytes_buffered, manifest_bytes_streaming, "the manifest's own bytes must be byte-identical between the buffered and streaming paths");
+
+    // -- claim 5: EVERY tile the manifest names resolves, byte-identical, in BOTH sinks --
+    // "assert the stored objects are identical between the two paths, not only the
+    // manifest". -----------------------------------------------------------------------
+    let manifest: pb::TileSetManifest = prost::Message::decode(manifest_bytes_streaming.as_slice()).expect("decoding the streaming manifest bytes");
+    assert_eq!(manifest.tiles.len(), 10, "sanity: same fixture, same tile count");
+    for tile in &manifest.tiles {
+        let bytes_from_buffered_sink = sink_buffered.get(&tile.sha256).unwrap_or_else(|| panic!("tile (level={}, x={}, y={}) sha256 {:?} must be present in the BUFFERED run's own sink", tile.level, tile.x, tile.y, tile.sha256));
+        let bytes_from_streaming_sink = sink_streaming.get(&tile.sha256).unwrap_or_else(|| panic!("tile (level={}, x={}, y={}) sha256 {:?} must be present in the STREAMING run's own sink", tile.level, tile.x, tile.y, tile.sha256));
+        assert_eq!(
+            bytes_from_buffered_sink, bytes_from_streaming_sink,
+            "tile (level={}, x={}, y={}): stored bytes must be byte-identical between the buffered and streaming paths, not merely hash-equal",
+            tile.level, tile.x, tile.y
+        );
+        // And each independently re-hashes to the sha256 the manifest itself claims.
+        assert_eq!(av_jobs::hash::hex_encode(&openssl::sha::sha256(&bytes_from_streaming_sink)), tile.sha256);
+    }
+}
+
+/// Like the streaming/buffered equality test above, but run under `JOB_ID = "job-pin"` --
+/// the exact job id `the_manifest_hash_is_pinned_for_the_fixture` pins -- so this test can
+/// additionally confirm the streaming path reproduces the SAME pinned fixture hash the
+/// buffered path is pinned to, from a second, independent code path. This does not move the
+/// pin (`crates/av-jobs/tests/store_tiler.rs`'s own `PINNED_MANIFEST_SHA256` also depends on
+/// it staying put); it only proves the streaming path lands on it too.
+#[test]
+fn the_streaming_path_reproduces_the_pinned_fixture_manifest_hash() {
+    let dir = TempDir::new("stream-equality-pin");
+    let clock = TestClock::new(5_000);
+    let runner = fresh_runner(dir.path(), &clock, fixture_raster_bytes());
+    let spec = tiler_spec("job-pin");
+    runner.queue().submit(&spec).unwrap();
+    let completion = runner.run_one_streaming(&spec).unwrap();
+    assert!(completion.ok, "{completion:?}");
+    assert_eq!(completion.manifest_sha256, "7c23f4f0b6a81270c196df8acf8d6c17c86d69185b31a35357c444f3bcdaa430", "the streaming path must reproduce the identical pinned manifest hash the buffered path (the_manifest_hash_is_pinned_for_the_fixture) pins for job_id \"job-pin\"");
+}

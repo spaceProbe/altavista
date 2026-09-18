@@ -209,6 +209,7 @@ mod tests {
             root_uri: String::new(),
             job_id: "job-1".to_string(),
             object_key_prefix: key_prefix.to_string(),
+            root_object_key: String::new(),
         };
         let manifest_bytes = manifest.encode_to_vec();
         let manifest_sha256 = crate::core::hex_sha256(&manifest_bytes);

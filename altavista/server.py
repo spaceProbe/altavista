@@ -47,6 +47,26 @@ GET  /api/command/commands/{id}/trail            every CommandTransition, in ord
 POST /api/command/commands/{id}/authorize        forwards the operator's token verbatim to
                                                   Authorize; never stores/logs it
 GET  /api/command/counters                       proxies av-command's /admin/api/evidence
+
+Tile gateway proxy (H5b-1, docs/heavy-plan.md milestone H5's "served through the viewer
+server with the gateway's authentication" half; question 51: the viewer is fully self-
+contained and never fetches any origin but the one that served the page) -- every route below
+is a thin, same-origin `httpx` proxy over a REAL, already-running `av-tiles` gateway
+(``altavista.tiles_client``), configured once at ``create_app``/``serve`` time, never a
+request parameter. The bearer token this server presents to the gateway is read from
+``tiles_token_path`` AT REQUEST TIME and sent as ``Authorization: Bearer ...`` -- NEVER taken
+from a query parameter, a request header, a cookie, or a request body of the incoming
+request (question 45's per-layer label enforcement in the gateway would mean nothing if a
+caller could hand this server a credential to forward on its behalf). Answers a typed 503 --
+never an empty 200 -- when no tiles gateway is configured or the configured one is
+unreachable; every other route, including every ``/api/command/*`` route above, still starts
+and serves normally when the tiles arguments are left at their defaults.
+GET  /api/tiles/{manifest_sha256}/manifest       proxies av-tiles' own manifest route
+GET  /api/tiles/{manifest_sha256}/tiles/{level}/{x}/{y}  proxies av-tiles' own tile route --
+                                                  status code, ETag, Cache-Control and
+                                                  Content-Type passed through verbatim;
+                                                  Range/If-None-Match forwarded from the
+                                                  incoming request
 """
 from __future__ import annotations
 
@@ -66,6 +86,7 @@ from google.protobuf.message import DecodeError
 from . import cdm as cdm_adapter
 from . import command_client
 from . import profile as profile_loader
+from . import tiles_client
 from .model import Frame, ScenarioData
 from .pb import core_pb2, trajectory_pb2
 # run_pb2 is not (yet) re-exported by altavista/pb/__init__.py's own explicit import list (that
@@ -197,7 +218,9 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
                 profile: str = profile_loader.DEFAULT_PROFILE_ID,
                 command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
                 command_entities: Sequence[str] = (),
-                profiles_dir: Optional[os.PathLike] = None) -> FastAPI:
+                profiles_dir: Optional[os.PathLike] = None,
+                tiles_endpoint: Optional[str] = None,
+                tiles_token_path: Optional[os.PathLike] = None) -> FastAPI:
     """``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
     section every published scenario gets stamped with (``Hub.put``) -- defaults to the
     "design" profile (altavista has no running "current profile" console yet; see
@@ -229,6 +252,20 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     be left at its default (``None``/empty): every OTHER route in this app still starts and
     serves normally, and the command routes themselves answer a typed 503 rather than ever
     failing this function or the app's startup.
+
+    ``tiles_endpoint``/``tiles_token_path`` (H5b-1, question 199): where the ``/api/tiles/*``
+    routes reach a real ``av-tiles`` gateway -- ``"host:port"`` for the gateway's own plain-
+    HTTP listener, and a file path holding the bearer token this server presents to it.
+    ``tiles_token_path`` names a FILE, never a token value: the token is read from that file
+    fresh on every proxied request (``altavista/tiles_client.py``'s own module doc, "Rule 1"),
+    so rotating the file's content on disk takes effect on the very next request with no
+    restart. Configuration, exactly like ``command_endpoint`` above -- never read from the
+    process environment and never a request parameter of any kind (not a query parameter, not
+    a header, not a cookie, not a body field). Both may be left at their default (``None``):
+    every OTHER route in this app, the ``/api/command/*`` routes included, still starts and
+    serves normally, and the tiles routes themselves answer a typed 503 rather than ever
+    failing this function or the app's startup -- see ``create_app()`` with no arguments at
+    all in this module's own test suite for the byte-for-byte proof that nothing else changes.
     """
     app = FastAPI(title="altavista")
     hub = Hub(
@@ -238,6 +275,7 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     app.state.hub = hub
     command_config = command_client.CommandServiceConfig(
         grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))
+    tiles_config = tiles_client.TilesServiceConfig(endpoint=tiles_endpoint, token_path=tiles_token_path)
     web = Path(web_dir) if web_dir else WEB_DIR
     textures = Path(texture_dir) if texture_dir else _default_texture_dir()
     # Shared with the app.mount(...) below (question 139, M21.1): the "/" route is a
@@ -875,6 +913,73 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             _raise_command_service_error(exc)
         return counters
 
+    def _raise_tiles_service_error(exc: tiles_client.TilesServiceError) -> None:
+        """Maps `exc` through `tiles_client.tiles_service_error_to_http_status` and raises
+        the resulting `fastapi.HTTPException` -- the one place either `/api/tiles/*` route
+        below turns a `TilesServiceError` (THIS server's own failure to reach the gateway at
+        all) into an HTTP response. A real answer FROM the gateway never raises this at all
+        (`tiles_client.proxy_get`'s own docstring) -- it is returned straight through by
+        `_tiles_proxy_response` below, whatever its own status code."""
+        status, message = tiles_client.tiles_service_error_to_http_status(exc)
+        raise HTTPException(status, message)
+
+    def _forwarded_request_headers(request: Request) -> Dict[str, str]:
+        """Exactly `tiles_client.PASSTHROUGH_REQUEST_HEADERS` (`Range`/`If-None-Match`) off
+        the INCOMING request, case-insensitively -- never `Authorization`, never any other
+        header, and in particular never anything that could let a caller supply their own
+        clearance (see this module's own doc, "Tile gateway proxy", and `tiles_client.py`'s
+        own module doc, "Rule 1")."""
+        return {name: request.headers[name] for name in tiles_client.PASSTHROUGH_REQUEST_HEADERS if name in request.headers}
+
+    def _tiles_proxy_response(resp: "tiles_client.TilesResponse") -> Response:
+        """Turns a `tiles_client.TilesResponse` into a real `fastapi.Response`, status code,
+        allowlisted headers (`tiles_client._PASSTHROUGH_RESPONSE_HEADERS`: `ETag`/`Cache-
+        Control`/`Content-Type`/`Content-Range`) and body all passed through verbatim --
+        `206`/`304`/`403`/`404`/`416` survive as themselves (this task's own rule 4), and a
+        `304`'s own empty body stays empty (Starlette never invents one)."""
+        content_type = resp.headers.get("content-type")
+        headers = {k: v for k, v in resp.headers.items() if k != "content-type"}
+        return Response(status_code=resp.status_code, content=resp.content, headers=headers, media_type=content_type)
+
+    @app.get("/api/tiles/{manifest_sha256}/manifest")
+    async def tiles_manifest(manifest_sha256: str, request: Request):
+        """Proxies `av-tiles`' own `GET /v1/tilesets/{manifest_sha256}/manifest` (`crates/
+        av-tiles/src/route.rs`). See this module's own doc, "Tile gateway proxy": the bearer
+        token this server presents to the gateway is read from `tiles_token_path` at request
+        time and sent as `Authorization: Bearer ...` -- NEVER taken from a query parameter, a
+        request header, a cookie, or this request's own body (there is none on a `GET`
+        anyway) -- a caller-supplied credential would let a browser choose its own clearance,
+        exactly what question 45's per-layer label enforcement in the gateway exists to
+        prevent. Only `Range`/`If-None-Match` are read off the incoming request and
+        forwarded; an incoming `Authorization` header, were a browser to send one, is never
+        even inspected. Answers a typed 503 when no tiles gateway is configured or the
+        configured one is unreachable -- this route never fails the app's own startup.
+        """
+        try:
+            resp = tiles_client.proxy_get(tiles_config, f"/v1/tilesets/{manifest_sha256}/manifest", _forwarded_request_headers(request))
+        except tiles_client.TilesServiceError as exc:
+            _raise_tiles_service_error(exc)
+        return _tiles_proxy_response(resp)
+
+    @app.get("/api/tiles/{manifest_sha256}/tiles/{level}/{x}/{y}")
+    async def tiles_tile(manifest_sha256: str, level: int, x: int, y: int, request: Request):
+        """Proxies `av-tiles`' own `GET /v1/tilesets/{manifest_sha256}/tiles/{level}/{x}/{y}`
+        (`crates/av-tiles/src/route.rs`) -- identical contract to `tiles_manifest` above (the
+        SAME token-handling rule, the SAME `Range`/`If-None-Match` forwarding, the SAME typed
+        503 when unconfigured/unreachable); see that route's own docstring for the full
+        reasoning, not repeated a second time here. `level`/`x`/`y` are plain path integers --
+        FastAPI itself refuses a non-integer segment with its own `422` before this function
+        ever runs; this route does not re-validate their shape a second time, mirroring
+        `crates/av-tiles/src/route.rs`'s own job of validating them again on the gateway side
+        (defence in depth across two independently-implemented layers, not a single point of
+        truth either one alone could get wrong).
+        """
+        try:
+            resp = tiles_client.proxy_get(tiles_config, f"/v1/tilesets/{manifest_sha256}/tiles/{level}/{x}/{y}", _forwarded_request_headers(request))
+        except tiles_client.TilesServiceError as exc:
+            _raise_tiles_service_error(exc)
+        return _tiles_proxy_response(resp)
+
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -1211,21 +1316,26 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
           log_level: str = "info", profile: str = profile_loader.DEFAULT_PROFILE_ID,
           command_endpoint: Optional[str] = None, command_admin_endpoint: Optional[str] = None,
           command_entities: Sequence[str] = (),
-          profiles_dir: Optional[os.PathLike] = None) -> None:
+          profiles_dir: Optional[os.PathLike] = None,
+          tiles_endpoint: Optional[str] = None,
+          tiles_token_path: Optional[os.PathLike] = None) -> None:
     """Run the viewer server (blocking). ``profile`` -- see ``create_app``'s docstring
     (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
     ``command_entities`` -- see ``create_app``'s docstring (R3.5a); all three passed straight
     through, never read from the process environment (question 199). ``profiles_dir`` (round 3,
     question 217(b)) -- see ``create_app``'s own doc; passed straight through as a CLI argument
     (``altavista/__main__.py``'s ``--profiles-dir``), never read from the process environment
-    either."""
+    either. ``tiles_endpoint``/``tiles_token_path`` (H5b-1) -- see ``create_app``'s own doc;
+    passed straight through as CLI arguments (``altavista/__main__.py``'s ``--tiles-endpoint``/
+    ``--tiles-token-path``), never read from the process environment either."""
     import uvicorn
 
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO),
                         format="%(asctime)s %(name)s: %(message)s")
     app = create_app(texture_dir=texture_dir, profile=profile, command_endpoint=command_endpoint,
                       command_admin_endpoint=command_admin_endpoint, command_entities=command_entities,
-                      profiles_dir=profiles_dir)
-    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s)",
-             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>")
+                      profiles_dir=profiles_dir, tiles_endpoint=tiles_endpoint,
+                      tiles_token_path=tiles_token_path)
+    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s)",
+             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>", tiles_endpoint or "<not configured>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

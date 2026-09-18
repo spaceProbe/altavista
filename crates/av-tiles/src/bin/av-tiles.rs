@@ -24,11 +24,12 @@ use av_tiles::source::StoreObjectSource;
 
 /// Question 208(c)/219(a): `docs/architecture.md` section 4, "Default ports", is the one
 /// owned port map for every service's default bind in this workspace -- this is `av-tiles`'
-/// own row. `av-tiles` has no admin surface (no `GET /admin/...` routes at all -- this
-/// crate's own crate doc names exactly two routes, neither under `/admin`), so there is no
-/// `+100` admin counterpart, the same shape as `crates/av-lockstep-shim/src/bin/
-/// av-lockstep-shim.rs::DEFAULT_GRPC_ADDR` and `crates/av-proposer/src/bin/
-/// av-proposer.rs::DEFAULT_MODEL_SERVICE_BIND`.
+/// own row. Round 2's own status recorded "no admin surface, hence no `+100` counterpart";
+/// H5b-1 (round 3) adds one, OPTIONAL and off by default -- see [`av_tiles::admin`]'s own
+/// module doc for why, and [`av_tiles::admin::DEFAULT_ADMIN_BIND`] for its own `+100` row
+/// (not yet added to `docs/architecture.md` itself -- that file is shared across tracks; an
+/// open item for the lead, the identical posture the round-2 status already took for this
+/// crate's own main-port row).
 const DEFAULT_BIND: &str = "127.0.0.1:50073";
 
 const USAGE: &str = "usage: av-tiles --oidc-issuer ISS --oidc-audience AUD --oidc-public-key-path PATH \
@@ -36,7 +37,7 @@ const USAGE: &str = "usage: av-tiles --oidc-issuer ISS --oidc-audience AUD --oid
                       --store-endpoint URL --store-region REGION --store-access-key-id ID \
                       --store-secret-access-key KEY --store-bucket BUCKET \
                       [--store-path-style] [--store-ca-file PATH] \
-                      [--group-clearance GROUP=MARKING]... [--bind ADDR]";
+                      [--group-clearance GROUP=MARKING]... [--bind ADDR] [--admin-bind ADDR]";
 
 #[derive(Debug)]
 struct CliArgs {
@@ -54,6 +55,10 @@ struct CliArgs {
     store_ca_file: Option<PathBuf>,
     group_clearance: BTreeMap<String, String>,
     bind: String,
+    /// H5b-1: the OPTIONAL admin surface's own bind (`crate::admin::serve`, `GET /admin/api/
+    /// counters`) -- `None` (this struct's own default) means "no admin surface at all",
+    /// never a silently-always-on listener a deployment did not ask for.
+    admin_bind: Option<String>,
 }
 
 fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
@@ -72,6 +77,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
         store_ca_file: None,
         group_clearance: BTreeMap::new(),
         bind: DEFAULT_BIND.to_string(),
+        admin_bind: None,
     };
 
     let mut args = args.skip(1).peekable();
@@ -91,6 +97,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
             "--store-path-style" => out.store_path_style = true,
             "--store-ca-file" => out.store_ca_file = Some(PathBuf::from(value()?)),
             "--bind" => out.bind = value()?,
+            "--admin-bind" => out.admin_bind = Some(value()?),
             "--group-clearance" => {
                 let raw = value()?;
                 let (group, marking) = raw.split_once('=').ok_or_else(|| format!("--group-clearance value {raw:?} must be GROUP=MARKING. {USAGE}"))?;
@@ -164,6 +171,23 @@ async fn main() {
     let clock: Arc<dyn av_command::clock::Clock> = Arc::new(SystemClock);
     let source = Arc::new(StoreObjectSource::new(store_client, ladder, clock.clone()));
     let counters = Arc::new(av_tiles::counters::Counters::new());
+
+    // H5b-1: the OPTIONAL admin surface, on its own bind, spawned before the "LISTENING"
+    // line so a caller polling for that line never observes a window where the main port is
+    // up but the admin one (if configured) is not -- mirrors `crates/av-command/src/bin/
+    // av-command.rs`'s own ordering for its own `--admin-bind`.
+    if let Some(admin_bind_raw) = &cli.admin_bind {
+        let admin_bind: SocketAddr = admin_bind_raw.parse().unwrap_or_else(|e| {
+            eprintln!("av-tiles: --admin-bind {admin_bind_raw:?}: {e}");
+            std::process::exit(1);
+        });
+        let admin_counters = counters.clone();
+        tokio::spawn(async move {
+            if let Err(e) = av_tiles::admin::serve(admin_bind, admin_counters).await {
+                eprintln!("av-tiles: admin server error: {e}");
+            }
+        });
+    }
 
     println!("av-tiles: LISTENING {bind}");
     if let Err(e) = av_tiles::server::serve(bind, config, source, counters, clock).await {

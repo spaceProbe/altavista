@@ -124,8 +124,10 @@ enum JobExecutorKind {
   JOB_EXECUTOR_KIND_UNSPECIFIED = 0;
   // A local subprocess, argv in `JobSpec.command` -- `crates/av-jobs::runner::ProcessExecutor`.
   JOB_EXECUTOR_KIND_PROCESS = 1;
-  // A labelled container, `JobSpec.container_image`/`container_image_digest`. Deferred this
-  // round: `crates/av-jobs::runner::Runner::run_one` refuses this kind with a typed, recorded
+  // A labelled, hardened, digest-pinned container -- `JobSpec.container_image`/
+  // `container_image_digest`, run by `crates/av-jobs::container::ContainerExecutor` (H3,
+  // round 3) via `crates/av-jobs::runner::Runner::register_container_executor`. A `Runner`
+  // with no container executor configured refuses this kind with a typed, recorded
   // `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`, never a silent skip -- see that crate's own module
   // doc.
   JOB_EXECUTOR_KIND_CONTAINER = 2;
@@ -144,8 +146,12 @@ enum JobFailureKind {
   // `sha256` -- never handed to the executor (`Runner::run_one`'s own doc, the input-fetch
   // step).
   JOB_FAILURE_KIND_INPUT_HASH_MISMATCH = 2;
-  // `JobSpec.executor` names an executor kind this round's `Runner` has no implementation for
-  // (`JOB_EXECUTOR_KIND_CONTAINER` only, this round).
+  // `JOB_EXECUTOR_KIND_CONTAINER` and no container executor is configured on this `Runner`
+  // (`crates/av-jobs::runner::Runner::register_container_executor`), or one is configured but
+  // refuses to trust the requested image right now -- `container_image` not present locally
+  // (this platform never runs `docker pull` at job-run time), or present under a digest other
+  // than `container_image_digest` (`crates/av-jobs::container`'s own module doc, "Never pulls;
+  // the digest gate").
   JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE = 3;
   // `JOB_EXECUTOR_KIND_PROCESS`'s own command could not even be spawned (e.g. the executable
   // named by `JobSpec.command[0]` does not exist).
@@ -212,13 +218,17 @@ message JobSpec {
   // `command[0]` the executable. Empty for an in-process job kind (none registered this
   // round).
   repeated string command = 8;
-  // `JOB_EXECUTOR_KIND_CONTAINER` only: the image reference. Unused this round -- see
-  // `JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`.
+  // `JOB_EXECUTOR_KIND_CONTAINER` only: the image reference, bare -- never itself carrying a
+  // tag or digest (`crates/av-jobs::container::ContainerExecutor` combines this with
+  // `container_image_digest` below as `"<container_image>@<container_image_digest>"` before
+  // ever running `docker run`).
   string container_image = 9;
-  // `JOB_EXECUTOR_KIND_CONTAINER` only: the recorded digest of `container_image` (question
-  // 212's "a test trusts an image only after comparing it to its recorded digest" rule,
-  // carried onto this field for the round that implements the container executor). Unused
-  // this round.
+  // `JOB_EXECUTOR_KIND_CONTAINER` only: the digest `container_image` is pinned to
+  // (`"sha256:..."`) -- question 212(a)'s "a test trusts an image only after comparing it to
+  // its recorded digest, and refuses rather than trusts on a mismatch" rule, applied at job-run
+  // time: `crates/av-jobs::container::digest_gate` compares this against the LOCAL image's own
+  // `docker image inspect` id and refuses (`JOB_FAILURE_KIND_EXECUTOR_UNAVAILABLE`) rather than
+  // trusts on a mismatch, never running `docker pull` to reconcile them.
   string container_image_digest = 10;
 }
 
@@ -394,7 +404,14 @@ message TileSetManifest {
   repeated string source_sha256 = 8;
   // `JobSpec.parameters`, verbatim -- a `BTreeMap` (see this message's own doc).
   map<string, string> parameters = 9;
-  // TILES3D only: the `tileset.json` entry's own `uri` (P3). Empty for every other `kind`.
+  // **Always empty, deliberately (P3a).** This field was reserved, before P3a implemented
+  // TILES3D, for "the `tileset.json` entry's own `uri`" -- but `crates/av-jobs::tiler` runs
+  // before the `ObjectSink` that stores its outputs, exactly the ordering constraint
+  // `TileEntry.uri`'s own doc comment above already explains, and for the identical reason: a
+  // fully-qualified URI would make this manifest's own hash -- the tile set's identity --
+  // depend on which store happened to hold `tileset.json`. `root_object_key` below (added by
+  // P3a) carries the backend-independent equivalent instead, the same "object_key, not uri"
+  // resolution `TileEntry` already established. Empty for every `kind` other than TILES3D.
   string root_uri = 10;
   string job_id = 11;
   // The `<prefix>` every `TileEntry.object_key` above was built under, so this manifest is
@@ -404,4 +421,10 @@ message TileSetManifest {
   // different key prefixes are genuinely different tile sets to a reader, and should not
   // share an identity.
   string object_key_prefix = 12;
+  // TILES3D only (P3a): the content-addressed object key (`crates/av-jobs::runner::
+  // content_addressed_key`, joined with `object_key_prefix` above exactly like every
+  // `TileEntry.object_key`) that `tileset.json`'s own encoded bytes are stored under -- the
+  // backend-independent equivalent `root_uri` above could never carry (see that field's own
+  // doc). Empty for every `kind` other than TILES3D.
+  string root_object_key = 13;
 }

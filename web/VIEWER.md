@@ -1228,4 +1228,91 @@ no build step yet, so there is nothing to hash filenames of today.
   writeup above.
 - **Entities**: no instanced markers beyond what `scene.js` already draws, no covariance ellipsoids, contact lines, or occlusion-aware labels. **M6.3 built the first sensor footprint** (a cone-vs-WGS84-ellipsoid ring, see §5's "Sensor footprint rendering") -- a single ring per declared footprint, discrete (nearest-sample) in time, not yet a full 3D cone/frustum mesh, and not yet exposed in the sidebar UI as its own toggleable list (only visible on the globe, and via the underlying `footprints` JSON).
 - **Views as data**: no view-profile persistence (frames/layers/camera rigs as declared data).
+
+## H5a: the streaming-layer module (`web/js/layers/`, docs/heavy-plan.md milestone H5, first half)
+
+A new module, `web/js/layers/`, owns the three things H5 asks the streaming-layer
+module to own: a priority queue ordered by screen-space error (descending) and view
+distance (ascending), a declared memory budget in **bytes** (`memoryBudgetBytes`, not
+a tile/item count), and cancellation of in-flight requests (via the platform
+`AbortController`/`AbortSignal`, question 48) when the view moves. It defines one
+interface (`Layer`: `id`, `plan(view)`, `load(request, signal)`, `release(key)` --
+see `web/js/layers/layer.js`'s module docstring for the exact contract) and three
+adapters implementing it: `ImageryLayerAdapter` (the globe's imagery loader, wrapping
+`web/js/globe.js`'s `urlForTile` and `web/js/globe_lod.js`'s screen-space-error
+arithmetic, never a second copy of either), `TerrainLayerAdapter` (see below), and
+`Tiles3DLayerAdapter` (wrapping `web/js/tiles_layer.js`'s `selectTiles3D` over the
+vendored 3DTilesRendererJS's own fixture-driven tileset, never a second copy of that
+arithmetic either). `LayerManager` (`web/js/layers/layer.js`) is the single owner
+driving all three; a caller only ever calls `addLayer()`/`update(view)` on it, never
+reaches into an adapter's own loader directly (`web/js/layers_check.mjs`'s
+`planNeverLoadsDirectly` and `LayerManager.getResidentPayload()`'s single
+lookup-by-globalKey are the harness's concrete proof of this).
+
+**Relationship to `globe_lod.js`'s `TileLoadScheduler`**: superseded for anything
+routed through `web/js/layers/`, not reused verbatim, and not copied into a second
+implementation either -- `TileLoadScheduler`'s budget is a tile *count*, a valid
+proxy only when every resident item costs the same number of bytes (true for the
+globe alone, and separately true for the 3D Tiles overlay alone, which is exactly why
+`globe.js` and `tiles_layer.js` could already share that one class for each of their
+own single-layer budgets). It stops being a valid proxy the moment imagery (262,144
+bytes/tile), a terrain mesh (1,944 bytes, see below) and a glTF-bearing 3D tile
+(2,621,440 bytes) share one budget. `LayerManager._evictIfNeeded` therefore
+reimplements the identical LRU-until-under-budget *policy* against a byte total
+instead of an item count -- see `web/js/layers/layer.js`'s module docstring for the
+line-by-line comparison. `globe_lod.js` itself is untouched by this task: it still
+exports `TileLoadScheduler` exactly as before, so `web/js/globe_lod_check.mjs` and
+`web/js/tiles3d_check.mjs` keep passing byte for byte, unchanged.
+
+**Disclosed shortcuts (H5a's scope, not H5's full exit)**:
+
+- **`web/js/globe.js` and `web/js/tiles_layer.js` are not rewired to call through
+  `web/js/layers/` live.** Both still drive their own, already-tested
+  `TileLoadScheduler`-based budgets directly (`GlobeLayer`, `TilesOverlayLayer`), and
+  neither is touched by this task. `web/js/layers/`'s adapters are built against the
+  exact loader shapes those two files already use (`ImageryLayerAdapter`'s injected
+  loader matches `GlobeLayer`'s `opts.textureLoader` shape; `Tiles3DLayerAdapter`
+  wraps the same `selectTiles3D`/`parseTileset3D` `TilesOverlayLayer` already calls),
+  so the live rewiring is additive follow-on work, not a redesign, when it happens.
+  This is deliberate given this round's scope (H5's own exit criterion -- a
+  ten-gigabyte tile set streamed through the real gateway with frame-time and memory
+  assertions holding, "driven in a browser at acceptance" -- is explicitly the
+  second half of H5, not H5a) and this round's host discipline (no wide test runs
+  while the manager's own baseline suite is in flight).
+- **The terrain adapter's loader is a typed, named refusal, not a real loader.**
+  There is no terrain loader anywhere in this codebase yet (this file's own
+  "Explicitly not built" list, above: "Globe terrain: imagery only"). `plan()` is
+  real -- it declares genuine demand (reusing `globe_lod.js`'s own
+  screen-space-error/distance arithmetic, same as the other two adapters) so terrain
+  requests genuinely participate in the one priority queue -- but `load()` always
+  rejects with `TerrainLoaderNotImplementedError` (`web/js/layers/terrain_layer.js`),
+  never a silently-resolved fake payload. `tests/test_viewer_layers.py` pins the
+  exact error name and asserts the refusal is actually observed (`terrainRefusalCount
+  > 0`), and terrain never becomes resident or charges the byte budget.
+- **3D-tile byte costs are a flat, declared estimate**
+  (`Tiles3DLayerAdapter.DEFAULT_TILE3D_BYTES`, 10x `ImageryLayerAdapter
+  .IMAGERY_TILE_BYTES`), used because neither `web/fixtures/gen_3dtiles_fixture.py`
+  nor `web/js/tiles_layer.js`'s `parseTileset3D` currently reads/emits a real
+  per-tile `content.byteLength` from `tileset.json`. Disclosed, not silent -- a real
+  tile gateway response would carry its own byte length, which a future change could
+  thread through `parseTileset3D`'s `TileNode3D` and this adapter without changing
+  `LayerManager`'s interface at all.
+- **Terrain mesh byte cost** (`TerrainLayerAdapter.TERRAIN_MESH_BYTES`, 1,944 bytes)
+  is likewise a documented estimate (a `(8+1)^2` vertex grid, position+normal, f32 --
+  `web/js/globe.js`'s own `DEFAULT_SEGMENTS`), not a measurement, since there is no
+  real terrain mesh to measure (see above).
+
+**Proof**: `web/js/layers_check.mjs` (a headless `node` CLI harness, no network I/O
+of any kind -- question 51, every loader is an injected in-memory stub, see that
+file's own module docstring) drives `LayerManager` and all three real adapters over a
+fixed, scripted camera path near the 3D Tiles fixture's own geo-referenced anchor,
+with a byte budget (`MEMORY_BUDGET_BYTES = 120,000,000`) measured (not estimated) to
+sit strictly between a single early step's own resident total and the path's full
+cumulative distinct-byte total, so eviction must genuinely run for the budget to
+hold. `tests/test_viewer_layers.py` asserts on its JSON output: determinism across
+two independent process runs, the byte budget never crossed with eviction actually
+having run, cancellation on the deliberate camera jump, the priority order
+independently recomputed in Python from the raw per-request numbers (not read back
+from the JS comparator's own answer), all three layers visibly sharing one manager,
+and the terrain refusal's exact typed name.
 - WebGPU path (open-questions.md Q47) -- WebGL2 only, as today.

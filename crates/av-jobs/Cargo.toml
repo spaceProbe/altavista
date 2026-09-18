@@ -23,6 +23,17 @@ av-cdm = { path = "../av-cdm" }
 av-label = { path = "../av-label" }
 prost.workspace = true
 thiserror.workspace = true
+# P3a (docs/heavy-plan.md H3, this round's own open item 5): crate::tiles3d's tileset.json
+# output is a real, externally-consumed 3D Tiles 1.0 document -- an EXTERNAL spec's own wire
+# format, unlike every other shape this crate reads or writes (JobLogRecord's protobuf
+# encoding), which stays exactly as JSON-free as before. Already resolved in this workspace's
+# Cargo.lock at 1.0.151 (crates/av-cdm, av-command, av-gateway, av-tiles, and others already
+# depend on it) -- this crate adds no new registry dependency at all (rule 2). Its default
+# (non-"preserve_order") Map is BTreeMap-backed -- crate::tiles3d's own module doc checks this
+# directly against Cargo.lock's own serde_json dependency list (no indexmap entry anywhere)
+# rather than assuming it -- so tileset.json's object-key order is deterministic for a fixed
+# key set, the same determinism bar this crate's protobuf encoding already holds itself to.
+serde_json.workspace = true
 
 # ADR-004's crypto rule: SHA-256 only, the system OpenSSL only, through the `openssl` crate
 # (`openssl::sha::sha256` for src/hash.rs's chain_hash, `openssl::memcmp::eq` for
@@ -33,18 +44,55 @@ thiserror.workspace = true
 # already depend on it) -- this crate adds no new registry dependency at all.
 openssl = "0.10"
 
-# Deliberately NOT a dependency:
+# H5b-1 (docs/heavy-plan.md H5, round 3): src/bin/av-tile-fixture.rs -- the committed
+# tile-set generator binary the brief requires to live IN this crate ("do NOT create a new
+# crate; a new crate moves six SBOM epochs"), yet run a REAL job through the REAL av-store/
+# MinIO. That is only possible if av-store (and the async plumbing to drive it) is a real
+# dependency of SOME target this package builds -- a `[[bin]]`'s dependencies are not
+# scoped separately from its package's, unlike a test/example/bench, which alone may draw on
+# [dev-dependencies] (verified directly: a bare `cargo build --bin` cannot see a
+# dev-dependency at all, "cannot find crate"). Rather than promote av-store to an
+# unconditional dependency -- which would silently change what a plain `cargo build -p
+# av-jobs` or `cargo build --workspace` links for EVERY target in this crate, reopening
+# exactly the hot-path-claim-check blast-radius risk the "Deliberately NOT a dependency"
+# note below still argues against for the library and for every OTHER bin -- these three are
+# `optional = true`, gated behind the `store-fixture` feature, and `av-tile-fixture` itself
+# is declared `required-features = ["store-fixture"]` below. The net effect: `cargo build
+# --workspace` / `cargo test --workspace` / `cargo clippy --workspace --all-targets` (none of
+# which name `--features store-fixture`) skip this binary silently and link av-store into
+# nothing new -- this crate's default dependency graph is byte-for-byte what it was before
+# this task. Only an explicit `--bin av-tile-fixture --features store-fixture` (or
+# `--all-features`) builds it, which is also therefore the one invocation that must be
+# clippy'd separately -- `cargo clippy --workspace --all-targets -- -D warnings` alone is
+# blind to this binary's own store-backed code path; see this task's own report for the
+# separate clippy run that covers it.
+av-store = { path = "../av-store", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net"], optional = true }
+bytes = { version = "1", optional = true }
+
+[features]
+# H5b-1: enables src/bin/av-tile-fixture.rs's real-MinIO path (the `--dry-run` path needs
+# none of this -- it uses this crate's own always-available MemoryObjectSource/
+# MemoryObjectSink). Never a default feature -- see the av-store dependency comment above.
+store-fixture = ["dep:av-store", "dep:tokio", "dep:bytes"]
+
+[[bin]]
+name = "av-tile-fixture"
+path = "src/bin/av-tile-fixture.rs"
+required-features = ["store-fixture"]
+
+# Deliberately NOT an unconditional dependency:
 # - av-edge: this crate reimplements av_edge::hash's two-line GENESIS/chain_hash primitive
 #   (src/hash.rs's own module doc) instead of depending on it -- question 216's own ruling,
 #   already applied once by crates/av-store/src/labels.rs's former module doc ("av-edge is
 #   off this heavy track entirely"): av-jobs is on this track, av-edge is not, and this
 #   track does not touch av-edge or add a workspace dependency edge onto it.
-# - av-store: task 3b (the tiler) wires a real store-backed ObjectSource/ObjectSink from a
-#   crate that depends on both av-jobs and av-store; av-jobs itself must not depend on
-#   av-store so that H1's own hot-path claim-check discipline (crates/av-store/tests/
-#   claim_check_hot_path.rs) is never at risk of a job-runner crate quietly becoming a
-#   fourth hot-path dependent by accident. src/runner.rs's ObjectSource/ObjectSink traits
-#   are the seam task 3b implements against.
+# - av-store: as an UNCONDITIONAL dependency -- task 3b (the tiler)'s own store-backed
+#   ObjectSource/ObjectSink lives in a dev-dependency test precisely so that this crate's
+#   LIBRARY and every OTHER bin stay outside H1's own hot-path claim-check discipline's
+#   blast radius (crates/av-store/tests/claim_check_hot_path.rs) by construction, not by
+#   promise -- see the `store-fixture`-gated entry above for the one target that genuinely
+#   needs it, and why gating rather than promoting it keeps that property.
 # - av-command: src/clock.rs defines its own two-method Clock trait (SystemClock/TestClock)
 #   mirroring crates/av-command/src/clock.rs's convention rather than depending on it --
 #   av-command is a hot-path crate (crates/av-command/src/clock.rs's own module doc: "every
@@ -52,12 +100,15 @@ openssl = "0.10"
 #   no business anywhere in its dependency tree.
 # - av-catalog: this round's runner never queries the catalog; H3b/H4 may need it, not H3a.
 # - sha2/hmac/ring: ADR-004 (see openssl above).
-# - serde/serde_json: every wire shape this crate reads or writes is the JobLogRecord
-#   protobuf encoding (src/log.rs); nothing here is ever serialized as JSON.
+# - serde: this crate's own wire shapes are still exactly the JobLogRecord protobuf encoding
+#   (src/log.rs) -- serde_json IS now a real [dependencies] entry (above), but only for
+#   crate::tiles3d's tileset.json, an external spec's own JSON document this crate WRITES,
+#   never something it round-trips back through `serde::Deserialize`; no type in this crate
+#   derives Serialize/Deserialize, and `serde` itself is not named here at all.
 # - anyhow: every error is one of this crate's own typed enums (JobLogError, JobError).
-# - tokio/async-anything: crates/av-jobs::runner::Runner::run_one is synchronous --
-#   ProcessExecutor blocks on std::process::Child::wait, and nothing in H3a needs
-#   concurrency within one job run.
+# - tokio/async-anything, UNCONDITIONALLY: crates/av-jobs::runner::Runner::run_one is
+#   synchronous -- ProcessExecutor blocks on std::process::Child::wait, and nothing in H3a
+#   needs concurrency within one job run. (`tokio` above is opt-in, `store-fixture` only.)
 # - chrono/time: src/clock.rs's SystemClock converts via av_cdm::time::Tai, the same
 #   boundary crates/av-command/src/clock.rs already uses; no separate calendar crate needed.
 
