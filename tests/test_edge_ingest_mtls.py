@@ -154,12 +154,6 @@ def unix_to_tai_ns(unix_seconds: float) -> int:
     return int(round(unix_seconds * 1_000_000_000)) + TAI_MINUS_UNIX_NS
 
 
-def now_tai_ns() -> int:
-    import datetime as _dt
-
-    return unix_to_tai_ns(_dt.datetime.now(_dt.timezone.utc).timestamp())
-
-
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -434,7 +428,13 @@ def _backend_and_front(work: Path, *, av_ingest_server_bin: Path, root_pem: Path
 
 # --------------------------------------------------------------------------- the mTLS client
 
-def _run_mtls_client(binary: Path, *, endpoint: str, server_ca: Path, client_cert: Path | None = None, client_key: Path | None = None, producer_id: str, shard_key: str = "shard-a", clearance: str = "CUI", label_marking: str = "CUI", submit_with_key: Path | None = None, batch_tai_ns: int | None = None) -> dict:
+def _run_mtls_client(binary: Path, *, endpoint: str, server_ca: Path, client_cert: Path | None = None, client_key: Path | None = None, producer_id: str, shard_key: str = "shard-a", clearance: str = "CUI", label_marking: str = "CUI", submit_with_key: Path | None = None, batch_tai_ns: int | str | None = None) -> dict:
+    # `batch_tai_ns` is either a literal TAI-nanosecond int this caller computed itself
+    # (`test_lapsed_leaf_is_refused_...` needs no batch at all, so never exercises this),
+    # or the literal string `"now"` (question 223: `av-ingest-mtls-client --batch-tai-ns
+    # now` reads its own wall clock immediately before it builds and signs the batch,
+    # inside the client process, rather than this Python caller stamping a value before
+    # the client is even spawned).
     args = [str(binary), "--endpoint", endpoint, "--server-ca", str(server_ca), "--producer-id", producer_id, "--clearance", clearance, "--label-marking", label_marking, "--shard-key", shard_key]
     if client_cert is not None:
         args += ["--client-cert", str(client_cert), "--client-key", str(client_key)]
@@ -480,7 +480,27 @@ def test_valid_seccert_leaf_is_accepted_through_nginx_and_batches_submit(tmp_pat
     accepted -- proving the certificate the ingest received (after nginx's own escaping,
     a header hop, and this crate's own percent-decoding) still carries the SAME public key
     the leaf's own private key matches. Also captures and prints the raw forwarded-header
-    evidence question 148 asks for."""
+    evidence question 148 asks for.
+
+    `batch_tai_ns="now"` (question 223): this test's own server runs `--real-clock` with a
+    five-second `--max-batch-age-ns` staleness window (see `_running_server`'s own
+    `--max-batch-age-ns 5000000000`), and this function's own module-scoped fixtures
+    (`av_ingest_binaries`'s `cargo build`, `provisioned`'s seccert+lego issuance) can take
+    on the order of tens of seconds on a contended host, plus `_backend_and_front` starts
+    a real `av-ingest-server` and a real nginx in front of it. None of that budget may be
+    spent against the five-second window -- and, empirically (see this round's own
+    scratchpad measurements), even the REMAINING gap after every fixture has already
+    finished -- `av-ingest-mtls-client`'s own process startup, the real mTLS handshake
+    through nginx, and the `Announce` round trip, all of which still happen after this
+    Python process's own timestamp and before `Submit` is ever called -- was measured at
+    0.32-0.40s on an idle host, and grows under the kind of contention this track's own
+    over-subscribed host (question 218) sees routinely. Stamping the batch from *this*
+    process, before spawning the client, was therefore never late enough: the client
+    itself now stamps the batch (`--batch-tai-ns now`) at the last possible moment, right
+    before it builds and signs the batch, so the batch's declared age reflects none of
+    this test's own setup, the subprocess spawn, or the TLS handshake -- only whatever the
+    server itself takes to receive and check the stream, which is what `--max-batch-age-ns`
+    is actually meant to bound."""
     _require_nginx()
     server_cert = _build_front_server_cert(tmp_path / "front_cert")
     client_fullchain = _fullchain(tmp_path / "edge_fullchain.pem", provisioned.edge.cert_pem, provisioned.edge.issuer_pem)
@@ -502,7 +522,7 @@ def test_valid_seccert_leaf_is_accepted_through_nginx_and_batches_submit(tmp_pat
             client_key=provisioned.edge.key_pem,
             producer_id="edge-plugin-good",
             submit_with_key=provisioned.edge.key_pem,
-            batch_tai_ns=now_tai_ns(),
+            batch_tai_ns="now",
         )
         assert result["announce"]["accepted"] is True, result
         assert len(result["submit_verdicts"]) == 1, result

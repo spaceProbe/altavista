@@ -233,18 +233,6 @@
           }
         }
       ],
-      "name": "pip",
-      "type": "library",
-      "version": "26.1.2"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
       "name": "pluggy",
       "type": "library",
       "version": "1.6.0"
@@ -424,15 +412,15 @@
       "properties": [
         {
           "name": "altavista:sbom:python-packages-source",
-          "value": "this component's package list is importlib.metadata over the one shared worktree .venv -- there is no per-component venv in this repository, so every Python component's SBOM enumerates the identical installed-distribution set; it is not resolved independently per component"
+          "value": "this component's package list is the committed declared set in scripts/kit/python-lock.json (pyproject.toml's [project].dependencies and [project.optional-dependencies].dev, resolved and pinned by scripts/kit/python_lock.py) -- the live worktree .venv is read only to cross-check the declared set against what is actually installed (a disagreement raises PythonSbomCrossCheckError rather than silently writing whichever was found); there is no per-component venv or lock file in this repository, so every Python component's SBOM enumerates the identical declared set"
         }
       ],
       "type": "application",
       "version": "0.1.0"
     },
-    "timestamp": "2026-09-16T04:14:06Z"
+    "timestamp": "2026-09-17T11:34:34Z"
   },
-  "serialNumber": "urn:uuid:cf2ee45b-3ec3-41d4-f9e0-27188c301f9b",
+  "serialNumber": "urn:uuid:66697dec-1ff5-4741-cc54-bbd97b6404b8",
   "specVersion": "1.5",
   "version": 1
 }

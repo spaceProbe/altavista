@@ -40,10 +40,36 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-b40eceef1042740041a1a561ded18b77a9101c220db98d56196a34b9f042e016
+ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa
 ```
 
-Recorded from the verification clone at the commit that regenerated the SBOMs (the bundle's
+Recorded by the lead from the verification clone on 2026-09-18 at `2aced3e`, which
+regenerated the two Python SBOMs: the commit that introduced `scripts/kit/python-lock.json`
+(an epoch input) also carried SBOMs generated before it existed, so their epoch was stale on
+landing and the previous number, `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32`,
+with it. That number had been moved from `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` by the
+native-dynamics track's own round 2 task 5 (question 224, the task this section's own last
+paragraph named as still open): `scripts/kit/sbom.py::python_dist_sbom` no longer reads the live
+worktree `.venv` directly for the two Python SBOMs' package list -- it reads the new committed
+`scripts/kit/python-lock.json` (`scripts/kit/python_lock.py`'s output), cross-checking the live
+venv rather than sourcing from it. Regenerating `av-viewer.cdx.json`/`gmat-service.cdx.json`
+through the generator with this fix applied dropped `pip` from both (the venv-bootstrap tool
+`pip install -e ".[dev]"` always adds regardless of what `pyproject.toml` declares -- nothing in
+this project's own dependency graph names it, so the declared set this task's fix reads never
+did either) and updated both files' `altavista:sbom:python-packages-source` property text to
+describe the new source; `docs/compliance/sbom/SHA256SUMS` changed as a direct result for
+exactly those two files, `SHA256SUMS` is one of `epoch_paths` above, and `sbom_hashes` is one of
+the evidence-dependent inputs `bundle_sha256` hashes (see "What the hash depends on" below) --
+so the bundle regenerated from the current tree no longer matched the previous recorded number,
+caught by `test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed the same way
+every prior move in this section was: re-running the documented command and recording what it
+actually printed. No control matrix, component set, or non-Python evidence content changed.
+
+Recorded from the verification clone at the commit that regenerated the SBOMs for the merge
+of heavy round 2 into the native-dynamics branch (`7ea2d24`, question 220), following the same
+two-step the previous value used. The previous value,
+`06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e`, was recorded from the
+verification clone at the commit that regenerated the SBOMs (the bundle's
 epoch is the last commit touching its inputs, so the SBOM commit itself moved it, and this
 record is written in a following commit that touches no input). Moved here, in two steps,
 from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
@@ -90,26 +116,6 @@ byte-for-byte -- confirmed with a real regeneration and `git status`/`diff` show
 so both files, and the bundle hash above, are already consistent with this worktree's real,
 current `.venv`; no component set, control matrix, or evidence content changed, only the two
 Python SBOMs' `.venv`-derived package list.
-
-It moved once more, to the number above, from
-`06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e`, at heavy round 3:
-`3f86b52` (the terrain and 3D Tiles tilers) gave `crates/av-jobs` a `serde_json` dependency
-edge for `tileset.json`, which touches the workspace manifest and so moved all six Rust SBOM
-epochs -- question 220's rule, and the seven tests it predicts failed exactly as described
-(`test_the_epoch_is_never_wall_clock` for each of the six components, plus
-`test_all_six_rust_components_share_exactly_one_epoch_from_git`, reporting the tree's
-`2026-09-17T04:42:19Z` against the recorded `2026-09-16T19:54:20Z`). The SBOMs were
-regenerated with the generator's own output in `41f0815` and this number was measured from
-the tree at that commit, before this record was written -- the two-step order the paragraph
-above describes, since the bundle's epoch is the last commit touching its inputs and this
-commit touches none of them.
-
-Question 224's interim rule was met and, in passing, evidenced: this worktree's `.venv` had
-no `setuptools` at the round's start and was repaired once with `pip install -e ".[dev]"`
-before any measurement; the round 3 regeneration then reproduced the two Python SBOMs
-(`av-viewer`, `gmat-service`) **byte-identically** to the ones the lead committed from the
-verification clone, so the repaired worktree venv and the clone's venv now write the same
-document.
 
 ## What the hash depends on
 

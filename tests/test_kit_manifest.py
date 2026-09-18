@@ -1022,6 +1022,27 @@ def test_prebuild_base_image_is_pinned_to_the_1_90_digest():
 def _compute_prebuild_digest_skip_reason() -> "str | None":
     if not _docker_available():
         return "Docker is not available on this host (`docker info` failed)."
+    # The positive half of the test below (`_verify_prebuild_base_image_digest(PREBUILD_BASE_IMAGE)`
+    # must NOT raise) needs the pinned base image actually cached on this host, and this test never
+    # pulls one (question 154: no network at test time). Colima's own kubelet image garbage
+    # collector evicts every image no container uses once the VM disk passes its high threshold
+    # (questions 196(d)/205), which took this image on the native-dynamics track's round-1 gate and
+    # turned an absent image into a hard failure instead of a visible skip. Guard it the same way
+    # `tests/test_edge_plugin_hardening_alpine.py` already guards its own `alpine:latest` probe.
+    result = subprocess.run(
+        ["docker", "image", "inspect", build_kit.PREBUILD_BASE_IMAGE],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return (
+            f"the pinned cross-build base image {build_kit.PREBUILD_BASE_IMAGE!r} is not present "
+            f"locally under this exact digest, and this test never pulls an image itself "
+            f"(question 154: no network at test time) -- it may have been evicted by Colima's own "
+            f"kubelet image garbage collector (questions 196(d)/205). Run "
+            f"`docker pull {build_kit.PREBUILD_BASE_IMAGE}` once, on a host with network access, "
+            f"then re-run this test. (`docker image inspect` said: "
+            f"{result.stderr.strip() or '(no stderr)'})"
+        )
     return None
 
 
