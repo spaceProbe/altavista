@@ -1,0 +1,26 @@
+# Generated compliance documents (round 3, question 227): a merge never stops on these paths --
+# `scripts/kit/regenerate_compliance.py` is the one committed script that regenerates them
+# correctly from the merged tree and is meant to run immediately after any merge that touches
+# them (see that script's own doc comment for the two-commit cycle it performs, and
+# scripts/kit/README.md's "Regenerating the compliance documents" section for the one-time
+# `git config merge.ours.driver true` this repository needs -- git does not ship the `ours`
+# merge driver enabled by default, only the strategy name; without that one-line config this
+# `merge=ours` attribute is silently ignored and an ordinary content merge (and possible
+# conflict) happens instead).
+docs/compliance/sbom/*.cdx.json merge=ours
+docs/compliance/sbom/SHA256SUMS merge=ours
+docs/compliance/BUNDLE.md merge=ours
+
+# scripts/kit/python-lock.json is deliberately NOT in this set. It is generated, but it is an
+# INPUT to the two Python SBOMs (the declared package set `scripts/kit/sbom.py` reads and
+# cross-checks against the live venv -- see `scripts/kit/python_lock.py`'s own doc), never an
+# output `regenerate_compliance.py` or any merge-time step writes. `ours` is the right answer
+# for the three paths above only because they are regenerated from the tree, correctly, right
+# after the merge, by a script this repository owns -- so taking either side at merge time is
+# equally arbitrary and gets overwritten a moment later anyway. That is not true of
+# python-lock.json: it is refreshed only by hand (`python scripts/kit/python_lock.py --refresh`,
+# run on a venv attested healthy) and committed like any other source change, so a merge
+# conflict on it can be a genuine disagreement between two branches' dependency sets -- `ours`
+# would silently discard the other side's real change, with no regeneration step downstream to
+# catch or correct it. Ordinary merge conflict resolution (a human reads both sides) is the only
+# safe answer for it.

@@ -43,44 +43,6 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa
 ```
 
-Recorded by the lead from the verification clone on 2026-09-18 at `2aced3e`, which
-regenerated the two Python SBOMs: the commit that introduced `scripts/kit/python-lock.json`
-(an epoch input) also carried SBOMs generated before it existed, so their epoch was stale on
-landing and the previous number, `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32`,
-with it. That number had been moved from `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` by the
-native-dynamics track's own round 2 task 5 (question 224, the task this section's own last
-paragraph named as still open): `scripts/kit/sbom.py::python_dist_sbom` no longer reads the live
-worktree `.venv` directly for the two Python SBOMs' package list -- it reads the new committed
-`scripts/kit/python-lock.json` (`scripts/kit/python_lock.py`'s output), cross-checking the live
-venv rather than sourcing from it. Regenerating `av-viewer.cdx.json`/`gmat-service.cdx.json`
-through the generator with this fix applied dropped `pip` from both (the venv-bootstrap tool
-`pip install -e ".[dev]"` always adds regardless of what `pyproject.toml` declares -- nothing in
-this project's own dependency graph names it, so the declared set this task's fix reads never
-did either) and updated both files' `altavista:sbom:python-packages-source` property text to
-describe the new source; `docs/compliance/sbom/SHA256SUMS` changed as a direct result for
-exactly those two files, `SHA256SUMS` is one of `epoch_paths` above, and `sbom_hashes` is one of
-the evidence-dependent inputs `bundle_sha256` hashes (see "What the hash depends on" below) --
-so the bundle regenerated from the current tree no longer matched the previous recorded number,
-caught by `test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed the same way
-every prior move in this section was: re-running the documented command and recording what it
-actually printed. No control matrix, component set, or non-Python evidence content changed.
-
-Recorded from the verification clone at the commit that regenerated the SBOMs for the merge
-of heavy round 2 into the native-dynamics branch (`7ea2d24`, question 220), following the same
-two-step the previous value used. The previous value,
-`06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e`, was recorded from the
-verification clone at the commit that regenerated the SBOMs (the bundle's
-epoch is the last commit touching its inputs, so the SBOM commit itself moved it, and this
-record is written in a following commit that touches no input). Moved here, in two steps,
-from `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` on
-2026-09-16 by the lead at the heavy round 2 merge: the two Python SBOMs (`av-viewer`,
-`gmat-service`) had been regenerated from a worktree venv that lacks `setuptools` and carries
-a stale `altavista` dist-info, so they recorded `setuptools:no-longer-there` and
-`altavista:no-licence-metadata`; regenerated from a venv installed with `pip install -e
-".[dev]"` (the verification clone's), which is what the committed documents describe. The
-finding that a Python SBOM records the live venv rather than the declared dependency set is
-question 224.
-
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
 slots) and reading `bundle_sha256` from the written `out/evidence/bundle.json` -- the same value
 the command's own stderr prints.
@@ -89,33 +51,37 @@ regenerates the bundle from the current tree and asserts its `bundle_sha256` equ
 number, parsed out of this file for real -- so this number is load-bearing, not decorative: if it
 ever drifts from what the current tree actually regenerates, CI fails until this file is updated.
 
-This number moved from the commit-1 value (`4d55fe50888b...`) because of D4b (commit 2, this
-task's live half, `scripts/kit/live_evidence.py`): `assemble_bundle` gained a new top-level
-`secdeploy_evidence` field alongside the existing `ledger_verify.live` one, and its own
-committed-default value (`SECDEPLOY_EVIDENCE_NOT_COLLECTED`) is new, real evidence content --
-exactly the "the hash moves when the EVIDENCE moves" rule this section states below, not a
-regression of the round-3 `git_commit` fix (see "What the hash depends on").
+### Regeneration history
 
-It moved again, to the number above, from `19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6`,
-because of the aiplane merge's own SBOM regeneration (commit `4f559a9`, "Regenerate the SBOMs for
-the merge's workspace-manifest epoch move (question 220)"): that commit's real content change
-(confirmed with `git show --stat`, not assumed from its message alone) was `docs/compliance/sbom/
-av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json` losing stale distribution
-entries the two Python SBOMs no longer install in the shared worktree `.venv` (`setuptools` is no
-longer an installed distribution there at all, and `altavista` itself now carries no captured
-licence metadata rather than the `Apache-2.0` an earlier, differently-provisioned `.venv` once
-reported) -- `docs/compliance/sbom/SHA256SUMS` changed as a direct result, `SHA256SUMS` is one of
-`epoch_paths` above, and `sbom_hashes` is one of the evidence-dependent inputs `bundle_sha256`
-hashes (see "What the hash depends on" below): the bundle regenerated from the current tree no
-longer matched this file's previously recorded number, caught by
-`test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` and fixed by re-running the documented
-command and recording what it actually printed. Re-running `scripts/kit/sbom.py --out docs/
-compliance/sbom` for `av-viewer`/`gmat-service` against this same tree reproduces
-`docs/compliance/sbom/av-viewer.cdx.json` and `docs/compliance/sbom/gmat-service.cdx.json`
-byte-for-byte -- confirmed with a real regeneration and `git status`/`diff` showing no change --
-so both files, and the bundle hash above, are already consistent with this worktree's real,
-current `.venv`; no component set, control matrix, or evidence content changed, only the two
-Python SBOMs' `.venv`-derived package list.
+Newest first, one row per hash this file has ever RECORDED (in its own fenced block, at some
+commit) -- every value, including the ones superseded within minutes. `scripts/kit/
+regenerate_compliance.py` (round 3, question 227) maintains both the fenced block above and this
+table's top row together, in the second of its own two commits -- see that script's own doc
+comment for the full two-commit ordering rule. "Commit" names the commit whose regeneration (or
+other evidence-changing content) this row's hash reflects; where that is a DIFFERENT commit from
+the one that actually wrote the value into this file's fenced block, the "Cause" column says so
+explicitly (the `d3f18b5`/`9cf8921` pair below is exactly this case -- read together). Where the
+prior prose named no commit for a value, this table says so rather than inventing one. The fuller
+per-move narrative this table condenses (exact `git show --stat` confirmations, byte-for-byte
+re-generation proofs) lives in this file's own git history, `git log -p -- docs/compliance/
+BUNDLE.md`. One further hash is named elsewhere in this document but deliberately has NO row
+here: `d5df21cfca7ae4b9f3a3039f4a77c7fbd852800bc7c64344d4253a9673d36286` was never a value this
+fenced block actually held -- it exists only as "What the hash depends on"'s own counter-example
+measurement (what the pre-fix code would have produced at commit `18d923a`, alongside the real
+value that commit actually recorded, `4d55fe50...`, the table's own oldest-but-one row below) --
+so it is not duplicated here.
+
+| Date | Hash | Commit | Cause |
+|---|---|---|---|
+| 2026-09-18 | `ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa` | `2aced3e` | Regenerated the two Python SBOMs so their epoch reflects the newly-committed `python-lock.json` (the SBOMs had briefly predated that file, so their epoch was stale on landing). |
+| 2026-09-17 | `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32` | `6fe41d7` | Question 224 landed: the two Python SBOMs now source from the committed `python-lock.json`, not the live venv (dropped `pip`, updated the `python-packages-source` property). |
+| 2026-09-16 | `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` | `7ea2d24` | SBOMs regenerated for the heavy-round-2-into-native-dynamics merge's workspace-manifest epoch move (question 220). |
+| 2026-09-16 | `06a1838aed06080ed56a8d9d46a5b131b02c3bbc74f5c3232fb24205e019db3e` | `d3f18b5` (correctly recorded by the following commit, `9cf8921`) | Two Python SBOMs regenerated from a complete venv (`pip install -e ".[dev]"`) by `d3f18b5`, correcting the row below's venv-incomplete hash -- but `d3f18b5` itself recorded that row's STALE value, not this one; `9cf8921` re-ran the documented command against the now-existing `d3f18b5` and recorded what it actually printed, this hash. |
+| 2026-09-16 | `b5b99cac4338633f3ea960deecf7d4896b37bb438323632f1b1b07d4263fad1e` | `d3f18b5` | The stale-on-landing value: `d3f18b5` computed and recorded this in the SAME commit as its own SBOM regeneration, before the epoch-affecting commit it was itself part of actually existed -- wrong the instant it landed, per `scripts/kit/regenerate_compliance.py`'s own doc comment (this is the real historical proof it cites for the two-commit ordering rule). Corrected one commit later by `9cf8921` (row above), which re-ran the same command against `d3f18b5` and recorded `06a1838a...` instead. |
+| 2026-09-16 | `c2670059ce354b9233a1e01455bead81c3223c0d919338f6321a8b0f2b899aec` | `53381cf` | Heavy-round-2 merge reconciliation recorded a hash computed from that incomplete venv -- wrong, corrected by the `06a1838a...` row above (question 224's own finding). |
+| 2026-09-16 | `19992e76e3938671ae444e917067b713a5beac295e91de0ec1f571ec274c78d6` | `8c5d93a` | Same-day SBOM refresh; the commit that produced this exact value is not named in the prior prose. Superseded hours later when the aiplane merge's own SBOM regeneration (`4f559a9`) dropped stale distribution entries from `av-viewer.cdx.json`/`gmat-service.cdx.json`. |
+| 2026-09-15 | `4d55fe50888b9df89cc64fb4b0f26f9fc0c8efd2e38aed01e4a26487cebfc32a` | `3f53aca` | Round 3 defect fix: excluded `git_commit` from `bundle_sha256`'s hashed content (a commit-inclusive hash was stale the instant it landed -- question 214's platform lesson). The illustration of this exact fix, with its own before/after hashes (including the pre-fix counter-example `d5df21cf...` named above) at commit `18d923a`, stays in "What the hash depends on" below. |
+| 2026-09-15 | `7d0a205333ced6c38f843aaa695b58ceb5da3be86172fa7aaf50491a8d4e8593` | `0b435e2` | This file's FIRST recorded value, from D4a ("the offline half of the evidence bundle"), the commit that first assembled and recorded the bundle at all. Superseded by the row above once the round-3 `git_commit`-exclusion fix landed. |
 
 ## What the hash depends on
 
