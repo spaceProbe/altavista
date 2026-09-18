@@ -130,7 +130,7 @@
 //     `failureNames` (both reported unconditionally here and in
 //     `web/js/layers_stream_check.mjs`) make the failure-memory policy itself
 //     observable, not just this one probe's pass/fail.
-import { LayerManager } from './layers/layer.js';
+import { LayerManager, compareAdmission } from './layers/layer.js';
 import { ImageryLayerAdapter, IMAGERY_TILE_BYTES } from './layers/imagery_layer.js';
 import { TerrainLayerAdapter, TerrainLoaderNotImplementedError } from './layers/terrain_layer.js';
 import { Tiles3DLayerAdapter, DEFAULT_TILE3D_BYTES } from './layers/tiles3d_layer.js';
@@ -357,10 +357,21 @@ const planNeverLoadsDirectly = probePlanNeverLoadsDirectly();
  *      camera position selects 14 imagery tiles, see globe_lod.js's selectTiles --
  *      far more than the 2-slot cap this probe uses) is run through one `update()`.
  *      The set of requests actually started (`pending`'s keys) must equal exactly
- *      the top-`maxConcurrentLoads` of the plan's own priority order -- proving
- *      "starts loads in priority order only while pending.size < maxConcurrentLoads"
- *      is really what happens, not merely that *some* subset started.
- *   2. A specific lower-priority request (the plan's 3rd-ranked, `plan[2]`) must be
+ *      the top-`maxConcurrentLoads` of the plan's own ADMISSION order -- proving
+ *      "starts loads in admission order only while pending.size < maxConcurrentLoads"
+ *      is really what happens, not merely that *some* subset started. Round 4
+ *      (question 228): `update()`'s RETURN value (`plan1`, below) stays sorted by
+ *      `comparePriority` unchanged (`tests/test_viewer_layers.py` pins that), but
+ *      what actually gets ADMITTED is decided by `compareAdmission` (coarser levels
+ *      first) -- this probe's `memoryBudgetBytes` is deliberately huge (999 GB) so
+ *      the budget itself never constrains anything and `maxConcurrentLoads` is
+ *      isolated as the only thing under test, but admission ORDER is still
+ *      `compareAdmission`'s, not `comparePriority`'s, regardless of whether the
+ *      budget binds -- so this probe's own "top N" must be recomputed by
+ *      `compareAdmission` over the same request set, not read off `plan1` directly
+ *      (`plan1` is `comparePriority`-sorted and the 'far' position's 14 tiles span
+ *      more than one level, so the two orders genuinely differ here).
+ *   2. A specific lower-admission-priority request (`admissionOrder1[CAP]`) must be
  *      observably NOT started (absent from `pending`) while both slots are full --
  *      this is the half a wrong implementation that starts every wanted request
  *      regardless of the cap would fail (see this file's module docstring: only
@@ -369,7 +380,7 @@ const planNeverLoadsDirectly = probePlanNeverLoadsDirectly();
  *      probe just happened to look at it before completion).
  *   3. Completing both in-flight loads frees two slots; a SECOND `update()` over the
  *      SAME view must then start that same previously-deferred request -- proving
- *      slots really free up and the queue really drains, in priority order, rather
+ *      slots really free up and the queue really drains, in admission order, rather
  *      than a request that missed its first window being dropped forever.
  */
 async function probeQueueIsLoadBearing() {
@@ -381,14 +392,18 @@ async function probeQueueIsLoadBearing() {
   const cameraEcef = cameraEcefFromEnu(0, 0, 3000000); // 'far': 14 imagery tiles, see selectTiles
   const view = { cameraEcef, screenHeightPx: IMG_SCREEN.screenHeightPx, fovYRad: IMG_SCREEN.fovYRad, tiles: selectTiles(cameraEcef, IMG_SCREEN) };
 
-  const plan1 = mgr.update(view); // already priority-sorted
-  const expectedFirstStarted = new Set(plan1.slice(0, CAP).map((r) => r.globalKey));
+  const plan1 = mgr.update(view); // already priority-sorted (comparePriority) -- this IS update()'s own unchanged return value
+  // What actually gets admitted is decided in `compareAdmission`'s own order (round
+  // 4, see this function's own doc comment) -- a freshly-sorted COPY of the same
+  // request set, exactly mirroring what layer.js's update() itself does internally.
+  const admissionOrder1 = plan1.slice().sort(compareAdmission);
+  const expectedFirstStarted = new Set(admissionOrder1.slice(0, CAP).map((r) => r.globalKey));
   const startedFirstUpdate = new Set(mgr.pending.keys());
   const startedFirstUpdateMatchesTopN = plan1.length > CAP
     && startedFirstUpdate.size === CAP
     && [...startedFirstUpdate].every((k) => expectedFirstStarted.has(k));
 
-  const deferredKey = plan1[CAP].globalKey; // the 3rd-ranked request: rank > CAP, must not have started
+  const deferredKey = admissionOrder1[CAP].globalKey; // the (CAP+1)-th by ADMISSION order: rank > CAP, must not have started
   const deferredKeyNotStartedFirstUpdate = !mgr.pending.has(deferredKey) && !mgr.resident.has(deferredKey);
 
   stub.completeOldest(CAP);
@@ -594,6 +609,20 @@ const result = {
   // when nonzero, so a green budgetRespected can never be hiding it (this file's own
   // module docstring, "byte budget" bullet, restated for this specific counter).
   softViolationCount: manager.softViolationCount,
+  // Round 4 (question 228): reported unconditionally, alongside softViolationCount,
+  // for the identical reason -- a budget deferral that is not counted is not a
+  // deferral this project accepts. See layer.js's constructor doc comment for the
+  // exact distinction between this (budget-only) and a request merely held back by
+  // maxConcurrentLoads or the failure-memory blacklist (neither counted here).
+  deferredCount: manager.deferredCount,
+  lastStepDeferred: manager.lastStepDeferred,
+  // Round 4 follow-up (manager review): reported unconditionally too -- see layer.js's
+  // constructor doc comment. This run's own camera path never changes a request's
+  // declared byteCost between steps (every stub layer here always plans the exact
+  // same number for a given key), so both are expected exactly 0 -- reported anyway,
+  // not merely when nonzero, exactly like softViolationCount/failedCount above.
+  byteCostRevisionCount: manager.byteCostRevisionCount,
+  byteCostRevisionBytes: manager.byteCostRevisionBytes,
   maxConcurrentLoads: manager.maxConcurrentLoads,
   queueIsLoadBearing,
   // Failure-memory policy (Finding 1, corrective round 3 -- see layer.js's

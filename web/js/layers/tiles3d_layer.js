@@ -76,6 +76,14 @@ export class Tiles3DLayerAdapter {
         sseError: sseFromGeometricError(node.geometricError, d, screenHeightPx, fovYRad),
         viewDistanceM: d,
         byteCost: node.byteLength || this._defaultByteCost,
+        // level (round 4, question 228): this node's own tree DEPTH, not a byte-cost
+        // or screen-space notion -- `web/js/tiles_layer.js`'s own node ids are
+        // dot-joined path strings ("0", "0.1", "0.2.0", ...), and `id.split('.').
+        // length - 1` is exactly `selectTiles3D`'s own `level` local (see that
+        // function's own traversal in tiles_layer.js) recovered from the id alone, so
+        // this is not a second, independently-derived notion of depth -- the root
+        // ("0") is level 0, the coarsest, matching layer.js's own `level` convention.
+        level: id.split('.').length - 1,
         contentUri: node.contentUri,
       };
     });

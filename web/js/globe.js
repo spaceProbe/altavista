@@ -33,6 +33,27 @@ import {
   selectTiles, TileLoadScheduler, tileKey, tileVertexPositions,
   WGS84_A_M, WGS84_B_M, SCENE_UNITS_PER_METRE,
 } from './globe_lod.js';
+// Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe through the
+// LayerManager"): imported from the INDIVIDUAL files, not the barrel
+// (`./layers/index.js`) -- deliberately, not a style choice. `./layers/imagery_layer.js`
+// already imports `urlForTile` from THIS file (`../globe.js`); if this file imported the
+// barrel instead, that barrel's own re-export of `./layers/gateway_imagery_layer.js`
+// (`class GatewayImageryLayerAdapter extends ImageryLayerAdapter`) would get pulled into
+// the SAME synchronous circular-evaluation chain this import creates, and Node evaluates
+// that `extends` clause before `imagery_layer.js`'s own `class ImageryLayerAdapter`
+// declaration has run in that specific cycle ordering -- a real
+// `ReferenceError: Cannot access 'ImageryLayerAdapter' before initialization`, caught
+// live while building this task (`node web/js/layers_check.mjs` failing) and root-caused
+// to exactly this, not papered over by reordering or a dynamic import. Importing the
+// two leaf files this module actually needs sidesteps the barrel's own wider cycle
+// entirely: `./layers/imagery_layer.js`/`./layers/terrain_layer.js` are only ever
+// dereferenced inside `GlobeLayer`'s constructor/methods (never at this module's own
+// top level or in a class `extends` clause), so the remaining globe.js<->imagery_layer.js
+// cycle itself is safe (see globe_lod.js's own note on the module-load-order
+// discipline this codebase already applies for a comparable case).
+import { ImageryLayerAdapter } from './layers/imagery_layer.js';
+import { TerrainLayerAdapter } from './layers/terrain_layer.js';
+import { globalKeyFor } from './layers/layer.js';
 
 const DEFAULT_IMAGERY_URL = './fixtures/tiles/{z}/{x}/{y}.png';
 const DEFAULT_SEGMENTS = 8; // quads per tile edge
@@ -66,7 +87,24 @@ export function urlForTile(template, tile) {
  * requirement: no unrecorded approximation -- the fallback is visible, not silent, via
  * `mesh.userData.imageryLoaded`).
  */
-function buildTileMesh(tile, imageryUrl, textureLoader, segments = DEFAULT_SEGMENTS) {
+/** Apply a loaded texture payload to a tile mesh's material -- exactly the steps
+ * `buildTileMesh`'s own direct-load callback (below) already performed inline;
+ * factored out (round 4, question 228's wiring task) so the SAME application logic
+ * runs whether the texture arrived via `buildTileMesh`'s own direct,
+ * `textureLoader.load()` call (`layerManager` absent) or via
+ * `LayerManager.getResidentPayload()` once a manager-driven load has genuinely
+ * completed (`layerManager` present, see `GlobeLayer.update()`) -- never two
+ * independently-written copies of "how a loaded texture becomes visible".
+ */
+function applyTileTexture(mesh, tex) {
+  tex.colorSpace = THREE.SRGBColorSpace;
+  mesh.material.map = tex;
+  mesh.material.color.set(0xffffff);
+  mesh.material.needsUpdate = true;
+  mesh.userData.imageryLoaded = true;
+}
+
+function buildTileMesh(tile, imageryUrl, textureLoader, segments = DEFAULT_SEGMENTS, skipDirectLoad = false) {
   const n = segments + 1;
   // The exact vertex-position math scene_jitter_harness.mjs's
   // measureRpoWithGlobePresent() also calls (see globe_lod.js's docstring) -- f64
@@ -110,18 +148,29 @@ function buildTileMesh(tile, imageryUrl, textureLoader, segments = DEFAULT_SEGME
   const mesh = new THREE.Mesh(geometry, material);
   mesh.userData.tile = tile;
   mesh.userData.imageryLoaded = false;
-  textureLoader.load(
-    urlForTile(imageryUrl, tile),
-    (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      material.map = tex;
-      material.color.set(0xffffff);
-      material.needsUpdate = true;
-      mesh.userData.imageryLoaded = true;
-    },
-    undefined,
-    () => { /* graceful fallback: keep the flat colour material, never throw */ },
-  );
+  // `skipDirectLoad` (round 4, question 228's wiring task): true only when this
+  // mesh's owning `GlobeLayer` was constructed with a `layerManager` -- the texture
+  // then arrives through that manager's own admitted, genuinely cancellable load
+  // instead (`GlobeLayer.update()`, below, applies it via `applyTileTexture` once
+  // `LayerManager.getResidentPayload()` says it is actually resident). A load fired
+  // directly here could never be genuinely cancelled on camera motion -- a real
+  // `THREE.TextureLoader`'s underlying XHR/fetch has no public abort hook (see
+  // `web/js/layers/imagery_layer.js`'s own docstring) -- so routing it through the
+  // manager instead is the whole point of this task's wiring.
+  // Every EXISTING call site (every headless check in this repo --
+  // `web/js/globe_imagery_check.mjs`, `web/js/globe_lod_check.mjs`,
+  // `web/js/scene_jitter_harness.mjs` -- and every call from `GlobeLayer` itself
+  // when no `layerManager` was given) omits this argument, so their behaviour -- an
+  // immediate, synchronous `textureLoader.load()` call for every newly-built mesh --
+  // is unchanged, byte for byte.
+  if (!skipDirectLoad) {
+    textureLoader.load(
+      urlForTile(imageryUrl, tile),
+      (tex) => applyTileTexture(mesh, tex),
+      undefined,
+      () => { /* graceful fallback: keep the flat colour material, never throw */ },
+    );
+  }
   return mesh;
 }
 
@@ -158,6 +207,64 @@ export class GlobeLayer {
     /** @type {Map<string, THREE.Mesh>} */
     this._meshes = new Map();
     this._lastSelectedKeys = new Set();
+
+    // Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe
+    // through the LayerManager"): OPTIONAL -- `opts.layerManager`, a
+    // `web/js/layers/` `LayerManager` (`./layers/index.js`) the CALLER owns (one per
+    // viewer -- see `web/js/scene.js`'s `Viewer` constructor -- "the whole point of
+    // a byte budget is that three layers ... share it", `./layers/layer.js`'s own
+    // module docstring).
+    //
+    // Absent (every headless check in this repo -- `web/js/globe_lod_check.mjs`,
+    // `web/js/globe_imagery_check.mjs`, `web/js/scene_jitter_harness.mjs` -- and
+    // every pre-round-4 call site): behaviour is UNCHANGED, BY CONSTRUCTION --
+    // nothing below this `if` ever runs, `this.scheduler` (unchanged,
+    // `TileLoadScheduler`) is still what drives admission/eviction bookkeeping
+    // exactly as before, and `buildTileMesh` still fires its own direct, immediate,
+    // synchronous `textureLoader.load()` call for every newly-selected tile. Proof:
+    // `web/js/globe_lod_check.mjs`/`web/js/tiles3d_check.mjs` (untouched,
+    // `globe_lod.js` itself is not part of this task) and every pytest in
+    // `tests/test_viewer_globe.py` keep passing byte-for-byte identical output (see
+    // this task's own report).
+    //
+    // Present (`web/js/scene.js`'s own `enableGlobe()`, the real, live viewer path
+    // -- round 4's own fix for "nothing in app.js or the scene imports
+    // web/js/layers/ ... a user cannot see a gateway tile set at all", question
+    // 228's finding 2): this layer registers a REAL `ImageryLayerAdapter` -- the
+    // SAME `imageryUrl`/`textureLoader` this instance already owns, never a second
+    // copy of either -- on the shared manager under a stable id (`imageryLayerId`,
+    // default `'imagery'`), and a `TerrainLayerAdapter` under `terrainLayerId`
+    // (default `'terrain'`) purely so terrain's own typed, named refusal
+    // (`TerrainLoaderNotImplementedError`, `./layers/terrain_layer.js`) genuinely
+    // participates in the manager's failure memory (asked once, not once per frame
+    // forever -- see that class's own module docstring) instead of never being
+    // asked at all -- there is still no terrain LOADER anywhere in this codebase
+    // (`web/VIEWER.md`'s "Explicitly not built"), and this wiring does not add one.
+    // `update()` (below) then takes its ADMISSION/EVICTION/CANCELLATION decision --
+    // which tile's texture is actually allowed to appear, and aborting an in-flight
+    // load that drops out of the plan -- from the manager instead of
+    // `this.scheduler`; the LOD SELECTION itself (`selectTiles()`) and the
+    // mesh-building/disposal SHAPE are unchanged either way (see `update()`'s own
+    // comment: "the same tiles are selected as before the change" is a design
+    // invariant, not an accident).
+    //
+    // Stable, not per-instance, ids: `web/js/scene.js`'s `enableGlobe()`/
+    // `disableGlobe()` construct and dispose a FRESH `GlobeLayer` on every call
+    // against the SAME long-lived manager -- `dispose()` (below) unregisters this
+    // instance's own adapters (`LayerManager.removeLayer`, new this task) so a
+    // later `enableGlobe()` call can register fresh ones under the same ids without
+    // colliding with `addLayer`'s own already-registered guard.
+    this.layerManager = opts.layerManager || null;
+    this.imageryLayerId = opts.imageryLayerId || 'imagery';
+    this.terrainLayerId = opts.terrainLayerId || 'terrain';
+    if (this.layerManager) {
+      this._imageryAdapter = new ImageryLayerAdapter({
+        id: this.imageryLayerId, imageryUrl: this.imageryUrl, loader: this.textureLoader,
+      });
+      this.layerManager.addLayer(this._imageryAdapter);
+      this._terrainAdapter = new TerrainLayerAdapter({ id: this.terrainLayerId });
+      this.layerManager.addLayer(this._terrainAdapter);
+    }
   }
 
   /**
@@ -177,15 +284,67 @@ export class GlobeLayer {
     const tiles = selectTiles(cameraEcef, {
       screenHeightPx, fovYRad, sseThreshold: this.sseThreshold, maxLevel: this.maxLevel, maxTiles: this.maxTiles,
     });
-    const selectedKeys = this.scheduler.update(tiles);
+
+    // Round 4: which tiles keep a mesh this tick is ALWAYS exactly this tick's own
+    // LOD selection (`tiles`) -- true before this task too (`TileLoadScheduler.
+    // update()` never filtered its own return value by `residentBudget` either, see
+    // globe_lod.js) and kept true here deliberately, in BOTH branches below: this
+    // task's own binding rule is "the same tiles are selected as before the
+    // change", and what a `layerManager` actually decides (below) is the narrower
+    // question of whether a given mesh's TEXTURE is allowed to appear yet -- never
+    // whether the mesh itself exists.
+    let selectedKeys;
+    if (this.layerManager) {
+      // The real admission/eviction/cancellation decision: `view.tiles` is this
+      // tick's own LOD selection, `plan()`'d by both the registered imagery and
+      // terrain adapters against the SAME `cameraEcef`/`screenHeightPx`/`fovYRad`
+      // this function already computes screen-space error from -- no second
+      // camera-state shape invented for this wiring. A tile no longer in `tiles`
+      // this tick is no longer "wanted" the instant this call returns, so
+      // `LayerManager.update()`'s own cancellation loop aborts its real, in-flight
+      // `ImageryLayerAdapter.load()` (a real `textureLoader.load()` tied to a real
+      // `AbortSignal`) synchronously, at `abort()` time -- genuinely real
+      // cancellation on camera motion, a property `this.scheduler`'s own
+      // (nothing-ever-listens-to-it) `AbortController` never had.
+      this.layerManager.update({
+        tiles, cameraEcef, screenHeightPx, fovYRad,
+      });
+      selectedKeys = new Set(tiles.map(tileKey));
+    } else {
+      selectedKeys = this.scheduler.update(tiles);
+    }
+
     for (const tile of tiles) {
       const k = tileKey(tile);
       if (!this._meshes.has(k)) {
-        const mesh = buildTileMesh(tile, this.imageryUrl, this.textureLoader, this.segments);
+        // `skipDirectLoad` (last arg) -- see `buildTileMesh`'s own comment -- true
+        // only in `layerManager` mode: the texture arrives through the manager's
+        // own admitted load instead (applied just below, once genuinely resident).
+        const mesh = buildTileMesh(tile, this.imageryUrl, this.textureLoader, this.segments, !!this.layerManager);
         this._meshes.set(k, mesh);
         this.group.add(mesh);
       }
     }
+
+    if (this.layerManager) {
+      // Apply the texture for every mesh whose tile the manager has genuinely
+      // finished loading (`getResidentPayload` -- `undefined` until `_onLoaded`
+      // runs, i.e. never before the real `load()` promise this manager itself
+      // started has actually resolved). `applyTileTexture` is the exact same steps
+      // `buildTileMesh`'s own direct-load callback performs in the other branch,
+      // never a second copy (see that function's own comment). A tile whose load is
+      // still pending, was deferred by the budget, or failed simply keeps its
+      // placeholder-colour material for now -- the same "graceful fallback, never
+      // throw" this class already documents for the direct-load path, just
+      // resolved over more than one `update()` tick instead of inside one
+      // `textureLoader` callback.
+      for (const [k, mesh] of this._meshes) {
+        if (mesh.userData.imageryLoaded) continue;
+        const tex = this.layerManager.getResidentPayload(globalKeyFor(this.imageryLayerId, k));
+        if (tex) applyTileTexture(mesh, tex);
+      }
+    }
+
     for (const [k, mesh] of this._meshes) {
       if (!selectedKeys.has(k)) {
         this.group.remove(mesh);
@@ -195,11 +354,17 @@ export class GlobeLayer {
         this._meshes.delete(k);
       }
     }
-    // Keep the scheduler's resident bookkeeping in step with what is actually built
-    // (unlike globe_lod_check.mjs's offline harness, the browser render path doesn't
-    // need to simulate a slow multi-frame load queue -- a mesh with a fallback-colour
-    // material renders immediately, and the texture swaps in asynchronously).
-    this.scheduler.completeLoads(this._meshes.size, selectedKeys);
+
+    if (!this.layerManager) {
+      // Unchanged: keep the scheduler's resident bookkeeping in step with what is
+      // actually built (unlike globe_lod_check.mjs's offline harness, the browser
+      // render path doesn't need to simulate a slow multi-frame load queue -- a
+      // mesh with a fallback-colour material renders immediately, and the texture
+      // swaps in asynchronously). Only reached when no `layerManager` was given --
+      // in `layerManager` mode the manager's own `update()` (above) already did the
+      // equivalent real bookkeeping.
+      this.scheduler.completeLoads(this._meshes.size, selectedKeys);
+    }
     this._lastSelectedKeys = selectedKeys;
     return tiles;
   }
@@ -211,5 +376,17 @@ export class GlobeLayer {
       mesh.material.dispose();
     }
     this._meshes.clear();
+    // Round 4: unregister this instance's own adapters from the shared manager (if
+    // any) -- see the constructor's own comment: `web/js/scene.js`'s `enableGlobe()`
+    // disposes the OLD `GlobeLayer` before constructing a fresh one against the SAME
+    // long-lived manager, under the SAME stable ids -- without this, a second
+    // `enableGlobe()` call would throw on `LayerManager.addLayer()`'s own
+    // already-registered guard, and the old, disposed instance's stale
+    // `textureLoader` would stay registered forever, silently consuming shared
+    // budget for content nothing renders any more.
+    if (this.layerManager) {
+      this.layerManager.removeLayer(this.imageryLayerId);
+      this.layerManager.removeLayer(this.terrainLayerId);
+    }
   }
 }

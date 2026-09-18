@@ -75,6 +75,10 @@ export class TerrainLayerAdapter {
         sseError: screenSpaceErrorPx(tile, cameraEcef, screenHeightPx, fovYRad),
         viewDistanceM: dist(cameraEcef, center),
         byteCost: TERRAIN_MESH_BYTES,
+        // level (round 4, question 228): same quadtree level as imagery_layer.js's own
+        // `tile.level` -- see layer.js's module docstring and that file's identical
+        // comment for why this is populated, not a second copy of the notion.
+        level: tile.level,
         tile,
       };
     });

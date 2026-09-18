@@ -71,6 +71,13 @@ export class ImageryLayerAdapter {
         sseError: screenSpaceErrorPx(tile, cameraEcef, screenHeightPx, fovYRad),
         viewDistanceM: dist(cameraEcef, center),
         byteCost: this.tileBytes,
+        // level (round 4, question 228): the tile's own quadtree level -- 0 is the
+        // whole-globe root tile (coarsest), ascending levels are finer, exactly
+        // `LayerManager`'s own `level` convention (see layer.js's module docstring).
+        // Used only for admission order (`compareAdmission`), never for selection or
+        // priority (`comparePriority`) -- this adapter reuses `globe_lod.js`'s own
+        // `tile.level`, never a second copy of that notion.
+        level: tile.level,
         url: urlForTile(this.imageryUrl, tile),
         tile,
       };

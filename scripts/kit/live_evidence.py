@@ -143,6 +143,16 @@ NOT_COLLECTED_COMPONENTS: dict[str, str] = {
         "ledger `verify` endpoint, and needs a live catalogue/proposer connection this task's "
         "'cheaply' qualifier does not extend to standing up."
     ),
+    "av-jobs": (
+        "a library and a job runner with a hash-chained file queue, not a service: it has no "
+        "admin HTTP surface to dial, and its ledger is verified by its own crate tests "
+        "(heavy round 4's control matrix, docs/compliance/av-jobs/, says so)."
+    ),
+    "av-tiles": (
+        "its admin surface is GET /admin/api/counters, refusal counters only -- the crate keeps "
+        "no durable ledger to `verify` (its control matrix records that as a Gap), and standing "
+        "it up needs a live object store and an OIDC issuer this module does not provision."
+    ),
 }
 
 

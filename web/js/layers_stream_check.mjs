@@ -262,10 +262,20 @@ let etagMismatchCount = 0;
 let byteCostCheckedCount = 0;
 let byteCostMismatchCount = 0;
 let maxByteCostErrorBytes = 0;
+// Round 4 (question 228's own round-3-defect-5 follow-up): once `fetchManifest()`
+// (below) resolves, `GatewayImageryLayerAdapter.plan()` charges each request the
+// manifest's own real per-tile `size_bytes` instead of this harness's single
+// DECLARED `tileBytes` estimate -- tagged `byteCostSource` on every request (see
+// gateway_imagery_layer.js's own `plan()`). Tallied here, per distinct load attempt,
+// so a run can never silently be accounted in estimated units without that being
+// visible in the printed JSON: a real run against a real, fully-populated manifest is
+// expected to show every entry under `'manifest'`, never `'fallback-estimate'`.
+const byteCostSourceCounts = {};
 
 const layer = new GatewayImageryLayerAdapter({ manifestSha256, origin, tileBytes: declaredTileBytes });
 const realLoad = layer.load.bind(layer);
 layer.load = async (request, signal) => {
+  byteCostSourceCounts[request.byteCostSource] = (byteCostSourceCounts[request.byteCostSource] || 0) + 1;
   try {
     const payload = await realLoad(request, signal);
     tilesFetched += 1;
@@ -412,6 +422,26 @@ const dwellMsPerPosition = Math.min(
   Math.max(MIN_DWELL_MS, calibrationRoundTripMs * DWELL_ROUND_TRIPS_PER_POSITION),
 );
 
+// ------------------------------------------------------------------- manifest fetch
+// Round 4 (question 228): ONE real fetch of this tile set's own manifest, over the
+// SAME same-origin proxy route the tile fetches themselves use (question 51 -- never
+// a second origin), before the camera path starts -- exactly the same "fetch once,
+// up front" shape as the calibration round trip above. Deliberately NOT fatal to this
+// run if it fails (unlike the calibration fetch, which this harness cannot proceed
+// without at all): a manifest fetch failure only means every subsequent request falls
+// back to the declared `tileBytes` estimate (see gateway_imagery_layer.js's own
+// `plan()`), which this harness can still measure and report honestly --
+// `manifestFetchError` (below) makes that failure visible rather than silently
+// swallowed, and `byteCostSourceCounts` (see the `layer.load` wrapper above) makes
+// the CONSEQUENCE of it (every request accounted in estimated, not manifest, units)
+// impossible to miss in the printed JSON either way.
+let manifestFetchError = null;
+try {
+  await layer.fetchManifest();
+} catch (err) {
+  manifestFetchError = (err && err.message) || String(err);
+}
+
 // A real, idle host can run many hundreds of bare `setImmediate` round trips inside
 // even a modest `dwellMsPerPosition` window -- `PER_POSITION_MAX_FRAMES` is a second,
 // independent stopping condition (a tick-count ceiling) purely so a position with
@@ -528,6 +558,30 @@ const result = {
   byteCostCheckedCount,
   byteCostMismatchCount,
   maxByteCostErrorBytes,
+  // Round 4 (question 228's own round-3-defect-5 follow-up) -- see the manifest-fetch
+  // section and the `layer.load` wrapper, above, for what these mean: a healthy run
+  // against this fixture's real, fully-populated manifest is expected to show
+  // `manifestLoaded: true` and every entry of `byteCostSourceCounts` under
+  // `'manifest'`, never `'fallback-estimate'`.
+  manifestLoaded: layer.manifestLoaded,
+  manifestTileCount: layer.manifestTileCount,
+  manifestFetchError,
+  byteCostSourceCounts,
+  // Round 4 (question 228): reported unconditionally, alongside softViolationTaken,
+  // for the identical reason -- see layer.js's constructor doc comment for the exact
+  // distinction between a budget deferral (counted here) and a request merely held
+  // back by maxConcurrentLoads or the failure-memory blacklist (neither counted).
+  deferredCount: manager.deferredCount,
+  lastStepDeferred: manager.lastStepDeferred,
+  // Round 4 follow-up (manager review): reported unconditionally too -- see layer.js's
+  // constructor doc comment. THIS harness is exactly where a nonzero value here would
+  // be most meaningful: `layer.fetchManifest()` (above) resolves mid-run relative to
+  // this file's own calibration timing, so any tile admitted between this run's first
+  // `update()` and that resolution -- if the ordering requirement documented on
+  // `fetchManifest()` itself were ever violated -- would show up here as a nonzero
+  // revision, not silently.
+  byteCostRevisionCount: manager.byteCostRevisionCount,
+  byteCostRevisionBytes: manager.byteCostRevisionBytes,
   cancelledCount: manager.cancelledCount,
   evictedCount: manager.evictedCount,
   // Failure-memory policy (Finding 1, corrective round 3 -- see layer.js's

@@ -40,9 +40,14 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-b97e3b2b27f80df15f791fa90037335152ec14dd77e944778c929aff131fa00c
+e116b9822f73a8a6d2a5efac37c139895fb82760a9330b0607754c1ec5e88855
 ```
 
+
+Recorded by the lead from the verification clone on 2026-09-18 at `56f16ce`: heavy round 4
+added control matrices for `av-tiles` and `av-jobs`, which the bundle discovers from disk, so
+the evidence moved; the value it replaces is
+`b97e3b2b27f80df15f791fa90037335152ec14dd77e944778c929aff131fa00c`.
 
 Recorded by the lead from the verification clone on 2026-09-18 at `6599211`, the SBOM
 regeneration for the merge of native-dynamics rounds 1 and 2 into the heavy branch (question
