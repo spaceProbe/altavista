@@ -40,10 +40,14 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32
+ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa
 ```
 
-Moved here from `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` by the
+Recorded by the lead from the verification clone on 2026-09-18 at `2aced3e`, which
+regenerated the two Python SBOMs: the commit that introduced `scripts/kit/python-lock.json`
+(an epoch input) also carried SBOMs generated before it existed, so their epoch was stale on
+landing and the previous number, `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32`,
+with it. That number had been moved from `459c107c164fc0756cb95c9a5a03659731a3296075e0c60abd45d2b63574d808` by the
 native-dynamics track's own round 2 task 5 (question 224, the task this section's own last
 paragraph named as still open): `scripts/kit/sbom.py::python_dist_sbom` no longer reads the live
 worktree `.venv` directly for the two Python SBOMs' package list -- it reads the new committed
