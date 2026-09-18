@@ -99,6 +99,17 @@
 //! finding that GMAT does the same for that block) position/velocity partial feeds
 //! [`stm::stm_rate`].
 //!
+//! N5 (`docs/native-dynamics-plan.md`, native frame reduction) adds:
+//!
+//! - [`fk5`]: [`fk5::Fk5BodyFixedRotation`], a native (GMAT-free, no cargo feature gate)
+//!   [`frame::BodyFixedRotation`] for Earth -- IAU-76/FK5 precession and nutation (the 1980
+//!   series) with polar motion and UT1 from GMAT's own IERS EOP file, read directly from GMAT's
+//!   `AxisSystem`/`BodyFixedAxes`/`EopFile` C++ source rather than a textbook. See that module's
+//!   own doc for the composition order, the direction proof, and the nutation-update-interval
+//!   decision; pinned against [`frame_gmat::GmatBodyFixedRotation`] at a thousand epochs in
+//!   `tests/fk5_vs_convert.rs` (gated on `gmat-frames`, since the comparison needs GMAT even
+//!   though this module itself does not).
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -129,6 +140,7 @@ pub mod cof;
 pub mod de;
 pub mod drag;
 pub mod dual;
+pub mod fk5;
 pub mod frame;
 #[cfg(feature = "gmat-frames")]
 pub mod frame_gmat;
@@ -147,6 +159,7 @@ pub mod weather;
 pub use cof::{CofError, GravityModel};
 pub use de::{DeBody, DeEphemeris, DeError};
 pub use drag::{drag_acceleration, DragError, DragProperties};
+pub use fk5::{EopTable, Fk5BodyFixedRotation, Fk5Error, NutationSeries};
 pub use frame::{BodyFixedRotation, Rotation};
 #[cfg(feature = "gmat-frames")]
 pub use frame_gmat::GmatBodyFixedRotation;
