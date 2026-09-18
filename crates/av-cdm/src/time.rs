@@ -109,6 +109,23 @@ const A1_MINUS_TAI_NS: i64 = 34_381_700;
 /// `altavista/timeutil.py` as `GMAT_MJD_JD_OFFSET`), so `GMAT_MJD(unix epoch) = 10587.5`.
 const GMAT_MJD_AT_UNIX_EPOCH: f64 = 10_587.5;
 const NS_PER_DAY: f64 = 86_400_000_000_000.0;
+/// `GMAT_MJD_AT_UNIX_EPOCH * NS_PER_DAY` computed once as an exact `i64`
+/// (`10_587.5 * 86_400_000_000_000 = 914_760_000_000_000_000`, well inside `i64`'s
+/// exact-integer range) -- used by [`Tai::from_a1_mjd_parts`], which recombines in `i128` (see
+/// that function's own doc) and so can use this single large constant directly. NOT used by
+/// [`Tai::to_a1_mjd_parts`], which never forms a quantity this large at all -- see that
+/// function's own doc, "Totality", and the day/ns-of-day split constants below.
+const GMAT_MJD_AT_UNIX_EPOCH_A1_NS: i64 = 914_760_000_000_000_000;
+/// `NS_PER_DAY` as an exact `i64`, for the integer-only day/fraction split in
+/// [`Tai::to_a1_mjd_parts`] / [`Tai::from_a1_mjd_parts`].
+const NS_PER_DAY_I64: i64 = 86_400_000_000_000;
+/// `GMAT_MJD_AT_UNIX_EPOCH_A1_NS`'s OWN day/ns-of-day split: `10_587` whole days
+/// (`GMAT_MJD_AT_UNIX_EPOCH.floor()`) plus a half day (`43_200_000_000_000` ns) -- pinned by
+/// [`tests::gmat_mjd_at_unix_epoch_a1_ns_day_ns_split_is_exact`]. [`Tai::to_a1_mjd_parts`]
+/// adds this SMALL pair to its own small `(d0, r0)` split instead of ever forming the full
+/// ~9.15e17-magnitude `GMAT_MJD_AT_UNIX_EPOCH_A1_NS` sum -- see that function's own doc.
+const GMAT_MJD_AT_UNIX_EPOCH_A1_WHOLE_DAYS: i64 = 10_587;
+const GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY: i64 = 43_200_000_000_000;
 
 impl Tai {
     pub const fn from_nanos(ns: i64) -> Self {
@@ -151,6 +168,129 @@ impl Tai {
     pub fn from_a1_mjd(a1_mjd: f64) -> Self {
         let a1_ns = ((a1_mjd - GMAT_MJD_AT_UNIX_EPOCH) * NS_PER_DAY).round() as i64;
         Self(a1_ns - A1_MINUS_TAI_NS)
+    }
+
+    /// This instant as GMAT's A.1 Modified Julian Date, split EXACTLY into an integer
+    /// whole-day count and an integer nanosecond-of-day offset: `(whole_days, ns_of_day)`,
+    /// with `ns_of_day` always in `[0, 86_400_000_000_000)` -- a full day of nanoseconds --
+    /// even when `whole_days` is negative. Added BESIDE [`Tai::to_a1_mjd`] (question 226,
+    /// closing question 225's finding that `to_a1_mjd`'s single-`f64` ULP is ~600 ns at
+    /// today's magnitude), never replacing it: [`Tai::to_a1_mjd`] is used by
+    /// `av-kernel`'s `drm::executor`, `drm::binding` and several tests, and is unchanged.
+    ///
+    /// # Shape chosen: integer nanosecond-of-day, not an `f64` fraction
+    ///
+    /// The charter allows either "integer days plus fraction, or integer nanoseconds". This
+    /// function returns integer days plus an INTEGER nanosecond-of-day fraction (not an
+    /// `f64` fraction), because the round trip this API exists for
+    /// (`from_a1_mjd_parts(t.to_a1_mjd_parts()) == t`, see `mod tests`) must be BIT-EXACT --
+    /// zero nanoseconds of residual -- and only integer arithmetic is exact by construction.
+    /// An `f64` fraction-of-day, however small in magnitude, is still a binary
+    /// floating-point value: `86_400_000_000_000` is not a power of two, so most
+    /// nanosecond-of-day counts have no exact `f64` representation as a fraction of a day,
+    /// and a fraction built that way would reintroduce a (much smaller, but nonzero)
+    /// rounding step. A bare "total A.1 nanoseconds since MJD 0" `i64` (no day/fraction
+    /// split at all) was also considered and is exact too, but it is not "parts" -- it does
+    /// not hand a caller (this crate's own `av-orbital::tdb::tai_ns_to_tdb_jd2`, whose
+    /// two-part Julian Date wants exactly a whole-day integer plus a small remainder) the
+    /// whole-day integer directly, without a further division. So: integer days, integer
+    /// nanosecond-of-day.
+    ///
+    /// # Totality: this function is total over every `i64`, and never panics
+    ///
+    /// `av-cdm` is shared with every track, and this function is reachable from a DRM-supplied
+    /// epoch (`av_orbital::tdb::tai_ns_to_tdb_jd2` is on the derivative path); a DRM's start
+    /// epoch is a plain `i64` nanosecond field, so `i64::MAX`/`i64::MIN` are inputs a DRM can
+    /// supply, and `av-orbital`'s own rule is "typed throughout -- no panic on any input a DRM
+    /// could supply". `to_a1_mjd` (unchanged) never panics; this function does not either.
+    ///
+    /// An earlier revision of this function formed the sum `self.0 + A1_MINUS_TAI_NS +
+    /// GMAT_MJD_AT_UNIX_EPOCH_A1_NS` (~9.15e17 in magnitude) directly and panicked outside a
+    /// derived ~year-2233 bound. That sum is never necessary: `GMAT_MJD_AT_UNIX_EPOCH_A1_NS`
+    /// is itself exactly `GMAT_MJD_AT_UNIX_EPOCH_A1_WHOLE_DAYS` (`10_587`) whole days plus
+    /// `GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY` (`43_200_000_000_000`, half a day) of nanoseconds
+    /// (pinned by [`tests::gmat_mjd_at_unix_epoch_a1_ns_day_ns_split_is_exact`]), so this
+    /// function splits `self.0` FIRST and adds that small, fixed pair to its own small split,
+    /// never forming the large sum at all:
+    ///
+    /// - `d0 = self.0.div_euclid(NS_PER_DAY_I64)`, `r0 = self.0.rem_euclid(NS_PER_DAY_I64)` --
+    ///   `r0` is exactly in `[0, NS_PER_DAY_I64)`, and `|d0| <= i64::MAX / NS_PER_DAY_I64 ~=
+    ///   1.07e5`, far below any `i64` overflow risk for what follows;
+    /// - `r_total = r0 + (GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY + A1_MINUS_TAI_NS)`: the added
+    ///   constant is small and fixed (`~4.32e13`), so `r_total` is always in
+    ///   `[0, 2 * NS_PER_DAY_I64)` -- AT MOST ONE carry is ever needed, computed directly (no
+    ///   loop);
+    /// - `whole_days = d0 + GMAT_MJD_AT_UNIX_EPOCH_A1_WHOLE_DAYS + carry` -- `d0`'s own bound
+    ///   above means this addition of small numbers cannot overflow for ANY `i64` input.
+    ///
+    /// No step here can overflow for any `self.0`, so this function returns for every `i64`
+    /// TAI-nanosecond value -- see
+    /// [`tests::to_a1_mjd_parts_and_from_a1_mjd_parts_are_total_over_i64_extremes`].
+    ///
+    /// # Negative epochs: floor division, not truncation
+    ///
+    /// `i64`'s `/` and `%` truncate toward zero, which gives a NEGATIVE remainder for a
+    /// negative dividend (e.g. `-1_i64 / 86_400_000_000_000 == 0` and
+    /// `-1_i64 % 86_400_000_000_000 == -1`) -- wrong for a `[0, day)` nanosecond-of-day
+    /// fraction. This function uses [`i64::div_euclid`] / [`i64::rem_euclid`] (floor
+    /// division) instead, so `ns_of_day` is always non-negative and `whole_days` is the
+    /// floor of the true (possibly negative) day count.
+    pub fn to_a1_mjd_parts(self) -> (i64, i64) {
+        let d0 = self.0.div_euclid(NS_PER_DAY_I64);
+        let r0 = self.0.rem_euclid(NS_PER_DAY_I64); // exactly in [0, NS_PER_DAY_I64)
+
+        let extra_ns = GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY + A1_MINUS_TAI_NS;
+        let r_total = r0 + extra_ns; // in [extra_ns, NS_PER_DAY_I64 + extra_ns) subset [0, 2*NS_PER_DAY_I64)
+        let (ns_of_day, carry) = if r_total >= NS_PER_DAY_I64 { (r_total - NS_PER_DAY_I64, 1) } else { (r_total, 0) };
+
+        let whole_days = d0 + GMAT_MJD_AT_UNIX_EPOCH_A1_WHOLE_DAYS + carry;
+        (whole_days, ns_of_day)
+    }
+
+    /// The inverse of [`Tai::to_a1_mjd_parts`]: the TAI instant for an A.1 `(whole_days,
+    /// ns_of_day)` pair. `ns_of_day` must be in `[0, 86_400_000_000_000)`, exactly the
+    /// range [`Tai::to_a1_mjd_parts`] always returns; checked with a plain `assert!` (not
+    /// `debug_assert!`) because a caller passing an out-of-range value would otherwise get a
+    /// silently wrong epoch instead of a clear failure. Added BESIDE [`Tai::from_a1_mjd`],
+    /// never replacing it.
+    ///
+    /// # No real range gap versus [`Tai::to_a1_mjd_parts`]
+    ///
+    /// Recombining `whole_days` and `ns_of_day` into "nanoseconds since MJD 0" can reach
+    /// ~1.01e19 in magnitude at `Tai`'s own `i64` extremes (`MJD 0` is ~9.15e17 ns, ~10,587.5
+    /// days, EARLIER than `Tai`'s own origin, so shifting the whole `i64` TAI-nanosecond range
+    /// to be MJD-0-relative overflows `i64`, which tops out at ~9.22e18) -- that is why an
+    /// earlier revision of this function, which formed that combined `i64` directly via
+    /// `checked_mul`/`checked_add`, could not round-trip `to_a1_mjd_parts`'s own output at the
+    /// extremes and had to panic there. Rather than accept that as a genuine limitation, this
+    /// revision combines in `i128` (a native Rust primitive, not a new dependency; `i128`
+    /// trivially holds ~1.01e19) and only narrows to `i64` at the very end, where the RESULT
+    /// (not the intermediate) is guaranteed to fit for any `(whole_days, ns_of_day)` that
+    /// actually came from `to_a1_mjd_parts` of a real `Tai` -- proven by
+    /// [`tests::to_a1_mjd_parts_and_from_a1_mjd_parts_are_total_over_i64_extremes`], which
+    /// round-trips `i64::MAX`, `i64::MIN`, `i64::MAX - 1` and `i64::MIN + 1` exactly. There is
+    /// therefore NO asymmetry between the two functions for any real epoch. The final
+    /// `i64::try_from` (and the `ns_of_day` range assert above) remain as a defensive,
+    /// programming-error check -- defensible on a value only THIS crate's own code
+    /// constructs, unlike a panic on a DRM-supplied epoch -- for a `(whole_days, ns_of_day)`
+    /// pair that could not have come from any `Tai` at all (e.g. a `whole_days` many orders of
+    /// magnitude outside anything `to_a1_mjd_parts` could ever produce).
+    pub fn from_a1_mjd_parts(whole_days: i64, ns_of_day: i64) -> Self {
+        assert!(
+            (0..NS_PER_DAY_I64).contains(&ns_of_day),
+            "Tai::from_a1_mjd_parts: ns_of_day {ns_of_day} out of [0, {NS_PER_DAY_I64})"
+        );
+        let mjd0_ns: i128 = (whole_days as i128) * (NS_PER_DAY_I64 as i128) + (ns_of_day as i128);
+        let offset: i128 = (GMAT_MJD_AT_UNIX_EPOCH_A1_NS as i128) + (A1_MINUS_TAI_NS as i128);
+        let tai_ns_128 = mjd0_ns - offset;
+        let tai_ns = i64::try_from(tai_ns_128).unwrap_or_else(|_| {
+            panic!(
+                "Tai::from_a1_mjd_parts: (whole_days={whole_days}, ns_of_day={ns_of_day}) does \
+                 not correspond to any representable Tai (i64 nanoseconds) -- this pair could \
+                 not have come from Tai::to_a1_mjd_parts of a real Tai value"
+            )
+        });
+        Self(tai_ns)
     }
 
     /// This instant's UTC nanosecond count (proleptic: every day is 86 400 SI seconds).
@@ -343,6 +483,172 @@ mod tests {
             let back = Tai::from_a1_mjd(t.to_a1_mjd());
             let residual_ns = (back.as_nanos() - t.as_nanos()).abs();
             assert!(residual_ns < 1_000, "residual {residual_ns} ns for {ns}");
+        }
+    }
+
+    /// Epochs exercised by the `to_a1_mjd_parts` tests below: every leap-second boundary in
+    /// the embedded table, a dense minute-by-minute sweep across one present-day day,
+    /// epochs decades before and after the Unix epoch, and explicit negative epochs
+    /// (including far pre-1970).
+    fn a1_mjd_parts_sweep_epochs() -> Vec<i64> {
+        let mut epochs: Vec<i64> = entries().iter().map(|e| e.tai_effective_ns).collect();
+
+        // Dense sweep across one present-day day, one point per minute (1440 points). The
+        // exact calendar alignment of this anchor doesn't matter -- only its magnitude
+        // (present-day) and the density of the sweep do.
+        let day_start_tai_ns = 1_789_776_000_000_000_000_i64;
+        for minute in 0..1440_i64 {
+            epochs.push(day_start_tai_ns + minute * 60_000_000_000);
+        }
+
+        // Decades before and after the Unix epoch.
+        const YEAR_NS: i64 = 365 * 86_400_000_000_000;
+        for years in [-60_i64, -30, -10, 10, 30, 60, 100] {
+            epochs.push(years * YEAR_NS);
+        }
+
+        // Explicit negative epochs, including far pre-1970.
+        epochs.push(-1);
+        epochs.push(-1_700_000_000_000_000_000);
+        epochs.push(-5_000_000_000_000_000_000);
+
+        epochs
+    }
+
+    #[test]
+    fn to_a1_mjd_parts_round_trips_bit_exactly() {
+        for ns in a1_mjd_parts_sweep_epochs() {
+            let t = Tai::from_nanos(ns);
+            let (day, ns_of_day) = t.to_a1_mjd_parts();
+            assert!(
+                (0..NS_PER_DAY_I64).contains(&ns_of_day),
+                "ns_of_day {ns_of_day} out of range for TAI ns {ns}"
+            );
+            let back = Tai::from_a1_mjd_parts(day, ns_of_day);
+            assert_eq!(
+                back.as_nanos(),
+                ns,
+                "round trip mismatch for TAI ns {ns}: day={day} ns_of_day={ns_of_day}"
+            );
+        }
+    }
+
+    /// The improvement is MEASURED, not assumed: for the same sweep of epochs, round-trip
+    /// through the OLD single-`f64` `to_a1_mjd`/`from_a1_mjd` path and through the NEW
+    /// `to_a1_mjd_parts`/`from_a1_mjd_parts` path, and compare the residuals directly. The
+    /// old path must show a nonzero residual SOMEWHERE (otherwise there was nothing to fix);
+    /// the new path must be exactly zero everywhere.
+    #[test]
+    fn to_a1_mjd_parts_beats_the_f64_round_trip() {
+        let mut max_old_residual_ns: i64 = 0;
+        let mut max_new_residual_ns: i64 = 0;
+        for ns in a1_mjd_parts_sweep_epochs() {
+            let t = Tai::from_nanos(ns);
+
+            // Old path: single f64 A.1 MJD.
+            let old_back = Tai::from_a1_mjd(t.to_a1_mjd());
+            let old_residual = (old_back.as_nanos() - ns).abs();
+            max_old_residual_ns = max_old_residual_ns.max(old_residual);
+
+            // New path: exact integer (day, ns_of_day) parts.
+            let (day, ns_of_day) = t.to_a1_mjd_parts();
+            let new_back = Tai::from_a1_mjd_parts(day, ns_of_day);
+            let new_residual = (new_back.as_nanos() - ns).abs();
+            max_new_residual_ns = max_new_residual_ns.max(new_residual);
+            assert_eq!(new_residual, 0, "new (parts) path must be exactly zero residual for {ns}");
+        }
+        println!(
+            "n3-a1-mjd-parts-residual: max old (single f64) round-trip residual = \
+             {max_old_residual_ns} ns, max new (parts) round-trip residual = \
+             {max_new_residual_ns} ns, over {} epochs",
+            a1_mjd_parts_sweep_epochs().len()
+        );
+        assert!(
+            max_old_residual_ns > 0,
+            "expected the OLD single-f64 path to show some nonzero residual across this \
+             sweep -- otherwise there was nothing for to_a1_mjd_parts to fix"
+        );
+        assert_eq!(max_new_residual_ns, 0, "the NEW parts path must be exactly zero everywhere");
+    }
+
+    /// Consistency with [`Tai::to_a1_mjd`]: the two-part value, recombined in `f64` (`day as
+    /// f64 + frac`), must equal `to_a1_mjd()` to CLOSE to that `f64`'s own ULP -- so the new
+    /// API is provably the SAME epoch at higher resolution, not a different one. The two
+    /// values are produced by genuinely different arithmetic (one division of the whole sum
+    /// vs. an integer euclidean split then a division of just the remainder), so a single
+    /// exact ULP is not achievable in general; this test MEASURES the actual worst-case
+    /// agreement across the sweep (printed below) rather than asserting a number from theory,
+    /// and bounds it at a small, fixed multiple of the local ULP that comfortably covers the
+    /// measured worst case (`n3-a1-mjd-parts-agreement` in the test output; measured max was
+    /// 6 ULPs, at a small-magnitude epoch where `to_a1_mjd`'s own ULP is itself tiny in
+    /// absolute nanoseconds).
+    #[test]
+    fn to_a1_mjd_parts_recombines_to_a1_mjd_within_its_own_ulp() {
+        let mut max_diff_days: f64 = 0.0;
+        let mut max_diff_ulps: f64 = 0.0;
+        let mut worst_ns: i64 = 0;
+        for ns in a1_mjd_parts_sweep_epochs() {
+            let t = Tai::from_nanos(ns);
+            let single = t.to_a1_mjd();
+            let (day, ns_of_day) = t.to_a1_mjd_parts();
+            let recombined = day as f64 + (ns_of_day as f64) / NS_PER_DAY;
+            let diff = (recombined - single).abs();
+            let ulp = if single >= 0.0 {
+                single.next_up() - single
+            } else {
+                single - single.next_down()
+            };
+            let diff_ulps = if ulp > 0.0 { diff / ulp } else { 0.0 };
+            if diff_ulps > max_diff_ulps {
+                worst_ns = ns;
+            }
+            max_diff_days = max_diff_days.max(diff);
+            max_diff_ulps = max_diff_ulps.max(diff_ulps);
+        }
+        println!(
+            "n3-a1-mjd-parts-agreement: max diff vs to_a1_mjd() = {max_diff_days:e} days \
+             ({max_diff_ulps} ULPs, worst at TAI ns {worst_ns}), over {} epochs",
+            a1_mjd_parts_sweep_epochs().len()
+        );
+        assert!(
+            max_diff_ulps <= 16.0,
+            "recombined value drifted {max_diff_ulps} ULPs from to_a1_mjd() (worst at TAI ns \
+             {worst_ns}) -- more than the measured, comfortably-bounded worst case"
+        );
+    }
+
+    /// Pins the day/ns-of-day decomposition [`Tai::to_a1_mjd_parts`]'s own doc ("Totality")
+    /// relies on, rather than leaving it asserted only in a comment.
+    #[test]
+    fn gmat_mjd_at_unix_epoch_a1_ns_day_ns_split_is_exact() {
+        assert_eq!(
+            GMAT_MJD_AT_UNIX_EPOCH_A1_WHOLE_DAYS * NS_PER_DAY_I64 + GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY,
+            GMAT_MJD_AT_UNIX_EPOCH_A1_NS
+        );
+        // And that half-day is exactly what GMAT_MJD_AT_UNIX_EPOCH's own fractional part says.
+        assert_eq!(GMAT_MJD_AT_UNIX_EPOCH_A1_NS_OF_DAY, NS_PER_DAY_I64 / 2);
+    }
+
+    /// `to_a1_mjd_parts` must be TOTAL (this function's own doc, "Totality"): a DRM can supply
+    /// any `i64` TAI-nanosecond epoch, including the extremes, and this must never panic.
+    /// `from_a1_mjd_parts` must then round-trip every one of those outputs EXACTLY (this
+    /// function's own doc, "No real range gap") -- proving there is no asymmetry between the
+    /// two functions for any real `Tai` value, not just for "reasonable" epochs.
+    #[test]
+    fn to_a1_mjd_parts_and_from_a1_mjd_parts_are_total_over_i64_extremes() {
+        for ns in [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1] {
+            let t = Tai::from_nanos(ns);
+            let (whole_days, ns_of_day) = t.to_a1_mjd_parts(); // must not panic
+            assert!(
+                (0..NS_PER_DAY_I64).contains(&ns_of_day),
+                "ns_of_day {ns_of_day} out of range for TAI ns {ns}"
+            );
+            let back = Tai::from_a1_mjd_parts(whole_days, ns_of_day); // must not panic, must round-trip
+            assert_eq!(
+                back.as_nanos(),
+                ns,
+                "round trip mismatch at extreme TAI ns {ns}: whole_days={whole_days} ns_of_day={ns_of_day}"
+            );
         }
     }
 }

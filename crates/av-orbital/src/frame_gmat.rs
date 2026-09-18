@@ -26,6 +26,16 @@
 //!   expression `av_kernel::drm::executor::fill_fixed_rotations`/`convert_gmat_trajectory_to_
 //!   declared_frame` use at their own `Gmat::convert`/`Gmat::convert_with_rotation` call
 //!   sites (`let epoch_a1mjd = Tai::from_nanos(sample.tai_ns).to_a1_mjd();`).
+//!   **Deliberately NOT adopting `av_cdm::time::Tai::to_a1_mjd_parts` here (round 3, question
+//!   226):** `Gmat::convert_with_rotation`'s own signature (`crates/gmat-sys/src/lib.rs`) is
+//!   `fn convert_with_rotation(&self, epoch_a1mjd: f64, state_km: &[f64; 6], from_cs: &str,
+//!   to_cs: &str) -> ...` -- a single `f64` epoch parameter, because it crosses into GMAT's own
+//!   C++ `CoordinateConverter::Convert`, whose signature takes one `Real` (a `double`). There is
+//!   no two-part overload to adopt: whatever precision `to_a1_mjd_parts` could recover would be
+//!   thrown away the instant it is packed back into this single `f64` argument to cross the FFI
+//!   boundary, so switching this call site would change nothing measurable and was not done.
+//!   (Contrast `crate::tdb::tai_ns_to_tdb_jd2`, which stays entirely on the Rust side of the DE
+//!   ephemeris reader and so CAN keep the exact integer split all the way to use.)
 //! - The state argument is `[0.0; 6]` -- the ROTATION this call returns (`rotation`/
 //!   `rotation_dot`) is a property of the two `CoordinateSystem`s and the epoch alone, not of
 //!   the state being converted (see `Gmat::convert_with_rotation`'s own doc comment: it is

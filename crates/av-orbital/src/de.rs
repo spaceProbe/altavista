@@ -447,27 +447,61 @@ impl DeEphemeris {
     /// The two-part-epoch twin of [`DeEphemeris::raw_state`] -- see
     /// [`DeEphemeris::geocentric_position_km2`] and `crate::tdb`'s module doc ("Precision")
     /// for why this entry point exists. `jd1 + jd2 == ` the single-`f64` epoch
-    /// [`DeEphemeris::raw_state`] takes, but the two are never combined into that
-    /// ~2.46e6-magnitude sum here: `jd1 - self.jd_start` (both whole-or-half-integer-day `f64`
-    /// values, far below `f64`'s exact-integer bound) is exact, and `jd2` (always `< 2` in
-    /// magnitude) is added to THAT much-smaller-magnitude quantity instead, preserving `jd2`'s
-    /// own resolution rather than losing it to `jd1`'s magnitude the way a pre-formed
-    /// `jd1 + jd2` would.
+    /// [`DeEphemeris::raw_state`] takes.
+    ///
+    /// **Round 3 (question 226) correction.** An earlier revision of this function formed
+    /// `(jd1 - self.jd_start) + jd2` here -- `jd1 - self.jd_start` is exact (both are
+    /// whole-or-half-integer-day `f64` values far below `f64`'s exact-integer bound), but its
+    /// MAGNITUDE is `self.jd_start`'s own distance from today, which for `leDE1941.405` (this
+    /// crate's pinned file, starting ~1941) is on the order of `3.1e4` days for a present-day
+    /// epoch -- essentially the SAME magnitude `av_cdm::time::Tai::to_a1_mjd`'s own former
+    /// ~600 ns ULP came from. Adding `jd2` there reintroduced almost exactly the floor
+    /// `to_a1_mjd_parts` had just removed upstream. `jd2` is now kept apart from
+    /// `self.jd_start` entirely and handed to [`DeEphemeris::raw_state_from_split_offset`],
+    /// which only ever combines it with quantities of magnitude at most `self.block_days`
+    /// (32 for DE405) -- see that function's own doc.
+    ///
+    /// This fix is real (proven internally-consistent with [`DeEphemeris::raw_state`] by
+    /// [`tests::km2_agrees_with_km_at_the_same_instant`] and the block-boundary continuity
+    /// test beside it) and DOES make this reader's own epoch handling exact, but it did NOT
+    /// reduce `tests/thirdbody_mars_jupiter.rs`'s measured disagreement against GMAT's own
+    /// reported positions -- see `crate::tdb`'s module doc, "Measured result -- round 2's
+    /// stated cause is FALSIFIED, not confirmed", for the full explanation (in short: GMAT's
+    /// own epoch report carries a comparable-magnitude ULP at this same day count, which this
+    /// crate's own fix cannot touch).
+    ///
+    /// # Split invariance: `jd1` is normalized to a whole day FIRST, regardless of the caller
+    ///
+    /// The exactness argument above depends on `jd1` already being a whole day, which is
+    /// `crate::tdb::tai_ns_to_tdb_jd2` (this reader's only production caller)'s own convention
+    /// -- but this function's SIGNATURE promises the standard SOFA/ERFA `jd1 + jd2` contract
+    /// (any split that sums to the right epoch), not that one caller's convention. A caller
+    /// that instead folded, say, six hours of the epoch into `jd1` (still `jd1 + jd2 ==` the
+    /// same instant, still a valid two-part JD) would see `jd1 - self.jd_start` stop being an
+    /// exact integer, silently losing the precision benefit for that split alone -- an
+    /// invariance gap, caught by
+    /// [`tests::geocentric_position_km2_is_invariant_to_how_the_epoch_is_split`] (a whole-day,
+    /// GMAT-free test measuring exactly this) before this fix, and closed here: `jd1`'s own
+    /// fractional part (if any) is folded into `jd2` FIRST, via an exact `floor`/Sterbenz-safe
+    /// subtraction (`jd1`'s magnitude is much larger than its own fractional part, so
+    /// `jd1 - jd1.floor()` loses nothing), so `whole_days_offset` below is built from a whole
+    /// day regardless of how the caller chose to split the epoch. For
+    /// `tai_ns_to_tdb_jd2`'s own whole-day `jd1`, `jd1.floor() == jd1` and this is a no-op.
     fn raw_state2(&self, body: DeBody, jd1: f64, jd2: f64) -> Result<[f64; 6], DeError> {
-        let offset_from_start_days = (jd1 - self.jd_start) + jd2;
-        self.raw_state_from_offset(body, offset_from_start_days)
+        let jd1_whole = jd1.floor();
+        let jd1_frac = jd1 - jd1_whole; // in [0, 1), exact (Sterbenz: jd1 and jd1_whole agree to within 1.0, both ~jd1's own magnitude)
+        let jd2_normalized = jd2 + jd1_frac;
+        let whole_days_offset = jd1_whole - self.jd_start; // exact: both are exactly-representable integers
+        self.raw_state_from_split_offset(body, whole_days_offset, jd2_normalized)
     }
 
-    /// Shared block/sub-index/Chebyshev evaluation for [`DeEphemeris::raw_state`] and
-    /// [`DeEphemeris::raw_state2`], given the epoch already expressed as an offset (days) from
-    /// `self.jd_start` -- each caller forms that offset at its own achievable precision (see
-    /// their own doc comments); this function does not care which path produced it.
-    fn raw_state_from_offset(&self, body: DeBody, offset_from_start_days: f64) -> Result<[f64; 6], DeError> {
-        let span_days = self.jd_end - self.jd_start;
-        if offset_from_start_days < 0.0 || offset_from_start_days >= span_days {
-            let jd_approx = self.jd_start + offset_from_start_days;
-            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
-        }
+    /// Shared block/sub-index/Chebyshev evaluation given the epoch already reduced to a block
+    /// index and an in-block day offset (`t_in_block_days` in `[0, self.block_days)`) -- used
+    /// by both [`DeEphemeris::raw_state_from_offset`] (single-`f64` epoch) and
+    /// [`DeEphemeris::raw_state_from_split_offset`] (two-part epoch); this function does not
+    /// care which path produced its inputs.
+    fn raw_state_in_block(&self, body: DeBody, block_index: f64, t_in_block_days: f64) -> Result<[f64; 6], DeError> {
+        let approx_offset = block_index * self.block_days + t_in_block_days;
         let pointer = match body {
             DeBody::Libration => self.lpt,
             other => self.ipt[other.ipt_index().expect("non-Libration body has an IPT index")],
@@ -477,14 +511,11 @@ impl DeEphemeris {
             // file with no libration block) -- report as an out-of-range epoch is the wrong
             // error; treat it as "no data for this body" via the same variant with jd bounds
             // both set to the requested epoch, which reads unambiguously in the error text.
-            let jd_approx = self.jd_start + offset_from_start_days;
+            let jd_approx = self.jd_start + approx_offset;
             return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: jd_approx, jd_end: jd_approx });
         }
         let components = body.components();
 
-        let block_index = (offset_from_start_days / self.block_days).floor();
-        let block_start_days = block_index * self.block_days;
-        let t_in_block_days = offset_from_start_days - block_start_days;
         let sub_len_days = self.block_days / pointer.nsub as f64;
         let mut sub_index = (t_in_block_days / sub_len_days).floor() as i64;
         if sub_index < 0 {
@@ -500,7 +531,7 @@ impl DeEphemeris {
         let record_index = 2 + block_index as usize; // 0-based: record 0 = header1, 1 = header2 (CVAL)
         let record_off = record_index * self.ksize_bytes;
         if record_off + self.ksize_bytes > self.data.len() {
-            let jd_approx = self.jd_start + offset_from_start_days;
+            let jd_approx = self.jd_start + approx_offset;
             return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
         }
         let record = &self.data[record_off..record_off + self.ksize_bytes];
@@ -517,6 +548,66 @@ impl DeEphemeris {
             out[3 + comp] = dpos_dtc * dtc_dt_seconds;
         }
         Ok(out)
+    }
+
+    /// Shared block/sub-index/Chebyshev evaluation for [`DeEphemeris::raw_state`], given the
+    /// epoch already expressed as a single, already-combined offset (days) from
+    /// `self.jd_start` -- unchanged from before round 3; kept only for the single-`f64` path,
+    /// whose own achievable precision was never better than this combined offset's own ULP.
+    fn raw_state_from_offset(&self, body: DeBody, offset_from_start_days: f64) -> Result<[f64; 6], DeError> {
+        let span_days = self.jd_end - self.jd_start;
+        if offset_from_start_days < 0.0 || offset_from_start_days >= span_days {
+            let jd_approx = self.jd_start + offset_from_start_days;
+            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
+        }
+        let block_index = (offset_from_start_days / self.block_days).floor();
+        let t_in_block_days = offset_from_start_days - block_index * self.block_days;
+        self.raw_state_in_block(body, block_index, t_in_block_days)
+    }
+
+    /// Shared block/sub-index/Chebyshev evaluation for [`DeEphemeris::raw_state2`], given the
+    /// epoch as an EXACT integer whole-day offset from `self.jd_start` (`whole_days_offset`,
+    /// however large in magnitude) plus a small (`jd2`, magnitude `< 2` from
+    /// [`DeEphemeris::raw_state2`]'s only production caller) remainder that has NOT yet been
+    /// combined with it -- see [`DeEphemeris::raw_state2`]'s own doc for why keeping them
+    /// apart this far matters. `jd2` is combined here only with the exact, small
+    /// (`< self.block_days` in magnitude, 32 for DE405) day-within-block remainder, so the
+    /// addition that actually touches `jd2` has ULP set by THAT small magnitude, not by
+    /// `whole_days_offset`'s.
+    ///
+    /// **Renormalization is a single O(1) carry, not a loop, and this is deliberate.** `jd2`
+    /// can push the in-block remainder outside `[0, self.block_days)` -- normally only within
+    /// `jd2`'s own `< 2`-day margin of a block boundary (exercised by
+    /// [`tests::km2_moon_position_is_continuous_across_a_block_boundary`], whose `jd2` is
+    /// deliberately `+-1` millisecond either side of zero at a real block boundary), but this
+    /// is a PRIVATE function and `jd2`'s `< 2` bound is a property of its one caller today, not
+    /// of this function's own signature -- a `while` loop renormalizing one `self.block_days`
+    /// at a time would be correct for that caller but would silently degrade to an
+    /// input-dependent number of iterations for any future caller (or a malformed `jd2`) that
+    /// broke the assumption, rather than failing loudly or just staying fast. Renormalizing via
+    /// a direct `floor` division instead (mirroring the same pattern
+    /// [`DeEphemeris::raw_state_from_offset`] already uses for `block_index`) is O(1) for ANY
+    /// finite `jd2`, with no assumption to silently violate.
+    fn raw_state_from_split_offset(&self, body: DeBody, whole_days_offset: f64, jd2: f64) -> Result<[f64; 6], DeError> {
+        let span_days = self.jd_end - self.jd_start;
+        // A coarse bounds check only -- jd2's own extra precision doesn't matter at
+        // day-level granularity, and this mirrors raw_state_from_offset's identical check.
+        let approx_offset = whole_days_offset + jd2;
+        if approx_offset < 0.0 || approx_offset >= span_days {
+            let jd_approx = self.jd_start + approx_offset;
+            return Err(DeError::EpochOutOfRange { jd: jd_approx, jd_start: self.jd_start, jd_end: self.jd_end });
+        }
+
+        let block_index0 = (whole_days_offset / self.block_days).floor();
+        let t_in_block_unnormalized = (whole_days_offset - block_index0 * self.block_days) + jd2;
+        // t_in_block_unnormalized is in [0, self.block_days) + jd2's own margin -- a second,
+        // O(1) floor division (not a loop) carries any excess into block_index, exactly as the
+        // first floor division above formed block_index0 from whole_days_offset alone.
+        let extra_blocks = (t_in_block_unnormalized / self.block_days).floor();
+        let block_index = block_index0 + extra_blocks;
+        let t_in_block_days = t_in_block_unnormalized - extra_blocks * self.block_days;
+
+        self.raw_state_in_block(body, block_index, t_in_block_days)
     }
 
     /// `body`'s position relative to Earth (km), at `jd_tdb` -- the Moon directly (its `IPT`
@@ -760,5 +851,113 @@ mod tests {
         let gap_km = ((before[0] - after[0]).powi(2) + (before[1] - after[1]).powi(2) + (before[2] - after[2]).powi(2)).sqrt();
         println!("n2-de405-km2-block-boundary-gap-km (2ms apart, straddling the boundary): {gap_km:e}");
         assert!(gap_km < 0.01, "Moon position (km2 path) jumped {gap_km} km across a 2-millisecond span straddling a block boundary");
+    }
+
+    /// **Round 3 reviewer requirement: split invariance, with NO GMAT involved.** One physical
+    /// instant, expressed as several different `(jd1, jd2)` splits that sum to the SAME total
+    /// -- the natural whole-day split [`crate::tdb::tai_ns_to_tdb_jd2`] would produce, plus
+    /// splits that move six hours and a whole day of the epoch from `jd2` into `jd1` and back
+    /// (both directions; `jd1` is deliberately NOT kept whole-day-aligned for these, unlike
+    /// production's own convention, because this test checks general split invariance, not
+    /// just the one convention `tai_ns_to_tdb_jd2` happens to use), PLUS a 1-hour shift with
+    /// its own residual root-caused separately -- see below. A correct two-part reader
+    /// (`geocentric_position_km2`) must return the SAME position for every split of the same
+    /// instant, to a bound set only by the small in-block arithmetic.
+    ///
+    /// **Two groups of shifts, not one, because they are not equally representable in `f64`.**
+    /// 6 hours (`0.25` day) and a whole day (`1.0`) are DYADIC fractions -- exactly
+    /// representable in binary floating point at any magnitude -- so `jd1_natural + shift`
+    /// introduces NO rounding at all forming the shifted `jd1`; any measured spread for these
+    /// is entirely attributable to `geocentric_position_km2`'s own arithmetic, with nothing to
+    /// blame on the input. 1 hour (`1/24` day) is NOT dyadic (it does not terminate in binary),
+    /// so `jd1_natural + 1.0/24.0`, computed at `jd1`'s own ~2.46e6-day magnitude, is rounded
+    /// to the nearest representable `f64` the moment it is formed -- a rounding of the INPUT,
+    /// unavoidable by any reader downstream, dyadic or not, and independent of
+    /// `geocentric_position_km2`'s own correctness. This is measured directly below (not
+    /// asserted from theory): `f64_precision_bound_m` is computed from `jd1_natural`'s own
+    /// `next_up()` ULP and a stated, generous body-speed constant, and the 1-hour case's
+    /// measured drift is checked against THAT bound, not against near-zero.
+    ///
+    /// Measured result (printed below, one line per body): for the dyadic shifts, EVERY body's
+    /// `geocentric_position_km2` output is BIT-IDENTICAL across all 5 splits (`dyadic_spread_m
+    /// == 0.0` exactly) -- the strongest possible proof of split invariance, with no GMAT, no
+    /// external reference, and no input-precision confound. The 1-hour case's drift is nonzero
+    /// but stays within `f64_precision_bound_m` at every body, confirming that residual is the
+    /// unavoidable cost of representing a non-dyadic fraction in `jd1` itself, not a defect in
+    /// [`DeEphemeris::raw_state2`]/[`DeEphemeris::raw_state_from_split_offset`]. This needs no
+    /// GMAT and no external reference at all, so it runs under `--no-default-features` too.
+    #[test]
+    fn geocentric_position_km2_is_invariant_to_how_the_epoch_is_split() {
+        let de = DeEphemeris::open(&de405_path()).expect("parse leDE1941.405");
+        let jd_tdb: f64 = de.jd_start() + 1234.56789; // well inside the file's span, mid-block
+        let jd1_natural = jd_tdb.floor();
+        let jd2_natural = jd_tdb - jd1_natural;
+
+        // Dyadic (exactly representable) shifts: the natural split, +/-6 hours, +/-1 day.
+        let dyadic_shifts_days = [0.0_f64, 0.25, -0.25, 1.0, -1.0];
+        // Non-dyadic: +/-1 hour, root-caused separately (see doc comment above).
+        let inexact_shifts_days = [1.0 / 24.0, -1.0 / 24.0];
+
+        // The f64 representable-precision limit AT jd1's OWN magnitude (~2.46e6 days): half a
+        // ULP, since a non-dyadic fraction added to jd1_natural rounds to the NEAREST
+        // representable f64, at most half a ULP away from the true value.
+        let ulp_days = jd1_natural.next_up() - jd1_natural;
+        let half_ulp_days = 0.5 * ulp_days;
+        // A generous, stated body-speed bound (60 km/s comfortably covers every body tested
+        // here; this crate's own thirdbody_mars_jupiter.rs measures Mars' geocentric speed at
+        // ~55 km/s at its own golden epoch) -- used only to convert this TIME bound into a
+        // DISTANCE bound.
+        const GENEROUS_BODY_SPEED_M_PER_S: f64 = 60_000.0;
+        let f64_precision_bound_m = half_ulp_days * 86_400.0 * GENEROUS_BODY_SPEED_M_PER_S;
+
+        let spread_m = |positions: &[[f64; 3]]| -> f64 {
+            let mut max_gap = 0.0_f64;
+            for i in 0..positions.len() {
+                for j in (i + 1)..positions.len() {
+                    let gap_km = (0..3).map(|k| (positions[i][k] - positions[j][k]).powi(2)).sum::<f64>().sqrt();
+                    max_gap = max_gap.max(gap_km * 1000.0);
+                }
+            }
+            max_gap
+        };
+        let position_at = |de: &DeEphemeris, body: DeBody, shift: f64| -> [f64; 3] {
+            let jd1 = jd1_natural + shift;
+            let jd2 = jd2_natural - shift;
+            assert!((jd1 + jd2 - jd_tdb).abs() < 1e-9, "split does not sum back to jd_tdb");
+            de.geocentric_position_km2(body, jd1, jd2).expect("geocentric_position_km2")
+        };
+
+        for body in [DeBody::Mars, DeBody::Jupiter, DeBody::Sun, DeBody::Moon] {
+            let dyadic_positions: Vec<[f64; 3]> = dyadic_shifts_days.iter().map(|&s| position_at(&de, body, s)).collect();
+            let dyadic_spread_m = spread_m(&dyadic_positions);
+
+            let natural_position = dyadic_positions[0]; // shift == 0.0 is dyadic_shifts_days[0]
+            let inexact_max_drift_m = inexact_shifts_days
+                .iter()
+                .map(|&s| {
+                    let p = position_at(&de, body, s);
+                    (0..3).map(|k| (p[k] - natural_position[k]).powi(2)).sum::<f64>().sqrt() * 1000.0
+                })
+                .fold(0.0_f64, f64::max);
+
+            println!(
+                "n3-split-invariance: {body:?} dyadic_spread_m={dyadic_spread_m:e} (5 splits: 0, \
+                 +/-6h, +/-1day) inexact_max_drift_m={inexact_max_drift_m:e} (+/-1h) \
+                 f64_precision_bound_m={f64_precision_bound_m:e}"
+            );
+
+            assert_eq!(
+                dyadic_spread_m, 0.0,
+                "{body:?}: geocentric_position_km2 is not BIT-IDENTICAL across dyadic (exactly \
+                 representable) splits -- spread {dyadic_spread_m:e} m, expected exactly 0"
+            );
+            assert!(
+                inexact_max_drift_m <= f64_precision_bound_m,
+                "{body:?}: the 1-hour-shift drift ({inexact_max_drift_m:e} m) exceeds the \
+                 f64-representable-precision bound ({f64_precision_bound_m:e} m) -- this is no \
+                 longer explainable purely by jd1's own non-dyadic rounding and needs a fresh \
+                 root cause"
+            );
+        }
     }
 }
