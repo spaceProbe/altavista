@@ -1152,8 +1152,18 @@ timed out at 900 s behind the target-directory lock. Same class as round 3's rec
 cc1f006..HEAD` matches no `.rs`, `Cargo.toml` or `Cargo.lock`. All three commits are
 JavaScript, Python and documentation. So no SBOM regeneration is owed (questions 220 and
 224), and `cargo test --workspace` / `cargo clippy --workspace` cannot have been changed
-by this round's work. `cargo clippy --workspace --all-targets -- -D warnings` was still
-started; its outcome is recorded in the open items below rather than claimed.
+by this round's work.
+
+**`cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace
+--exclude av-kernel` were both started and neither completed on this host**, and that is
+recorded rather than claimed clean. Clippy ran for over seventy minutes and emitted 20
+`Compiling`/`Checking` lines and **zero** `error` or `warning` lines before it was
+stopped; the workspace test run produced no test-result line in fifty-five minutes. Both
+were starved by the host state measured above, not by anything in the tree. What supports
+"the Rust gate is unaffected" is the `git diff` above, not a green run — no Rust file in
+this workspace was touched by any of this round's four commits. **The lead should treat
+the Rust half of this round's gate as unrun**, exactly as round 3's was, and take it in a
+quiet window. It is this round's largest outstanding risk, stated here rather than buried.
 
 ### Decisions taken this round (numbered for the lead's log)
 
