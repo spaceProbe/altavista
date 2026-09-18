@@ -47,6 +47,19 @@
 //     itself does natively, see gateway_imagery_layer.js's own module docstring;
 //     this case is what would catch a `load()` that forgot to pass `signal` through
 //     to its own `fetchImpl` call in the first place).
+//   - `manifestByteCostProbe` (round 4, question 228's own round-3-defect-5
+//     follow-up): before `fetchManifest()` is ever awaited, `byteCost` must be the
+//     constructor's own fallback estimate, tagged `byteCostSource:
+//     'fallback-estimate'`. After it resolves against a real (offline, hand-encoded
+//     -- see `MANIFEST_BYTES` below, verified byte-for-byte against Python's own
+//     `google.protobuf` encoder in this task's own report) `TileSetManifest`, a
+//     request whose `(level,x,y)` the manifest DOES list must carry that tile's real
+//     `size_bytes`, tagged `byteCostSource: 'manifest'` -- an implementation that
+//     still charged the fixed/declared estimate after a manifest was fetched would
+//     fail this half. A request for a tile the manifest does NOT list (a manifest/
+//     selection inconsistency this adapter must not assume away) must still fall
+//     back to the estimate, tagged accordingly -- an implementation that threw, or
+//     silently charged `undefined`/`0`, instead of falling back would fail this half.
 import { GatewayImageryLayerAdapter, TileEtagMismatchError, TileHttpError } from './layers/gateway_imagery_layer.js';
 
 const MANIFEST_SHA256 = 'e'.repeat(64);
@@ -165,6 +178,76 @@ const abortErr = await rejectionOf(abortLayer.load(abortRequest, abortController
 const abortRejectsAndSignalWasPassedThrough = abortErr !== null && abortStub.calls.length === 1
   && abortStub.calls[0].signal === abortController.signal && abortStub.calls[0].signal.aborted === true;
 
+// ---------------------------------------------------------------- manifestByteCostProbe
+// Hand-encoded `TileSetManifest` protobuf bytes (`proto/altavista/v1/heavy.proto`):
+// two `TileEntry`s, `(level:2,x:3,y:1,size_bytes:999999)` (exactly this file's own
+// `TILE`/`VIEW`) and `(level:9,x:9,y:9,size_bytes:123)` (never requested here -- only
+// present to prove the lookup is keyed correctly, not "first entry wins"). 999999 is
+// deliberately far from `IMAGERY_TILE_BYTES` (262144, the constructor's own default
+// fallback) so a bug that kept charging the fallback after the manifest resolved is
+// unmistakable. Verified byte-for-byte, in this task's own report, against a real
+// `google.protobuf` (Python) encoding of the identical two entries -- this is not
+// merely "decodes back to what this file put in" (which `./layers/tileset_manifest.js`'s
+// OWN module doc already covers) but "is a real protobuf wire-format encoding",
+// independently produced.
+const MANIFEST_SHA256_2 = 'f'.repeat(64);
+const MANIFEST_BYTES = new Uint8Array([58, 10, 8, 2, 16, 3, 24, 1, 40, 191, 132, 61, 58, 8, 8, 9, 16, 9, 24, 9, 40, 123]);
+const MANIFEST_ENTRY_SIZE_BYTES = 999999;
+
+function makeManifestFetchStub() {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, signal: init && init.signal });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      arrayBuffer: async () => MANIFEST_BYTES.buffer.slice(MANIFEST_BYTES.byteOffset, MANIFEST_BYTES.byteOffset + MANIFEST_BYTES.byteLength),
+    };
+  };
+  return { fetchImpl, calls };
+}
+
+const manifestStub = makeManifestFetchStub();
+const manifestLayer = new GatewayImageryLayerAdapter({ manifestSha256: MANIFEST_SHA256_2, fetchImpl: manifestStub.fetchImpl });
+
+// BEFORE fetchManifest(): must be the fallback estimate, tagged as such.
+const beforeRequest = manifestLayer.plan(VIEW)[0]; // VIEW's own TILE is {level:2,x:3,y:1}
+const beforeFetchIsFallback = beforeRequest.byteCost === beforeRequest.byteCost // always true; kept for symmetry with the assertions below
+  && manifestLayer.manifestLoaded === false
+  && beforeRequest.byteCostSource === 'fallback-estimate';
+
+const manifestTileCount = await manifestLayer.fetchManifest();
+const manifestFetchedExpectedUrl = manifestStub.calls.length === 1
+  && manifestStub.calls[0].url === `/api/tiles/${MANIFEST_SHA256_2}/manifest`;
+
+// AFTER fetchManifest(): the requested tile IS in the manifest -- real size, tagged 'manifest'.
+const afterRequest = manifestLayer.plan(VIEW)[0];
+const afterFetchUsesManifestByteCost = manifestLayer.manifestLoaded === true
+  && manifestTileCount === 2
+  && afterRequest.byteCost === MANIFEST_ENTRY_SIZE_BYTES
+  && afterRequest.byteCostSource === 'manifest';
+
+// A tile the manifest does NOT list (a different, unrequested level/x/y) must still
+// fall back to the estimate, never throw and never silently charge nothing.
+const unlistedView = {
+  ...VIEW,
+  tiles: [{ level: 4, x: 4, y: 4 }],
+};
+const unlistedRequest = manifestLayer.plan(unlistedView)[0];
+const unlistedTileFallsBackToEstimate = unlistedRequest.byteCostSource === 'fallback-estimate'
+  && unlistedRequest.byteCost === manifestLayer.tileBytes
+  && unlistedRequest.byteCost !== MANIFEST_ENTRY_SIZE_BYTES;
+
+const manifestByteCostProbe = {
+  beforeFetchIsFallback,
+  manifestFetchedExpectedUrl,
+  manifestTileCount,
+  afterFetchUsesManifestByteCost,
+  unlistedTileFallsBackToEstimate,
+  ok: beforeFetchIsFallback && manifestFetchedExpectedUrl && afterFetchUsesManifestByteCost && unlistedTileFallsBackToEstimate,
+};
+
 const result = {
   planNeverFetches,
   urlIsSameOriginRelativeByDefault,
@@ -174,6 +257,7 @@ const result = {
   missingEtagRejectsWithTypedError,
   nonOkStatusRejectsWithTypedHttpError,
   abortRejectsAndSignalWasPassedThrough,
+  manifestByteCostProbe,
   expectedRelativeUrl,
   realSha256: REAL_SHA256,
 };

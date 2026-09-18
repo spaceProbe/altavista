@@ -436,6 +436,7 @@ def test_layers_report(layers_data, capsys):
               f"budgetRespected={layers_data['budgetRespected']}")
         print(f"  cancelledCount={layers_data['cancelledCount']} evictedCount={layers_data['evictedCount']} "
               f"softViolationCount={layers_data['softViolationCount']}")
+        print(f"  deferredCount={layers_data.get('deferredCount')} lastStepDeferred={layers_data.get('lastStepDeferred')}")
         print(f"  maxConcurrentLoads={layers_data['maxConcurrentLoads']} "
               f"queueIsLoadBearing={layers_data['queueIsLoadBearing']}")
         print(f"  failedCount={layers_data['failedCount']} failureNames={layers_data['failureNames']} "

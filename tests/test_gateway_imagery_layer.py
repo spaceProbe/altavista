@@ -102,6 +102,39 @@ def test_abort_signal_reaches_the_injected_fetch_implementation(check_data):
     assert check_data["abortRejectsAndSignalWasPassedThrough"] is True
 
 
+def test_byte_cost_comes_from_the_manifest_when_one_is_available(check_data):
+    """Round 4 (question 228's own round-3-defect-5 follow-up): before
+    `fetchManifest()` resolves, `byteCost` must be the constructor's own declared
+    fallback estimate, tagged `byteCostSource: 'fallback-estimate'`. After it
+    resolves against a real (hand-encoded, byte-verified against Python's own
+    `google.protobuf` encoder -- see gateway_imagery_layer_check.mjs's own module
+    docstring) `TileSetManifest`, a request for a tile the manifest DOES list must
+    carry that tile's own real `size_bytes`, tagged `byteCostSource: 'manifest'` -- an
+    implementation that kept charging the fixed estimate after a manifest was fetched
+    would fail `afterFetchUsesManifestByteCost`. A request for a tile the manifest
+    does NOT list must still fall back to the estimate rather than throw or charge
+    `undefined`/`0` -- `unlistedTileFallsBackToEstimate`.
+    """
+    p = check_data["manifestByteCostProbe"]
+    assert p["beforeFetchIsFallback"] is True
+    assert p["manifestFetchedExpectedUrl"] is True, (
+        "expected fetchManifest() to GET the same-origin relative "
+        "/api/tiles/<manifestSha256>/manifest route (question 51: never a second "
+        "origin) -- see gateway_imagery_layer.js's own fetchManifest()"
+    )
+    assert p["manifestTileCount"] == 2
+    assert p["afterFetchUsesManifestByteCost"] is True, (
+        "expected byteCost to become the manifest's own real per-tile size_bytes "
+        "once fetchManifest() resolved, not the constructor's fixed estimate"
+    )
+    assert p["unlistedTileFallsBackToEstimate"] is True, (
+        "expected a request for a tile the manifest does not list to fall back to "
+        "the declared estimate, explicitly tagged, never to throw or silently charge "
+        "an undefined/zero byte cost"
+    )
+    assert p["ok"] is True
+
+
 def test_gateway_imagery_layer_report(check_data, capsys):
     with capsys.disabled():
         print("\ngateway imagery layer (web/js/gateway_imagery_layer_check.mjs):")

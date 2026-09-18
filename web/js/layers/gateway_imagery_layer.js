@@ -8,10 +8,32 @@
 // arithmetic a second time: it extends `ImageryLayerAdapter` and calls its real
 // `plan()` (which itself only ever reuses `web/js/globe_lod.js`'s own `selectTiles`/
 // `screenSpaceErrorPx`/`dist`/`tileBoundingSphere`/`tileKey` -- see that file's own
-// module docstring) and replaces only the one field that differs -- `url` -- with
-// this gateway's own tile address. Every `sseError`/`viewDistanceM`/`byteCost`/`key`
-// value a caller sees from this adapter is `ImageryLayerAdapter`'s own, byte for
-// byte; this file adds nothing to that arithmetic at all.
+// module docstring) and replaces the `url` field with this gateway's own tile
+// address. Every `sseError`/`viewDistanceM`/`key` value a caller sees from this
+// adapter is `ImageryLayerAdapter`'s own, byte for byte; this file adds nothing to
+// that arithmetic at all.
+//
+// `byteCost` is the one field this adapter DOES override, and only when it can do so
+// honestly (round 4, question 228's own round-3-defect-5 follow-up): round 3 already
+// replaced a fixed 262,144-byte-whatever-the-tile-set estimate with a caller-DECLARED
+// `tileBytes` (still one uniform number per tile set, only checked post-hoc against
+// what the gateway actually returns -- see `web/js/layers_stream_check.mjs`'s own
+// `byteCostMismatchCount`). This closes that remaining gap: once `fetchManifest()`
+// (below) has been awaited, `plan()` charges each tile's REAL, per-tile
+// `TileEntry.size_bytes` from the tile set's own manifest (`./tileset_manifest.js`'s
+// hand-rolled protobuf decoder -- ADR-004's "no bundled dependency" crypto rule,
+// extended the same way to protobuf: see that file's own module docstring) --
+// `TileHttpError`'s `502`-shaped intent has always applied to manifest fetch failures
+// too, TileEtagMismatchError to the individual tile bytes -- **never** to a fixed
+// estimate again. A request's manifest-sourced byte cost is tagged
+// `byteCostSource: 'manifest'`; BEFORE `fetchManifest()` resolves (or if the manifest
+// simply does not list a requested tile -- an inconsistency between the manifest and
+// what `selectTiles()` asked for, which should never happen against a real tile set
+// but is not this adapter's job to assume away), `plan()` falls back to the
+// constructor's own declared `tileBytes` estimate, tagged `byteCostSource:
+// 'fallback-estimate'` -- so a caller/harness can always tell which unit a given
+// request's `byteCost` is actually in, and a run can never silently be accounted in
+// estimated units without that being visible on every single request it happened for.
 //
 // Question 51 (the viewer never fetches any other origin, structurally, not merely
 // "in practice"): `origin` is an injected string, defaulting to `''` -- in the
@@ -37,6 +59,7 @@
 // (a missing header can never equal a real hex digest, so it is a mismatch, not a
 // separate silently-accepted case).
 import { ImageryLayerAdapter } from './imagery_layer.js';
+import { decodeTileSetManifest, manifestTileKey } from './tileset_manifest.js';
 
 /** Thrown by `load()` when the gateway answers with a non-2xx status. Typed and
  * named (this codebase's binding rule for every refusal: never a bare `Error`, see
@@ -122,16 +145,112 @@ export class GatewayImageryLayerAdapter extends ImageryLayerAdapter {
     this._manifestSha256 = manifestSha256;
     this._origin = origin;
     this._fetch = fetchImpl;
+    // Round 4 (question 228): `null` until `fetchManifest()` (below) resolves, then a
+    // `Map` from `tileKey({level,x,y})`'s own string format (`manifestTileKey`,
+    // `./tileset_manifest.js` -- IDENTICAL format to `web/js/globe_lod.js`'s own
+    // `tileKey`, which is exactly what `r.key` already is on every request
+    // `ImageryLayerAdapter.plan()` produces, see `plan()` below) to that tile's real
+    // `TileEntry.size_bytes`. Never fetched automatically by the constructor -- a
+    // caller (a real viewer, or this task's own headless harness) awaits
+    // `fetchManifest()` explicitly, exactly like `web/js/layers_stream_check.mjs`'s
+    // own separate calibration fetch before its real camera-path loop starts.
+    this._manifestSizeByTile = null;
+    this.manifestLoaded = false;
+    this.manifestTileCount = 0;
+  }
+
+  /** Fetches and decodes this tile set's own manifest (`GET
+   * /api/tiles/<manifestSha256>/manifest`, `altavista/server.py`'s `tiles_manifest`
+   * route -- the same real, same-origin proxy `_tileUrl` below uses for tile bytes,
+   * question 51: never a second origin) and populates the per-tile byte-cost map
+   * `plan()` (below) reads from thereafter. Idempotent-by-caller-discipline (calling
+   * it twice simply re-fetches and replaces the map; this class does not itself
+   * cache across calls or de-duplicate concurrent calls -- a caller that only ever
+   * awaits it once, before its first `plan()`/`update()` call, exactly like every
+   * other one-time setup fetch in this codebase, gets the single-fetch behaviour for
+   * free without this method adding sequencing logic on top of a single `await`).
+   *
+   * **REQUIREMENT ON CALLERS, not a suggestion (manager review of round 4's own
+   * admission fix):** await this method to completion BEFORE handing this layer to a
+   * `LayerManager` (i.e. before that manager's first `update()` that could `plan()`
+   * this layer at all) -- never let a real viewer's first frame(s) run with the
+   * manifest still in flight. `LayerManager.update()` DOES now reconcile an
+   * already-resident entry's `byteCost` if a later `plan()` call reports a different
+   * one for the same key (see `web/js/layers/layer.js`'s own `update()`, the
+   * reconciliation pass) -- so a tile admitted at this class's fallback estimate
+   * before the manifest resolves is no longer PERMANENTLY stuck at that stale
+   * number, and the hard admission invariant is defended even if a caller gets the
+   * ordering wrong. But that reconciliation is DEFENCE IN DEPTH, not a licence to
+   * open this window on purpose: every tile admitted before the manifest resolves is
+   * a real HTTP round trip and a real GPU-texture-shaped resident cost accounted in
+   * the wrong units for however long that window stays open, and a revision that
+   * later turns out to be irreconcilable (the true costs of everything still wanted
+   * simply do not fit, with nothing unwanted left to evict) surfaces as a genuine,
+   * correctly-reported `softViolationCount` increment rather than being avoided in
+   * the first place. `await layer.fetchManifest()` once, up front, and this window
+   * never opens at all -- see `web/js/layers_stream_check.mjs`'s own real-gateway
+   * harness for the concrete "fetch the manifest before the camera path starts"
+   * shape a real caller should copy.
+   *
+   * Rejects with the same typed `TileHttpError` a non-2xx tile fetch would (a
+   * manifest fetch is not special-cased: `altavista/server.py`'s proxy passes the
+   * real gateway status through unchanged for the manifest route exactly as it does
+   * for the tile route), or with `./tileset_manifest.js`'s own typed
+   * `ManifestDecodeError` if the response body does not decode as a well-formed
+   * `TileSetManifest`. Never resolves with a partially-populated map: on ANY
+   * rejection here, `this._manifestSizeByTile` is left exactly as it was before this
+   * call (`null` on a first call, or the previous manifest's map on a re-fetch) --
+   * `plan()` then keeps using the fallback estimate (or the previous manifest) for
+   * every tile, never a half-decoded manifest silently mixed with fallback values for
+   * a single run.
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<number>} the number of distinct tiles this manifest lists.
+   */
+  async fetchManifest(signal) {
+    const url = `${this._origin}/api/tiles/${this._manifestSha256}/manifest`;
+    const resp = await this._fetch(url, signal ? { signal } : undefined);
+    if (!resp.ok) {
+      throw new TileHttpError(url, resp.status);
+    }
+    const bytes = await resp.arrayBuffer();
+    const decoded = decodeTileSetManifest(bytes); // throws ManifestDecodeError on malformed bytes -- see that function's own doc comment
+    const sizeByTile = new Map();
+    for (const entry of decoded.tiles) {
+      sizeByTile.set(manifestTileKey(entry), entry.sizeBytes);
+    }
+    this._manifestSizeByTile = sizeByTile;
+    this.manifestLoaded = true;
+    this.manifestTileCount = decoded.tiles.length;
+    return this.manifestTileCount;
   }
 
   /** `super.plan(view)` -- `ImageryLayerAdapter.plan()` -- computes every field
    * (`key`, `sseError`, `viewDistanceM`, `byteCost`, `tile`) from `web/js/
    * globe_lod.js`'s own real tile selection and screen-space-error arithmetic; this
-   * override's only job is to replace the *local-fixture* `url` that call would
-   * have built with this adapter's own real gateway tile address (`_tileUrl`,
-   * below) -- see this file's module docstring. */
+   * override replaces the *local-fixture* `url` that call would have built with this
+   * adapter's own real gateway tile address (`_tileUrl`, below), and -- round 4,
+   * question 228 -- replaces `byteCost` with this tile's own real manifest-declared
+   * size whenever `fetchManifest()` has resolved AND the manifest actually lists this
+   * exact `(level,x,y)` (see this file's module docstring for the fallback and the
+   * `byteCostSource` tag every request now carries, both cases). `r.key` is already
+   * `tileKey(tile)` (`ImageryLayerAdapter.plan()`'s own computation, reused, never
+   * duplicated) -- exactly `manifestTileKey`'s own format, so the lookup below is a
+   * single `Map.get`, no second key derivation. */
   plan(view) {
-    return super.plan(view).map((r) => ({ ...r, url: this._tileUrl(r.tile) }));
+    return super.plan(view).map((r) => {
+      const url = this._tileUrl(r.tile);
+      const manifestByteCost = this._manifestSizeByTile ? this._manifestSizeByTile.get(r.key) : undefined;
+      if (manifestByteCost !== undefined) {
+        return {
+          ...r, url, byteCost: manifestByteCost, byteCostSource: 'manifest',
+        };
+      }
+      // Fallback -- see this file's module docstring: the constructor's own declared
+      // `tileBytes` (`r.byteCost`, unchanged from `ImageryLayerAdapter.plan()`'s own
+      // computation), explicitly tagged so a caller/harness can never mistake this
+      // for a manifest-verified number.
+      return { ...r, url, byteCostSource: 'fallback-estimate' };
+    });
   }
 
   /** `<origin>/api/tiles/<manifestSha256>/tiles/<level>/<x>/<y>` -- exactly
