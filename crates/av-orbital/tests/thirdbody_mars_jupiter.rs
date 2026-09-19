@@ -253,18 +253,40 @@ fn ten_epoch_ephemeris_agreement_with_gmat_reported_positions() {
     // GOLDEN (round 1's decision 3: never a copy kept in the test -- this replaces round 1's
     // own `const TOLERANCE_ABS_M`/`TOLERANCE_REL`, moved into
     // `goldens/leo_1day_jgm2_8x8_mars_jupiter.json`'s `tolerance_ephemeris_abs_m`/
-    // `tolerance_ephemeris_rel` fields by round 2, task 2b). **Measured after the round-2 fix**
-    // (debug build, `cargo test -p av-orbital --test thirdbody_mars_jupiter -- --nocapture`):
-    // Mars max |diff| = 1.757690e-2 m / max relative = 4.874442e-14; Jupiter max |diff| =
-    // 5.438822e-3 m / max relative = 8.572570e-15 -- roughly 80x smaller than round 1's own
-    // measured 1.404740 m / 0.4356596 m (see this test's own printed output for every epoch,
-    // both bodies, and `crate::tdb`'s module doc, "Precision", for the root cause: round 1's
+    // `tolerance_ephemeris_rel` fields by round 2, task 2b).
+    //
+    // **Round 2 measured** (debug build, `cargo test -p av-orbital --test
+    // thirdbody_mars_jupiter -- --nocapture`): Mars max |diff| = 1.757690e-2 m / max relative =
+    // 4.874442e-14; Jupiter max |diff| = 5.438822e-3 m / max relative = 8.572570e-15 -- roughly
+    // 80x smaller than round 1's own measured 1.404740 m / 0.4356596 m (root cause: round 1's
     // disagreement was the ~40-47 microsecond epoch-quantization ceiling in the single-`f64`
-    // `tai_ns_to_tdb_jd`, not accumulated cancellation). What remains at the millimeter-to-
-    // centimeter scale measured here is consistent with `av_cdm::time::Tai::to_a1_mjd`'s own
-    // ~600 ns resolution ceiling (this crate does not extend `av_cdm` this round -- see
-    // `crate::tdb::tai_ns_to_tdb_jd2`'s own doc comment) propagated through each body's own
-    // geocentric velocity, the same mechanism at ~65-80x better resolution.
+    // `tai_ns_to_tdb_jd`). Round 2's own analysis attributed what remained to
+    // `av_cdm::time::Tai::to_a1_mjd`'s own ~600 ns resolution ceiling.
+    //
+    // **Round 3 (question 226) re-measurement, with `av_cdm::time::Tai::to_a1_mjd_parts`
+    // adopted by `crate::tdb::tai_ns_to_tdb_jd2` AND an analogous floor fixed in
+    // `crate::de::DeEphemeris::raw_state2` (see both functions' own doc comments): Mars max
+    // |diff| = 1.941907e-2 m / max relative = 5.385312e-14; Jupiter max |diff| = 5.990193e-3 m
+    // / max relative = 9.439799e-15 -- NOT an improvement (both bodies moved slightly WORSE, 8
+    // of the 10 individual epochs moved from near-zero to a few mm-to-cm, and the 2
+    // previously-worst epochs stayed about the same). Round 2's stated cause is therefore
+    // FALSIFIED, not confirmed: removing `to_a1_mjd`'s ~600 ns floor entirely (both upstream in
+    // `av-cdm` and downstream in the DE reader's own offset arithmetic) did not shrink the
+    // disagreement. Root-caused, not left unexplained -- see `crate::tdb`'s module doc,
+    // "Measured result": `tests/tdb_check.rs` already measured GMAT's OWN Modified Julian Date
+    // report to carry a `2^-38`-day (~314-629 ns) ULP at this identical ~31,000-day magnitude,
+    // independent of anything in this crate. Before round 3, native's own comparable-magnitude
+    // rounding coincidentally cancelled against GMAT's at 8 of 10 epochs (near-zero
+    // disagreement there) and did not at 2 (the ~1.76 cm / 0.54 cm outliers) -- a partly-lucky
+    // near-cancellation, not evidence native's rounding was the sole or even the dominant
+    // cause. With native's own epoch now exact, the comparison shows GMAT's own floor at
+    // essentially every epoch instead of only the 2 unlucky ones. Both epoch fixes are kept:
+    // they make this crate's own epoch handling correct (`av-cdm`'s own tests prove
+    // `to_a1_mjd_parts` exact; `crate::de`'s own tests prove `geocentric_position_km2` still
+    // agrees with `geocentric_position_km`), and the residual measured here remains
+    // comfortably inside the golden's own recorded tolerance either way, so the golden is NOT
+    // regenerated (ADR-002's goldens rule: only regenerate when the recorded tolerance no
+    // longer pins anything, which is not the case here).
     for name in ["Mars", "Jupiter"] {
         assert!(
             max_abs_m[name] < golden.tolerance_ephemeris_abs_m,

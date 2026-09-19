@@ -151,6 +151,12 @@
 //! Unix-epoch-relative MJD constant a second time in this crate.
 use av_cdm::time::Tai;
 
+/// `NS_PER_DAY` restated here (as an `f64`) for [`tai_ns_to_tdb_jd2`]'s exact-integer-numerator
+/// division of [`av_cdm::time::Tai::to_a1_mjd_parts`]'s `ns_of_day` -- `av_cdm::time` does not
+/// export its own copy of this constant (see this module's doc, "TT, from TAI, without touching
+/// `av_cdm::time`", for why constants are restated here rather than imported).
+const NS_PER_DAY_F64: f64 = 86_400_000_000_000.0;
+
 /// `TT - A.1`, seconds, exact (both are fixed offsets from TAI: `TT = TAI + 32.184 s`,
 /// `A1 = TAI + 0.034_381_7 s`, `av_cdm::time`'s own documented constants).
 const TT_MINUS_A1_SECONDS: f64 = 32.184 - 0.034_381_7;
@@ -223,26 +229,59 @@ pub fn tai_ns_to_tdb_jd(t_tai_ns: i64) -> f64 {
 /// together while EVERY term is still small in magnitude (`jd2` itself always lands in
 /// `[0, 2)` days), never combined with `jd1`'s own ~2.46e6 magnitude before a caller uses it.
 ///
-/// This recovers precision down to what [`av_cdm::time::Tai::to_a1_mjd`] itself carries at
-/// its own, much smaller (~3.1e4), magnitude -- measured at ~600 ns (`to_a1_mjd`'s own ULP
-/// there), not the sub-nanosecond floor a from-scratch two-part epoch could reach, because
-/// this function deliberately does not re-derive `to_a1_mjd`'s own TAI-nanoseconds-to-days
-/// division (`av_cdm` is shared with other tracks and not this round's to extend -- see this
-/// module's doc, "TT, from TAI, without touching `av_cdm::time`"). ~600 ns is still a ~65x
-/// improvement over the ~40 microsecond ULP [`tai_ns_to_tdb_jd`] measures at the same
-/// magnitude, and -- per this module's "Precision" section -- was enough to move the round-2
-/// ten-epoch ephemeris disagreement from meter-scale to millimeter-scale or below; see
-/// [`crate::de::DeEphemeris::geocentric_position_km2`] and this crate's round-2 report for the
-/// measured before/after.
+/// **Round 3 update:** this used to recover precision only down to what
+/// [`av_cdm::time::Tai::to_a1_mjd`] itself carries (~600 ns, that function's own ULP at its
+/// ~3.1e4 magnitude), because the day/fraction split above was computed by calling
+/// `to_a1_mjd()` and then `.floor()`-splitting the ALREADY-ROUNDED `f64` it returned -- the
+/// split itself added no further error, but it never had better than 600 ns of input to split
+/// in the first place. `av-cdm` round 3 (question 226) added
+/// [`av_cdm::time::Tai::to_a1_mjd_parts`] beside `to_a1_mjd`: an EXACT `(whole_days: i64,
+/// ns_of_day: i64)` split done entirely in integer arithmetic, never passing through an `f64`
+/// at all. `jd1`/`jd2` below are now built directly from THAT split, so the exact TAI-derived
+/// day-of-epoch never touches a lossy intermediate; the only rounding left in the whole
+/// `jd1`/`jd2` construction is the single division `ns_of_day as f64 / NS_PER_DAY` (an exact
+/// integer numerator under `2^53`, quotient in `[0, 1)`) -- a single correctly-rounded
+/// IEEE-754 division at `f64`'s OWN best resolution for a value that small (ULP `~1.1e-16`
+/// days `~1e-11 s`, i.e. sub-nanosecond), not `to_a1_mjd`'s coarser ~31,000-magnitude ULP.
 ///
-/// [`tai_ns_to_tdb_jd`] is UNCHANGED and kept: other code, and this module's own doc, refer to
-/// it, and it remains correct for any caller that only needs its documented ~47-microsecond-
-/// class resolution (e.g. a human-readable epoch log).
+/// **Measured result -- round 2's stated cause is FALSIFIED, not confirmed.** With this fix
+/// alone, and again after also fixing an analogous, independently-discovered floor in
+/// `crate::de::DeEphemeris::raw_state2` (it re-summed `jd1 - jd_start` with `jd2` at
+/// `jd_start`'s own ~31,000-day-from-today magnitude, reintroducing almost exactly the
+/// ceiling this function had just removed -- see that function's own doc), the ten-epoch
+/// Mars/Jupiter disagreement in `tests/thirdbody_mars_jupiter.rs` did NOT drop; it got
+/// slightly WORSE for 8 of 10 epochs (both bodies), while the 2 previously-worst epochs stayed
+/// about the same. Root-caused, not left unexplained: `tests/tdb_check.rs` already measured
+/// GMAT's OWN Modified-Julian-Date report to have a ULP of `2^-38` days (~314-629 ns) AT THIS
+/// SAME ~31,000-day magnitude bucket -- essentially `to_a1_mjd`'s own former ~600 ns ULP,
+/// independently. Before this fix, native's epoch carried a SIMILAR-magnitude, uncorrelated
+/// rounding error, which happened to land on the SAME side of GMAT's own rounding for 8 of 10
+/// epochs (near-zero disagreement there) and the opposite side for 2 (the ~1.76 cm / 0.54 cm
+/// outliers round 2 recorded) -- a partly-lucky near-cancellation, not evidence the native
+/// side's rounding was the sole cause. Making native's OWN epoch exact removes native's
+/// contribution to that cancellation without touching GMAT's, so the comparison now shows
+/// GMAT's OWN ~300-600 ns-class epoch floor essentially everywhere instead of only at 2
+/// unlucky epochs. Both fixes are kept anyway: they are genuine, well-justified precision
+/// improvements to THIS crate's own epoch handling (proven exact in `av-cdm`'s own tests, and
+/// in `crate::de`'s block arithmetic), and the remaining disagreement -- still comfortably
+/// inside the golden's own recorded 0.03 m / 1e-13 relative tolerance -- is no longer
+/// attributable to anything on this crate's side of the comparison. See
+/// `tests/thirdbody_mars_jupiter.rs` for the re-measured per-epoch numbers and this crate's
+/// round-3 report for the full before/after table.
+///
+/// [`tai_ns_to_tt_mjd`] and [`tai_ns_to_tdb_jd`] are UNCHANGED: [`tai_ns_to_tt_mjd`] still
+/// calls `to_a1_mjd()` because it only ever feeds [`tai_ns_to_tdb_minus_tt_seconds`]'s
+/// periodic-series ARGUMENT (`M_E`, a slowly-varying angle, amplitude never more than ~1.7
+/// ms) -- that argument's sensitivity to a ~600 ns epoch error works out to about `3.3e-10`
+/// (dimensionless slope, `TDB_COEFF1 * angular rate`) `* 600 ns ~= 2e-16 s`, utterly negligible
+/// next to the series amplitude, so touching it would have bought nothing measurable.
+/// [`tai_ns_to_tdb_jd`] is UNCHANGED and kept for the same reason as before: other code, and
+/// this module's own doc, refer to it, and it remains correct for any caller that only needs
+/// its documented ~47-microsecond-class resolution (e.g. a human-readable epoch log).
 pub fn tai_ns_to_tdb_jd2(t_tai_ns: i64) -> (f64, f64) {
-    let a1_mjd = Tai::from_nanos(t_tai_ns).to_a1_mjd();
-    let whole_days = a1_mjd.floor();
-    let frac_days = a1_mjd - whole_days; // in [0, 1); exact given a1_mjd and its own floor (Sterbenz)
-    let jd1 = whole_days + GMAT_MJD_TO_JD_OFFSET; // exact: sum of two exactly-representable integers
+    let (whole_days, ns_of_day) = Tai::from_nanos(t_tai_ns).to_a1_mjd_parts();
+    let jd1 = whole_days as f64 + GMAT_MJD_TO_JD_OFFSET; // exact: sum of two exactly-representable integers
+    let frac_days = (ns_of_day as f64) / NS_PER_DAY_F64; // in [0, 1); a single correctly-rounded division of an exact integer numerator
     let tdb_minus_tt_s = tai_ns_to_tdb_minus_tt_seconds(t_tai_ns);
     let jd2 = frac_days + TT_MINUS_A1_SECONDS / 86_400.0 + tdb_minus_tt_s / 86_400.0;
     (jd1, jd2)

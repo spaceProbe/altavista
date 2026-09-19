@@ -18,8 +18,16 @@ use std::sync::Arc;
 use av_edge::pb;
 use av_track::harness::{self, HarnessError, PlacementTarget};
 
+/// Every call gets its own directory. The name used to be `<name>-<pid>` alone, and every test
+/// in this binary runs in ONE process on parallel threads with the same placement labels
+/// (`edge-a`, `edge-b`, ...), so two tests shared a directory and the later one's
+/// `remove_dir_all` deleted the partition log under the earlier one's running server: the
+/// lead's clone gate saw it twice (2026-09-18 `EINVAL`, 2026-09-19 `ENOENT`, both on `edge-b`),
+/// passing alone every time. A process-wide counter makes the path unique per call.
 fn tmp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("av-track-multi-target-{name}-{}", std::process::id()));
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("av-track-multi-target-{name}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }

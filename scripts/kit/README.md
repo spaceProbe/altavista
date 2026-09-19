@@ -335,6 +335,58 @@ kit builder is offline EXCEPT:
 Nothing else -- `--with-images` only inspects/saves an already-built local image, and every
 remaining step reads files already in this worktree.
 
+## Regenerating the compliance documents (round 3, question 227)
+
+`scripts/kit/regenerate_compliance.py` is the one committed script for the whole cross-track
+compliance-document regeneration cycle: it regenerates the ten SBOMs
+(`scripts/kit/sbom.py --out docs/compliance/sbom`), commits them, computes
+`docs/compliance/BUNDLE.md`'s bundle hash (`scripts/kit/evidence.py`, no `--kit`/`--ledger-dir`),
+records it (both the fenced hash block and a new row in that file's "Regeneration history"
+table), and commits that -- in that order, as two separate commits, because the bundle's epoch
+is derived from git history that only exists once the SBOM commit has actually landed (see that
+script's own doc comment for the full reasoning, with a real example from this repository's own
+history). It refuses, before touching anything, on an incomplete venv (reusing
+`scripts/kit/sbom.py`'s own `python-lock.json` cross-check) or a dirty working tree outside the
+paths it owns:
+
+```
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+.venv/bin/python scripts/kit/regenerate_compliance.py            # the real cycle, up to two commits
+.venv/bin/python scripts/kit/regenerate_compliance.py --dry-run  # regenerates for real, previews, commits nothing
+.venv/bin/python scripts/kit/regenerate_compliance.py --check    # read-only: is anything stale?
+```
+
+**`docs/compliance/sbom/*.cdx.json`, `docs/compliance/sbom/SHA256SUMS`, and
+`docs/compliance/BUNDLE.md` are marked `merge=ours` in this repository's `.gitattributes`**, so a
+cross-track merge that touches any of them never stops on a conflict there -- the losing side's
+content is simply discarded at merge time, and running the script above immediately afterward
+regenerates the correct, current content from the merged tree and commits it. This is safe
+specifically BECAUSE the script runs right after: taking either side of a merge conflict on a
+generated document is equally arbitrary when both are about to be overwritten anyway, so `ours`
+just skips a pointless conflict prompt. **The one hazard: if the script is NOT run after such a
+merge, the committed documents are simply stale** (correct for neither parent, and no longer
+matching the merged tree's real dependency graph or evidence). Nothing silently hides that --
+`tests/test_sbom.py` (byte-identical regeneration, licence/epoch checks) and
+`tests/test_evidence_bundle.py::test_bundle_sha256_matches_the_hash_recorded_in_bundle_md` both
+fail loudly against a stale post-merge tree, exactly as they would against any other stale
+regeneration. Running the script after a merge that touched these paths is mandatory, not
+optional; `.gitattributes`' own comment says so too. `scripts/kit/python-lock.json` is
+deliberately NOT in the `merge=ours` set -- see `.gitattributes`' own comment for why (it is an
+input a human refreshes by hand, not an output this script regenerates, so an ordinary merge
+conflict on it is a real disagreement to resolve, not noise to discard).
+
+**One-time setup this needs, once per clone:** `merge=ours` names a merge *driver* git does not
+ship enabled by default (only the strategy name exists out of the box) -- without registering it,
+the attribute is silently ignored and an ordinary content merge (and possible conflict) happens
+on these paths instead. Run once, in this checkout:
+
+```
+git config merge.ours.driver true
+```
+
+(`git config --global merge.ours.driver true` registers it for every checkout on the machine
+instead, if preferred.)
+
 ## What's still a declared gap
 
 `KIT_MANIFEST`'s own `gaps` list names these explicitly, with the reason, rather than shipping an
