@@ -66,6 +66,13 @@ services/edge-plugin/build/last-build-events.jsonl
 # events capture.
 services/proposer/bin/av-proposer
 services/proposer/build/last-build-events.jsonl
+# H4's remaining round-2 open item 6 (services/tiles/build-image.sh): the prebuilt, stripped
+# av-tiles binary (a compiled artifact, exactly like services/edge-plugin/bin/av-edge-plugin
+# and services/proposer/bin/av-proposer -- see services/tiles/Dockerfile's own header comment
+# for why it is prebuilt, not compiled by the Dockerfile) and its own per-run docker events
+# capture.
+services/tiles/bin/av-tiles
+services/tiles/build/last-build-events.jsonl
 # tests/test_edge_plugin_container.py's and tests/test_proposer_container.py's own scratch
 # directories -- deliberately under $HOME (never system /tmp) so Colima actually
 # bind-mounts files under it into containers (see that test's own module doc, "Why every

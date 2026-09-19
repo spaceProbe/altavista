@@ -267,6 +267,7 @@ dependencies = [
  "bytes",
  "openssl",
  "prost",
+ "serde_json",
  "thiserror",
  "tokio",
 ]

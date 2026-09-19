@@ -126,6 +126,22 @@ function mintViewport(panelId) {
 if (window.altavistaLayoutManager) window.altavistaLayoutManager.panelFactories.viewport = mintViewport;
 
 const viewer = new Viewer(els.canvas, els.labels);
+// Round 4 (question 228 finding 2): the one `Viewer`, and through it the one
+// `LayerManager` it owns (`web/js/scene.js`), published on `window` under the same
+// `altavista*` convention `altavistaCurrentScenario`/`altavistaLayoutManager` already
+// use. Two reasons, both real:
+//   1. it is what makes the streaming layer OBSERVABLE from outside the module graph --
+//      `tests/test_viewer_globe_layer_manager.py` drives a real headless Chrome and has
+//      to reach `viewer.globeLayer.group` to assert from the SCENE GRAPH that a texture
+//      is genuinely bound to a tile mesh. A counter reported by the page would prove only
+//      that something was counted; question 148's rule applied to the browser;
+//   2. the lead re-drives this as a user at acceptance, and a resident-byte/deferral/
+//      failure count that can be read straight off `window.altavistaViewer.layerManager`
+//      in a devtools console is the difference between diagnosing a stalled tile set and
+//      guessing at it.
+// Read-only by convention: nothing in this codebase writes to it, and no viewer
+// behaviour depends on its presence.
+window.altavistaViewer = viewer;
 const clock = { t: 0, t0: 0, t1: 1, playing: false, speed: 60, t0Iso: null };
 let scenario = null;
 

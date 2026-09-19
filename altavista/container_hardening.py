@@ -111,14 +111,21 @@ def _docker_inspect_one(name: str) -> dict[str, Any]:
     return data[0]
 
 
-def assert_inspect_hardening(container_name: str, *, writable_mount_dest: str) -> dict[str, Any]:
+def assert_inspect_hardening(container_name: str, *, writable_mount_dest: str | None = None) -> dict[str, Any]:
     """From `docker inspect` of `container_name`: a non-root `.Config.User`, `.HostConfig.
     ReadonlyRootfs` is true, `.HostConfig.CapDrop` contains `ALL`, `.HostConfig.SecurityOpt`
-    contains a `no-new-privileges` entry, and a `.Mounts` entry at `writable_mount_dest` that is
-    RW. Valid whether the container is still running or has already exited (not yet removed) --
-    every field checked here is fixed at create time. Returns the full inspect object (question
-    148: so the caller can print more of what was actually observed, not just what was
-    asserted)."""
+    contains a `no-new-privileges` entry, and -- iff `writable_mount_dest` is given -- a
+    `.Mounts` entry there that is RW. Valid whether the container is still running or has
+    already exited (not yet removed) -- every field checked here is fixed at create time.
+    Returns the full inspect object (question 148: so the caller can print more of what was
+    actually observed, not just what was asserted).
+
+    `writable_mount_dest=None` (round 3, `tests/test_tiles_container.py`) is for an image that
+    declares NO writable path at all -- `--read-only` applies to its whole root with no
+    exception. This is only correct for an image whose production code is independently known
+    (grepped, not assumed) to write nothing anywhere; every existing caller of this function
+    (`tests/test_edge_plugin_container.py`, `tests/test_edge_plugin_hardening_alpine.py`) still
+    passes an explicit destination and is unaffected by this default."""
     info = _docker_inspect_one(container_name)
     config_user = info["Config"]["User"]
     assert config_user not in ("", "0", "root"), f"expected a non-root .Config.User, got {config_user!r}"
@@ -132,24 +139,31 @@ def assert_inspect_hardening(container_name: str, *, writable_mount_dest: str) -
     security_opt = host_config.get("SecurityOpt") or []
     assert any("no-new-privileges" in opt for opt in security_opt), f"expected .HostConfig.SecurityOpt to contain a no-new-privileges entry, got {security_opt!r}"
 
-    mounts = info.get("Mounts") or []
-    matching = [m for m in mounts if m.get("Destination") == writable_mount_dest]
-    assert matching, f"expected a mount at {writable_mount_dest}, found .Mounts={mounts!r}"
-    assert matching[0].get("RW") is True, f"expected the mount at {writable_mount_dest} to be RW, got {matching[0]!r}"
+    if writable_mount_dest is not None:
+        mounts = info.get("Mounts") or []
+        matching = [m for m in mounts if m.get("Destination") == writable_mount_dest]
+        assert matching, f"expected a mount at {writable_mount_dest}, found .Mounts={mounts!r}"
+        assert matching[0].get("RW") is True, f"expected the mount at {writable_mount_dest} to be RW, got {matching[0]!r}"
 
     return info
 
 
-def assert_exec_hardening(container_name: str, *, writable_path: str) -> dict[str, Any]:
+def assert_exec_hardening(container_name: str, *, writable_path: str | None = None) -> dict[str, Any]:
     """From `docker exec` of the RUNNING container `container_name` -- the kernel's own view,
     which is what actually matters, not merely the absence of a `docker run` flag: `id -u` is
     non-zero, `/proc/1/status` shows `NoNewPrivs: 1` and `Seccomp: 2` (filter mode -- this is how
     the DEFAULT seccomp profile is proven really applied, rather than merely asserting the
-    absence of a `--security-opt seccomp=...` flag), a write to `/` fails, and a write to
-    `writable_path` succeeds. Requires the container to actually be running (unlike
-    `assert_inspect_hardening`) -- callers must not call this after the container has exited.
-    Returns the observed facts as a dict (question 148: the caller prints these, not just the
-    pass/fail)."""
+    absence of a `--security-opt seccomp=...` flag), a write to `/` fails, and -- iff
+    `writable_path` is given -- a write there succeeds. Requires the container to actually be
+    running (unlike `assert_inspect_hardening`) -- callers must not call this after the
+    container has exited. Returns the observed facts as a dict (question 148: the caller prints
+    these, not just the pass/fail).
+
+    `writable_path=None` (round 3, `tests/test_tiles_container.py`) skips the volume-write probe
+    entirely, for an image with no declared writable path at all -- see
+    `assert_inspect_hardening`'s own doc for the same case and why it is only correct when the
+    image's own production code is independently known to write nothing. Every existing caller
+    still passes an explicit path and is unaffected by this default."""
     id_result = _run("exec", container_name, "id", "-u", timeout=15)
     assert id_result.returncode == 0, f"docker exec {container_name} id -u failed (rc={id_result.returncode}): {id_result.stderr}"
     uid = int(id_result.stdout.strip())
@@ -185,6 +199,9 @@ def assert_exec_hardening(container_name: str, *, writable_path: str) -> dict[st
         "seccomp": seccomp,
         "root_write_failed": root_write_failed,
     }
+
+    if writable_path is None:
+        return {**partial_facts, "volume_write_ok": None}
 
     volume_write = _run(
         "exec", container_name, "sh", "-c",
