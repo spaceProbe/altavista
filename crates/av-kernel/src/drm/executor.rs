@@ -301,25 +301,62 @@
 //! (creating the directory, writing the file) is [`super::DrmError::PortTrafficSidecarIo`], a
 //! typed refusal -- never a panic, never a silently-empty hash.
 
+// `docs/open-questions.md` question 230: `RefCell`/`Rc` are named only by the gated container-
+// span/error-slot plumbing (`ModelSpanState`/`ContainerSpanState`/`erase_container`/
+// `run_one_span`); `AtomicU64`/`Ordering` only by the gated `GMAT_EXECUTE_SEQ`.
+#[cfg(feature = "gmat")]
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+#[cfg(feature = "gmat")]
 use std::path::PathBuf;
+#[cfg(feature = "gmat")]
 use std::rc::Rc;
+#[cfg(feature = "gmat")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use av_cdm::pb;
-use av_cdm::pb::{
-    AuthorKind, DesignReferenceMission, Event, Fault, FaultTargetKind, Provenance, Scenario, SosConfiguration, SystemDefinition, SystemInstance, Trajectory, TrajectorySample, TrajectorySegment, Unit,
-};
+use av_cdm::pb::{Event, Provenance, Trajectory, Unit};
+// `docs/open-questions.md` question 230: `Scenario` and `TrajectorySegment` are named only by
+// gated code now (`merge_adjacent_segments`/`collect_frames`/`execute`'s own body).
+#[cfg(feature = "gmat")]
+use av_cdm::pb::{Scenario, TrajectorySegment};
+// `docs/open-questions.md` question 230: every one of these is named only by gated code --
+// `AuthorKind`/`Fault`/`SystemDefinition`/`SystemInstance`/`TrajectorySample` by `execute`'s own
+// body and the gated frame/covariance/span machinery; `DesignReferenceMission`/`SosConfiguration`
+// by the (gated) `RunConfig` struct's own fields; `FaultTargetKind` only inside the (gated)
+// `run_shared_group`'s fault-dispatch loop.
+#[cfg(feature = "gmat")]
+use av_cdm::pb::{AuthorKind, DesignReferenceMission, Fault, FaultTargetKind, SosConfiguration, SystemDefinition, SystemInstance, TrajectorySample};
+#[cfg(feature = "gmat")]
 use av_cdm::time::Tai;
+#[cfg(feature = "gmat")]
 use av_cdm::units;
+#[cfg(feature = "gmat")]
 use av_dynamics::{BoxedModel, ModelError};
+// `docs/open-questions.md` question 230: gated behind the `gmat` feature (default-on). This
+// crate's own re-measurement (not the round-3 open item's list, which undercounted it) found
+// that `RunConfig.gmat: &'a Gmat` makes `execute` -- and everything reachable only from it
+// (materialize_plan*, run_shared_group, run_covariance_*, the frame-conversion functions) --
+// inherently GMAT-bound; each such item is gated at its own definition below, individually.
+// `RunProducts`/`Score`/`ExecutionErrorMode` and this module's pure `to_proto` conversion are
+// NOT gated: they carry no GMAT dependency of their own and `av-run`'s own tests (and its own
+// `--no-default-features` build) need them regardless of whether GMAT ran.
+#[cfg(feature = "gmat")]
 use gmat_sys::Gmat;
+#[cfg(feature = "gmat")]
 use prost::Message as _;
 
+// `docs/open-questions.md` question 230: every name below is reachable only from `execute`'s own
+// (gated) call graph -- `binding::{BindingPlan, ContainerError, SharedContainerModel}`,
+// `ModelHandle`/`ModelRegistry` (materialize_plan*), `events`/`fault`/`hash`/`maneuver`/`replay`
+// (run_shared_group, run_covariance_*), `DrmError` itself (every gated function's own `Result`).
+#[cfg(feature = "gmat")]
 use super::binding::{self, BindingPlan, ContainerError, SharedContainerModel};
+#[cfg(feature = "gmat")]
 use super::command;
+#[cfg(feature = "gmat")]
 use super::command_source;
+#[cfg(feature = "gmat")]
 use crate::registry::{ModelHandle, ModelRegistry};
 
 /// Every named `StepResult.outputs` series one instance's run produced (question 95's second
@@ -327,19 +364,30 @@ use crate::registry::{ModelHandle, ModelRegistry};
 /// into a named alias (clippy::type_complexity) rather than written out at every call site --
 /// epochs are the model's own native step times (`crate::schedule::HeteroScheduler::outputs`'s
 /// own doc comment), not resampled onto the trajectory's own output grid.
+#[cfg(feature = "gmat")]
 type NamedOutputSeries = BTreeMap<String, (Vec<i64>, Vec<f64>)>;
+#[cfg(feature = "gmat")]
 use super::events;
+#[cfg(feature = "gmat")]
 use super::fault;
+#[cfg(feature = "gmat")]
 use super::hash;
+#[cfg(feature = "gmat")]
 use super::maneuver::{self, ExecutionErrorMode, ParsedManeuver};
+// `docs/open-questions.md` question 230: named only by `execute`'s own replay handling (gated) --
+// `super::replay::ReplayConfig` (re-exported from `mod.rs`, ungated) is unaffected.
+#[cfg(feature = "gmat")]
 use super::replay;
+#[cfg(feature = "gmat")]
 use super::DrmError;
+#[cfg(feature = "gmat")]
 use crate::kernel::{HeteroKernel, HeteroKernelError};
 
 /// Everything [`execute`] needs: a live GMAT handle (only touched for `"gmat."`-dispatched
 /// instances -- see the module doc comment), the three loaded-and-parsed artifacts, and a
 /// caller-supplied run id. The caller must hold `gmat_sys::engine_lock()` for the duration of
 /// this call whenever any instance actually needs GMAT.
+#[cfg(feature = "gmat")]
 pub struct RunConfig<'a> {
     pub gmat: &'a Gmat,
     pub drm: &'a DesignReferenceMission,
@@ -490,6 +538,7 @@ pub struct RunProducts {
 /// whatever order they were produced in (native-step order, per instance) -- the same
 /// "ascending, stable" convention [`super::events::epoch_id_order`] already established for
 /// `RunProducts.events`.
+#[cfg(feature = "gmat")]
 fn sort_measurements(measurements: &mut [pb::Measurement]) {
     measurements.sort_by(|a, b| a.epoch_ns.cmp(&b.epoch_ns).then_with(|| a.measurement_id.cmp(&b.measurement_id)));
 }
@@ -570,6 +619,7 @@ impl RunProducts {
 /// by `crates/gmat-sys/tests/epoch_writeback.rs`'s own "EpochBackAxes"; `"ICRF"`/`"MJ2000Eq"`/
 /// `"MJ2000Ec"` are GMAT's own well-known AxisSystem names). `pub(crate)`: also called from
 /// `binding::parse_gmat_spec` (a sibling module under `drm`).
+#[cfg(feature = "gmat")]
 pub(crate) fn body_axes_suffix(frame_id: &str) -> Option<(&str, &'static str)> {
     const SUFFIXES: [&str; 4] = ["MJ2000Eq", "MJ2000Ec", "BodyFixed", "ICRF"];
     for suffix in SUFFIXES {
@@ -587,6 +637,7 @@ pub(crate) fn body_axes_suffix(frame_id: &str) -> Option<(&str, &'static str)> {
 /// open-questions.md`, decided by the lead): a producer-supplied `FrameDefinition.description`
 /// must read as a mission analyst's tooltip for the frame itself (what it is, its origin, its
 /// axes), never a process note ("registry default for...") or a question-number citation.
+#[cfg(feature = "gmat")]
 fn human_axes_description(axes: pb::AxesKind, body: &str) -> String {
     match axes {
         pb::AxesKind::Icrf => format!(
@@ -609,6 +660,7 @@ fn human_axes_description(axes: pb::AxesKind, body: &str) -> String {
     }
 }
 
+#[cfg(feature = "gmat")]
 fn registry_default_frame(frame_id: &str) -> Option<pb::FrameDefinition> {
     let (body, suffix) = body_axes_suffix(frame_id)?;
     let axes = match suffix {
@@ -637,6 +689,7 @@ fn registry_default_frame(frame_id: &str) -> Option<pb::FrameDefinition> {
 /// `CdmBundle.state_spaces` does on the Python side). A `frame_id` neither `scenario.frames`
 /// declares nor [`registry_default_frame`] can honestly derive is left out entirely -- see that
 /// function's own doc comment for why silence, not a guess, is the right failure mode here.
+#[cfg(feature = "gmat")]
 fn collect_frames(scenario: &Scenario, trajectories: &BTreeMap<String, Trajectory>) -> Vec<pb::FrameDefinition> {
     let mut by_id: BTreeMap<String, pb::FrameDefinition> = BTreeMap::new();
     for f in &scenario.frames {
@@ -656,6 +709,7 @@ fn collect_frames(scenario: &Scenario, trajectories: &BTreeMap<String, Trajector
 /// Question 10's day-one mandatory frames -- ICRF and MJ2000 equatorial for a run's own central
 /// body, plus that body's body-fixed frame -- as [`registry_default_frame`]'s own body-axes
 /// suffixes.
+#[cfg(feature = "gmat")]
 const MANDATORY_BODY_AXES_SUFFIXES: [&str; 3] = ["ICRF", "MJ2000Eq", "BodyFixed"];
 
 /// Question 10/124 (M18.1): [`collect_frames`]'s own result, augmented with the mandatory
@@ -676,6 +730,7 @@ const MANDATORY_BODY_AXES_SUFFIXES: [&str; 3] = ["ICRF", "MJ2000Eq", "BodyFixed"
 /// wins over derived" rule, question 122). See [`DrmError::MandatoryFrameNotRealizable`]'s own
 /// doc comment for why the `None` arm below is structurally unreachable today, and is still a
 /// typed refusal rather than a silent omission.
+#[cfg(feature = "gmat")]
 fn add_mandatory_body_frames(frames: Vec<pb::FrameDefinition>, plans: &BTreeMap<String, (BindingPlan, i64)>) -> Result<Vec<pb::FrameDefinition>, DrmError> {
     let mut by_id: BTreeMap<String, pb::FrameDefinition> = frames.into_iter().map(|f| (f.id.clone(), f)).collect();
     let central_bodies: std::collections::BTreeSet<&str> = plans
@@ -703,6 +758,7 @@ fn add_mandatory_body_frames(frames: Vec<pb::FrameDefinition>, plans: &BTreeMap<
 /// orders of magnitude looser than the floating-point noise a correct DCM-to-quaternion
 /// conversion of a genuine rotation matrix produces (~1e-15), so this only ever catches a real
 /// arithmetic bug, never ordinary rounding.
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_UNIT_NORM_TOLERANCE: f64 = 1e-9;
 
 /// Question 129: the wire's own contract for `FrameDefinition.fixed_rotation_q` --
@@ -714,6 +770,7 @@ const FIXED_ROTATION_UNIT_NORM_TOLERANCE: f64 = 1e-9;
 /// computes (belt-and-suspenders against this module's own arithmetic), and `pub(crate)` so a
 /// future caller elsewhere in this crate can reuse the identical rule rather than a second,
 /// drifting copy of "what counts as a valid fixed_rotation_q".
+#[cfg(feature = "gmat")]
 pub(crate) fn validate_fixed_rotation_q(frame_id: &str, q: &[f64]) -> Result<(), DrmError> {
     match q.len() {
         0 => Ok(()),
@@ -768,6 +825,7 @@ pub(crate) fn validate_fixed_rotation_q(frame_id: &str, q: &[f64]) -> Result<(),
 /// incorrectly report the wire's own headline fixed-frame case as time-varying -- exactly the
 /// failure this constant's value was chosen to avoid, root-caused rather than worked around by
 /// loosening [`FIXED_ROTATION_CONSTANCY_TOLERANCE`] itself (which stays at the brief's own 1e-12).
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_MEASURE_INTERVAL_NS: i64 = 10 * 1_000_000_000;
 
 /// [`fill_fixed_rotations`]'s own constancy bound: the two measured rotation matrices
@@ -778,6 +836,7 @@ const FIXED_ROTATION_MEASURE_INTERVAL_NS: i64 = 10 * 1_000_000_000;
 /// even for the genuinely-fixed `EarthICRF`/`EarthMJ2000Eq` pair, and why the fix is the
 /// separation, not this tolerance. See that same doc comment for why a body-fixed frame is
 /// *expected* to fail this at any separation, not a bug to work around.
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_CONSTANCY_TOLERANCE: f64 = 1e-12;
 
 /// The 3x3 direction-cosine (change-of-basis) matrix `C` such that, for any physical vector,
@@ -789,6 +848,7 @@ const FIXED_ROTATION_CONSTANCY_TOLERANCE: f64 = 1e-12;
 /// MJ2000Eq, so the converted velocity component is never read). This is exactly the matrix
 /// [`matrix_to_quaternion`] turns into `fixed_rotation_q`'s own "parent -> this" unit quaternion
 /// when `from_cs` is the body's MJ2000Eq and `to_cs` is the candidate frame.
+#[cfg(feature = "gmat")]
 fn rotation_matrix(gmat: &Gmat, epoch_a1mjd: f64, from_cs: &str, to_cs: &str) -> Result<[[f64; 3]; 3], DrmError> {
     let mut c = [[0.0_f64; 3]; 3];
     for col in 0..3 {
@@ -807,6 +867,7 @@ fn rotation_matrix(gmat: &Gmat, epoch_a1mjd: f64, from_cs: &str, to_cs: &str) ->
 /// 1978), branching on the largest diagonal term to avoid dividing by a near-zero `sqrt` --
 /// numerically safe for any proper rotation, which `rotation_matrix`'s output always is (GMAT's
 /// own `CoordinateConverter::Convert` on two inertial axes systems is orthogonal by construction).
+#[cfg(feature = "gmat")]
 fn matrix_to_quaternion(m: &[[f64; 3]; 3]) -> [f64; 4] {
     let trace = m[0][0] + m[1][1] + m[2][2];
     if trace > 0.0 {
@@ -855,6 +916,7 @@ fn matrix_to_quaternion(m: &[[f64; 3]; 3]) -> [f64; 4] {
 /// invocation) and the candidate frame's own `id`, so two different frames' own `CoordinateSystem`
 /// pairs can never collide with each other or with another `execute()` call's objects -- the same
 /// convention [`convert_gmat_trajectory_to_declared_frame`] already follows.
+#[cfg(feature = "gmat")]
 fn fill_fixed_rotations(gmat: &Gmat, gmat_ns: &str, frames: Vec<pb::FrameDefinition>, base_tai_ns: i64) -> Result<Vec<pb::FrameDefinition>, DrmError> {
     use std::collections::BTreeSet;
 
@@ -928,6 +990,7 @@ fn fill_fixed_rotations(gmat: &Gmat, gmat_ns: &str, frames: Vec<pb::FrameDefinit
 /// directly (see `binding`'s module doc comment's "Parameter vocabulary" section). This module
 /// hands `binding::classify_binding` the real, unmodified `sys` unconditionally now -- the same
 /// `SystemDefinition` `hash::verify_system_hash` checks and [`declared_outputs`] reads.
+#[cfg(feature = "gmat")]
 const OUTPUT_PARAMETER_PREFIX: &str = "output.";
 
 /// See [`OUTPUT_PARAMETER_PREFIX`]'s doc comment: every `"output.<name>"` parameter this
@@ -935,10 +998,12 @@ const OUTPUT_PARAMETER_PREFIX: &str = "output.";
 /// parameter's own `unit` field was left unset/unrecognized (never refused here; an expression
 /// referencing it would still typecheck, just against an unhelpful unit, same as any other
 /// `Parameter` this crate reads).
+#[cfg(feature = "gmat")]
 fn declared_outputs(sys: &SystemDefinition) -> Vec<(String, Unit)> {
     sys.parameters.iter().filter_map(|p| p.name.strip_prefix(OUTPUT_PARAMETER_PREFIX).map(|name| (name.to_string(), Unit::try_from(p.unit).unwrap_or(Unit::Unspecified)))).collect()
 }
 
+#[cfg(feature = "gmat")]
 fn effective_step_rate_hz(instance: &SystemInstance, options: &av_cdm::pb::DrmOptions) -> f64 {
     if instance.step_rate_hz > 0.0 {
         instance.step_rate_hz
@@ -953,6 +1018,7 @@ fn effective_step_rate_hz(instance: &SystemInstance, options: &av_cdm::pb::DrmOp
 /// needs to be ordered against reading or incrementing this counter. Never itself surfaced in any
 /// output; folded only into a purely-internal GMAT object name string (see
 /// `binding::materialize_gmat`'s own doc comment).
+#[cfg(feature = "gmat")]
 static GMAT_EXECUTE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A caller-supplied `run_id` (`RunConfig.run_id`) is not, by itself, enough to namespace this
@@ -969,6 +1035,7 @@ static GMAT_EXECUTE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// materialize_gmat`'s own doc comment -- but a `run_id` containing e.g. `-` (a UUID) should never
 /// produce a name some *later* GMAT operation, such as a script re-parse, would refuse under
 /// GMAT's own `GmatStringUtil::IsValidName`).
+#[cfg(feature = "gmat")]
 fn gmat_execution_namespace(run_id: &str) -> String {
     let sanitized: String = run_id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let seq = GMAT_EXECUTE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -984,6 +1051,7 @@ fn gmat_execution_namespace(run_id: &str) -> String {
 /// and threaded straight through to `construct_gmat`/`binding::materialize_gmat` for a `Gmat`
 /// plan -- see that function's own doc comment for exactly what it namespaces.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn materialize_plan(gmat: &Gmat, plan: &BindingPlan, sys: &SystemDefinition, epoch_tai_ns: i64, with_stm: bool, accept_missing_stm_terms: bool, gmat_ns: &str, name_suffix: &str) -> Result<ModelHandle, DrmError> {
     match plan {
         BindingPlan::Gmat(spec) => {
@@ -1047,6 +1115,7 @@ fn materialize_plan(gmat: &Gmat, plan: &BindingPlan, sys: &SystemDefinition, epo
 /// freshly rebuilt spec (`fault::rebind_gmat_spec_at_state`) -- there is no separate "mutate an
 /// existing handle" API; see `crate::registry`'s own module doc comment for why.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn materialize_plan_at_boundary(
     gmat: &Gmat,
     plan: &BindingPlan,
@@ -1127,6 +1196,7 @@ fn materialize_plan_at_boundary(
 /// never actually disagree with that one system's own period -- see `HeteroKernel::run`'s own
 /// doc comment for why the gate's failure arm is not reachable through a single-system
 /// registration.
+#[cfg(feature = "gmat")]
 fn hetero_err_to_drm(e: HeteroKernelError) -> DrmError {
     match e {
         HeteroKernelError::BasePeriod(be) => DrmError::Schedule(be.to_string()),
@@ -1143,11 +1213,13 @@ fn hetero_err_to_drm(e: HeteroKernelError) -> DrmError {
 /// the star-tracker instance's spec to its exact pre-fault value (`fault::clear_sensor_fault`).
 /// See [`run_shared_group`]'s own doc comment for how all of these are merged into one sorted
 /// boundary list (M14.1: across every active `BINDING_KIND_MODEL` instance, not just one).
+#[cfg(feature = "gmat")]
 enum Boundary<'a> {
     Fault(&'a Fault),
     Maneuver(&'a ParsedManeuver),
     SensorFaultEnd(&'a Fault),
 }
+#[cfg(feature = "gmat")]
 impl Boundary<'_> {
     fn tai_ns(&self) -> i64 {
         match self {
@@ -1185,6 +1257,7 @@ impl Boundary<'_> {
 /// [`run_covariance_instance`] apply at a maneuver boundary. `dv` is a parameter (not always
 /// `m.dv` directly) since a [`ExecutionErrorMode::Sampled`] run applies a Gates-perturbed dv,
 /// not the bare commanded one -- see [`dv_to_apply`].
+#[cfg(feature = "gmat")]
 fn apply_dv_to_state(axes: av_cdm::pb::AxesKind, dv: [f64; 3], state_si: [f64; 6]) -> [f64; 6] {
     let r = [state_si[0], state_si[1], state_si[2]];
     let v = [state_si[3], state_si[4], state_si[5]];
@@ -1204,6 +1277,7 @@ fn apply_dv_to_state(axes: av_cdm::pb::AxesKind, dv: [f64; 3], state_si: [f64; 6
 /// only converts `maneuver::SampledDv` into [`events::SampledManeuver`] (the two are
 /// field-for-field identical; `maneuver` does not depend on `events`, so the conversion happens
 /// here rather than there).
+#[cfg(feature = "gmat")]
 fn dv_to_apply(mode: ExecutionErrorMode, m: &ParsedManeuver, seeds: &BTreeMap<String, u64>) -> ([f64; 3], Option<events::SampledManeuver>) {
     let (applied_dv, sampled) = maneuver::dv_to_apply(mode, m, seeds);
     (applied_dv, sampled.map(|s| events::SampledManeuver { applied_dv: s.applied_dv, draws: s.draws }))
@@ -1249,6 +1323,7 @@ fn dv_to_apply(mode: ExecutionErrorMode, m: &ParsedManeuver, seeds: &BTreeMap<St
 /// per [`HeteroKernel`] sub-run), but this loops over however many there are rather than assuming
 /// exactly one: only the *first* new segment was preceded by this span's own boundary, any
 /// further one (were `sub.segments` ever to carry more than one) was not.
+#[cfg(feature = "gmat")]
 fn append_span_samples(sub: Trajectory, all_samples: &mut Vec<TrajectorySample>, all_segments: &mut Vec<TrajectorySegment>, segment_preceded_by_own_maneuver: &mut Vec<bool>, shell: &mut Option<Trajectory>, keep_previous_last_and_drop_incoming_first: bool) {
     if shell.is_none() {
         *shell = Some(Trajectory { samples: vec![], segments: vec![], ..sub.clone() });
@@ -1280,6 +1355,7 @@ fn append_span_samples(sub: Trajectory, all_samples: &mut Vec<TrajectorySample>,
 /// `end_tai_ns` (extended to the later segment's own `end_tai_ns`) -- `name`/`dynamics_model`/
 /// `dynamics_hash`/`dynamics_depth` are already identical between two segments this function
 /// merges (that is what "mergeable" means), so there is nothing to reconcile between them.
+#[cfg(feature = "gmat")]
 fn merge_adjacent_segments(segments: Vec<TrajectorySegment>, boundary_is_own_maneuver: &[bool]) -> Vec<TrajectorySegment> {
     let mut merged: Vec<TrajectorySegment> = Vec::with_capacity(segments.len());
     for (i, seg) in segments.into_iter().enumerate() {
@@ -1299,6 +1375,7 @@ fn merge_adjacent_segments(segments: Vec<TrajectorySegment>, boundary_is_own_man
 /// [`HeteroKernel`]) the moment it is registered, and always refilled (by
 /// [`materialize_plan_at_boundary`]) before the *next* span, so it is `None` only transiently
 /// inside [`run_one_span`] itself.
+#[cfg(feature = "gmat")]
 struct ModelSpanState {
     period_ns: i64,
     cur_plan: BindingPlan,
@@ -1370,6 +1447,7 @@ struct ModelSpanState {
 /// raised deep inside a `step_with_ports` call (erased to `av_dynamics::ModelError` by the time
 /// [`HeteroKernel::run_with_ports`] reports it) makes it back out as the *typed* error every
 /// container test in this crate matches on -- see [`hetero_err_to_drm_shared`].
+#[cfg(feature = "gmat")]
 struct ContainerSpanState {
     period_ns: i64,
     model: Rc<binding::ContainerModel>,
@@ -1393,6 +1471,7 @@ struct ContainerSpanState {
 /// (`ModelError::BindingTransport`, per that variant's own doc comment: "a container's lockstep
 /// protocol failed to deliver a step") -- see [`hetero_err_to_drm_shared`] for how the typed
 /// error is recovered from `error_slot` after [`HeteroKernel::run_with_ports`] returns `Err`.
+#[cfg(feature = "gmat")]
 fn erase_container(name: &str, model: Rc<binding::ContainerModel>, error_slot: Rc<RefCell<Option<ContainerError>>>) -> BoxedModel {
     av_dynamics::erase_with_id(name.to_string(), SharedContainerModel(model), move |model_id, err: ContainerError| {
         *error_slot.borrow_mut() = Some(err.clone());
@@ -1410,6 +1489,7 @@ fn erase_container(name: &str, model: Rc<binding::ContainerModel>, error_slot: R
 /// (`SequenceMismatch`/`ReachedTaiMismatch`) keep passing unchanged even though the container
 /// now steps through the *generic* `HeteroScheduler`/`ModelError` machinery instead of a
 /// dedicated loop calling `ContainerModel::step_with_ports` directly.
+#[cfg(feature = "gmat")]
 fn hetero_err_to_drm_shared(e: HeteroKernelError, container_error_slots: &BTreeMap<String, Rc<RefCell<Option<ContainerError>>>>) -> DrmError {
     if let HeteroKernelError::Schedule(crate::schedule::HeteroScheduleError::Model(ModelError::BindingTransport { ref model_id, .. })) = e {
         if let Some(slot) = container_error_slots.get(model_id) {
@@ -1436,6 +1516,7 @@ fn hetero_err_to_drm_shared(e: HeteroKernelError, container_error_slots: &BTreeM
 /// identically to a kernel that was never split at all (see [`run_shared_group`]'s own doc
 /// comment for the "byte-identical, not merely assumed" scope this claim is limited to).
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn run_one_span(
     seg_start: i64,
     seg_end: i64,
@@ -1643,6 +1724,7 @@ fn run_one_span(
 /// own "A3.3" comment further down), and `Router::take_port_traffic` is a genuine drain (a
 /// second call returns nothing) -- so the ONE drain happens here and is threaded back out
 /// through this tuple, rather than `execute()` draining it again itself and getting nothing.
+#[cfg(feature = "gmat")]
 type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, String>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>);
 
 /// Question 178 (R5.1a): drain `handle`'s own accumulated SENSOR fault effect (if any) and fold
@@ -1657,6 +1739,7 @@ type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<Str
 /// than from `ModelSpanState::handle` afterward, which is always `None` by the time a span
 /// finishes) into `sensor_fault_totals`, attributed to whichever fault id [`active_sensor_fault`]
 /// says is currently installed on `name`.
+#[cfg(feature = "gmat")]
 fn fold_sensor_fault_span_drain(name: &str, drain: Option<av_dynamics::SensorFaultEffectDrain>, active_sensor_fault: &BTreeMap<String, String>, sensor_fault_totals: &mut BTreeMap<String, (Option<i64>, u64)>) {
     let Some(fault_id) = active_sensor_fault.get(name) else { return };
     let Some(drain) = drain else { return };
@@ -1669,10 +1752,12 @@ fn fold_sensor_fault_span_drain(name: &str, drain: Option<av_dynamics::SensorFau
 
 /// One chronological "did this port's decode attempt this call succeed or fail" entry, folded
 /// by [`decode_error_episode_events`] -- never constructed elsewhere.
+#[cfg(feature = "gmat")]
 enum DecodeAttempt<'a> {
     Failed(&'a crate::ports::DecodeErrorRecord),
     Succeeded(&'a crate::ports::DecodeSuccessRecord),
 }
+#[cfg(feature = "gmat")]
 impl DecodeAttempt<'_> {
     fn tai_ns(&self) -> i64 {
         match self {
@@ -1714,6 +1799,7 @@ impl DecodeAttempt<'_> {
 /// Ports are iterated in `BTreeMap` order (deterministic, ADR-004) and every episode within one
 /// port in the chronological order it opened, so two runs given the same occurrences always
 /// produce their `decode_error_start`/`_end` pairs in the same relative order.
+#[cfg(feature = "gmat")]
 fn decode_error_episode_events(errors: &[crate::ports::DecodeErrorRecord], successes: &[crate::ports::DecodeSuccessRecord], instance: &str, run_end_tai_ns: i64, provenance: Provenance) -> Vec<Event> {
     let mut by_port: BTreeMap<&str, Vec<DecodeAttempt>> = BTreeMap::new();
     for e in errors {
@@ -1759,6 +1845,7 @@ fn decode_error_episode_events(errors: &[crate::ports::DecodeErrorRecord], succe
 /// (further down, in `run_shared_group`'s own applied-commands drain) can find and decode the
 /// SAME ack packet a live run's own `AttitudeControllerModel`/`ConstantAccelModel::step_with_
 /// ports` genuinely sent, never a second, independently-maintained guess at the pairing.
+#[cfg(feature = "gmat")]
 fn resolve_ack_framed(plan: &BindingPlan, target_sys: &SystemDefinition, instance: &str) -> Option<(String, pb::PacketCodec)> {
     match plan {
         BindingPlan::ConstantAccel(spec) => match (&spec.ack_framed_port, &spec.ack_framed_codec) {
@@ -1780,6 +1867,7 @@ fn resolve_ack_framed(plan: &BindingPlan, target_sys: &SystemDefinition, instanc
 /// AppliedPortCommand`] a REPLAYED target's own derivation (further down) feeds to [`events::
 /// port_command_event`] -- the identical field name a live, non-replayed run of the same
 /// binding kind already carries on its own real `AppliedCommand`.
+#[cfg(feature = "gmat")]
 fn resolve_consume_framed_port(plan: &BindingPlan) -> Option<String> {
     match plan {
         BindingPlan::ConstantAccel(spec) => spec.consume_framed_port.clone(),
@@ -1790,6 +1878,7 @@ fn resolve_consume_framed_port(plan: &BindingPlan) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn run_shared_group(
     gmat: &Gmat,
     plans: &BTreeMap<String, (BindingPlan, i64)>,
@@ -2603,6 +2692,7 @@ fn run_shared_group(
 /// `av_cdm::covariance::nearest_spd_row_major`'s projection -- logged loudly and still counted
 /// as a hygiene failure, exactly the pattern `HeteroKernel::run_with_covariance` already applies
 /// to propagated samples, reused here rather than reinvented.
+#[cfg(feature = "gmat")]
 fn load_initial_covariance(instance: &SystemInstance, n: usize, options: &av_cdm::pb::DrmOptions) -> Result<Vec<f64>, DrmError> {
     if instance.initial_covariance.is_empty() {
         return Err(DrmError::MissingInitialCovariance { instance: instance.name.clone() });
@@ -2653,6 +2743,7 @@ fn load_initial_covariance(instance: &SystemInstance, n: usize, options: &av_cdm
 /// (`CovarianceHygieneError::DimensionMismatch`, `0 != n*n`), not silently accepted as a real
 /// covariance.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn run_covariance_span(
     instance_name: &str,
     output_period_ns: i64,
@@ -2764,6 +2855,7 @@ fn run_covariance_span(
 /// `crates/av-kernel/tests/drm_executor.rs`'s equality test for the plain-vs-covariance product
 /// set comparison this makes possible.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 fn run_covariance_instance(
     gmat: &Gmat,
     plan: &BindingPlan,
@@ -2903,6 +2995,7 @@ fn run_covariance_instance(
     Ok((traj, emitted, all_outputs))
 }
 
+#[cfg(feature = "gmat")]
 fn finish_trajectory(mut traj: Trajectory, drm_hash: &str, sos_hash: &str, scenario: &Scenario, run_id: &str, sys: &SystemDefinition, sys_hash: &str) -> Trajectory {
     traj.config_hash = drm_hash.to_string();
     traj.provenance = Some(Provenance {
@@ -2982,6 +3075,7 @@ fn finish_trajectory(mut traj: Trajectory, drm_hash: &str, sos_hash: &str, scena
 /// `rotation`/`rotation_dot` are unitless (a pure rotation and its rate), so the SI `cov` this
 /// function reads and writes back never passes through a km<->m conversion at all -- see
 /// [`Gmat::convert_with_rotation`]'s own doc comment.
+#[cfg(feature = "gmat")]
 fn convert_gmat_trajectory_to_declared_frame(gmat: &Gmat, plan: &BindingPlan, gmat_ns: &str, instance_name: &str, mut traj: Trajectory) -> Result<Trajectory, DrmError> {
     let spec = match plan {
         BindingPlan::Gmat(spec) => spec,
@@ -3043,6 +3137,7 @@ fn convert_gmat_trajectory_to_declared_frame(gmat: &Gmat, plan: &BindingPlan, gm
 ///
 /// [`DrmError::CovarianceHygiene`] if the rotated covariance fails
 /// [`av_cdm::covariance::check_spd_row_major`].
+#[cfg(feature = "gmat")]
 fn rotate_covariance(rotation: &[f64; 9], rotation_dot: &[f64; 9], cov: &[f64], context: &str) -> Result<Vec<f64>, DrmError> {
     assert_eq!(cov.len(), 36, "TrajectorySample.cov is always a 6x6 row-major matrix (36 elements) when non-empty");
     let mut m = [0.0_f64; 36];
@@ -3083,6 +3178,7 @@ fn rotate_covariance(rotation: &[f64; 9], rotation_dot: &[f64; 9], cov: &[f64], 
 /// provenance` can tell whether anything was lost without separately reconstructing the router's
 /// own wiring. See `events::dropped_messages_event`'s own doc comment for the companion
 /// `EVENT_KIND_LIFECYCLE` event `execute()` adds to `RunProducts.events` when this is non-zero.
+#[cfg(feature = "gmat")]
 fn build_run_provenance(drm_hash: &str, sos_hash: &str, scenario: &Scenario, run_id: &str, error_mode: ExecutionErrorMode, covariance: bool, dropped_in_flight_messages: usize) -> Provenance {
     let kernel_run_mode = if covariance { "covariance_per_instance" } else { "shared" };
     Provenance {
@@ -3107,6 +3203,7 @@ fn build_run_provenance(drm_hash: &str, sos_hash: &str, scenario: &Scenario, run
 /// (`entity_id`, `state_space_id`) and empty `samples` -- built from `cfg.systems`/
 /// `cfg.sos.instances` alone, before any instance has run, for the load-time expression
 /// validation pass. See the module doc comment's "Scoring" section.
+#[cfg(feature = "gmat")]
 fn declared_shape_trajectory(instance_name: &str, state_space_id: &str) -> Trajectory {
     Trajectory { entity_id: instance_name.to_string(), state_space_id: state_space_id.to_string(), samples: vec![], ..Default::default() }
 }
@@ -3127,6 +3224,7 @@ fn declared_shape_trajectory(instance_name: &str, state_space_id: &str) -> Traje
 /// the very same port at the very same epoch in the very same step) keep
 /// [`crate::router::Router::take_port_traffic`]'s own emission order rather than being
 /// reordered here.
+#[cfg(feature = "gmat")]
 fn sort_port_traffic(records: &mut [pb::PortTrafficRecord]) {
     records.sort_by(|a, b| (a.tai_ns, a.sequence, a.instance.as_str(), a.port.as_str()).cmp(&(b.tai_ns, b.sequence, b.instance.as_str(), b.port.as_str())));
 }
@@ -3139,6 +3237,7 @@ fn sort_port_traffic(records: &mut [pb::PortTrafficRecord]) {
 /// carries (a snapshot from *before* either `"port_traffic_uri"` or `"port_traffic"` is added --
 /// the sidecar's own provenance describes the run, not itself), never mutated in place; the
 /// returned `Provenance` is what `RunProducts.provenance` becomes.
+#[cfg(feature = "gmat")]
 fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &str, mut records: Vec<pb::PortTrafficRecord>, undeclared_port_emissions: u64, base_provenance: &Provenance) -> Result<(String, Provenance), DrmError> {
     let mut provenance = base_provenance.clone();
     let Some(dir) = products_dir else {
@@ -3179,6 +3278,7 @@ fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &s
 /// two connections never put two records on the same `(sequence, instance)` pair), so this is
 /// the one place that tie-break is actually proven, directly against the sort function real
 /// runs also use.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod sort_port_traffic_tests {
     use super::*;
@@ -3283,6 +3383,7 @@ mod sort_port_traffic_tests {
 /// -- [`super::DrmError::InvalidExpression`] on either failure. Never touches
 /// `Trajectory.samples` (`crate::expr::typecheck::check`'s own guarantee), so this is safe to
 /// call before any instance has been propagated.
+#[cfg(feature = "gmat")]
 fn validate_expression_at_load(name: &str, expression: &str, run: &crate::expr::ExprRunProducts) -> Result<(), DrmError> {
     let expr = crate::expr::parse(expression).map_err(|e| DrmError::InvalidExpression { name: name.to_string(), reason: e.to_string() })?;
     crate::expr::check(&expr, run).map_err(|e| DrmError::InvalidExpression { name: name.to_string(), reason: e.to_string() })?;
@@ -3296,6 +3397,7 @@ fn validate_expression_at_load(name: &str, expression: &str, run: &crate::expr::
 /// objective/measure against the real result, and return one [`RunProducts`]. See the module
 /// doc comment for exactly how `DrmOptions` fields map to kernel behaviour and how scoring
 /// works.
+#[cfg(feature = "gmat")]
 pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     // M25.4b: `RunConfig.replay` combined with `DrmOptions.covariance` is refused first, before
     // even opening `RunConfig.replay.log_path` -- cheaper than the hash check just below (no
@@ -4030,6 +4132,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
 /// alone, with no GMAT/kernel machinery involved -- see this module's own doc comment's "Segment
 /// merge across an unaffected boundary" section, and `tests/segment_merge.rs` for the same claims
 /// proven end to end through the real `execute()` path.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod merge_adjacent_segments_tests {
     use super::*;
@@ -4099,6 +4202,7 @@ mod merge_adjacent_segments_tests {
 /// for the "registry defaults the run actually used" half of `RunProducts.frames`, isolated
 /// from any real DRM run -- `tests/drm_executor.rs`/`tests/drm_maneuver.rs` separately prove
 /// this is actually wired into a real GMAT-bound run (the golden's own `EarthMJ2000Eq`).
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod frame_registry_tests {
     use super::*;
@@ -4398,6 +4502,7 @@ mod to_proto_tests {
     /// [`sort_measurements`]'s own required order (question 173: "sorted by epoch and id").
     /// Fails against an implementation that sorts by `measurement_id` alone (would put "a"
     /// before "b" regardless of epoch) or leaves input order untouched.
+    #[cfg(feature = "gmat")]
     #[test]
     fn sort_measurements_orders_by_epoch_then_id() {
         let mut m = vec![
@@ -4455,6 +4560,7 @@ mod to_proto_tests {
 /// Question 129 (M19.2): `validate_fixed_rotation_q`/`matrix_to_quaternion`, no GMAT/`gmat_sys::
 /// engine_lock()` needed -- pure arithmetic, unlike `fixed_rotation_measurement_interval_tests`
 /// below.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod fixed_rotation_math_tests {
     use super::*;
@@ -4557,6 +4663,7 @@ mod fixed_rotation_math_tests {
 /// ADR-002's fourth amendment) and this is exactly the kind of GMAT-version-sensitive fact that
 /// should re-fail loudly, not silently bit-rot, if a future GMAT/data-file update ever changes
 /// `ICRF_Table.txt`'s own tabulated values.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod fixed_rotation_measurement_interval_tests {
     use super::*;

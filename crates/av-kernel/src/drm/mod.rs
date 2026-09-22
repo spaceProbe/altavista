@@ -67,6 +67,10 @@ pub mod controller;
 pub mod events;
 pub mod executor;
 pub mod fault;
+// `docs/open-questions.md` question 230: the whole module is GMAT-only (`gmat_command::
+// GmatFramedCommandModel` wraps `gmat_sys::model::GmatModel`) -- gated at the `mod` declaration
+// per this task's brief, rather than sprinkling `#[cfg(feature = "gmat")]` through the file.
+#[cfg(feature = "gmat")]
 pub mod gmat_command;
 pub mod ground;
 pub mod hash;
@@ -76,7 +80,13 @@ pub mod schema;
 pub mod sensors;
 
 pub use command_source::{CommandOutcome, ExternalCommandSource};
-pub use executor::{execute, RunConfig, RunProducts, Score};
+// `docs/open-questions.md` question 230: `execute`/`RunConfig` are gated at their own
+// definitions in `executor.rs` (both are inherently GMAT-bound -- see that module's own `use
+// gmat_sys::Gmat` doc comment); `RunProducts`/`Score` are not gated there and stay exported
+// unconditionally.
+#[cfg(feature = "gmat")]
+pub use executor::{execute, RunConfig};
+pub use executor::{RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
 pub use replay::ReplayConfig;
 
@@ -176,7 +186,16 @@ pub enum DrmError {
     /// doc comment's "Covariance" section.
     MissingInitialCovariance { instance: String },
     /// A GMAT FFI call failed.
+    #[cfg(feature = "gmat")]
     Gmat(gmat_sys::GmatError),
+    /// `docs/open-questions.md` question 230: a DRM instance's `dynamics_model` named a
+    /// `"gmat."`-prefixed id, but this `av-kernel` was built with `--no-default-features` (the
+    /// `gmat` feature off, `gmat-sys` not even a dependency) -- refused here, typed, naming the
+    /// missing feature, rather than a panic, a silent fallback to the native placeholder, or a
+    /// mis-classification. See `binding::classify_binding`'s own `#[cfg(not(feature = "gmat"))]`
+    /// arm for exactly where this is raised.
+    #[cfg(not(feature = "gmat"))]
+    GmatFeatureDisabled { instance: String, dynamics_model: String },
     /// `av_kernel::schedule::ScheduleError` from the underlying kernel run, stringified (its
     /// own `M::Error` is `binding::AnyModelError`, which is not `Clone`/`'static`-simple
     /// enough to nest here without another layer of boilerplate for no behavioural gain).
@@ -629,7 +648,13 @@ impl std::fmt::Display for DrmError {
             DrmError::CovarianceWithFaultsNotSupported { instance } => write!(f, "instance {instance:?}: covariance and DYNAMICS faults requested together are not yet supported"),
             DrmError::ModelNotStmCapable { instance } => write!(f, "instance {instance:?}: covariance requested but the bound model is not STM-capable"),
             DrmError::MissingInitialCovariance { instance } => write!(f, "instance {instance:?}: covariance requested but SystemInstance.initial_covariance was empty"),
+            #[cfg(feature = "gmat")]
             DrmError::Gmat(e) => write!(f, "{e}"),
+            #[cfg(not(feature = "gmat"))]
+            DrmError::GmatFeatureDisabled { instance, dynamics_model } => write!(
+                f,
+                "instance {instance:?}: dynamics_model {dynamics_model:?} names a \"gmat.\"-prefixed model, but this av-kernel was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked); rebuild with the default features to run a GMAT-backed instance"
+            ),
             DrmError::Schedule(e) => write!(f, "{e}"),
             DrmError::CovarianceHygiene(e) => write!(f, "{e}"),
             DrmError::MissingFaultSeed { fault_id } => write!(f, "fault {fault_id:?} needs a random draw but Scenario.seeds has no entry keyed by its id"),

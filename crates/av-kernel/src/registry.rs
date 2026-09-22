@@ -66,14 +66,23 @@ use std::collections::BTreeMap;
 
 use av_cdm::pb::{ModelInfo, PacketCodec, PortTrafficLog, StateSpace};
 use av_dynamics::{erase_with_id, BoxedModel, DynamicsModel, ModelError, StmAugmented};
+// `docs/open-questions.md` question 230: gated behind the `gmat` feature (default-on) --
+// `Gmat` is only named by `ModelRegistry::construct_gmat`'s own signature and the
+// `AnyModel::Gmat` match arm in `ModelHandle::into_boxed` below, both gated the same way.
+#[cfg(feature = "gmat")]
 use gmat_sys::Gmat;
 
 use crate::drm::attitude::AttitudeWheelsSpec;
-use crate::drm::binding::{self, AnyModel, ConstantAccelSpec, GmatSystemSpec, Materialized};
+#[cfg(feature = "gmat")]
+use crate::drm::binding::GmatSystemSpec;
+use crate::drm::binding::{self, AnyModel, ConstantAccelSpec, Materialized};
 use crate::drm::controller::AttitudeControllerSpec;
 use crate::drm::ground::GroundStationSpec;
 use crate::drm::replay::ReplayModel;
 use crate::drm::sensors::{ImuSpec, StarTrackerSpec};
+// `docs/open-questions.md` question 230: `DrmError` is named only by
+// `gmat_materialize_err_to_model_error` (gated the same way).
+#[cfg(feature = "gmat")]
 use crate::drm::DrmError;
 
 /// Which of ADR-005 sec 1's constructors a `SystemDefinition.dynamics_model` id dispatches to.
@@ -209,6 +218,7 @@ impl ModelHandle {
     /// which is normally `SystemDefinition.dynamics_model` itself).
     pub fn into_boxed(self, erase_id: &str) -> BoxedModel {
         match self.model {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(inner) => erase_with_id(erase_id, inner, |id, e: gmat_sys::GmatError| ModelError::Gmat { model_id: id, detail: e.to_string() }),
             AnyModel::ConstantAccel(inner) => erase_with_id(erase_id, inner, |_id, never: std::convert::Infallible| match never {}),
             // M22.4: the wrapped model is `crate::drm::controller::CommandedAttitude<sensors::
@@ -268,6 +278,7 @@ impl ModelHandle {
 /// boundary `gmat_sys::model::GmatModel` owns, so both were reported as `ModelError::Gmat`
 /// here; the original `DrmError`'s own `Display` is preserved verbatim in `detail`, so nothing
 /// about the distinction is lost, only its type.
+#[cfg(feature = "gmat")]
 fn gmat_materialize_err_to_model_error(model_id: &str, e: DrmError) -> ModelError {
     ModelError::Gmat { model_id: model_id.to_string(), detail: e.to_string() }
 }
@@ -439,6 +450,7 @@ impl ModelRegistry {
     ///
     /// [`ModelError::Gmat`] wrapping whatever `materialize_gmat` returned (a GMAT FFI failure)
     /// -- see [`gmat_materialize_err_to_model_error`].
+    #[cfg(feature = "gmat")]
     #[allow(clippy::too_many_arguments)]
     pub fn construct_gmat(
         gmat: &Gmat,

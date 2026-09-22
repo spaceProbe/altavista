@@ -201,19 +201,46 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
+// `docs/open-questions.md` question 230: `Rc` is named only by `SharedContainerModel`/
+// `ContainerModel` (gated -- see that struct's own doc comment for why, even though a
+// container binding itself has nothing to do with GMAT).
+#[cfg(feature = "gmat")]
 use std::rc::Rc;
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DrmOptions, ModelCapability, ModelInfo, PacketCodec, PacketField, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DrmOptions, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
+// `docs/open-questions.md` question 230: `ModelCapability` is named only by `materialize_container`
+// (gated); `PacketField` only by `resolve_gmat_command_port` and this module's own GMAT-only
+// tests (both gated); `Tai` only by `materialize_gmat` (`Tai::from_nanos(epoch_tai_ns)
+// .to_a1_mjd()` at the `Gmat::convert`-adjacent A1MJD boundary).
+#[cfg(feature = "gmat")]
+use av_cdm::pb::ModelCapability;
+#[cfg(feature = "gmat")]
+use av_cdm::pb::PacketField;
+#[cfg(feature = "gmat")]
 use av_cdm::time::Tai;
 use av_dynamics::{AppliedCommand, DynamicsModel, Inbox, Outbox, StepResult, StmStepResult};
+// `docs/open-questions.md` question 230: both named only by `ContainerModel`/`materialize_container`
+// (gated -- see that struct's own doc comment).
+#[cfg(feature = "gmat")]
 use av_lockstep::docker::ManagedContainer;
+#[cfg(feature = "gmat")]
 use av_lockstep::{BlockingLockstepClient, LockstepBindRequest, LockstepStepRequest};
+// `docs/open-questions.md` question 230: gated behind the `gmat` feature (default-on) -- these
+// two `use`s, and `super::gmat_command` below, are named only by the GMAT-backed half of this
+// module (`AnyModel::Gmat`, `AnyModelError::Gmat`, `materialize_gmat`), all gated the same way.
+#[cfg(feature = "gmat")]
 use gmat_sys::model::{GmatModel, GmatModelInfo};
+#[cfg(feature = "gmat")]
 use gmat_sys::{Gmat, GmatError};
 
 use super::attitude::{self, AttitudeSpecError, AttitudeWheelsModel, AttitudeWheelsSpec};
 use super::controller::{self, AttitudeControllerModel, AttitudeControllerSpec, CommandedAttitude, ControllerSpecError};
+// `docs/open-questions.md` question 230: all three are named only by `gmat_settings` (gated) --
+// `fault.rs` itself is untouched (this task's own binding rule) and keeps its own internal use
+// of `CARTESIAN_FIELDS`/`KEPLERIAN_FIELDS` in `rebind_gmat_spec_at_state`, unaffected by this.
+#[cfg(feature = "gmat")]
 use super::fault::{CARTESIAN_FIELDS, DISPLAY_STATE_TYPE_FIELD, KEPLERIAN_FIELDS};
+#[cfg(feature = "gmat")]
 use super::gmat_command::{self, FramedAck, FramedCommandInput, GmatFramedCommandModel};
 use super::ground::{self, GroundSpecError, GroundStationModel, GroundStationSpec};
 use super::replay::ReplayModel;
@@ -223,6 +250,7 @@ use super::DrmError;
 /// GMAT version every space-system binding in this module is pinned against -- this
 /// repository ships exactly one GMAT install (`GMAT R2026a/`), the same constant
 /// `tests/golden_acceptance.rs` records literally in its own `GmatModelInfo`.
+#[cfg(feature = "gmat")]
 const GMAT_VERSION: &str = "R2026a";
 
 // --------------------------------------------------------------------------------------
@@ -247,6 +275,7 @@ pub(crate) enum AnyModel {
     /// GmatError`, identical to the type `GmatModel` itself used here before this task -- so
     /// `AnyModelError::Gmat`/`registry::ModelHandle::into_boxed`'s own erasure closure (`|id, e:
     /// gmat_sys::GmatError| ...`) also needed no change.
+    #[cfg(feature = "gmat")]
     Gmat(gmat_command::GmatFramedCommandModel),
     ConstantAccel(ConstantAccelModel),
     /// M22.1b (`docs/open-questions.md` questions 151/152): a real
@@ -610,6 +639,7 @@ impl DynamicsModel for ConstantAccelModel {
 
 #[derive(Debug)]
 pub(crate) enum AnyModelError {
+    #[cfg(feature = "gmat")]
     Gmat(GmatError),
     /// (Question 112) `stm_derivatives`/`step_with_stm` invoked on a variant whose own
     /// `stm_capable()` is `false` -- the `AnyModel` counterpart of `av_dynamics::erase::
@@ -637,6 +667,7 @@ pub(crate) enum AnyModelError {
 impl fmt::Display for AnyModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModelError::Gmat(e) => write!(f, "{e}"),
             AnyModelError::CapabilityMissing { model_id, capability } => write!(f, "model {model_id:?}: capability {capability:?} was invoked but is not declared"),
             AnyModelError::PortCodec { model_id, detail } => write!(f, "model {model_id:?}: port codec error: {detail}"),
@@ -651,6 +682,7 @@ impl DynamicsModel for AnyModel {
 
     fn state_dim(&self) -> usize {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.state_dim(),
             AnyModel::ConstantAccel(m) => m.state_dim(),
             AnyModel::Attitude(m) => m.state_dim(),
@@ -663,6 +695,7 @@ impl DynamicsModel for AnyModel {
     }
     fn derivatives(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.derivatives(state, t_tai_ns, controls, out).map_err(AnyModelError::Gmat),
             AnyModel::ConstantAccel(m) => match m.derivatives(state, t_tai_ns, controls, out) {
                 Ok(()) => Ok(()),
@@ -697,6 +730,7 @@ impl DynamicsModel for AnyModel {
     }
     fn describe(&self) -> ModelInfo {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.describe(),
             AnyModel::ConstantAccel(m) => m.describe(),
             AnyModel::Attitude(m) => m.describe(),
@@ -709,6 +743,7 @@ impl DynamicsModel for AnyModel {
     }
     fn stm_capable(&self) -> bool {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.stm_capable(),
             // The native placeholder model declares no STM capability -- consistent with the
             // existing `ConstantAccel` test models in `kernel`/`schedule`, which also default
@@ -754,7 +789,13 @@ impl DynamicsModel for AnyModel {
         }
     }
     fn stm_derivatives(&self, augmented_state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
+        // `docs/open-questions.md` question 230: every arm below except the (gated) `AnyModel::
+        // Gmat` one ignores all four parameters (each returns `CapabilityMissing` unconditionally)
+        // -- without the `gmat` feature that arm is gone, so these become genuinely unused.
+        #[cfg(not(feature = "gmat"))]
+        let _ = (&augmented_state, &t_tai_ns, &controls, &out);
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.stm_derivatives(augmented_state, t_tai_ns, controls, out).map_err(AnyModelError::Gmat),
             // Question 112: a typed `CapabilityMissing`, not a panic -- see `AnyModelError::
             // CapabilityMissing`'s own doc comment. `ConstantAccelModel::stm_capable()` is
@@ -788,6 +829,7 @@ impl DynamicsModel for AnyModel {
     /// than one that happens to work only because nothing overrides this method yet" reasoning.
     fn integrator(&self) -> av_dynamics::integrate::Dopri5 {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.integrator(),
             AnyModel::ConstantAccel(m) => m.integrator(),
             AnyModel::Attitude(m) => m.integrator(),
@@ -810,6 +852,7 @@ impl DynamicsModel for AnyModel {
     /// their actual source.
     fn step(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64) -> Result<StepResult, Self::Error> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.step(state, t_tai_ns, controls, dt_ns).map_err(AnyModelError::Gmat),
             AnyModel::ConstantAccel(m) => match m.step(state, t_tai_ns, controls, dt_ns) {
                 Ok(r) => Ok(r),
@@ -847,6 +890,7 @@ impl DynamicsModel for AnyModel {
     /// see that arm's own comment.
     fn step_with_stm(&self, augmented_state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64) -> Result<StmStepResult, Self::Error> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.step_with_stm(augmented_state, t_tai_ns, controls, dt_ns).map_err(AnyModelError::Gmat),
             // Question 112: same typed-error guard as `stm_derivatives` above, for the same
             // reason -- `ConstantAccelModel::stm_capable()` is always `false`, so calling this
@@ -907,6 +951,7 @@ impl DynamicsModel for AnyModel {
     /// construct_native` path `crate::drm::executor`'s shared kernel run registers).
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64, inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox).map_err(AnyModelError::Gmat),
             AnyModel::ConstantAccel(m) => match m.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox) {
                 Ok(r) => Ok(r),
@@ -975,6 +1020,7 @@ impl DynamicsModel for AnyModel {
     /// this file regardless of which method's match arm it belongs to).
     fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.last_measurements(),
             AnyModel::ConstantAccel(m) => m.last_measurements(),
             AnyModel::Attitude(m) => m.last_measurements(),
@@ -994,6 +1040,7 @@ impl DynamicsModel for AnyModel {
     /// same executable arm-count check.
     fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.drain_sensor_fault_effect(),
             AnyModel::ConstantAccel(m) => m.drain_sensor_fault_effect(),
             AnyModel::Attitude(m) => m.drain_sensor_fault_effect(),
@@ -1011,6 +1058,7 @@ impl DynamicsModel for AnyModel {
     /// check (`any_model_arm_count_for_ground_station_matches_star_tracker`).
     fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
         match self {
+            #[cfg(feature = "gmat")]
             AnyModel::Gmat(m) => m.drain_decode_errors(),
             AnyModel::ConstantAccel(m) => m.drain_decode_errors(),
             AnyModel::Attitude(m) => m.drain_decode_errors(),
@@ -1103,6 +1151,18 @@ impl std::error::Error for ContainerError {}
 /// model in this workspace implements), but a gRPC client and a monotonically increasing
 /// sequence counter are inherently stateful -- the same reason `gmat_sys::model::GmatModel`
 /// (a `!Send` FFI handle) is driven through `&self` methods that mutate hidden native state.
+///
+/// `docs/open-questions.md` question 230: gated behind the `gmat` feature, though a
+/// `BINDING_KIND_CONTAINER` instance itself has nothing to do with GMAT -- this cluster
+/// (`ContainerModel`/`SharedContainerModel`/`MaterializedContainer`/`materialize_container`) is
+/// dead code once `--no-default-features` is set, purely because its one caller,
+/// `executor::run_shared_group`/`materialize_plan_at_boundary` (gated as a whole -- see
+/// `executor.rs`'s own `use gmat_sys::Gmat` doc comment: `RunConfig.gmat: &Gmat` makes `execute`
+/// and everything only it reaches GMAT-bound regardless of binding kind), is gone. `classify_
+/// binding`'s own `BINDING_KIND_CONTAINER` classification path (`parse_container_spec`,
+/// `ContainerSpec`, `Classification::Container`) stays ungated -- it is genuinely GMAT-free and
+/// has its own tests below that do not construct a real `ContainerModel`.
+#[cfg(feature = "gmat")]
 pub(crate) struct ContainerModel {
     client: RefCell<BlockingLockstepClient>,
     next_sequence: Cell<u64>,
@@ -1121,6 +1181,7 @@ pub(crate) struct ContainerModel {
     managed: RefCell<Option<ManagedContainer>>,
 }
 
+#[cfg(feature = "gmat")]
 impl DynamicsModel for ContainerModel {
     type Error = ContainerError;
 
@@ -1201,6 +1262,7 @@ impl DynamicsModel for ContainerModel {
     }
 }
 
+#[cfg(feature = "gmat")]
 impl ContainerModel {
     /// Send `Shutdown` and, for a Docker-run instance ([`ContainerModel::managed`] is `Some`),
     /// stop and remove the container afterward -- question 118's "Shutdown then stop and remove
@@ -1253,7 +1315,9 @@ impl ContainerModel {
 /// `DrmError::ContainerFaultsOrManeuversNotSupported`), so this wrapper never needs to change
 /// what it wraps between spans -- only which span's kernel currently owns a box pointing at it.
 #[derive(Clone)]
+#[cfg(feature = "gmat")]
 pub(crate) struct SharedContainerModel(pub Rc<ContainerModel>);
+#[cfg(feature = "gmat")]
 impl DynamicsModel for SharedContainerModel {
     type Error = ContainerError;
     fn state_dim(&self) -> usize {
@@ -1318,6 +1382,7 @@ impl DynamicsModel for SharedContainerModel {
 /// edit); [`MaterializedContainer`] is a parallel, self-contained return shape
 /// `crate::drm::executor::run_container_instance` (also not going through `HeteroKernel`,
 /// for the same "no physical state to schedule" reason) consumes directly.
+#[cfg(feature = "gmat")]
 pub(crate) struct MaterializedContainer {
     pub model: ContainerModel,
     pub t0_tai_ns: i64,
@@ -1357,6 +1422,7 @@ pub(crate) struct MaterializedContainer {
 /// `pub(crate)`: only `crate::drm::executor::run_shared_group` calls this, matching
 /// `materialize_gmat`/`materialize_constant_accel`'s own visibility.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "gmat")]
 pub(crate) fn materialize_container(
     spec: &ContainerSpec,
     sys: &SystemDefinition,
@@ -1590,6 +1656,7 @@ pub struct GmatSystemSpec {
 /// required test case (a "drag-coefficient command", question 126's own decision text); the list
 /// is a `const`, not a single hardcoded string comparison, so a future task can extend it in one
 /// place without touching the refusal logic itself.
+#[cfg(feature = "gmat")]
 pub const GMAT_WRITABLE_PARAMETERS: &[&str] = &["Cd"];
 
 /// Parsed parameters for the native `ConstantAccelModel` placeholder.
@@ -1901,6 +1968,7 @@ pub fn effective_parameters(sys: &SystemDefinition, instance: &SystemInstance) -
     out
 }
 
+#[cfg(feature = "gmat")]
 fn parse_gmat_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Result<GmatSystemSpec, DrmError> {
     let mut spec = GmatSystemSpec::default();
     // M18.3 (question 126): collected across the loop, paired/validated once it ends -- same
@@ -2388,6 +2456,11 @@ fn binding_kind_display(kind: i32) -> String {
 /// into a [`BindingPlan`]. Pure data in, pure data out -- this is what lets the "non-model
 /// binding" and "RelativisticCorrection refused" tests run with no GMAT install.
 pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, options: &DrmOptions) -> Result<Classification, DrmError> {
+    // `docs/open-questions.md` question 230: `options` is read only inside the (gated)
+    // `ModelKind::Gmat` arm below (the RelativisticCorrection-plus-covariance check); without the
+    // `gmat` feature that arm's `#[cfg(not(feature = "gmat"))]` twin does not read it either.
+    #[cfg(not(feature = "gmat"))]
+    let _ = &options;
     let binding: &Binding = instance.binding.as_ref().ok_or_else(|| DrmError::UnsupportedBinding { instance: instance.name.clone(), kind: "BINDING_KIND_UNSPECIFIED (no binding set)".to_string() })?;
 
     let context = format!("instance {:?} (system {:?})", instance.name, sys.id);
@@ -2422,6 +2495,15 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
     // classification one), so it is refused the same way an unsupported binding kind already
     // is, rather than silently falling through to the native placeholder.
     match crate::registry::kind_for(&sys.dynamics_model) {
+        // `docs/open-questions.md` question 230: this av-kernel was built with
+        // `--no-default-features` (the `gmat` feature off, `gmat-sys` not even a dependency) --
+        // a typed refusal naming the missing feature, before `parse_gmat_spec`/`resolve_gmat_
+        // command_port` (both gated the same way) would ever be reached, never a panic, never a
+        // silent fallback to the native placeholder, never a silent mis-classification. See
+        // `DrmError::GmatFeatureDisabled`'s own doc comment.
+        #[cfg(not(feature = "gmat"))]
+        crate::registry::ModelKind::Gmat => Err(DrmError::GmatFeatureDisabled { instance: instance.name.clone(), dynamics_model: sys.dynamics_model.clone() }),
+        #[cfg(feature = "gmat")]
         crate::registry::ModelKind::Gmat => {
             let mut spec = parse_gmat_spec(&context, &params)?;
             // M25.2b (`docs/sil-plan.md`'s M25 milestone, migrating the demo's drag-sail
@@ -2726,6 +2808,7 @@ pub(crate) struct Materialized {
 /// its own boundary now (it changes only state) -- harmless, because `executor::
 /// merge_adjacent_segments` keeps a maneuver's own boundary unconditionally, regardless of hash
 /// equality (question 115's other half, unchanged by this task).
+#[cfg(feature = "gmat")]
 fn gmat_settings(spec: &GmatSystemSpec) -> BTreeMap<String, String> {
     let mut settings = BTreeMap::new();
     settings.insert("central_body".to_string(), spec.central_body.clone());
@@ -2796,6 +2879,7 @@ fn gmat_settings(spec: &GmatSystemSpec) -> BTreeMap<String, String> {
 ///
 /// `pub(crate)`: only `crate::registry::ModelRegistry::construct_gmat` calls this (M10.3) --
 /// see the module doc comment.
+#[cfg(feature = "gmat")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_gmat(
     gmat: &Gmat,
@@ -3218,6 +3302,7 @@ pub(crate) fn resolve_constant_accel_ack_port(sys: &SystemDefinition, instance: 
 /// -- zero such fields (nothing this instance could ever apply) or more than one (which one
 /// would actually govern is ambiguous) are both typed refusals, never a silent "first field
 /// wins".
+#[cfg(feature = "gmat")]
 pub(crate) fn resolve_gmat_command_port(sys: &SystemDefinition, instance: &str, port_name: &str) -> Result<(PacketCodec, String, String), DrmError> {
     let matching: Vec<&Port> = sys.ports.iter().filter(|p| p.name == port_name).collect();
     let [port] = matching.as_slice() else {
@@ -3426,6 +3511,9 @@ pub(crate) fn resolve_controller_ports(sys: &SystemDefinition, instance: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `docs/open-questions.md` question 230: named only by the gated `gmat_settings_*` rebind
+    // tests below (`fault::rebind_gmat_spec_at_state`).
+    #[cfg(feature = "gmat")]
     use super::super::fault;
     use av_cdm::pb::{Binding, ContainerBinding, ModelBinding, RenodeBinding};
 
@@ -3593,7 +3681,46 @@ mod tests {
         assert!(matches!(err, DrmError::UnsupportedBinding { .. }), "{err:?}");
     }
 
+    /// `docs/open-questions.md` question 230: built with `--no-default-features` (the `gmat`
+    /// feature off, `gmat-sys` not even a dependency), a `"gmat."`-prefixed `dynamics_model`
+    /// must fail with a typed, named refusal at classification time -- never a panic (there is
+    /// no `Gmat`/`GmatModel` type left to panic reaching for), never a silent fallback to the
+    /// native `ConstantAccelModel` placeholder (`binding.kind == BindingKind::Model` and a
+    /// `"gmat."` prefix would otherwise dispatch there only by accident, which would silently
+    /// mis-propagate a spacecraft with the wrong force model), and never a silent
+    /// mis-classification as anything else. This is the smallest test that proves the refusal:
+    /// `classify_binding` alone, no `Gmat` handle, no `execute()` (gone entirely in this build --
+    /// see `executor.rs`'s own `use gmat_sys::Gmat` doc comment). Fails to compile at all against
+    /// a default (`gmat`-on) build, which is exactly the point -- this behaviour only exists
+    /// without the feature, so the test only exists without it either.
     #[test]
+    #[cfg(not(feature = "gmat"))]
+    fn a_gmat_prefixed_dynamics_model_is_a_typed_refusal_without_the_gmat_feature() {
+        let instance = SystemInstance {
+            name: "leo".to_string(),
+            system_id: "leo_sys".to_string(),
+            binding: Some(Binding { kind: BindingKind::Model as i32, config: Some(av_cdm::pb::binding::Config::Model(ModelBinding { model_id: "leo_sys".to_string() })) }),
+            ..Default::default()
+        };
+        let sys = SystemDefinition { id: "leo_sys".to_string(), dynamics_model: "gmat.earth.jgm2_8x8".to_string(), ..Default::default() };
+        let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
+        match &err {
+            DrmError::GmatFeatureDisabled { instance, dynamics_model } => {
+                assert_eq!(instance, "leo");
+                assert_eq!(dynamics_model, "gmat.earth.jgm2_8x8");
+            }
+            other => panic!("expected DrmError::GmatFeatureDisabled, got {other:?}"),
+        }
+        // The message names the missing feature, actionable by a human reading a log --
+        // question 230's own wording, "a clear, typed error that names the missing feature".
+        let message = format!("{err}");
+        assert!(message.contains("--no-default-features"), "{message}");
+        assert!(message.contains("\"gmat\""), "{message}");
+        assert!(message.contains("gmat.earth.jgm2_8x8"), "{message}");
+    }
+
+    #[test]
+    #[cfg(feature = "gmat")]
     fn relativistic_correction_with_covariance_is_refused_unless_accepted() {
         let instance = SystemInstance {
             name: "leo".to_string(),
@@ -3633,6 +3760,7 @@ mod tests {
     /// Builds a minimal, otherwise-valid `"gmat."`-bound instance/system pair with
     /// `central_body = "Earth"` and the given `spacecraft.CoordinateSystem` value -- the shared
     /// fixture for the M19.1 (question 128) coordinate-system tests below.
+    #[cfg(feature = "gmat")]
     fn earth_instance_with_coordinate_system(coordinate_system: &str) -> (SystemInstance, SystemDefinition) {
         let instance = SystemInstance {
             name: "leo".to_string(),
@@ -3667,6 +3795,7 @@ mod tests {
     /// `executor::body_axes_suffix`'s own vocabulary (unlike `"EarthICRF"`, see the next test) --
     /// it must stay refused even after Step 4 lifts the refusal for realizable frames.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_binding_refuses_a_coordinate_system_the_registry_cannot_realize() {
         let (instance, sys) = earth_instance_with_coordinate_system("EarthNoSuchFrame");
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3688,6 +3817,7 @@ mod tests {
     /// value, realizable or not, would still be refused) -- exactly the regression this test
     /// exists to catch once the shim/executor conversion capability lands.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_binding_accepts_a_registry_realizable_coordinate_system_other_than_the_integration_frame() {
         let (instance, sys) = earth_instance_with_coordinate_system("EarthICRF");
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("EarthICRF is registry-realizable (Earth + ICRF)");
@@ -3704,6 +3834,7 @@ mod tests {
     /// refusal or the Step 4 carve-out. A regression here would mean the new check is stricter
     /// than intended, breaking every existing GMAT-bound fixture in this crate.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_binding_accepts_the_integration_frame_itself() {
         let (instance, sys) = earth_instance_with_coordinate_system("EarthMJ2000Eq");
         assert!(matches!(classify_binding(&instance, &sys, &DrmOptions::default()), Ok(Classification::Model(BindingPlan::Gmat(_)))));
@@ -3721,6 +3852,7 @@ mod tests {
     /// covered by `gmat_binding_accepts_a_registry_realizable_coordinate_system_other_than_the_
     /// integration_frame` without `options.covariance` set).
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_binding_accepts_covariance_combined_with_a_non_integration_frame() {
         let (instance, sys) = earth_instance_with_coordinate_system("EarthICRF");
         let options = DrmOptions { covariance: true, ..Default::default() };
@@ -3734,6 +3866,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gmat")]
     fn unknown_parameter_name_is_a_typed_error_not_a_silent_drop() {
         let instance = SystemInstance {
             name: "leo".to_string(),
@@ -3751,6 +3884,7 @@ mod tests {
     /// `SystemDefinition` declaring one classifies without `crate::drm::executor` needing to
     /// hand this function a filtered copy of `sys` first.
     #[test]
+    #[cfg(feature = "gmat")]
     fn output_dot_parameters_classify_without_being_stripped_first() {
         let instance = SystemInstance {
             name: "leo".to_string(),
@@ -3783,6 +3917,7 @@ mod tests {
     // the old blanket `UnknownParameter { name: "port.emit" }`-style catch-all could not produce
     // (the old code never got far enough to check pairing or writability at all). ---------------
 
+    #[cfg(feature = "gmat")]
     fn gmat_instance(name: &str, params: Vec<Parameter>) -> (SystemInstance, SystemDefinition) {
         let instance = SystemInstance {
             name: name.to_string(),
@@ -3808,6 +3943,7 @@ mod tests {
     /// since `"port."` fell straight into the catch-all `_ =>` arm) and against an
     /// implementation that recognizes the names but forgets to write `spec.emit`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn a_well_formed_emit_pair_classifies_and_is_carried_on_the_spec() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.emit", "cd_out"), sparam("port.emit_output", gmat_sys::model::OUTPUT_CD)]);
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("a valid emit pair classifies");
@@ -3824,6 +3960,7 @@ mod tests {
     /// declared-writable field (`Cd`). Fails against the pre-M18.3 blanket refusal, and against
     /// an implementation that forgets to write `spec.consume`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn a_well_formed_consume_pair_naming_cd_classifies_and_is_carried_on_the_spec() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.consume", "cd_in"), sparam("port.consume_parameter", "Cd")]);
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("a valid consume pair naming Cd classifies");
@@ -3841,6 +3978,7 @@ mod tests {
     /// pairing rule. Fails against an implementation that treats `"port.emit"` alone as
     /// sufficient (silently emitting nothing meaningful) or that returns the wrong error variant.
     #[test]
+    #[cfg(feature = "gmat")]
     fn emit_without_emit_output_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.emit", "cd_out")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3849,6 +3987,7 @@ mod tests {
 
     /// The symmetric case: `"port.emit_output"` without `"port.emit"`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn emit_output_without_emit_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.emit_output", gmat_sys::model::OUTPUT_RMAG)]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3857,6 +3996,7 @@ mod tests {
 
     /// `"port.consume"` without `"port.consume_parameter"` is `DrmError::MissingParameter`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_without_consume_parameter_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.consume", "cd_in")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3865,6 +4005,7 @@ mod tests {
 
     /// The symmetric case: `"port.consume_parameter"` without `"port.consume"`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_parameter_without_consume_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.consume_parameter", "Cd")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3877,6 +4018,7 @@ mod tests {
     /// discovers at run time (in `GmatModel::step_with_ports`) that `result.outputs` has no such
     /// key -- silently emitting nothing, forever, with no error anywhere.
     #[test]
+    #[cfg(feature = "gmat")]
     fn emit_output_naming_an_unrecognized_key_is_a_typed_refusal_at_load_time() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.emit", "out"), sparam("port.emit_output", "totally_bogus")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3893,6 +4035,7 @@ mod tests {
     /// would happily forward to `GmatBase::SetField`, `GMAT_WRITABLE_PARAMETERS`'s own doc
     /// comment: "that crate's job is to apply whatever it is told, not to judge it").
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_parameter_naming_a_non_writable_field_is_a_typed_refusal_at_load_time() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.consume", "in"), sparam("port.consume_parameter", "DryMass")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3903,6 +4046,7 @@ mod tests {
     /// still refused, the same "never silently ignored" contract every other prefix in this
     /// function already follows.
     #[test]
+    #[cfg(feature = "gmat")]
     fn an_unrecognized_port_dot_field_name_is_a_typed_refusal() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("port.bogus_field", "x")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -3914,6 +4058,7 @@ mod tests {
     /// this task, with both fields `None` -- proves M18.3 is additive, not a behaviour change
     /// for every pre-existing GMAT-bound DRM in this repository.
     #[test]
+    #[cfg(feature = "gmat")]
     fn no_port_parameters_at_all_still_classifies_with_both_fields_none() {
         let (instance, sys) = gmat_instance("leo", vec![]);
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("no port.* parameters at all is the pre-M18.3 default shape");
@@ -3934,22 +4079,27 @@ mod tests {
     // (M25.2) one binding kind over.
     // =========================================================================================
 
+    #[cfg(feature = "gmat")]
     fn gmat_command_in_codec(target: &str) -> PacketCodec {
         let f = PacketField { name: "value".to_string(), bit_offset: 0, bit_width: 64, r#type: av_cdm::pb::PacketFieldType::Float64 as i32, unit: av_cdm::pb::Unit::Dimensionless as i32, scale: 1.0, offset: 0.0, target: target.to_string() };
         PacketCodec { id: "test_cmd_in".to_string(), apid: 950, is_command: true, secondary_header_bytes: 0, user_data_bytes: 8, fields: vec![f], description: "test".to_string() }
     }
+    #[cfg(feature = "gmat")]
     fn gmat_ack_out_codec() -> PacketCodec {
         crate::drm::command::command_ack_packet_codec("test_ack_out", 951)
     }
+    #[cfg(feature = "gmat")]
     fn gmat_instance_with_ports(name: &str, params: Vec<Parameter>, ports: Vec<Port>, packet_codecs: Vec<PacketCodec>) -> (SystemInstance, SystemDefinition) {
         let (instance, mut sys) = gmat_instance(name, params);
         sys.ports = ports;
         sys.packet_codecs = packet_codecs;
         (instance, sys)
     }
+    #[cfg(feature = "gmat")]
     fn framed_in_port(name: &str) -> Port {
         Port { name: name.to_string(), kind: PortKind::Framed as i32, direction: PortDirection::In as i32, schema: "ccsds.spp".to_string(), ..Default::default() }
     }
+    #[cfg(feature = "gmat")]
     fn framed_out_port(name: &str) -> Port {
         Port { name: name.to_string(), kind: PortKind::Framed as i32, direction: PortDirection::Out as i32, schema: "ccsds.spp".to_string(), ..Default::default() }
     }
@@ -3961,6 +4111,7 @@ mod tests {
     /// error. Fails against an implementation that never resolves the codec at all, or that
     /// looks the field up by a fixed name (`"value"`) instead of by `target`.
     #[test]
+    #[cfg(feature = "gmat")]
     fn a_well_formed_consume_framed_declaration_classifies_and_resolves_target_from_the_codec() {
         let (instance, sys) = gmat_instance_with_ports("leo", vec![sparam("port.consume_framed", "cd_cmd_in")], vec![framed_in_port("cd_cmd_in")], vec![gmat_command_in_codec("Cd")]);
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("a valid consume_framed declaration classifies");
@@ -3979,6 +4130,7 @@ mod tests {
 
     /// `"port.consume_framed"` and `"port.ack_framed"` declared together resolve both codecs.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_framed_with_ack_framed_resolves_both_codecs() {
         let (instance, sys) = gmat_instance_with_ports(
             "leo",
@@ -4000,6 +4152,7 @@ mod tests {
     /// nothing to acknowledge is meaningless, mirroring `ConstantAccelSpec`'s identical pairing
     /// rule.
     #[test]
+    #[cfg(feature = "gmat")]
     fn ack_framed_without_consume_framed_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance_with_ports("leo", vec![sparam("port.ack_framed", "cd_ack_out")], vec![framed_out_port("cd_ack_out")], vec![gmat_ack_out_codec()]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -4011,6 +4164,7 @@ mod tests {
     /// slot, so silently letting one win would hide a fixture bug. Fails against an
     /// implementation that lets `materialize_gmat`'s own `.or_else` fallback silently pick one.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_and_consume_framed_declared_together_is_a_typed_refusal() {
         let (instance, sys) = gmat_instance_with_ports(
             "leo",
@@ -4026,6 +4180,7 @@ mod tests {
     /// typed -- "nothing this instance could ever apply," never a silent no-op that only fails
     /// at run time when nothing ever decodes.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_framed_codec_with_no_writable_target_field_is_a_typed_refusal() {
         let (instance, sys) = gmat_instance_with_ports("leo", vec![sparam("port.consume_framed", "cd_cmd_in")], vec![framed_in_port("cd_cmd_in")], vec![gmat_command_in_codec("DryMass")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -4036,6 +4191,7 @@ mod tests {
     /// refused, typed -- "which one would actually govern is ambiguous," never a silent
     /// first-field-wins.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_framed_codec_with_two_writable_target_fields_is_a_typed_refusal() {
         let mut codec = gmat_command_in_codec("Cd");
         codec.fields.push(PacketField { name: "value2".to_string(), bit_offset: 0, bit_width: 64, r#type: av_cdm::pb::PacketFieldType::Float64 as i32, unit: av_cdm::pb::Unit::Dimensionless as i32, scale: 1.0, offset: 0.0, target: "Cd".to_string() });
@@ -4047,6 +4203,7 @@ mod tests {
     /// `"port.consume_framed"` naming a port that is not declared `PORT_KIND_FRAMED`/
     /// `PORT_DIRECTION_IN` (e.g. declared `OUT` instead) is a typed refusal.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_framed_naming_a_wrong_direction_port_is_a_typed_refusal() {
         let (instance, sys) = gmat_instance_with_ports("leo", vec![sparam("port.consume_framed", "cd_cmd_in")], vec![framed_out_port("cd_cmd_in")], vec![gmat_command_in_codec("Cd")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -4055,6 +4212,7 @@ mod tests {
 
     /// `"port.consume_framed"` naming a port this instance declares no `Port` for at all.
     #[test]
+    #[cfg(feature = "gmat")]
     fn consume_framed_naming_an_undeclared_port_is_a_typed_refusal() {
         let (instance, sys) = gmat_instance_with_ports("leo", vec![sparam("port.consume_framed", "cd_cmd_in")], vec![], vec![gmat_command_in_codec("Cd")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -4189,6 +4347,7 @@ mod tests {
     /// bystander boundary that changed nothing about this instance's own dynamics). Same
     /// `central_body`/`gravity_*`/`point_masses`/ballistic `spacecraft.*` throughout -- only the
     /// state *representation* differs, exactly the M18.4 fix's own claim.
+    #[cfg(feature = "gmat")]
     fn keplerian_spec() -> GmatSystemSpec {
         GmatSystemSpec {
             central_body: "Earth".to_string(),
@@ -4222,6 +4381,7 @@ mod tests {
     /// by coincidence. Against the fix, the map is exactly the same central-body/gravity/ballistic
     /// configuration either side of a rebind.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_settings_is_unchanged_across_a_rebind_that_changed_only_state_representation() {
         let before = keplerian_spec();
         let after = fault::rebind_gmat_spec_at_state(&before, [7_000_000.0, 123_456.0, -654_321.0, 10.0, 7_500.0, -20.0]);
@@ -4236,6 +4396,7 @@ mod tests {
     /// changing a genuine ballistic configuration value (`Cd`, never touched by
     /// `rebind_gmat_spec_at_state`) must still change the hash, both before and after a rebind.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_settings_still_changes_when_a_real_ballistic_parameter_differs() {
         let mut changed = keplerian_spec();
         changed.spacecraft_real.insert("Cd".to_string(), 3.3);
@@ -4251,6 +4412,7 @@ mod tests {
     /// physical states hash differently, since the full `X/Y/Z/VX/VY/VZ` state was included) and
     /// against a fix that forgot to exclude `CARTESIAN_FIELDS` specifically.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_settings_is_unchanged_across_two_rebinds_at_different_physical_states() {
         let spec = keplerian_spec();
         let rebound_1 = fault::rebind_gmat_spec_at_state(&spec, [7_000_000.0, 0.0, 0.0, 0.0, 7_500.0, 0.0]);
@@ -4265,6 +4427,7 @@ mod tests {
     /// implementation that (incorrectly) also excludes `force_model.*` fields, or that stopped
     /// reading `gravity_order` into the map at all.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_settings_still_changes_when_gravity_order_differs_after_a_rebind() {
         let mut faulted = keplerian_spec();
         faulted.gravity_order = 0;
@@ -4289,6 +4452,7 @@ mod tests {
     /// model"}`) and against an implementation that recognizes the names but forgets to write
     /// one of the four spec fields.
     #[test]
+    #[cfg(feature = "gmat")]
     fn a_well_formed_drag_declaration_classifies_and_is_carried_on_the_spec() {
         let (instance, sys) = gmat_instance(
             "leo",
@@ -4318,6 +4482,7 @@ mod tests {
     /// `"ConstantFluxAndGeoMag"` default rather than the declared packaged file) or that returns
     /// the wrong error variant/name.
     #[test]
+    #[cfg(feature = "gmat")]
     fn drag_model_alone_without_its_weather_companions_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance("leo", vec![sparam("force_model.drag_model", "JacchiaRoberts")]);
         let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
@@ -4328,6 +4493,7 @@ mod tests {
     /// is refused naming `drag_model` specifically, not one of the fields that happen to be
     /// present.
     #[test]
+    #[cfg(feature = "gmat")]
     fn drag_weather_fields_without_drag_model_is_a_typed_missing_parameter_error() {
         let (instance, sys) = gmat_instance(
             "leo",
@@ -4346,6 +4512,7 @@ mod tests {
     /// None` -- proves M19.4 is additive, not a behaviour change for every pre-existing
     /// GMAT-bound DRM in this repository.
     #[test]
+    #[cfg(feature = "gmat")]
     fn no_drag_parameters_at_all_still_classifies_with_drag_model_none() {
         let (instance, sys) = gmat_instance("leo", vec![]);
         let plan = classify_binding(&instance, &sys, &DrmOptions::default()).expect("no drag_* parameters is the pre-M19.4 default shape");
@@ -4364,6 +4531,7 @@ mod tests {
     /// that cannot tell a drag-inclusive force model from a drag-free one apart, silently
     /// breaking question 127/130's "equal `dynamics_hash` means equal configuration" contract.
     #[test]
+    #[cfg(feature = "gmat")]
     fn gmat_settings_changes_when_drag_is_declared_and_survives_a_rebind() {
         let mut dragged = keplerian_spec();
         dragged.drag_model = Some("JacchiaRoberts".to_string());
