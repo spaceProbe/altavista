@@ -424,6 +424,87 @@ def test_terrain_adapter_is_a_typed_named_refusal_not_a_silent_stub(layers_data)
     assert layers_data["perLayerCounts"]["terrain"]["pending"] == 0
 
 
+# ------------------------------------------------------ task 5b: failure attribution
+def test_layer_manager_declares_terrain_has_no_loader(layers_data):
+    """`TerrainLayerAdapter` declares `notImplemented = true` on itself
+    (web/js/layers/terrain_layer.js), and `LayerManager.noLoaderLayers()` reads that
+    self-declaration -- never a hard-coded 'terrain' string anywhere in
+    LayerManager or the Layers panel. A wrong implementation that special-cased the
+    id 'terrain' instead would still pass this one assertion by coincidence, but
+    would fail the moment a SECOND no-loader layer existed; `noLoaderLayerIds` being
+    driven straight off the manager's own accessor (not a fixture-level constant) is
+    what this test actually pins.
+    """
+    assert layers_data["noLoaderLayerIds"] == ["terrain"], (
+        f"expected LayerManager.noLoaderLayers() to report exactly ['terrain'] for "
+        f"this harness's three real adapters (only TerrainLayerAdapter sets "
+        f"notImplemented), got {layers_data['noLoaderLayerIds']!r}"
+    )
+
+
+def test_failures_by_layer_matches_terrain_refusal_count_and_the_unattributed_total(layers_data):
+    """`LayerManager.failuresByLayer()` (additive bookkeeping beside `failedCount`/
+    `failureNames()`, task 5b) must attribute every one of this run's real terrain
+    refusals to the 'terrain' layer id specifically, and the sum of every layer's own
+    count must equal the manager's own unattributed `failedCount` exactly -- this
+    harness's terrain layer is the ONLY layer that ever fails (imagery/tiles3d always
+    resolve, see the injected loader stubs), so `failuresByLayer` must contain
+    exactly one key.
+    """
+    by_layer = layers_data["failuresByLayer"]
+    assert set(by_layer.keys()) == {"terrain"}, (
+        f"expected failuresByLayer to contain exactly the one layer that ever fails "
+        f"in this harness ('terrain'), got keys {sorted(by_layer.keys())!r}"
+    )
+    assert by_layer["terrain"]["count"] == layers_data["terrainRefusalCount"], (
+        f"failuresByLayer['terrain']['count'] ({by_layer['terrain']['count']}) must "
+        f"equal terrainRefusalCount ({layers_data['terrainRefusalCount']}) -- both "
+        f"count the exact same real refusals"
+    )
+    assert by_layer["terrain"]["names"] == ["TerrainLoaderNotImplementedError"]
+    total_attributed = sum(entry["count"] for entry in by_layer.values())
+    assert total_attributed == layers_data["failedCount"], (
+        f"sum of every layer's own attributed count ({total_attributed}) must equal "
+        f"the manager's unchanged, unattributed failedCount ({layers_data['failedCount']}) "
+        f"-- failuresByLayer must never lose or double-count a failure"
+    )
+
+
+def test_failure_attribution_probe_separates_a_real_terrain_refusal_from_a_real_gateway_style_failure(layers_data):
+    """web/js/layers_check.mjs's own dedicated `probeFailureAttribution` -- a REAL
+    `TerrainLayerAdapter` and a real imagery-SHAPED adapter that always fails with a
+    DIFFERENT typed error, on an isolated manager -- proves attribution is real
+    (neither layer's bucket contains the other's typed name), not merely two
+    independent running totals that happen to both be nonzero. See that probe's own
+    doc comment in web/js/layers_check.mjs for exactly what a wrong `split` on
+    `globalKey` (as opposed to `globalKeyFor`'s own `\\u0000` join character) would
+    have broken.
+    """
+    p = layers_data["failureAttributionProbe"]
+    assert p["totalsMatch"] is True, (
+        f"sumCounts ({p['sumCounts']}) must equal failedCount ({p['failedCount']}) on "
+        f"this isolated probe manager too"
+    )
+    assert p["terrainAttributedCorrectly"] is True, (
+        f"expected the real TerrainLayerAdapter's {p['terrainRequestCount']} requests "
+        f"to be attributed to its own layer id with exactly "
+        f"['TerrainLoaderNotImplementedError'], got "
+        f"{p['failuresByLayer'].get(p['terrainLayerId'])!r}"
+    )
+    assert p["badAttributedCorrectly"] is True, (
+        f"expected the bad imagery-shaped layer's {p['badImageryRequestCount']} "
+        f"requests to be attributed to its own layer id with exactly "
+        f"['ProbeGatewayFailureError'], got "
+        f"{p['failuresByLayer'].get(p['badImageryLayerId'])!r}"
+    )
+    assert p["noCrossContamination"] is True, (
+        "expected neither layer's failuresByLayer bucket to contain the OTHER "
+        "layer's typed error name -- a shared/miscounted bucket would still pass "
+        "totalsMatch by coincidence, which is exactly why this is asserted "
+        "separately"
+    )
+
+
 # ------------------------------------------------------------------------------ report
 def test_layers_report(layers_data, capsys):
     """Not a correctness assertion -- prints the measured budget/cancellation/
