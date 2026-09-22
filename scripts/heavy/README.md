@@ -112,6 +112,11 @@ services/catalog/run-dev-catalog.sh
 #    of both runs). --applied-tai-ns is optional; the documented default (never a silent read)
 #    is the real OS wall clock, converted UTC -> TAI via av_cdm::time::Tai::from_utc_nanos --
 #    pass the flag yourself to pin an exact value instead.
+#    Lead's drive (2026-09-22): run this a few seconds AFTER step a returns, or retry it.
+#    Docker publishes the host port the instant the container starts, before Postgres
+#    inside it listens (about 1.8 s, measured in heavy round 6), so an immediate run fails
+#    with "connection closed by peer while reading startup/authentication" -- not a
+#    schema or credential problem, just too early.
 cargo build -p av-catalog --bin av-catalog-migrate
 target/debug/av-catalog-migrate \
   --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
@@ -131,9 +136,14 @@ target/debug/av-catalog-migrate \
 #    heavy-stackup-demo job -- see this task's own report): prints "registered the tile-set
 #    manifest in the catalog (asset_id=...)" on success, or a real, typed PostgreSQL error
 #    (e.g. `42P01 relation "assets" does not exist`) if step b above was skipped.
-target/debug/av-tile-fixture \
+#    Lead's drive (2026-09-22): step 0's script builds this binary in RELEASE
+#    (target/release/av-tile-fixture), and the flag parser requires exactly one of
+#    --source-path / --synthetic-source -- step 0 used --synthetic-source 64x32, so pass the
+#    same here or the fixture refuses with its usage line before doing anything.
+target/release/av-tile-fixture \
   --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
   --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
+  --synthetic-source 64x32 \
   --store-endpoint "http://127.0.0.1:<MINIO_PORT>" --store-region us-east-1 \
   --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
   --store-bucket "<BUCKET>" --store-path-style \
@@ -164,7 +174,7 @@ def b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 now = int(time.time())
 claims = {"iss": "https://sso.test.example/", "aud": "av-tiles", "sub": "stackup-demo",
-          "iat": now, "exp": now + 3600, "groups": ["tile-readers"], "amr": [], "acr": "",
+          "iat": now, "exp": now + 3600, "groups": ["tile-readers", "operators"], "amr": [], "acr": "",
           "jti": str(uuid.uuid4())}
 header_b64 = b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
 payload_b64 = b64url(json.dumps(claims, separators=(",", ":")).encode())
@@ -179,7 +189,10 @@ PYEOF
 
 `"groups": ["tile-readers"]` is what `--group-clearance tile-readers=CUI` (step 2) maps to
 the tile set's own `CUI` label -- change both together if you mint a token for a different
-clearance.
+clearance. `"operators"` is the group `profiles/gateway-authority.yaml` grants the `query`
+surface to; without it step 2b's `av-gateway` answers step 4b with
+`403 no role in groups ["tile-readers"] grants surface query` (lead's drive, 2026-09-22),
+and the viewer's Layers panel lists nothing.
 
 ### 2. Start the real `av-tiles` gateway against that MinIO
 
