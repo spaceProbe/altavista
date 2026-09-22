@@ -43,8 +43,15 @@
 //                              profile; isExecutionProfile; defaultLayoutTreeForScenario
 //                              adds the panel exactly once, at the documented share, for
 //                              an execution-profile scenario in every shape (ordinary/
-//                              RPO/sweep), and leaves every other profile's shape
-//                              byte-identical to before this task.
+//                              RPO/sweep), and leaves every non-execution/non-design
+//                              profile's shape byte-identical to before this task. Round
+//                              6 (question 231) additionally pins the layers panel's own
+//                              presence for BOTH the execution and design profiles here
+//                              (the fuller isDesignProfile/layers battery lives in
+//                              web/js/layout/layout_tree_check.mjs, not duplicated here
+//                              -- this section only re-pins the leaf counts THIS file's
+//                              own command-console checks already depended on, which
+//                              Round 6's change moved).
 
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -54,7 +61,7 @@ import {
 } from './panels/command_panel.js';
 import {
   COMMAND_PANEL_ID, REGISTERED_PANEL_TYPES, availablePanelChoices, isExecutionProfile,
-  defaultLayoutTreeForScenario,
+  defaultLayoutTreeForScenario, LAYERS_PANEL_ID,
 } from './layout/default_layouts.js';
 import { listLeaves, createLeaf, findNode } from './layout/split_tree.js';
 
@@ -445,41 +452,57 @@ withFakeDocument(() => {
 
   function leafIds(tree) { return listLeaves(tree).map((l) => l.panelId); }
   function countCommandLeaves(tree) { return leafIds(tree).filter((id) => id === COMMAND_PANEL_ID).length; }
+  function countLayersLeaves(tree) { return leafIds(tree).filter((id) => id === LAYERS_PANEL_ID).length; }
 
-  // ---- non-execution: BYTE-IDENTICAL to before this task (the brief's own explicit
-  // "the default layout for every other profile must be byte-identical to today's").
+  // ---- non-execution, non-design: BYTE-IDENTICAL to before this task (the brief's own
+  // explicit "the default layout for every other profile must be byte-identical to
+  // today's"). NOTE (Round 6, question 231): the "design" case below moved OFF this
+  // list -- see the new "design profile" sub-section further down for why, and
+  // web/js/layout/layout_tree_check.mjs's own "layersRound6.*" checks for the fuller
+  // battery (every OTHER profile/no-profile/null case, still asserted unaffected there).
   const ordinaryNoProfile = defaultLayoutTreeForScenario({ imagery: null });
-  check('layout: ordinary scenario, NO profileId -- still exactly 5 leaves, no command panel (unregressed)',
-    leafIds(ordinaryNoProfile).length === 5 && countCommandLeaves(ordinaryNoProfile) === 0);
-  const ordinaryDesign = defaultLayoutTreeForScenario({ imagery: null, profileId: 'design' });
-  check('layout: ordinary scenario, profileId "design" -- still exactly 5 leaves, no command panel',
-    leafIds(ordinaryDesign).length === 5 && countCommandLeaves(ordinaryDesign) === 0);
+  check('layout: ordinary scenario, NO profileId -- still exactly 5 leaves, no command panel, no layers panel (unregressed)',
+    leafIds(ordinaryNoProfile).length === 5 && countCommandLeaves(ordinaryNoProfile) === 0 && countLayersLeaves(ordinaryNoProfile) === 0);
   const rpoNoProfile = defaultLayoutTreeForScenario({ frames: [{ axes: 'AXES_KIND_RIC' }] });
-  check('layout: RPO scenario, no profileId -- still exactly 7 leaves, no command panel',
-    leafIds(rpoNoProfile).length === 7 && countCommandLeaves(rpoNoProfile) === 0);
+  check('layout: RPO scenario, no profileId -- still exactly 7 leaves, no command panel, no layers panel',
+    leafIds(rpoNoProfile).length === 7 && countCommandLeaves(rpoNoProfile) === 0 && countLayersLeaves(rpoNoProfile) === 0);
   const sweepNoProfile = defaultLayoutTreeForScenario({ sweep: {} });
-  check('layout: sweep scenario, no profileId -- still exactly 4 leaves, no command panel',
-    leafIds(sweepNoProfile).length === 4 && countCommandLeaves(sweepNoProfile) === 0);
+  check('layout: sweep scenario, no profileId -- still exactly 4 leaves, no command panel, no layers panel',
+    leafIds(sweepNoProfile).length === 4 && countCommandLeaves(sweepNoProfile) === 0 && countLayersLeaves(sweepNoProfile) === 0);
 
-  // ---- execution profile: the command panel joins the default layout EXACTLY ONCE, in
-  // every underlying shape, at the documented share.
+  // ---- design profile (Round 6, question 231: "the Layers panel joins the execution
+  // AND DESIGN default layouts"): the Layers panel joins EXACTLY ONCE, the command
+  // panel never does -- design gets no command console (R3.5b/question 201(d) is
+  // execution-only, unchanged).
+  const ordinaryDesign = defaultLayoutTreeForScenario({ imagery: null, profileId: 'design' });
+  check('layout: ordinary scenario, profileId "design" -- exactly 6 leaves (5 + the layers panel), no command panel',
+    leafIds(ordinaryDesign).length === 6 && countCommandLeaves(ordinaryDesign) === 0 && countLayersLeaves(ordinaryDesign) === 1,
+    { leaves: leafIds(ordinaryDesign) });
+
+  // ---- execution profile: the command panel AND (Round 6) the layers panel each join
+  // the default layout EXACTLY ONCE, in every underlying shape, at their documented
+  // shares.
   const ordinaryExec = defaultLayoutTreeForScenario({ imagery: null, profileId: 'execution' });
-  check('layout: ordinary scenario, profileId "execution" -- exactly 6 leaves (5 + the command panel), added exactly once',
-    leafIds(ordinaryExec).length === 6 && countCommandLeaves(ordinaryExec) === 1, { leaves: leafIds(ordinaryExec) });
+  check('layout: ordinary scenario, profileId "execution" -- exactly 7 leaves (5 + the layers panel + the command panel), each added exactly once',
+    leafIds(ordinaryExec).length === 7 && countCommandLeaves(ordinaryExec) === 1 && countLayersLeaves(ordinaryExec) === 1, { leaves: leafIds(ordinaryExec) });
   const rpoExec = defaultLayoutTreeForScenario({ frames: [{ axes: 'AXES_KIND_RIC' }], profileId: 'execution' });
-  check('layout: RPO scenario, profileId "execution" -- exactly 8 leaves (7 + the command panel), added exactly once',
-    leafIds(rpoExec).length === 8 && countCommandLeaves(rpoExec) === 1, { leaves: leafIds(rpoExec) });
+  check('layout: RPO scenario, profileId "execution" -- exactly 9 leaves (7 + the layers panel + the command panel), each added exactly once',
+    leafIds(rpoExec).length === 9 && countCommandLeaves(rpoExec) === 1 && countLayersLeaves(rpoExec) === 1, { leaves: leafIds(rpoExec) });
   const sweepExec = defaultLayoutTreeForScenario({ sweep: {}, profileId: 'execution' });
-  check('layout: sweep scenario, profileId "execution" -- exactly 5 leaves (4 + the command panel), added exactly once',
-    leafIds(sweepExec).length === 5 && countCommandLeaves(sweepExec) === 1, { leaves: leafIds(sweepExec) });
+  check('layout: sweep scenario, profileId "execution" -- exactly 6 leaves (4 + the layers panel + the command panel), each added exactly once',
+    leafIds(sweepExec).length === 6 && countCommandLeaves(sweepExec) === 1 && countLayersLeaves(sweepExec) === 1, { leaves: leafIds(sweepExec) });
 
-  // "a sensible share": the command console is the OUTERMOST, narrower child (documented
-  // 0.78/0.22 split, default_layouts.js's own attachCommandPanel doc comment) -- checked
-  // structurally here rather than merely trusting that comment.
+  // "a sensible share": the command console is still the OUTERMOST, narrower child
+  // (documented 0.78/0.22 split, default_layouts.js's own attachCommandPanel doc
+  // comment) -- checked structurally here rather than merely trusting that comment.
+  // Round 6: the layers panel now sits just inside it (documented 0.82/0.18 split,
+  // attachLayersPanel's own doc comment).
   const outerSplit = ordinaryExec;
   check('layout: the command panel sits behind an outer split at the documented 0.78 share, as the SECOND (narrower) child',
     outerSplit.type === 'split' && Math.abs(outerSplit.ratio - 0.78) < 1e-9 && outerSplit.children[1].panelId === COMMAND_PANEL_ID);
-  check('layout: every leaf the underlying (non-execution) layout already had is still present, untouched, alongside the command panel',
+  check('layout: the layers panel sits just inside the command console, behind a split at the documented 0.82 share, as the SECOND (narrower) child',
+    outerSplit.children[0].type === 'split' && Math.abs(outerSplit.children[0].ratio - 0.82) < 1e-9 && outerSplit.children[0].children[1].panelId === LAYERS_PANEL_ID);
+  check('layout: every leaf the underlying (non-execution) layout already had is still present, untouched, alongside the command panel and the layers panel',
     ['sidebar', 'viewport', 'run-products', 'map-2d', 'console-log'].every((id) => leafIds(ordinaryExec).includes(id)));
 }
 
