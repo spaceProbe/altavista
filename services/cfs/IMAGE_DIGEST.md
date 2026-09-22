@@ -84,11 +84,11 @@ Recorded digest (re-pinned 2026-09-12 by the lead for the mirror-backed fetch, s
 
 ```
 sha256:04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a
+```
 
 Re-pinned 2026-09-21 after the ninth eviction, rebuilt from an empty cache with the same
 Dockerfile; the runtime-content hash below is unchanged (question 190). The previous recorded
 ID was `sha256:dea163a1bad929b53c27498e182dadc62ef0f63cb6a63ac73dd1ac31bf6cded2`.
-```
 
 Re-pinned 2026-09-15 after the user reclaimed the Colima VM disk (question 196(d): the
 kubelet garbage collector had removed the tag a sixth time); rebuilt from an empty cache with
