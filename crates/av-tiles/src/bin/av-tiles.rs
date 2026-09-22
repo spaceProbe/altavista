@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use av_command::clock::SystemClock;
 use av_command::oidc::IssuerConfig;
-use av_command::service::resolve_loopback_bind_address;
+use av_command::service::{resolve_internal_network_bind_address, resolve_loopback_bind_address};
 use av_label::{ClearanceLadder, GroupClearanceMap};
 use av_store::{StoreClient, StoreConfig};
 use av_tiles::config::TilesConfig;
@@ -39,7 +39,7 @@ const USAGE: &str = "usage: av-tiles --oidc-issuer ISS --oidc-audience AUD --oid
                       --store-secret-access-key KEY --store-bucket BUCKET \
                       [--store-path-style] [--store-ca-file PATH] \
                       [--group-clearance GROUP=MARKING]... [--bind ADDR] [--admin-bind ADDR] \
-                      [--admin-role ROLE]...";
+                      [--admin-role ROLE]... [--internal-network-bind]";
 
 #[derive(Debug)]
 struct CliArgs {
@@ -61,6 +61,14 @@ struct CliArgs {
     /// counters`) -- `None` (this struct's own default) means "no admin surface at all",
     /// never a silently-always-on listener a deployment did not ask for.
     admin_bind: Option<String>,
+    /// Question 232 (lead, round 5 gate): the explicit opt-in that lets BOTH binds leave
+    /// loopback, resolved through `resolve_internal_network_bind_address` instead of
+    /// `resolve_loopback_bind_address` -- the same opt-in `av-gateway` has for its
+    /// `--internal-network-bind ADDR` (question 206 decision 8), shaped as a switch here
+    /// because this binary's two surfaces sit behind the same token check and a container
+    /// reached through Docker port mapping needs both on its own interface. Off (this
+    /// struct's own default) means the question 155 loopback rule applies unchanged.
+    internal_network_bind: bool,
     /// Round 5, item B: OIDC `groups` entries granted `av_tiles::admin::SURFACE`
     /// (`"admin_counters"`) -- an empty `Vec` (this struct's own default) denies every
     /// caller, `av_command::authz::RoleTable::granting_role`'s own deny-by-default
@@ -87,6 +95,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
         group_clearance: BTreeMap::new(),
         bind: DEFAULT_BIND.to_string(),
         admin_bind: None,
+        internal_network_bind: false,
         admin_roles: Vec::new(),
     };
 
@@ -109,6 +118,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
             "--bind" => out.bind = value()?,
             "--admin-bind" => out.admin_bind = Some(value()?),
             "--admin-role" => out.admin_roles.push(value()?),
+            "--internal-network-bind" => out.internal_network_bind = true,
             "--group-clearance" => {
                 let raw = value()?;
                 let (group, marking) = raw.split_once('=').ok_or_else(|| format!("--group-clearance value {raw:?} must be GROUP=MARKING. {USAGE}"))?;
@@ -151,7 +161,10 @@ async fn main() {
     // identical function, with the identical typed `BindAddressError` and the identical
     // "refused before any socket is bound" ordering `av-command`'s own binary already has
     // (see that binary's `main()`, lines ~186-190).
-    let bind: SocketAddr = resolve_loopback_bind_address(&cli.bind).unwrap_or_else(|e| {
+    // Question 232: `--internal-network-bind` is the one explicit way off loopback (see the
+    // `CliArgs` field's own comment); without it the question 155 rule stands.
+    let resolve_bind = if cli.internal_network_bind { resolve_internal_network_bind_address } else { resolve_loopback_bind_address };
+    let bind: SocketAddr = resolve_bind(&cli.bind).unwrap_or_else(|e| {
         eprintln!("av-tiles: --bind {:?}: {e}", cli.bind);
         std::process::exit(1);
     });
@@ -198,7 +211,7 @@ async fn main() {
     // up but the admin one (if configured) is not -- mirrors `crates/av-command/src/bin/
     // av-command.rs`'s own ordering for its own `--admin-bind`.
     if let Some(admin_bind_raw) = &cli.admin_bind {
-        let admin_bind: SocketAddr = resolve_loopback_bind_address(admin_bind_raw).unwrap_or_else(|e| {
+        let admin_bind: SocketAddr = resolve_bind(admin_bind_raw).unwrap_or_else(|e| {
             eprintln!("av-tiles: --admin-bind {admin_bind_raw:?}: {e}");
             std::process::exit(1);
         });

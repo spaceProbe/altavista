@@ -708,6 +708,9 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
                 # was updated with it, this container path was not, and the container test
                 # had never run far enough to show it (lead, 2026-09-21, question 232).
                 "--admin-role", "admin-readers",
+                # Question 232: the binds above are 0.0.0.0 so Docker's port mapping can reach
+                # them; that needs the binary's explicit opt-in off loopback (question 155).
+                "--internal-network-bind",
             ]
             run_result = subprocess.run(run_cmd, capture_output=True, text=True, timeout=30)
             if run_result.returncode != 0:
