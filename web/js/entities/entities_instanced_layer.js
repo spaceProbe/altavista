@@ -86,9 +86,18 @@ function microtaskLoad(build, signal) {
  * e.g. `sizePx` directly, same shape as `screenSpaceErrorPx`'s own return value).
  */
 export class MarkerLayerAdapter {
-  constructor({ id = 'markers', markerBytes = MARKER_INSTANCE_BYTES } = {}) {
+  constructor({ id = 'markers', markerBytes = MARKER_INSTANCE_BYTES, kind = 'entity-marker' } = {}) {
     this.id = id;
     this.markerBytes = markerBytes;
+    // Heavy round 7 (H6 wiring, question 233): an explicit, non-'imagery' `kind` --
+    // `LayerManager.imageryLayers()` (web/js/layers/layer.js) filters on
+    // `layer.kind === 'imagery'`, and this adapter never set `kind` at all before this
+    // round, which happened to be a safe default (`undefined !== 'imagery'`) but left
+    // the separation implicit rather than stated. Overridable (never hardcoded) only so
+    // a headless check can PROVE the separation matters, by constructing one with
+    // `kind: 'imagery'` and showing it wrongly appears in `imageryLayers()` -- never
+    // overridden by any real caller.
+    this.kind = kind;
   }
 
   plan(view) {
@@ -121,10 +130,14 @@ export class MarkerLayerAdapter {
  * visibility metrics per trail).
  */
 export class TrailLayerAdapter {
-  constructor({ id = 'trails', pointBytes = TRAIL_POINT_BYTES, fixedOverheadBytes = TRAIL_FIXED_OVERHEAD_BYTES } = {}) {
+  constructor({
+    id = 'trails', pointBytes = TRAIL_POINT_BYTES, fixedOverheadBytes = TRAIL_FIXED_OVERHEAD_BYTES, kind = 'entity-trail',
+  } = {}) {
     this.id = id;
     this.pointBytes = pointBytes;
     this.fixedOverheadBytes = fixedOverheadBytes;
+    // See MarkerLayerAdapter's own comment on `kind`, above -- identical reasoning.
+    this.kind = kind;
   }
 
   plan(view) {
