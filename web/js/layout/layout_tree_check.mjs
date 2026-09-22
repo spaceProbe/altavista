@@ -86,6 +86,8 @@ import {
   REGISTERED_PANEL_TYPES, availablePanelChoices,
   hasSweep, buildSweepStudyLayout, defaultLayoutTreeForScenario, defaultLayoutForScenario,
   attachM264Panels, FEASIBILITY_PANEL_ID, RUN_PRODUCTS_PANEL_ID, CONSOLE_PANEL_ID,
+  isExecutionProfile, isDesignProfile, attachCommandPanel, attachLayersPanel,
+  LAYERS_PANEL_ID, COMMAND_PANEL_ID,
 } from './default_layouts.js';
 import { LayoutManager } from './layout_manager.js';
 
@@ -449,6 +451,89 @@ resetIdCounterForTests();
       serializeLayout(customizedManager.tree) === serializeLayout(persistedTree) &&
       !listLeaves(customizedManager.tree).some((l) => l.panelId === FEASIBILITY_PANEL_ID));
   });
+
+  // ---------------------------------------------- Round 6 (question 231): Layers panel
+  // "The Layers panel joins the execution and design default layouts once F5.1's
+  // regression guard is updated with it" (question 231, the lead's ratification,
+  // verbatim). THIS is that update: default_layouts.js's own LAYERS_PANEL_ID comment
+  // used to point here as the reason the panel was NOT threaded in (the ordinary-
+  // scenario checks two sections above pin the ordinary/no-profile tree byte-
+  // identically, and unconditionally threading Layers in would have changed that
+  // pinned tree). This section pins the NEW execution/design trees byte-identically,
+  // the same way the section above pins the sweep tree -- see default_layouts.js's own
+  // `attachLayersPanel`/`isDesignProfile` doc comments for the placement/share
+  // reasoning. Fails against an implementation that threads Layers in unconditionally
+  // (would also change the ordinary/no-profile/analysis checks below), that forgets one
+  // of the three underlying shapes (ordinary/RPO/sweep), that adds it more than once, or
+  // that silently drops the command console for execution.
+  {
+    function leafIds(tree) { return listLeaves(tree).map((l) => l.panelId); }
+    function countOf(tree, panelId) { return leafIds(tree).filter((id) => id === panelId).length; }
+
+    // ---- isDesignProfile: mirrors isExecutionProfile's own battery exactly ----
+    check('isDesignProfile.trueOnlyForProfileIdDesign', isDesignProfile({ profileId: 'design' }) === true);
+    check('isDesignProfile.falseForADifferentRealProfileId(execution)', isDesignProfile({ profileId: 'execution' }) === false);
+    check('isDesignProfile.falseForAScenarioWithNoProfileIdAtAll', isDesignProfile({ imagery: null }) === false);
+    check('isDesignProfile.falseForNull', isDesignProfile(null) === false);
+
+    // ---- every OTHER profile's default tree is untouched by this round's change ----
+    const ordinaryNoProfile = defaultLayoutTreeForScenario({ imagery: null });
+    check('layersRound6.ordinaryNoProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)',
+      countOf(ordinaryNoProfile, LAYERS_PANEL_ID) === 0 && leafIds(ordinaryNoProfile).length === 5);
+    const ordinaryAnalysis = defaultLayoutTreeForScenario({ imagery: null, profileId: 'analysis' });
+    check('layersRound6.ordinaryAnalysisProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)',
+      countOf(ordinaryAnalysis, LAYERS_PANEL_ID) === 0 && leafIds(ordinaryAnalysis).length === 5);
+    const ordinaryFeasibility = defaultLayoutTreeForScenario({ imagery: null, profileId: 'feasibility' });
+    check('layersRound6.ordinaryFeasibilityProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)',
+      countOf(ordinaryFeasibility, LAYERS_PANEL_ID) === 0 && leafIds(ordinaryFeasibility).length === 5);
+    const nullScenarioRound6 = defaultLayoutTreeForScenario(null);
+    check('layersRound6.nullScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)',
+      countOf(nullScenarioRound6, LAYERS_PANEL_ID) === 0 && leafIds(nullScenarioRound6).length === 5);
+
+    // ---- design profile: Layers joins the default tree exactly once, in every shape ----
+    const ordinaryDesign = defaultLayoutTreeForScenario({ imagery: null, profileId: 'design' });
+    check('layersRound6.ordinaryDesign.sixLeavesLayersAddedExactlyOnceNoCommandConsole',
+      leafIds(ordinaryDesign).length === 6 && countOf(ordinaryDesign, LAYERS_PANEL_ID) === 1 && countOf(ordinaryDesign, COMMAND_PANEL_ID) === 0,
+      { leaves: leafIds(ordinaryDesign) });
+    check('layersRound6.ordinaryDesign.byteIdenticalToAttachLayersPanelOfAttachM264PanelsOfDefaultLayoutForScenario',
+      serializeLayout(ordinaryDesign) === serializeLayout(attachLayersPanel(attachM264Panels(defaultLayoutForScenario({ imagery: null, profileId: 'design' })))));
+
+    const rpoDesign = defaultLayoutTreeForScenario({ frames: [{ axes: 'AXES_KIND_RIC' }], profileId: 'design' });
+    check('layersRound6.rpoDesign.eightLeavesLayersAddedExactlyOnceNoCommandConsole',
+      leafIds(rpoDesign).length === 8 && countOf(rpoDesign, LAYERS_PANEL_ID) === 1 && countOf(rpoDesign, COMMAND_PANEL_ID) === 0,
+      { leaves: leafIds(rpoDesign) });
+
+    const sweepDesign = defaultLayoutTreeForScenario({ sweep: fixtureSweep, profileId: 'design' });
+    check('layersRound6.sweepDesign.fiveLeavesLayersAddedExactlyOnceNoCommandConsole',
+      leafIds(sweepDesign).length === 5 && countOf(sweepDesign, LAYERS_PANEL_ID) === 1 && countOf(sweepDesign, COMMAND_PANEL_ID) === 0,
+      { leaves: leafIds(sweepDesign) });
+
+    // ---- execution profile: Layers AND the command console each join exactly once ----
+    const ordinaryExec = defaultLayoutTreeForScenario({ imagery: null, profileId: 'execution' });
+    check('layersRound6.ordinaryExecution.sevenLeavesLayersAndCommandEachAddedExactlyOnce',
+      leafIds(ordinaryExec).length === 7 && countOf(ordinaryExec, LAYERS_PANEL_ID) === 1 && countOf(ordinaryExec, COMMAND_PANEL_ID) === 1,
+      { leaves: leafIds(ordinaryExec) });
+    check('layersRound6.ordinaryExecution.byteIdenticalToAttachCommandPanelOfAttachLayersPanelOfAttachM264PanelsOfDefaultLayoutForScenario',
+      serializeLayout(ordinaryExec) === serializeLayout(attachCommandPanel(attachLayersPanel(attachM264Panels(defaultLayoutForScenario({ imagery: null, profileId: 'execution' }))))));
+    check('layersRound6.ordinaryExecution.commandConsoleStaysTheOutermostSplitAtItsDocumented0.78Share',
+      ordinaryExec.type === 'split' && Math.abs(ordinaryExec.ratio - 0.78) < 1e-9 && ordinaryExec.children[1].panelId === COMMAND_PANEL_ID);
+    check('layersRound6.ordinaryExecution.layersSitsJustInsideTheCommandConsoleAtItsDocumented0.82Share',
+      ordinaryExec.children[0].type === 'split' && Math.abs(ordinaryExec.children[0].ratio - 0.82) < 1e-9 && ordinaryExec.children[0].children[1].panelId === LAYERS_PANEL_ID);
+
+    const rpoExec = defaultLayoutTreeForScenario({ frames: [{ axes: 'AXES_KIND_RIC' }], profileId: 'execution' });
+    check('layersRound6.rpoExecution.nineLeavesLayersAndCommandEachAddedExactlyOnce',
+      leafIds(rpoExec).length === 9 && countOf(rpoExec, LAYERS_PANEL_ID) === 1 && countOf(rpoExec, COMMAND_PANEL_ID) === 1,
+      { leaves: leafIds(rpoExec) });
+
+    const sweepExec = defaultLayoutTreeForScenario({ sweep: fixtureSweep, profileId: 'execution' });
+    check('layersRound6.sweepExecution.sixLeavesLayersAndCommandEachAddedExactlyOnce',
+      leafIds(sweepExec).length === 6 && countOf(sweepExec, LAYERS_PANEL_ID) === 1 && countOf(sweepExec, COMMAND_PANEL_ID) === 1,
+      { leaves: leafIds(sweepExec) });
+
+    // ---- LAYERS_PANEL_ID stays chooser-reachable everywhere, unchanged by this round ----
+    check('layersRound6.layersStillRegisteredAndChooserReachable',
+      REGISTERED_PANEL_TYPES.some((t) => t.panelId === LAYERS_PANEL_ID));
+  }
 }
 
 const allPass = checks.every(c => c.pass);

@@ -222,6 +222,212 @@ SKIP_REASON = _compute_skip_reason()
 
 
 # =================================================================================================
+# Question 232, extending question 212(a): "every IMAGE_DIGEST.md records the commit the image
+# was built from beside the digest, the build scripts write both, and a docker-gated test refuses
+# (visibly) when the tree's HEAD is not a descendant of that commit for the paths the Dockerfile
+# copies." This is the ONE shared home for that check -- beside the digest helpers above, which
+# already own "the recorded digest has exactly one home" for the same reason (question 212(a)'s
+# own rule, restated at 218's own "no second, independently-maintained copy" reasoning, applied
+# to provenance instead of to application logic). `tests/test_proposer_container.py` and
+# `tests/test_edge_plugin_container.py` both import `verify_image_commit_provenance` from here
+# rather than growing a second copy of it.
+#
+# Round-5 defect this rule exists to catch (question 232, the lead, 2026-09-21): the `av-tiles:
+# local` image on the host was built from `develop` at `01df602`, whose binary predates
+# `--admin-role`, and its recorded DIGEST matched that image exactly -- so question 212(a)'s own
+# digest gate passed an image whose code was not the branch's. `01df602` WAS an ancestor of HEAD
+# (so a plain "is this an ancestor" check alone would NOT have caught it) -- what made the image
+# wrong was that commits touching the image's own copied paths had landed on top of it since.
+# Both conditions are therefore implemented and distinguished below:
+#   * "not an ancestor at all" -- the plain descendant reading; catches an image built from a
+#     branch that has since been rebased/force-pushed away, or from a foreign branch entirely.
+#   * "an ancestor, but commits touching the copied paths landed since" -- the one that actually
+#     would have caught the round-5 defect.
+# =================================================================================================
+
+def image_digest_mismatch_reason(image_dir: Path, tag: str, build_script: str) -> Optional[str]:
+    """Question 212(a)'s digest comparison, as a SHARED skip-reason helper.
+
+    Manager review, round 6: `tests/test_proposer_container.py` and
+    `tests/test_edge_plugin_container.py` gated only on `_image_present(tag)` -- that a tag
+    EXISTS -- and never compared the running image to the digest their own IMAGE_DIGEST.md
+    records, so question 212(a) ("a test trusts an image only after comparing it to its
+    recorded digest") was not actually enforced for either of them. That also left question
+    232's new `verify_image_commit_provenance` resting on nothing, since its own contract is
+    that callers run it only AFTER a presence/digest gate has passed: a hand-built or
+    locally-retagged image would clear presence, clear provenance, and be trusted.
+
+    Returns None when the image is present AND its id equals the recorded digest; otherwise a
+    visible SKIP reason (question 194) in the same shape `_compute_tiles_skip_reason` already
+    produces for the tiles image -- a mismatch means "rebuild it", not "this branch is wrong",
+    which is what the separate provenance FAILURE is for.
+    """
+    digest_md = image_dir / "IMAGE_DIGEST.md"
+    if not digest_md.exists():
+        return (
+            f"{digest_md} does not exist -- {tag} has never been built on this host "
+            f"(question 194: this test only inspects/runs an already-built image, it never "
+            f"builds one). Run `{build_script}`, then re-run this test."
+        )
+    recorded_id = _fenced_block_after(digest_md.read_text(), "docker image inspect")
+    if not recorded_id:
+        return f"could not find the 'docker image inspect' fenced code block in {digest_md}"
+    actual_id = _local_image_id(tag)
+    if actual_id is None:
+        return (
+            f"image {tag!r} is not present locally -- this test never builds one (question "
+            f"194: a test that finds no image and returns is a defect, so this is a visible "
+            f"skip, not a silent pass). Run `{build_script}`, then re-run this test."
+        )
+    if actual_id != recorded_id:
+        return (
+            f"image {tag!r} is present locally but its id {actual_id!r} does not match the "
+            f"digest {recorded_id!r} recorded in {digest_md} (question 212(a): a test trusts "
+            f"an image only after comparing it to its recorded digest). Rebuild with "
+            f"`{build_script}`."
+        )
+    return None
+
+
+IMAGE_COPIED_PATHS_FILENAME = "IMAGE_COPIED_PATHS.txt"
+
+_BUILT_FROM_COMMIT_RE = re.compile(
+    r"^([0-9a-f]{40})(?: \(working tree dirty: (\d+) modified paths under the copied paths\))?$"
+)
+
+
+def _read_copied_paths(image_dir: Path) -> list:
+    """Reads `<image_dir>/IMAGE_COPIED_PATHS.txt` -- the ONE place both a build script (to
+    compute whether the tree was dirty under these paths at build time) and this verifier (to
+    run `git log <recorded_commit>..HEAD -- <these paths>`) read the path set from; see that
+    file's own header comment, per image, for exactly what was chosen and what was deliberately
+    left out."""
+    paths_file = image_dir / IMAGE_COPIED_PATHS_FILENAME
+    if not paths_file.is_file():
+        raise RuntimeError(
+            f"{paths_file} does not exist -- every image this rule covers records its own "
+            f"copied-paths list there (question 232)."
+        )
+    paths = [line.strip() for line in paths_file.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not paths:
+        raise RuntimeError(f"{paths_file} names no paths -- question 232's check needs at least one.")
+    return paths
+
+
+def _parse_built_from_commit(digest_md: Path) -> Tuple[str, int]:
+    """The RECORDED build commit (a full 40-hex SHA) and the dirty-path count from the "Built
+    from commit" fenced block a build script writes -- generated, never hand-edited, exactly
+    like the digest block above it."""
+    if not digest_md.is_file():
+        raise RuntimeError(
+            f"{digest_md} does not exist, even though this image's own presence/digest gate "
+            f"already passed -- an image built by something other than its own build script "
+            f"(question 232 extends question 212(a); re-run this image's own build script)."
+        )
+    text = digest_md.read_text()
+    block = _fenced_block_after(text, "Built from commit")
+    if not block:
+        raise RuntimeError(
+            f"could not find the 'Built from commit' fenced code block in {digest_md} (question "
+            f"232 extends question 212(a) -- re-run this image's own build script to regenerate it)."
+        )
+    match = _BUILT_FROM_COMMIT_RE.match(block.strip())
+    if not match:
+        raise RuntimeError(f"could not parse the commit-provenance line {block.strip()!r} in {digest_md}")
+    sha = match.group(1)
+    dirty_count = int(match.group(2)) if match.group(2) else 0
+    return sha, dirty_count
+
+
+def verify_image_commit_provenance(image_dir: Path, build_script: str) -> Optional[str]:
+    """Question 232, extending question 212(a). Callers run this ONLY after their own
+    presence/digest gate (`..._SKIP_REASON`) has already passed -- this function assumes
+    `IMAGE_DIGEST.md` exists and its digest already matches the running image; it adds the
+    commit-provenance check the digest comparison alone cannot make (a digest match only proves
+    the running image equals what was recorded, never that what was recorded was built from a
+    commit this branch's own history still agrees with).
+
+    Returns `None` iff the image's provenance is trustworthy; otherwise a FAILURE message. This
+    is deliberately NOT a skip reason -- question 232's own words are "a docker-gated test
+    refuses (visibly)", not skips: an image that is present and digest-matched but stale by
+    commit is a defect to report loudly, the same way question 194 already treats "found no
+    image" as a defect rather than a silent pass. Every caller must `pytest.fail(...)` this
+    return value, never `pytest.skip(...)` it.
+
+    Any unexpected condition below (an unparsable record, a `git` command that fails outright)
+    is caught and folded into the returned FAILURE message too, rather than raising -- this
+    function is called at MODULE IMPORT time (mirrors `..._SKIP_REASON`'s own convention), and
+    an uncaught exception there would abort collection of the whole test file instead of
+    failing the one gated test that actually depends on this image.
+    """
+    try:
+        return _verify_image_commit_provenance_or_raise(image_dir, build_script)
+    except RuntimeError as e:
+        return str(e)
+
+
+def _verify_image_commit_provenance_or_raise(image_dir: Path, build_script: str) -> Optional[str]:
+    if shutil.which("git") is None:
+        raise RuntimeError(
+            "the `git` binary is not on PATH -- this repository's own tooling already assumes "
+            "git is present (every other digest/provenance check in this module already shells "
+            "out to it); that assumption does not hold on this host."
+        )
+
+    digest_md = image_dir / "IMAGE_DIGEST.md"
+    recorded_sha, dirty_count = _parse_built_from_commit(digest_md)
+
+    # Item 1: a build recorded as dirty UNDER ITS OWN COPIED PATHS is a claim, not a fact --
+    # refuse outright, before even looking at git history. (Dirt OUTSIDE the copied paths is
+    # recorded honestly too, by the build script, but never makes it into this count -- see
+    # each IMAGE_COPIED_PATHS.txt's own header and the build script's own dirty-count step.)
+    if dirty_count > 0:
+        return (
+            f"{digest_md} records commit {recorded_sha} built from a DIRTY working tree "
+            f"({dirty_count} modified/untracked path(s) under this image's own copied paths at "
+            f"build time -- question 232) -- that image's provenance is a claim, not a fact, and "
+            f"this test refuses to trust it. Rebuild from a clean tree with `{build_script}`."
+        )
+
+    paths = _read_copied_paths(image_dir)
+
+    ancestor_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", recorded_sha, "HEAD"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+    )
+    if ancestor_check.returncode not in (0, 1):
+        raise RuntimeError(
+            f"`git merge-base --is-ancestor {recorded_sha} HEAD` failed unexpectedly "
+            f"(returncode={ancestor_check.returncode}): {ancestor_check.stderr}"
+        )
+    head_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30).stdout.strip()
+    if ancestor_check.returncode != 0:
+        return (
+            f"{digest_md} records commit {recorded_sha}, which is NOT an ancestor of HEAD "
+            f"({head_sha}) -- this image was not built from a commit this branch's own history "
+            f"contains (question 232, extending 212(a)). Rebuild with `{build_script}`."
+        )
+
+    log = subprocess.run(
+        ["git", "log", "--oneline", f"{recorded_sha}..HEAD", "--", *paths],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+    )
+    if log.returncode != 0:
+        raise RuntimeError(f"`git log {recorded_sha}..HEAD -- {paths}` failed: {log.stderr}")
+    drifted_commits = [line for line in log.stdout.splitlines() if line.strip()]
+    if drifted_commits:
+        return (
+            f"{digest_md} records commit {recorded_sha}, an ancestor of HEAD ({head_sha}), but "
+            f"{len(drifted_commits)} commit(s) touching this image's own copied paths "
+            f"({', '.join(paths)}) have landed on top of it since (question 232 -- this is the "
+            f"round-5 defect this rule exists to catch: {recorded_sha} WAS an ancestor of HEAD, "
+            f"the image was stale anyway): {'; '.join(drifted_commits)}. Rebuild with "
+            f"`{build_script}`."
+        )
+    return None
+
+
+# =================================================================================================
 # Rust binaries -- module-scoped, mirrors tests/test_command_console_routes.py::command_bin.
 # =================================================================================================
 
@@ -583,6 +789,14 @@ def _compute_tiles_skip_reason() -> Optional[str]:
 
 TILES_SKIP_REASON = _compute_tiles_skip_reason()
 
+# Question 232: only ever computed once the presence/digest gate above has already passed --
+# an absent or digest-mismatched image is still TILES_SKIP_REASON's own visible SKIP (question
+# 194, unchanged); a PRESENT, digest-matched image that is stale BY COMMIT is this, a FAILURE.
+TILES_PROVENANCE_FAILURE = (
+    None if TILES_SKIP_REASON is not None
+    else verify_image_commit_provenance(REPO_ROOT / "services" / "tiles", TILES_BUILD_SCRIPT)
+)
+
 
 def _wait_for_container_listening_line(container_id: str, deadline_s: float) -> None:
     """Polls `docker logs` for `av-tiles`' own `"LISTENING"` startup line -- mirrors
@@ -652,6 +866,8 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
     """
     if TILES_SKIP_REASON is not None:
         pytest.skip(TILES_SKIP_REASON)
+    if TILES_PROVENANCE_FAILURE is not None:
+        pytest.fail(TILES_PROVENANCE_FAILURE)
 
     run_id = f"tiles-container-{uuid.uuid4().hex[:12]}"
     scratch = TILES_CONTAINER_SCRATCH_ROOT / run_id

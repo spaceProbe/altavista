@@ -81,6 +81,11 @@ LABEL_FILTER="label=org.altavista.component=proposer"
 BIN_DIR="${SCRIPT_DIR}/bin"
 BIN_PATH="${BIN_DIR}/av-proposer"
 DIGEST_DOC="${SCRIPT_DIR}/IMAGE_DIGEST.md"
+# Question 232 (extending question 212(a)): the ONE place the paths this image's content is
+# derived from are listed -- this script reads it to compute whether the tree was dirty under
+# them at build time; tests/heavy_stack.py's own verify_image_commit_provenance (imported by
+# tests/test_proposer_container.py) reads the SAME file. Never duplicated.
+COPIED_PATHS_FILE="${SCRIPT_DIR}/IMAGE_COPIED_PATHS.txt"
 EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 # Question 219(b): SPOORE_ROOT overrides the spoore checkout used for the cross-build below;
 # unset, it defaults to the sibling checkout next to this repository's own root (question
@@ -203,6 +208,7 @@ fi
 command -v git >/dev/null 2>&1 || die "git binary not found on PATH."
 [ -f "${DOCKERFILE}" ] || die "Dockerfile not found at ${DOCKERFILE}"
 [ -f "${FIXTURE_PATH}" ] || die "committed fixture not found at ${FIXTURE_PATH} -- this Dockerfile bakes it in for provenance (see its own header comment, 'Self-contained and offline')."
+[ -f "${COPIED_PATHS_FILE}" ] || die "${COPIED_PATHS_FILE} not found -- question 232's commit-provenance record needs the same copied-paths list tests/heavy_stack.py's own verifier reads."
 SPOORE_ROOT="$(cd "${SPOORE_ROOT}" 2>/dev/null && pwd)" || die "SPOORE_ROOT (${SPOORE_ROOT}) does not exist -- set SPOORE_ROOT to your spoore checkout, or place one at the sibling-checkout default ${REPO_ROOT}/../spoore (question 219(b))."
 [ -d "${SPOORE_ROOT}/crates/spoore-cdm" ] || die "${SPOORE_ROOT}/crates/spoore-cdm not found -- the prebuild step below bind-mounts SPOORE_ROOT (see the Dockerfile's own header comment for why: av-cdm's spoore-cdm AND av-proposer's spoore-models path dependencies, and its own build.rs's direct read of spoore's model_service.proto)."
 [ -d "${SPOORE_ROOT}/crates/spoore-models" ] || die "${SPOORE_ROOT}/crates/spoore-models not found -- av-proposer's own D2 dependency (a real spoore_models::KalmanFilter, decision 11(b)), the second of the two spoore path dependencies this crate has and av-edge-plugin never did."
@@ -293,6 +299,31 @@ if echo "${LDD_OUTPUT}" | grep -q "not found"; then
 fi
 log "ldd: every shared library av-proposer needs resolves inside ${IMAGE_TAG}"
 
+# --- 4b. Question 232 (extending 212(a)): the commit HEAD points at, and whether the tree was
+# dirty UNDER THIS IMAGE'S OWN COPIED PATHS (never the whole tree) at build time. Read from
+# COPIED_PATHS_FILE -- the ONE list this script and tests/heavy_stack.py's own
+# verify_image_commit_provenance both read, never duplicated. bash 3.2 on this host has no
+# `mapfile`/`readarray`, so a plain `while read` loop into an array, matching this script's own
+# `STALE_IDS` loop above.
+COPIED_PATHS=()
+while IFS= read -r copied_path; do
+    case "${copied_path}" in
+        ''|'#'*) continue ;;
+    esac
+    COPIED_PATHS+=("${copied_path}")
+done < "${COPIED_PATHS_FILE}"
+[ "${#COPIED_PATHS[@]}" -gt 0 ] || die "${COPIED_PATHS_FILE} names no paths"
+
+BUILD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+DIRTY_STATUS="$(git -C "${REPO_ROOT}" status --porcelain -- "${COPIED_PATHS[@]}")"
+DIRTY_COUNT=0
+if [ -n "${DIRTY_STATUS}" ]; then
+    DIRTY_COUNT="$(printf '%s\n' "${DIRTY_STATUS}" | grep -c .)"
+fi
+if [ "${DIRTY_COUNT}" -gt 0 ]; then
+    warn "working tree is dirty under ${DIRTY_COUNT} of this image's own copied path(s) at build time -- IMAGE_DIGEST.md will record this honestly, and tests/heavy_stack.py's own commit-provenance verifier (question 232) will refuse to trust this build until it is rebuilt from a clean tree."
+fi
+
 # --- 5. Record the digests, the prebuilt binary's own hash, and this run's duration. -------
 DURATION_S=$(( SECONDS - START_SECONDS ))
 {
@@ -310,6 +341,12 @@ DURATION_S=$(( SECONDS - START_SECONDS ))
     printf '```\nsha256:%s\n```\n' "${BIN_SHA256}"
     printf -- '- ldd verification against this exact image (step 4):\n'
     printf '```\n%s\n```\n' "${LDD_OUTPUT}"
+    printf -- '- Built from commit (question 232, extending question 212(a) -- the paths this covers are services/proposer/IMAGE_COPIED_PATHS.txt):\n'
+    if [ "${DIRTY_COUNT}" -gt 0 ]; then
+        printf '```\n%s (working tree dirty: %s modified paths under the copied paths)\n```\n' "${BUILD_COMMIT}" "${DIRTY_COUNT}"
+    else
+        printf '```\n%s\n```\n' "${BUILD_COMMIT}"
+    fi
     printf -- '- Build duration (this run, prebuild + image build + ldd verification): %ds\n' "${DURATION_S}"
     printf -- '- Rebuild with: `services/proposer/build-image.sh`\n'
 } > "${DIGEST_DOC}.new"

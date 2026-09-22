@@ -838,6 +838,41 @@ export class LayerManager {
     return this.resident.get(globalKey)?.payload;
   }
 
+  /**
+   * Round 6 (docs/open-questions.md question 231's ruling, "replace or composite"):
+   * every registered layer whose `kind === 'imagery'`, in REGISTRATION order -- a
+   * fresh array, never a live view onto `_layers`. `kind` is a marker
+   * `./imagery_layer.js`'s `ImageryLayerAdapter` sets on itself in its own
+   * constructor (inherited by `GatewayImageryLayerAdapter`, which only ever calls
+   * `super()`); `./terrain_layer.js`/`./tiles3d_layer.js` never set it, so this list
+   * never includes them.
+   *
+   * This is the one, honest way `web/js/globe.js`'s `GlobeLayer` gets an ordered list
+   * of "candidates for this tile's texture" without a private reach into `_layers`
+   * itself (this file's own module docstring: "no caller outside web/js/layers/ has
+   * to know which of the three it is talking to" -- extended here to "or how many of
+   * them there currently are, or in what order they were added"). Map iteration
+   * order is insertion order for every key a `Map` has ever seen (ECMA-262
+   * 24.1.3.x), so "registration order" here means exactly "the order `addLayer` was
+   * called in" -- `GlobeLayer`'s own default `'imagery'` adapter is registered
+   * FIRST, in its own constructor (see globe.js), so it is always the earliest (most
+   * easily overridden) entry in this list; a tile set toggled on later via
+   * `web/js/app.js`'s `toggleGatewayLayer` (`addLayer`) is always later, i.e. always
+   * "topmost" over both the default and any tile set toggled on before it --
+   * "two selected sets compose in list order with the later on top" (question 231's
+   * ruling) falls directly out of this ordering, not a second rule GlobeLayer has to
+   * apply on top of it. `removeLayer` (toggle off) removes the layer from `_layers`
+   * entirely, so it drops out of this list on the very next call -- what "the
+   * default restored when it is turned off" (the ruling's own words) actually means
+   * for a caller that always walks this list from the bottom: nothing below the
+   * removed layer changed, so the next-lower one (or the default) is simply the last
+   * entry with a resident payload again, the instant the removed layer's own entry
+   * stops being in this list at all.
+   */
+  imageryLayers() {
+    return [...this._layers.values()].filter((layer) => layer.kind === 'imagery');
+  }
+
   /** Per-layer resident/pending counts -- for reporting/debugging (this task's
    * harness prints these; see `web/js/layers_check.mjs`). */
   countsByLayer() {

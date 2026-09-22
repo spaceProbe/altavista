@@ -1,0 +1,42 @@
+{
+  "asset": { "version": "2.0", "generator": "hand-authored fixture for web/js/entities_model_check.mjs -- see that file's module docstring" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes": [ { "mesh": 0, "name": "EntityFixtureModel" } ],
+  "meshes": [
+    {
+      "name": "tetra",
+      "primitives": [
+        { "attributes": { "POSITION": 0 }, "indices": 1, "mode": 4 }
+      ]
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 4,
+      "type": "VEC3",
+      "min": [0, 0, 0],
+      "max": [1, 1, 1.5]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5123,
+      "count": 9,
+      "type": "SCALAR",
+      "min": [0],
+      "max": [3]
+    }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 48, "target": 34962 },
+    { "buffer": 0, "byteOffset": 48, "byteLength": 18, "target": 34963 }
+  ],
+  "buffers": [
+    {
+      "byteLength": 68,
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAMA/AAABAAIAAAACAAMAAAADAAEAAAA="
+    }
+  ]
+}

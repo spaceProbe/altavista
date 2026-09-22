@@ -224,21 +224,28 @@ export const COMMAND_PANEL_ID = 'command-console';
 // list's own comment); declared here, ahead of REGISTERED_PANEL_TYPES, for the same
 // reason COMMAND_PANEL_ID is.
 //
-// Deliberately NOT threaded into `defaultLayoutTreeForScenario` below (unlike
-// COMMAND_PANEL_ID's own `attachCommandPanel`): doing so unconditionally would change
-// `defaultLayoutTreeForScenario`'s output shape for EVERY scenario, including the
-// ordinary/no-profile case web/js/layout/layout_tree_check.mjs's own
+// Round 5 threaded this constant only into REGISTERED_PANEL_TYPES (chooser-reachable
+// everywhere, in no default layout) -- see heavy-plan.md's round-5 status, decision 11,
+// and this constant's own history in version control for that reasoning in full: doing
+// so unconditionally back then would have changed `defaultLayoutTreeForScenario`'s
+// output shape for EVERY scenario, including the ordinary/no-profile case
+// web/js/layout/layout_tree_check.mjs's own
 // "defaultLayoutTreeForScenario.ordinaryScenarioIsByteIdenticalToAttachM264PanelsOf
-// DefaultLayoutForScenario(noRegression)" and "...nullScenarioDegradesToTheOrdinary
-// DefaultRatherThanThrowing" checks (tests/test_viewer_layout.py) pin as an explicit,
-// named regression guard for a DIFFERENT feature (F5.1's sweep default) -- neither of
-// those files is this task's to modify (see this round's own brief). This mirrors
-// FEASIBILITY_PANEL_ID's own precedent exactly (that constant's own comment, above):
-// registered here so the panel is reachable from the pane chooser/header-menu in EVERY
-// profile and EVERY layout ("that alone makes it reachable ... everywhere", this
-// round's own brief, verbatim), without changing any existing default layout's shape.
-// See this task's own report for the full reasoning and what the manager should
-// confirm if default-visibility (not just chooser-reachability) is wanted after all.
+// DefaultLayoutForScenario(noRegression)" check pins as a named regression guard for a
+// DIFFERENT feature (F5.1's sweep default).
+//
+// Round 6 (question 231, "Also next round" -- the lead's ratification, verbatim: "the
+// Layers panel joins the execution and design default layouts once F5.1's regression
+// guard is updated with it"): now threaded in, but only CONDITIONALLY -- see
+// `attachLayersPanel` and `isDesignProfile` below, applied from
+// `defaultLayoutTreeForScenario` when `isExecutionProfile(sc) || isDesignProfile(sc)`.
+// The ordinary/no-profile scenario `layout_tree_check.mjs`'s guard pins is neither
+// execution- nor design-shaped, so that check's pinned tree is genuinely unaffected and
+// unchanged by this round's edit -- `layout_tree_check.mjs` gained NEW checks instead,
+// pinning the execution- and design-profile trees byte-identically in the same way.
+// Still chooser-reachable everywhere via REGISTERED_PANEL_TYPES below, exactly as
+// before -- this round only adds default-layout presence for two of the four profiles,
+// it does not change reachability for any of them.
 export const LAYERS_PANEL_ID = 'layers';
 
 export const REGISTERED_PANEL_TYPES = [
@@ -256,8 +263,10 @@ export const REGISTERED_PANEL_TYPES = [
   // swapped to the command console through the M26.5 chooser/header-menu, exactly like
   // FEASIBILITY_PANEL_ID above already is outside its own one profile-shaped default.
   { panelId: COMMAND_PANEL_ID, label: 'Command Console' },
-  // Round 5: the Layers panel -- see LAYERS_PANEL_ID's own comment above for why this
-  // is chooser-reachable everywhere but not threaded into any default layout.
+  // Round 5: the Layers panel, chooser-reachable in every profile like
+  // COMMAND_PANEL_ID/FEASIBILITY_PANEL_ID above. Round 6 (question 231) additionally
+  // threads it into the execution and design default layouts -- see LAYERS_PANEL_ID's
+  // own comment above and `attachLayersPanel` below.
   { panelId: LAYERS_PANEL_ID, label: 'Layers' },
 ];
 
@@ -431,17 +440,66 @@ export function attachCommandPanel(tree) {
   );
 }
 
+// --------------------------------------------------- Round 6 (question 231): Layers panel
+// The lead's ratification, verbatim (question 231, "Also next round"): "the Layers panel
+// joins the execution and design default layouts once F5.1's regression guard is updated
+// with it." `isDesignProfile` mirrors `isExecutionProfile` exactly -- same signal
+// (`scenario.profileId`), same degrade-never-guess posture: a scenario carrying no
+// `profileId` at all is neither execution- nor design-shaped, so it is unaffected by
+// either check.
+export function isDesignProfile(sc) {
+  return !!(sc && sc.profileId === 'design');
+}
+
+// Deliberately a SEPARATE, additive wrapper -- the exact same posture `attachCommandPanel`
+// already takes (see that function's own doc comment): every existing default-layout
+// function stays byte-identical for every OTHER profile (feasibility, analysis, or a
+// profile-less scenario), because this wrapper is only ever called when
+// `isExecutionProfile(sc) || isDesignProfile(sc)` is true (see `defaultLayoutTreeForScenario`
+// below). Works generically over whatever tree `_ordinaryOrSweepLayout` already decided,
+// exactly like `attachCommandPanel`.
+//
+// Placement/share (this task's own open design decision, decided here): a narrow
+// right-hand strip, same style as `attachCommandPanel`'s own 0.78/0.22 strip but a touch
+// narrower -- 0.82/0.18 -- because the Layers panel's own content (web/js/panels/
+// layers_panel.js: a catalogued-tile-set table plus two streaming-budget numbers) needs
+// less width than the command console's rationale/decision/trail/token UI. In
+// `defaultLayoutTreeForScenario`, this wrapper is applied BEFORE `attachCommandPanel`
+// (i.e. nested INSIDE it) for the execution profile, so the command console --
+// "one focused, occasional-use panel", `attachCommandPanel`'s own doc comment -- keeps
+// the true outermost/rightmost position it already had; the Layers panel sits just
+// inside it, sharing the rest of the window with the sidebar/viewport/run-products/map/
+// console (or feasibility) content exactly as before, only slightly narrower to make
+// room for this one new strip. For the design profile, which gets no command console at
+// all, this is the only extra wrapper applied, so the Layers panel is the outermost
+// strip there.
+export function attachLayersPanel(tree) {
+  return createSplit(
+    'row',
+    0.82,
+    [
+      tree,
+      createLeaf(LAYERS_PANEL_ID, { id: 'pane-layers' }),
+    ],
+    { id: 'split-layers-panel' },
+  );
+}
+
 /**
  * The one real default-layout entry point (unchanged call sites, see this function's
- * own pre-R3.5b doc comment above `_ordinaryOrSweepLayout`) -- now ALSO wraps the
- * result with `attachCommandPanel` when, and only when, `isExecutionProfile(sc)` is
- * true. For every non-execution profile (or a profile-less scenario -- `sc` may still
- * be `null`, exactly as before), this is BYTE-IDENTICAL to what this function computed
- * before R3.5b: `isExecutionProfile(null)` is `false`, so the pre-existing "no
- * scenario loaded yet" behaviour is completely unaffected.
+ * own pre-R3.5b doc comment above `_ordinaryOrSweepLayout`) -- wraps the result with
+ * `attachLayersPanel` when, and only when, `isExecutionProfile(sc) || isDesignProfile(sc)`
+ * is true (question 231, Round 6), and further wraps with `attachCommandPanel` when,
+ * and only when, `isExecutionProfile(sc)` is true (R3.5b, unchanged). For every other
+ * profile (feasibility, analysis) or a profile-less scenario (`sc` may still be `null`,
+ * exactly as before), this is BYTE-IDENTICAL to what this function computed before this
+ * task: both `isExecutionProfile(null)` and `isDesignProfile(null)` are `false`, so the
+ * pre-existing "no scenario loaded yet" behaviour is completely unaffected.
  * @param {object|null} sc a wire scenario object (or null)
  */
 export function defaultLayoutTreeForScenario(sc) {
-  const tree = _ordinaryOrSweepLayout(sc);
-  return isExecutionProfile(sc) ? attachCommandPanel(tree) : tree;
+  let tree = _ordinaryOrSweepLayout(sc);
+  if (isExecutionProfile(sc) || isDesignProfile(sc)) tree = attachLayersPanel(tree);
+  if (isExecutionProfile(sc)) tree = attachCommandPanel(tree);
+  return tree;
 }
