@@ -704,6 +704,10 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
                 "--group-clearance", "tile-guests=UNCLASSIFIED",
                 "--bind", "0.0.0.0:50073",
                 "--admin-bind", "0.0.0.0:50173",
+                # Round 5 item B authenticated the admin route; the in-process fixture above
+                # was updated with it, this container path was not, and the container test
+                # had never run far enough to show it (lead, 2026-09-21, question 232).
+                "--admin-role", "admin-readers",
             ]
             run_result = subprocess.run(run_cmd, capture_output=True, text=True, timeout=30)
             if run_result.returncode != 0:
@@ -722,9 +726,11 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
 
                 bind_port = _container_host_port(container_id, 50073)
                 admin_port = _container_host_port(container_id, 50173)
+                admin_token = issuer.mint(_valid_claims("heavy-stack-admin", ["admin-readers"]))
                 yield SimpleNamespace(
                     endpoint=f"127.0.0.1:{bind_port}",
                     admin_endpoint=f"127.0.0.1:{admin_port}",
+                    admin_token=admin_token,
                     container_id=container_id,
                     container_name=container_name,
                     issuer=issuer,
