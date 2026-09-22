@@ -658,8 +658,13 @@ def tiles_gateway_container(rust_bins, minio, key_prefix, tile_set_label):
     scratch.mkdir(parents=True, exist_ok=True)
 
     with lock_docker_tests():
-        prune_stale_labelled_resources()
-
+        # No prune here: `prune_stale_labelled_resources` removes EVERY resource carrying the
+        # test label, and the `minio` fixture this context manager depends on already pruned
+        # before creating its container, which carries that label. A second prune at this
+        # point killed the fixture's own live MinIO (`docker events`: kill, die 137, destroy,
+        # one second after creation) and every `docker network connect` after it failed with
+        # "No such container" -- the third distinct reason this test had never been seen
+        # green (lead, 2026-09-21, question 232). Prune once, before the first creation.
         issuer = LocalTestIssuer(scratch)
         network_name = f"av-tiles-test-net-{run_id}"
 
