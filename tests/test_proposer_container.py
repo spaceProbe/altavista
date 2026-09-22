@@ -125,6 +125,7 @@ import pytest
 
 from altavista.docker_test_lock import lock_docker_tests
 from altavista.test_env import missing_spoore_reason, spoore_dir
+import heavy_stack  # question 232's shared verify_image_commit_provenance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROPOSER_DIR = REPO_ROOT / "services" / "proposer"
@@ -263,6 +264,14 @@ def _compute_skip_reason() -> "str | None":
             f"returns is a defect, so this is a visible skip, not a silent pass). Run `{BUILD_SCRIPT}` "
             f"on a host with Docker and network access, then re-run this test."
         )
+    # Manager review, round 6: question 212(a)'s DIGEST comparison, which this gate never
+    # made -- `_image_present` above only proves a tag exists. Without it, question 232's
+    # `verify_image_commit_provenance` below rests on nothing, because its own contract is
+    # that a caller runs it only once a presence/digest gate has passed. Shared with the
+    # tiles image's own gate rather than copied (heavy_stack.image_digest_mismatch_reason).
+    digest_reason = heavy_stack.image_digest_mismatch_reason(PROPOSER_DIR, IMAGE_TAG, BUILD_SCRIPT)
+    if digest_reason is not None:
+        return digest_reason
     if not _image_present(PROBE_IMAGE):
         return (
             f"probe image {PROBE_IMAGE!r} (used only for the raw-socket network-reachability probes -- "
@@ -289,6 +298,14 @@ def _compute_skip_reason() -> "str | None":
 
 
 _SKIP_REASON = _compute_skip_reason()
+
+# Question 232, extending 212(a): only ever computed once the presence gate above has already
+# passed -- an absent image is still `_SKIP_REASON`'s own visible SKIP (question 194,
+# unchanged); a PRESENT image that is stale BY COMMIT is this, a FAILURE, not a skip.
+_PROVENANCE_FAILURE = (
+    None if _SKIP_REASON is not None
+    else heavy_stack.verify_image_commit_provenance(PROPOSER_DIR, BUILD_SCRIPT)
+)
 
 # Missing-image text Docker itself emits when a `docker run` names a tag that is not local and
 # cannot be pulled. Matched, rather than re-inspecting, so a disappearance is caught at the exact
@@ -603,6 +620,12 @@ def test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority
     # Held for this whole test body (not just around any one docker command), via the SAME
     # `$HOME`-rooted lock file the Rust side uses -- `tests/test_edge_plugin_container.py`'s own
     # precedent, verbatim.
+    #
+    # Question 232, extending 212(a): checked before taking the lock at all -- a stale-by-commit
+    # image is a FAILURE (not a skip; `_SKIP_REASON` above already handles "absent"), and there
+    # is no reason to touch the host-wide docker lock just to report it.
+    if _PROVENANCE_FAILURE is not None:
+        pytest.fail(_PROVENANCE_FAILURE)
     with lock_docker_tests():
         _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority()
 

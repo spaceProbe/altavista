@@ -1,0 +1,26 @@
+# services/edge-plugin/IMAGE_COPIED_PATHS.txt -- the paths av-edge-plugin:local's content is
+# derived from (question 232, extending question 212(a)). See services/tiles/
+# IMAGE_COPIED_PATHS.txt's own header comment for the full method and the same reasoning,
+# applied here to av-edge-plugin's own dependency closure; not repeated a second time.
+#
+# `crates/av-ingest-client` itself (the crate the `av-edge-plugin` binary target lives in),
+# its committed `proto/altavista/v1` input, and the transitive closure of its own LOCAL
+# `normal`+`build` dependencies (`cargo metadata --locked`, dev-only edges filtered out --
+# this crate's own `av-ingest` dependency is `[dev-dependencies]`-only, used by
+# `tests/av_edge_plugin_binary.rs` to drive the built binary as a subprocess, and never
+# reaches the shipped binary itself), the Dockerfile, and the two fixtures plus the default
+# config the Dockerfile itself COPYs in.
+#
+# Deliberately NOT covered, and why: the root Cargo.lock/Cargo.toml and
+# services/edge-plugin/build-image.sh itself -- same reasoning as services/tiles/
+# IMAGE_COPIED_PATHS.txt's own header; services/edge-plugin/IMAGE_DIGEST.md and
+# services/edge-plugin/bin/ -- the build's own output.
+proto/altavista/v1
+crates/av-cdm
+crates/av-codec
+crates/av-dynamics
+crates/av-edge
+crates/av-grpc
+crates/av-ingest-client
+services/edge-plugin/Dockerfile
+services/edge-plugin/plugin-config.default.json

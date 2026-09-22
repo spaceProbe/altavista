@@ -1,0 +1,38 @@
+# services/tiles/IMAGE_COPIED_PATHS.txt -- the paths av-tiles:local's content is derived
+# from (question 232, extending question 212(a): every image records the commit it was built
+# from, and a docker-gated test refuses when a commit touching these paths has landed since).
+#
+# ONE list, read by BOTH services/tiles/build-image.sh (to record whether the tree was dirty
+# under these paths at build time) and tests/heavy_stack.py's own
+# verify_image_commit_provenance (to run `git log <recorded_commit>..HEAD -- <these paths>`)
+# -- never duplicated between the two.
+#
+# Chosen, not guessed: `crates/av-tiles` itself, its committed `proto/altavista/v1` input
+# (crates/av-cdm/build.rs compiles it), and the transitive closure of av-tiles' own LOCAL
+# (within-this-repository) `normal`+`build` dependencies -- computed with a real
+# `cargo metadata --locked` and filtering OUT every dev-only edge (e.g. av-store's own
+# `av-lockstep` dependency is `[dev-dependencies]`-only, used by av-store's own tests, and
+# never reaches this binary; confirmed by reading crates/av-store/Cargo.toml directly, not
+# guessed from the dependency name alone) -- plus the Dockerfile that assembles the runtime
+# image from the resulting prebuilt binary.
+#
+# Deliberately NOT covered, and why:
+#   - The root Cargo.lock/Cargo.toml: a version bump for an EXTERNAL (crates.io) dependency
+#     anywhere in this workspace touches that one shared file, so treating the whole file as
+#     "copied" would fire this check on every unrelated crate's own dependency bump too --
+#     exactly the over-broad trap this task's own brief warns against ("an over-broad set ...
+#     will be turned off by the next person"). Re-deriving which Cargo.lock entries actually
+#     affect THIS binary would need a `cargo metadata` resolve on every test import, which
+#     spends a host-wide cargo job-slot (question 229) a module-import-time check must not
+#     spend.
+#   - services/tiles/build-image.sh itself: it orchestrates the build: it is not a source the
+#     image's bytes are compiled from.
+#   - services/tiles/IMAGE_DIGEST.md and services/tiles/bin/: self-referential / the build's
+#     own output, never an input.
+proto/altavista/v1
+crates/av-cdm
+crates/av-command
+crates/av-label
+crates/av-store
+crates/av-tiles
+services/tiles/Dockerfile
