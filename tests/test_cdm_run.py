@@ -1636,6 +1636,114 @@ def test_cdm_trajectory_route_is_unchanged_by_question_174(client: TestClient):
         "POST /api/cdm/trajectory must be untouched by question 174 -- it never populates measurements at all"
 
 
+# ==================================================================================
+# Covariance (heavy round 7, question 233): "no producer fills TrajectorySample.cov, so
+# the ellipsoids have no live input." These tests build a real `trajectory_pb2.Trajectory`
+# with a real `TrajectorySample.cov` directly through the generated bindings (never a
+# hand-rolled byte layout, same `_build_run_products` convention this file already
+# established) and POST it through the real, unmodified `POST /api/cdm/run` /
+# `POST /api/cdm/trajectory` routes -- proving the whole seam this task closes:
+# altavista/cdm.py's cdm_trajectory_to_viewer_json -> altavista/model.py's Trajectory.cov/
+# cov_dim -> ScenarioData.to_dict()'s "cov"/"covDim" wire keys, with NO altavista/server.py
+# code change needed (both routes already call cdm_trajectory_to_viewer_json unmodified;
+# POST /api/cdm/run additionally goes through _run_products_to_scenario_data, which calls
+# the same function -- see that function's own docstring and this task's report for the
+# call-graph argument that server.py needed no edits).
+#
+# A 6x6 row-major SI covariance whose every nonzero entry is an exact multiple of
+# M_PER_KM**2 (1e6), so the SI->km unit conversion lands on an exactly-representable float
+# -- the same "exact, not just close" discipline this file's sibling test_cdm_adapter.py
+# already uses for pos/vel.
+_RUN_COV_SI_6X6 = [
+    10_000_000.0, 500_000.0, 0.0, 0.0, 0.0, 0.0,
+    500_000.0, 20_000_000.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 30_000_000.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 4_000_000.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 5_000_000.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 6_000_000.0,
+]
+_RUN_COV_KM_6X6 = [v / (cdm_adapter.M_PER_KM ** 2) for v in _RUN_COV_SI_6X6]
+
+
+def _traj_pb_with_cov(cov_per_sample, *, trajectory_id="cov-run-traj", entity_id="leo") -> trajectory_pb2.Trajectory:
+    tr = trajectory_pb2.Trajectory(id=trajectory_id, entity_id=entity_id,
+                                   state_space_id=cdm_adapter.DEFAULT_STATE_SPACE_ID,
+                                   frame_id="EarthMJ2000Eq", interpolation=trajectory_pb2.INTERPOLATION_HERMITE_VELOCITY)
+    base_tai_ns = 1767225637000000000
+    for i, cov in enumerate(cov_per_sample):
+        tr.samples.add(tai_ns=base_tai_ns + i * 100_000_000, mean=[6800.5 + i, 0.0, 0.0, 0.0, 7.5, 0.0],
+                       cov=list(cov) if cov is not None else [], kind=trajectory_pb2.SAMPLE_KIND_NATIVE)
+    return tr
+
+
+def test_run_covariance_is_additive_and_empty_by_default(client: TestClient):
+    """A RunProducts trajectory with no `cov` on any sample must still publish
+    `"cov": []`/`"covDim": 0` -- present, not absent -- mirroring the established
+    `scores`/`measurements` additive convention this file already tests."""
+    traj = _traj_pb_with_cov([None, None])
+    provenance = core_pb2.Provenance(config_hash="cov-fixture-hash", run_id="test-cov-empty")
+    rp = _build_run_products([("leo", traj)], [], provenance, run_id="test-cov-empty")
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    scenario = client.get(f"/api/scenario/{name}").json()
+    sc = scenario["spacecraft"][0]
+    assert sc["cov"] == [], "no cov requested -- must publish an empty list, never a fabricated one"
+    assert sc["covDim"] == 0
+
+
+def test_run_covariance_threads_through_with_correct_unit_conversion_and_shape(client: TestClient):
+    """The core of question 233's route-level seam: `POST /api/cdm/run` publishes a real
+    `cov` -- flat, row-major n x n per sample, concatenated, parallel to `t`
+    (`len(cov) == len(t) * covDim**2`) -- converted SI -> km exactly like `pos`/`vel`,
+    through the real, unmodified route (no server.py handler edit exists for this: the
+    conversion happens entirely in cdm_trajectory_to_viewer_json/Trajectory.to_dict).
+    """
+    cov_b = [v * 3 for v in _RUN_COV_SI_6X6]
+    traj = _traj_pb_with_cov([_RUN_COV_SI_6X6, cov_b])
+    provenance = core_pb2.Provenance(config_hash="cov-fixture-hash", run_id="test-cov-shape")
+    rp = _build_run_products([("leo", traj)], [], provenance, run_id="test-cov-shape")
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    scenario = client.get(f"/api/scenario/{name}").json()
+    sc = scenario["spacecraft"][0]
+    assert sc["covDim"] == 6
+    assert len(sc["cov"]) == len(sc["t"]) * 36 == 72
+    assert sc["cov"][0:36] == _RUN_COV_KM_6X6
+    assert sc["cov"][36:72] == [v / (cdm_adapter.M_PER_KM ** 2) for v in cov_b]
+
+
+def test_run_covariance_partial_is_a_typed_400(client: TestClient):
+    """The all-or-nothing rule, exercised through the real HTTP route: a trajectory with
+    cov on only some samples is refused with a 400 naming the counts, exactly like an
+    unmapped axes or unknown body already is elsewhere in this file -- never a 500, never
+    silently truncated to the samples that do carry one."""
+    traj = _traj_pb_with_cov([_RUN_COV_SI_6X6, None])
+    provenance = core_pb2.Provenance(config_hash="cov-fixture-hash", run_id="test-cov-partial")
+    rp = _build_run_products([("leo", traj)], [], provenance, run_id="test-cov-partial")
+    resp = client.post("/api/cdm/run", content=rp.SerializeToString(), headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 400, resp.text
+    assert "cov must be present on every sample or none" in resp.text
+
+
+def test_cdm_trajectory_route_also_carries_covariance(client: TestClient):
+    """`POST /api/cdm/trajectory` shares the exact same `cdm_trajectory_to_viewer_json`
+    conversion `POST /api/cdm/run` uses (M16.3's own design steer) -- so it carries `cov`
+    through too, with no route-specific handling of its own, proving this task's
+    call-graph claim ("anything that goes through cdm_trajectory_to_viewer_json gets it
+    for free") for the SECOND of the two routes that call it directly."""
+    traj = _traj_pb_with_cov([_RUN_COV_SI_6X6])
+    resp = client.post("/api/cdm/trajectory", content=traj.SerializeToString(),
+                       headers={"content-type": "application/x-protobuf"})
+    assert resp.status_code == 200, resp.text
+    name = resp.json()["name"]
+    scenario = client.get(f"/api/scenario/{name}").json()
+    sc = scenario["spacecraft"][0]
+    assert sc["covDim"] == 6
+    assert sc["cov"] == _RUN_COV_KM_6X6
+
+
 # ---------------------------------------------------------------- the acceptance test
 FROZEN_DEMO_MEASUREMENTS_BUNDLE_PATH = REPO_ROOT / "tests" / "fixtures" / "demo_measurements.runproducts.bin"
 

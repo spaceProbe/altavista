@@ -170,6 +170,58 @@ def test_trajectory_attitude_flattens_like_pos_and_vel():
     assert d["attitude"] == [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.70710678, 0.70710678]
 
 
+def test_trajectory_cov_is_additive_and_empty_by_default():
+    """Heavy round 7 (question 233): `Trajectory.cov`/`cov_dim` (a real spacecraft-state
+    covariance stream, threaded from `altavista.cdm.cdm_trajectory_to_viewer_json`) is
+    additive -- unset by default, wire form a flat empty list and `covDim: 0` -- not
+    present-but-null, not omitted. Mirrors
+    test_trajectory_attitude_is_additive_and_empty_by_default exactly.
+    """
+    tr = Trajectory("Sat")
+    tr.append(100.0, [1, 2, 3, 4, 5, 6])
+    d = tr.to_dict()
+    assert d["cov"] == []
+    assert d["covDim"] == 0
+
+
+def test_trajectory_cov_flattens_like_pos_and_vel():
+    tr = Trajectory("Sat", cov=[[1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]], cov_dim=3)
+    tr.append(100.0, [1, 2, 3, 4, 5, 6])
+    d = tr.to_dict()
+    assert d["cov"] == [1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]
+    assert d["covDim"] == 3
+
+
+def test_scenario_data_json_shape_is_unaffected_by_the_additive_cov_fields():
+    """This task's own "byte-identical" requirement (heavy7-covariance-producer.md): a
+    covariance-free Trajectory.to_dict() must be unchanged from before this task -- proven
+    here by reproducing test_scenario_data_json_shape's exact fixture/assertions verbatim
+    (every one of them still holds) and additionally asserting the two new keys are
+    present-but-empty, never absent and never populated when no cov was ever set. This is
+    the "assert the new keys are absent/empty and no existing key changed" proof option
+    (as opposed to diffing against a `git show HEAD:altavista/model.py` snapshot) --
+    chosen because it is self-contained and does not need a second, throwaway import of
+    the pre-task module.
+    """
+    tr = Trajectory("Sat", color="#fff")
+    tr.append(100.0, [1, 2, 3, 4, 5, 6])
+    tr.append(100.5, [2, 3, 4, 5, 6, 7])
+    data = ScenarioData(name="t", spacecraft=[tr])
+    d = data.to_dict()
+    # Every pre-existing assertion from test_scenario_data_json_shape, unchanged:
+    assert d["t0"] == 100.0 and d["t1"] == 100.5
+    assert d["spacecraft"][0]["pos"] == [1, 2, 3, 2, 3, 4]
+    assert d["spacecraft"][0]["vel"] == [4, 5, 6, 5, 6, 7]
+    assert d["frame"]["name"] == "EarthMJ2000Eq"
+    assert "published" in d["meta"]
+    assert d["frames"] == []
+    assert d["stateSpaces"] == []
+    assert d["spacecraft"][0]["stateSpaceId"] == "altavista.cartesian_pos_vel_6"
+    # New, additive-only:
+    assert d["spacecraft"][0]["cov"] == []
+    assert d["spacecraft"][0]["covDim"] == 0
+
+
 def test_trajectory_to_dict_state_space_id_upgrades_with_attitude():
     """M7.1 (question 88): `Trajectory.to_dict()["stateSpaceId"]` names the plain
     6-component id when `attitude` is empty, and the 10-component attitude id when it is
