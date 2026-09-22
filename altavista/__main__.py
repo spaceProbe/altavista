@@ -47,6 +47,19 @@ def main(argv=None) -> int:
     s.add_argument("--tiles-token-path", default=None,
                     help="path to a file holding the bearer token this server presents to "
                          "the av-tiles gateway (read fresh on every proxied request)")
+    # Question 228's finding 2 (server half): configuration for GET /api/catalog/tilesets
+    # (altavista/gateway_client.py) -- a real, already-running av-gateway DataGatewayService's
+    # gRPC endpoint, plus a file holding the OIDC token this server presents to it. Read once
+    # here, as ordinary CLI flags -- never the process environment -- and passed straight
+    # through to altavista.server.serve/create_app. Mirrors --tiles-endpoint/--tiles-token-path
+    # exactly, restated for a gRPC request field (GatewayQueryRequest.caller_token) instead of
+    # an HTTP Authorization header.
+    s.add_argument("--gateway-endpoint", default=None,
+                    help="host:port of a running av-gateway DataGatewayService (enables "
+                         "GET /api/catalog/tilesets)")
+    s.add_argument("--gateway-token-path", default=None,
+                    help="path to a file holding the OIDC token this server presents to "
+                         "the av-gateway DataGatewayService (read fresh on every call)")
 
     r = sub.add_parser("run", help="run a GMAT script and publish it to the viewer")
     r.add_argument("script")
@@ -63,7 +76,8 @@ def main(argv=None) -> int:
               command_admin_endpoint=args.command_admin_endpoint,
               command_entities=args.command_entities or [],
               profiles_dir=args.profiles_dir,
-              tiles_endpoint=args.tiles_endpoint, tiles_token_path=args.tiles_token_path)
+              tiles_endpoint=args.tiles_endpoint, tiles_token_path=args.tiles_token_path,
+              gateway_endpoint=args.gateway_endpoint, gateway_token_path=args.gateway_token_path)
         return 0
     if args.cmd == "run":
         from .scenario import Scenario

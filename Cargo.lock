@@ -260,6 +260,7 @@ dependencies = [
 name = "av-jobs"
 version = "0.1.0"
 dependencies = [
+ "av-catalog",
  "av-cdm",
  "av-label",
  "av-lockstep",
