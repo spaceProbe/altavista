@@ -15,7 +15,7 @@ import { LayoutManager } from './layout/layout_manager.js';
 import {
   ICRF_PANEL_ID, RIC_PANEL_ID, GLOBE_PANEL_ID,
   RUN_PRODUCTS_PANEL_ID, MAP_PANEL_ID, CONSOLE_PANEL_ID, FEASIBILITY_PANEL_ID,
-  COMMAND_PANEL_ID,
+  COMMAND_PANEL_ID, LAYERS_PANEL_ID,
 } from './layout/default_layouts.js';
 
 const layoutManager = new LayoutManager({
@@ -40,6 +40,10 @@ const layoutManager = new LayoutManager({
     // profile-only, chooser-reachable everywhere else, exactly like FEASIBILITY_PANEL_ID
     // above.
     [COMMAND_PANEL_ID]: document.getElementById('panel-command-console'),
+    // Round 5 (index.html's #panel-layers, question 228 finding 2) -- chooser-reachable
+    // everywhere, not in any default layout, exactly like FEASIBILITY_PANEL_ID above
+    // (see LAYERS_PANEL_ID's own comment in default_layouts.js).
+    [LAYERS_PANEL_ID]: document.getElementById('panel-layers'),
   },
   errorBanner: document.getElementById('layout-error'),
   onResize: () => window.dispatchEvent(new Event('resize')), // scene.js's Viewer.resize() is wired to window 'resize' by app.js

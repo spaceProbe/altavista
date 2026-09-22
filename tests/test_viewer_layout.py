@@ -350,6 +350,73 @@ def test_ordinary_scenario_default_layout_is_unregressed_by_the_sweep_default(la
     assert names["defaultLayoutTreeForScenario.ordinaryScenarioIsByteIdenticalToAttachM264PanelsOfDefaultLayoutForScenario(noRegression)"] is True
 
 
+# --------------------------------------------------------- Round 6 (question 231)
+def test_design_profile_isolation_signal(layout_data):
+    """`isDesignProfile` mirrors `isExecutionProfile`'s own signal exactly
+    (`scenario.profileId === 'design'`), same degrade-never-guess posture for a
+    profile-less scenario or `None`.
+    """
+    names = _names(layout_data)
+    for name in (
+        "isDesignProfile.trueOnlyForProfileIdDesign",
+        "isDesignProfile.falseForADifferentRealProfileId(execution)",
+        "isDesignProfile.falseForAScenarioWithNoProfileIdAtAll",
+        "isDesignProfile.falseForNull",
+    ):
+        assert names[name] is True, f"{name} failed"
+
+
+def test_layers_panel_joins_the_execution_and_design_default_layouts(layout_data):
+    """Question 231's ratification, verbatim: "the Layers panel joins the execution
+    and design default layouts once F5.1's regression guard is updated with it." This
+    IS that update -- the guard above (`ordinaryScenarioIsByteIdenticalToAttachM264Panels
+    OfDefaultLayoutForScenario(noRegression)`) still pins the profile-less/ordinary tree
+    unchanged, because that scenario is neither execution- nor design-shaped; this test
+    asserts the Layers panel now joins the default tree exactly once for BOTH the
+    execution and design profiles, in every one of the three underlying shapes
+    (ordinary/RPO/sweep), and that the execution profile still also carries the
+    pre-existing command console exactly once alongside it. Fails against an
+    implementation that threads the panel in unconditionally (would also flip the
+    "every other profile is unaffected" assertions below), that adds it more than
+    once, that drops it for one of the three shapes, or that silently removes the
+    command console for execution.
+    """
+    names = _names(layout_data)
+    for name in (
+        "layersRound6.ordinaryDesign.sixLeavesLayersAddedExactlyOnceNoCommandConsole",
+        "layersRound6.ordinaryDesign.byteIdenticalToAttachLayersPanelOfAttachM264PanelsOfDefaultLayoutForScenario",
+        "layersRound6.rpoDesign.eightLeavesLayersAddedExactlyOnceNoCommandConsole",
+        "layersRound6.sweepDesign.fiveLeavesLayersAddedExactlyOnceNoCommandConsole",
+        "layersRound6.ordinaryExecution.sevenLeavesLayersAndCommandEachAddedExactlyOnce",
+        "layersRound6.ordinaryExecution.byteIdenticalToAttachCommandPanelOfAttachLayersPanelOfAttachM264PanelsOfDefaultLayoutForScenario",
+        "layersRound6.ordinaryExecution.commandConsoleStaysTheOutermostSplitAtItsDocumented0.78Share",
+        "layersRound6.ordinaryExecution.layersSitsJustInsideTheCommandConsoleAtItsDocumented0.82Share",
+        "layersRound6.rpoExecution.nineLeavesLayersAndCommandEachAddedExactlyOnce",
+        "layersRound6.sweepExecution.sixLeavesLayersAndCommandEachAddedExactlyOnce",
+        "layersRound6.layersStillRegisteredAndChooserReachable",
+    ):
+        assert names[name] is True, f"{name} failed"
+
+
+def test_layers_panel_default_layout_change_is_scoped_to_execution_and_design_only(layout_data):
+    """The other half of question 231's requirement, symmetric with
+    `test_ordinary_scenario_default_layout_is_unregressed_by_the_sweep_default` above:
+    a profile-less scenario, an explicit non-execution/non-design profile (analysis,
+    feasibility), and `None` must all still resolve with NO Layers leaf and the exact
+    same leaf count as before this task. Fails against an implementation that widens
+    the Layers dispatch beyond execution/design (e.g. threading it in for every
+    profile, or unconditionally).
+    """
+    names = _names(layout_data)
+    for name in (
+        "layersRound6.ordinaryNoProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)",
+        "layersRound6.ordinaryAnalysisProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)",
+        "layersRound6.ordinaryFeasibilityProfileScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)",
+        "layersRound6.nullScenarioUnaffected(stillNoLayersLeafStillFiveLeaves)",
+    ):
+        assert names[name] is True, f"{name} failed"
+
+
 def test_customized_or_persisted_layout_is_never_replaced_by_the_sweep_default(layout_data):
     """"A user who has arranged or persisted their own layout must NOT get their layout
     replaced when they select a sweep scenario" (this task's own brief, restating the

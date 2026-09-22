@@ -67,6 +67,19 @@ GET  /api/tiles/{manifest_sha256}/tiles/{level}/{x}/{y}  proxies av-tiles' own t
                                                   Content-Type passed through verbatim;
                                                   Range/If-None-Match forwarded from the
                                                   incoming request
+
+Catalog listing (question 228's finding 2, server half: "a catalog listing the viewer can
+read") -- behind the EXACT SAME credential rule as the tile gateway proxy above: the browser
+never supplies a credential (this route does not read an incoming ``Authorization`` header at
+all -- there is nothing on its own request-header allowlist, because there is nothing to
+forward), and the server attaches its own token, read fresh from ``gateway_token_path`` on
+every call (``altavista.gateway_client``, this module's third real-backend-service client
+after ``command_client``/``tiles_client``). Answers a typed, specific error -- never an empty
+``200 []`` -- when no data gateway is configured or the configured one is unreachable or
+refuses; an unconfigured gateway must never look like "there are no tile sets" to a caller.
+GET  /api/catalog/tilesets                       every tile-set manifest the caller's (verified,
+                                                  token-derived) clearance may see -- see
+                                                  ``altavista.gateway_client.list_tile_sets``
 """
 from __future__ import annotations
 
@@ -85,6 +98,7 @@ from google.protobuf.message import DecodeError
 
 from . import cdm as cdm_adapter
 from . import command_client
+from . import gateway_client
 from . import profile as profile_loader
 from . import tiles_client
 from .model import Frame, ScenarioData
@@ -220,7 +234,9 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
                 command_entities: Sequence[str] = (),
                 profiles_dir: Optional[os.PathLike] = None,
                 tiles_endpoint: Optional[str] = None,
-                tiles_token_path: Optional[os.PathLike] = None) -> FastAPI:
+                tiles_token_path: Optional[os.PathLike] = None,
+                gateway_endpoint: Optional[str] = None,
+                gateway_token_path: Optional[os.PathLike] = None) -> FastAPI:
     """``profile`` (M19.5, question 132): which ``profiles/*.yaml`` file's ``imagery:``
     section every published scenario gets stamped with (``Hub.put``) -- defaults to the
     "design" profile (altavista has no running "current profile" console yet; see
@@ -266,6 +282,19 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     serves normally, and the tiles routes themselves answer a typed 503 rather than ever
     failing this function or the app's startup -- see ``create_app()`` with no arguments at
     all in this module's own test suite for the byte-for-byte proof that nothing else changes.
+
+    ``gateway_endpoint``/``gateway_token_path`` (question 228's finding 2, server half,
+    question 199): where ``GET /api/catalog/tilesets`` reaches a real ``av-gateway``
+    ``DataGatewayService`` -- ``"host:port"`` for the gRPC service, and a file path holding
+    the OIDC token this server presents to it as ``GatewayQueryRequest.caller_token``.
+    ``gateway_token_path`` names a FILE, never a token value: the token is read from that file
+    fresh on every call (``altavista/gateway_client.py``'s own module doc), exactly
+    ``tiles_token_path``'s own "read fresh, every call" rule restated for a gRPC request field
+    instead of an HTTP header. Configuration, exactly like ``tiles_endpoint`` above -- never
+    read from the process environment and never a request parameter of any kind. Both may be
+    left at their default (``None``): every OTHER route in this app still starts and serves
+    normally, and the catalog listing route itself answers a typed, specific error (never an
+    empty ``200 []``) rather than ever failing this function or the app's startup.
     """
     app = FastAPI(title="altavista")
     hub = Hub(
@@ -276,6 +305,7 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
     command_config = command_client.CommandServiceConfig(
         grpc_endpoint=command_endpoint, admin_endpoint=command_admin_endpoint, entities=tuple(command_entities))
     tiles_config = tiles_client.TilesServiceConfig(endpoint=tiles_endpoint, token_path=tiles_token_path)
+    gateway_config = gateway_client.GatewayServiceConfig(endpoint=gateway_endpoint, token_path=gateway_token_path)
     web = Path(web_dir) if web_dir else WEB_DIR
     textures = Path(texture_dir) if texture_dir else _default_texture_dir()
     # Shared with the app.mount(...) below (question 139, M21.1): the "/" route is a
@@ -980,6 +1010,34 @@ def create_app(texture_dir: Optional[os.PathLike] = None, web_dir: Optional[os.P
             _raise_tiles_service_error(exc)
         return _tiles_proxy_response(resp)
 
+    def _raise_gateway_service_error(exc: gateway_client.GatewayServiceError) -> None:
+        """Maps `exc` through `gateway_client.gateway_service_error_to_http_status` and raises
+        the resulting `fastapi.HTTPException` -- the one place `catalog_tilesets` below turns
+        a `GatewayServiceError` (this server's own failure to reach the gateway, or the
+        gateway's own typed refusal) into an HTTP response, so it never reaches a caller
+        flattened to a generic 500 or a misleading empty list (mirrors `_raise_command_
+        service_error`/`_raise_tiles_service_error` above)."""
+        status, message = gateway_client.gateway_service_error_to_http_status(exc)
+        raise HTTPException(status, message)
+
+    @app.get("/api/catalog/tilesets")
+    async def catalog_tilesets():
+        """Every tile-set manifest the caller's clearance may see (question 228's finding 2,
+        server half). See this module's own doc, "Catalog listing": this route reads NO
+        credential off the incoming request at all (there is no `Authorization`-forwarding
+        code path here to even accidentally trigger) -- the server's own token is read fresh
+        from `gateway_token_path` on every call, entirely inside `gateway_client.list_tile_
+        sets`. An unconfigured or unreachable gateway, or a real refusal from the gateway
+        itself, answers a typed, specific `fastapi.HTTPException` (`_raise_gateway_service_
+        error`) -- never a fake empty `200 []`, which would be indistinguishable to the
+        Layers panel from "the catalog genuinely has no tile sets yet".
+        """
+        try:
+            tile_sets = gateway_client.list_tile_sets(gateway_config)
+        except gateway_client.GatewayServiceError as exc:
+            _raise_gateway_service_error(exc)
+        return {"tileSets": tile_sets}
+
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
@@ -1318,7 +1376,9 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
           command_entities: Sequence[str] = (),
           profiles_dir: Optional[os.PathLike] = None,
           tiles_endpoint: Optional[str] = None,
-          tiles_token_path: Optional[os.PathLike] = None) -> None:
+          tiles_token_path: Optional[os.PathLike] = None,
+          gateway_endpoint: Optional[str] = None,
+          gateway_token_path: Optional[os.PathLike] = None) -> None:
     """Run the viewer server (blocking). ``profile`` -- see ``create_app``'s docstring
     (M19.5, question 132). ``command_endpoint``/``command_admin_endpoint``/
     ``command_entities`` -- see ``create_app``'s docstring (R3.5a); all three passed straight
@@ -1327,7 +1387,11 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
     (``altavista/__main__.py``'s ``--profiles-dir``), never read from the process environment
     either. ``tiles_endpoint``/``tiles_token_path`` (H5b-1) -- see ``create_app``'s own doc;
     passed straight through as CLI arguments (``altavista/__main__.py``'s ``--tiles-endpoint``/
-    ``--tiles-token-path``), never read from the process environment either."""
+    ``--tiles-token-path``), never read from the process environment either.
+    ``gateway_endpoint``/``gateway_token_path`` (question 228's finding 2) -- see
+    ``create_app``'s own doc; passed straight through as CLI arguments (``altavista/
+    __main__.py``'s ``--gateway-endpoint``/``--gateway-token-path``), never read from the
+    process environment either."""
     import uvicorn
 
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO),
@@ -1335,7 +1399,9 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, texture_dir: Optional
     app = create_app(texture_dir=texture_dir, profile=profile, command_endpoint=command_endpoint,
                       command_admin_endpoint=command_admin_endpoint, command_entities=command_entities,
                       profiles_dir=profiles_dir, tiles_endpoint=tiles_endpoint,
-                      tiles_token_path=tiles_token_path)
-    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s)",
-             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>", tiles_endpoint or "<not configured>")
+                      tiles_token_path=tiles_token_path, gateway_endpoint=gateway_endpoint,
+                      gateway_token_path=gateway_token_path)
+    log.info("altavista viewer at http://%s:%d/  (textures: %s, profile: %s, command_endpoint: %s, tiles_endpoint: %s, gateway_endpoint: %s)",
+             host, port, _default_texture_dir(), profile, command_endpoint or "<not configured>", tiles_endpoint or "<not configured>",
+             gateway_endpoint or "<not configured>")
     uvicorn.run(app, host=host, port=port, log_level=log_level)

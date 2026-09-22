@@ -31,9 +31,14 @@
 #     own header comment for exactly why (macOS ships no `flock(1)` CLI, and why this uses
 #     python3's stdlib `fcntl.flock` instead of a hand-rolled alternative).
 #   - Does NOT run any migration. This script starts a bare PostGIS container -- a developer
-#     who wants the catalog schema applied runs `Migrator::apply_pending` themselves (e.g. from
-#     a small `cargo run`/test harness), the same way this script's MinIO sibling does not
-#     `ensure_bucket` on a developer's behalf either.
+#     who wants the catalog schema applied runs it themselves, with the new
+#     `av-catalog-migrate` binary (heavy round 6, task 5: `crates/av-catalog/src/bin/
+#     av-catalog-migrate.rs`; `cargo build -p av-catalog --bin av-catalog-migrate` then
+#     `target/debug/av-catalog-migrate --catalog-host 127.0.0.1 --catalog-port <the port this
+#     script printed> --catalog-user postgres --catalog-password <printed> --catalog-database
+#     <printed>` -- idempotent, prints what it applied). `scripts/heavy/README.md` step 0.5b is
+#     the copy-pasteable version of that command. This mirrors the same way this script's MinIO
+#     sibling does not `ensure_bucket` on a developer's behalf either.
 #
 # Usage: services/catalog/run-dev-catalog.sh
 # Stop it with the `docker rm -f <container id>` command this script prints at the end.
@@ -155,7 +160,9 @@ echo "  Password:     $POSTGRES_PASSWORD"
 echo "  Database:     $POSTGRES_DB"
 echo "  (SCRAM-SHA-256 auth from outside the container -- services/catalog/IMAGE_DIGEST.md's"
 echo "   own measured pg_hba.conf; \`trust\` applies only inside the container itself)"
-echo "  No schema is applied by this script -- run crate::migrate::Migrator::apply_pending"
-echo "  yourself against this connection if you want the catalog tables."
+echo "  No schema is applied by this script -- run av-catalog-migrate against this connection"
+echo "  if you want the catalog tables (cargo build -p av-catalog --bin av-catalog-migrate,"
+echo "  then target/debug/av-catalog-migrate --catalog-host 127.0.0.1 --catalog-port $HOST_PORT"
+echo "  --catalog-user $POSTGRES_USER --catalog-password $POSTGRES_PASSWORD --catalog-database $POSTGRES_DB)."
 echo "  Stop it with: docker rm -f $CONTAINER_ID"
 echo "  (labelled av.test=1 -- the next docker-gated test run on this host will also prune it)"

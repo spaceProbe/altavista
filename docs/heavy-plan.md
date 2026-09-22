@@ -1252,3 +1252,1052 @@ quiet window. It is this round's largest outstanding risk, stated here rather th
    host it cannot be.
 5. The plan is **not closed**; there is no `## Delivered` section, because 1–4 above are
    outstanding.
+
+## Status (heavy manager, 2026-09-21) — round 5
+
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `710d4ab` | Task 1: question 229's three rulings and round-4 defect 4 — the `BodyInterp.orientation` guard, `av-tiles` admin authentication through the same `av_command::oidc::verify` the main port uses, both binds through `resolve_loopback_bind_address`, `removeLayer` pinned by a check with teeth, the `av-tiles` control matrix moved off three Gaps |
+| `e710efc` | The host-wide docker-test lock made re-entrant within one process — the self-deadlock that has been wedging docker-gated testing for three teams, and the real reason `tests/test_tiles_container.py` "has never been observed green" |
+| `2f49e0b` | Task 3: the 3D Tiles overlay's content fetch routed through the one `LayerManager` (round 4's deferred decision 9), through the vendored renderer's own `fetchData` plugin hook, with the existing fixture overlay and its checks byte-identical |
+| `f65cbfb` | Task 2a: `GET /api/catalog/tilesets` behind the same credential rule as `/api/tiles/*`, a typed `av-gateway` gRPC client for the catalog selector, and the tiler registering its manifest in the catalog so a generated tile set is listable |
+| `55d52ac` | Task 2b: the Layers panel — a user selects a catalogued tile set and it is registered, fetched and budgeted on the one `LayerManager`; plus the stack-up recipe's catalog and panel steps. **Its tiles are requested but not painted — see below** |
+
+**Round 5 delivered questions 228's finding 2 in substance but not entirely: a selected
+tile set streams, but is not yet drawn. H6 was not started and the plan is NOT closed** —
+see "What remains".
+
+### Review of task 1 (inherited from the terminated predecessor manager)
+
+The predecessor dispatched task 1 and was cut off by three consecutive transient API
+errors before it could verify the work. I reviewed it from the artifacts rather than from
+any report.
+
+**The guard has a check that fails without it — verified, not assumed.** Reverting the
+`!this.quat ||` clause alone and re-running `web/js/attitude_slerp_check.mjs` fails exactly
+the two new missing-quat checks and nothing else; with the guard, 75 of 75 pass. The
+control checks (a body WITH a real quat still reproduces its recorded samples at both ends
+and slerps strictly between them) are what stop the guard from having quietly disabled real
+attitude behaviour.
+
+**The admin-auth tests exercise a real token and a real refusal, not a mock.**
+`av_command::test_support::TestIssuer` generates a fresh RSA-2048 key pair through the
+system OpenSSL (ADR-004) and mints a real RS256 compact JWS; the tests spawn a real
+`TcpListener`, send a real HTTP request over a real socket, and read real 401/403/200
+status lines with the refusal counters moving. Nothing is stubbed.
+
+**`removeLayer` is genuinely pinned.** `layers_budget_check.mjs` phase 4 measures, on a
+manager holding two registered layers: removing one clears its resident, pending and failed
+entries and only its bytes (`residentBytes` 2000 → 1000, `pendingBytes` 4000 → 2000),
+cancels its in-flight load (`cancelledCount` 0 → 1, `evictedCount` 0 → 1), leaves the second
+layer's entries and bytes untouched, is a no-op on an unregistered id, and leaves the
+manager able to admit a freshly registered layer. A `removeLayer` that only dropped the id
+from its own map passes none of that.
+
+### Defects found in review, and their root causes
+
+1. **The admin-auth suite never proved a signature was checked.** Root cause: its one
+   negative token case was malformed rather than merely untrusted, so it exercised
+   `oidc::verify`'s pre-signature parsing path only. Found by reading which refusal branch
+   each test actually reaches rather than by counting tests. Fixed in `710d4ab` with a
+   foreign-key test and an expired-token test. **Definitively root-caused.**
+2. **`target/debug/deps` at 1 026 183 entries, costing rustc 99 % of its wall clock in
+   `__getdirentries64`.** Root cause: cargo never garbage-collects `deps`, and twenty-two
+   days of multi-round building across many feature combinations accumulated a million
+   hashed artifacts; every rustc invocation re-scans the directory via
+   `-L dependency=…`. This is the real cause of rounds 3, 4 and 5's lost Rust gates.
+   **Definitively root-caused, with a controlled before/after on the same command.**
+3. **The two-slot cargo mechanism starves a polling waiter.** Root cause: `LOCK_EX |
+   LOCK_NB` in a poll loop is not a queue; a team running back-to-back jobs reclaims the
+   slot inside the poll window. Observed directly, fixed by blocking acquisition.
+   **Definitively root-caused.**
+4. **The stack-up recipe bound an admin port that, after task 1, refused every caller**,
+   with nothing in the file saying so. Root cause: a deny-by-default gate added to a
+   surface whose only operator-facing documentation predated the gate. Fixed in `710d4ab`.
+5. **Several `web/js/` sources contain a literal NUL byte** (a composite-key separator,
+   e.g. `` `${id}\x00${key}` `` in `web/js/layers/layer.js` and
+   `web/js/layers_budget_check.mjs`). Not a correctness defect — the separator choice is
+   sound, since a layer id cannot contain NUL — but `grep` and `file` classify those
+   sources as binary, so **they drop out of ordinary repo-wide `grep -rn` sweeps unless
+   `-a` is passed.** That is a reviewability hazard for exactly the kind of audit this
+   track relies on ("claimed only after grepping"). Recorded, not fixed: the fix
+   Recorded, not fixed: the fix (write the separator as a backslash-u-0000 ESCAPE
+   rather than as a raw NUL byte -- byte-identical at runtime, but the file stays
+   textual) is safe, yet it touches files outside this round's committed scope.
+   **Recommended for the lead's ruling.** Until then, anyone grepping under
+   `web/js/` must pass `grep -a` or silently miss those files. To be precise about
+   provenance: this round introduced none of them. Of the eleven files its commits touch,
+   exactly one contains a NUL, `web/js/layers_budget_check.mjs`, and it held the same three
+   at `01df602` as it does now. I mention it because it bit me directly — a heredoc
+   round-trip put a raw NUL into this very status draft while I was writing the paragraph
+   above, which would have made `heavy-plan.md` itself a file `grep` skips. Checked and
+   stripped before landing.
+
+### Review of task 3 (the 3D Tiles overlay through the manager)
+
+The worker found two real defects while building it, both by measurement rather than by
+reasoning, and both are worth the lead's attention:
+
+1. **A fetch cache keyed by URL.** This project's own fixture gives every tile node the
+   same relative `content.uri` (`"tile.glb"`), so one tile's fetch silently satisfied 42
+   unrelated tiles. It surfaced as a real diff in `web/js/layers_check.mjs`'s output
+   (`cancelledCount`, `evictedCount`, per-step `residentBytes` all moved) — the
+   "existing checks must be unchanged in outcome" constraint is what caught it. Rekeyed to
+   the local tile key, the same granularity `release(key)` uses, and pinned by a check that
+   43 keys sharing one URL still get 43 independent fetches.
+2. **Two `update()` calls per frame on one shared manager cancel each other's work.**
+   `LayerManager.update(view)` treats every registered layer's `plan(view)` as THIS tick's
+   entire wanted set, so a globe driving it and an overlay driving it each saw the other's
+   content as unwanted — cancelling in-flight loads and evicting resident entries every
+   frame. Exactly one drives it per tick now. The counterfactual is kept as a check:
+   reinstating the hazard takes the imagery layer's load count from 2 to 8 and its
+   cancellations from 0 to 8, and leaves it not resident after tick 1.
+
+**What I verified myself rather than from the report.** I re-ran
+`node web/js/tiles3d_manager_check.mjs` and reproduced every number; I ran the new
+`tests/test_viewer_tiles3d_manager.py` (10 passed, including the live headless-Chrome
+test) and `tests/test_viewer_globe_layer_manager.py`/`test_viewer_globe.py`/
+`test_viewer_layers.py` (33 passed) against the change; I confirmed the new plugin is
+imported from `./layers/tiles3d_layer.js` directly and never through the barrel, so round
+4's defect 3 (a circular import through `layers/index.js`) is not reintroduced; and I
+checked the "existing checks unchanged" claim at the code level rather than accepting it,
+by extracting the four symbols `web/js/tiles3d_check.mjs` imports from the modified
+`tiles_layer.js` at the base commit and in the working tree — `selectTiles3D`,
+`parseTileset3D`, `ecefFromRootTransform`, `enuBasisFromRootTransform`, all four
+byte-identical. That claim needed checking: the file those symbols live in changed by 254
+lines, so "unchanged in outcome" was not self-evident.
+
+**The disclosed limitation is real and I am letting it stand.** The vendored renderer's own
+traversal decides which URLs it asks for, and that is not our `selectTiles3D`. A URL our
+`plan()` does not recognise falls through to an ungated direct fetch, counted in
+`fetchDataFallbackCount` — measured 0 in every run, but not structurally impossible.
+Closing it means owning the traversal, which is the rewrite round 4 judged out of budget.
+Counted and disclosed beats quietly unbounded.
+
+### Review of task 2a (the catalog listing route and the tiler's registration)
+
+The credential rule is implemented more strongly than the tiles proxy's, and deliberately
+so: `catalog_tilesets()` takes **no request object at all**, so there is no incoming header
+for it to read, forward or be tricked by. The tiles proxy needs a header allowlist because
+it legitimately forwards `Range` and `If-None-Match`; this route has nothing to forward, so
+the safe behaviour is structural rather than maintained. The test that matters proves the
+response is byte-identical with and without a caller-supplied `Authorization`, and that the
+token the gateway actually received was always the server's own.
+
+**Verified myself rather than from the report:** `cargo tree` (0 `av-catalog` edges in
+`av-jobs`' default graph, 1 under `--features store-fixture`); `AV_SBOM_REBUILD=1` (67
+passed, so the manifest change owes no SBOM regeneration); `tests/test_catalog_tilesets_route.py`
+(21 passed); and `cargo clippy --workspace --all-targets -- -D warnings` clean with the
+change in the tree.
+
+**One thing a plain workspace clippy would have missed, and the lead should know about it
+generally.** `av-tile-fixture` declares `required-features = ["store-fixture"]`, so
+`cargo clippy --workspace --all-targets` **silently skips that binary entirely** — the new
+Rust code in it would have gone unlinted by this round's own named gate. It is clean, but
+only because it was linted explicitly with the feature enabled. Any crate in this workspace
+with `required-features` has the same hole in the standing gate.
+
+**Two gaps the worker disclosed plainly, which I am accepting rather than papering over.**
+There is no real-Postgres round trip for the registration path — `PgClient::connect` and
+`CatalogAsset::insert` are unexercised against a live container, because nothing
+docker-gated can run on this host today. And the credential-rule test drives a fake
+in-process gRPC server rather than a real `av-gateway` subprocess; that pins the Python
+side's request shape and error mapping, while `av-gateway`'s own auth and label enforcement
+stay covered by that crate's Rust tests. Both are boundaries, not full coverage, and both
+should be closed once the docker lock is free.
+
+**A rule the worker introduced on its own and argued for:** `--catalog-host` and
+`--dry-run` are now mutually exclusive, because the dry-run sink always produces an
+`AssetRef` with no provenance and `CatalogAsset::from_asset_ref` refuses that outright — so
+the combination could never have succeeded, and refusing it at parse time beats failing
+deep inside a job that already ran. I checked the underlying refusal is real and tested
+directly, not just the flag check. I am ratifying it; the lead may want to log it.
+
+### Review of task 2b (the Layers panel)
+
+**What I checked myself rather than from the report.** The panel module imports nothing at
+all, so the "panels never reach into `scene.js`/`globe.js`/`layers/`" contract holds by
+construction. `app.js` awaits `fetchManifest()` before `addLayer`, which is the ordering
+round 4's budget invariant depends on — and the live test proves it from the outside by
+recomputing `byteCostSourcesOnFreshPlan` from a fresh `plan()` and requiring exactly
+`["manifest"]`, which the fallback-estimate path could not produce. `app.js` imports the
+`layers/` barrel; round 4's defect 3 was a cycle through that barrel, so I checked
+(`imagery_layer.js` → `globe.js`, and nothing under `layers/` imports `app.js`: no cycle)
+and confirmed it in a real browser with zero page exceptions. 50 node assertions pass, the
+panel's own pytest passes, and the wider viewer suite is 70 passed with it in the tree —
+including `tests/test_viewer_layout.py`, the guard the panel deliberately avoided
+disturbing.
+
+**The stubbing in the live test is cut in the right place.** A real `grpc.server` speaking
+the real `DataGatewayService` with real `CatalogRecord`s, and a real HTTP server serving a
+real `TileSetManifest` with real tile bytes and correct ETags. Nothing in `server.py`,
+`gateway_client.py`, `tiles_client.py` or any `web/js/layers/` module is patched. The
+credential rule is proved end to end: the token the fake gateway actually received is the
+server's own, not anything the browser could supply.
+
+### The one thing round 5 does NOT deliver: a selected tile set is streamed, not drawn
+
+This is the most important paragraph in this status, so it is not buried at the end.
+
+Question 228's decision asks for "a catalogued tile set … selectable from a panel", and
+this round's brief asked for headless proof that "a selected tile set's tiles are requested
+and drawn". **Requested is delivered and proved. Drawn, in the literal pixel sense, is
+not.**
+
+What genuinely works, measured in a real browser against real (wire-protocol) backends: the
+panel lists what the gateway's catalog selector returns, a toggle registers a real
+`GatewayImageryLayerAdapter` on the one shared `LayerManager` under a stable
+manifest-derived id, `fetchManifest()` is awaited before admission (proved by
+`byteCostSourcesOnFreshPlan == ["manifest"]` from a fresh `plan()`), **two real tile GETs
+arrive at the tile server** for the selected set, the bytes are budgeted and counted
+(`resident 2, pending 0`; 526 336 against 67 108 864; zero soft violations), and toggling
+off releases them.
+
+What does not happen: those tiles are not painted. `GlobeLayer` binds a mesh's
+`material.map` from `getResidentPayload(globalKeyFor(this.imageryLayerId, k))` — hard-wired
+to its own `'imagery'` adapter id — so a layer registered under
+`gateway-tileset:<sha>` can never have its payload reach a mesh. I verified this in
+`web/js/globe.js` myself rather than taking the worker's word for it. The globe's own two
+meshes do still have textures bound, from the default adapter, unaffected.
+
+The worker declined to add that seam and was right to. It is a `globe.js` change in the
+area this round already found to be delicate, and it needs a decision that is the lead's,
+not a worker's: **does a selected tile set REPLACE the globe's default imagery, or
+composite over it, and what happens with two tile sets toggled on at once?** Round 4
+refused to fake the overlay wiring for the same kind of reason. **I am recommending this as
+round 6's first task, with that question answered first.**
+
+### One usability defect in the Layers panel, found by driving it rather than by reading it
+
+`web/js/app.js` re-renders the panel from the animation loop, throttled to every 500 ms so
+the resident-bytes readout stays live. The panel contract is teardown-and-rebuild
+(`container.innerHTML = ''`), so **the entire panel DOM is destroyed and recreated twice a
+second, including the buttons a user has to click.**
+
+I hit this directly: two clicks on `Refresh catalog` failed with "ref is stale (element
+removed)" before a coordinate click landed. A human will experience it as a click that
+occasionally does nothing, and as losing text selection or focus inside the panel twice a
+second. It is not a correctness bug — the throttle is deliberate and documented, and the
+500 ms figure is a reasonable choice for a live number — but rebuilding a list of
+interactive controls at that cadence to keep two numbers fresh is the wrong trade.
+
+Not fixed this round, and recorded rather than quietly accepted. The obvious fix is to
+split the tick-driven update from the structural one: let the animation loop update only
+the budget section's text nodes in place, and rebuild the tile-set list only when the
+catalog or a layer's state actually changes. **Recommended for the lead's ruling**, since
+it touches the panel contract every other panel in this codebase also follows.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **I killed the predecessor's leftover pytest rather than waiting for it.** It had run 55
+   minutes with 0.53 s of CPU. `sample` showed it blocked in `flock` on
+   `~/.altavista/locks/docker-tests.lock`, held by the verify team's docker suite in
+   `/Users/probe/code/AltaVista-verify` (1 h 28 m and counting at that point). Root cause is
+   **correct behaviour, not a defect**: `tests/test_viewer_tiles_route.py` imports
+   `tests/heavy_stack.py`, which stands up the real docker stack and therefore rightly takes
+   question 207's host-wide lock. Leaving it queued would have fired a docker stack-up
+   unattended later, so I cleared it. Its edits were already in the tree and are in
+   `710d4ab`.
+2. **The cargo-slot waiter must block, not poll** — see "The cargo-slot mechanism" below.
+   Recorded here because the native-dynamics team owns the real script.
+3. **I moved this worktree's `target/debug` aside rather than deleting it**, and did not
+   touch the other worktrees' equally bloated ones, which are not mine. See "The Rust gate"
+   above; the stale directory is left for the user to remove at a quiet moment.
+4. **The predecessor's admin-auth suite needed a signature test, and I added one rather
+   than accepting the suite as it stood.** Its only invalid-token case was the malformed
+   string `"not.a.real.token"`, which `oidc::verify` rejects on segment-count and base64
+   grounds *before* signature verification runs. Nothing in the suite would have failed if
+   the route had been wired to a verifier that never checked a signature. The added test
+   mints a structurally perfect token with the granting group from a second, independent
+   RSA-2048 key; a second added test expires a correctly signed token against the injected
+   clock, which also proves the injected reading is consulted rather than passed and
+   dropped.
+5. **The stack-up recipe's `av-tiles` invocation gained `--admin-role`.** Task 1 made the
+   admin surface deny-by-default, which silently turned the recipe's `--admin-bind` port
+   into one that binds and refuses everyone. The group is deliberately NOT the
+   `tile-readers` group step 1's token carries — an admin credential and a tile-clearance
+   credential are never the same token, the separation `tests/heavy_stack.py` already keeps.
+   The added block is marked as derived from the implementation rather than pasted from a
+   live run, which is the standard the rest of that file holds itself to.
+6. **The 3D Tiles overlay is gated at the vendored renderer's own `fetchData` hook, not by
+   taking over its traversal.** That hook is real and public
+   (`registerPlugin`/`invokeOnePlugin`, read out of the pinned vendored source), it carries
+   a per-tile `AbortSignal`, and it makes the manager the thing that authorises a load
+   while the renderer consumes exactly what the manager loaded — no duplicate fetch, which
+   is what round 4 refused to write. Owning the traversal as well was judged out of budget
+   again; the residual is counted in `fetchDataFallbackCount` rather than left unbounded.
+7. **Only one caller drives `layerManager.update()` per tick.** With a globe and an overlay
+   on one shared manager, two independent drivers make each see the other's content as
+   unwanted and cancel and evict it every frame. The globe's view already carries
+   everything the overlay's adapter needs, so the overlay stands down when a globe is
+   present. This one is worth the lead's attention beyond this task: it is a property of
+   `LayerManager`'s contract, and **any third layer registered on that manager by a future
+   task inherits the same constraint.**
+8. **`caller_clearance` is sent empty on every catalog query.** The gateway derives
+   clearance from the verified token and refuses a non-empty value that disagrees; sending
+   one could only be redundant or a refusal.
+9. **An unconfigured gateway is a typed error, never an empty list.** "No gateway is wired
+   up" must not render to a user as "this deployment has no tile sets". A gateway that is
+   up but has no catalog tier is a second, separately distinguished case.
+10. **`av-catalog` rides the existing `store-fixture` feature rather than a new one**, so
+    catalog registration lives in `av-tile-fixture` and never in the runner —
+    `crates/av-jobs/Cargo.toml` says in as many words that the runner must not depend on
+    the catalog, and `cargo tree` confirms it still does not.
+11. **The Layers panel is chooser-reachable in every layout rather than threaded into the
+    default tree**, and I accepted the worker's reasoning rather than overriding it.
+    Threading it into `defaultLayoutTreeForScenario` changes that function's output for
+    EVERY scenario, and `tests/test_viewer_layout.py` plus
+    `web/js/layout/layout_tree_check.mjs` pin the ordinary-scenario tree byte-identically
+    as a named regression guard for a DIFFERENT feature (F5.1's sweep default) — neither
+    file being this task's to modify. It follows `FEASIBILITY_PANEL_ID`'s existing
+    precedent exactly. **The practical consequence for the lead's drive is one extra
+    click**: open the pane chooser and pick "Layers". If the lead wants it visible by
+    default, that is a deliberate change to a pinned default tree and should be its own
+    task with the guard updated knowingly.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `buf lint proto` | **clean, exit 0** |
+| `buf breaking proto` against develop's tree | **clean, exit 0** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0, 20.13 s** |
+| `cargo clippy -p av-tiles --all-targets -- -D warnings` | **clean, exit 0, 11.49 s** |
+| `cargo test -p av-tiles` | **59 + 8 passed, 0 failed, exit 0, 29 s from cold** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **148 binaries, 1482 passed, 0 failed, 4 ignored**, exit 0, **456 s** — with 3 visible `SKIPPED` lines (question 212). See "The wedge cleared" below |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0 — with exactly the six expected spoore wildcard warnings (2 for `spoore-models`, 4 for `spoore-tree`) and three duplicate-crate warnings (`syn`, `tower`, `windows-sys`) |
+| `AV_SBOM_REBUILD=1 pytest tests/test_sbom.py` | **67 passed, 0 skipped, 0 failed**, 35.75 s — see "The SBOM question" below |
+| `node` checks at the final head | **8 of 8 exit 0** — `layers_check`, `layers_budget_check`, `globe_lod_check`, `tiles3d_check`, `gateway_imagery_layer_check`, `attitude_slerp_check`, plus the new `tiles3d_manager_check` and `layers_panel_check` — and `layout/layout_tree_check` exit 0. `tiles3d_check`'s output hashes to `911eeeef…` at the base and at the final head, so the "unchanged in outcome" constraint holds at the output level as well as the code level |
+| Python, the round's own surface (10 files, no docker) | **143 passed, 0 failed** — the viewer, panel, catalog-route, tiles3d-manager, globe-layer-manager, layout, jitter and docker-lock suites |
+| `cargo test --workspace --exclude av-kernel --exclude av-lockstep --lib --bins --no-fail-fast` | **38 binaries, 1083 passed, 0 failed, 0 ignored**, exit 0 |
+| `.venv/bin/python -m pytest -q -rs` | **857 passed, 11 failed, 18 skipped**, 497 s — every skip visible with its reason (question 212). All 11 failures attributed below; **9 are mine and are one command from green, 2 are not mine** |
+
+**Why two gates are blocked, and by what.** Not by anything in this tree. A `pytest` run
+of `tests/test_tiles_container.py` in `/Users/probe/code/AltaVista-verify` self-deadlocked
+on question 207's host-wide docker lock (defect 6 above) and has held it for over two
+hours with 1.30 s of CPU. Every docker-gated test on this host queues behind it:
+
+- `cargo test --workspace` reaches `crates/av-catalog/tests/catalog_postgis.rs`, correctly
+  announces `WAITING for the docker-test lock`, and stops there. One result line
+  (83 passed) came out before it blocked.
+- **`cargo test -p av-tiles -p av-jobs -p av-catalog` cannot complete either**, for the
+  same reason and the same target — worth flagging because it is named verbatim in this
+  round's gate list. Everything in it except that one docker-gated target was run and is
+  green (see the table).
+- `crates/av-lockstep`'s own lib tests take the real lock and block the same way.
+- `.venv/bin/python -m pytest -q -rs` queues on it identically, and does so from an
+  easily-missed direction: `pyproject.toml`'s `testpaths` is `["tests", "services/cfs/tests"]`,
+  and the cFS tests are docker-gated, so excluding only the docker-gated files under
+  `tests/` is not enough. Measured: a run so filtered still blocked in `flock` at about 70 %,
+  which is exactly where `services/cfs/tests` begins.
+- The native-dynamics team's `drm_attitude_control_cfs` is queued behind it too, with
+  0.03 s of CPU in 36 minutes.
+
+Question 212's design is working exactly as intended — a docker-gated test runs for real
+or skips visibly, and there is deliberately no flag to skip one that *can* run — so there
+is no honest way to route around this. What I could measure, I measured:
+`cargo test --workspace --exclude av-kernel --lib --bins --no-fail-fast` (which excludes
+the docker-gated integration targets) reached **22 test binaries, 667 passed, 0 failed, 0
+ignored** before hitting `av-lockstep`'s own lock-taking lib tests.
+
+**I did not kill the wedged process.** It is another team's run, `AltaVista-verify` is
+explicitly outside my worktree, and destroying it is the lead's call, not mine. It is
+recorded here with its PID and the evidence instead. Commit `e710efc` prevents a recurrence.
+
+### The wedge cleared, and both blocked gates then ran in full
+
+The wedged process exited on its own after about two and three-quarter hours (not by my
+hand). I re-ran both blocked gates immediately rather than leave the round's headline
+evidence missing, and **both completed for the first time in three rounds**:
+
+- **`cargo test --workspace --exclude av-kernel --no-fail-fast`: 148 binaries, 1482 passed,
+  0 failed, 4 ignored, exit 0, in 456 seconds.** Round 4 ran this for fifty-five minutes and
+  never reached a result line; the lead's own clone gate took about ninety minutes. Three
+  `SKIPPED` lines, each visible with its reason. The docker-gated targets — including
+  `crates/av-catalog/tests/catalog_postgis.rs`, which had queued forever earlier in this
+  same round — ran for real and passed, and the lock correctly serialised them against each
+  other along the way.
+- **`.venv/bin/python -m pytest -q -rs`: 857 passed, 11 failed, 18 skipped, in 497 seconds.**
+  Every skip is an opt-in gate printing its own reason. The 11 failures are attributed
+  individually below; none is a defect in this round's code, and I checked rather than
+  assumed.
+
+That the full docker-gated suite runs at all on this host is itself new. It needed three
+things to line up: the user's volume prune, the `deps` directory fixed, and the lock
+deadlock gone.
+
+### The 11 Python failures, each attributed
+
+**Nine are mine, and all nine are one command from green.** They are two separate symptoms
+of the same cause — committing changes under a generated compliance artifact:
+
+- 2 in `tests/test_evidence_bundle.py`: the bundle hash moved because `710d4ab` rewrote six
+  rows of `docs/compliance/av-tiles/control-matrix.md`. Regenerated value measured:
+  `4e1e41ee8a1a9227d8df6d2bc224570c4de2e1803b86fe6ac0681b86e8ff8d98`.
+- 7 in `tests/test_sbom.py`: `test_the_epoch_is_never_wall_clock` for each of the six Rust
+  components, plus `test_all_six_rust_components_share_exactly_one_epoch_from_git`. The
+  committed SBOMs record `2026-09-18T15:44:03Z`; git's committer date for `RUST_EPOCH_PATHS`
+  is now `2026-09-22T03:06:32Z`, because `f65cbfb` committed Rust changes. Worth noting for
+  the standing gate: **any commit touching Rust moves this epoch, so these seven fail on
+  every round that changes Rust until the SBOMs are regenerated.** They passed earlier in
+  this same round, before `f65cbfb` landed — `AV_SBOM_REBUILD=1` was 67 passed then.
+
+Both are fixed by the one documented command, which also has its own test
+(`tests/test_regenerate_compliance.py`): `.venv/bin/python scripts/kit/regenerate_compliance.py`.
+**I did not run it**, because this round added no workspace member and my instructions
+restrict generated compliance documents to that case. Round 4 ended identically and the lead
+regenerated them (`7163149`).
+
+**Two are not mine:**
+
+- `services/cfs/tests/test_image_digest.py::test_image_digest_matches_recorded_value` — the
+  cFS image's digest against its recorded value. This round never touched `services/cfs`,
+  and `develop`'s own recent history is a run of re-pinning commits after repeated image
+  evictions ("Re-pin the four images after the ninth eviction"). This is that story
+  continuing, not this round's work.
+- `tests/test_viewer_layers_stream.py::test_eviction_and_cancellation_both_actually_happened`
+  — `evictedCount == 0`. **I root-caused this rather than waving at it.** The test drove a
+  real stack for real: 13 765 frames, `maxFrameMs` 2.346, a real manifest
+  (`f1f700b4…`). It is not a regression: this round left `web/js/layers/layer.js`,
+  `gateway_imagery_layer.js` and `imagery_layer.js` **byte-identical to the base commit** —
+  the only files it touched under `web/js/layers/` are `index.js` (one barrel export line)
+  and `tiles3d_layer.js` (the 3D Tiles adapter, which this test does not exercise). What
+  the failure actually means is what the test's own message says: the streaming proof's
+  tile set never approached `MEMORY_BUDGET_BYTES`, so its "budget respected" result would
+  have been true for the wrong reason. **The test is right and the proof's shape is wrong** —
+  it needs a tile set large enough, or a budget small enough, to force eviction. It has
+  almost certainly never run before, since docker-gated tests have been unrunnable here for
+  three rounds. **Recommended as a real item for the lead**, not a flake.
+
+### The Rust gate: three rounds of "the host is slow" root-caused, definitively
+
+**`target/debug/deps` in this worktree held 1 026 183 entries. One directory, over a
+million files.** The main repo's is the same shape (1 092 950). This is the cause of
+rounds 3, 4 and 5's lost Rust gates, and it is not memory, not CPU, and not the
+two-cargo-job rule.
+
+How it was found, rather than guessed. `cargo test -p av-tiles` sat at 0.22 s of CPU over
+7.5 minutes. Its two `rustc` children had 5.15 s and 3.87 s of CPU after 8 minutes, while
+the load average was **2.48 on 12 cores** — a starved process on an idle machine, which is
+a contradiction that has to be explained rather than absorbed. `sample` on the parent
+showed it in `poll`, waiting on its children. `sample` on a child showed the answer:
+
+```
+__getdirentries64  (in libsystem_kernel.dylib)        2227      (of ~2250 samples)
+```
+
+**99 % of rustc's wall clock was spent enumerating a directory**, not compiling. rustc is
+passed `-L dependency=target/debug/deps` and scans it on every invocation; at a million
+entries on APFS that scan costs minutes, and it is paid again by every single rustc unit.
+`ls -U target/debug/deps | wc -l` did not itself complete inside 120 seconds — the measuring
+command hitting the same wall is corroboration, not an inconvenience.
+
+This retro-explains, exactly, what previous rounds recorded as unexplained host slowness:
+round 4's clippy emitting 20 `Compiling` lines and zero diagnostics in seventy minutes,
+round 4's workspace test producing no result line in fifty-five minutes, and round 3's
+"cold Rust build timeouts". None of those runs were starved of RAM or cores. They were
+scanning a million files per compilation unit.
+
+**What I did.** In THIS worktree only, `mv target/debug target/debug.stale-1M-deps` (an
+instant rename; `target/debug` itself has only 80 direct entries) and re-ran the identical
+command. I did not touch `/Users/probe/code/AltaVista` or `/Users/probe/code/AltaVista-edge`,
+which are not mine, and I did not delete the stale directory — removing a million files
+would contend for I/O with the rebuild that immediately follows it, and disk is not scarce
+(950 GB free). **It is left in place for the user to delete at a quiet moment:**
+`rm -rf /Users/probe/code/AltaVista-aiplane/target/debug.stale-1M-deps`.
+
+**The before/after, same command, same machine, minutes apart — this is the proof.**
+
+| | bloated `deps` | after `mv target/debug` aside |
+| --- | --- | --- |
+| `target/debug/deps` entries | **1 026 183** | **1 883** |
+| `cargo test -p av-tiles` | **8 min, one `Compiling` line, no result; killed** | **29 s wall clock, exit 0** |
+| what was built | essentially nothing | **144 rlibs, 979 MB, a full COLD dependency tree** (nalgebra, tonic, openssl, axum, hyper, …) |
+| test result | never reached | **59 passed, 8 passed, 0 failed** |
+| `cargo clippy -p av-tiles --all-targets -- -D warnings` | not attempted | **clean, exit 0, 11.49 s** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | round 4: **70 min, 20 `Compiling` lines, zero diagnostics, abandoned** | **clean, exit 0, 20.13 s** |
+
+A cold rebuild of the entire dependency tree now finishes in a fraction of the time a
+single incremental unit failed to finish in before. The 59 is also the task-1 evidence:
+the predecessor measured 57, and my two added tests make exactly 59.
+
+**It is still costing the other team, live, as I write this.** Late in the round both
+host-wide cargo slots were held by `/Users/probe/code/AltaVista-edge`:
+`cargo rustc -p av-orbital --lib` at **20 min 45 s elapsed on 0.18 s of CPU**, and
+`cargo check -p av-kernel` at **10 min 20 s on 0.10 s**. Same signature, same cause, their
+`target/debug/deps` uncleaned. Because the two slots are host-wide, their starvation
+becomes everyone's queue: my own follow-up clippy sat behind them and I cancelled it as
+redundant rather than wait. **Cleaning their target directory is worth more to that team's
+throughput than any scheduling change.**
+
+**What the lead should do with this.** Every worktree on this host is affected, including
+the lead's own clone (whose gate "runs in about twenty-five minutes alone" — that is the
+figure with a bloated `deps`, so a clean one should be faster still). Cargo never garbage-
+collects `deps`; twenty-two days of continuous multi-round building across many feature
+combinations is enough to accumulate this. A periodic `cargo clean`, or at minimum a check
+on `deps` entry count in the gate, belongs in the standing rules. **I recommend this become
+a question in `docs/open-questions.md` — it has cost this track three rounds of Rust
+evidence.**
+
+### The host, measured this round — and why round 4's manager and the lead disagreed
+
+Question 229 recorded the lead's measurement ("64 GB of RAM with 78 percent free, so memory
+is not the constraint the manager reported") against round 4's manager's ("swap 6 818 MB of
+8 192 MB with ~720 MB free RAM"). **Both numbers were true of the same machine.** Measured
+here, in one sitting:
+
+| | |
+| --- | --- |
+| `memory_pressure -Q` free percentage | **79 %** — the lead's figure, reproduced |
+| `vm_stat` pages free | **4 649 pages × 16 KiB = 74 MB** genuinely free |
+| `vm_stat` pages inactive + speculative | 1 648 890 pages ≈ **26 GB**, reclaimable |
+| `sysctl vm.swapusage` | **6 690 MB of 8 192 MB used, 1 502 MB free** |
+| cumulative swapouts / swapins | 3 918 951 / 1 711 938 |
+| load average, 12 CPUs | **2.48** — the machine is NOT CPU-bound |
+
+`memory_pressure`'s "free percentage" counts reclaimable (inactive, speculative,
+purgeable) pages as free; `vm_stat`'s "pages free" does not. That single definitional
+difference is the whole disagreement. Neither manager mis-measured.
+
+**What that means for the Rust gate, measured not inferred.** While `cargo test -p
+av-tiles` ran, its two `rustc` units had accumulated **3.76 s and 2.87 s of CPU over 6
+minutes of wall clock** with a **load average of 2.48 on 12 cores**. A starved-for-CPU
+process on an idle machine is a contradiction; the signature is page-fault stalling against
+6.7 GB of swap with 74 MB free, not contention for cores. Round 4's diagnosis was closer to
+the mechanism than question 229 credits, though its attribution (the Colima VM at 14.3 GB
+RSS) does not hold today: `limactl` is at **100 MB** RSS this round, and the largest
+consumers are two WebKit content processes (1.60 GB and 1.14 GB) and a macOS
+`installd` at 1.02 GB and 25.6 % CPU — background work of the user's machine, not of either
+track.
+
+**Consequence the lead should plan around:** the two-cargo-slot rule (question 229) bounds
+concurrency but cannot make a swapped host fast. The Rust gate on this box is slow for a
+reason no scheduling rule fixes.
+
+### The cargo-slot mechanism: one defect, found by using it
+
+`scripts/dev/cargo-slot` does not exist in this worktree yet — it is on the native-dynamics
+team's round-4 list — so I wrote a local stand-in against the same two lock files under
+`$HOME/.altavista/locks/`. My first version polled with `LOCK_EX | LOCK_NB` every 15
+seconds. **It starved.** Measured: the other worktree's `cargo test -p av-kernel
+--no-default-features` exited, and its replacement (`cargo test -p av-run`) took the freed
+slot inside my poll window; my waiter lost the race repeatedly and never acquired. The fix
+is to **block**, not poll: two threads each take a blocking `LOCK_EX` on one slot, the first
+to be granted wins and the other releases immediately. `flock` is FIFO-fair per file, so
+this queues honestly. It acquired on the first attempt after the change.
+
+**For the native-dynamics team, who own the real script:** a non-blocking poll loop is not a
+fair queue and will starve a team that runs one job against a team that runs many
+back-to-back. The mechanism question 229 asks for needs blocking acquisition.
+
+### My own browser drive of the Layers panel
+
+I drove it myself, in a real browser, as a user would — not through a test harness. Viewer
+server on `127.0.0.1:18099` with **no** `--gateway-endpoint`, which is the configuration a
+lead will hit first if they start the viewer before the gateway.
+
+What a user sees, in order. There is no Layers pane in the default layout (decision 11), so
+the first action is the pane chooser: pick "Layers" from any pane's "Swap panel…" and the
+panel appears. It shows **CATALOGUED TILE SETS** with a `Refresh catalog` button and
+"Tile set catalog not loaded yet — click 'Refresh catalog' to fetch it", and **STREAMING
+BUDGET** reading `resident / budget  0 B / 64.0 MB` and `deferred requests  0`. It does not
+fetch at boot, which is right: a panel that silently hammers an unconfigured backend on
+every page load is worse than one that waits to be asked.
+
+Clicking `Refresh catalog` renders, in red:
+
+> Cannot load the tile set catalog: (503) no data gateway is configured for this viewer
+> server (pass `--gateway-endpoint`/`--gateway-token-path` to `python -m altavista serve`)
+
+That is the server's own message, carried through verbatim with its status code — not a
+generic "failed", and emphatically not an empty list that would read as "this deployment
+has no tile sets". The requirement that "not configured" must never render as "no tile
+sets" is met end to end, from `GatewayNotConfiguredError` through the route's 503 to the
+red line a user actually reads. Browser console: **no JavaScript exceptions**, only the
+expected 503 network log that any failed fetch produces.
+
+**What this drive could NOT cover, and why.** Selecting a real tile set and seeing tiles
+drawn needs a real `av-gateway` and a real catalogued tile set, which needs
+`scripts/heavy/README.md`'s step 0, which starts a MinIO container — and nothing
+docker-gated can run on this host while the lock is wedged. **The half of the feature a
+user most cares about is therefore proved by the headless checks and not yet by my own
+eyes.** I am saying so rather than implying a fuller drive than I did.
+
+### The SBOM question, answered by measurement rather than by argument
+
+Round 4 could say "no SBOM regeneration is owed" cheaply, because no Rust source and no
+Cargo manifest changed. This round **a Cargo manifest did change**: `av-jobs` gained
+`av-catalog` as an optional dependency, and `Cargo.lock` gained exactly one line for it.
+Questions 220 and 224 make that worth checking rather than asserting.
+
+`tests/test_sbom.py` carries a deep check that the default suite skips: with
+`AV_SBOM_REBUILD=1` it runs `cargo auditable build --offline` for all six Rust components
+and requires each regenerated SBOM to be **byte-identical** to the committed one. It has
+not been runnable on this host in previous rounds. It is now, and it ran: **67 passed, 0
+skipped, 0 failed, 35.75 s.**
+
+So **no SBOM regeneration is owed**, and the reason is structural rather than lucky: the
+new dependency sits behind the `store-fixture` feature, and the SBOMs are built without
+it, so it is absent from every component's dependency graph as shipped. Verified
+independently with `cargo tree`: `av-catalog` appears **0** times in `av-jobs`' default
+edges and **1** time under `--features store-fixture`. The H1 rule that no hot-path crate
+depends on the store or catalog is intact.
+
+### The evidence bundle: two failures I caused, deliberately left for the lead
+
+`tests/test_evidence_bundle.py` has two failures, and they are mine:
+
+```
+regenerated bundle_sha256='4e1e41ee8a1a9227d8df6d2bc224570c4de2e1803b86fe6ac0681b86e8ff8d98'
+does not match docs/compliance/BUNDLE.md's recorded
+'e116b9822f73a8a6d2a5efac37c139895fb82760a9330b0607754c1ec5e88855'
+-- run the documented command and update BUNDLE.md
+```
+
+Cause, by construction rather than by guess: the evidence bundle hashes every
+`docs/compliance/*/control-matrix.md`, and `710d4ab` rewrote six rows of
+`docs/compliance/av-tiles/control-matrix.md` under question 229's rulings. `BUNDLE.md`'s
+own history table already records this exact scenario as routine maintenance — its
+`bceec44` row reads "`bundle_sha256` moved with no SBOM byte changed — some other
+evidence-dependent input (e.g. a control matrix) changed".
+
+**I did not regenerate it, and that is a deliberate choice, not an oversight.** My
+instructions for this round are explicit: do not touch the generated compliance documents
+unless a workspace member is added, in which case run
+`scripts/kit/regenerate_compliance.py`. I added no workspace member. Round 4 ended the same
+way and the lead regenerated it (`7163149`). So rather than take a step I was told not to
+take, here is everything needed to make it a few seconds' work:
+
+```sh
+.venv/bin/python scripts/kit/regenerate_compliance.py
+```
+
+and the value it will record is `4e1e41ee8a1a9227d8df6d2bc224570c4de2e1803b86fe6ac0681b86e8ff8d98`,
+measured here. Nothing else in the suite depends on it.
+
+### A gap in the drive path that nobody had noticed: no way to apply the catalog schema
+
+The updated recipe surfaced something real. Registering a tile set needs a PostGIS catalog
+with the schema applied, and **there is no way to apply it outside a test.**
+`av_catalog::migrate::Migrator::apply_pending` is a library function, and the only callers
+in the whole workspace are `crates/av-catalog/tests/catalog_postgis.rs` and
+`crates/av-gateway/tests/catalog_selector.rs` — both of which start and own their own
+container. `services/catalog/run-dev-catalog.sh` starts a container and its own header says
+as much: a developer who wants the schema applied "runs `Migrator::apply_pending` themselves,
+e.g. from a small cargo run/test harness". No such harness exists. I checked by grep rather
+than taking the comment's word for it.
+
+So the lead's drive has a missing rung: step 0.5b cannot be performed as written by anyone
+who does not first write a small Rust program. **That is worth a task of its own** — a tiny
+`av-catalog-migrate` binary, or a documented `cargo run --example`, would close it. It is
+recorded here rather than improvised at the end of a round.
+
+### What remains
+
+0. **A selected tile set is not drawn** (see the dedicated section above) — round 6's first
+   task, once the lead answers whether it replaces or composites with the default imagery.
+   Closely related: **H6 (`web/js/entities/`) was not started for the second round running**
+   — covariance ellipsoids, keep-out volumes, glTF models with attitude, instanced markers
+   and trails, and the RIC jitter test at a ten-metre RPO range (question 46). I ran out of
+   round before it, and recorded that rather than starting it badly; its brief is written
+   and ready at `scratchpad/brief-task4.md` if the lead wants it dispatched first next
+   round. **The plan is therefore NOT closed and there is no `## Delivered` section**, since
+   H6 and the drawing half are outstanding.
+1. **Regenerate the compliance documents.** Nine of the eleven Python failures are the
+   evidence bundle's hash and the six Rust SBOM epochs, both moved by this round's own
+   commits. One command closes all nine:
+   `.venv/bin/python scripts/kit/regenerate_compliance.py`. I left it for the lead under the
+   round's own rule about generated compliance documents. **The wedge itself is gone** — the
+   process exited on its own and both blocked gates then ran in full, so nothing is waiting
+   on it any more, including the lead's drive.
+2. **`target/debug.stale-1M-deps` should be deleted** at a quiet moment, and the other
+   worktrees' equally bloated `target/debug/deps` cleaned by their owners. The main repo's
+   was measured at 1 092 950 entries.
+3. **The streaming proof does not stress its own budget.**
+   `tests/test_viewer_layers_stream.py::test_eviction_and_cancellation_both_actually_happened`
+   fails with `evictedCount == 0` against a real 13 765-frame run. Not a regression — the
+   whole path is byte-identical to the base commit — but the test is correct that a zero
+   there makes its "budget respected" result meaningless. The proof needs a bigger tile set
+   or a smaller budget.
+4. **The cFS image digest no longer matches its recorded value**
+   (`services/cfs/tests/test_image_digest.py`). Not this round's work and not this track's
+   file; it is the re-pinning story `develop`'s recent history already tells, now visible
+   again because docker-gated tests can finally run.
+5. **`tests/test_tiles_container.py` — round 4's item 4 — still has not been observed green,
+   and now there is a THIRD reason.** I ran it directly rather than inferring anything from
+   its absence among the failures, and it **skipped**, visibly and precisely:
+
+   > image `av-tiles:local` is present locally but its id
+   > `sha256:ed91784131e4…` does not match the digest `sha256:e20f1c36b39d…` recorded in
+   > `services/tiles/IMAGE_DIGEST.md` (question 212(a): a test trusts an image only after
+   > comparing it to its recorded digest). Rebuild with `services/tiles/build-image.sh`.
+
+   So the two causes that hid it before — Colima evicting the image, and the lock deadlock —
+   are both genuinely closed, and a third was underneath them: the image on this host is
+   stale against its recorded digest. Question 212(a) is doing exactly its job here. Fixing
+   it is `services/tiles/build-image.sh` plus re-recording the digest, which is the same
+   re-pinning chore item 4 describes for cFS. **I did not rebuild it**: it is an image-digest
+   record, the same class of artifact as the compliance documents, and the round was already
+   over.
+
+## Status (heavy manager, 2026-09-22) — round 6
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `f1d735b` | Task 7: `required-features` binaries linted explicitly in the gate (question 231) — discovery from `cargo metadata`, never a named crate |
+| `eacd34e` | Task 3: the Layers panel joins the execution and design default layouts, with F5.1's guard updated in the same change (question 231) |
+| `2321e7f` | Task 4: the Layers panel repaints only on state change — the budget numbers patched in place, the tile-set list rebuilt only when its state moves (question 231) |
+| `81c3b38` | Task 8: **H6, the entity module `web/js/entities/`** — covariance ellipsoids, keep-out volumes, glTF with attitude, instanced markers and trails on the one budget, and the RIC jitter bound at a ten-metre RPO range (question 46) |
+| `8e4d335` | Task 5: `av-catalog-migrate` — `Migrator::apply_pending` as a command, and the drive path round-tripped for real |
+| `16efe57` | Task 1: **a selected tile set is drawn** — `GlobeLayer` binds from whichever imagery layer is topmost for that tile (question 231's replace-or-composite ruling) |
+| `b4bf890` | Task 6: image provenance by commit for the tiles, proposer and edge-plugin images (question 232) |
+| `3894ef6` | Task 2: the streaming proof's eviction shape — two budgets, two real runs, the round-5 carried failure closed |
+
+**All eight tasks in the round's brief are delivered.** The two things question 231 and
+question 232 opened are closed: a selected tile set is drawn, and an image is trusted only
+when its recorded commit still agrees with the branch. H6 has landed after four rounds —
+but as a module with proofs, **not** as a viewer feature; see the Delivered section for
+exactly what that does and does not mean.
+
+### Task 1: a selected tile set is drawn (question 231's ruling)
+
+`GlobeLayer.update()` bound `material.map` from
+`getResidentPayload(globalKeyFor(this.imageryLayerId, k))` — hard-wired to its own
+`'imagery'` id, so a layer registered under `gateway-tileset:<sha>` could never reach a
+mesh. It now walks `LayerManager.imageryLayers()` — a new ordered, read-only accessor over
+every registered layer marked `kind === 'imagery'` — and takes the **last** one with a
+resident payload for that tile. The default adapter is simply the first entry in that same
+list, so "the default restored when it is off" and "two selected sets compose in list
+order, later on top" both fall out of the ordering rather than out of a second rule.
+`web/js/app.js` needed no change at all.
+
+Measured against the real `av-tiles` gateway, real MinIO and a real `GlobeLayer`:
+`everyMeshBoundToSetAWhileOn` true over 20 meshes, `someMeshChangedProvenanceFromDefaultToA`
+true, `restoredToDefaultAfterToggleOff` true; with two real sets on,
+`laterSetWinsWhereCovered` true over the 4 meshes set B covers and
+`earlierSetWinsWhereLaterDoesNotCover` true over the 16 it does not, with 16 real HTTP
+errors recorded for those uncovered tiles rather than assumed away; `exercisedBothCases`
+and `restoredToSetAAfterRemovingB` both true. `consoleWarnings` and `unhandledRejections`
+empty.
+
+**Reverting the bind loop to the round-5 fixed-id version flips five of those to false** —
+`everyMeshBoundToSetAWhileOn`, `someMeshChangedProvenanceFromDefaultToA`,
+`laterSetWinsWhereCovered`, `earlierSetWinsWhereLaterDoesNotCover` and
+`restoredToSetAAfterRemovingB`. Run by the manager, not reported by the worker.
+
+**The byte-to-texture seam.** `GatewayImageryLayerAdapter.load()` returned raw bytes, not a
+texture, so there was nothing `material.map` could accept. The conversion is cut inside
+`load()` immediately after the SHA-256/ETag verification, which is unweakened, and
+`release(key)` disposes the exact texture `load()` created. It never rejects: an earlier
+strict version did, and that is defect 1 below.
+
+### Task 2: the streaming proof's eviction shape
+
+The round-5 carried failure, closed. The old comment sized its one budget against
+`IMAGERY_TILE_BYTES`' 262,144-byte **estimate**, which is what requests were charged when
+it was written; round 4 changed that to the tile's real manifest `size_bytes`, and this
+fixture's synthetic tiles are tiny under it. Instrumented against the real stack: every
+tile the camera path asks for costs **exactly 852 bytes**, and the path's smallest position
+costs **exactly 1,704**. The old 3,000,000 is ~184× the whole path's cumulative total —
+eviction was structurally unreachable, exactly as the lead read it.
+
+Two runs now, differing only in the budget argument. The tight run at **11,000** is what
+every existing test reads, so "budget respected, no soft violation" is finally checked
+against a run where eviction had to do something; the generous run at 3,000,000 is read by
+one new test asserting the converse. Neither assertion was weakened, made conditional or
+given a tolerance. Representative pair, measured here — TIGHT: `tilesFetched` 16,
+`evictedCount` 4, `cancelledCount` 4, `budgetRespected` true, `softViolationTaken` false,
+`maxFrameMs` 1.67. GENEROUS: `tilesFetched` 11, `evictedCount` 0, `cancelledCount` 4,
+`softViolationTaken` false, `maxFrameMs` 1.77. **14 passed on eight consecutive
+full-module runs at this head.**
+
+The budget was tuned empirically and the docstring records the failures as well as the
+win: 6,000 left `cancelledCount` at 0 on roughly half of nine runs (admission became as
+tight as the real two-load concurrency cap, so nothing survived in flight to cancel);
+9,000 still showed that about one run in ten; 12,000 showed the opposite, `evictedCount` 0
+on one run in eight. It is also honest that the naive "budget below the cumulative total"
+inequality does **not** hold on the low end — repeat generous runs range 9,372 to 16,188
+bytes — and explains what actually keeps eviction reliable. That empirical record, not the
+inequality, is the basis for 11,000.
+
+Both perturbations run by the manager: the tight run given the generous budget reproduces
+round 5's exact failure (`assert 0 > 0`); the generous run given the tight budget fails the
+converse test (`assert 2 == 0`).
+
+### Task 6: image provenance by commit (question 232)
+
+Each build script records the commit it built from beside the digest, plus whether the tree
+was dirty **under that image's own copied paths** — dirt elsewhere is not that image's
+concern, and a build recorded dirty is refused outright because its provenance is a claim
+rather than a fact. The path set per image lives in one file,
+`services/<name>/IMAGE_COPIED_PATHS.txt`, read by both the build script and the verifier so
+it is never duplicated, and derived from a real `cargo metadata --locked` closure with
+dev-only edges filtered out.
+
+`verify_image_commit_provenance` in `tests/heavy_stack.py` is the one shared home,
+implementing and distinguishing both readings: "not an ancestor of HEAD at all", and "an
+ancestor, but commits touching the copied paths have landed since" — the second being the
+one that actually catches the round-5 defect. It refuses as a **FAILURE**, never a skip.
+
+Reproduced by the manager against the real records: recording `710d4ab`, a genuine ancestor
+of HEAD that predates a later `crates/av-tiles` commit, fails naming the recorded commit,
+HEAD, all seven copied paths and the offending commit `b90e68d`; a foreign sha fails; a
+record marked dirty fails before git is consulted. All three restored; the three container
+tests then pass together, **3 passed in 176.63s**.
+
+**What each `IMAGE_COPIED_PATHS.txt` deliberately does not cover** is stated in the file:
+the shared root `Cargo.lock` (an unrelated crate's dependency bump would fire the check on
+every image, and the next person would switch it off), the build script itself, and — for
+the proposer — the `spoore` path dependencies, which live in a separate checkout this
+repository's git history cannot see. That last is a real but different provenance risk,
+named rather than glossed.
+
+### Task 5: `av-catalog-migrate`, and the readiness race root-caused
+
+A `[[bin]]` in `av-catalog` rather than a `cargo run --example` or a new workspace member:
+the library already depends on everything the binary needs, so it costs no new dependency
+and no feature gate, and a new workspace member would have forced a compliance regeneration
+for a 300-line CLI. Flags match the `--catalog-*` shape `av-tile-fixture` and `av-gateway`
+already use, read off argv, never the environment. `--applied-tai-ns` is optional and the
+value actually recorded is printed either way, so the clock is never read silently behind
+the caller.
+
+The round trip is a committed, docker-gated test with the perturbation built in as a
+permanent assertion rather than a manual check: `av-tile-fixture --catalog-*` must be
+refused against an unmigrated database with a real `server error [42P01]: relation "assets"
+does not exist`. Measured end to end: that refusal; `applied 1 migration(s) this run:
+["0001_init.sql"]`; then `no pending migrations -- database already at the latest schema
+version (idempotent: this run applied nothing)`; 42 tiles registered as
+`tileset:catalog-round-trip-job:3f294e84…`; `av-gateway: catalog tier configured at
+127.0.0.1:36171`; and `GET /api/catalog/tilesets` returning exactly that asset at marking
+CUI.
+
+**The readiness race is root-caused, not mitigated blind** (defect 4 below).
+
+### Defects found in review, and their root causes
+
+1. **Task 1's first decode rejected with a typed `TileDecodeError`, which made a selected
+   tile set invisible rather than merely undecoded.** Found by the manager running
+   `tests/test_viewer_layers_panel.py` against the in-flight tree: both tiles reached the
+   fake gateway, the manifest loaded, `byteCostSourcesOnFreshPlan == ["manifest"]` — and
+   then `failedCount: 4` with `failureNames: ['TerrainLoaderNotImplementedError',
+   'TileDecodeError']`, a class that does not exist at the base commit. Root cause: this
+   codebase's fixtures serve a repeating ASCII pattern tagged `image/png`, which a real
+   `createImageBitmap` correctly refuses, and the strict version turned that into a counted
+   load failure so the tiles never became resident. Fixed by making the decode never reject:
+   three disclosed outcomes tagged on `texture.userData.decodeMode`, the failure reason kept
+   on `decodeError`. `TileDecodeError` removed entirely. **Definitively root-caused.**
+2. **The proposer and edge-plugin container tests never had question 212(a)'s digest gate
+   at all.** They gated only on `_image_present(tag)` — that a tag exists. Nothing compared
+   the running image to the digest its own `IMAGE_DIGEST.md` records. This mattered more
+   than it sounds: task 6's new provenance check documents itself as running only *after* a
+   presence/digest gate has passed, so it was resting on nothing — a hand-built or
+   locally-retagged image would have cleared presence, cleared provenance and been trusted.
+   Found by the worker, fixed by the manager with a shared
+   `heavy_stack.image_digest_mismatch_reason` beside the tiles image's own gate.
+   **Definitively root-caused.**
+3. **The four new H6 node checks exited 0 with failing checks**, one of them deliberately
+   (`process.exitCode = 0; // let the pytest side decide`). That inverts question 148: the
+   rule is "an exit code is not evidence of success", not "make failures exit 0" — and it
+   silently voids this round's own gate line ("the node checks at the final head: N of N
+   exit 0") for those files. Fixed to match `layout_tree_check.mjs`'s precedent; the
+   fixtures now parse the JSON instead of asserting `returncode`, so a failure still reports
+   the failing check **names**. Verified: perturbed ellipsoid check exits 1 and pytest names
+   all five failing checks. **Definitively root-caused.**
+4. **The catalog round trip's readiness flake, root-caused by measurement.** The worker
+   described it as "PostGIS accepting TCP before extension init" and mitigated it with a
+   bounded retry without reproducing it. Measured against one real container under question
+   207's lock: the published host port accepts a raw TCP `connect()` at **t = 0.014 s, the
+   same instant it is published**, while the first successful migrate is at **t = 1.764 s** —
+   a 1.75 s window, 8 attempts, every failing attempt reporting `connection closed by peer
+   while reading startup/authentication`. The actor is **Docker's port publisher**, not
+   PostGIS: the postgres entrypoint deliberately runs `initdb` and the `postgis` init
+   scripts with `listen_addresses=''`, so the connection Docker accepted is closed as soon
+   as it is proxied inward — hence an immediate typed refusal rather than a hang. The
+   bounded retry is correct and 15 s per attempt is ~8× the measured window. Measurement
+   recorded beside the constant. **Definitively root-caused.**
+5. **A latent defect in `av-catalog`, found by that probe and NOT fixed here.**
+   `PgClient::connect` wraps only `TcpStream::connect` in
+   `tokio::time::timeout(config.connect_timeout, …)` and then awaits `client.startup(config)`
+   with **no deadline at all** (`crates/av-catalog/src/client.rs`). A peer that accepts and
+   never writes hangs any caller — `av-gateway` and `av-tile-fixture` included — forever. It
+   did not cause the flake above. Fixing it changes `connect` semantics for every caller and
+   needs its own test; recorded for the lead rather than improvised at a round's end.
+6. **Two H6 trail checks shared one name** (`sceneGraph_trailIsRealThreeLine_`), because the
+   template keyed off a `line.userData.id` that `buildTrailGroup` never sets — and that
+   file's pytest reads results by name, so they collapsed. Indexed now: 17 checks, 17
+   distinct names.
+7. **The generous-budget test's failure message contradicted itself under perturbation** —
+   it interpolated the run's budget but hard-coded the prose, so a mis-set budget produced
+   "16,188 bytes fits comfortably under this run's 11000-byte budget". Now prints the
+   measured range and says that a budget outside it means a misconfigured fixture rather
+   than an eviction defect.
+8. **`tests/test_required_features_lint.py` errored rather than skipping when `cargo` was
+   absent** — a bare `FileNotFoundError` out of `subprocess.run`, against question 194. Now
+   a visible skip with a reason.
+
+### One claim that is true but NOT proved, disclosed rather than counted
+
+Task 1's `neverTexturelessOnceLoadedPerMesh` / `texturelessRegressionCount` holds in every
+real run. **The manager showed it has no teeth:** an implementation that deliberately
+clears `mesh.material.map` whenever nothing is resident for that tile still passes it. Task
+2 then root-caused *why* it cannot be made live by a budget change: `globeLayerProbe` builds
+its own manager with a **hardcoded `memoryBudgetBytes: 50_000_000`**, independent of the
+budget the two stream runs pass to the other manager, so the "a resident default evicted
+from under a live mesh" branch is unreachable from there;
+`texturelessRegressionCount` stayed 0 across ~50 runs at every candidate budget. Recorded as
+a real gap with a known cause and a known fix (give the probe's manager the run's budget),
+not counted as a proof.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **F5.1's regression guard is updated by ADDITION, not mutation, and I ratified that
+   reading.** Because the Layers dispatch is conditional on `profileId`, the
+   ordinary/no-profile tree the original guard pins genuinely does not move; the guard file
+   gains 19 new checks pinning the new execution and design trees byte-identically. The
+   guard still has teeth — reverting `defaultLayoutTreeForScenario` to its round-5 body
+   fails exactly 9 of the 86 checks and nothing else.
+2. **The Layers panel sits in a 0.82/0.18 right-hand strip, inside the command console's
+   own 0.78/0.22 strip.** For execution the console keeps the outermost position it already
+   had; for design, which gets no console, Layers is the outermost strip. `"design"` is
+   `altavista`'s own `DEFAULT_PROFILE_ID`, so an ordinary session now shows the panel with
+   no chooser click — which is the point of the ruling.
+3. **`render()`'s teardown-and-rebuild contract is untouched; the repaint fix is a separate
+   entry point.** Every other panel still follows the identical contract, and no shared
+   panel interface moved.
+4. **A `[[bin]]` in `av-catalog`, not a `cargo run --example` and not a new workspace
+   member** — reasoning in the task 5 section above. No compliance regeneration is owed by
+   this round on that account.
+5. **Question 232's provenance check refuses as a FAILURE and an absent image still SKIPs.**
+   The rule's own word is "refuses (visibly)"; a present-but-stale image is a defect to
+   report loudly, while "no image here" stays question 194's visible skip.
+6. **The copied-path sets exclude the root `Cargo.lock` deliberately**, because an unrelated
+   crate's dependency bump would otherwise fire the check on every image and the next person
+   would switch it off. Stated in each file rather than left implicit.
+7. **I fixed the missing digest gate on the proposer and edge-plugin container tests myself**
+   rather than recording it, because it made the deliverable I was accepting rest on
+   nothing. See defect 2.
+8. **I made the four H6 checks exit non-zero on failure** rather than accepting the worker's
+   deliberate choice of exit 0. See defect 3.
+9. **`av-catalog`'s untimed startup handshake is recorded, not fixed** — see defect 5.
+10. **H6 is recorded as delivered as a module and proofs, not as a viewer feature.** Nothing
+    under `web/js/entities/` is wired into `scene.js` or `app.js`, because those files
+    belonged to other tasks this round. Stating it plainly beats letting "H6 delivered"
+    imply a user can see it.
+11. **I killed two leftover round-4 `while true … sleep 20` wait loops** still spinning on
+    this host (19 minutes of elapsed time each, polling for a `GATES_DONE` sentinel from a
+    round that ended days ago), per the standing sweep rule.
+
+### Notes for the lead
+
+- **Question 232 assigns "the cFS and plugin ones" to the native team**, while this round's
+  brief assigned `edge-plugin` to heavy. Edge-plugin is done here; the native team need not
+  repeat it. The cFS image is untouched.
+- **`cargo deny`'s six spoore wildcard warnings are now one each across six crates**
+  (`spoore-assoc`, `spoore-engine`, `spoore-math`, `spoore-ml`, `spoore-models`,
+  `spoore-tree`), where round 5 recorded 2 for `spoore-models` and 4 for `spoore-tree`. Same
+  accepted count, different distribution — the spoore checkout moved under us. Not ours.
+- **A pre-existing hazard, now easier to hit:** `GlobeLayer`'s mesh-removal path and
+  `dispose()` both call `mesh.material.map?.dispose()` on a texture the `LayerManager` may
+  still hold as resident and hand to another mesh later. True at HEAD for the single default
+  adapter; with two or three imagery layers it is simply easier to reach. Not a correctness
+  break in three.js, and not introduced by this round.
+- **Round 5's defect 5 (literal NUL bytes under `web/js/`) is unchanged and still
+  unrecommended-on.** Every file this round touched was scanned; the only NUL is the
+  pre-existing one in `web/js/layers/layer.js`, present identically at HEAD.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `buf lint proto` | **clean, exit 0** |
+| `buf breaking proto --against` develop's proto | **clean, exit 0** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0, 14.43 s** |
+| `scripts/lint/required_features_clippy.sh` (new, question 231) | **clean, exit 0** — `linted 1 (package, feature set) group(s)`, `av-jobs`/`store-fixture`/`av-tile-fixture:bin` |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **149 binaries, 1489 passed, 0 failed, 4 ignored, exit 0** |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0 — exactly the six accepted spoore wildcard warnings, plus seven duplicate-crate warnings |
+| `cargo test -p av-kernel` | **44 result lines, 876 passed, 0 failed, 2 ignored, exit 0** |
+| `.venv/bin/python -m pytest -q -rs` (with `CFS_MIRROR_DIR`) | **904 passed, 10 failed, 17 skipped**, 1261 s — every failure attributed below, every skip a visible opt-in gate with its own reason |
+| `node` checks at the final head | **8 of 8 exit 0** (`layers_check`, `layers_budget_check`, `globe_lod_check`, `globe_imagery_check`, `gateway_imagery_layer_check`, `tiles3d_check`, `tiles3d_manager_check`, `layers_panel_check`), plus `layout/layout_tree_check` exit 0 (86 checks) and the four new `entities_*` checks exit 0 (17 + 13 + 17 checks and the jitter measurement) |
+
+**A precision earlier rounds did not draw.** The workspace test gate reports three `SKIPPED`
+lines, but **two of them are unit tests of the skip-announcement formatter itself** —
+`crates/av-lockstep/src/docker.rs`'s `announce_gate_skip`, with its fixture strings
+`some_test_name` and `some/image:tag`. There is exactly **one real skip**: `alpine:latest`
+present locally but not matching the digest recorded beside its run script, refused rather
+than trusted. Question 212(a) working, not a gap.
+
+### The 10 Python failures, each attributed
+
+**Nine are the compliance-regeneration pattern rounds 4 and 5 both ended on, and are the
+lead's at the merge** (questions 220/227 — I did not run the script):
+
+- 8 × `tests/test_sbom.py::test_the_epoch_is_never_wall_clock[...]` plus
+  `test_all_six_rust_components_share_exactly_one_epoch_from_git`. This round committed Rust
+  (`av-catalog`'s new `[[bin]]`), so git's committer date for `RUST_EPOCH_PATHS` moved past
+  the epoch the committed SBOMs record. Round 5 recorded seven of these for the same reason;
+  it is eight now because `edge-plugin-image` is in the epoch set too.
+- 1 × `tests/test_sbom.py::test_two_generations_are_byte_identical[edge-plugin-image]` —
+  `docs/compliance/sbom/edge-plugin-image.cdx.json` is stale because task 6 rebuilt the
+  edge-plugin image and that SBOM records the image's digest. First difference at byte 1349.
+
+All nine are closed by the one documented command, which has its own test
+(`tests/test_regenerate_compliance.py`):
+`.venv/bin/python scripts/kit/regenerate_compliance.py`.
+
+**The tenth was mine, and it was a real failure rather than a flake, so I root-caused it
+instead of re-running it away.**
+`tests/test_catalog_tilesets_route.py::test_real_round_trip_migrate_then_register_then_list_through_the_real_gateway_route`
+failed with `av-gateway did not print its own readiness line within 60.0s
+(returncode=None)`. It passes alone, every time — but *how long* it takes alone is the
+point: three consecutive runs on a load-average-4.19 host immediately afterwards took
+**37.98 s, 5.51 s and 36.01 s**. A test whose own wall clock swings seven-fold at rest
+cannot carry a 60 s budget for one of its phases; that is about 1.6× the slow end of the
+quiet-host range before the 21-minute full suite's own load is added, which is what
+consumed it. `GATEWAY_READY_TIMEOUT_S` is raised to 180.0 — the same ~4.7× multiple of its
+own measured worst case that `POSTGIS_READY_TIMEOUT_S` already carries, and still below
+`heavy_stack.READY_TIMEOUT_S`'s 240.0 — with the measurement recorded at the constant.
+**22 passed** afterwards.
+
+That failure also shows defect 5 from the outside: `av-gateway` reaches its readiness line
+only after connecting to the catalog, and `PgClient::connect` bounds only the TCP connect,
+so a catalog that accepts and then stalls hangs the gateway indefinitely and a readiness
+budget is the only thing that can give up on it. Raising the number is the right fix for
+the test; bounding the handshake is the fix for the product, and it is the lead's to
+schedule.
+
+### What remains — and why there is no `## Delivered` section yet
+
+**Every task in round 6's brief is delivered, and H6 has landed. The plan is still not
+closed, and saying so plainly is the point of this section.** H6's own line in the plan
+above asks for the entity module *in the viewer*; what landed is the module and its
+proofs, with nothing wired into `web/js/scene.js` or `web/js/app.js`, because those files
+belonged to other tasks this round. That is the same shape H5 had at round 3 — accepted as
+a module and a proof, not yet as a feature — and it is the one substantive thing between
+here and `## Delivered`.
+
+1. **H6 is not wired into the viewer.** `web/js/entities/` has covariance ellipsoids,
+   keep-out volumes, glTF-with-attitude, instanced markers and trails on the one
+   `LayerManager`, and the ten-metre RPO jitter bound — all proved against a standalone
+   manager and real scene-graph reads. No user can see any of it. Wiring it is a
+   `scene.js`/`app.js` task of its own, and it should be its own round's first task the way
+   drawing the tile set was this round's.
+2. **No producer plumbs a state covariance to the browser.** `TrajectorySample.cov` exists
+   on the wire, `altavista/cdm.py` documents it as a permanent placeholder and never fills
+   it, and `altavista/model.py`'s `Trajectory` has no covariance field at all. The ellipsoid
+   module is built against the declared wire shape and has no live input. Verified by
+   reading both files, not inferred. This is a platform gap, not H6's to close.
+3. **`av-catalog`'s startup handshake has no deadline** — defect 5 above. A peer that
+   accepts and never writes hangs `av-gateway`, `av-tile-fixture` and the new
+   `av-catalog-migrate` forever.
+4. **The textureless guard has no teeth**, with a known cause and a known fix — see the
+   disclosed-claim section above.
+5. **Compliance regeneration is the lead's at the merge** (questions 220/227). This round
+   changed Rust (`av-catalog`'s new binary) and touched no `docs/compliance/` file, so the
+   six Rust SBOM epochs and the evidence-bundle hash will have moved exactly as they did in
+   rounds 4 and 5. One command: `.venv/bin/python scripts/kit/regenerate_compliance.py`.

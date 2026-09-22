@@ -79,8 +79,18 @@ cargo build --workspace
 cargo test --workspace --exclude av-kernel
 cargo test -p av-kernel
 cargo clippy --workspace --all-targets -- -D warnings
+scripts/lint/required_features_clippy.sh
 cargo deny check
 ```
+
+`cargo clippy --workspace --all-targets` never builds a `[[bin]]`, `[[example]]`, `[[test]]`
+or `[[bench]]` that declares `required-features` (Cargo skips it unless those features are
+enabled), so any such target is invisible to that gate; `scripts/lint/required_features_clippy.sh`
+closes that hole by discovering every `required-features` target from `cargo metadata` and
+linting each one explicitly with its required features enabled (question 231 — found when
+`av-jobs`'s `av-tile-fixture` binary, gated behind the `store-fixture` feature, went unlinted
+by the plain workspace gate). It is additional coverage, run beside the standing
+`cargo clippy --workspace --all-targets -- -D warnings` step, never a replacement for it.
 
 `cargo deny` needs the `cargo-deny` tool installed. The kernel suite runs GMAT in-process
 and takes several minutes; run it alone rather than beside other heavy jobs. Tests that need

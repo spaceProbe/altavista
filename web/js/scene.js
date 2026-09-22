@@ -88,11 +88,12 @@ const ENTITIES_MAX_DISTANCE = 1e8;
 // maps to `undefined` -- no client-side rotation for those, unchanged from M4.1.
 const AXES_KIND_MAP = { AXES_KIND_RIC: 'ric', AXES_KIND_VNB: 'vnb', AXES_KIND_VVLH: 'vvlh' };
 // Round 4 (question 228 finding 2): the ONE budget every registered streaming layer
-// (today: the globe's imagery and terrain adapters, registered by `enableGlobe()`,
-// below; `web/js/layers/layer.js`'s own module docstring names the 3D Tiles overlay
-// as a future registrant too -- NOT wired live by this task, see `loadTilesOverlay()`'s
-// own docstring for why) shares -- "the whole point of a byte budget is that three
-// layers with per-item costs differing by orders of magnitude share it" (that file's
+// (the globe's imagery and terrain adapters, registered by `enableGlobe()` below; AND,
+// as of round 5 (question 228/decision 9, round 4's own deferral, ratified question
+// 229), the 3D Tiles overlay's own adapter, registered by `loadTilesOverlay()` below --
+// `web/js/layers/layer.js`'s own module docstring named it as the third registrant
+// from the start) shares -- "the whole point of a byte budget is that three layers
+// with per-item costs differing by orders of magnitude share it" (that file's
 // words). 64 MiB is generous headroom over this module's own worst-case DEMO demand
 // (`GlobeLayer`'s own default `maxTiles=128` imagery tiles * 262,144 bytes/tile,
 // `web/js/layers/imagery_layer.js`'s `IMAGERY_TILE_BYTES`, = 33,554,432 bytes) so the
@@ -1403,6 +1404,14 @@ export class Viewer {
    * overlay's group into `bodyName`'s *body-fixed* frame node
    * (`_bodyFixedFrame`/`_syncBodyFixedFrame` above), replacing M15.4's fixed demo
    * scale/offset in the (non-rotating) entities frame.
+   * Round 5 (question 228/decision 9, round 4's deferral, ratified question 229):
+   * `layerManager: this.layerManager` -- THIS viewer's one shared manager, same
+   * invariant `enableGlobe()` already documents above -- routes the overlay's real
+   * content fetch through it (`web/js/tiles_layer.js`'s own "Round 5" module
+   * docstring has the full mechanism). Per-tick driving of that shared manager stays
+   * coordinated with the globe (`update()`, below): `TilesOverlayLayer`'s own
+   * `selfDriveManager` is decided fresh every tick from whether `this.globeLayer` is
+   * currently set, never fixed here at construction time.
    * @param {string} url
    * @param {string} [bodyName] which body's body-fixed frame to geo-reference
    *   against -- defaults to 'Earth', matching every example scenario that loads a
@@ -1410,7 +1419,7 @@ export class Viewer {
    */
   loadTilesOverlay(url, bodyName = 'Earth') {
     this.clearTilesOverlay();
-    this.tilesOverlay = new TilesOverlayLayer(url);
+    this.tilesOverlay = new TilesOverlayLayer(url, { layerManager: this.layerManager });
     this.tilesOverlay.attachCamera(this.camera, this.renderer);
     this._tilesOverlayBodyName = bodyName;
     const frameNode = this._bodyFixedFrame(bodyName);
@@ -1652,7 +1661,17 @@ export class Viewer {
     // update() (which reads camera position through that same frame's world matrix).
     if (this._tilesOverlayBodyName) this._syncBodyFixedFrame(this._tilesOverlayBodyName);
     if (this.globeLayer) this._syncGlobeLayer(cam);
-    if (this.tilesOverlay) this.tilesOverlay.update();
+    // Round 5 (question 228/decision 9): `selfDriveManager = !this.globeLayer` --
+    // when a globe is ALSO active on this viewer's one shared `layerManager`,
+    // `_syncGlobeLayer` above has ALREADY called `layerManager.update()` this tick
+    // with a view that already carries everything a co-registered `Tiles3DLayerAdapter`
+    // needs (see `globe.js`'s own `update()` docstring), so `tilesOverlay.update()`
+    // here must NOT drive the manager a second, independent time -- see
+    // `web/js/tiles_layer.js`'s "Round 5" module docstring for why a second call
+    // would wrongly cancel/evict the other layer's own still-wanted content every
+    // frame. When no globe is active, the overlay is the sole registrant and safely
+    // self-drives.
+    if (this.tilesOverlay) this.tilesOverlay.update(!this.globeLayer);
     // lighting from the Sun (direction only; the small origin shift folded into
     // b.mesh.position above is negligible next to interplanetary distance, so the
     // normalized direction is unaffected)

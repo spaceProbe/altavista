@@ -92,10 +92,48 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { LayerManager } from './layers/layer.js';
 import { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError } from './layers/gateway_imagery_layer.js';
-import { selectTiles, geodeticToEcef } from './globe_lod.js';
+import { selectTiles, geodeticToEcef, SCENE_UNITS_PER_METRE } from './globe_lod.js';
+// Round 6 (docs/open-questions.md question 231's ruling, "replace or composite" --
+// docs/heavy-plan.md's round-5 status, "the one thing round 5 does NOT deliver: a
+// selected tile set is streamed, not drawn"). This task's own precedent for building
+// a real GlobeLayer under node is web/js/globe_imagery_check.mjs (see that file's own
+// module docstring) -- this harness follows the identical shape, just against the
+// real gateway this file already stands up rather than a network-free stub for every
+// layer.
+import { GlobeLayer } from './globe.js';
+
+// Round 6: "console-clean: zero errors/warnings from the harness" (this task's own
+// required proof 5) -- tracked for the WHOLE run, not just the new GlobeLayer section
+// below, since a regression anywhere in this file should be caught. `console.warn`/
+// `console.error` are wrapped (nothing in this file calls either today -- a
+// call appearing at all is itself the signal); `unhandledRejection` catches a
+// promise this file (or anything it drives) failed to attach a `.catch` to, exactly
+// the class of bug a "zero page exceptions" browser gate (tests/
+// test_viewer_globe_layer_manager.py) would catch for a page -- this is that same
+// discipline applied to a node CLI harness instead of a page.
+const consoleWarnings = [];
+const originalConsoleWarn = console.warn.bind(console);
+const originalConsoleError = console.error.bind(console);
+console.warn = (...args) => { consoleWarnings.push(`warn: ${args.map(String).join(' ')}`); originalConsoleWarn(...args); };
+console.error = (...args) => { consoleWarnings.push(`error: ${args.map(String).join(' ')}`); originalConsoleError(...args); };
+const unhandledRejections = [];
+process.on('unhandledRejection', (reason) => {
+  unhandledRejections.push(String((reason && reason.stack) || reason));
+});
 
 // ------------------------------------------------------------------------ arguments
-const [origin, manifestSha256, frameBudgetMsRaw, memoryBudgetBytesRaw, maxLevelRaw, tileBytesRaw, maxConcurrentLoadsRaw, dwellRoundTripsRaw] = process.argv.slice(2);
+const [
+  origin, manifestSha256, frameBudgetMsRaw, memoryBudgetBytesRaw, maxLevelRaw, tileBytesRaw,
+  maxConcurrentLoadsRaw, dwellRoundTripsRaw,
+  // Round 6 (question 231's ruling): OPTIONAL, a SECOND real tile set's manifest
+  // hash -- a shallower one (fewer levels) than `manifestSha256`'s own, deliberately,
+  // so the GlobeLayer probe (below) can construct "a tile the later set does not
+  // cover" for real, against the real gateway, rather than assume it. Omitted, the
+  // two-set/composition half of that probe is skipped and says so explicitly
+  // (`twoSetProbe.skipped`) -- this file stays runnable standalone with just one
+  // manifest, exactly as it always has.
+  manifestSha256BRaw,
+] = process.argv.slice(2);
 
 function fail(message) {
   process.stdout.write(JSON.stringify({ error: message }));
@@ -104,8 +142,13 @@ function fail(message) {
 
 if (!origin || !manifestSha256 || !frameBudgetMsRaw || !memoryBudgetBytesRaw) {
   fail(
-    'usage: node web/js/layers_stream_check.mjs <origin> <manifestSha256> <frameBudgetMs> <memoryBudgetBytes> [maxLevel] [tileBytes] [maxConcurrentLoads] [dwellRoundTrips]',
+    'usage: node web/js/layers_stream_check.mjs <origin> <manifestSha256> <frameBudgetMs> <memoryBudgetBytes> '
+    + '[maxLevel] [tileBytes] [maxConcurrentLoads] [dwellRoundTrips] [manifestSha256B]',
   );
+}
+const manifestSha256B = manifestSha256BRaw === undefined ? null : manifestSha256BRaw;
+if (manifestSha256B !== null && !/^[0-9a-f]{64}$/.test(manifestSha256B)) {
+  fail(`manifestSha256B must be 64 lowercase hex characters, got ${JSON.stringify(manifestSha256BRaw)}`);
 }
 const frameBudgetMs = Number(frameBudgetMsRaw);
 const memoryBudgetBytes = Number(memoryBudgetBytesRaw);
@@ -271,17 +314,38 @@ let maxByteCostErrorBytes = 0;
 // visible in the printed JSON: a real run against a real, fully-populated manifest is
 // expected to show every entry under `'manifest'`, never `'fallback-estimate'`.
 const byteCostSourceCounts = {};
+// Round 6 (docs/open-questions.md question 231's ruling; manager review of this
+// task's own report): tallied on EVERY successful real load, per
+// `payload.userData.decodeMode` (`web/js/layers/gateway_imagery_layer.js`'s own
+// `decodeTileBytesToTexture`) -- so a reader never has to take "the bound texture's
+// provenance is the selected set's own payload" as proof that the set's own REAL
+// PIXELS reached the screen. Stated plainly, not left implicit: this harness runs
+// under NODE, which has no `createImageBitmap` at all (measured directly, see
+// gateway_imagery_layer.js's own module docstring) -- so EVERY entry here is
+// structurally expected to be `'placeholder-no-createImageBitmap'`, regardless of
+// how real the bytes crossing the wire are (and they ARE real: `av-tile-fixture`'s
+// own tiler, `crates/av-jobs/src/tiler.rs`, encodes genuine PNGs). The one place a
+// real `createImageBitmap` decode of a real PNG is actually proved is a real
+// browser: `tests/test_viewer_globe_layer_manager.py`'s own
+// `test_decode_tile_bytes_to_texture_really_decodes_a_real_png_in_a_real_browser`.
+const decodeModeCounts = {};
 
 const layer = new GatewayImageryLayerAdapter({ manifestSha256, origin, tileBytes: declaredTileBytes });
 const realLoad = layer.load.bind(layer);
 layer.load = async (request, signal) => {
   byteCostSourceCounts[request.byteCostSource] = (byteCostSourceCounts[request.byteCostSource] || 0) + 1;
   try {
+    // Round 6 (question 231's ruling): `realLoad`'s own payload is now a real
+    // `THREE.Texture`-shaped object, not the pre-round-6 `{bytes, sha256, ...}` --
+    // the verified wire bytes/digest this section has always measured are still
+    // there, just relocated to `payload.userData.bytes`/`.sha256` (see
+    // web/js/layers/gateway_imagery_layer.js's own module docstring, "Problem 1").
     const payload = await realLoad(request, signal);
+    decodeModeCounts[payload.userData.decodeMode] = (decodeModeCounts[payload.userData.decodeMode] || 0) + 1;
     tilesFetched += 1;
-    bytesFetched += payload.bytes.byteLength;
+    bytesFetched += payload.userData.bytes.byteLength;
     byteCostCheckedCount += 1;
-    const err = Math.abs(payload.bytes.byteLength - request.byteCost);
+    const err = Math.abs(payload.userData.bytes.byteLength - request.byteCost);
     if (err > maxByteCostErrorBytes) maxByteCostErrorBytes = err;
     if (err !== 0) byteCostMismatchCount += 1;
     etagVerifiedCount += 1;
@@ -349,16 +413,18 @@ let commitCount = 0;
 function commitOne(globalKey) {
   const payload = manager.getResidentPayload(globalKey);
   if (payload === undefined) return; // evicted before its own turn to commit -- nothing to do
-  const recomputed = createHash('sha256').update(Buffer.from(payload.bytes)).digest('hex');
-  if (recomputed !== payload.sha256) {
-    // payload.sha256 was already verified against the gateway's own ETag inside
-    // load() (crypto.subtle, off-frame); this is a SECOND, synchronous check over
-    // the SAME bytes this harness already has in hand -- see module docstring.
+  // Round 6: `payload.bytes`/`.sha256` -> `payload.userData.bytes`/`.sha256` -- see
+  // the `layer.load` wrapper's own comment, above, for why.
+  const recomputed = createHash('sha256').update(Buffer.from(payload.userData.bytes)).digest('hex');
+  if (recomputed !== payload.userData.sha256) {
+    // payload.userData.sha256 was already verified against the gateway's own ETag
+    // inside load() (crypto.subtle, off-frame); this is a SECOND, synchronous check
+    // over the SAME bytes this harness already has in hand -- see module docstring.
     // Disagreement here would mean the bytes changed after load() returned, which
     // never legitimately happens; fail loudly rather than silently commit garbage.
-    throw new Error(`layers_stream_check: commit-time SHA-256 ${recomputed} disagrees with load-time ${payload.sha256} for ${globalKey}`);
+    throw new Error(`layers_stream_check: commit-time SHA-256 ${recomputed} disagrees with load-time ${payload.userData.sha256} for ${globalKey}`);
   }
-  pngDimensions(payload.bytes); // real, synchronous per-tile work -- see module docstring
+  pngDimensions(payload.userData.bytes); // real, synchronous per-tile work -- see module docstring
   commitCount += 1;
 }
 
@@ -521,6 +587,312 @@ function CAMERA_PATH_LAST_VIEW() {
   };
 }
 
+// ============================================================================
+// Round 6 (docs/open-questions.md question 231's ruling, "replace or composite" --
+// docs/heavy-plan.md's round-5 status, "the one thing round 5 does NOT deliver: a
+// selected tile set is streamed, not drawn"). A SEPARATE `LayerManager`/`GlobeLayer`
+// pair from the one above (`manager`/`layer`) -- this probe's own admission/eviction
+// bookkeeping must never perturb the frame-time/memory numbers `result` (below)
+// already reports, which this task's own brief says to leave exactly as they were.
+//
+// Measures, against the SAME real gateway/manifest this whole file already proves
+// real bytes cross a real loopback socket for:
+//   1. a catalogued set toggled ON binds a globe mesh's texture to THAT set's own
+//      payload (provenance tagged at its source, gateway_imagery_layer.js's own
+//      `load()` -- see that file's module docstring), not the default's;
+//   2. toggling it OFF restores the default's texture on those same meshes;
+//   3. (only when `manifestSha256B` was given) with TWO real sets on, the LATER one
+//      wins PER TILE, and a tile the later one does not cover falls back to the
+//      earlier one -- constructed for real by giving the second manifest a
+//      SHALLOWER real tile pyramid than the first (fewer levels), never assumed;
+//   4. the globe's own meshes never show `material.map === null` once the default
+//      has first loaded -- checked on EVERY tick this whole probe ever runs, not
+//      just before/after.
+// ============================================================================
+
+// A close-in camera -- the SAME position this file's own CAMERA_PATH already uses
+// for 'near-0-0-close' (never a second, independently-chosen position) -- deliberately
+// picked there for a reason that also serves this probe: `selectTiles()` at this
+// position returns a REAL MIX of levels (finer near the camera, coarser at the
+// edges of the current view), so at least one selected tile sits at the tile set's
+// own deepest level (2, covered by `manifestSha256` but NOT by the deliberately
+// shallower `manifestSha256B`) and at least one sits at a shallower level (0 or 1,
+// covered by BOTH) -- exactly the two cases requirement 3 needs, in ONE camera
+// position, never a contrived selection.
+const GLOBE_PROBE_CAMERA_ECEF_M = cameraEcef(2, 2, 400_000);
+const GLOBE_PROBE_CAMERA_LOCAL = {
+  x: GLOBE_PROBE_CAMERA_ECEF_M.x * SCENE_UNITS_PER_METRE,
+  y: GLOBE_PROBE_CAMERA_ECEF_M.y * SCENE_UNITS_PER_METRE,
+  z: GLOBE_PROBE_CAMERA_ECEF_M.z * SCENE_UNITS_PER_METRE,
+};
+
+/** THREE.TextureLoader-shaped stub for the globe's own DEFAULT imagery -- this
+ * probe is about the GATEWAY-backed sets (proof 1/2/3 above), not about proving a
+ * real XYZ tile server exists (there is none under node -- see web/js/
+ * globe_imagery_check.mjs's own identical reasoning for GlobeLayer's default
+ * imagery loader). Resolves SYNCHRONOUSLY, immediately, with a plain, distinctly-
+ * tagged payload -- `ImageryLayerAdapter.load()` (unmodified by this task except
+ * for its own provenance tagging, see that file's module docstring) wraps this in a
+ * real Promise and tags `.userData.sourceLayerId = 'imagery'` itself; nothing here
+ * needs to do that tagging a second time. */
+function makeDefaultImageryLoaderStub() {
+  let invocationCount = 0;
+  return {
+    invocationCount: () => invocationCount,
+    load(url, onLoad) {
+      invocationCount += 1;
+      onLoad({ kind: 'default-imagery-probe-stub', url });
+    },
+  };
+}
+
+/** Runs real `globe.update()` ticks (yielding one real event-loop tick between each,
+ * same "no sleeping, ever" discipline as this whole file) until `probeManager.
+ * pending.size === 0` (every admitted load has settled -- resolved, rejected, or
+ * cancelled) or `maxTicks` is hit. `onTick(globe)` is called after EVERY tick
+ * (including the very first, before anything may have settled at all) -- this is
+ * what lets the caller check requirement 4 ("never material.map === null once the
+ * default has loaded") across the WHOLE run, not just at the end. */
+async function driveGlobeUntilSettled(globe, probeManager, onTick, maxTicks = 20_000) {
+  let ticks = 0;
+  for (;;) {
+    globe.update(GLOBE_PROBE_CAMERA_LOCAL, SCREEN.screenHeightPx, SCREEN.fovYRad);
+    if (onTick) onTick(globe);
+    ticks += 1;
+    if (probeManager.pending.size === 0) return { settled: true, ticks };
+    if (ticks >= maxTicks) return { settled: false, ticks };
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+/** `{ "<level>/<x>/<y>": { sourceLayerId, hasTexture } }` for every mesh `globe.group`
+ * currently holds -- read off the REAL scene graph (`group.traverse`), the same
+ * technique `tests/test_viewer_globe_layer_manager.py`'s own browser probe uses
+ * (`group.traverse((o) => { if (!o.isMesh) return; ... })`), not a private reach
+ * into `GlobeLayer`'s own `_meshes` Map. `sourceLayerId` comes from
+ * `mesh.material.map.userData.sourceLayerId` -- the REAL, per-texture provenance tag
+ * `ImageryLayerAdapter`/`GatewayImageryLayerAdapter`'s own `load()` applies AT ITS
+ * SOURCE (see those files' own module docstrings), asserted PER MESH here, never
+ * from a global counter. */
+function meshProvenance(globe) {
+  const out = {};
+  globe.group.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const tile = obj.userData.tile;
+    const key = tile ? `${tile.level}/${tile.x}/${tile.y}` : '(no tile)';
+    const map = obj.material && obj.material.map;
+    out[key] = {
+      hasTexture: !!map,
+      sourceLayerId: map && map.userData ? (map.userData.sourceLayerId ?? null) : null,
+      level: tile ? tile.level : null,
+    };
+  });
+  return out;
+}
+
+// Required proof 4, exactly as written: "never a frame with material.map === null
+// once the default has loaded" -- a PER-MESH monotonic invariant, not a global one.
+// A brand-new mesh (or one whose own first load simply has not resolved yet --
+// `probeManager`'s own `maxConcurrentLoads: 6` means, with `meshCountProbe` tiles
+// selected at once, only 6 default-imagery requests are admitted per tick, so the
+// OTHER meshes legitimately still show their initial `material.map === null` for a
+// few ticks even after the FIRST few meshes' own default texture has already
+// resolved) is not a regression -- `buildTileMesh`'s own documented contract is a
+// flat placeholder colour, `material.map === null`, until THAT mesh's own first
+// load completes (web/js/globe.js's module docstring). What this invariant actually
+// guards against is a mesh that ALREADY had a texture LOSING it (regressing back to
+// null) on a later tick -- toggling a set on/off must never do that. `everLoadedKeys`
+// is the real, per-tile-key memory this needs: once a key's own mesh has EVER shown
+// a texture, this checks that it still shows ONE (not necessarily the SAME one) on
+// every subsequent tick.
+const everLoadedKeys = new Set();
+let neverTexturelessOnceLoadedPerMesh = true;
+let texturelessRegressionCount = 0;
+function checkTextureInvariant(globe) {
+  const prov = meshProvenance(globe);
+  for (const [key, v] of Object.entries(prov)) {
+    if (v.hasTexture) {
+      everLoadedKeys.add(key);
+    } else if (everLoadedKeys.has(key)) {
+      neverTexturelessOnceLoadedPerMesh = false;
+      texturelessRegressionCount += 1;
+    }
+  }
+}
+
+const probeManager = new LayerManager({ memoryBudgetBytes: 50_000_000, maxConcurrentLoads: 6 });
+const globe = new GlobeLayer({
+  layerManager: probeManager,
+  textureLoader: makeDefaultImageryLoaderStub(),
+  maxLevel,
+  maxTiles: 64,
+});
+
+// Round 6 (manager review): the SAME `decodeModeCounts` disclosure as the frame-time
+// section above, for every REAL gateway-backed layer this probe registers
+// (`gateway-a`/`gateway-b`, never the default -- the default's own payload is this
+// probe's own synchronous stub, not `decodeTileBytesToTexture`'s output, so it has
+// no `decodeMode` at all and is intentionally excluded here). Tallies whatever is
+// CURRENTLY resident under a `gateway-*` layer id at the moment it's called --
+// called after every settle point below, so a tile that later gets evicted/disposed
+// is still counted for the settle point(s) where it WAS resident (a running tally,
+// not a live recount from probeManager.resident at report time, which would miss
+// anything already evicted/removed by then).
+const probeDecodeModeCounts = {};
+function tallyGatewayDecodeModes() {
+  for (const entry of probeManager.resident.values()) {
+    if (!entry.layerId.startsWith('gateway-')) continue;
+    const mode = entry.payload && entry.payload.userData && entry.payload.userData.decodeMode;
+    if (!mode) continue;
+    probeDecodeModeCounts[mode] = (probeDecodeModeCounts[mode] || 0) + 1;
+  }
+}
+
+// -------------------------------------------------------------- step A: default only
+const stepA = await driveGlobeUntilSettled(globe, probeManager, checkTextureInvariant);
+const provenanceDefaultOnly = meshProvenance(globe);
+const meshCountProbe = Object.keys(provenanceDefaultOnly).length;
+const allDefaultBeforeAnyGatewaySet = meshCountProbe > 0
+  && Object.values(provenanceDefaultOnly).every((v) => v.sourceLayerId === 'imagery' && v.hasTexture);
+
+// ---------------------------------------------------------- step B: toggle set A ON
+const layerA = new GatewayImageryLayerAdapter({ id: 'gateway-a', manifestSha256, origin });
+await layerA.fetchManifest();
+probeManager.addLayer(layerA);
+const stepB = await driveGlobeUntilSettled(globe, probeManager, checkTextureInvariant);
+tallyGatewayDecodeModes();
+const provenanceWithA = meshProvenance(globe);
+// Requirement 1: EVERY mesh this camera selected (manifest A covers levels 0-2 in
+// full, the same maxLevel this whole file already runs at) must now be bound to
+// gateway-a's own payload, not the default's.
+const everyMeshBoundToSetAWhileOn = Object.values(provenanceWithA).length > 0
+  && Object.values(provenanceWithA).every((v) => v.sourceLayerId === 'gateway-a' && v.hasTexture);
+const someMeshChangedProvenanceFromDefaultToA = Object.keys(provenanceWithA).some(
+  (k) => provenanceDefaultOnly[k] && provenanceDefaultOnly[k].sourceLayerId === 'imagery' && provenanceWithA[k].sourceLayerId === 'gateway-a',
+);
+
+// --------------------------------------------------------- step C: toggle set A OFF
+probeManager.removeLayer('gateway-a');
+globe.update(GLOBE_PROBE_CAMERA_LOCAL, SCREEN.screenHeightPx, SCREEN.fovYRad); // "on the next update() tick, without a page reload"
+checkTextureInvariant(globe);
+const provenanceAfterRemoveA = meshProvenance(globe);
+// Requirement 2: restored to the default on the VERY NEXT tick, no further settling
+// needed (the default's own resident payload never went anywhere -- only the
+// now-unregistered gateway-a entries drop out of layerManager.imageryLayers()).
+const restoredToDefaultAfterToggleOff = Object.values(provenanceAfterRemoveA).length > 0
+  && Object.values(provenanceAfterRemoveA).every((v) => v.sourceLayerId === 'imagery' && v.hasTexture);
+
+// ------------------------------------------------ step D/E: two real sets, per tile
+// Only when the caller gave this harness a second, real manifest -- see this file's
+// own module docstring on `manifestSha256B` for why this is optional and what
+// running without it means.
+let twoSetProbe = { skipped: 'no manifestSha256B given on the command line' };
+if (manifestSha256B) {
+  // Re-add set A fresh (the instance `removeLayer`'d above already released/disposed
+  // its own textures -- a fresh instance is exactly what web/js/app.js's own
+  // toggleGatewayLayer does on every toggle-on, never a reused, half-torn-down one).
+  const layerA2 = new GatewayImageryLayerAdapter({ id: 'gateway-a', manifestSha256, origin });
+  await layerA2.fetchManifest();
+  probeManager.addLayer(layerA2);
+  await driveGlobeUntilSettled(globe, probeManager, checkTextureInvariant);
+  tallyGatewayDecodeModes();
+  const provenanceWithA2 = meshProvenance(globe);
+
+  // Set B: deliberately shallower (maxLevel below the tile set the CALLER built it
+  // as -- see tests/test_viewer_layers_stream.py's own `tile_set_b` fixture) than
+  // set A, so it genuinely, provably does NOT cover this camera's own level-2 tiles
+  // -- never assumed, checked below from B's own real, fetched manifest.
+  const layerB = new GatewayImageryLayerAdapter({ id: 'gateway-b', manifestSha256: manifestSha256B, origin });
+  const manifestTileCountB = await layerB.fetchManifest();
+  probeManager.addLayer(layerB); // registered AFTER layerA2 -- "later in list order", per question 231's ruling
+  const stepD = await driveGlobeUntilSettled(globe, probeManager, checkTextureInvariant);
+  tallyGatewayDecodeModes();
+  const provenanceWithB = meshProvenance(globe);
+
+  const meshesByLevel = {};
+  for (const [k, v] of Object.entries(provenanceWithB)) {
+    (meshesByLevel[v.level] ??= []).push({ key: k, sourceLayerId: v.sourceLayerId, hasTexture: v.hasTexture });
+  }
+  const levelsPresent = Object.keys(meshesByLevel).map(Number).sort((a, b) => a - b);
+  const deepestLevel = Math.max(...levelsPresent);
+  const shallowLevels = levelsPresent.filter((lv) => lv < deepestLevel);
+
+  // Requirement 3, half 1: every mesh at a level SET B's own manifest covers (< the
+  // deepest/finest level this camera selected, which is exactly the level B's own
+  // shallower pyramid stops short of -- confirmed structurally below, not assumed)
+  // must be bound to gateway-b -- the LATER-registered set wins, per tile.
+  const laterSetWinsWhereCovered = shallowLevels.length > 0 && shallowLevels.every(
+    (lv) => meshesByLevel[lv].every((m) => m.sourceLayerId === 'gateway-b' && m.hasTexture),
+  );
+  // Requirement 3, half 2: every mesh at the deepest level (NOT in set B's own
+  // manifest -- set B's manifest only goes to `maxLevelB`, confirmed against
+  // `manifestTileCountB` and the real HTTP failures this produced, below) falls back
+  // to set A, which DOES cover it -- never left textureless, never wrongly shown as
+  // set B's.
+  const earlierSetWinsWhereLaterDoesNotCover = meshesByLevel[deepestLevel]
+    && meshesByLevel[deepestLevel].length > 0
+    && meshesByLevel[deepestLevel].every((m) => m.sourceLayerId === 'gateway-a' && m.hasTexture);
+  // The real, structural reason half 2 holds: set B's real gateway genuinely 404'd
+  // real requests for the deepest level's real tile addresses (never assumed from
+  // the manifest tile count alone) -- `TileHttpError`, this manager's own real
+  // failure-memory policy (web/js/layers/layer.js's own module docstring).
+  const realHttpErrorsRecordedForUncoveredTiles = probeManager.failureNames().includes('TileHttpError')
+    && probeManager.failedCount > 0;
+
+  // ------------------------------------------------------- toggle B off, back to A
+  probeManager.removeLayer('gateway-b');
+  globe.update(GLOBE_PROBE_CAMERA_LOCAL, SCREEN.screenHeightPx, SCREEN.fovYRad);
+  checkTextureInvariant(globe);
+  const provenanceAfterRemoveB = meshProvenance(globe);
+  const restoredToSetAAfterRemovingB = Object.values(provenanceAfterRemoveB).length > 0
+    && Object.values(provenanceAfterRemoveB).every((v) => v.sourceLayerId === 'gateway-a' && v.hasTexture);
+
+  twoSetProbe = {
+    manifestSha256B,
+    manifestTileCountB,
+    deepestLevel,
+    shallowLevels,
+    meshCountAtDeepestLevel: (meshesByLevel[deepestLevel] || []).length,
+    meshCountAtShallowLevels: shallowLevels.reduce((n, lv) => n + meshesByLevel[lv].length, 0),
+    laterSetWinsWhereCovered,
+    earlierSetWinsWhereLaterDoesNotCover,
+    realHttpErrorsRecordedForUncoveredTiles,
+    restoredToSetAAfterRemovingB,
+    settledD: stepD,
+    // Sanity: this probe is only meaningful if it genuinely exercised both a
+    // covered-by-both level AND an uncovered-by-B level in the SAME run -- the "only
+    // a meaningful test if it had to run" reasoning this codebase applies elsewhere
+    // (tests/test_viewer_layers_stream.py's own module docstring).
+    exercisedBothCases: shallowLevels.length > 0 && (meshesByLevel[deepestLevel] || []).length > 0,
+  };
+  twoSetProbe.ok = laterSetWinsWhereCovered && earlierSetWinsWhereLaterDoesNotCover
+    && realHttpErrorsRecordedForUncoveredTiles && restoredToSetAAfterRemovingB && twoSetProbe.exercisedBothCases;
+}
+
+const globeLayerProbe = {
+  meshCountProbe,
+  allDefaultBeforeAnyGatewaySet,
+  stepASettled: stepA.settled,
+  stepBSettled: stepB.settled,
+  everyMeshBoundToSetAWhileOn,
+  someMeshChangedProvenanceFromDefaultToA,
+  restoredToDefaultAfterToggleOff,
+  twoSetProbe,
+  neverTexturelessOnceLoadedPerMesh,
+  defaultHasEverLoaded: everLoadedKeys.size > 0,
+  texturelessRegressionCount,
+  probeManagerFailedCount: probeManager.failedCount,
+  probeManagerFailureNames: probeManager.failureNames(),
+  // Round 6 (manager review) -- see `tallyGatewayDecodeModes`'s own doc comment:
+  // structurally expected to be 100% `'placeholder-no-createImageBitmap'` under
+  // node, regardless of how real the underlying PNG bytes are.
+  decodeModeCounts: probeDecodeModeCounts,
+};
+globeLayerProbe.ok = allDefaultBeforeAnyGatewaySet && everyMeshBoundToSetAWhileOn
+  && someMeshChangedProvenanceFromDefaultToA && restoredToDefaultAfterToggleOff
+  && neverTexturelessOnceLoadedPerMesh && globeLayerProbe.defaultHasEverLoaded
+  && (manifestSha256B ? twoSetProbe.ok === true : true);
+
 // ------------------------------------------------------------------------- report
 frameMsList.sort((a, b) => a - b);
 function percentile(sorted, p) {
@@ -567,6 +939,7 @@ const result = {
   manifestTileCount: layer.manifestTileCount,
   manifestFetchError,
   byteCostSourceCounts,
+  decodeModeCounts,
   // Round 4 (question 228): reported unconditionally, alongside softViolationTaken,
   // for the identical reason -- see layer.js's constructor doc comment for the exact
   // distinction between a budget deferral (counted here) and a request merely held
@@ -603,6 +976,13 @@ const result = {
   maxConcurrentLoads: manager.maxConcurrentLoads,
   calibrationRoundTripMs,
   dwellMsPerPosition,
+  // Round 6 (docs/open-questions.md question 231's ruling) -- see this file's own
+  // module docstring section above the GlobeLayer probe for what each field means.
+  globeLayerProbe,
+  // Required proof 5 ("console-clean") -- see this file's own module docstring at
+  // the top, "console.warn/console.error are wrapped".
+  consoleWarnings,
+  unhandledRejections,
 };
 
 process.stdout.write(JSON.stringify(result));

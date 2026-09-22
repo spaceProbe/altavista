@@ -1,0 +1,28 @@
+# services/proposer/IMAGE_COPIED_PATHS.txt -- the paths av-proposer:local's content is
+# derived from (question 232, extending question 212(a)). See services/tiles/
+# IMAGE_COPIED_PATHS.txt's own header comment for the full method and the same reasoning,
+# applied here to av-proposer's own dependency closure; not repeated a second time.
+#
+# `crates/av-proposer` itself, its committed `proto/altavista/v1` input, and the transitive
+# closure of its own LOCAL `normal`+`build` dependencies (`cargo metadata --locked`, dev-only
+# edges filtered out -- av-proposer's own `av-gateway`/`spoore-ml` dependencies are
+# `[dev-dependencies]`-only and never reach the shipped binary), the Dockerfile, and the one
+# fixture the Dockerfile itself COPYs in (baked in for provenance only -- see that
+# Dockerfile's own "Self-contained and offline" header section -- but still a real COPY
+# source, so still a real input to this image's bytes).
+#
+# Deliberately NOT covered, and why:
+#   - `spoore-cdm`/`spoore-models` (path dependencies into the SEPARATE `spoore` checkout,
+#     question 219(b)): outside this repository's own git history entirely -- `git log`
+#     against a path in another repository is meaningless, and SPOORE_ROOT is a host-local
+#     override this repository's own commits cannot see. A stale spoore checkout is a real,
+#     but different, provenance risk this rule does not attempt to close.
+#   - The root Cargo.lock/Cargo.toml and services/proposer/build-image.sh itself: same
+#     reasoning as services/tiles/IMAGE_COPIED_PATHS.txt's own header.
+#   - services/proposer/IMAGE_DIGEST.md and services/proposer/bin/: the build's own output.
+proto/altavista/v1
+crates/av-cdm
+crates/av-command
+crates/av-proposer
+services/proposer/Dockerfile
+tests/fixtures/demo_two_instance.runproducts.bin

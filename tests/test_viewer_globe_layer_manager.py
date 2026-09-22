@@ -397,6 +397,79 @@ def test_the_globe_streams_through_the_layer_manager_and_binds_a_texture(live_se
     )
 
 
+_DECODE_PROBE_JS = r"""
+(async () => {
+  const out = {step: 'start'};
+  try {
+    const mod = await import('/js/layers/gateway_imagery_layer.js');
+    const resp = await fetch('/fixtures/tiles/0/0/0.png');
+    out.fetchOk = resp.ok;
+    out.fetchStatus = resp.status;
+    const bytes = await resp.arrayBuffer();
+    out.byteLength = bytes.byteLength;
+    const texture = await mod.decodeTileBytesToTexture(bytes);
+    out.isTexture = texture.isTexture === true;
+    out.decodeMode = texture.userData.decodeMode;
+    out.imageWidth = texture.image && texture.image.width;
+    out.imageHeight = texture.image && texture.image.height;
+    texture.dispose();
+    out.step = 'done';
+  } catch (e) {
+    out.error = String((e && e.stack) || e);
+  }
+  return out;
+})()
+"""
+
+
+def test_decode_tile_bytes_to_texture_really_decodes_a_real_png_in_a_real_browser(live_server):
+    """Round 6 (docs/open-questions.md question 231's ruling) -- manager review of
+    that task's own report: the two node-based real-gateway proofs
+    (`web/js/layers_stream_check.mjs` and its GlobeLayer probe) are structurally
+    stuck in `decodeTileBytesToTexture`'s "no `createImageBitmap` at all" fallback
+    mode, because node has no `createImageBitmap` -- true even though the real
+    `av-tiles` gateway those harnesses drive serves genuinely real PNG bytes
+    (`crates/av-jobs/src/tiler.rs`'s own `image::codecs::png` encoder). A provenance
+    tag alone ("this mesh's texture came from gateway-a") is NOT proof that gateway-a's
+    own real pixels reached the screen -- it is equally true, and indistinguishable
+    from a provenance assertion alone, when every one of gateway-a's tiles silently
+    decoded to the SAME opaque-white 1x1 placeholder. This is the one, minimal,
+    reuses-existing-infra way to close that gap: no new docker-gated fixture (per the
+    manager's own instruction) -- `live_server` is the SAME plain `python -m altavista
+    serve` subprocess `test_the_globe_streams_through_the_layer_manager_and_binds_a_
+    texture` above already uses (no tiles gateway configured, no docker at all), and
+    `web/fixtures/tiles/0/0/0.png` is an EXISTING, already-committed real 64x64 PNG
+    this repo's own default imagery fixture set already serves. This test fetches
+    those real bytes over a real HTTP request in a real browser (which DOES have
+    `createImageBitmap`) and feeds them directly to the real, exported
+    `decodeTileBytesToTexture` (the exact function `GatewayImageryLayerAdapter.load()`
+    calls after its own SHA-256/ETag verification) -- proving the real-decode branch
+    genuinely decodes a real PNG into a real, correctly-dimensioned texture, not just
+    that the branch exists and returns SOMETHING texture-shaped.
+    """
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        pytest.skip("no Chrome/Chromium binary found on this host; cannot drive a headless browser")
+    errors, value = asyncio.run(_drive(live_server.url, chrome_path, _DECODE_PROBE_JS, wait_s=2.0))
+
+    print("\nreal PNG decode probe:", json.dumps(value, indent=2, sort_keys=True))
+
+    assert value is not None, f"the page probe returned nothing; console errors were: {errors}"
+    assert not value.get("error"), f"probe reported an error: {value.get('error')}\nconsole: {errors}"
+    assert value.get("fetchOk") is True, f"could not fetch the real fixture PNG: {value!r}"
+    assert value.get("byteLength", 0) > 0, f"the fetched PNG was empty: {value!r}"
+    assert value.get("isTexture") is True, f"decodeTileBytesToTexture did not return a real THREE.Texture: {value!r}"
+    assert value.get("decodeMode") == "createImageBitmap", (
+        f"expected the REAL decode branch (a real browser has createImageBitmap), not a fallback: {value!r}"
+    )
+    # The real, known dimensions of web/fixtures/tiles/0/0/0.png (confirmed directly
+    # from its own IHDR chunk, this task's own report) -- a placeholder texture could
+    # never produce these, only a genuine decode of these exact real bytes could.
+    assert value.get("imageWidth") == 64, f"expected the real fixture PNG's own real width (64): {value!r}"
+    assert value.get("imageHeight") == 64, f"expected the real fixture PNG's own real height (64): {value!r}"
+    assert errors == [], f"expected zero page exceptions/console errors, got {len(errors)}:\n" + "\n".join(errors)
+
+
 def test_the_exception_collector_sees_an_uncaught_exception():
     """Teeth for the detection mechanism the test above depends on (question 211).
 

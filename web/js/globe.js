@@ -274,6 +274,26 @@ export class GlobeLayer {
    * selection. `screenHeightPx`/`fovYRad` are passed straight through to
    * `selectTiles()` (web/js/globe_lod.js) -- the real screen-space-error LOD
    * computation, not reimplemented here.
+   *
+   * Round 5 (question 228/decision 9) note, not a signature change: when a
+   * `web/js/tiles_layer.js` `TilesOverlayLayer` is ALSO registered on this SAME
+   * `layerManager` (`web/js/scene.js`'s `loadTilesOverlay()`), the `layerManager.
+   * update()` call below already carries everything `Tiles3DLayerAdapter.plan()`
+   * needs (`cameraEcef`/`screenHeightPx`/`fovYRad`, the same field names and the same
+   * body-centred-ECEF-metres convention that adapter uses -- see tiles_layer.js's own
+   * module docstring, "both ECEF-metre consumers in this codebase agree on scale") --
+   * so `scene.js` deliberately does NOT also drive a second, independent
+   * `layerManager.update()` call for the overlay that tick (`TilesOverlayLayer`'s own
+   * `selfDriveManager: false` mode, used exactly when a globe is active). Two
+   * independent per-tick calls on ONE shared manager would each see the OTHER
+   * layer's content as "not wanted" (`LayerManager.update(view)` treats every
+   * registered layer's `plan(view)` output as THIS tick's entire wanted set, layer.js's
+   * own module docstring) -- cancelling in-flight loads and evicting resident entries
+   * that are still genuinely wanted, every single frame. See `web/js/tiles_layer.js`'s
+   * own "Round 5" module docstring and `tests/test_viewer_tiles3d_manager.py` for the
+   * live proof this does not happen. This method itself needs no change for any of
+   * that: it already builds and sends exactly the view a co-registered `Tiles3D
+   * LayerAdapter` needs, it simply did not have one registered before this task.
    */
   update(cameraLocalPos, screenHeightPx, fovYRad) {
     const cameraEcef = {
@@ -327,21 +347,50 @@ export class GlobeLayer {
     }
 
     if (this.layerManager) {
-      // Apply the texture for every mesh whose tile the manager has genuinely
-      // finished loading (`getResidentPayload` -- `undefined` until `_onLoaded`
-      // runs, i.e. never before the real `load()` promise this manager itself
-      // started has actually resolved). `applyTileTexture` is the exact same steps
-      // `buildTileMesh`'s own direct-load callback performs in the other branch,
-      // never a second copy (see that function's own comment). A tile whose load is
-      // still pending, was deferred by the budget, or failed simply keeps its
-      // placeholder-colour material for now -- the same "graceful fallback, never
-      // throw" this class already documents for the direct-load path, just
-      // resolved over more than one `update()` tick instead of inside one
-      // `textureLoader` callback.
+      // Round 6 (docs/open-questions.md question 231's ruling, "replace or
+      // composite" -- docs/heavy-plan.md's round-5 status, "the one thing round 5
+      // does NOT deliver: a selected tile set is streamed, not drawn"): a mesh's
+      // texture is bound from whichever REGISTERED imagery layer is topmost FOR
+      // THIS TILE, not from a fixed id -- walk `layerManager.imageryLayers()`
+      // (./layers/layer.js's own ordered, read-only accessor: every registered
+      // layer whose `kind === 'imagery'`, in REGISTRATION/list order) and take the
+      // LAST one that actually has a resident payload for this tile's globalKey.
+      // This class's own default `'imagery'` adapter is itself just one entry in
+      // that same list -- registered FIRST, in this class's own constructor above
+      // -- so it is exactly what a mesh falls back to when nothing toggled on above
+      // it has anything resident yet, and exactly what is restored the instant a
+      // higher layer is unregistered (`web/js/app.js`'s `toggleGatewayLayer`'s
+      // `removeLayer` call, on the very next `update()` tick) -- never a second,
+      // hand-rolled notion of "topmost" or "default" here.
+      //
+      // Re-evaluated EVERY tick for EVERY mesh (unlike the pre-round-6 version of
+      // this loop, which bound a mesh's texture once and never revisited it): a
+      // toggle-off/toggle-on, or a still-loading topmost layer's tile resolving on a
+      // LATER tick than the layer(s) under it, must change what a mesh shows without
+      // a page reload, and only a per-tick recompute can do that. `mesh.material.map
+      // !== chosenTex` is a cheap guard against reapplying the identical texture
+      // object every single tick when nothing actually changed -- `applyTileTexture`
+      // itself is idempotent (setting the same map again would be harmless, just
+      // wasteful).
+      //
+      // `chosenTex === undefined` (no registered layer has ANYTHING resident yet for
+      // this tile -- e.g. the first few ticks, before even the default has loaded)
+      // deliberately leaves `mesh.material.map` exactly as it was: the flat
+      // placeholder colour `buildTileMesh` starts every mesh with, or whatever was
+      // bound on an earlier tick -- this class's own "graceful fallback, never
+      // throw" contract (module docstring) restated as "never clear a bound texture
+      // back to nothing", which is also this task's own required proof 4 ("the
+      // globe's own two meshes keep a texture at all times ... once the default has
+      // loaded").
       for (const [k, mesh] of this._meshes) {
-        if (mesh.userData.imageryLoaded) continue;
-        const tex = this.layerManager.getResidentPayload(globalKeyFor(this.imageryLayerId, k));
-        if (tex) applyTileTexture(mesh, tex);
+        let chosenTex;
+        for (const layer of this.layerManager.imageryLayers()) {
+          const tex = this.layerManager.getResidentPayload(globalKeyFor(layer.id, k));
+          if (tex !== undefined) chosenTex = tex; // later (topmost) registered layer wins, per tile
+        }
+        if (chosenTex !== undefined && mesh.material.map !== chosenTex) {
+          applyTileTexture(mesh, chosenTex);
+        }
       }
     }
 

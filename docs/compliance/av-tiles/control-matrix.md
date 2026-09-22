@@ -17,7 +17,10 @@ test` held this host's `target/` lock for the whole of this task, no `cargo` com
 actually executed here — each row's evidence command is instead backed by reading the cited
 test's own source and confirming its logic matches the row's claim, recorded honestly in this
 task's own report rather than left implied. See that report for exactly which rows have the
-strongest (source-read) evidence and which are weakest.
+strongest (source-read) evidence and which are weakest. (Round 5, items B/C: this round's own
+new/changed evidence commands — AC 3.1.12/3.1.13, CM 3.4.7, AU 3.3.9's admin-auth tests, IA
+3.5.1/3.5.2's admin row, SC 3.13.1/3.13.5 — WERE actually run, as `cargo test -p av-tiles`, and
+this round's own report states the exact pass counts.)
 ```
 
 ## Legend
@@ -57,12 +60,16 @@ admin listener with exactly one route.
 - `src/range.rs` — [`range::parse`]: `bytes=<start>-<end>` only; unparseable is ignored (served
   `200`, RFC 9110 §14.2), a syntactically valid but out-of-bounds range is refused (`416`,
   counted) — a deliberate distinction, not an oversight.
-- `src/admin.rs` (H5b-1, round 3) — [`admin::serve`]: `GET /admin/api/counters` on a SEPARATE,
-  optional, off-by-default bind (`--admin-bind`) — this round's own reason it exists at all:
-  "a refusal counter must be readable from outside the process for a refusal to be provable
-  rather than asserted" (round 3 decision 3). Deliberately unauthenticated (this module's own
-  doc, "Unauthenticated, on purpose, on a SEPARATE bind") — see Deficiencies below for why that
-  is recorded as a real, not merely theoretical, gap.
+- `src/admin.rs` (H5b-1, round 3; authenticated round 5, item B) — [`admin::serve`]: `GET
+  /admin/api/counters` on a SEPARATE, optional, off-by-default bind (`--admin-bind`) — this
+  round's own reason it exists at all: "a refusal counter must be readable from outside the
+  process for a refusal to be provable rather than asserted" (round 3 decision 3). Round 5
+  (question 229's open ruling, defect 7) closed the "no access control at all" gap: the SAME
+  posture `av-gateway`'s own admin surface has — `Authorization: Bearer <token>` through the
+  SAME `av_command::oidc::verify`, then a role check against `av_command::authz::RoleTable`
+  for the `"admin_counters"` surface (`--admin-role ROLE`, repeatable, deny-by-default), `401`
+  for absent/invalid, `403` for a verified token naming no granting role, every refusal
+  counted in the SAME `Counters` this route already reads back.
 - `src/server.rs` — [`server::serve`]/[`server::handle_connection`]: reads back exactly the
   three headers this crate ever needs (`Authorization`, `Range`, `If-None-Match`), discards
   every other header, turns a [`core::TileResponse`] into real HTTP bytes.
@@ -74,10 +81,11 @@ admin listener with exactly one route.
   reading this file's own `parse_cli_args` and confirming no `std::env::var` call exists
   anywhere in this crate's source.
 
-**Not built in this crate, stated here rather than left implied**: no bind-address restriction
-of any kind (unlike `av-command`/`av-gateway`'s `resolve_loopback_bind_address`), no durable,
-per-request audit trail (only in-memory `Counters`), no TLS, no FIPS-posture detection, no MFA.
-See Deficiencies.
+**Not built in this crate, stated here rather than left implied**: no durable, per-request
+audit trail (only in-memory `Counters`), no TLS, no FIPS-posture detection, no MFA. (Round 5,
+items B/C closed the two gaps this note used to name here — no bind-address restriction, and
+no access control on `GET /admin/api/counters` — see AC 3.1.12/3.1.13 and AU 3.3.9's own rows,
+below, and Deficiencies for what remains.)
 
 ## 3.1 Access Control (AC)
 
@@ -86,7 +94,7 @@ See Deficiencies.
 | 3.1.1 / 3.1.2 | Limit system access to authorized users/processes | Met | Both of this crate's routes authenticate a real OIDC token before doing any work: `crates/av-tiles/src/core.rs::handle` step 2 calls `av_command::oidc::verify` on the `Authorization: Bearer <token>` header (never a query param or trusted header — neither route even has one); an absent or empty token is `TileRefusal::AuthMissingToken` (`crates/av-tiles/src/refusal.rs`), a present-but-unverifiable one is `AuthTokenInvalid`, both refused (`401`) before any manifest/tile fetch. `crates/av-tiles/src/bin/av-tiles.rs::parse_cli_args` refuses to start without `--oidc-issuer`/`--oidc-audience`/`--oidc-public-key-path` — no code path reaches `core::handle` with no issuer configured | `cargo test -p av-tiles --lib core::tests::no_authorization_header_is_401_and_counted_as_missing_token core::tests::a_syntactically_present_but_unverifiable_token_is_401_and_counted_as_token_invalid core::tests::an_expired_token_is_401_and_counted_distinctly_as_token_expired` and `cargo test -p av-tiles --lib server::tests::no_authorization_header_is_401` and `cargo test -p av-tiles --bin av-tiles every_required_flag_missing_is_refused` |
 | 3.1.3 | Control the flow of CUI | Met | `crates/av-tiles/src/core.rs::handle` step 5 calls `av_label::ClearanceLadder::classify(caller_clearance, &manifest_object.label)` — a marking absent from the deployment's configured ladder (either side) is refused, never defaulted to a rank. `crates/av-tiles/src/refusal.rs`'s own module doc records the deliberate reasoning for why this ONE check, run once per request against the manifest's own layer label, IS both the "per layer" and the "per request" enforcement H4's brief asked for: the same `caller_clearance` and the same layer label are both fixed for the lifetime of one request, so a textually second call site over identical inputs could only reproduce the first's own answer — this crate's own conclusion, not an omission | `cargo test -p av-tiles --lib core::tests::a_caller_below_the_tile_sets_label_is_refused_403_with_no_tile_bytes_and_counted_exactly_once` and `cargo test -p av-tiles --lib server::tests::a_caller_below_the_tile_sets_clearance_is_refused_403_with_no_bytes` |
 | 3.1.5 | Least privilege | Inherited / Not applicable | This crate has no analogue of `av-gateway`'s `ProposeOnlyAuthority` (no command-authority seam to narrow) — its own two routes are both read-only fetch-by-hash, and access is gated by clearance (3.1.3's row), not by a role table restricting which RPCs a caller may reach | N/A |
-| 3.1.12 / 3.1.13 | Control & encrypt remote access | Gap | **Unlike `av-command`/`av-gateway`, this crate enforces NO bind-address restriction at all.** `crates/av-tiles/src/bin/av-tiles.rs::main` parses `--bind`/`--admin-bind` with a bare `SocketAddr::parse`, never through `av_command::service::resolve_loopback_bind_address` (verified: `grep -rn resolve_loopback_bind_address crates/av-tiles/` returns nothing) — an operator could bind either listener to `0.0.0.0` or a public address with no refusal at startup, a real, not merely theoretical, difference from `av-command`'s and `av-gateway`'s own identical row (both Partial there, because at least the address-restriction half is Met for them). "Encrypt" is also Gap: no TLS stack is linked (`crates/av-tiles/Cargo.toml` names no `rustls`/`tonic` `"tls"` feature/`hyper-openssl`) | `grep -rn "resolve_loopback_bind_address" crates/av-tiles/` (empty — confirms the absence) |
+| 3.1.12 / 3.1.13 | Control & encrypt remote access | Partial | **Round 5, item C (question 229's second open ruling, round 4 defect 6) closed the bind-address half.** `crates/av-tiles/src/bin/av-tiles.rs::main` now resolves BOTH `--bind` and `--admin-bind` through `av_command::service::resolve_loopback_bind_address` — the identical typed `BindAddressError`, and the identical "refused before any `TcpListener::bind` call" ordering, `av-command`'s and `av-gateway`'s own binaries already use — before this round the same function appeared nowhere in this crate (`grep -rn resolve_loopback_bind_address crates/av-tiles/` returned nothing); it now appears in `src/bin/av-tiles.rs` for both binds. Still Partial, not Met, matching `av-command`'s/`av-gateway`'s own identical row: "encrypt" remains Gap — no TLS stack is linked (`crates/av-tiles/Cargo.toml` names no `rustls`/`tonic` `"tls"` feature/`hyper-openssl`) | `grep -n "resolve_loopback_bind_address" crates/av-tiles/src/bin/av-tiles.rs` (now two call sites) and `cargo test -p av-tiles --bin av-tiles resolve_loopback_bind_address_refuses_non_loopback_and_accepts_the_spellings_this_binarys_own_flags_use` |
 | 3.1.20 | Control connections to external systems | Inherited | Host firewall/network segmentation — this crate makes one outbound connection type (to `av-store`/MinIO, via `crates/av-tiles/src/source.rs::StoreObjectSource`), unrestricted by any egress control of this crate's own | N/A |
 | 3.1.22 | Control publicly-posted content | Inherited | This crate posts nothing publicly | N/A |
 | 3.1.4 | Separation of duties (two-person rule) | Inherited / Not built | No command-authorization concept exists in this crate at all (it is a read-path tile server) | N/A |
@@ -98,11 +106,11 @@ See Deficiencies.
 |---|---|---|---|---|
 | 3.3.1 | Create and retain audit records | Gap | This crate has NO durable audit record of any kind — no ledger, no evidence recorder, no audit-sink file (unlike `av-command`'s `Ledger`/`AuditWriter` or `av-gateway`'s `EvidenceRecorder`). The only record of anything happening is `crate::counters::Counters`, in-memory, process-lifetime only: a restart loses every count. See the next row for what IS Met (aggregate counting, readable externally) | N/A |
 | 3.3.1 (everything rejected is counted) | ADR-004's own audit line: "Everything rejected is counted" | Met | Every `TileRefusal` variant (`crates/av-tiles/src/refusal.rs`) implements `Counted` and is recorded through the shared `av_command::counters::Counters` primitive (re-exported as `crate::counters`, `crates/av-tiles/src/lib.rs`) at the exact point the refusal is decided; `refusal::ALL_CODES` is a pinned, tested list of every code this crate can ever produce, cross-checked 1:1 against the enum's own variants | `cargo test -p av-tiles --lib refusal::tests::refusal_codes_are_counted_under_stable_distinct_keys` |
-| 3.3.1 (round 3 decision 3, a refusal counter must be readable from outside the process) | Refusal counters provable, not merely asserted | Met | `crates/av-tiles/src/admin.rs::serve` binds a SEPARATE listener (`DEFAULT_ADMIN_BIND = "127.0.0.1:50173"`, the main bind's own `+100`, off unless `--admin-bind` is passed) serving `GET /admin/api/counters` — a flat, sorted `{"counters":{"<code>":<count>,...}}` JSON document read straight from the live `Counters::snapshot()`, so a test (or an operator) reads this crate's own refusal counts from a genuinely separate connection, not merely from in-process state the crate under test also wrote | `cargo test -p av-tiles --lib admin::tests::counters_route_returns_every_recorded_code_and_count_sorted admin::tests::an_unknown_path_is_404_and_a_non_get_method_is_405 admin::tests::default_admin_bind_is_the_main_default_bind_plus_100` |
+| 3.3.1 (round 3 decision 3, a refusal counter must be readable from outside the process) | Refusal counters provable, not merely asserted | Met | `crates/av-tiles/src/admin.rs::serve` binds a SEPARATE listener (`DEFAULT_ADMIN_BIND = "127.0.0.1:50173"`, the main bind's own `+100`, off unless `--admin-bind` is passed) serving `GET /admin/api/counters` — a flat, sorted `{"counters":{"<code>":<count>,...}}` JSON document read straight from the live `Counters::snapshot()`, so a test (or an operator holding a granted token, round 5 item B) reads this crate's own refusal counts from a genuinely separate connection, not merely from in-process state the crate under test also wrote | `cargo test -p av-tiles --lib admin::tests::a_verified_token_with_the_granting_role_gets_the_counters_body_sorted admin::tests::an_unknown_path_is_404_and_a_non_get_method_is_405 admin::tests::default_admin_bind_is_the_main_default_bind_plus_100` |
 | 3.3.2 | Trace actions to individual users/processes | Gap | The verified token subject (`av_command::oidc::verify`'s own `Principal.sub`) is used ONLY to derive `caller_clearance` (`crates/av-tiles/src/core.rs::handle` step 2) and is never recorded anywhere — no per-request log, no ledger line, nothing durable ties a specific request (or refusal) to a specific caller. `Counters` records only the refusal CODE, in aggregate, never who triggered it. This is a real gap this crate's own design accepts (no ledger exists to write to), distinct from `av-command`'s/`av-gateway`'s Partial/Met rows for the identical control | N/A |
 | 3.3.4 | Alert on audit logging failure | Inherited / Not applicable | There is no audit log to fail to write to (see 3.3.1's row) | N/A |
 | 3.3.5 / 3.3.6 | Correlate and report audit review | Gap | No correlation tooling of any kind — `GET /admin/api/counters` is a flat snapshot, not a query/aggregation layer, and there is no analogue of `av-gateway`'s evidence bundle | N/A |
-| 3.3.9 | Limit audit management to a subset of privileged users | Gap | **`GET /admin/api/counters` has NO access control of any kind** — `crates/av-tiles/src/admin.rs`'s own module doc states this is deliberate ("Unauthenticated, on purpose, on a SEPARATE bind"), reasoning that firewalling is an operator's job at the network layer. Contrast with `av-gateway`'s own `GET /admin/api/evidence/bundle`, which R5.1 gated behind a verified, role-checked bearer token (`docs/compliance/av-gateway/control-matrix.md`'s AU 3.3.9 row, Met) — this crate's admin surface took the opposite posture, and it is recorded here as a real Gap, not silently matched to av-gateway's Met | `cargo test -p av-tiles --lib admin::tests::counters_route_returns_every_recorded_code_and_count_sorted` (confirms no token is required to reach the route at all) |
+| 3.3.9 | Limit audit management to a subset of privileged users | Met | **Round 5, item B (question 229's open ruling, round 4 defect 7) closed this gap: `GET /admin/api/counters` now takes the SAME authentication `av-gateway`'s own admin surface has** (question 215's posture). `crates/av-tiles/src/admin.rs::AdminAuthContext::authenticate` verifies `Authorization: Bearer <token>` through the SAME `av_command::oidc::verify` this crate's main port already uses, then checks the verified token's `groups` against an `av_command::authz::RoleTable` for the `"admin_counters"` surface (`--admin-role ROLE`, repeatable, deny-by-default) — an absent/invalid token is `401` (`AdminAuthRefusal::MissingToken`/`TokenInvalid`), a verified token naming no granting role is `403` (`AdminAuthRefusal::RoleNotGranted`), both counted under `tiles_admin_auth_*` codes distinct from the main port's own `tiles_auth_*` codes. Mirrors `av-gateway`'s own `GET /admin/api/evidence/bundle` (`docs/compliance/av-gateway/control-matrix.md`'s AU 3.3.9 row, Met) | `cargo test -p av-tiles --lib admin::tests::counters_route_without_a_token_is_401_and_the_counter_moves admin::tests::counters_route_with_an_invalid_token_is_401_and_the_counter_moves admin::tests::counters_route_with_a_token_naming_no_granting_role_is_403_and_the_counter_moves admin::tests::a_verified_token_with_the_granting_role_gets_the_counters_body_sorted` |
 | 3.3.7 | Authoritative, time-synced timestamps | Inherited | The one clock reading this crate's pipeline uses (`now_tai_ns`, `core::handle`'s own parameter) is injected — `av_command::oidc::verify`'s own `exp`/`nbf` check runs against it; NTP synchronization of `SystemClock` is the environment's responsibility | N/A |
 
 ## 3.4 Configuration Management (CM)
@@ -111,13 +119,13 @@ See Deficiencies.
 |---|---|---|---|---|
 | 3.4.6 | Least functionality | Met | `crates/av-tiles/src/route.rs::parse` recognises exactly two path shapes, refusing everything else as `RouteError::Malformed`; `crates/av-tiles/src/server.rs::handle_connection` is `GET`-only (`405` otherwise); `crates/av-tiles/src/admin.rs::handle_connection` matches exactly one documented route (`404`/`405` for everything else) | `cargo test -p av-tiles --lib route::tests::refuses_a_completely_unrelated_path_as_malformed server::tests::a_non_get_method_is_405 admin::tests::an_unknown_path_is_404_and_a_non_get_method_is_405` |
 | 3.4.1 / 3.4.2 | Baseline configuration & enforce security settings | Met | **Stricter than `av-gateway`'s own identical row**: every knob this binary takes is a CLI flag only — verified by `grep -rn "env::var" crates/av-tiles/` returning nothing anywhere in this crate (unlike `av-gateway`, whose own CM 3.4.1/3.4.2 row records several env-var-defaulted binds as a real, stated difference from `av-command`'s CLI-only discipline). `Cargo.lock` pins every dependency; the workspace-root `deny.toml` covers this crate's tree too | `grep -rn "env::var" crates/av-tiles/` (empty) and `cargo test -p av-tiles --bin av-tiles every_required_flag_missing_is_refused` |
-| 3.4.7 | Restrict nonessential programs/ports | Partial | Exactly two listeners in this crate's own binary (the main tile-serving port and the optional, off-by-default admin port) — but see AC 3.1.12/3.1.13's row: neither is refused at a non-loopback bind address, unlike every other crate in this workspace with an admin/gRPC listener | Same as AC 3.1.12/3.1.13 |
+| 3.4.7 | Restrict nonessential programs/ports | Partial | Exactly two listeners in this crate's own binary (the main tile-serving port and the optional, off-by-default admin port) — round 5, item C closed the AC 3.1.12/3.1.13 gap this row used to point at: both are now refused at a non-loopback bind address (question 155), matching `av-command`'s/`av-gateway`'s own identical Partial row exactly (still no firewall/segmentation control of its own beyond that refusal) | Same as AC 3.1.12/3.1.13 |
 
 ## 3.5 Identification and Authentication (IA)
 
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
-| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Met | Both routes require `Authorization: Bearer <token>`, verified through the EXACT SAME `av_command::oidc::verify` path `av-command`/`av-gateway` already use — no second verifier of any kind (`grep -n "jsonwebtoken\|josekit\|jwt" crates/av-tiles/Cargo.toml` is empty; this crate does not even depend on a JWT-specific crate). `crates/av-tiles/src/bin/av-tiles.rs` requires all three OIDC flags with no default | `cargo test -p av-tiles --lib core::tests::no_authorization_header_is_401_and_counted_as_missing_token core::tests::a_syntactically_present_but_unverifiable_token_is_401_and_counted_as_token_invalid` and `cargo test -p av-tiles --bin av-tiles every_required_flag_missing_is_refused` |
+| 3.5.1 / 3.5.2 | Identify and authenticate users/processes | Met | Both main-port routes AND (round 5, item B) the admin `GET /admin/api/counters` route require `Authorization: Bearer <token>`, verified through the EXACT SAME `av_command::oidc::verify` path `av-command`/`av-gateway` already use — no second verifier of any kind (`grep -n "jsonwebtoken\|josekit\|jwt" crates/av-tiles/Cargo.toml` is empty; this crate does not even depend on a JWT-specific crate). `crates/av-tiles/src/bin/av-tiles.rs` requires all three OIDC flags with no default | `cargo test -p av-tiles --lib core::tests::no_authorization_header_is_401_and_counted_as_missing_token core::tests::a_syntactically_present_but_unverifiable_token_is_401_and_counted_as_token_invalid admin::tests::counters_route_without_a_token_is_401_and_the_counter_moves` and `cargo test -p av-tiles --bin av-tiles every_required_flag_missing_is_refused` |
 | 3.5.3 | MFA for privileged/remote access | Gap | No MFA check of any kind — this crate's own auth gate is identification/clearance-derivation only, the same unclosed gap every other crate on this track records | N/A |
 | 3.5.10 | Cryptographically-protected passwords/secrets | Inherited / N/A | This crate holds no passwords or long-lived secrets of its own (the OIDC public key it verifies against is a public key, and the object-store credentials it holds are `av-store`'s own concern, not this crate's) | N/A |
 
@@ -126,10 +134,10 @@ See Deficiencies.
 | ID | Requirement | Status | Implementation | Evidence |
 |---|---|---|---|---|
 | 3.13.6 | Deny network traffic by default | Met | `crates/av-tiles/src/route.rs::parse` and `crates/av-tiles/src/admin.rs::handle_connection` each match a fixed, closed set of shapes and refuse/reject everything else | `cargo test -p av-tiles --lib route::tests::refuses_a_completely_unrelated_path_as_malformed admin::tests::an_unknown_path_is_404_and_a_non_get_method_is_405` |
-| 3.13.1 / 3.13.5 | Boundary protection / subnetwork separation | Gap | No boundary enforcement of any kind on either listener — see AC 3.1.12/3.1.13's row above; this is a real, not merely theoretical, Gap for this crate, unlike `av-command`/`av-gateway`'s own Partial for the identical control | Same as AC 3.1.12/3.1.13 |
+| 3.13.1 / 3.13.5 | Boundary protection / subnetwork separation | Partial | Round 5, item C closed the gap this row used to point at: see AC 3.1.12/3.1.13's row above — both listeners now refuse a non-loopback bind address, matching `av-command`'s/`av-gateway`'s own identical Partial row (still no firewall/segmentation control beyond that refusal) | Same as AC 3.1.12/3.1.13 |
 | 3.13.8 | Encrypt CUI in transit | Gap | `crates/av-tiles/Cargo.toml` links no TLS stack of any kind — its own `tokio` features are `["net", "io-util", "rt-multi-thread", "macros", "signal"]`, no `"tls"`; no `rustls`/`hyper-openssl`/`tonic` dependency exists in this crate's own manifest at all | `grep -n "rustls\|hyper-openssl\|tls" crates/av-tiles/Cargo.toml` (empty) |
 | 3.13.11 | Use FIPS-validated cryptography | Gap | This crate has no FIPS-posture detection of its own (unlike `av-command`'s `crates/av-command/src/fips.rs`) — it does call `openssl::sha::sha256` (system OpenSSL, ADR-004) for its own hash verification, but reports no posture about that linkage anywhere | N/A |
-| 3.13.15 | Protect authenticity of comms sessions | Partial | Every request this crate serves carries a verified credential (IA 3.5.1/3.5.2's row) — the AUTHENTICITY half is Met. Still Partial, not Met: the credential (and every byte of the response) crosses the wire in plaintext (SC 3.13.8 is Gap), and — unlike `av-gateway` — nothing stops that plaintext session from being reachable off-loopback in the first place (AC 3.1.12/3.1.13 is Gap here, Partial there) | Same as IA 3.5.1/3.5.2 |
+| 3.13.15 | Protect authenticity of comms sessions | Partial | Every request this crate serves carries a verified credential (IA 3.5.1/3.5.2's row) — the AUTHENTICITY half is Met. Still Partial, not Met: the credential (and every byte of the response) crosses the wire in plaintext (SC 3.13.8 is Gap). Round 5, item C narrowed where that plaintext session can be reached from (AC 3.1.12/3.1.13 is now Partial here, matching `av-gateway`), but the plaintext itself is unchanged | Same as IA 3.5.1/3.5.2 |
 
 ## 3.14 System and Information Integrity (SI)
 
@@ -193,31 +201,29 @@ Matching `docs/compliance/av-gateway/control-matrix.md`'s identical table:
 
 Ranked by what a reviewer would flag first:
 
-1. **No bind-address restriction of any kind, on either listener** (AC 3.1.12/3.1.13, SC
-   3.13.1/3.13.5, CM 3.4.7). `crates/av-tiles/src/bin/av-tiles.rs::main` parses `--bind`/
-   `--admin-bind` with a bare `SocketAddr::parse` and never calls
-   `av_command::service::resolve_loopback_bind_address` — the exact typed refusal
-   `av-command`'s and `av-gateway`'s own binaries both use for the identical concern
-   (question 155). This crate could be started with `--bind 0.0.0.0:50073` and nothing in it
-   would refuse. Distinct from those two crates' own Partial rows for the same control: this
-   is a genuine gap this crate introduced, not merely "the same unclosed TLS half everyone
-   else has too."
-2. **`GET /admin/api/counters` has no access control of any kind**, and is a deliberate design
-   choice, not an oversight (AU 3.3.9) — `crates/av-tiles/src/admin.rs`'s own module doc says
-   so plainly. Combined with Deficiency 1 above, an admin surface meant to be reached only
-   from a trusted operator network has no code-level reason it could not also be reached from
-   anywhere the main bind is reachable from, since neither listener refuses a non-loopback
-   address.
-3. **No durable, per-request record of any kind** (AU 3.3.1, 3.3.2, 3.3.5/3.3.6). This crate's
+1. **No durable, per-request record of any kind** (AU 3.3.1, 3.3.2, 3.3.5/3.3.6). This crate's
    only observable trace of what happened is an in-memory `Counters` snapshot — aggregate
    counts by refusal code, never tied to a caller, a request, or a specific tile, and lost on
    every restart. `av-command`'s ledger and `av-gateway`'s evidence recorder both have no
    analogue here; this crate's own H4 brief never asked for one, and none was added
    speculatively.
-4. **No TLS anywhere in this crate's own stack** (SC 3.13.8), identical in shape to every
-   other crate on this track's own Gap for the same control — but combined with Deficiency 1,
-   there is here no bind-address restriction limiting the blast radius of that plaintext
-   traffic either.
-5. **No FIPS-posture detection of this crate's own** (SC 3.13.11) — unlike `av-command`, this
+2. **No TLS anywhere in this crate's own stack** (SC 3.13.8), identical in shape to every
+   other crate on this track's own Gap for the same control.
+3. **No FIPS-posture detection of this crate's own** (SC 3.13.11) — unlike `av-command`, this
    crate reports nothing about its own OpenSSL linkage.
-6. **No MFA anywhere** (IA 3.5.3) — the same unclosed gap every crate on this track records.
+4. **No MFA anywhere** (IA 3.5.3) — the same unclosed gap every crate on this track records.
+
+**Closed since round 4** (recorded here, not silently deleted, so a reader of this document's
+own history can see what changed and why):
+
+- Round 5, item C (question 229) closed **"no bind-address restriction of any kind"** (AC
+  3.1.12/3.1.13, SC 3.13.1/3.13.5, CM 3.4.7) — `crates/av-tiles/src/bin/av-tiles.rs::main` now
+  resolves both `--bind` and `--admin-bind` through `av_command::service::
+  resolve_loopback_bind_address`, the identical typed refusal `av-command`'s and `av-gateway`'s
+  own binaries already use. These three rows are now Partial, matching those two crates' own
+  identical rows exactly (the address-restriction half is Met; TLS is still Gap, tracked
+  separately as Deficiency 2 above).
+- Round 5, item B (question 229) closed **"`GET /admin/api/counters` has no access control of
+  any kind"** (AU 3.3.9) — that route now takes the same authentication `av-gateway`'s own
+  admin surface has (question 215's posture); see AU 3.3.9's own row, above, for the full
+  mechanism. Now Met.

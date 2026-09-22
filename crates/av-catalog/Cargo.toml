@@ -8,6 +8,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Heavy round 6 (docs/heavy-plan.md's "A gap in the drive path that nobody had noticed"): the
+# small, real, `cargo run`-able harness `crate::migrate::Migrator::apply_pending`'s own module
+# doc, and `services/catalog/run-dev-catalog.sh`'s header comment, both pointed a developer at
+# but that did not exist until now. See `src/bin/av-catalog-migrate.rs`'s own module doc for
+# the full "why a `[[bin]]` in THIS crate, not `cargo run --example`, not a new workspace
+# member" reasoning. No new dependency and no feature gate: this binary uses only what `av-
+# catalog`'s own `[dependencies]` above already provide (`PgClient`/`Migrator`, `tokio`,
+# `av-cdm`), unlike `crates/av-jobs`'s `av-tile-fixture` (which needs `av-store`/`av-catalog`
+# gated behind a feature specifically because `av-jobs`'s OWN library code must stay free of
+# them) -- `av-catalog`'s own library code already depends on everything this binary needs.
+[[bin]]
+name = "av-catalog-migrate"
+path = "src/bin/av-catalog-migrate.rs"
+
 [dependencies]
 # Why this crate exists at all, restated here because it is the single most important thing
 # a reader of THIS file needs to know before adding anything to the list below: every
