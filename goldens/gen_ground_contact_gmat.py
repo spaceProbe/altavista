@@ -68,6 +68,15 @@ DURATION_S = 10800.0  # 3 hours: ~2 full passes at this orbit's ~93-minute perio
 STEP_S = 30.0
 N_STEPS = int(DURATION_S / STEP_S)  # 360, so N_STEPS+1 = 361 rows including t=0
 
+# The golden's own purpose statement (question 230, ADR-002's goldens rule: the file's "reason"
+# field states why the golden exists, not why it was last regenerated). Fixed here rather than
+# taken from --reason so a tolerance-only or metadata-only regeneration never erases it; carried
+# verbatim from this golden's original M25.1 commit.
+GOLDEN_REASON = (
+    "M25.1 acceptance pin: ground contact windows vs GMAT ContactLocator (fix: self-consistent "
+    "epoch reference for contact windows)"
+)
+
 SCRIPT_TEMPLATE = """\
 %----------------------------------------------------------------------------
 % M25.1 acceptance pin: GMAT's own ContactLocator AOS/LOS report, plus a dense
@@ -156,7 +165,15 @@ EndFor;
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reason", required=True, help="why this golden is (re)generated; recorded in the file")
+    ap.add_argument(
+        "--reason",
+        required=True,
+        help=(
+            "why this run regenerates the golden; recorded in golden_regeneration_reason. "
+            "The file's own 'reason' field is fixed below (the golden's purpose) and is never "
+            "overwritten by this flag -- see GOLDEN_REASON."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(__file__).parent
@@ -252,7 +269,8 @@ def main():
     golden = {
         "name": "ground_contact_gmat",
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "reason": args.reason,
+        "reason": GOLDEN_REASON,
+        "golden_regeneration_reason": args.reason,
         "gmat_version": "R2026a",
         "note": (
             "GMAT's own ContactLocator AOS/LOS windows (Legacy report format) for the declared "
@@ -276,6 +294,19 @@ def main():
         "units": {"position": "km", "time": "s (elapsed since epoch_utc)"},
         "position_series": samples,
         "gmat_contact_windows_s": windows,
+        # Question 230: the tolerance crates/av-kernel/tests/ground_contact_gmat.rs actually
+        # asserts AOS/LOS agreement with, moved here (not changed) from that file's own
+        # `TOLERANCE_S` constant so the golden -- not a hardcoded Rust constant -- is what pins
+        # the comparison bound. Not measured by this generator: this is the constant that test
+        # has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 ("Initial import of
+        # the Alta Vista platform"), reasoned there (one-third of this golden's own 30 s
+        # `step_s` sampling interval -- see that file's own module doc comment for the full
+        # curvature-error justification), not measured against any specific run.
+        "golden_comparison_tolerance": {
+            "value": 10.0,
+            "unit": "s",
+            "source": "the constant (TOLERANCE_S) crates/av-kernel/tests/ground_contact_gmat.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/ground_contact_gmat.rs:93,133-134 -- one-third of this golden's own 30 s step_s sampling interval, reasoned (not measured) against the sampling cadence per that file's own module doc comment",
+        },
     }
     body = json.dumps(golden, indent=2, sort_keys=True)
     out = out_dir / (golden["name"] + ".json")

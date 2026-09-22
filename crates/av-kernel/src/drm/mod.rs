@@ -67,6 +67,10 @@ pub mod controller;
 pub mod events;
 pub mod executor;
 pub mod fault;
+// `docs/open-questions.md` question 230: the whole module is GMAT-only (`gmat_command::
+// GmatFramedCommandModel` wraps `gmat_sys::model::GmatModel`) -- gated at the `mod` declaration
+// per this task's brief, rather than sprinkling `#[cfg(feature = "gmat")]` through the file.
+#[cfg(feature = "gmat")]
 pub mod gmat_command;
 pub mod ground;
 pub mod hash;
@@ -76,6 +80,19 @@ pub mod schema;
 pub mod sensors;
 
 pub use command_source::{CommandOutcome, ExternalCommandSource};
+// `docs/open-questions.md` question 230, N6 (this task): `execute`/`RunConfig` are no longer
+// gated here -- round 4's earlier task gated them because `RunConfig.gmat: &Gmat` was a
+// MANDATORY field, which made `execute` (and everything reachable only from it) inherently
+// GMAT-bound, so the `--no-default-features` kernel could not run a DRM at all. This task makes
+// `RunConfig.gmat` itself the `#[cfg(feature = "gmat")]`-gated piece (a cfg attribute on one
+// struct field, `executor.rs`'s own `RunConfig` doc comment), and un-gates `execute` -- it now
+// builds and runs a GMAT-free DRM (every instance either native, `"orbital."`-dispatched, or
+// another non-GMAT binding kind) in both feature states. See `executor.rs`'s own module doc
+// comment and this task's report for the exact boundary: which helpers stayed gated (real
+// `gmat_sys::Gmat` FFI calls -- `rotation_matrix`/`fill_fixed_rotations`/the real-conversion
+// branch of `convert_gmat_trajectory_to_declared_frame`) and which were restored GMAT-free
+// (everything else `execute` reaches, including the container-materialization cluster in
+// `binding.rs` and `replay::verify_and_load`).
 pub use executor::{execute, RunConfig, RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
 pub use replay::ReplayConfig;
@@ -176,7 +193,32 @@ pub enum DrmError {
     /// doc comment's "Covariance" section.
     MissingInitialCovariance { instance: String },
     /// A GMAT FFI call failed.
+    #[cfg(feature = "gmat")]
     Gmat(gmat_sys::GmatError),
+    /// `docs/open-questions.md` question 230: a DRM instance's `dynamics_model` named a
+    /// `"gmat."`-prefixed id, but this `av-kernel` was built with `--no-default-features` (the
+    /// `gmat` feature off, `gmat-sys` not even a dependency) -- refused here, typed, naming the
+    /// missing feature, rather than a panic, a silent fallback to the native placeholder, or a
+    /// mis-classification. See `binding::classify_binding`'s own `#[cfg(not(feature = "gmat"))]`
+    /// arm for exactly where this is raised.
+    #[cfg(not(feature = "gmat"))]
+    GmatFeatureDisabled { instance: String, dynamics_model: String },
+    /// N6 (`docs/native-dynamics-plan.md`): a `"orbital."`-dispatched instance's declared
+    /// `SystemDefinition.parameters`/`spacecraft.*` state could not be turned into a real
+    /// `av_orbital::EarthGravityModel` -- an unreadable/unparsable gravity or DE ephemeris file
+    /// (`GMAT_ROOT` missing, a bad `force_model.gravity_file` name), a body-fixed rotation setup
+    /// failure (`av_orbital::Fk5Error`, e.g. a missing EOP/nutation data file), or any other
+    /// `av_orbital::OrbitalModelError` the crate's own constructors returned -- `detail` is that
+    /// error's own `Display`, mirroring [`DrmError::Gmat`]'s "wrap the FFI error's own message"
+    /// convention for the analogous GMAT-side failure. Typed, never a panic.
+    OrbitalModel { instance: String, detail: String },
+    /// N6: `spacecraft.DisplayStateType` named something other than `"Cartesian"` for a
+    /// `"orbital."`-dispatched instance. The native model has no GMAT to convert a Keplerian (or
+    /// any other) element set to the Cartesian state it actually propagates in, so a DRM author
+    /// must supply `spacecraft.X/Y/Z/VX/VY/VZ` directly -- refused here, typed, naming what was
+    /// declared instead, rather than silently reinterpreting the six numeric fields as if they
+    /// were Cartesian (which would propagate a physically wrong state with no error at all).
+    OrbitalRequiresCartesianState { instance: String, declared: String },
     /// `av_kernel::schedule::ScheduleError` from the underlying kernel run, stringified (its
     /// own `M::Error` is `binding::AnyModelError`, which is not `Clone`/`'static`-simple
     /// enough to nest here without another layer of boilerplate for no behavioural gain).
@@ -629,7 +671,18 @@ impl std::fmt::Display for DrmError {
             DrmError::CovarianceWithFaultsNotSupported { instance } => write!(f, "instance {instance:?}: covariance and DYNAMICS faults requested together are not yet supported"),
             DrmError::ModelNotStmCapable { instance } => write!(f, "instance {instance:?}: covariance requested but the bound model is not STM-capable"),
             DrmError::MissingInitialCovariance { instance } => write!(f, "instance {instance:?}: covariance requested but SystemInstance.initial_covariance was empty"),
+            #[cfg(feature = "gmat")]
             DrmError::Gmat(e) => write!(f, "{e}"),
+            #[cfg(not(feature = "gmat"))]
+            DrmError::GmatFeatureDisabled { instance, dynamics_model } => write!(
+                f,
+                "instance {instance:?}: dynamics_model {dynamics_model:?} names a \"gmat.\"-prefixed model, but this av-kernel was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked); rebuild with the default features to run a GMAT-backed instance"
+            ),
+            DrmError::OrbitalModel { instance, detail } => write!(f, "instance {instance:?}: could not construct the native orbital model: {detail}"),
+            DrmError::OrbitalRequiresCartesianState { instance, declared } => write!(
+                f,
+                "instance {instance:?}: spacecraft.DisplayStateType={declared:?}, but a \"orbital.\"-dispatched instance requires \"Cartesian\" (declare spacecraft.X/Y/Z/VX/VY/VZ directly -- the native model has no GMAT to convert any other element set)"
+            ),
             DrmError::Schedule(e) => write!(f, "{e}"),
             DrmError::CovarianceHygiene(e) => write!(f, "{e}"),
             DrmError::MissingFaultSeed { fault_id } => write!(f, "fault {fault_id:?} needs a random draw but Scenario.seeds has no entry keyed by its id"),

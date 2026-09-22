@@ -110,6 +110,14 @@
 //!   `tests/fk5_vs_convert.rs` (gated on `gmat-frames`, since the comparison needs GMAT even
 //!   though this module itself does not).
 //!
+//! N6 (`docs/native-dynamics-plan.md`, "Selection, goldens and the C ABI hedge") adds:
+//!
+//! - [`ffi`]: the C ABI export of the native derivative function (question 9's hedge, ADR-002's
+//!   "portable form") -- an opaque model handle over exactly [`model::EarthGravityModel<fk5::
+//!   Fk5BodyFixedRotation>`], construct/evaluate/destroy, no cargo feature gate (the whole point
+//!   is a derivative function a GMAT-free build can still hand to a foreign C caller). See that
+//!   module's own doc comment and the hand-written `include/av_orbital.h` it mirrors.
+//!
 //! # Units
 //!
 //! Every public function in [`cof`]/[`legendre`]/[`gravity`] works in SI: metres, seconds, and
@@ -140,6 +148,7 @@ pub mod cof;
 pub mod de;
 pub mod drag;
 pub mod dual;
+pub mod ffi;
 pub mod fk5;
 pub mod frame;
 #[cfg(feature = "gmat-frames")]
@@ -159,6 +168,7 @@ pub mod weather;
 pub use cof::{CofError, GravityModel};
 pub use de::{DeBody, DeEphemeris, DeError};
 pub use drag::{drag_acceleration, DragError, DragProperties};
+pub use ffi::{AvOrbitalModel, AvOrbitalStatus};
 pub use fk5::{EopTable, Fk5BodyFixedRotation, Fk5Error, NutationSeries};
 pub use frame::{BodyFixedRotation, Rotation};
 #[cfg(feature = "gmat-frames")]

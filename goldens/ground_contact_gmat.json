@@ -14,7 +14,7 @@
       "Sun"
     ]
   },
-  "generated": "2026-09-07T07:18:27+00:00",
+  "generated": "2026-09-22T05:52:42+00:00",
   "gmat_contact_windows_s": [
     {
       "duration_s": 411.60946809,
@@ -23,6 +23,12 @@
     }
   ],
   "gmat_version": "R2026a",
+  "golden_comparison_tolerance": {
+    "source": "the constant (TOLERANCE_S) crates/av-kernel/tests/ground_contact_gmat.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/ground_contact_gmat.rs:93,133-134 -- one-third of this golden's own 30 s step_s sampling interval, reasoned (not measured) against the sampling cadence per that file's own module doc comment",
+    "unit": "s",
+    "value": 10.0
+  },
+  "golden_regeneration_reason": "question 230: move the tolerance crates/av-kernel/tests/ground_contact_gmat.rs already asserted (TOLERANCE_S = 10.0 s) into this golden as golden_comparison_tolerance, no value changing; fixes this round's own defect where the prior regeneration overwrote the golden's reason field with a regeneration note instead of preserving its purpose statement",
   "keplerian": {
     "AOP": 0.0,
     "Cd": 2.2,

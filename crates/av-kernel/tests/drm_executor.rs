@@ -299,13 +299,15 @@ fn drm_rmag_output_matches_a_genuine_gmat_reportfile() {
         "[drm_executor rmag] output.leo_rmag.rmag@end = {:.6} m; GMAT ReportFile RMAG = {gmat_reportfile_rmag_m:.6} m; |err| = {err:.6} m",
         score.value
     );
-    // Same order of magnitude as the base golden's own 0.05 m position tolerance
-    // (goldens/leo_1day_jgm2_8x8_sunmoon.json's tolerance_m) -- rmag is a smooth function of
-    // position alone, so its own error should not exceed the position error by much; a looser
-    // bound than 0.05 m to leave headroom for this run's own km<->m and epoch round-trips,
-    // still two orders of magnitude tighter than a value that would indicate a real bug (a unit
-    // or frame mistake would show up as a multi-kilometre disagreement, not a sub-metre one).
-    assert!(err < 0.1, "rmag output {} m disagrees with GMAT's own ReportFile value {gmat_reportfile_rmag_m} m by {err} m, exceeding the 0.1 m bound", score.value);
+    // Question 230: read from the golden itself (goldens/gen_leo_1day_rmag.py writes it), never
+    // a bare Rust constant -- see that generator's own written `source` note for the "same order
+    // of magnitude as the base golden's own 0.05 m position tolerance" reasoning this bound was
+    // originally set from (unchanged). A reader that silently fell back to a default tolerance
+    // here would pin nothing (round 1's own review lesson, restated in this task).
+    let tolerance_m = rmag_golden["golden_comparison_tolerance"]["value"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("goldens/leo_1day_jgm2_8x8_sunmoon_rmag.json is missing golden_comparison_tolerance.value -- regenerate it with goldens/gen_leo_1day_rmag.py (question 230: this field must be present, never defaulted)"));
+    assert!(err < tolerance_m, "rmag output {} m disagrees with GMAT's own ReportFile value {gmat_reportfile_rmag_m} m by {err} m, exceeding the {tolerance_m} m bound", score.value);
 
     // Question 99's non-derivable-parameter proof: leo_1day_golden.system.yaml's own
     // "spacecraft.Cd" parameter is 2.2 -- this crate never reads that YAML value back into any

@@ -8,6 +8,31 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["gmat"]
+# `docs/open-questions.md` question 230 (the lead's ruling, round 4): the GMAT-backed half of
+# this crate's `drm` module (`registry::construct_gmat`/`AnyModel::Gmat`, `drm::binding`'s
+# `materialize_gmat`/`GmatModel`/`GmatModelInfo` plumbing, `drm::mod`'s `DrmError::Gmat`,
+# `drm::executor`'s GMAT-frame-conversion functions, and the whole of `drm::gmat_command`) is
+# behind this feature, mirroring `crates/av-orbital/Cargo.toml`'s own `gmat-frames` feature
+# comment exactly (that crate's own precedent for this track): default-on, because every
+# current caller (the DRM executor's own tests, `av-run`) wants the real GMAT engine until
+# N6's additive `ModelKind` (a separate task) gives the kernel a native model to select
+# instead; a kernel build that must omit `gmat-sys` entirely turns this off and still gets a
+# crate that builds (`cargo test -p av-kernel --no-default-features`, this task's own report)
+# with its non-GMAT `drm`/`schedule`/`kernel`/`trajectory`/`clock`/`interpolate` tests intact
+# and a typed refusal (not a panic, not a silent native fallback) for any DRM instance whose
+# `dynamics_model` names a `"gmat."`-prefixed id.
+#
+# N6 (`docs/native-dynamics-plan.md`, `docs/open-questions.md` question 230): also forwards to
+# `av-orbital`'s own `gmat-frames` feature (its Cargo.toml's identical comment is this crate's
+# own precedent) -- `av-orbital` is a normal, always-on dependency below (`default-features =
+# false`), so its `EarthGravityModel`/`ModelKind::Orbital` dispatch is available in BOTH feature
+# states; only the GMAT-backed half of *that* crate needs forwarding here. Verified by `cargo
+# tree -p av-kernel --no-default-features -i gmat-sys`, not by reading: this task's own report
+# has the output.
+gmat = ["dep:gmat-sys", "av-orbital/gmat-frames"]
+
 [dependencies]
 av-cdm = { path = "../av-cdm" }
 av-dynamics = { path = "../av-dynamics" }
@@ -19,7 +44,22 @@ av-codec = { path = "../av-codec" }
 # gmat_sys::model::GmatModel -- see src/drm/mod.rs's module doc comment for why this moved
 # out of [dev-dependencies] (previously only tests/golden_acceptance.rs used it). Every other
 # module (clock/interpolate/schedule/kernel/trajectory) still has no GMAT dependency.
-gmat-sys = { path = "../gmat-sys" }
+# `optional = true` behind the `gmat` feature above (question 230): this is what lets
+# `cargo build -p av-kernel --no-default-features` never touch `gmat-sys` (and therefore never
+# need a linked GMAT) at all -- verified in this task's own report by `otool -L` on the built
+# test binary and by `cargo tree -i gmat-sys` showing it absent from that feature state's graph.
+gmat-sys = { path = "../gmat-sys", optional = true }
+# N6 (`docs/native-dynamics-plan.md`): the native orbital force model behind the additive
+# `ModelKind::Orbital` (`src/registry.rs`) -- `crate::drm::binding::AnyModel::Orbital` wraps its
+# `EarthGravityModel<av_orbital::Fk5BodyFixedRotation>`. `default-features = false`: this crate's
+# own default `gmat-frames` feature would pull `gmat-sys` in unconditionally, defeating the whole
+# point of the `gmat` feature above -- forwarded explicitly instead (`gmat = [...,
+# "av-orbital/gmat-frames"]`) so `--no-default-features` here really does leave `gmat-sys` out of
+# the dependency graph (verified by `cargo tree`, this task's own report, not assumed from this
+# comment). Unconditional (not `optional = true`): the native model must be constructible in
+# EVERY feature state -- that is N6's whole point ("no GMAT library linked when the DRM selects
+# it").
+av-orbital = { path = "../av-orbital", default-features = false }
 # M13.2 (question 107): the crate/drm/binding.rs's ContainerModel speaks
 # altavista.v1.LockstepService (BINDING_KIND_CONTAINER) through this crate's tonic client --
 # see crates/av-lockstep/src/lib.rs's own module doc comment for why it, not av-grpc
@@ -66,3 +106,131 @@ av-lockstep-shim = { path = "../av-lockstep-shim" }
 # `av-kernel` nor `gmat-sys` (question 205's whole point), so this edge is dev-only and one
 # way, never a cycle.
 av-edge = { path = "../av-edge" }
+
+# `docs/open-questions.md` question 230: every integration test/example below actually calls
+# into the GMAT-backed half of this crate (a live `Gmat` engine, `materialize_gmat`,
+# `AnyModel::Gmat`, or a `"gmat."`-dispatched `execute()` run) -- measured with
+# `grep -rl gmat_sys crates/av-kernel/tests crates/av-kernel/examples` and then re-checked file
+# by file, not trusted from the grep alone: `tests/state_space_declaration.rs` also matches that
+# grep (one doc-comment mention, `gmat_sys::engine_lock()`, in its own module doc) but never
+# calls `classify_binding`/`execute` against a `"gmat."` dynamics_model in a way that needs a
+# live engine, so it is deliberately left off this list and out of `[[test]]` entirely (plain
+# autodiscovery covers it in both feature states). `required-features = ["gmat"]` -- not an
+# inner `#![cfg(feature = "gmat")]` in each file -- because an inner `cfg` that evaluates false
+# still produces a linked, empty test binary, and this host's `syspolicyd` blocks for one to
+# three minutes per FRESHLY LINKED binary regardless of what it actually runs
+# (`docs/open-questions.md` question 226): 35 empty binaries would be roughly an hour of nothing.
+# `required-features` means cargo does not build these targets at all under
+# `--no-default-features` -- confirmed by listing the test binaries cargo actually produces in
+# each feature state (`cargo test --no-run --message-format=json`), not assumed. Declaring these
+# named `[[test]]` entries does not disable autodiscovery of the remaining, non-GMAT test files
+# (`cargo help cargo-test`'s own documented behaviour, re-confirmed here): only the files listed
+# below stop being built without the feature; every other file in `tests/` is unaffected.
+[[test]]
+name = "covariance_frame_conversion"
+required-features = ["gmat"]
+[[test]]
+name = "decode_errors"
+required-features = ["gmat"]
+[[test]]
+name = "demo_ground_command"
+required-features = ["gmat"]
+[[test]]
+name = "demo_measurements"
+required-features = ["gmat"]
+[[test]]
+name = "demo_two_instance"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude_command"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude_control"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude_control_cfs"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude_control_renode"
+required-features = ["gmat"]
+[[test]]
+name = "drm_attitude_sensors"
+required-features = ["gmat"]
+[[test]]
+name = "drm_command"
+required-features = ["gmat"]
+[[test]]
+name = "drm_container"
+required-features = ["gmat"]
+[[test]]
+name = "drm_executor"
+required-features = ["gmat"]
+[[test]]
+name = "drm_ground_segment"
+required-features = ["gmat"]
+[[test]]
+name = "drm_maneuver"
+required-features = ["gmat"]
+[[test]]
+name = "drm_shared_run"
+required-features = ["gmat"]
+[[test]]
+name = "dropped_messages"
+required-features = ["gmat"]
+[[test]]
+name = "expr_goldens"
+required-features = ["gmat"]
+[[test]]
+name = "expr_objectives"
+required-features = ["gmat"]
+[[test]]
+name = "external_command_source"
+required-features = ["gmat"]
+[[test]]
+name = "faults_determinism"
+required-features = ["gmat"]
+[[test]]
+name = "gates_execution_error"
+required-features = ["gmat"]
+[[test]]
+name = "generate_e4a_ground_segment_fixture"
+required-features = ["gmat"]
+[[test]]
+name = "golden_acceptance"
+required-features = ["gmat"]
+[[test]]
+name = "port_command_events"
+required-features = ["gmat"]
+[[test]]
+name = "port_command_rematerialization"
+required-features = ["gmat"]
+[[test]]
+name = "port_faults"
+required-features = ["gmat"]
+[[test]]
+name = "port_traffic_sidecar"
+required-features = ["gmat"]
+[[test]]
+name = "registry"
+required-features = ["gmat"]
+[[test]]
+name = "replay"
+required-features = ["gmat"]
+[[test]]
+name = "restart_invariance"
+required-features = ["gmat"]
+[[test]]
+name = "segment_merge"
+required-features = ["gmat"]
+[[test]]
+name = "sensor_faults"
+required-features = ["gmat"]
+
+# `examples/gen_expr_goldens.rs`: same reason as the [[test]] entries above -- it runs a real
+# GMAT-bound DRM to regenerate the expr_* goldens.
+[[example]]
+name = "gen_expr_goldens"
+required-features = ["gmat"]

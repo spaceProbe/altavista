@@ -55,7 +55,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use av_cdm::pb::SystemDefinition;
-use av_kernel::drm::{execute, schema, DrmError, ExecutionErrorMode, RunConfig};
+use av_kernel::drm::{schema, ExecutionErrorMode};
+// `docs/open-questions.md` question 230: named only by `run_drm`'s gated half (see that
+// function's own doc comment).
+#[cfg(feature = "gmat")]
+use av_kernel::drm::{execute, DrmError, RunConfig};
+#[cfg(feature = "gmat")]
 use gmat_sys::Gmat;
 use prost::Message;
 
@@ -183,13 +188,13 @@ fn load_systems(paths: &[PathBuf]) -> Result<BTreeMap<String, SystemDefinition>,
     Ok(systems)
 }
 
-fn run(args: &[String]) -> Result<(), String> {
-    let cli = parse_cli(args)?;
-
-    let drm = schema::parse_drm_yaml(&read_to_string(&cli.drm)?).map_err(|e| format!("{}: {e}", cli.drm.display()))?;
-    let sos = schema::parse_sos_yaml(&read_to_string(&cli.sos)?).map_err(|e| format!("{}: {e}", cli.sos.display()))?;
-    let systems = load_systems(&cli.systems)?;
-
+/// `docs/open-questions.md` question 230: the one place this binary needs a live GMAT engine.
+/// Gated behind the `gmat` feature (default-on) -- `av-kernel`'s own `execute`/`RunConfig` do
+/// not exist at all without it (see `av_kernel::drm::executor`'s own `use gmat_sys::Gmat` doc
+/// comment: `RunConfig.gmat: &Gmat` makes the whole entry point GMAT-bound). Byte-identical to
+/// what `run` used to do inline in the default build.
+#[cfg(feature = "gmat")]
+fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb::SosConfiguration, systems: &BTreeMap<String, SystemDefinition>) -> Result<av_kernel::drm::RunProducts, String> {
     // GMAT is a per-process singleton and not thread-safe (gmat_sys::lib.rs's own doc comment);
     // this binary runs exactly one DRM per process, so the lock is held for the process's whole
     // working lifetime -- there is no second caller in this process to contend with it.
@@ -201,8 +206,32 @@ fn run(args: &[String]) -> Result<(), String> {
     // task -- `av-run` always passes `None` here. Wiring a flag through to `ReplayConfig::{log_path,
     // expected_hash, instances}` is deliberately left for a later task; this line only keeps
     // `av-run` compiling against `RunConfig`'s new field.
-    let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
-    let products = execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))?;
+    let cfg = RunConfig { gmat: &gmat, drm, sos, systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
+    execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
+}
+
+/// `docs/open-questions.md` question 230: the `--no-default-features` counterpart of
+/// [`run_drm`] -- a clear, typed (here, a plain `String` message, this binary's own error type)
+/// refusal naming the missing feature, never a panic and never built at all against a `Gmat`
+/// this binary cannot construct (`gmat-sys` is not even a dependency in this feature state).
+#[cfg(not(feature = "gmat"))]
+fn run_drm(_cli: &Cli, _drm: &av_cdm::pb::DesignReferenceMission, _sos: &av_cdm::pb::SosConfiguration, _systems: &BTreeMap<String, SystemDefinition>) -> Result<av_kernel::drm::RunProducts, String> {
+    // `Cli::gmat_startup`/`.error_mode` and `products_dir_for_out` are read only by the gated
+    // half of `run_drm` above; referenced here so they stay reachable (not dead code) in a
+    // build that never runs a DRM at all -- `Cli`'s own shape (and `parse_cli`/`products_dir_
+    // for_out`'s own tests) are unchanged in either feature state.
+    let _ = (&_cli.gmat_startup, &_cli.error_mode, &products_dir_for_out as &dyn Fn(Option<&PathBuf>) -> Option<PathBuf>);
+    Err("av-run was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked); rebuild with the default features to run a DRM".to_string())
+}
+
+fn run(args: &[String]) -> Result<(), String> {
+    let cli = parse_cli(args)?;
+
+    let drm = schema::parse_drm_yaml(&read_to_string(&cli.drm)?).map_err(|e| format!("{}: {e}", cli.drm.display()))?;
+    let sos = schema::parse_sos_yaml(&read_to_string(&cli.sos)?).map_err(|e| format!("{}: {e}", cli.sos.display()))?;
+    let systems = load_systems(&cli.systems)?;
+
+    let products = run_drm(&cli, &drm, &sos, &systems)?;
 
     eprintln!(
         "av-run: run_id={:?} config_hash={} trajectories={} events={}",

@@ -8,6 +8,14 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["gmat"]
+# `docs/open-questions.md` question 230: forwards to `av-kernel`'s own `gmat` feature (see that
+# crate's Cargo.toml comment) and gates this binary's own direct `gmat-sys` use (`src/main.rs`'s
+# `Gmat::setup`/`gmat_sys::engine_lock()`, the live handle every DRM run currently needs).
+# Default-on for the same reason `av-kernel`'s is: every current caller wants the real engine.
+gmat = ["dep:gmat-sys", "av-kernel/gmat"]
+
 [dependencies]
 av-cdm = { path = "../av-cdm" }
 # M16.3's only reason this binary exists: av_kernel::drm::{schema, execute, RunConfig,
@@ -15,7 +23,11 @@ av-cdm = { path = "../av-cdm" }
 # standalone binary rather than a run_drm RPC (proto/** is read-only to this task, and
 # av-dynamics-service's altavista.v1.DynamicsService proto has no DRM-level RPC to extend
 # without a proto change).
-av-kernel = { path = "../av-kernel" }
+# `default-features = false` (question 230): otherwise av-kernel's own `default = ["gmat"]`
+# would stay on regardless of this crate's own `--no-default-features`, since a dependency
+# keeps its own defaults unless the parent explicitly opts out -- this crate's `gmat` feature
+# (default-on) is what turns it back on via the `av-kernel/gmat` forward above.
+av-kernel = { path = "../av-kernel", default-features = false }
 # A3.2 (`docs/aiplane-plan.md`'s A3 milestone, D1): `src/command_adapter.rs` is the one seam
 # that wires `av_command::service::DispatchSink` (the command-authority service's own dispatch
 # seam) to `av_kernel::drm::command_source::ExternalCommandSource` (the kernel's own external
@@ -27,7 +39,8 @@ av-kernel = { path = "../av-kernel" }
 av-command = { path = "../av-command" }
 # Constructing the one live Gmat handle a DRM run needs (crates/av-kernel/tests/drm_maneuver.rs
 # and golden_acceptance.rs's own established pattern: Gmat::setup + gmat_sys::engine_lock()).
-gmat-sys = { path = "../gmat-sys" }
+# `optional = true` behind the `gmat` feature above (question 230).
+gmat-sys = { path = "../gmat-sys", optional = true }
 prost.workspace = true
 # `src/command_adapter.rs`'s own gRPC client (`av_command::pb::command_authority_service_
 # client::CommandAuthorityServiceClient<Channel>`), reporting kernel `CommandOutcome`s back to

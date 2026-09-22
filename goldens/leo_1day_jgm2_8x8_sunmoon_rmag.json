@@ -1,7 +1,13 @@
 {
   "frame": "EarthMJ2000Eq",
-  "generated": "2026-09-03T21:03:40+00:00",
+  "generated": "2026-09-22T05:52:46+00:00",
   "gmat_version": "R2026a",
+  "golden_comparison_tolerance": {
+    "source": "the constant crates/av-kernel/tests/drm_executor.rs's drm_rmag_output_matches_a_genuine_gmat_reportfile has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/drm_executor.rs:308 -- reasoned (not measured) as the same order of magnitude as goldens/leo_1day_jgm2_8x8_sunmoon.json's own 0.05 m position tolerance, loosened for round-trip km<->m and epoch noise",
+    "unit": "m",
+    "value": 0.1
+  },
+  "golden_regeneration_reason": "question 230: move the tolerance crates/av-kernel/tests/drm_executor.rs's drm_rmag_output_matches_a_genuine_gmat_reportfile already asserted (0.1 m) into this golden as golden_comparison_tolerance, no value changing; fixes this round's own defect where the prior regeneration overwrote the golden's reason field with a regeneration note instead of preserving its purpose statement",
   "name": "leo_1day_jgm2_8x8_sunmoon_rmag",
   "note": "GMAT's own RMAG real parameter, read from a genuine GMAT ReportFile (script run, SolverIterations=Current -- never Execute() through the object API, per this repository's documented ReportFile quirk) for the identical arc leo_1day_jgm2_8x8_sunmoon.json pins. As of M11.1 (question 99), gmat_sys::model::GmatModel::step reads its own OUTPUT_RMAG through gmat_sys::DerivativeModel::real_parameter (gmatffi_get_real_parameter) -- GMAT's own GetRealParameter, not Rust arithmetic -- so this golden confirms that value against a second, genuinely different GMAT code path: the script engine's own Propagate statement and parameter evaluation (this file), versus gmat-sys's own GetDerivatives-driven integration with the propagated state written back into a different Spacecraft object and read via GetRealParameter directly, not a ReportFile (crates/gmat-sys/src/model.rs).",
   "reason": "M11.1 (question 99): gmat_sys::model::GmatModel::step now reads RMAG through gmatffi_get_real_parameter instead of computing it in Rust; regenerating only to update this golden's own note/reason text to match -- the ReportFile mechanism, script, and golden arc are unchanged, so the numeric value is expected to reproduce exactly",

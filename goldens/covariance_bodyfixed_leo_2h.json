@@ -90,9 +90,15 @@
     ]
   },
   "frame": "EarthBodyFixed",
-  "generated": "2026-09-05T16:53:23+00:00",
+  "generated": "2026-09-22T05:52:39+00:00",
   "gmat_coordinate_system": "EarthFixed",
   "gmat_version": "R2026a",
+  "golden_comparison_tolerance": {
+    "source": "the constant (the 'scale'-normalized bound) crates/gmat-sys/tests/convert_rotation.rs's convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/convert_rotation.rs:222-226 -- applies only to the position block (rows/cols 0-2), the one block a missing Rdot term cannot affect; see that file's own module doc comment for why the velocity/cross blocks are checked as a disagreement floor instead, not a match tolerance",
+    "unit": "relative (position block max-abs-diff, scaled by the largest declared position variance, 0.04 km^2)",
+    "value": 1e-09
+  },
+  "golden_regeneration_reason": "question 230: move the tolerance crates/gmat-sys/tests/convert_rotation.rs's convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance already asserted (1e-9 relative, position block) into this golden as golden_comparison_tolerance, no value changing; fixes this round's own defect where the prior regeneration overwrote the golden's reason field with a regeneration note instead of preserving its purpose statement",
   "keplerian": {
     "AOP": 0.0,
     "Cd": 2.2,

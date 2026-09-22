@@ -146,7 +146,7 @@ use av_cdm::pb::{Fault, FaultTargetKind};
 use av_cdm::units;
 
 use super::attitude::{parse_index_and_field, AttitudeWheelsSpec};
-use super::binding::{BindingPlan, ConstantAccelSpec, GmatSystemSpec};
+use super::binding::{BindingPlan, ConstantAccelSpec, GmatSystemSpec, OrbitalSystemSpec};
 use super::controller::AttitudeControllerSpec;
 use super::ground::GroundStationSpec;
 use super::sensors::{ImuSpec, StarTrackerSpec};
@@ -315,6 +315,7 @@ pub(crate) const CARTESIAN_FIELDS: [&str; 6] = ["X", "Y", "Z", "VX", "VY", "VZ"]
 /// demo_two_instance_bystander_invariance_against_real_single_instance_gmat_runs` measures: a
 /// bystander's own FIRST-EVER re-materialization is necessarily this Keplerian -> Cartesian
 /// transition, whether or not anything about its own dynamics configuration changed.
+#[cfg(feature = "gmat")]
 pub(crate) const DISPLAY_STATE_TYPE_FIELD: &str = "DisplayStateType";
 
 fn fault_value(fault: &Fault) -> Result<f64, DrmError> {
@@ -700,6 +701,36 @@ pub fn apply_dynamics_fault(plan: &BindingPlan, fault: &Fault) -> Result<Binding
             apply_ground_station_target(&mut spec, &fault.target, value, &fault.id)?;
             Ok(BindingPlan::GroundStation(spec))
         }
+        // N6 (`docs/native-dynamics-plan.md`, this task): a DYNAMICS fault on a
+        // `"orbital."`-dispatched instance changes gravity-field truncation --
+        // `force_model.gravity_degree`/`.gravity_order`, the only two `OrbitalSystemSpec` fields
+        // that are both numeric and genuinely re-bindable (the next boundary's own
+        // `materialize_plan_at_boundary` -> `ModelRegistry::construct_orbital` re-reads this
+        // exact spec, the identical "fault mutates the plan, the next re-materialization picks
+        // it up" mechanism `apply_gmat_target`'s own `force_model.gravity_degree`/`.gravity_order`
+        // arms already use for a GMAT-bound instance). Every other `force_model.*`/`spacecraft.*`
+        // name is refused, typed, rather than silently accepted and ignored: `force_model.
+        // relativistic_correction` has no counterpart here at all -- `av_orbital::
+        // EarthGravityModel` (searched: nothing in `crates/av-orbital/src` mentions a
+        // relativistic correction) implements no such term to toggle; `force_model.central_body`/
+        // `.gravity_file`/`.point_masses` are string/list-valued, never the single `f64`
+        // `Fault.params["value"]` carries; and `OrbitalSystemSpec` carries no `spacecraft_real`-
+        // style field map the way `GmatSystemSpec` does, so no `spacecraft.*` fault target is
+        // supported at all -- `spacecraft.CoordinateSystem`/`.DisplayStateType` are frame/
+        // representation invariants this instance's own classify-time validation already pins
+        // (`binding::parse_orbital_spec`), and an instance's initial declared state is not a
+        // fault target for any binding kind in this module (this function's own "What a DYNAMICS
+        // fault can change" module doc comment section: only a declared *parameter*, never
+        // initial state, is ever in scope).
+        BindingPlan::Orbital(spec) => {
+            let mut spec: OrbitalSystemSpec = spec.clone();
+            match fault.target.as_str() {
+                "force_model.gravity_degree" => spec.gravity_degree = value.round() as i32,
+                "force_model.gravity_order" => spec.gravity_order = value.round() as i32,
+                other => return Err(DrmError::UnknownParameter { context: format!("fault {:?}", fault.id), name: other.to_string() }),
+            }
+            Ok(BindingPlan::Orbital(spec))
+        }
     }
 }
 
@@ -713,6 +744,44 @@ mod tests {
         let fault = Fault { id: "f1".to_string(), target: "accel.y".to_string(), kind: "parameter".to_string(), params: std::collections::BTreeMap::from([("value".to_string(), 99.0)]), ..Default::default() };
         let BindingPlan::ConstantAccel(spec) = apply_dynamics_fault(&plan, &fault).unwrap() else { panic!("expected ConstantAccel") };
         assert_eq!(spec.a, [1.0, 99.0, 3.0]);
+    }
+
+    fn orbital_fault(target: &str, value: f64) -> Fault {
+        Fault { id: "f1".to_string(), target: target.to_string(), kind: "parameter".to_string(), target_kind: FaultTargetKind::Dynamics as i32, params: std::collections::BTreeMap::from([("value".to_string(), value)]), ..Default::default() }
+    }
+
+    /// N6 (this task): a DYNAMICS fault on a `"orbital."`-dispatched instance changes
+    /// `force_model.gravity_degree`/`.gravity_order`, the only two `OrbitalSystemSpec` fields
+    /// this task's new `BindingPlan::Orbital` arm accepts. Fails against an implementation
+    /// missing the arm entirely (a compile error) or one that silently no-ops it.
+    #[test]
+    fn a_dynamics_fault_on_an_orbital_instance_changes_gravity_degree_and_order() {
+        let plan = BindingPlan::Orbital(OrbitalSystemSpec { central_body: "Earth".to_string(), gravity_file: "JGM2.cof".to_string(), gravity_degree: 8, gravity_order: 8, ..Default::default() });
+        let BindingPlan::Orbital(spec) = apply_dynamics_fault(&plan, &orbital_fault("force_model.gravity_degree", 4.0)).unwrap() else { panic!("expected Orbital") };
+        assert_eq!(spec.gravity_degree, 4);
+        // Every other field, including the sibling gravity_order, must be untouched -- only the
+        // named parameter changes.
+        assert_eq!(spec.gravity_order, 8);
+        assert_eq!(spec.central_body, "Earth");
+
+        let BindingPlan::Orbital(spec) = apply_dynamics_fault(&plan, &orbital_fault("force_model.gravity_order", 2.0)).unwrap() else { panic!("expected Orbital") };
+        assert_eq!(spec.gravity_order, 2);
+        assert_eq!(spec.gravity_degree, 8);
+    }
+
+    /// N6 (this task): every `force_model.*`/`spacecraft.*` name `apply_gmat_target` recognizes
+    /// for a GMAT-bound instance but `OrbitalSystemSpec` has no field for is a typed refusal here
+    /// too -- never a silent no-op that would let a DRM declare a fault which then does nothing.
+    /// Covers all three of this task's report's own reasons: no counterpart field at all
+    /// (`relativistic_correction`), non-numeric/configuration-only (`central_body`), and no
+    /// `spacecraft.*` support whatsoever (`spacecraft.X`, an initial-state component).
+    #[test]
+    fn a_dynamics_fault_on_an_orbital_instance_refuses_every_unsupported_target() {
+        let plan = BindingPlan::Orbital(OrbitalSystemSpec { central_body: "Earth".to_string(), gravity_file: "JGM2.cof".to_string(), gravity_degree: 8, gravity_order: 8, ..Default::default() });
+        for target in ["force_model.relativistic_correction", "force_model.central_body", "force_model.gravity_file", "force_model.point_masses", "spacecraft.X"] {
+            let err = apply_dynamics_fault(&plan, &orbital_fault(target, 1.0)).expect_err(&format!("{target} must be refused, not silently accepted"));
+            assert!(matches!(err, DrmError::UnknownParameter { .. }), "{target} produced {err:?}, expected DrmError::UnknownParameter");
+        }
     }
 
     fn attitude_spec(n_wheels: usize) -> AttitudeWheelsSpec {

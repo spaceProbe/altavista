@@ -301,6 +301,13 @@
 //! (creating the directory, writing the file) is [`super::DrmError::PortTrafficSidecarIo`], a
 //! typed refusal -- never a panic, never a silently-empty hash.
 
+// `docs/open-questions.md` question 230, N6 (this task): almost none of these are GMAT-specific
+// any more -- round 4's earlier task gated the whole set because everything below was reachable
+// only from `execute`, which was itself fully gated at the time (`RunConfig.gmat: &Gmat` was a
+// mandatory field). This task un-gates `execute` and its call graph; only `gmat_sys::Gmat`
+// itself stays behind the feature (see [`GmatHandle`]'s own doc comment for how the handful of
+// functions that used to take `gmat: &Gmat` directly keep one, unconditional signature across
+// both feature states).
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -308,16 +315,25 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use av_cdm::pb;
-use av_cdm::pb::{
-    AuthorKind, DesignReferenceMission, Event, Fault, FaultTargetKind, Provenance, Scenario, SosConfiguration, SystemDefinition, SystemInstance, Trajectory, TrajectorySample, TrajectorySegment, Unit,
-};
+use av_cdm::pb::{AuthorKind, DesignReferenceMission, Event, Fault, FaultTargetKind, Provenance, Scenario, SosConfiguration, SystemDefinition, SystemInstance, Trajectory, TrajectorySample, TrajectorySegment, Unit};
+// `docs/open-questions.md` question 230, N6: named only by `fill_fixed_rotations` and the new
+// `convert_gmat_trajectory_to_declared_frame_gmat` helper (both gated) -- every other A1MJD/km
+// boundary in this crate is inside `gmat_sys`/`av_orbital` themselves now.
+#[cfg(feature = "gmat")]
 use av_cdm::time::Tai;
+#[cfg(feature = "gmat")]
 use av_cdm::units;
 use av_dynamics::{BoxedModel, ModelError};
+#[cfg(feature = "gmat")]
 use gmat_sys::Gmat;
 use prost::Message as _;
 
 use super::binding::{self, BindingPlan, ContainerError, SharedContainerModel};
+// Named only by `convert_gmat_trajectory_to_declared_frame_gmat`'s own signature (gated) --
+// the real GMAT-side frame conversion needs a `&GmatSystemSpec` (its own `central_body` names
+// the integration frame to convert away from), never reached without a live `Gmat` handle.
+#[cfg(feature = "gmat")]
+use super::binding::GmatSystemSpec;
 use super::command;
 use super::command_source;
 use crate::registry::{ModelHandle, ModelRegistry};
@@ -332,15 +348,41 @@ use super::events;
 use super::fault;
 use super::hash;
 use super::maneuver::{self, ExecutionErrorMode, ParsedManeuver};
+// `docs/open-questions.md` question 230: named only by `execute`'s own replay handling (gated) --
+// `super::replay::ReplayConfig` (re-exported from `mod.rs`, ungated) is unaffected.
 use super::replay;
 use super::DrmError;
 use crate::kernel::{HeteroKernel, HeteroKernelError};
+
+/// `docs/open-questions.md` question 230, N6 (this task): the handful of functions below that
+/// used to take a live `gmat: &Gmat` (`materialize_plan`, `materialize_plan_at_boundary`,
+/// `run_shared_group`, `run_covariance_instance`, `convert_gmat_trajectory_to_declared_frame`)
+/// keep that exact parameter position, unconditionally, across both feature states -- under the
+/// `gmat` feature this is literally `&Gmat` (a type alias, zero runtime cost); without it,
+/// `BindingPlan::Gmat` can never actually be constructed (`binding::classify_binding` refuses a
+/// `"gmat."`-dispatched `dynamics_model`, typed, before any of these five are ever reached --
+/// `DrmError::GmatFeatureDisabled`), so the handle is never dereferenced and this is a
+/// zero-sized marker instead. This is what lets `execute`'s own call graph stay ONE copy of each
+/// of these five functions rather than a second, `--no-default-features`-only copy of every one
+/// of them (`run_shared_group` alone is several hundred lines) -- see this task's own report for
+/// why that would have been the alternative.
+#[cfg(feature = "gmat")]
+pub(crate) type GmatHandle<'a> = &'a Gmat;
+#[cfg(not(feature = "gmat"))]
+pub(crate) type GmatHandle<'a> = &'a ();
 
 /// Everything [`execute`] needs: a live GMAT handle (only touched for `"gmat."`-dispatched
 /// instances -- see the module doc comment), the three loaded-and-parsed artifacts, and a
 /// caller-supplied run id. The caller must hold `gmat_sys::engine_lock()` for the duration of
 /// this call whenever any instance actually needs GMAT.
 pub struct RunConfig<'a> {
+    /// `docs/open-questions.md` question 230, N6 (this task): the ONE field this task's own
+    /// brief asks to gate directly ("a cfg-gated `RunConfig.gmat` field") -- every other field
+    /// below carries no GMAT dependency of its own. Absent under `--no-default-features`: no
+    /// instance in that build can ever be `"gmat."`-dispatched (`binding::classify_binding`
+    /// refuses one, typed, before this field would ever be read), so there is nothing for a
+    /// caller to supply here.
+    #[cfg(feature = "gmat")]
     pub gmat: &'a Gmat,
     pub drm: &'a DesignReferenceMission,
     pub sos: &'a SosConfiguration,
@@ -703,6 +745,7 @@ fn add_mandatory_body_frames(frames: Vec<pb::FrameDefinition>, plans: &BTreeMap<
 /// orders of magnitude looser than the floating-point noise a correct DCM-to-quaternion
 /// conversion of a genuine rotation matrix produces (~1e-15), so this only ever catches a real
 /// arithmetic bug, never ordinary rounding.
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_UNIT_NORM_TOLERANCE: f64 = 1e-9;
 
 /// Question 129: the wire's own contract for `FrameDefinition.fixed_rotation_q` --
@@ -714,6 +757,7 @@ const FIXED_ROTATION_UNIT_NORM_TOLERANCE: f64 = 1e-9;
 /// computes (belt-and-suspenders against this module's own arithmetic), and `pub(crate)` so a
 /// future caller elsewhere in this crate can reuse the identical rule rather than a second,
 /// drifting copy of "what counts as a valid fixed_rotation_q".
+#[cfg(feature = "gmat")]
 pub(crate) fn validate_fixed_rotation_q(frame_id: &str, q: &[f64]) -> Result<(), DrmError> {
     match q.len() {
         0 => Ok(()),
@@ -768,6 +812,7 @@ pub(crate) fn validate_fixed_rotation_q(frame_id: &str, q: &[f64]) -> Result<(),
 /// incorrectly report the wire's own headline fixed-frame case as time-varying -- exactly the
 /// failure this constant's value was chosen to avoid, root-caused rather than worked around by
 /// loosening [`FIXED_ROTATION_CONSTANCY_TOLERANCE`] itself (which stays at the brief's own 1e-12).
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_MEASURE_INTERVAL_NS: i64 = 10 * 1_000_000_000;
 
 /// [`fill_fixed_rotations`]'s own constancy bound: the two measured rotation matrices
@@ -778,6 +823,7 @@ const FIXED_ROTATION_MEASURE_INTERVAL_NS: i64 = 10 * 1_000_000_000;
 /// even for the genuinely-fixed `EarthICRF`/`EarthMJ2000Eq` pair, and why the fix is the
 /// separation, not this tolerance. See that same doc comment for why a body-fixed frame is
 /// *expected* to fail this at any separation, not a bug to work around.
+#[cfg(feature = "gmat")]
 const FIXED_ROTATION_CONSTANCY_TOLERANCE: f64 = 1e-12;
 
 /// The 3x3 direction-cosine (change-of-basis) matrix `C` such that, for any physical vector,
@@ -789,6 +835,7 @@ const FIXED_ROTATION_CONSTANCY_TOLERANCE: f64 = 1e-12;
 /// MJ2000Eq, so the converted velocity component is never read). This is exactly the matrix
 /// [`matrix_to_quaternion`] turns into `fixed_rotation_q`'s own "parent -> this" unit quaternion
 /// when `from_cs` is the body's MJ2000Eq and `to_cs` is the candidate frame.
+#[cfg(feature = "gmat")]
 fn rotation_matrix(gmat: &Gmat, epoch_a1mjd: f64, from_cs: &str, to_cs: &str) -> Result<[[f64; 3]; 3], DrmError> {
     let mut c = [[0.0_f64; 3]; 3];
     for col in 0..3 {
@@ -807,6 +854,7 @@ fn rotation_matrix(gmat: &Gmat, epoch_a1mjd: f64, from_cs: &str, to_cs: &str) ->
 /// 1978), branching on the largest diagonal term to avoid dividing by a near-zero `sqrt` --
 /// numerically safe for any proper rotation, which `rotation_matrix`'s output always is (GMAT's
 /// own `CoordinateConverter::Convert` on two inertial axes systems is orthogonal by construction).
+#[cfg(feature = "gmat")]
 fn matrix_to_quaternion(m: &[[f64; 3]; 3]) -> [f64; 4] {
     let trace = m[0][0] + m[1][1] + m[2][2];
     if trace > 0.0 {
@@ -855,6 +903,7 @@ fn matrix_to_quaternion(m: &[[f64; 3]; 3]) -> [f64; 4] {
 /// invocation) and the candidate frame's own `id`, so two different frames' own `CoordinateSystem`
 /// pairs can never collide with each other or with another `execute()` call's objects -- the same
 /// convention [`convert_gmat_trajectory_to_declared_frame`] already follows.
+#[cfg(feature = "gmat")]
 fn fill_fixed_rotations(gmat: &Gmat, gmat_ns: &str, frames: Vec<pb::FrameDefinition>, base_tai_ns: i64) -> Result<Vec<pb::FrameDefinition>, DrmError> {
     use std::collections::BTreeSet;
 
@@ -984,11 +1033,47 @@ fn gmat_execution_namespace(run_id: &str) -> String {
 /// and threaded straight through to `construct_gmat`/`binding::materialize_gmat` for a `Gmat`
 /// plan -- see that function's own doc comment for exactly what it namespaces.
 #[allow(clippy::too_many_arguments)]
-fn materialize_plan(gmat: &Gmat, plan: &BindingPlan, sys: &SystemDefinition, epoch_tai_ns: i64, with_stm: bool, accept_missing_stm_terms: bool, gmat_ns: &str, name_suffix: &str) -> Result<ModelHandle, DrmError> {
+fn materialize_plan(
+    gmat: GmatHandle<'_>,
+    plan: &BindingPlan,
+    sys: &SystemDefinition,
+    epoch_tai_ns: i64,
+    // `docs/open-questions.md` question 230, N6 (this task): all four of these are read only by
+    // this function's own `#[cfg(feature = "gmat")]` `BindingPlan::Gmat` arm below -- every other
+    // arm (`Orbital`/`ConstantAccel`/`Attitude`/...) ignores them, the same way `state_si` is
+    // deliberately ignored by most of `materialize_plan_at_boundary`'s own arms just below. Named
+    // with a leading underscore under `--no-default-features` (never `#[allow(unused_variables)]`
+    // -- the call sites in `execute`'s own call graph are unconditional either way, so the
+    // parameter itself cannot simply be dropped from the signature without also splitting this
+    // function into two near-duplicates).
+    #[cfg(feature = "gmat")] with_stm: bool,
+    #[cfg(not(feature = "gmat"))] _with_stm: bool,
+    #[cfg(feature = "gmat")] accept_missing_stm_terms: bool,
+    #[cfg(not(feature = "gmat"))] _accept_missing_stm_terms: bool,
+    #[cfg(feature = "gmat")] gmat_ns: &str,
+    #[cfg(not(feature = "gmat"))] _gmat_ns: &str,
+    #[cfg(feature = "gmat")] name_suffix: &str,
+    #[cfg(not(feature = "gmat"))] _name_suffix: &str,
+) -> Result<ModelHandle, DrmError> {
     match plan {
+        #[cfg(feature = "gmat")]
         BindingPlan::Gmat(spec) => {
             ModelRegistry::construct_gmat(gmat, spec, epoch_tai_ns, &sys.dynamics_model, gmat_ns, name_suffix, &sys.state_space_id, with_stm, accept_missing_stm_terms).map_err(DrmError::Model)
         }
+        // `docs/open-questions.md` question 230, N6: `BindingPlan::Gmat` can only be constructed
+        // when the `gmat` feature is on (`binding::classify_binding` refuses a `"gmat."`-
+        // dispatched `dynamics_model`, typed, before a `GmatSystemSpec` is ever built otherwise)
+        // -- this arm is unreachable in practice, but still a typed refusal, never a panic, in
+        // case that invariant is ever violated.
+        #[cfg(not(feature = "gmat"))]
+        BindingPlan::Gmat(_spec) => {
+            let _ = gmat;
+            Err(DrmError::GmatFeatureDisabled { instance: sys.id.clone(), dynamics_model: sys.dynamics_model.clone() })
+        }
+        // N6 (`docs/native-dynamics-plan.md`): the native orbital model, GMAT-free in both
+        // feature states -- see `crate::registry::ModelRegistry::construct_orbital`'s own doc
+        // comment for exactly what it builds.
+        BindingPlan::Orbital(spec) => ModelRegistry::construct_orbital(spec, epoch_tai_ns, &sys.dynamics_model, &sys.state_space_id).map_err(DrmError::Model),
         BindingPlan::ConstantAccel(spec) => Ok(ModelRegistry::construct_native(spec, epoch_tai_ns, &sys.dynamics_model, &sys.state_space_id)),
         // M22.1b: `AttitudeWheelsModel::new` needs the full resolved `StateSpace` (dimension and
         // per-component units), not just `sys.state_space_id` -- re-resolved here rather than
@@ -1048,17 +1133,25 @@ fn materialize_plan(gmat: &Gmat, plan: &BindingPlan, sys: &SystemDefinition, epo
 /// existing handle" API; see `crate::registry`'s own module doc comment for why.
 #[allow(clippy::too_many_arguments)]
 fn materialize_plan_at_boundary(
-    gmat: &Gmat,
+    gmat: GmatHandle<'_>,
     plan: &BindingPlan,
     sys: &SystemDefinition,
     epoch_tai_ns: i64,
     state_si: &[f64],
-    with_stm: bool,
-    accept_missing_stm_terms: bool,
-    gmat_ns: &str,
-    name_suffix: &str,
+    // See `materialize_plan`'s own identical doc comment just above -- the same four
+    // GMAT-only parameters, read only by this function's own `#[cfg(feature = "gmat")]`
+    // `BindingPlan::Gmat` arm below.
+    #[cfg(feature = "gmat")] with_stm: bool,
+    #[cfg(not(feature = "gmat"))] _with_stm: bool,
+    #[cfg(feature = "gmat")] accept_missing_stm_terms: bool,
+    #[cfg(not(feature = "gmat"))] _accept_missing_stm_terms: bool,
+    #[cfg(feature = "gmat")] gmat_ns: &str,
+    #[cfg(not(feature = "gmat"))] _gmat_ns: &str,
+    #[cfg(feature = "gmat")] name_suffix: &str,
+    #[cfg(not(feature = "gmat"))] _name_suffix: &str,
 ) -> Result<ModelHandle, DrmError> {
     match plan {
+        #[cfg(feature = "gmat")]
         BindingPlan::Gmat(spec) => {
             // A `Gmat` plan's own carried-over state is always exactly 6-dimensional
             // (`gmat_sys::model::GmatModel` has no other physical shape) -- M21.3 (question
@@ -1067,6 +1160,25 @@ fn materialize_plan_at_boundary(
             let state_si_6: [f64; 6] = state_si.try_into().expect("a Gmat plan's own carried-over state is always 6-dimensional");
             let rebound = fault::rebind_gmat_spec_at_state(spec, state_si_6);
             ModelRegistry::construct_gmat(gmat, &rebound, epoch_tai_ns, &sys.dynamics_model, gmat_ns, name_suffix, &sys.state_space_id, with_stm, accept_missing_stm_terms).map_err(DrmError::Model)
+        }
+        // See `materialize_plan`'s own identical `#[cfg(not(feature = "gmat"))]` arm doc comment
+        // -- unreachable in practice, still a typed refusal.
+        #[cfg(not(feature = "gmat"))]
+        BindingPlan::Gmat(_spec) => {
+            let _ = (gmat, state_si);
+            Err(DrmError::GmatFeatureDisabled { instance: sys.id.clone(), dynamics_model: sys.dynamics_model.clone() })
+        }
+        // N6: same "state_si deliberately unused" shape as `ConstantAccel` immediately below --
+        // a freshly re-bound `EarthGravityModel`'s own declared initial state is likewise never
+        // what seeds the next span; only its *behaviour* (the bound gravity/third-body/SRP/drag
+        // configuration, unaffected by a DYNAMICS fault this model does not yet support) matters
+        // here. `EarthGravityModel` carries no re-bindable fault surface today (unlike
+        // `GmatSystemSpec`'s own `rebind_gmat_spec_at_state`) -- a DYNAMICS fault targeting a
+        // `"orbital."`-dispatched instance is refused earlier, at classify time, the same way
+        // every other native binding kind's own fault surface (or lack of one) already is.
+        BindingPlan::Orbital(spec) => {
+            let _ = state_si;
+            ModelRegistry::construct_orbital(spec, epoch_tai_ns, &sys.dynamics_model, &sys.state_space_id).map_err(DrmError::Model)
         }
         // `state_si` (the previous segment's own carried-over physical state) is deliberately
         // unused here -- see this function's own doc comment: a `ConstantAccel` plan's fresh
@@ -1791,7 +1903,7 @@ fn resolve_consume_framed_port(plan: &BindingPlan) -> Option<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn run_shared_group(
-    gmat: &Gmat,
+    gmat: GmatHandle<'_>,
     plans: &BTreeMap<String, (BindingPlan, i64)>,
     container_plans: &BTreeMap<String, (binding::ContainerSpec, i64)>,
     instances_by_name: &BTreeMap<String, &SystemInstance>,
@@ -2765,7 +2877,7 @@ fn run_covariance_span(
 /// set comparison this makes possible.
 #[allow(clippy::too_many_arguments)]
 fn run_covariance_instance(
-    gmat: &Gmat,
+    gmat: GmatHandle<'_>,
     plan: &BindingPlan,
     sys: &SystemDefinition,
     instance: &SystemInstance,
@@ -2982,7 +3094,7 @@ fn finish_trajectory(mut traj: Trajectory, drm_hash: &str, sos_hash: &str, scena
 /// `rotation`/`rotation_dot` are unitless (a pure rotation and its rate), so the SI `cov` this
 /// function reads and writes back never passes through a km<->m conversion at all -- see
 /// [`Gmat::convert_with_rotation`]'s own doc comment.
-fn convert_gmat_trajectory_to_declared_frame(gmat: &Gmat, plan: &BindingPlan, gmat_ns: &str, instance_name: &str, mut traj: Trajectory) -> Result<Trajectory, DrmError> {
+fn convert_gmat_trajectory_to_declared_frame(gmat: GmatHandle<'_>, plan: &BindingPlan, gmat_ns: &str, instance_name: &str, traj: Trajectory) -> Result<Trajectory, DrmError> {
     let spec = match plan {
         BindingPlan::Gmat(spec) => spec,
         BindingPlan::ConstantAccel(_) => return Ok(traj),
@@ -2999,7 +3111,27 @@ fn convert_gmat_trajectory_to_declared_frame(gmat: &Gmat, plan: &BindingPlan, gm
         // M25.1: a ground station has no GMAT central body/integration frame concept either --
         // same no-op passthrough, for the same reason.
         BindingPlan::GroundStation(_) => return Ok(traj),
+        // N6: `parse_orbital_spec` already refuses (at classify time, `DrmError::
+        // UnsupportedCoordinateSystem`) a declared `spacecraft.CoordinateSystem` other than this
+        // instance's own integration frame -- so `traj.frame_id` can never differ from it here,
+        // and a passthrough is provably correct, not a silent skip of a conversion this instance
+        // could otherwise need (this task's own brief's "never silently skip the conversion").
+        BindingPlan::Orbital(_) => return Ok(traj),
     };
+    // `docs/open-questions.md` question 230, N6: `BindingPlan::Gmat` can only be constructed
+    // when the `gmat` feature is on (see `materialize_plan`'s own identical doc comment) -- this
+    // is unreachable in practice without it, but still a typed refusal, never a panic.
+    #[cfg(not(feature = "gmat"))]
+    {
+        let _ = (gmat, gmat_ns);
+        Err(DrmError::GmatFeatureDisabled { instance: instance_name.to_string(), dynamics_model: format!("gmat.{}", spec.central_body) })
+    }
+    #[cfg(feature = "gmat")]
+    convert_gmat_trajectory_to_declared_frame_gmat(gmat, spec, gmat_ns, instance_name, traj)
+}
+
+#[cfg(feature = "gmat")]
+fn convert_gmat_trajectory_to_declared_frame_gmat(gmat: &Gmat, spec: &GmatSystemSpec, gmat_ns: &str, instance_name: &str, mut traj: Trajectory) -> Result<Trajectory, DrmError> {
     let integration_frame = format!("{}MJ2000Eq", spec.central_body);
     if traj.frame_id.is_empty() || traj.frame_id == integration_frame {
         return Ok(traj);
@@ -3043,6 +3175,7 @@ fn convert_gmat_trajectory_to_declared_frame(gmat: &Gmat, plan: &BindingPlan, gm
 ///
 /// [`DrmError::CovarianceHygiene`] if the rotated covariance fails
 /// [`av_cdm::covariance::check_spd_row_major`].
+#[cfg(feature = "gmat")]
 fn rotate_covariance(rotation: &[f64; 9], rotation_dot: &[f64; 9], cov: &[f64], context: &str) -> Result<Vec<f64>, DrmError> {
     assert_eq!(cov.len(), 36, "TrajectorySample.cov is always a 6x6 row-major matrix (36 elements) when non-empty");
     let mut m = [0.0_f64; 36];
@@ -3297,6 +3430,17 @@ fn validate_expression_at_load(name: &str, expression: &str, run: &crate::expr::
 /// doc comment for exactly how `DrmOptions` fields map to kernel behaviour and how scoring
 /// works.
 pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
+    // `docs/open-questions.md` question 230, N6: `RunConfig.gmat` is `#[cfg(feature = "gmat")]`
+    // (its own doc comment) -- this is the one place that field is read, converted into the
+    // [`GmatHandle`] every downstream helper below (`materialize_plan`, `run_shared_group`,
+    // `run_covariance_instance`, `convert_gmat_trajectory_to_declared_frame`) takes
+    // unconditionally, so nothing past this line needs its own `#[cfg]` just to thread the
+    // handle through.
+    #[cfg(feature = "gmat")]
+    let gmat: GmatHandle<'_> = cfg.gmat;
+    #[cfg(not(feature = "gmat"))]
+    let gmat: GmatHandle<'_> = &();
+
     // M25.4b: `RunConfig.replay` combined with `DrmOptions.covariance` is refused first, before
     // even opening `RunConfig.replay.log_path` -- cheaper than the hash check just below (no
     // I/O), and there is no reason to make a caller supply, or this executor read, a real replay
@@ -3783,7 +3927,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             let (plan, period_ns) = plans.get(&instance.name).expect("populated in pass 1 (every instance is in exactly one of plans/container_plans)");
             let (traj, events, outputs) =
                 run_covariance_instance(
-                    cfg.gmat,
+                    gmat,
                     plan,
                     sys,
                     instance,
@@ -3800,14 +3944,14 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
                 )?;
             all_events.extend(events);
             outputs_by_instance.insert(instance.name.clone(), outputs);
-            let traj = convert_gmat_trajectory_to_declared_frame(cfg.gmat, plan, &gmat_ns, &instance.name, traj)?;
+            let traj = convert_gmat_trajectory_to_declared_frame(gmat, plan, &gmat_ns, &instance.name, traj)?;
             let finished = finish_trajectory(traj, &computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, sys, &sys_hash);
             trajectories.insert(instance.name.clone(), finished);
         }
     } else {
         let instances_by_name: BTreeMap<String, &SystemInstance> = cfg.sos.instances.iter().map(|i| (i.name.clone(), i)).collect();
         let (shared_trajectories, shared_events, shared_outputs, container_binding_hashes, shared_measurements, shared_group_port_traffic) = run_shared_group(
-            cfg.gmat,
+            gmat,
             &plans,
             &container_plans,
             &instances_by_name,
@@ -3840,7 +3984,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             // `convert_gmat_trajectory_to_declared_frame`'s own `BindingPlan::ConstantAccel` arm
             // does for a native (non-container) instance.
             let traj = match plans.get(&instance.name) {
-                Some((plan, _period_ns)) => convert_gmat_trajectory_to_declared_frame(cfg.gmat, plan, &gmat_ns, &instance.name, traj)?,
+                Some((plan, _period_ns)) => convert_gmat_trajectory_to_declared_frame(gmat, plan, &gmat_ns, &instance.name, traj)?,
                 None => traj,
             };
             // M21.3 (`docs/open-questions.md` question 141, decided by the lead): an instance
@@ -3874,6 +4018,9 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
                 // with an instantaneous visibility transform has nothing to propagate) -- same
                 // "emits no trajectory" rule as `StarTracker`/`Controller` above.
                 Some((BindingPlan::GroundStation(_), _)) => true,
+                // N6: `OrbitalHandle::state_dim() == 6` always (a real propagated Cartesian
+                // state) -- same "emits a real trajectory" rule as `Gmat`/`Attitude`/`Imu` above.
+                Some((BindingPlan::Orbital(_), _)) => false,
                 None => false,
             };
             if !emits_no_trajectory {
@@ -4021,7 +4168,26 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     // constant -- see fill_fixed_rotations's own doc comment. Runs after every frame this run
     // could possibly reference (declared, referenced-by-trajectory, and mandatory) is already
     // known, so a frame added by either earlier pass is covered too.
-    let frames = fill_fixed_rotations(cfg.gmat, &gmat_ns, frames, scenario.start_tai_ns)?;
+    // `docs/open-questions.md` question 230, N6: `fill_fixed_rotations` needs a real `&Gmat`
+    // (it measures a candidate frame's own rotation against its body's MJ2000Eq via `Gmat::
+    // convert`), not `GmatHandle` -- skipped under `--no-default-features`. This is a proven,
+    // not merely assumed, no-op for that build: `add_mandatory_body_frames` contributes no
+    // central body without a real `"gmat."`-bound instance (its own doc comment), and `frames`
+    // otherwise only ever carries AXES_KIND_MJ2000_EQ frames (never a fixed-rotation candidate
+    // itself -- `fill_fixed_rotations`'s own doc comment, "never a candidate at all") for a run
+    // with no GMAT-bound instance and no DRM-declared ICRF/MJ2000Ec frame; a DRM that declares
+    // one anyway (without any GMAT-bound instance to have needed GMAT regardless) leaves that
+    // one frame's `fixed_rotation_q` empty, a legitimate value `validate_fixed_rotation_q`
+    // already accepts (0 entries) and this same function already leaves empty today whenever the
+    // measured rotation is genuinely time-varying -- so an absent value here is never
+    // distinguishable from an ordinary, already-existing outcome of a live GMAT measurement.
+    #[cfg(feature = "gmat")]
+    let frames = fill_fixed_rotations(gmat, &gmat_ns, frames, scenario.start_tai_ns)?;
+    #[cfg(not(feature = "gmat"))]
+    let frames = {
+        let _ = gmat;
+        frames
+    };
     sort_measurements(&mut all_measurements);
     Ok(RunProducts { trajectories, events: all_events, scores, provenance, dropped_in_flight_messages: dropped_in_flight_messages as u64, frames, measurements: all_measurements, port_traffic_hash })
 }
@@ -4455,6 +4621,7 @@ mod to_proto_tests {
 /// Question 129 (M19.2): `validate_fixed_rotation_q`/`matrix_to_quaternion`, no GMAT/`gmat_sys::
 /// engine_lock()` needed -- pure arithmetic, unlike `fixed_rotation_measurement_interval_tests`
 /// below.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod fixed_rotation_math_tests {
     use super::*;
@@ -4557,6 +4724,7 @@ mod fixed_rotation_math_tests {
 /// ADR-002's fourth amendment) and this is exactly the kind of GMAT-version-sensitive fact that
 /// should re-fail loudly, not silently bit-rot, if a future GMAT/data-file update ever changes
 /// `ICRF_Table.txt`'s own tabulated values.
+#[cfg(feature = "gmat")]
 #[cfg(test)]
 mod fixed_rotation_measurement_interval_tests {
     use super::*;
