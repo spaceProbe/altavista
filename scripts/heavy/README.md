@@ -118,12 +118,31 @@ target/debug/av-tiles \
   --store-path-style \
   --group-clearance "tile-readers=CUI" \
   --bind "127.0.0.1:18080" \
-  --admin-bind "127.0.0.1:18081" &
+  --admin-bind "127.0.0.1:18081" \
+  --admin-role "stackup-admins" &
 ```
 
 Wait for its own `av-tiles: LISTENING 127.0.0.1:18080` line on stdout before continuing (this
 is the identical readiness signal `tests/heavy_stack.py::_wait_for_listening_line` polls for
 -- never a fixed sleep).
+
+**On `--admin-role` (round 5).** `GET /admin/api/counters` on the admin bind now
+authenticates, exactly as `av-gateway`'s admin surface does (question 229's ruling;
+`crates/av-tiles/src/admin.rs`). It is deny-by-default: with **no** `--admin-role` flag the
+port binds and refuses every caller, so the flag is given here to keep this recipe's admin
+port actually usable. Note the group is `stackup-admins`, **not** the `tile-readers` group
+step 1's token carries -- an admin credential and a tile-clearance credential are
+deliberately never the same token (`tests/heavy_stack.py` keeps the same separation). Step
+1's token therefore gets `403` here, which is the correct answer, not a fault. To read the
+counters, mint a second token with step 1's block changing only
+`"groups": ["stackup-admins"]`, and send it as `Authorization: Bearer <token>`
+(unlike step 4's response headers, this block is derived from the implementation and from
+`tests/heavy_stack.py`'s equivalent fixture rather than pasted from a live run):
+
+```sh
+curl -sS -H "Authorization: Bearer $(cat "$WORKDIR/admin_token.txt")" \
+  http://127.0.0.1:18081/admin/api/counters
+```
 
 ### 3. Start the viewer server against that gateway
 

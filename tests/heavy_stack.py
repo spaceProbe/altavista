@@ -441,7 +441,15 @@ def _wait_for_listening_line(proc: subprocess.Popen, deadline_s: float) -> str:
 def av_tiles_service(rust_bins, minio, issuer, key_prefix, tile_set_label):
     """Starts a real `av-tiles` subprocess on two OS-assigned ephemeral loopback ports
     (main + `--admin-bind`), configured with `issuer`, `LADDER`, a group-clearance map,
-    and `minio`."""
+    and `minio`.
+
+    Round 5, item B: `GET /admin/api/counters` now authenticates (question 229's open
+    ruling -- see `crates/av-tiles/src/admin.rs`'s own module doc). `--admin-role
+    admin-readers` grants the ONE group this fixture mints an admin token for
+    (`admin_token`, below) the `admin_counters` surface -- a group name deliberately
+    distinct from `tile-readers`/`tile-guests` (the main port's own clearance groups),
+    so an admin token and a tile-clearance token are never accidentally the same
+    credential."""
     bind_port = _free_port()
     admin_port = _free_port()
     cmd = [
@@ -461,11 +469,13 @@ def av_tiles_service(rust_bins, minio, issuer, key_prefix, tile_set_label):
         "--group-clearance", "tile-guests=UNCLASSIFIED",
         "--bind", f"127.0.0.1:{bind_port}",
         "--admin-bind", f"127.0.0.1:{admin_port}",
+        "--admin-role", "admin-readers",
     ]
     proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     try:
         _wait_for_listening_line(proc, READY_TIMEOUT_S)
-        yield SimpleNamespace(endpoint=f"127.0.0.1:{bind_port}", admin_endpoint=f"127.0.0.1:{admin_port}", proc=proc)
+        admin_token = issuer.mint(_valid_claims("heavy-stack-admin", ["admin-readers"]))
+        yield SimpleNamespace(endpoint=f"127.0.0.1:{bind_port}", admin_endpoint=f"127.0.0.1:{admin_port}", admin_token=admin_token, proc=proc)
     finally:
         proc.terminate()
         try:
@@ -480,12 +490,18 @@ def admin_counter(av_tiles_service, code: str) -> int:
     `GET /admin/api/counters` (`crates/av-tiles/src/admin.rs`) -- never assumed, never
     inferred from a caller's own request count. A short, bounded retry tolerates the
     admin listener's own bind finishing a moment after the main port's; this is a poll
-    for a real condition (a successful connection), never a fixed sleep-then-assume."""
+    for a real condition (a successful connection), never a fixed sleep-then-assume.
+
+    Round 5, item B: this route now authenticates -- `av_tiles_service.admin_token`
+    (minted for the `admin-readers` group the fixture's own `--admin-role` flag
+    grants) is sent as `Authorization: Bearer <token>`, exactly like every other
+    caller of this crate's authenticated surfaces in this module."""
     deadline = time.monotonic() + 10.0
     last_exc = None
+    headers = {"Authorization": f"Bearer {av_tiles_service.admin_token}"}
     while time.monotonic() < deadline:
         try:
-            resp = httpx.get(f"http://{av_tiles_service.admin_endpoint}/admin/api/counters", timeout=2.0)
+            resp = httpx.get(f"http://{av_tiles_service.admin_endpoint}/admin/api/counters", headers=headers, timeout=2.0)
             resp.raise_for_status()
             return resp.json()["counters"].get(code, 0)
         except httpx.HTTPError as e:
