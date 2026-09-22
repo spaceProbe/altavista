@@ -64,13 +64,30 @@ docker port "$CONTAINER_ID" 9000/tcp
 ```
 
 ### 0.5. Register the generated tile set in the catalog (round 5, question 228 finding 2)
-**-- steps below NOT RUN this round (see this task's own report: no docker container may be
-started this round, question 207's host-wide lock is held by another team, and this task's
-budget explicitly excludes building the catalog tier's own Rust binaries). Every flag named
-below was verified to exist by reading the real, on-disk source this round's server-half
-worker landed (`crates/av-jobs/src/bin/av-tile-fixture.rs`) and the pre-existing
-`crates/av-gateway/src/bin/av-gateway.rs` -- never guessed, and never copied from a doc
-comment without checking the flag parser itself.**
+**-- steps a/b/c below WERE RUN FOR REAL this round (heavy round 6, task 5).** Round 5 left
+step b as a real, named gap -- `av_catalog::migrate::Migrator::apply_pending` was a LIBRARY
+function with no standalone CLI anywhere in this workspace (`docs/heavy-plan.md`'s "A gap in
+the drive path that nobody had noticed" section), so step b used to be a paragraph explaining
+that gap rather than a command. It is now `av-catalog-migrate`
+(`crates/av-catalog/src/bin/av-catalog-migrate.rs`, this round's own new `[[bin]]` target of
+the `av-catalog` crate -- see that file's own module doc for why a `[[bin]]` of THIS crate,
+not `cargo run --example`, not a new workspace member). **What "run for real" means here:**
+this task ran `services/catalog/run-dev-catalog.sh` (step a), `av-catalog-migrate` against the
+real container it started (step b, both a first schema-applying run and a second, idempotent
+one), and `av-tile-fixture --catalog-*` against the now-migrated database (step c) -- this
+task's own report quotes every one of those runs' real output. The exact commands below, with
+the substituted values, were not re-typed a second time by a human this round (they are
+derived from the real, on-disk flag parsers the same way step 0.5c's flags always were, per
+this section's own pre-existing standard) -- what proves this whole sequence works, every time,
+committed and re-runnable by anyone, is
+`tests/test_catalog_tilesets_route.py::test_real_round_trip_migrate_then_register_then_list_through_the_real_gateway_route`
+(docker-gated, real PostGIS + real MinIO + real `av-catalog-migrate` + real `av-tile-fixture`
++ a real `av-gateway` subprocess + a real `GET /api/catalog/tilesets` through `create_app`):
+
+```sh
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+.venv/bin/python -m pytest tests/test_catalog_tilesets_route.py -k real_round_trip -q -s
+```
 
 This is the only step that makes a generated tile set visible to `GET /api/catalog/tilesets`
 (and therefore to the Layers panel) -- step 0 above never registers anything; it only writes
@@ -82,29 +99,38 @@ opened.
 
 ```sh
 # a. Start the real, digest-verified PostGIS catalog container (a developer convenience
-#    script, never invoked by a test -- see that script's own header comment).
+#    script, never invoked by a test -- see that script's own header comment). Run for real
+#    this round: prints e.g. "PostGIS dev container started (image id sha256:f8a700ac...,
+#    matches .../IMAGE_DIGEST.md)." plus the container id, host port, user, password, database.
 services/catalog/run-dev-catalog.sh
 # prints the container id and the host port it published 5432/tcp on, e.g.:
-#   container <id> listening on 127.0.0.1:<CATALOG_PORT>
+#   Connect:      psql -h 127.0.0.1 -p <CATALOG_PORT> -U postgres -d <CATALOG_DATABASE>
 
-# b. Apply the catalog schema. THIS IS A REAL GAP, not merely unrun: as of this round,
-#    `av_catalog::migrate::Migrator::apply_pending` (crates/av-catalog/src/migrate.rs) is a
-#    LIBRARY function with no standalone CLI wrapping it anywhere in this workspace --
-#    services/catalog/run-dev-catalog.sh's own header comment says exactly this ("a developer
-#    who wants the catalog schema applied runs Migrator::apply_pending themselves, e.g. from a
-#    small cargo run/test harness"). Until one exists, this step is a small Rust program (or a
-#    `cargo test -p av-catalog` run against `--catalog-host 127.0.0.1 --catalog-port
-#    <CATALOG_PORT>`, if that crate's own test suite is willing to run against an
-#    externally-started container rather than one it manages itself -- NOT verified either
-#    way this round) that calls `Migrator::apply_pending(&mut client, applied_tai_ns)` once
-#    against the container `a.` started. The manager should confirm whether such a harness
-#    already exists elsewhere before a human re-derives one from scratch.
+# b. Apply the catalog schema -- av-catalog-migrate, this round's own new binary. Idempotent: a
+#    second run against the same, already-migrated database applies nothing and says so (run
+#    for real this round, both ways -- see this task's own report for the exact quoted output
+#    of both runs). --applied-tai-ns is optional; the documented default (never a silent read)
+#    is the real OS wall clock, converted UTC -> TAI via av_cdm::time::Tai::from_utc_nanos --
+#    pass the flag yourself to pin an exact value instead.
+cargo build -p av-catalog --bin av-catalog-migrate
+target/debug/av-catalog-migrate \
+  --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
+  --catalog-user postgres \
+  --catalog-password "<CATALOG_PASSWORD from a.>" --catalog-database "<CATALOG_DATABASE from a.>"
+# prints what schema_migrations already recorded before this run, the applied_tai_ns used and
+# where it came from, exactly which migrations THIS run applied (or "no pending migrations --
+# database already at the latest schema version (idempotent: this run applied nothing)" on a
+# second run), and the resulting schema version.
 
 # c. Re-run av-tile-fixture (cargo build -p av-jobs --bin av-tile-fixture --features
 #    store-fixture, the SAME binary and the SAME --store-*/--key-prefix/--job-id values step
 #    0's ten_gigabyte_proof.py used internally -- content-addressed, so re-running it against
 #    the identical inputs is idempotent, never a second, diverging tile set), this time WITH
-#    the catalog flags so it ALSO registers the manifest as a CatalogAsset:
+#    the catalog flags so it ALSO registers the manifest as a CatalogAsset. Run for real this
+#    round (against the automated test's own smaller synthetic tile set, not this exact
+#    heavy-stackup-demo job -- see this task's own report): prints "registered the tile-set
+#    manifest in the catalog (asset_id=...)" on success, or a real, typed PostgreSQL error
+#    (e.g. `42P01 relation "assets" does not exist`) if step b above was skipped.
 target/debug/av-tile-fixture \
   --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
   --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
@@ -112,10 +138,10 @@ target/debug/av-tile-fixture \
   --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
   --store-bucket "<BUCKET>" --store-path-style \
   --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
-  --catalog-user "<the PostGIS image's own default user/password -- see services/catalog/IMAGE_DIGEST.md/run-dev-catalog.sh>" \
-  --catalog-password "<same>" --catalog-database "<same>"
-# (flag names verified at crates/av-jobs/src/bin/av-tile-fixture.rs lines ~192-197/274-279;
-# NOT run -- depends on a. and b. actually being up, which this round did not attempt)
+  --catalog-user postgres \
+  --catalog-password "<CATALOG_PASSWORD from a.>" --catalog-database "<CATALOG_DATABASE from a.>"
+# (flag names verified at crates/av-jobs/src/bin/av-tile-fixture.rs lines ~192-197/274-279, and
+# run for real this round -- see this task's own report)
 ```
 
 ### 1. Mint a real RS256 bearer token (no new dependency: the system `openssl` CLI)
@@ -200,8 +226,12 @@ curl -sS -H "Authorization: Bearer $(cat "$WORKDIR/admin_token.txt")" \
 ```
 
 ### 2b. Start the real `av-gateway` DataGatewayService (round 5, question 228 finding 2)
-**-- NOT RUN this round, same reason as step 0.5 above (no PostGIS/catalog tier actually
-stood up).** Flags verified against `crates/av-gateway/src/bin/av-gateway.rs`'s own CLI
+**-- NOT RUN as this exact copy-pasted shell recipe this round either** (step 0.5's own reason
+this used to cite -- "no PostGIS/catalog tier actually stood up" -- no longer applies; heavy
+round 6 stood one up for real, see step 0.5's own banner). What WAS run for real this round is
+an equivalent `av-gateway --catalog-*` invocation, inside
+`tests/test_catalog_tilesets_route.py`'s own committed, docker-gated round-trip test -- see
+that test and this task's own report. Flags verified against `crates/av-gateway/src/bin/av-gateway.rs`'s own CLI
 parser (not merely its doc comment): `--oidc-issuer`/`--oidc-audience`/
 `--oidc-public-key-path` are REQUIRED (R5.1) -- reuse step 1's SAME issuer/public key/ladder,
 a second, independent token mint is not needed, `av-gateway` verifies against the same
@@ -349,11 +379,16 @@ docker rm -f "<the PostGIS container id from step 0.5a, if it was started>"
   this task's own author was instructed not to run it.
 - `docs/heavy-plan.md`: owned by the manager; this file exists specifically so the exact
   commands above have a home that is NOT that document.
-- **Round 5 (question 228 finding 2) additions -- steps 0.5, 2b, and 4b's live-stack half are
-  UNVERIFIED this round**, clearly marked inline above: no docker container may be started
-  this round (question 207's host-wide lock), and building `av-gateway`/`av-catalog`'s own
-  migration path was out of this task's own budget. Every flag those steps name was still
-  verified against the real, on-disk CLI parsers (never copied from a doc comment alone) --
-  see this task's own report for exactly what that verification did and did not cover, and
-  `tests/test_viewer_layers_panel.py` for the equivalent proof against a real (fixture, not
-  docker/cargo) gateway pair instead.
+- **Round 5 (question 228 finding 2) additions -- steps 2b and 4b's live-stack half are STILL
+  UNVERIFIED this round** as a copy-pasted shell recipe, clearly marked inline above. **Step
+  0.5 (a/b/c) is no longer in that category: heavy round 6 (task 5) ran it for real**, closing
+  the `av-catalog-migrate` gap step b used to describe -- see that step's own banner above,
+  this task's own report for the quoted output, and
+  `tests/test_catalog_tilesets_route.py::test_real_round_trip_migrate_then_register_then_list_through_the_real_gateway_route`
+  for the committed, docker-gated proof that ALSO covers step 2b's `av-gateway` and step 4b's
+  `GET /api/catalog/tilesets` for real (that one test's own scope is wider than its home
+  section's "0.5" number suggests). Every flag every step in this file names was verified
+  against the real, on-disk CLI parsers (never copied from a doc comment alone) -- see this
+  task's own report for exactly what was and was not run this round, and
+  `tests/test_viewer_layers_panel.py` for the equivalent proof of steps 3-5 against a real
+  (fixture, not docker/cargo) gateway pair instead.
