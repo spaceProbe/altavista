@@ -464,7 +464,32 @@ GATEWAY_QUERY_GROUP = "operators"
 GATEWAY_QUERY_CLEARANCE = "CUI"  # profiles/gateway-authority.yaml: group_clearance.operators
 
 POSTGIS_READY_TIMEOUT_S = 90.0  # crates/av-catalog/tests/catalog_postgis.rs::READY_TIMEOUT is 60s for its own connect-retry loop; this file's own loop pays for a whole av-catalog-migrate process per attempt (not just a connect), so it gets extra headroom on top under this host's own real memory pressure (measured directly: see MIGRATE_ATTEMPT_TIMEOUT_S's own doc).
-GATEWAY_READY_TIMEOUT_S = 60.0
+# Manager review, round 6, at the round's own gate. 60.0 was too thin for this host and this
+# test FAILED in the full-suite run with "av-gateway did not print its own readiness line
+# within 60.0s (returncode=None)" -- a real failure, not a flake to re-run away, so it is
+# recorded here rather than quietly retried.
+#
+# Measured, alone, on a load-average-4.19 host immediately afterwards: three consecutive runs
+# of this one test took 37.98 s, 5.51 s and 36.01 s. A single test whose own wall clock swings
+# seven-fold at rest has no business carrying a 60 s budget for one of its phases -- that is
+# ~1.6x the slow end of the quiet-host range before the 21-minute full suite's own load is
+# added on top, which is exactly what consumed it.
+#
+# Raised to 180.0, and deliberately NOT to "whatever made it pass once": it is the same
+# multiple of its own measured worst case (~4.7x) that POSTGIS_READY_TIMEOUT_S above already
+# carries over its own, and it stays below `heavy_stack.READY_TIMEOUT_S`'s 240.0 for the
+# heavier stack that file stands up. A readiness budget bounds "did this process ever come
+# up", not "how fast is this host today"; the frame-time and memory budgets in
+# tests/test_viewer_layers_stream.py are the ones that exist to be tight.
+#
+# One thing this does NOT fix, and it is why the failure mode was a bare timeout rather than
+# a legible refusal: av-gateway reaches its readiness line only after connecting to the
+# catalog, and `PgClient::connect` (crates/av-catalog/src/client.rs) bounds only the TCP
+# connect -- the startup handshake that follows has no deadline at all (round 6's defect 5,
+# docs/heavy-plan.md). A catalog that accepts and then stalls therefore hangs the gateway
+# indefinitely, and all this constant can do is give up on it. Closing that is the fix
+# recorded for the lead, not this number.
+GATEWAY_READY_TIMEOUT_S = 180.0
 
 
 def _parse_catalog_image_digest_md() -> Tuple[str, str]:
