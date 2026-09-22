@@ -156,6 +156,13 @@
        layout only (question 201(d)), but registered like every panel above so the
        chooser can still move it into a pane in any OTHER profile. -->
   <div class="av-panel" id="panel-command-console"></div>
+  <!-- Round 5 (question 228 finding 2, browser half): the Layers panel
+       (web/js/panels/layers_panel.js) -- a user selects a catalogued tile set here and
+       sees it drawn through the shared LayerManager (web/js/scene.js). Chooser-reachable
+       in every profile/layout, like panel-feasibility/panel-command-console above; not in
+       any default layout (see LAYERS_PANEL_ID's own comment in
+       web/js/layout/default_layouts.js). -->
+  <div class="av-panel" id="panel-layers"></div>
   </div><!-- /#pane-content-pool -->
 
   <footer id="timebar">
