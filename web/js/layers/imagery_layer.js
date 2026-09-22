@@ -52,6 +52,15 @@ export class ImageryLayerAdapter {
     this.imageryUrl = imageryUrl;
     this._loader = loader;
     this.tileBytes = tileBytes;
+    // Round 6 (docs/open-questions.md question 231's ruling, "replace or
+    // composite"): the marker `./layer.js`'s `LayerManager.imageryLayers()` filters
+    // on -- an ordered, read-only way for `web/js/globe.js`'s `GlobeLayer` to find
+    // "every layer that can supply a tile mesh's texture" without reaching into
+    // `LayerManager._layers` directly. `GatewayImageryLayerAdapter` (below, extends
+    // this class) inherits it for free via `super()`; `./terrain_layer.js`/
+    // `./tiles3d_layer.js` never set it at all, so `imageryLayers()` never includes
+    // them.
+    this.kind = 'imagery';
   }
 
   /**
@@ -101,7 +110,27 @@ export class ImageryLayerAdapter {
       signal.addEventListener('abort', onAbort, { once: true });
       this._loader.load(
         request.url,
-        (payload) => { signal.removeEventListener('abort', onAbort); resolve(payload); },
+        (payload) => {
+          signal.removeEventListener('abort', onAbort);
+          // Round 6 (question 231's ruling): tag this payload's provenance AT ITS
+          // SOURCE -- the one place every imagery Layer's own load() actually
+          // produces the object `GlobeLayer` will bind to a mesh's
+          // `material.map` -- so a caller can always trace a bound texture back
+          // to the layer that produced it (a REAL, per-texture property, not a
+          // global counter) without `LayerManager` (which treats `payload` as
+          // opaque, ./layer.js's own module docstring) ever needing to know.
+          // Works whether `payload` is a real `THREE.Texture` (production, a
+          // real `THREE.TextureLoader`'s own constructor already sets
+          // `.userData = {}`) or a plain-object stub (this codebase's own
+          // headless harnesses, e.g. web/js/layers_check.mjs's
+          // `imagery-texture-stub`) -- `.userData` is created fresh if absent,
+          // never assumed to already exist.
+          if (payload && typeof payload === 'object') {
+            payload.userData = payload.userData || {};
+            payload.userData.sourceLayerId = this.id;
+          }
+          resolve(payload);
+        },
         undefined,
         (err) => { signal.removeEventListener('abort', onAbort); reject(err); },
       );

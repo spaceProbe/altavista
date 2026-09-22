@@ -135,6 +135,81 @@ def test_byte_cost_comes_from_the_manifest_when_one_is_available(check_data):
     assert p["ok"] is True
 
 
+def test_load_resolves_with_a_texture_shaped_payload(check_data):
+    """Round 6 (docs/open-questions.md question 231's ruling, "replace or
+    composite"): `load()` used to resolve with `{kind, tile, url, sha256, bytes}` --
+    raw, verified bytes a real `THREE.Material.map`/`THREE.WebGLRenderer` would
+    reject outright. It must now resolve with something texture-shaped
+    (`isTexture === true`, a real `.dispose()`) -- see
+    gateway_imagery_layer_check.mjs's own module docstring, `textureShapedPayload`,
+    for exactly what an implementation that still returned the old raw object, or
+    that threw instead of using the documented fallback when `createImageBitmap` is
+    simply absent (node has none -- an environment limitation, not a data problem),
+    would fail here."""
+    assert check_data["textureShapedPayload"] is True
+
+
+def test_the_resolved_texture_is_tagged_with_its_own_source_layer_id(check_data):
+    """Question 231's ruling: "GlobeLayer binds a material map from whichever
+    imagery layer is topmost for that tile" needs a REAL, per-texture property
+    tracing a bound texture back to the layer that produced it -- tagged AT THE
+    SOURCE (this adapter's own `load()`), never inferred from which
+    `LayerManager` slot a payload happened to be stored under."""
+    assert check_data["provenanceTagged"] is True
+
+
+def test_the_verified_wire_bytes_are_still_reachable_off_the_texture(check_data):
+    """web/js/layers_stream_check.mjs still needs the real, ETag-verified wire bytes
+    for its own second, synchronous SHA-256 check and real PNG-header parse -- the
+    SHA-256/ETag verification this adapter performs must not be weakened by this
+    task's own texture-conversion seam, only relocated (`payload.bytes` ->
+    `payload.userData.bytes`, byte-for-byte identical)."""
+    assert check_data["verifiedBytesStillReachable"] is True
+
+
+def test_release_disposes_the_exact_texture_load_created(check_data):
+    """`release(key)` -- the Layer interface's own eviction/unregistration hook
+    (web/js/layers/layer.js's module docstring) -- must free the real GPU resource
+    this adapter's own `load()` now creates (round 6), and must do so exactly once
+    per load, not on every subsequent call for the same, already-released key (a
+    `release()` that looked up the wrong key, or that never disposed anything at
+    all, would fail `releaseDisposesTheRealTexture`; one that disposed again on a
+    repeat call for an already-released key would fail
+    `releaseIsNoopOnceAlreadyReleased`)."""
+    assert check_data["releaseDisposesTheRealTexture"] is True
+    assert check_data["releaseIsNoopOnceAlreadyReleased"] is True
+
+
+def test_the_real_decode_branch_and_a_genuine_decode_failure_are_both_reachable(check_data):
+    """node has no `createImageBitmap` (measured directly in
+    gateway_imagery_layer_check.mjs's own module docstring), so every OTHER case in
+    this file only ever exercises `decodeTileBytesToTexture`'s "API absent" fallback
+    branch. This proves the OTHER TWO branches' own logic under node by temporarily
+    stubbing the global function node does not have: a resolving stub must produce a
+    real `THREE.Texture` tagged `decodeMode: 'createImageBitmap'`; a throwing stub
+    (bytes that pass SHA-256/ETag verification but are not a valid image) must NOT
+    reject `load()` -- it must still resolve, with the same placeholder texture,
+    tagged `decodeMode: 'createImageBitmap-failed'` and carrying the real decode
+    error on `userData.decodeError`, distinct from the "API absent" tag, and still
+    carrying this adapter's own provenance tag. An earlier version of this adapter
+    rejected on a genuine decode failure instead, which regressed
+    tests/test_viewer_layers_panel.py's own real-browser proof (that fixture's tile
+    bytes are exactly this case: tagged `image/png` but not a real one) -- this case
+    is what pins the fix. This does NOT prove a real browser's `createImageBitmap`
+    correctly decodes a real PNG this codebase's own gateway serves -- that piece is
+    proved separately, in a real headless-Chrome check (see this task's own report
+    for exactly where)."""
+    d = check_data["decodeModeSwitch"]
+    assert d["realDecodePathProducesRealTexture"] is True
+    assert d["realDecodeFailureStillResolvesWithTaggedFallback"] is True
+    assert d["globalRestoredAfterStubbing"] is True, (
+        "the temporary createImageBitmap stub must be restored (or removed, if node "
+        "never had one) after this probe -- a real global left mutated would leak "
+        "into whatever this node process runs next"
+    )
+    assert d["ok"] is True
+
+
 def test_gateway_imagery_layer_report(check_data, capsys):
     with capsys.disabled():
         print("\ngateway imagery layer (web/js/gateway_imagery_layer_check.mjs):")

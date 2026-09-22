@@ -6,7 +6,7 @@
 // docstring for the interface itself).
 export { LayerManager, comparePriority, compareAdmission, globalKeyFor } from './layer.js';
 export { ImageryLayerAdapter, IMAGERY_TILE_BYTES } from './imagery_layer.js';
-export { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError } from './gateway_imagery_layer.js';
+export { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError, decodeTileBytesToTexture } from './gateway_imagery_layer.js';
 export { decodeTileSetManifest, manifestTileKey, ManifestDecodeError } from './tileset_manifest.js';
 export { TerrainLayerAdapter, TerrainLoaderNotImplementedError, TERRAIN_MESH_BYTES } from './terrain_layer.js';
 export { Tiles3DLayerAdapter, DEFAULT_TILE3D_BYTES, ManagerGatedTilesFetchPlugin } from './tiles3d_layer.js';
