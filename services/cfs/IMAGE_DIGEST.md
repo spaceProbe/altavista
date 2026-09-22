@@ -78,12 +78,13 @@ one is unlikely to be masked by the same bug in the other):
   on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
   network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-09-12 by the lead for the mirror-backed fetch, see "Re-pinned
-2026-09-12 (round 7, mirror-backed fetch)" below -- `third_party/cfs` still pinned at
-`088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
+Recorded digest (re-pinned 2026-09-22, native5-cfs-image-provenance round 5, question 232's
+commit-provenance record -- see "Re-pinned 2026-09-22 (round 5, native5-cfs-image-provenance:
+question 232 commit-provenance record; first build on this worktree)" below -- `third_party/cfs`
+still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a
+sha256:3bef12a6f2d63ddc561383e0e40d1be04e7f5426fea61ad7272787b7c36953fd
 ```
 
 Re-pinned 2026-09-21 after the ninth eviction, rebuilt from an empty cache with the same
@@ -95,11 +96,90 @@ kubelet garbage collector had removed the tag a sixth time); rebuilt from an emp
 the same Dockerfile, so the ID moved and the runtime-content hash below did not. The
 previous recorded ID was `sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d`.
 
-Recorded runtime-content hash for this pin (question 185, see the definition above; unchanged
-by the 2026-09-12 re-pin, which is the point of that hash):
+Recorded runtime-content hash for this pin (question 185, see the definition above; MOVED by the
+2026-09-22 re-pin -- see that section below for the measured cause: the whole move is
+`/cfs/av-lockstep-shim`, and the isolated reason is the cross-build ENVIRONMENT, not a source
+change, which is a finding about question 185's invariant rather than a routine re-pin):
 ```
-sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef
+sha256:cc83bb68e53151baa86a1bb6dd16580108e4cbe565d133fa09bef307c4ae9031
 ```
+
+- Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
+```
+9d1350e1bb315c531de83e008ab5841a7705b251
+```
+
+## Re-pinned 2026-09-22 (round 5, native5-cfs-image-provenance: question 232 commit-provenance record; first build on this worktree)
+
+**What changed.** Question 232, extending question 212(a): `services/cfs/build-image.sh` now
+also records the commit `HEAD` pointed at, and whether the working tree was dirty under this
+image's own copied paths (`services/cfs/IMAGE_COPIED_PATHS.txt`, new this round), at build
+time -- see the "Built from commit" bullet above, which the script writes itself (never
+hand-typed, unlike every other line in this file).
+
+**Why a rebuild was needed at all.** The image already on this host before this round
+(`sha256:04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a`, matching the
+digest this file recorded) had no recorded build commit -- nobody had observed which commit it
+was built from, and writing one down after the fact would have been a claim, not a fact, which
+is exactly what question 232's own dirty-build clause refuses on principle. So it needed a real
+rebuild, from a clean tree, with the new script writing the commit down as it happened.
+
+**What it took.** This was the first time `services/cfs/build-image.sh` ran on this specific
+worktree (`AltaVista-edge`): `services/cfs/bin/` did not exist at all (the git-ignored
+`av-lockstep-shim` cross-build artifact had never been produced here), so the first
+`build-image.sh` attempt failed exactly as it should at `COPY services/cfs/bin/
+av-lockstep-shim` (question 194: a docker-gated build failing loudly on a missing precondition,
+not silently). Running this Dockerfile's own header-documented cross-build recipe to produce
+that binary then failed too, with `Could not find \`protoc\``: the recipe as written never
+installed `protobuf-compiler`, unlike every other cross-build script in this repository that
+builds an av-cdm-dependent crate (`spoore-cdm`'s and `av-cdm`'s own `build.rs` both shell out to
+`protoc` via `prost-build`). Fixed in this Dockerfile's own header comment (the recipe now
+installs `protobuf-compiler`/`libprotobuf-dev` first, matching `services/tiles/build-image.sh`'s
+own prebuild step, minus the `libssl-dev`/`pkg-config` that crate does not need -- see
+`crates/av-lockstep-shim/Cargo.toml`'s own comment on its `tonic` dependency). With that fixed,
+the cross-build succeeded and `services/cfs/build-image.sh` then ran clean (0 dirty paths under
+the copied paths, both the shim cross-build and the image build were held under the host-wide
+docker-test lock for their entire run). The previous recorded ID was
+`sha256:04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a`; this run measured
+85 seconds end to end (shim cross-build + image build, wrapper-measured, includes an 11.6s
+initial wait for the docker-test lock held by another process on this host).
+
+**Runtime-content hash moved, and the cause was isolated rather than assumed (manager review).**
+Unlike every prior re-pin in this file's own history (each of which left the runtime-content
+hash unchanged, the entire point of that hash existing alongside the whole-image digest --
+question 185), this pin's runtime-content hash DID move. `/cfs/cpu1`'s own content came from
+Docker's build cache (`Using cache` for every `native_std.*` step) and is unchanged, so the
+whole move is `/cfs/av-lockstep-shim`: the binary went from
+`f04908af8394ee42703850832d3af949569cc9e76cd60938a604862e8e644dea` (2 303 928 bytes, built
+2026-09-06, the hash `IMAGE_CONTEXT_MANIFEST.txt` had carried unchanged since `bcc16e5`) to
+`49739c9300eb889df320482cc1d62d2d744227e29a5a28c2d995fe10d48efcbc` (2 306 360 bytes).
+
+The first account written here said the binary was new because it was "freshly cross-built from
+this round's source". **That is not what the evidence isolates.** Comparing the two binaries'
+own embedded strings directly:
+
+* the old binary was compiled by rustc `4eb16125` and the new one by rustc `1159e78c`, with
+  `clang version 20.1.0-rc2` appearing only in the new one -- `rust:1.90-bookworm` is a MOVING
+  tag and the two builds resolved to different images;
+* the new binary embeds the absolute path `/Users/probe/code/AltaVista-edge` and the old binary
+  embeds **no** `/Users/probe/code/...` path at all, so the recipe as run here leaks its build
+  location into the output and the previous one did not;
+* the new binary carries newer transitive crate versions (hyper 1.11.1, tokio 1.53.1,
+  hashbrown 0.17.1, http 1.5.0); the recorded recipe passes no `--locked`.
+
+So the measured cause of the move is the BUILD ENVIRONMENT, not a source change. A source change
+may also have landed -- `crates/av-cdm` and `proto/altavista/v1` are direct inputs to this binary
+and both moved between 2026-09-06 and now (most recently `4b6b60b`) -- but nothing above isolates
+that, and the old binary's own build commit was never recorded, so whether the previously shipped
+image was stale by source is now unknowable. Recording that honestly is the point; it is the same
+gap this round is closing for the image itself, one level down.
+
+**What this means for question 185's invariant, for the lead.** The runtime-content hash is
+reproducible for the cFS half of this image and is NOT reproducible for the shim half: two
+builds of the same commit produce different bytes, because the recipe uses a moving base-image
+tag, no `--locked`, and no `--remap-path-prefix`. Pinning the base image by digest, adding
+`--locked`, and remapping the path prefix would make it reproducible; that is a change to a
+cross-build recipe outside this round's charter and is left to the lead rather than taken here.
 
 ## Re-pinned 2026-09-12 (round 7, mirror-backed fetch)
 
