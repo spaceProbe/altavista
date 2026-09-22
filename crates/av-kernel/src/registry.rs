@@ -75,7 +75,7 @@ use gmat_sys::Gmat;
 use crate::drm::attitude::AttitudeWheelsSpec;
 #[cfg(feature = "gmat")]
 use crate::drm::binding::GmatSystemSpec;
-use crate::drm::binding::{self, AnyModel, ConstantAccelSpec, Materialized};
+use crate::drm::binding::{self, AnyModel, ConstantAccelSpec, Materialized, OrbitalSystemSpec};
 use crate::drm::controller::AttitudeControllerSpec;
 use crate::drm::ground::GroundStationSpec;
 use crate::drm::replay::ReplayModel;
@@ -118,6 +118,14 @@ pub enum ModelKind {
     /// system"): a real `crate::drm::ground::GroundStationModel`. See [`ModelRegistry::
     /// construct_ground_station`].
     Ground,
+    /// `"orbital."`-prefixed (N6, `docs/native-dynamics-plan.md`, `docs/open-questions.md`
+    /// question 230's "N6's registry access" ruling): a real `av_orbital::EarthGravityModel`,
+    /// selectable beside [`ModelKind::Gmat`] with the identical physical parameters (gravity
+    /// file, degree/order, third bodies) -- see `crate::drm::binding::OrbitalSystemSpec`'s own
+    /// doc comment. Unlike [`ModelKind::Gmat`], never gated: constructible in every feature
+    /// state (see [`ModelRegistry::construct_orbital`]'s own doc comment for why it never takes
+    /// a `Gmat` handle at all).
+    Orbital,
 }
 
 /// Classify a `SystemDefinition.dynamics_model` id by its dispatch prefix (ADR-005 sec 1).
@@ -126,6 +134,13 @@ pub enum ModelKind {
 pub fn kind_for(dynamics_model: &str) -> ModelKind {
     if dynamics_model.starts_with("gmat.") {
         ModelKind::Gmat
+    } else if dynamics_model.starts_with("orbital.") {
+        // N6: `av-orbital` is this crate's own name for the native force-model crate
+        // (`crates/av-orbital`), so `"orbital."` is the direct, unambiguous precedent -- no
+        // other prefix in this function names a crate this literally, but every one of them
+        // (`"gmat."`, `"attitude."`, `"startracker."`, ...) already names a BINDING KIND rather
+        // than a crate, and `"orbital."` reads the same way: "the orbital dynamics binding."
+        ModelKind::Orbital
     } else if dynamics_model.starts_with("remote.") {
         ModelKind::Remote
     } else if dynamics_model.starts_with("attitude.") {
@@ -255,6 +270,12 @@ impl ModelHandle {
             // is refused before either boundary is reached, `DrmError::
             // ReplayWithCovarianceNotSupported`).
             AnyModel::Replay(inner) => erase_with_id(erase_id, inner, |id, e: crate::drm::replay::ReplayError| ModelError::InvalidSpec { model_id: id, detail: e.to_string() }),
+            // N6: `OrbitalHandle::Error` (`av_orbital::OrbitalModelError<av_orbital::Fk5Error>`)
+            // is genuinely fallible at every step (a DE-ephemeris-range/rotation failure) --
+            // stringified into `ModelError::InvalidSpec`, the same "wrap the model-specific
+            // error's `Display`" convention the `Attitude`/`Controller`/`Replay` arms above
+            // already use for their own genuinely-fallible wrapped models.
+            AnyModel::Orbital(inner) => erase_with_id(erase_id, inner, |id, e: av_orbital::OrbitalModelError<av_orbital::Fk5Error>| ModelError::InvalidSpec { model_id: id, detail: e.to_string() }),
         }
     }
 
@@ -468,6 +489,31 @@ impl ModelRegistry {
         Ok(ModelHandle { model, t0_tai_ns, x0_si, settings })
     }
 
+    /// N6 (`docs/native-dynamics-plan.md`): build a real `av_orbital::EarthGravityModel`
+    /// (`crate::drm::binding::materialize_orbital`) and wrap it as a [`ModelHandle`]. **Never
+    /// takes a `Gmat` handle, in either feature state** -- unlike [`ModelRegistry::
+    /// construct_gmat`], this constructor is not behind the `gmat` cargo feature at all, which
+    /// is the whole point of N6's exit criterion ("the demo DRM propagates ... with the native
+    /// model alone in a kernel built without GMAT"): a `"orbital."`-dispatched instance must be
+    /// constructible, and runnable, with no live GMAT engine anywhere in the process, even in a
+    /// build where `gmat-sys` IS linked for some other instance's sake. See `crate::drm::
+    /// binding::OrbitalHandle`'s own doc comment for why its body-fixed rotation is always the
+    /// native FK5 reduction, never `av_orbital::GmatBodyFixedRotation`, for the identical reason.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::InvalidSpec`] wrapping whatever [`binding::materialize_orbital`] returned
+    /// (a `crate::drm::DrmError::OrbitalModel`, stringified: an unreadable/malformed gravity or
+    /// DE ephemeris file, or a body-fixed rotation setup failure) -- `InvalidSpec` is this
+    /// crate's own "general-purpose counterpart to `ModelError::Gmat` for a native (non-GMAT,
+    /// non-FFI) constructor that can fail" (that variant's own doc comment), the same mapping
+    /// [`ModelRegistry::construct_attitude`]/[`ModelRegistry::construct_star_tracker`] already
+    /// use for their own native constructors.
+    pub fn construct_orbital(spec: &OrbitalSystemSpec, epoch_tai_ns: i64, model_id: &str, _state_space_id: &str) -> Result<ModelHandle, ModelError> {
+        let Materialized { model, t0_tai_ns, x0_si, settings } = binding::materialize_orbital(spec, epoch_tai_ns, model_id).map_err(|e| ModelError::InvalidSpec { model_id: model_id.to_string(), detail: e.to_string() })?;
+        Ok(ModelHandle { model, t0_tai_ns, x0_si, settings })
+    }
+
     /// The remote `DynamicsService` constructor ADR-005 sec 1 names (a thin client over
     /// `crates/av-grpc`/`crates/av-dynamics-service`, ADR-003's gRPC front). **Not wired to a
     /// live client in this task**: `av-kernel` does not depend on `av-grpc` or
@@ -528,6 +574,10 @@ mod tests {
         // implementation that never added the prefix check (every "ground.*" id would fall
         // through to the trailing `else` and classify Native).
         assert_eq!(kind_for("ground.station_demo"), ModelKind::Ground);
+        // N6 (`docs/native-dynamics-plan.md`): "orbital." dispatches to the new ModelKind, not
+        // Native -- fails against an implementation that never added the prefix check (every
+        // "orbital.*" id would fall through to the trailing `else` and classify Native).
+        assert_eq!(kind_for("orbital.jgm2_8x8"), ModelKind::Orbital);
     }
 
     /// M25.1: `construct_ground_station` builds a usable, zero-dimensional `ModelHandle` (a

@@ -1,3 +1,15 @@
+[lib]
+# N6 deliverable 1 (`docs/native-dynamics-plan.md`): the C ABI export of the native derivative
+# function (question 9's hedge, ADR-002's "portable form") needs a `staticlib` artifact for a
+# C caller to link against. `rlib` stays first and is NOT dropped -- every existing in-workspace
+# consumer of this crate (`av-kernel`'s eventual N6 `ModelKind`, this crate's own `tests/*.rs`
+# integration tests, `crates/av-dynamics`'s dev-dependents, if any) links it as an ordinary Rust
+# rlib, and Cargo only emits the crate-types actually listed here -- dropping `rlib` would break
+# every such consumer at the next `cargo build --workspace`. Verified by building the whole
+# workspace after this change (this task's own report has the command and output), not merely
+# by reading this comment.
+crate-type = ["rlib", "staticlib"]
+
 [package]
 name = "av-orbital"
 publish = false

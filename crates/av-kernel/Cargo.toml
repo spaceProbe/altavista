@@ -23,7 +23,15 @@ default = ["gmat"]
 # with its non-GMAT `drm`/`schedule`/`kernel`/`trajectory`/`clock`/`interpolate` tests intact
 # and a typed refusal (not a panic, not a silent native fallback) for any DRM instance whose
 # `dynamics_model` names a `"gmat."`-prefixed id.
-gmat = ["dep:gmat-sys"]
+#
+# N6 (`docs/native-dynamics-plan.md`, `docs/open-questions.md` question 230): also forwards to
+# `av-orbital`'s own `gmat-frames` feature (its Cargo.toml's identical comment is this crate's
+# own precedent) -- `av-orbital` is a normal, always-on dependency below (`default-features =
+# false`), so its `EarthGravityModel`/`ModelKind::Orbital` dispatch is available in BOTH feature
+# states; only the GMAT-backed half of *that* crate needs forwarding here. Verified by `cargo
+# tree -p av-kernel --no-default-features -i gmat-sys`, not by reading: this task's own report
+# has the output.
+gmat = ["dep:gmat-sys", "av-orbital/gmat-frames"]
 
 [dependencies]
 av-cdm = { path = "../av-cdm" }
@@ -41,6 +49,17 @@ av-codec = { path = "../av-codec" }
 # need a linked GMAT) at all -- verified in this task's own report by `otool -L` on the built
 # test binary and by `cargo tree -i gmat-sys` showing it absent from that feature state's graph.
 gmat-sys = { path = "../gmat-sys", optional = true }
+# N6 (`docs/native-dynamics-plan.md`): the native orbital force model behind the additive
+# `ModelKind::Orbital` (`src/registry.rs`) -- `crate::drm::binding::AnyModel::Orbital` wraps its
+# `EarthGravityModel<av_orbital::Fk5BodyFixedRotation>`. `default-features = false`: this crate's
+# own default `gmat-frames` feature would pull `gmat-sys` in unconditionally, defeating the whole
+# point of the `gmat` feature above -- forwarded explicitly instead (`gmat = [...,
+# "av-orbital/gmat-frames"]`) so `--no-default-features` here really does leave `gmat-sys` out of
+# the dependency graph (verified by `cargo tree`, this task's own report, not assumed from this
+# comment). Unconditional (not `optional = true`): the native model must be constructible in
+# EVERY feature state -- that is N6's whole point ("no GMAT library linked when the DRM selects
+# it").
+av-orbital = { path = "../av-orbital", default-features = false }
 # M13.2 (question 107): the crate/drm/binding.rs's ContainerModel speaks
 # altavista.v1.LockstepService (BINDING_KIND_CONTAINER) through this crate's tonic client --
 # see crates/av-lockstep/src/lib.rs's own module doc comment for why it, not av-grpc

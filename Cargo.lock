@@ -282,6 +282,7 @@ dependencies = [
  "av-edge",
  "av-lockstep",
  "av-lockstep-shim",
+ "av-orbital",
  "gmat-sys",
  "openssl",
  "prost",

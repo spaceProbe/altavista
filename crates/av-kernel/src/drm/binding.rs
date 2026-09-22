@@ -201,29 +201,29 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
-// `docs/open-questions.md` question 230: `Rc` is named only by `SharedContainerModel`/
-// `ContainerModel` (gated -- see that struct's own doc comment for why, even though a
-// container binding itself has nothing to do with GMAT).
-#[cfg(feature = "gmat")]
+// `docs/open-questions.md` question 230, N6 (this task): `Rc` is named by `SharedContainerModel`/
+// `ContainerModel` -- restored GMAT-free (round 4's earlier task gated it only because it was
+// reachable solely from `execute`, which was itself fully gated at the time; a container binding
+// genuinely has nothing to do with GMAT, this crate's own module doc comment's "Container
+// (lockstep) binding" section).
 use std::rc::Rc;
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DrmOptions, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
-// `docs/open-questions.md` question 230: `ModelCapability` is named only by `materialize_container`
-// (gated); `PacketField` only by `resolve_gmat_command_port` and this module's own GMAT-only
-// tests (both gated); `Tai` only by `materialize_gmat` (`Tai::from_nanos(epoch_tai_ns)
-// .to_a1_mjd()` at the `Gmat::convert`-adjacent A1MJD boundary).
-#[cfg(feature = "gmat")]
-use av_cdm::pb::ModelCapability;
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DrmOptions, ModelCapability, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
+// `docs/open-questions.md` question 230: `PacketField` is named only by `resolve_gmat_command_
+// port` and this module's own GMAT-only tests (both gated); `Tai` only by `materialize_gmat`
+// (`Tai::from_nanos(epoch_tai_ns).to_a1_mjd()` at the `Gmat::convert`-adjacent A1MJD boundary).
+// `ModelCapability` (above, ungated as of this task) is named by BOTH `materialize_container`
+// (GMAT-free) and `materialize_gmat` (gated) -- `ModelCapability::Derivatives`/`::Step`/etc are
+// plain proto enum values with no GMAT dependency of their own, so there is nothing to gate.
 #[cfg(feature = "gmat")]
 use av_cdm::pb::PacketField;
 #[cfg(feature = "gmat")]
 use av_cdm::time::Tai;
+use av_cdm::units;
 use av_dynamics::{AppliedCommand, DynamicsModel, Inbox, Outbox, StepResult, StmStepResult};
-// `docs/open-questions.md` question 230: both named only by `ContainerModel`/`materialize_container`
-// (gated -- see that struct's own doc comment).
-#[cfg(feature = "gmat")]
+// `docs/open-questions.md` question 230, N6: both named by `ContainerModel`/`materialize_
+// container` -- restored GMAT-free for the identical reason `Rc` above was.
 use av_lockstep::docker::ManagedContainer;
-#[cfg(feature = "gmat")]
 use av_lockstep::{BlockingLockstepClient, LockstepBindRequest, LockstepStepRequest};
 // `docs/open-questions.md` question 230: gated behind the `gmat` feature (default-on) -- these
 // two `use`s, and `super::gmat_command` below, are named only by the GMAT-backed half of this
@@ -232,6 +232,14 @@ use av_lockstep::{BlockingLockstepClient, LockstepBindRequest, LockstepStepReque
 use gmat_sys::model::{GmatModel, GmatModelInfo};
 #[cfg(feature = "gmat")]
 use gmat_sys::{Gmat, GmatError};
+
+// N6 (`docs/native-dynamics-plan.md`): the native orbital model, unconditional in both feature
+// states (`crates/av-kernel/Cargo.toml`'s own doc comment on the `av-orbital` dependency --
+// `default-features = false` keeps `gmat-sys` out unless the `gmat` feature forwards it). Its
+// own `BodyFixedRotation` is [`Fk5BodyFixedRotation`] (the native IAU-76/FK5 reduction, N5) in
+// BOTH feature states -- see [`OrbitalHandle`]'s own doc comment for why, deliberately, even
+// though `av_orbital::GmatBodyFixedRotation` is available when `gmat` is on.
+use av_orbital::{DeBody, EarthGravityModel, EarthGravityModelInfo, Fk5BodyFixedRotation};
 
 use super::attitude::{self, AttitudeSpecError, AttitudeWheelsModel, AttitudeWheelsSpec};
 use super::controller::{self, AttitudeControllerModel, AttitudeControllerSpec, CommandedAttitude, ControllerSpecError};
@@ -335,7 +343,35 @@ pub(crate) enum AnyModel {
     /// this run -- so a DRM/SOS/SystemDefinition triple is completely unaware replay ever
     /// happens; only `RunConfig` says so.
     Replay(ReplayModel),
+    /// N6 (`docs/native-dynamics-plan.md`): `"orbital."`-prefixed, a real
+    /// `av_orbital::EarthGravityModel` -- see [`OrbitalHandle`]'s own doc comment for the exact
+    /// concrete type and why its rotation is the native FK5 reduction regardless of the `gmat`
+    /// feature.
+    Orbital(OrbitalHandle),
 }
+
+/// N6: the concrete type [`AnyModel::Orbital`] wraps. **Deliberate choice, stated plainly (this
+/// task's own brief asks for one): [`Fk5BodyFixedRotation`] (N5's native IAU-76/FK5 reduction),
+/// never `av_orbital::GmatBodyFixedRotation`, even in the default (`gmat` feature on) build.**
+/// Three reasons. First, `docs/open-questions.md` question 230's own ruling is unconditional --
+/// "In the GMAT-free build, av-orbital's BodyFixedRotation must be the native FK5 reduction" --
+/// and a model whose own *type* changes between feature states would make `ModelKind::Orbital`'s
+/// own promise ("selectable by name beside the GMAT model, with identical parameters") false in
+/// the default build: two different rotations behind the identical `"orbital."` id would mean a
+/// `dynamics_hash` computed against one feature state's binary could never be reproduced by the
+/// other, defeating ADR-004's "hashes are portable" intent for exactly this one model. Second,
+/// N5 already measured `Fk5BodyFixedRotation` against `GmatBodyFixedRotation` at a thousand
+/// epochs (1.52e-9 rad max, `docs/open-questions.md` question 230's own round-3 ratification) --
+/// the native reduction is not a downgrade the default build would be settling for, it is the
+/// SAME validated implementation N1-N5 already pinned goldens against. Third, and most direct to
+/// this task's own exit criterion ("no GMAT library linked when the DRM selects it"): a
+/// `GmatBodyFixedRotation`-backed native model would need a live `Gmat`/`engine_lock()` handle
+/// threaded through [`crate::registry::ModelRegistry::construct_orbital`] purely to rotate its
+/// OWN force model, even on a run where no OTHER instance is GMAT-bound at all -- reintroducing
+/// exactly the "GMAT-bound regardless of binding kind" coupling this task's own brief names as
+/// `fbb3af2`'s defect. [`crate::registry::ModelRegistry::construct_orbital`] therefore never
+/// takes a `Gmat` parameter, in either feature state.
+pub(crate) type OrbitalHandle = EarthGravityModel<Fk5BodyFixedRotation>;
 
 /// A closed-form constant-acceleration model, parameterized entirely from declared
 /// `SystemDefinition` parameters (never a hidden default) -- the "anything else, for now"
@@ -663,6 +699,11 @@ pub(crate) enum AnyModelError {
     /// not folded into `PortCodec` (which names a specific, different cause) just to avoid
     /// adding a variant.
     Replay { model_id: String, detail: String },
+    /// N6: `av_orbital::EarthGravityModel`'s own `Error` (`OrbitalModelError<Fk5Error>`) is
+    /// genuinely fallible on every call (a DE-ephemeris-range/rotation failure), unlike the
+    /// native placeholder models above -- stringified, mirroring `AnyModelError::Replay`'s own
+    /// "a genuinely new failure shape, not folded into `PortCodec`" reasoning.
+    Orbital { model_id: String, detail: String },
 }
 impl fmt::Display for AnyModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -672,6 +713,7 @@ impl fmt::Display for AnyModelError {
             AnyModelError::CapabilityMissing { model_id, capability } => write!(f, "model {model_id:?}: capability {capability:?} was invoked but is not declared"),
             AnyModelError::PortCodec { model_id, detail } => write!(f, "model {model_id:?}: port codec error: {detail}"),
             AnyModelError::Replay { model_id, detail } => write!(f, "model {model_id:?}: {detail}"),
+            AnyModelError::Orbital { model_id, detail } => write!(f, "model {model_id:?}: {detail}"),
         }
     }
 }
@@ -691,6 +733,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.state_dim(),
             AnyModel::GroundStation(m) => m.state_dim(),
             AnyModel::Replay(m) => m.state_dim(),
+            AnyModel::Orbital(m) => m.state_dim(),
         }
     }
     fn derivatives(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
@@ -726,6 +769,8 @@ impl DynamicsModel for AnyModel {
             // real `map_err`, mirroring the `Attitude`/`Controller` arms' shape rather than the
             // `match never {}` shape.
             AnyModel::Replay(m) => m.derivatives(state, t_tai_ns, controls, out).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
+            // N6: genuinely fallible (see `AnyModelError::Orbital`'s own doc comment).
+            AnyModel::Orbital(m) => m.derivatives(state, t_tai_ns, controls, out).map_err(|e| AnyModelError::Orbital { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
     fn describe(&self) -> ModelInfo {
@@ -739,6 +784,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.describe(),
             AnyModel::GroundStation(m) => m.describe(),
             AnyModel::Replay(m) => m.describe(),
+            AnyModel::Orbital(m) => m.describe(),
         }
     }
     fn stm_capable(&self) -> bool {
@@ -786,6 +832,12 @@ impl DynamicsModel for AnyModel {
             // same "the invariant, not merely the call site that happens to enforce it today"
             // reasoning every other variant's own arm above already follows.
             AnyModel::Replay(_) => false,
+            // N6: `EarthGravityModel::stm_capable()` is always `true` (N4's own variational
+            // equations, over every force this model has configured) -- delegated, not
+            // hardcoded, so a future `av-orbital` change that ever withholds the capability
+            // (mirroring `gmat_sys::model::GmatModel`'s own `RelativisticCorrection` withholding)
+            // is picked up automatically rather than silently staying `true` behind this wrapper.
+            AnyModel::Orbital(m) => m.stm_capable(),
         }
     }
     fn stm_derivatives(&self, augmented_state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
@@ -817,6 +869,9 @@ impl DynamicsModel for AnyModel {
             // Same typed guard, same reason: a replayed instance's stm_capable() is always
             // false (see that arm above).
             AnyModel::Replay(m) => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "stm_derivatives".to_string() }),
+            // N6: `stm_capable()` is always `true` (above), so this is genuinely reachable and
+            // genuinely fallible, unlike every other arm's typed guard above.
+            AnyModel::Orbital(m) => m.stm_derivatives(augmented_state, t_tai_ns, controls, out).map_err(|e| AnyModelError::Orbital { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -838,6 +893,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.integrator(),
             AnyModel::GroundStation(m) => m.integrator(),
             AnyModel::Replay(m) => m.integrator(),
+            AnyModel::Orbital(m) => m.integrator(),
         }
     }
 
@@ -878,6 +934,7 @@ impl DynamicsModel for AnyModel {
             // with an empty inbox, which CAN fail on a missing frame), but the error type is not
             // `Infallible`, so this needs a real `map_err` too.
             AnyModel::Replay(m) => m.step(state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
+            AnyModel::Orbital(m) => m.step(state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Orbital { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -934,6 +991,9 @@ impl DynamicsModel for AnyModel {
             // Attitude/Controller arms' identical "dead but must typecheck" shape.
             AnyModel::Replay(m) if !m.stm_capable() => Err(AnyModelError::CapabilityMissing { model_id: m.describe().id, capability: "step_with_stm".to_string() }),
             AnyModel::Replay(m) => m.step_with_stm(augmented_state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
+            // N6: `stm_capable()` is always `true` (above), so no guard arm is needed -- always
+            // delegates.
+            AnyModel::Orbital(m) => m.step_with_stm(augmented_state, t_tai_ns, controls, dt_ns).map_err(|e| AnyModelError::Orbital { model_id: m.describe().id, detail: e.to_string() }),
         }
     }
 
@@ -1003,6 +1063,14 @@ impl DynamicsModel for AnyModel {
             // `AnyModelError::Replay`'s own doc comment for why that refusal gets its own
             // variant rather than reusing `PortCodec`.
             AnyModel::Replay(m) => m.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox).map_err(|e| AnyModelError::Replay { model_id: m.describe().id, detail: e.to_string() }),
+            // N6: `EarthGravityModel` declares no ports (no `step_with_ports` override --
+            // `av_dynamics::DynamicsModel`'s own default, which calls `step` and returns an
+            // empty `Outbox`) -- same shape as the trait default every other unwrapped model
+            // here would reach if it, too, declared none.
+            AnyModel::Orbital(m) => match m.step_with_ports(state, t_tai_ns, controls, dt_ns, inbox) {
+                Ok(r) => Ok(r),
+                Err(e) => Err(AnyModelError::Orbital { model_id: m.describe().id, detail: e.to_string() }),
+            },
         }
     }
 
@@ -1029,6 +1097,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.last_measurements(),
             AnyModel::GroundStation(m) => m.last_measurements(),
             AnyModel::Replay(m) => m.last_measurements(),
+            AnyModel::Orbital(m) => m.last_measurements(),
         }
     }
 
@@ -1049,6 +1118,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.drain_sensor_fault_effect(),
             AnyModel::GroundStation(m) => m.drain_sensor_fault_effect(),
             AnyModel::Replay(m) => m.drain_sensor_fault_effect(),
+            AnyModel::Orbital(m) => m.drain_sensor_fault_effect(),
         }
     }
 
@@ -1067,6 +1137,7 @@ impl DynamicsModel for AnyModel {
             AnyModel::Imu(m) => m.drain_decode_errors(),
             AnyModel::GroundStation(m) => m.drain_decode_errors(),
             AnyModel::Replay(m) => m.drain_decode_errors(),
+            AnyModel::Orbital(m) => m.drain_decode_errors(),
         }
     }
 }
@@ -1152,17 +1223,16 @@ impl std::error::Error for ContainerError {}
 /// sequence counter are inherently stateful -- the same reason `gmat_sys::model::GmatModel`
 /// (a `!Send` FFI handle) is driven through `&self` methods that mutate hidden native state.
 ///
-/// `docs/open-questions.md` question 230: gated behind the `gmat` feature, though a
-/// `BINDING_KIND_CONTAINER` instance itself has nothing to do with GMAT -- this cluster
-/// (`ContainerModel`/`SharedContainerModel`/`MaterializedContainer`/`materialize_container`) is
-/// dead code once `--no-default-features` is set, purely because its one caller,
-/// `executor::run_shared_group`/`materialize_plan_at_boundary` (gated as a whole -- see
-/// `executor.rs`'s own `use gmat_sys::Gmat` doc comment: `RunConfig.gmat: &Gmat` makes `execute`
-/// and everything only it reaches GMAT-bound regardless of binding kind), is gone. `classify_
-/// binding`'s own `BINDING_KIND_CONTAINER` classification path (`parse_container_spec`,
-/// `ContainerSpec`, `Classification::Container`) stays ungated -- it is genuinely GMAT-free and
-/// has its own tests below that do not construct a real `ContainerModel`.
-#[cfg(feature = "gmat")]
+/// `docs/open-questions.md` question 230, N6 (this task): **ungated as of this task.** A
+/// `BINDING_KIND_CONTAINER` instance has nothing to do with GMAT -- this cluster
+/// (`ContainerModel`/`SharedContainerModel`/`MaterializedContainer`/`materialize_container`)
+/// was only dead code under `--no-default-features` because its one caller,
+/// `executor::run_shared_group`/`materialize_plan_at_boundary`, was itself gated as a whole
+/// (`RunConfig.gmat: &Gmat` was a mandatory field, making `execute` -- and everything reachable
+/// only from it, regardless of binding kind -- inherently GMAT-bound). This task un-gates that
+/// call graph, and this cluster along with it: a lockstep container speaks `altavista.v1.
+/// LockstepService` over gRPC (`crate::drm::binding`'s own module doc comment, "Container
+/// (lockstep) binding"), never GMAT.
 pub(crate) struct ContainerModel {
     client: RefCell<BlockingLockstepClient>,
     next_sequence: Cell<u64>,
@@ -1181,7 +1251,6 @@ pub(crate) struct ContainerModel {
     managed: RefCell<Option<ManagedContainer>>,
 }
 
-#[cfg(feature = "gmat")]
 impl DynamicsModel for ContainerModel {
     type Error = ContainerError;
 
@@ -1262,7 +1331,6 @@ impl DynamicsModel for ContainerModel {
     }
 }
 
-#[cfg(feature = "gmat")]
 impl ContainerModel {
     /// Send `Shutdown` and, for a Docker-run instance ([`ContainerModel::managed`] is `Some`),
     /// stop and remove the container afterward -- question 118's "Shutdown then stop and remove
@@ -1315,9 +1383,7 @@ impl ContainerModel {
 /// `DrmError::ContainerFaultsOrManeuversNotSupported`), so this wrapper never needs to change
 /// what it wraps between spans -- only which span's kernel currently owns a box pointing at it.
 #[derive(Clone)]
-#[cfg(feature = "gmat")]
 pub(crate) struct SharedContainerModel(pub Rc<ContainerModel>);
-#[cfg(feature = "gmat")]
 impl DynamicsModel for SharedContainerModel {
     type Error = ContainerError;
     fn state_dim(&self) -> usize {
@@ -1382,7 +1448,6 @@ impl DynamicsModel for SharedContainerModel {
 /// edit); [`MaterializedContainer`] is a parallel, self-contained return shape
 /// `crate::drm::executor::run_container_instance` (also not going through `HeteroKernel`,
 /// for the same "no physical state to schedule" reason) consumes directly.
-#[cfg(feature = "gmat")]
 pub(crate) struct MaterializedContainer {
     pub model: ContainerModel,
     pub t0_tai_ns: i64,
@@ -1422,7 +1487,6 @@ pub(crate) struct MaterializedContainer {
 /// `pub(crate)`: only `crate::drm::executor::run_shared_group` calls this, matching
 /// `materialize_gmat`/`materialize_constant_accel`'s own visibility.
 #[allow(clippy::too_many_arguments)]
-#[cfg(feature = "gmat")]
 pub(crate) fn materialize_container(
     spec: &ContainerSpec,
     sys: &SystemDefinition,
@@ -1940,6 +2004,44 @@ pub enum BindingPlan {
     /// required-field presence, checked by constructing and discarding a real `crate::drm::
     /// ground::GroundStationModel`).
     GroundStation(GroundStationSpec),
+    /// N6 (`docs/native-dynamics-plan.md`): a `"orbital."`-dispatched instance's parsed,
+    /// validated [`OrbitalSystemSpec`] -- see [`classify_binding`]'s own new `ModelKind::Orbital`
+    /// arm for exactly what "validated" means (`spacecraft.DisplayStateType` is `"Cartesian"`,
+    /// `spacecraft.CoordinateSystem` is this instance's own integration frame, `force_model.
+    /// point_masses` names only bodies [`av_orbital::DeBody`] resolves).
+    Orbital(OrbitalSystemSpec),
+}
+
+/// N6: parsed, not-yet-materialized parameters for a `"orbital."`-dispatched `SystemDefinition`
+/// -- the native counterpart of [`GmatSystemSpec`], deliberately reusing the SAME `force_model.*`
+/// parameter names for the same physical quantity wherever one exists (`central_body`,
+/// `gravity_file`, `gravity_degree`, `gravity_order`, `point_masses`) so a DRM author can select
+/// either model for the identical physics by changing only `SystemDefinition.dynamics_model`'s
+/// own prefix. Building this touches no file I/O and reads no `GMAT_ROOT` -- exactly
+/// [`GmatSystemSpec`]'s own "classification touches nothing live" contract -- [`materialize_
+/// orbital`] is what actually reads the gravity/DE files.
+#[derive(Debug, Clone, Default)]
+pub struct OrbitalSystemSpec {
+    /// `force_model.central_body` -- must be `"Earth"` ([`av_orbital::EarthGravityModel`] is
+    /// Earth-only this round; a different value is refused, typed, at classify time, never
+    /// silently treated as Earth anyway).
+    pub central_body: String,
+    /// `force_model.gravity_file` -- a bare filename under `$GMAT_ROOT/data/gravity/earth/`
+    /// (`JGM2.cof`, `JGM3.cof`, `EGM96.cof`, ...), identical to [`GmatSystemSpec::gravity_file`]'s
+    /// own vocabulary -- GMAT resolves the same string against its own `FileManager`'s
+    /// `EARTH_POT_PATH`.
+    pub gravity_file: String,
+    pub gravity_degree: i32,
+    pub gravity_order: i32,
+    /// `force_model.point_masses` -- comma-separated GMAT body names (`"Luna"`, `"Sun"`, ...),
+    /// the identical string [`GmatSystemSpec::point_masses`] parses, resolved to
+    /// [`av_orbital::DeBody`] by [`parse_orbital_spec`].
+    pub point_masses: Vec<DeBody>,
+    /// `spacecraft.X/Y/Z/VX/VY/VZ`, km / km/s -- GMAT's own units and field names for a
+    /// Cartesian state (`fault::CARTESIAN_FIELDS`'s own vocabulary, gated behind `gmat` but the
+    /// same six names either way) -- converted to SI at materialization, mirroring every
+    /// GMAT-bound instance's own km->m boundary (`crate::drm::units`).
+    pub x0_km: [f64; 6],
 }
 
 /// [`classify_binding`]'s actual return shape (M13.2, question 107): a `BINDING_KIND_MODEL`
@@ -2145,6 +2247,120 @@ fn parse_gmat_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Resul
             }
             unreachable!("every combination other than all-Some/all-None has at least one absent field, caught by the loop above");
         }
+    }
+    Ok(spec)
+}
+
+/// N6: the native counterpart of [`parse_gmat_spec`] -- see [`OrbitalSystemSpec`]'s own doc
+/// comment for the shared `force_model.*` vocabulary. Pure parsing, GMAT-free in both feature
+/// states (never reads `GMAT_ROOT` or any file -- [`materialize_orbital`] does that).
+fn parse_orbital_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Result<OrbitalSystemSpec, DrmError> {
+    let mut spec = OrbitalSystemSpec::default();
+    let mut display_state_type: Option<String> = None;
+    let mut coordinate_system: Option<String> = None;
+    let mut point_mass_names: Vec<String> = Vec::new();
+    let mut seen_state = [false; 6];
+    for (name, p) in params {
+        if let Some(field) = name.strip_prefix("force_model.") {
+            match field {
+                "central_body" => spec.central_body = p.string_value.clone(),
+                "gravity_file" => spec.gravity_file = p.string_value.clone(),
+                "gravity_degree" => spec.gravity_degree = p.value.round() as i32,
+                "gravity_order" => spec.gravity_order = p.value.round() as i32,
+                "point_masses" => point_mass_names = p.string_value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+                // N6's own scope: unlike `parse_gmat_spec`, `golden_ref` is not a recognized
+                // name here (no test in this task pins a golden against this spec type) --
+                // refused as unknown, same as any other undeclared name, rather than silently
+                // accepted and ignored.
+                _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
+            }
+        } else if let Some(field) = name.strip_prefix("spacecraft.") {
+            match field {
+                "CoordinateSystem" => coordinate_system = Some(p.string_value.clone()),
+                "DisplayStateType" => display_state_type = Some(p.string_value.clone()),
+                "X" => {
+                    spec.x0_km[0] = p.value;
+                    seen_state[0] = true;
+                }
+                "Y" => {
+                    spec.x0_km[1] = p.value;
+                    seen_state[1] = true;
+                }
+                "Z" => {
+                    spec.x0_km[2] = p.value;
+                    seen_state[2] = true;
+                }
+                "VX" => {
+                    spec.x0_km[3] = p.value;
+                    seen_state[3] = true;
+                }
+                "VY" => {
+                    spec.x0_km[4] = p.value;
+                    seen_state[4] = true;
+                }
+                "VZ" => {
+                    spec.x0_km[5] = p.value;
+                    seen_state[5] = true;
+                }
+                _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
+            }
+        } else if name.starts_with("output.") {
+            // See `parse_gmat_spec`'s own identical handling -- `crate::drm::executor::
+            // declared_outputs` reads this straight off the real `SystemDefinition`.
+        } else {
+            return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() });
+        }
+    }
+    if spec.central_body.is_empty() {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "force_model.central_body".to_string() });
+    }
+    if spec.central_body != "Earth" {
+        return Err(DrmError::UnknownParameter { context: context.to_string(), name: format!("force_model.central_body={:?} (av_orbital::EarthGravityModel is Earth-only this round)", spec.central_body) });
+    }
+    if spec.gravity_file.is_empty() {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "force_model.gravity_file".to_string() });
+    }
+    let Some(coordinate_system) = coordinate_system else {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "spacecraft.CoordinateSystem".to_string() });
+    };
+    let integration_frame = format!("{}MJ2000Eq", spec.central_body);
+    if coordinate_system != integration_frame {
+        // N6's own scope: unlike a `"gmat."`-dispatched instance, this binding kind has no
+        // `crate::drm::executor::convert_gmat_trajectory_to_declared_frame` conversion path of
+        // its own -- refused here, typed, rather than propagating in the wrong frame silently
+        // (this task's own brief: "a silent skip that produces a trajectory in the wrong frame
+        // is the worst possible outcome").
+        return Err(DrmError::UnsupportedCoordinateSystem { context: context.to_string(), declared: coordinate_system, integration_frame });
+    }
+    let Some(display_state_type) = display_state_type else {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "spacecraft.DisplayStateType".to_string() });
+    };
+    if display_state_type != "Cartesian" {
+        return Err(DrmError::OrbitalRequiresCartesianState { instance: context.to_string(), declared: display_state_type });
+    }
+    if seen_state.iter().any(|&s| !s) {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "spacecraft.{X,Y,Z,VX,VY,VZ} (all six required -- a \"orbital.\"-dispatched instance's Cartesian state, no partial subset)".to_string() });
+    }
+    for name in point_mass_names {
+        let body = match name.as_str() {
+            "Luna" => DeBody::Moon,
+            "Sun" => DeBody::Sun,
+            "Mercury" => DeBody::Mercury,
+            "Venus" => DeBody::Venus,
+            "Mars" => DeBody::Mars,
+            "Jupiter" => DeBody::Jupiter,
+            "Saturn" => DeBody::Saturn,
+            "Uranus" => DeBody::Uranus,
+            "Neptune" => DeBody::Neptune,
+            "Pluto" => DeBody::Pluto,
+            other => {
+                return Err(DrmError::UnknownParameter {
+                    context: context.to_string(),
+                    name: format!("force_model.point_masses names {other:?}, which av_orbital::DeBody does not resolve (GMAT body names, e.g. \"Luna\", \"Sun\")"),
+                })
+            }
+        };
+        spec.point_masses.push(body);
     }
     Ok(spec)
 }
@@ -2599,6 +2815,15 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
                 return Err(DrmError::StateSpaceDimensionMismatch { instance: instance.name.clone(), declared_dim, model_state_dim: configured_dim });
             }
             Ok(Classification::Model(BindingPlan::ConstantAccel(spec)))
+        }
+        // N6 (`docs/native-dynamics-plan.md`): `"orbital."`-prefixed, the real
+        // `av_orbital::EarthGravityModel`, GMAT-free in every feature state -- `parse_orbital_
+        // spec` is where `spacecraft.DisplayStateType != "Cartesian"`/a non-integration-frame
+        // `spacecraft.CoordinateSystem`/an unresolvable `force_model.point_masses` name are all
+        // refused, typed, before any file is touched.
+        crate::registry::ModelKind::Orbital => {
+            let spec = parse_orbital_spec(&context, &params)?;
+            Ok(Classification::Model(BindingPlan::Orbital(spec)))
         }
         crate::registry::ModelKind::Remote => Err(DrmError::UnsupportedBinding { instance: instance.name.clone(), kind: format!("MODEL_KIND_REMOTE (dynamics_model {:?}; ADR-005 sec 1's remote DynamicsService constructor is registered but not yet wired into this executor)", sys.dynamics_model) }),
         // M22.1b (`docs/open-questions.md` questions 151/152, decided by the lead): the
@@ -3113,6 +3338,48 @@ pub(crate) fn materialize_constant_accel(spec: &ConstantAccelSpec, epoch_tai_ns:
         decode_errors_this_step: RefCell::new(Vec::new()),
     };
     Materialized { model: AnyModel::ConstantAccel(model), t0_tai_ns: epoch_tai_ns, x0_si: spec.x0_si.clone(), settings: BTreeMap::new() }
+}
+
+/// N6 (`docs/native-dynamics-plan.md`): build a real [`OrbitalHandle`] (`av_orbital::
+/// EarthGravityModel<av_orbital::Fk5BodyFixedRotation>`) from `spec` -- the one place this crate
+/// actually reads `GMAT_ROOT`/a gravity file/a DE ephemeris file for a `"orbital."`-dispatched
+/// instance (mirrors [`materialize_gmat`]'s own "classification touches nothing live,
+/// materialization does" split). `av_orbital::cof::locate_gmat_root` is the SAME resolution
+/// `crate::drm::binding`'s own GMAT-bound path ultimately depends on transitively (through
+/// `gmat_sys`'s own `GMAT_ROOT`) -- see that function's own doc comment for the environment
+/// variable / repo-relative-fallback rule (question 199: read-only, never written).
+///
+/// `settings: BTreeMap::new()` (like [`materialize_constant_accel`]): `EarthGravityModel::
+/// describe()` already reports its own `settings_hash`, computed at construction from the
+/// gravity/DE file names and digests, the degree/order, `mu`, the reference radius, the frame
+/// id and the integrator settings (`av_orbital::model::EarthGravityModel::new`'s own doc
+/// comment) -- this task's own brief's "match the same physical quantities `parse_gmat_spec`
+/// hashes" is satisfied there, not by a second, parallel settings map here.
+///
+/// `pub(crate)`: only `crate::registry::ModelRegistry::construct_orbital` calls this, mirroring
+/// [`materialize_constant_accel`]/[`materialize_gmat`].
+///
+/// # Errors
+///
+/// [`DrmError::OrbitalModel`] wrapping whatever `av_orbital` returned (an unreadable/malformed
+/// gravity or DE file, a rotation-setup failure) -- never a panic.
+pub(crate) fn materialize_orbital(spec: &OrbitalSystemSpec, epoch_tai_ns: i64, model_id: &str) -> Result<Materialized, DrmError> {
+    let err = |detail: String| DrmError::OrbitalModel { instance: model_id.to_string(), detail };
+    let gmat_root = av_orbital::cof::locate_gmat_root().map_err(|e| err(e.to_string()))?;
+    let gravity_path = gmat_root.join("data/gravity/earth").join(&spec.gravity_file);
+    let rotation = Fk5BodyFixedRotation::new(&gmat_root).map_err(|e| err(e.to_string()))?;
+    let info = EarthGravityModelInfo { id: model_id.to_string(), version: env!("CARGO_PKG_VERSION").to_string(), goldens: vec![] };
+    let mut model = EarthGravityModel::new(&gravity_path, spec.gravity_degree as usize, spec.gravity_order as usize, &spec.central_body, rotation, info).map_err(|e| err(e.to_string()))?;
+    if !spec.point_masses.is_empty() {
+        // N2's own reference DE file (`docs/native-dynamics-plan.md`'s "N2: the DE ephemeris"
+        // section, `crates/av-orbital/src/de.rs`'s own tests): the one file GMAT's own
+        // `SolarSystem.DEFilename` names on this install, read the same way `av-orbital`'s own
+        // N2/N3 goldens do.
+        let de_path = gmat_root.join("data/planetary_ephem/de/leDE1941.405");
+        model = model.with_third_bodies(&de_path, &spec.point_masses).map_err(|e| err(e.to_string()))?;
+    }
+    let x0_si = units::state_km_to_m(spec.x0_km);
+    Ok(Materialized { model: AnyModel::Orbital(model), t0_tai_ns: epoch_tai_ns, x0_si: x0_si.to_vec(), settings: BTreeMap::new() })
 }
 
 /// Build an [`AttitudeWheelsModel`] from `spec` and its instance's own declared/resolved
