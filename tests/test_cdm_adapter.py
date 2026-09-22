@@ -357,6 +357,125 @@ def test_cdm_trajectory_to_viewer_json_rejects_partial_attitude():
         cdm.cdm_trajectory_to_viewer_json(cdm_traj)
 
 
+# --------------------------------------------------------------------------- covariance (heavy round 7, question 233)
+# trajectory_to_cdm(altavista.Trajectory -> CDM) never fills TrajectorySample.cov -- see
+# test_km_to_m_round_trip_is_exact_not_just_self_consistent's own
+# `assert list(sample.cov) == []` above, unchanged by this task. Everything below exercises
+# the other direction, cdm_trajectory_to_viewer_json (CDM -> altavista.Trajectory), which is
+# the one function this task's producer plumbing actually populates `cov`/`cov_dim` through.
+def _cdm_traj_with_cov(cov_per_sample, *, state_space_id=cdm.DEFAULT_STATE_SPACE_ID,
+                       entity_id="Sat", trajectory_id="cov-traj") -> trajectory_pb2.Trajectory:
+    """Builds a real ``altavista.v1.Trajectory`` directly through the generated bindings
+    (never a hand-rolled byte layout), one sample per entry of ``cov_per_sample`` -- ``None``
+    means "no cov on this sample", anything else is passed straight to ``TrajectorySample.cov``
+    (SI, row-major n x n). Epochs deliberately descending (out of tai_ns order) so a test
+    that only passes because ``cov`` happened to already be time-sorted is impossible --
+    ``cdm_trajectory_to_viewer_json`` sorts by ``tai_ns`` before building ``tr.cov``, so its
+    output must reflect that sort, not input order."""
+    tr = trajectory_pb2.Trajectory(id=trajectory_id, entity_id=entity_id, state_space_id=state_space_id,
+                                   frame_id="EarthMJ2000Eq", interpolation=trajectory_pb2.INTERPOLATION_HERMITE_VELOCITY)
+    n = len(cov_per_sample)
+    for i, cov in enumerate(cov_per_sample):
+        tai_ns = cdm.a1mjd_to_tai_ns(21545.0) + (n - i) * 1_000_000_000  # descending epochs
+        mean = [6800.5 + i, 100.25, -50.125, -1.5, 7.625, 0.0625]
+        tr.samples.add(tai_ns=tai_ns, mean=mean, cov=list(cov) if cov is not None else [],
+                       kind=trajectory_pb2.SAMPLE_KIND_NATIVE)
+    return tr
+
+
+# A 6x6 row-major SI covariance whose every nonzero entry is an exact multiple of
+# M_PER_KM**2 (1e6) -- so dividing by 1e6 lands on an exactly-representable float, the same
+# "exact, not just close" discipline test_km_to_m_round_trip_is_exact_not_just_self_consistent
+# already uses for pos/vel above -- and whose off-diagonal (index [0][1] / [1][0]) is nonzero
+# and distinct from every diagonal entry, so a transposition or wrong-index bug would be
+# caught, not masked by symmetry.
+_COV_SI_6X6 = [
+    10_000_000.0, 500_000.0, 0.0, 0.0, 0.0, 0.0,
+    500_000.0, 20_000_000.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 30_000_000.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 4_000_000.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 5_000_000.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 6_000_000.0,
+]
+_COV_KM_6X6 = [v / (cdm.M_PER_KM ** 2) for v in _COV_SI_6X6]  # [10, 0.5, 0,0,0,0, 0.5, 20, ...]
+
+
+def test_cdm_trajectory_to_viewer_json_carries_cov_with_correct_unit_conversion_and_order():
+    """The core of question 233's Python-side seam: a real ``TrajectorySample.cov`` (SI)
+    reaches ``altavista.model.Trajectory.cov`` (km/km-s units) with every entry divided by
+    the SAME ``M_PER_KM ** 2`` factor -- never a per-block conversion -- and parallel to the
+    (sorted-by-epoch) ``t``/``pos``/``vel`` streams, with ``cov_dim`` set to 6."""
+    cov_b = [v * 2 for v in _COV_SI_6X6]  # a second, distinguishable matrix
+    cdm_traj = _cdm_traj_with_cov([_COV_SI_6X6, cov_b])  # sample 0 built first, but epoch-later (descending)
+    tr = cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+    assert tr.cov_dim == 6
+    assert len(tr.cov) == 2 == len(tr.t)
+    # Epochs were built descending, so the LATER-epoch sample (index 0 at construction,
+    # carrying _COV_SI_6X6) sorts to tr.cov[1], and cov_b (built second, earlier epoch)
+    # sorts to tr.cov[0] -- proves cdm_trajectory_to_viewer_json's own epoch sort actually
+    # reorders cov in lockstep with t/pos/vel, not just those three.
+    assert tr.t[0] < tr.t[1]
+    assert tr.cov[1] == _COV_KM_6X6
+    assert tr.cov[0] == [v / (cdm.M_PER_KM ** 2) for v in cov_b]
+
+
+def test_cdm_trajectory_to_viewer_json_cov_is_empty_when_the_cdm_carries_none():
+    """Old behaviour, byte-for-byte: a Trajectory with no cov on any sample gets an empty
+    ``cov``/``cov_dim == 0`` -- symmetric with attitude's own
+    test_trajectory_to_cdm_without_attitude_keeps_6_component_mean_and_default_id."""
+    cdm_traj = _cdm_traj_with_cov([None, None])
+    tr = cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+    assert tr.cov == []
+    assert tr.cov_dim == 0
+
+
+def test_cdm_trajectory_to_viewer_json_rejects_partial_cov():
+    cdm_traj = _cdm_traj_with_cov([_COV_SI_6X6, None, None])
+    with pytest.raises(cdm.CdmAdapterError, match=r"1 sample\(s\).*out of 3 total"):
+        cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+
+
+def test_cdm_trajectory_to_viewer_json_rejects_a_cov_of_the_wrong_length():
+    bad = list(range(16))  # neither 9 (3x3) nor 36 (6x6)
+    cdm_traj = _cdm_traj_with_cov([bad])
+    with pytest.raises(cdm.CdmAdapterError, match=r"16-element cov"):
+        cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+
+
+def test_cdm_trajectory_to_viewer_json_rejects_an_inconsistent_dimension_across_samples():
+    """n must stay the same across every sample of one trajectory -- proven with an
+    UNRESOLVABLE state_space_id so the "must match the declared 6-component position
+    class" cross-check (the next test below) is not what is being isolated here: with no
+    resolvable state space, either 3x3 or 6x6 alone is accepted, but switching between them
+    mid-trajectory is still refused."""
+    cov_3x3 = [1_000_000.0, 0.0, 0.0, 0.0, 1_000_000.0, 0.0, 0.0, 0.0, 1_000_000.0]
+    cdm_traj = _cdm_traj_with_cov([_COV_SI_6X6, cov_3x3], state_space_id="custom.unresolvable.6")
+    with pytest.raises(cdm.CdmAdapterError, match=r"6x6 cov.*earlier sample.*3x3"):
+        cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+
+
+def test_cdm_trajectory_to_viewer_json_accepts_a_3x3_cov_when_the_state_space_is_unresolvable():
+    """The positive counterpart of the previous test: with no resolvable state space to
+    cross-check against, a 3x3 cov alone (never mixed with 6x6) is accepted on its own --
+    proving the "n in {3, 6}" acceptance set is real, not merely "6 is the only value this
+    code path can produce"."""
+    cov_3x3 = [1_000_000.0, 0.0, 0.0, 0.0, 2_000_000.0, 0.0, 0.0, 0.0, 3_000_000.0]
+    cdm_traj = _cdm_traj_with_cov([cov_3x3], state_space_id="custom.unresolvable.3")
+    tr = cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+    assert tr.cov_dim == 3
+    assert tr.cov == [[v / (cdm.M_PER_KM ** 2) for v in cov_3x3]]
+
+
+def test_cdm_trajectory_to_viewer_json_rejects_a_3x3_cov_against_a_resolved_6_component_state_space():
+    """The cross-check: DEFAULT_STATE_SPACE_ID resolves to a real, declared StateSpace with
+    a 6-component position/velocity class (state_space_for/has_position_class), so a 3x3
+    cov alongside it is refused rather than silently accepted as "close enough"."""
+    cov_3x3 = [1_000_000.0, 0.0, 0.0, 0.0, 1_000_000.0, 0.0, 0.0, 0.0, 1_000_000.0]
+    cdm_traj = _cdm_traj_with_cov([cov_3x3], state_space_id=cdm.DEFAULT_STATE_SPACE_ID)
+    with pytest.raises(cdm.CdmAdapterError, match=r"3x3 cov.*6-component position/velocity class"):
+        cdm.cdm_trajectory_to_viewer_json(cdm_traj)
+
+
 # --------------------------------------------------------------------------- declared state spaces (M7.1)
 def test_state_space_for_declares_the_6_component_cartesian_shape():
     """docs/open-questions.md question 88's condition (a): DEFAULT_STATE_SPACE_ID must

@@ -51,7 +51,7 @@ import {
 // top level or in a class `extends` clause), so the remaining globe.js<->imagery_layer.js
 // cycle itself is safe (see globe_lod.js's own note on the module-load-order
 // discipline this codebase already applies for a comparable case).
-import { ImageryLayerAdapter } from './layers/imagery_layer.js';
+import { ImageryLayerAdapter, IMAGERY_TILE_BYTES } from './layers/imagery_layer.js';
 import { TerrainLayerAdapter } from './layers/terrain_layer.js';
 import { globalKeyFor } from './layers/layer.js';
 
@@ -257,9 +257,24 @@ export class GlobeLayer {
     this.layerManager = opts.layerManager || null;
     this.imageryLayerId = opts.imageryLayerId || 'imagery';
     this.terrainLayerId = opts.terrainLayerId || 'terrain';
+    // Round 7 (heavy7 task 4, docs/open-questions.md question 233): ADDITIVE,
+    // defaulted to IMAGERY_TILE_BYTES -- the exact estimate `ImageryLayerAdapter`
+    // itself already defaults to (`./layers/imagery_layer.js`) -- so every EXISTING
+    // call site (scene.js's enableGlobe, and every headless check that omits this
+    // option) is byte-for-byte unaffected. This exists so a caller that knows it is
+    // NOT in the 256x256 RGBA8 regime -- `web/js/layers_stream_check.mjs`'s own
+    // GlobeLayer probe, once its manager took the run's REAL byte budget instead of
+    // a hardcoded one (question 233's disclosed gap), needed to declare the
+    // default's own per-tile cost in the SAME small, real regime its gateway-backed
+    // layers already charge, not the fictional 262,144-byte estimate that made
+    // every default tile alone larger than that budget -- can say so, exactly the
+    // seam `ImageryLayerAdapter`'s own `tileBytes` option already provides one
+    // layer down (see that class's own doc comment: "a tile set is not obliged to
+    // be 256x256").
+    this.imageryTileBytes = opts.imageryTileBytes ?? IMAGERY_TILE_BYTES;
     if (this.layerManager) {
       this._imageryAdapter = new ImageryLayerAdapter({
-        id: this.imageryLayerId, imageryUrl: this.imageryUrl, loader: this.textureLoader,
+        id: this.imageryLayerId, imageryUrl: this.imageryUrl, loader: this.textureLoader, tileBytes: this.imageryTileBytes,
       });
       this.layerManager.addLayer(this._imageryAdapter);
       this._terrainAdapter = new TerrainLayerAdapter({ id: this.terrainLayerId });

@@ -1,0 +1,44 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- heavy round 7
+# (question 233): "no producer fills TrajectorySample.cov, so the ellipsoids have no live
+# input". This is the sibling of leo_1day_golden.drm.yaml with options.covariance: true --
+# same sos_configuration_id (leo_sos, unchanged, whose sole "leo" instance already declares
+# the golden's own P0 -- see leo_1day_golden.sos.yaml's own header comment), same scenario
+# window, same everything except this file's own id, options.covariance and hash. One new
+# file, not three: leo_1day_golden.sos.yaml and leo_1day_golden.system.yaml need no changes
+# at all to turn covariance on, since DrmOptions.covariance is a property of the DRM, not of
+# the SosConfiguration/SystemDefinition it names.
+#
+# start_tai_ns / end_tai_ns: identical to leo_1day_golden.drm.yaml -- see that file's own
+# header comment for the exact arithmetic (2026-01-01T00:00:00Z, TAI-UTC = 37 s, one-day
+# duration).
+#
+# Reproduces crates/av-kernel/tests/drm_executor.rs's own
+# drm_covariance_matches_the_golden_stm_and_propagated_cov test as a committed, on-disk
+# fixture (that test builds an equivalent DesignReferenceMission/SosConfiguration in Rust
+# rather than loading one from drms/, per its own doc comment's "GMAT object naming"
+# section -- this file is the disk-committed counterpart an external caller, e.g. av-run,
+# can point at directly without writing any Rust). Checked against
+# goldens/leo_1day_jgm2_8x8_sunmoon.json's "stm".cov_t1_si at the end of the run -- see this
+# task's own report for the measured Frobenius relative error and the tolerance it is
+# checked against (that test's own < 1e-6 bound, cited rather than re-derived).
+id: drm_leo_1day_golden_cov
+version: "1"
+name: LEO one day, JGM2 8x8 + Sun/Moon (golden reproduction, covariance on)
+sos_configuration_id: leo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767312037000000000
+options:
+  covariance: true
+  default_step_rate_hz: 10.0
+  sample_interval_s: 0.1
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (heavy round 7, question 233)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   $SCRATCH/cargo-slot run -p av-kernel --example drm_hash -- drm drms/leo_1day_golden_cov.drm.yaml
+hash: "f0e6c1635bbc59deabdd14084804cf1b56eb42e4668967366baa31a56cf21011"

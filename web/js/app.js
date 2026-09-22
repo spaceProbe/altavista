@@ -376,6 +376,16 @@ function renderLayersPanelNow() {
     deferredCount: lm.deferredCount,
     failedCount: lm.failedCount,
     failureNames: lm.failureNames(),
+    // Task 5b (panel-failure-attribution, round 7): which layer produced each
+    // recorded failure (`LayerManager.failuresByLayer()`), and which registered
+    // layers have declared they have no loader at all (`LayerManager.
+    // noLoaderLayers()`, read here by id only -- see terrain_layer.js's
+    // `notImplemented`) -- so the panel can attribute a terrain gap to terrain
+    // instead of the tile set the user actually selected, without this file or the
+    // panel ever hard-coding a layer id or error name. `failedCount`/`failureNames`
+    // above are UNCHANGED (still the manager's own unattributed totals).
+    failuresByLayer: lm.failuresByLayer(),
+    noLoaderLayerIds: lm.noLoaderLayers().map((layer) => layer.id),
   } : null;
   renderLayersPanel(els.layersPanel, {
     tileSets: layersState.tileSets,
@@ -385,6 +395,16 @@ function renderLayersPanelNow() {
     budget,
     onToggleLayer: toggleGatewayLayer,
     onRefreshCatalog: refreshTileSetCatalog,
+    // Heavy round 7 (question 233, H6 wiring): the "Entities" section's own state --
+    // `viewer.entityOptions` is null before the first scenario ever loads
+    // (web/js/scene.js's own constructor default is actually a real object, never
+    // null, but this panel treats "no scenario yet" the same way `layersState`'s own
+    // absence-of-catalog does: the checkboxes still render, reflecting the CURRENT
+    // (harmless-to-toggle-early) defaults). `setEntityClassEnabled` is the one setter
+    // (scene.js's own doc comment on it) -- never touching `viewer.entityOptions`
+    // directly from here.
+    entityOptions: viewer.entityOptions,
+    onToggleEntity: (cls, enabled) => { viewer.setEntityClassEnabled(cls, enabled); renderLayersPanelNow(); },
   });
 }
 
@@ -955,7 +975,19 @@ function frame(now) {
       if (vp && v.hud) v.hud.textContent = hudText(scenario.name, vp.cameraFrameId, vp.focus);
     }
   } else {
-    viewer.update(0);
+    // Round 7 (manager review, found by the entities-wiring task's own browser probe):
+    // this used to be an unconditional `viewer.update(0)`, which silently REVERTS the
+    // rendered epoch to zero on the very next animation frame whenever anything other
+    // than this file has driven the viewer -- exactly what a browser probe does when it
+    // calls `viewer.setScenario(...)`/`viewer.update(t)` directly while this module's own
+    // `scenario` is still null. Every entity position, every interpolated body, the
+    // floating origin's own rebase target: all quietly snapped back to t = 0 between the
+    // probe's write and its read. `_lastT ?? 0` keeps rendering at whatever epoch was
+    // last actually set and falls back to 0 only when nothing has ever set one, which is
+    // the pre-existing behaviour for a genuinely empty page. The `?? 0` idiom is
+    // scene.js's own, used there for the identical reason (`_focusPosition`,
+    // `_updateViewportLabels`).
+    viewer.update(viewer._lastT ?? 0);
   }
   // Round 5: refresh the Layers panel's "resident bytes against the budget" /
   // deferred / failed counters at ~2 Hz, the same throttle the 2D map panel's own

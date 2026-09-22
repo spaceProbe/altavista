@@ -362,6 +362,16 @@ export class LayerManager {
     this.failedCount = 0;
     /** @type {Set<string>} */
     this._failureNames = new Set();
+    // Task 5b (panel-failure-attribution, round 7): additive, read-only bookkeeping
+    // beside `failedCount`/`_failureNames` above -- WHICH layer produced each
+    // recorded failure, so a caller (the Layers panel) can tell a real gateway tile
+    // set's own failure apart from a layer that has no loader at all (e.g. terrain's
+    // permanent, disclosed refusal -- see terrain_layer.js's `notImplemented`). Never
+    // read by `_onFailed`'s existing policy decisions (the blacklist/clearing rule
+    // above is completely unchanged); only written there, alongside the existing
+    // counters, for `failuresByLayer()` (below) to read back.
+    /** @type {Map<string, {count:number, names:Set<string>}>} */
+    this._failuresByLayer = new Map();
   }
 
   /** Register one layer (its `id` must be unique on this manager). */
@@ -696,6 +706,25 @@ export class LayerManager {
     this._failed.set(globalKey, { name, step: this._step });
     this.failedCount += 1;
     this._failureNames.add(name);
+
+    // Task 5b: attribute this SAME failure to the layer that produced it, purely as
+    // additive bookkeeping -- never read by anything above, never changes what
+    // `failedCount`/`_failureNames`/the blacklist do. The layer id is recovered from
+    // `globalKey` via `globalKeyFor`'s OWN join character (`\u0000`), not a guessed
+    // separator: `globalKeyFor`'s doc comment states `\u0000` is "never a legal
+    // character in either half", so the FIRST (and only) occurrence in `globalKey` is
+    // unambiguously the boundary `globalKeyFor` itself inserted -- unlike, say, a
+    // space or a colon, either of which a real layer id can legitimately contain
+    // (`layers_panel.js`'s own tile-set layer ids are `gateway-tileset:<sha>`).
+    const sep = globalKey.indexOf('\u0000');
+    const layerId = sep === -1 ? globalKey : globalKey.slice(0, sep);
+    let byLayer = this._failuresByLayer.get(layerId);
+    if (!byLayer) {
+      byLayer = { count: 0, names: new Set() };
+      this._failuresByLayer.set(layerId, byLayer);
+    }
+    byLayer.count += 1;
+    byLayer.names.add(name);
   }
 
   /** Sorted array of every distinct error `.name` `_onFailed` has ever recorded --
@@ -704,6 +733,33 @@ export class LayerManager {
    * directly. */
   failureNames() {
     return [...this._failureNames].sort();
+  }
+
+  /**
+   * Task 5b (panel-failure-attribution): every failure `_onFailed` has ever recorded,
+   * attributed to the LAYER that produced it -- `{ [layerId]: { count, names:
+   * string[] } }`, a fresh plain object (never a live view onto `_failuresByLayer`)
+   * with each layer's own `names` sorted, so a caller/harness can `JSON.stringify` it
+   * directly (same convention as `failureNames()`). Summing every entry's `count`
+   * here always equals `failedCount` exactly -- both are incremented in the same
+   * place, unconditionally, for every genuine failure `_onFailed` records (see that
+   * method, above), and neither is ever reset (not even by `removeLayer`, which is
+   * why this is keyed by whatever `globalKeyFor` actually put in `globalKey`, not by
+   * `_layers`' current membership -- a failure a since-removed layer produced still
+   * counted toward `failedCount` and still belongs to it here).
+   *
+   * This is deliberately the ONLY new surface `LayerManager` gains for this task: the
+   * Layers panel (`web/js/panels/layers_panel.js`) does the actual "tile set vs. no
+   * loader" split itself, from this data plus `noLoaderLayers()` (below) -- so this
+   * manager never has to know what a "tile set" or "terrain" even is.
+   * @returns {Object<string, {count:number, names:string[]}>}
+   */
+  failuresByLayer() {
+    const out = {};
+    for (const [layerId, { count, names }] of this._failuresByLayer) {
+      out[layerId] = { count, names: [...names].sort() };
+    }
+    return out;
   }
 
   /** Choose the LRU eviction victim -- the resident entry with the smallest
@@ -871,6 +927,22 @@ export class LayerManager {
    */
   imageryLayers() {
     return [...this._layers.values()].filter((layer) => layer.kind === 'imagery');
+  }
+
+  /**
+   * Task 5b (panel-failure-attribution): every registered layer that has declared
+   * `notImplemented === true` on itself, in REGISTRATION order -- a fresh array,
+   * never a live view onto `_layers`, byte-for-byte the same shape as
+   * `imageryLayers()` above (this method exists specifically so this one, established
+   * "a layer declares a fact about itself, the manager only reads it" pattern covers
+   * this case too, rather than the manager or a caller hard-coding a layer id or an
+   * error name to recognise "has no loader"). `./terrain_layer.js`'s
+   * `TerrainLayerAdapter` is the only adapter that sets this flag today; a future real
+   * terrain loader drops it and this list (and therefore every caller reading it,
+   * e.g. the Layers panel) reflects that with no further change anywhere.
+   */
+  noLoaderLayers() {
+    return [...this._layers.values()].filter((layer) => layer.notImplemented === true);
   }
 
   /** Per-layer resident/pending counts -- for reporting/debugging (this task's
