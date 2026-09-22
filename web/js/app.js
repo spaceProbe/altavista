@@ -50,7 +50,14 @@ import { render as renderCommandPanel } from './panels/command_panel.js';
 // id -- the identical "one place a format is computed, never two independently-typed
 // copies" discipline `web/js/layers/tileset_manifest.js`'s own module doc states for
 // `manifestTileKey`.
-import { render as renderLayers, layerIdForManifest } from './panels/layers_panel.js';
+// Round 6 task 4: `renderLayersPanel` (never the plain `render` this file used to call
+// directly) -- see that function's own doc comment in layers_panel.js for why: it is the
+// one seam that lets the animation loop's own ~2 Hz tick (below) stop tearing down and
+// rebuilding this panel's buttons twice a second (question 231's ruling on round 5's own
+// recorded usability defect) without this file needing to know which of ITS OWN call
+// sites below are "structural" and which are "just a tick" -- layers_panel.js decides
+// that from its own state key, every time.
+import { renderLayersPanel, layerIdForManifest } from './panels/layers_panel.js';
 // `GatewayImageryLayerAdapter` -- the only `web/js/layers/` import in this file for
 // this feature (the panel itself never imports `layers/`, per its own top comment).
 import { GatewayImageryLayerAdapter } from './layers/index.js';
@@ -370,7 +377,7 @@ function renderLayersPanelNow() {
     failedCount: lm.failedCount,
     failureNames: lm.failureNames(),
   } : null;
-  renderLayers(els.layersPanel, {
+  renderLayersPanel(els.layersPanel, {
     tileSets: layersState.tileSets,
     catalogError: layersState.catalogError,
     loading: layersState.loading,
@@ -959,6 +966,15 @@ function frame(now) {
   // Runs regardless of whether a scenario is loaded -- `viewer.layerManager` exists
   // for the whole lifetime of `viewer` (web/js/scene.js's constructor), not only once
   // a scenario streams in.
+  // Round 6 task 4: this call site is UNCHANGED -- still `renderLayersPanelNow()`, still
+  // this same ~2 Hz throttle -- because the fix lives entirely inside `renderLayersPanel()`
+  // (layers_panel.js): on an ordinary idle tick like this one, nothing about the tile-set
+  // list's own state has changed, so it patches only the budget numbers in place and never
+  // tears down the panel's buttons (question 231's ruling on round 5's own recorded
+  // usability defect). A REAL catalog/toggle change still reaches this exact call site
+  // too (`renderLayersPanelNow()` is also called directly after a refresh/toggle settles,
+  // above) and DOES rebuild, correctly, because the state key it computes actually
+  // differs then.
   if (now - lastLayersRenderWall > 500) {
     lastLayersRenderWall = now;
     renderLayersPanelNow();

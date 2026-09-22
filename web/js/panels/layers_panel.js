@@ -55,7 +55,39 @@
 // renders its own honest "not loaded yet" notice, distinct from both the error case and
 // the real-empty-list case.
 
+// -------------------------------------------------------------- round 6 task 4: repaint cadence
+// Question 231's ruling on round 5's own recorded usability defect (this file's module
+// doc above did not yet exist when that defect was found): `web/js/app.js` re-renders
+// this panel from its animation loop, throttled to ~2 Hz so the streaming-budget numbers
+// stay live -- but this panel's OWN contract used to be strict teardown/rebuild
+// (`container.innerHTML = ''` in `render()`, below) on every single call, which tore out
+// and rebuilt the tile-set list's own buttons twice a second, including while a user's
+// click was still in flight ("ref is stale (element removed)").
+//
+// The fix is entirely local to this file: `render()` itself is UNCHANGED -- still a full
+// teardown/rebuild every time it is called, byte-for-byte the same contract every other
+// panel in this codebase follows (command_panel.js et al.), so nothing outside this panel
+// needs to know anything changed. `renderLayersPanel()` (bottom of this file) is the new,
+// panel-scoped entry point `web/js/app.js` now calls INSTEAD of `render()` directly: it
+// decides, from a cheap total change key over exactly the fields that affect the tile-set
+// list (`layersPanelStateKey()`, below -- never the budget numbers), whether to run a real
+// `render()` (a genuine structural change: the catalog changed, or some tile set's own
+// on/off/loading/error status changed) or to patch only the streaming-budget section's
+// existing text nodes in place (`updateBudgetSection()`, below -- the animation loop's own
+// ~2 Hz tick, where NOTHING about the tile-set list ever changes on its own). No node
+// belonging to the tile-set list -- table, rows, or buttons -- is ever touched by the
+// budget-only path. `structuralRebuildCount` (below) is a REAL counter `render()` itself
+// increments every time it actually tears down and rebuilds, so a test can assert "zero
+// structural rebuilds across an idle window" against production code, not a test shim.
+
 const LAYER_ID_PREFIX = 'gateway-tileset:';
+
+/** Real production counter, incremented by `render()` (below) every time it performs a
+ * full teardown/rebuild of this panel's DOM -- never incremented, never touched, by
+ * `updateBudgetSection()`'s in-place budget patch. Exists so a test can read a REAL
+ * count of structural rebuilds off the shipped module, not a test-only shim (round 6
+ * task 4's own proof requirement: "a real counter the production code increments"). */
+export let structuralRebuildCount = 0;
 
 /**
  * The stable, unique layer id this panel derives for one catalogued tile set -- keyed by
@@ -160,6 +192,52 @@ export function layerStateFor(manifestSha256, layerStates) {
   const entry = layerStates && layerStates[manifestSha256];
   if (!entry) return { status: 'off', errorMessage: null };
   return { status: entry.status || 'off', errorMessage: entry.errorMessage || null };
+}
+
+/**
+ * A cheap, TOTAL change key over exactly the fields that affect the TILE-SET LIST's own
+ * structure -- round 6 task 4's own required "state, precisely": this is where "state"
+ * is defined, as code rather than as prose.
+ *
+ * Included (a change in ANY of these means the list itself must be rebuilt):
+ *   - `tileSets` -- the catalog listing's own contents, whole-array, order included (the
+ *     server's own `assetId`-ascending order is re-derived by `tileSetRows()` regardless,
+ *     but a change in WHICH tile sets are present, or in any one of their own fields --
+ *     name, marking, caveats, size, sha, media type, uri, job id, timestamp, footprint --
+ *     is a real catalog change the list must show).
+ *   - `catalogError` -- status + message; the "not configured"/real-fetch-failure notice
+ *     this panel's own top comment documents.
+ *   - `loading` -- the in-flight-fetch notice and the disabled Refresh button.
+ *   (Together these three also determine `render()`'s own `neverFetched` branch, so no
+ *   separate key component is needed for it -- it is a pure function of exactly these.)
+ *   - `layerStates` -- every catalogued tile set's OWN on/off/loading/error status, and
+ *     its error message where present (the retry label and the typed failure text a row
+ *     itself shows) -- "any per-layer status the list shows", keyed by manifestSha256 and
+ *     re-sorted here so key equality never depends on insertion/iteration order.
+ *
+ * Deliberately EXCLUDED: `budget` (residentBytes/memoryBudgetBytes/deferredCount/
+ * failedCount/failureNames) -- those are the streaming-budget section's own concern,
+ * change every animation-loop tick by design, and are patched in place by
+ * `updateBudgetSection()` below, never by a rebuild this key would trigger.
+ *
+ * `JSON.stringify` over this small, already-fetched-once data (never the DOM) is the
+ * "cheap" part -- a handful of short strings/numbers per tile set, not a deep DOM
+ * comparison.
+ * @param {{tileSets?:Array<object>|null, catalogError?:{status?:number,message?:string}|null,
+ *   loading?:boolean, layerStates?:Object<string,{status:string,errorMessage?:string|null}>}} data
+ * @returns {string}
+ */
+export function layersPanelStateKey(data) {
+  const { tileSets, catalogError, loading, layerStates } = data || {};
+  const layerStateEntries = layerStates
+    ? Object.keys(layerStates).sort().map((k) => `${k}${layerStates[k].status || 'off'}${layerStates[k].errorMessage || ''}`)
+    : [];
+  return JSON.stringify([
+    tileSets ?? null,
+    catalogError ? [catalogError.status ?? null, catalogError.message ?? null] : null,
+    !!loading,
+    layerStateEntries,
+  ]);
 }
 
 // -------------------------------------------------------------------------------- DOM
@@ -273,48 +351,119 @@ function buildTileSetsSection(rows, catalogError, loading, neverFetched, layerSt
  * user, with its typed name, not swallowed" -- round 3's failure-memory policy
  * (`web/js/layers/layer.js`'s own module doc) means a typed refusal is remembered rather
  * than retried every frame, and this section is where that memory becomes visible.
+ *
+ * Round 6 task 4: builds the section's DOM structure exactly ONCE (the labels, the `dl`,
+ * the empty value `dd`s, a host `div` for the failure list/notice) and returns a HANDLE
+ * -- `{section, residentDd, deferredDd, failedDd, failuresHost, noManager}` -- that
+ * `updateBudgetSection()` (below) reuses on every later animation-loop tick to patch
+ * VALUES in place, never rebuilding this structure again. The handle is stashed on the
+ * container by `render()` (below); this function itself never touches the container.
+ * @param {{residentBytes:number, memoryBudgetBytes:number, deferredCount:number,
+ *   failedCount:number, failureNames:string[]}|null|undefined} budget
+ * @returns {{section:HTMLElement, noManager:boolean, residentDd?:HTMLElement,
+ *   deferredDd?:HTMLElement, failedDd?:HTMLElement, failuresHost?:HTMLElement,
+ *   failuresKey?:string}}
  */
 function buildBudgetSection(budget) {
   const section = document.createElement('div');
   section.className = 'av-panel-section';
   section.appendChild(el('h4', null, 'Streaming budget'));
 
+  const handle = { section, noManager: !budget };
   if (!budget) {
     section.appendChild(noticeEl('No layer manager available yet.'));
-    return section;
+    return handle;
   }
 
   const dl = document.createElement('dl');
   dl.className = 'av-layers-budget';
-  const addRow = (label, value) => {
+  const addRow = (label) => {
     dl.appendChild(el('dt', null, label));
-    dl.appendChild(el('dd', null, value));
+    const dd = el('dd', null, '');
+    dl.appendChild(dd);
+    return dd;
   };
-  addRow('resident / budget', `${formatBytes(String(budget.residentBytes ?? 0))} / ${formatBytes(String(budget.memoryBudgetBytes ?? 0))}`);
-  addRow('deferred requests', String(budget.deferredCount ?? 0));
-  addRow('failed requests', String(budget.failedCount ?? 0));
+  handle.residentDd = addRow('resident / budget');
+  handle.deferredDd = addRow('deferred requests');
+  handle.failedDd = addRow('failed requests');
   section.appendChild(dl);
 
+  // A dedicated, button-free host for the failure-name list/notice -- the ONLY part of
+  // this section whose own child nodes are ever added/removed after the first build
+  // (when the SET of failure names actually changes, below), scoped to this small div
+  // alone so it can never touch the `dl`'s own dt/dd nodes or anything in the tile-set
+  // list.
+  handle.failuresHost = document.createElement('div');
+  handle.failuresHost.className = 'av-layers-failures-host';
+  section.appendChild(handle.failuresHost);
+
+  updateBudgetSection(handle, budget);
+  return handle;
+}
+
+/**
+ * Patches an EXISTING budget-section handle's own value nodes in place -- this is the
+ * animation loop's own ~2 Hz tick path (round 6 task 4): `residentDd`/`deferredDd`/
+ * `failedDd` get a plain `.textContent =` assignment (a text-node mutation; the `dt`
+ * labels and the `dd` elements themselves are never touched, added, or removed here).
+ *
+ * The failure-name list is the one value that is not a single scalar: it is patched by
+ * comparing a cheap join of the current `failureNames` array against the join stashed
+ * from the last update (`handle.failuresKey`) and, ONLY on a real change, rebuilding
+ * `failuresHost`'s own small subtree (never the `dl`, never the tile-set list). In
+ * practice this fires exactly when a NEW distinct failure type is first recorded --
+ * `web/js/layers/layer.js`'s own failure-memory policy means the SET of typed failure
+ * names is small and rarely grows -- so on every ordinary idle tick (the case this task's
+ * own proof measures) `failuresKey` is unchanged and this function touches zero nodes at
+ * all beyond the three `textContent` assignments above.
+ * @param {{noManager:boolean, residentDd?:HTMLElement, deferredDd?:HTMLElement,
+ *   failedDd?:HTMLElement, failuresHost?:HTMLElement, failuresKey?:string}|null|undefined} handle
+ * @param {{residentBytes:number, memoryBudgetBytes:number, deferredCount:number,
+ *   failedCount:number, failureNames:string[]}|null|undefined} budget
+ */
+function updateBudgetSection(handle, budget) {
+  // `noManager` (the "No layer manager available yet." notice) and a null `budget` here
+  // are a structural mismatch a caller must resolve with a real `render()` instead (see
+  // `renderLayersPanel()` below, which checks `hasManager` before ever reaching here) --
+  // this function only ever patches values into a handle that was built WITH a budget.
+  if (!handle || handle.noManager || !budget) return;
+  handle.residentDd.textContent = `${formatBytes(String(budget.residentBytes ?? 0))} / ${formatBytes(String(budget.memoryBudgetBytes ?? 0))}`;
+  handle.deferredDd.textContent = String(budget.deferredCount ?? 0);
+  handle.failedDd.textContent = String(budget.failedCount ?? 0);
+
   const failureNames = Array.isArray(budget.failureNames) ? budget.failureNames : [];
+  const failuresKey = failureNames.join('');
+  if (handle.failuresKey === failuresKey) return; // identical set of failures -- zero further DOM touch
+  handle.failuresKey = failuresKey;
+  handle.failuresHost.innerHTML = ''; // scoped to this one small, button-free div only
   if (failureNames.length === 0) {
-    section.appendChild(noticeEl('No load failures recorded.'));
+    handle.failuresHost.appendChild(noticeEl('No load failures recorded.'));
   } else {
     const list = document.createElement('ul');
     list.className = 'av-layers-failures';
     for (const name of failureNames) list.appendChild(el('li', null, name));
-    section.appendChild(list);
+    handle.failuresHost.appendChild(list);
   }
-  return section;
 }
 
 /**
- * Render this panel's content into `container` (an existing, empty DOM element -- same
- * contract as every other panel's own `render()`). Full teardown/rebuild on every call;
- * the caller (`web/js/app.js`) owns every piece of mutable state (`tileSets`/
- * `catalogError`/`loading`/`layerStates`) and re-renders after the catalog fetch settles,
- * after each toggle attempt settles, and periodically as `viewer.layerManager`'s own
- * counters change -- exactly like `command_panel.js`'s own `commandPanelState` /
- * `renderCommandPanelNow` split.
+ * Render this panel's content into `container` (an existing DOM element -- same contract
+ * as every other panel's own `render()`). Full teardown/rebuild on EVERY call, byte-for-
+ * byte UNCHANGED from before round 6 task 4 -- this function itself does not know or care
+ * why it was called, and every other panel in this codebase still follows this identical
+ * contract untouched. The caller (`web/js/app.js`) owns every piece of mutable state
+ * (`tileSets`/`catalogError`/`loading`/`layerStates`) and re-renders after the catalog
+ * fetch settles, after each toggle attempt settles, and periodically as
+ * `viewer.layerManager`'s own counters change -- exactly like `command_panel.js`'s own
+ * `commandPanelState` / `renderCommandPanelNow` split.
+ *
+ * Round 6 task 4: also stashes, on `container` itself, the change key this render
+ * corresponds to (`layersPanelStateKey`) and the budget-section handle it just built
+ * (`buildBudgetSection`'s return) -- `renderLayersPanel()` below is what reads these back
+ * to decide whether a LATER call needs a real rebuild at all. `render()` remains a
+ * complete, self-sufficient full rebuild whether or not anything ever reads them back
+ * (calling it directly, as this panel's own `layers_panel_check.mjs` still does for every
+ * one of its own render() checks, works exactly as it always has).
  * @param {HTMLElement} container
  * @param {{tileSets?: Array<object>|null, catalogError?: {status:number,message:string}|null,
  *   loading?: boolean, layerStates?: Object<string, {status:string, errorMessage?:string|null}>,
@@ -324,6 +473,7 @@ function buildBudgetSection(budget) {
  */
 export function render(container, data) {
   container.innerHTML = '';
+  structuralRebuildCount += 1;
   const {
     tileSets, catalogError, loading, layerStates, budget, onToggleLayer, onRefreshCatalog,
   } = data || {};
@@ -332,5 +482,44 @@ export function render(container, data) {
   container.appendChild(buildTileSetsSection(
     tileSetRows({ tileSets }), catalogError, !!loading, neverFetched, layerStates, onToggleLayer, onRefreshCatalog,
   ));
-  container.appendChild(buildBudgetSection(budget));
+  const budgetHandle = buildBudgetSection(budget);
+  container.appendChild(budgetHandle.section);
+
+  container.__avLayersPanelBudgetHandle = budgetHandle;
+  container.__avLayersPanelState = {
+    key: layersPanelStateKey({ tileSets, catalogError, loading, layerStates }),
+    hasManager: !!budget,
+  };
+}
+
+/**
+ * Round 6 task 4's own new entry point -- `web/js/app.js` now calls THIS, never `render()`
+ * directly, from every one of its own existing call sites (the initial scaffold, after a
+ * catalog refresh settles, after a toggle settles, AND the animation loop's own ~2 Hz
+ * tick that used to call `render()` unconditionally and is exactly what produced round
+ * 5's own recorded defect). `app.js` itself needed no other change: it does not need to
+ * know which of its call sites are "structural" and which are "just a tick" -- this
+ * function decides, every time, from `layersPanelStateKey()` alone.
+ *
+ * - Never rendered before, OR the tile-set list's own state key changed, OR whether a
+ *   `budget` is available at all just flipped (the one case `updateBudgetSection` cannot
+ *   patch: the "No layer manager available yet." notice swapping for the real `dl`, or
+ *   back -- not observed in practice, since `viewer.layerManager` exists for the whole
+ *   lifetime of `viewer`, but handled correctly rather than assumed away): a real
+ *   `render()`, exactly as before.
+ * - Otherwise (the ordinary idle tick): `updateBudgetSection()` patches the existing
+ *   budget handle's value nodes in place. The tile-set list -- table, rows, buttons -- is
+ *   never touched.
+ * @param {HTMLElement} container
+ * @param {Parameters<typeof render>[1]} data
+ */
+export function renderLayersPanel(container, data) {
+  const { tileSets, catalogError, loading, layerStates, budget } = data || {};
+  const key = layersPanelStateKey({ tileSets, catalogError, loading, layerStates });
+  const prev = container.__avLayersPanelState;
+  if (!prev || prev.key !== key || prev.hasManager !== !!budget) {
+    render(container, data);
+    return;
+  }
+  updateBudgetSection(container.__avLayersPanelBudgetHandle, budget);
 }

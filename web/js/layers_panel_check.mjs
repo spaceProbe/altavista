@@ -17,6 +17,10 @@
 // Section map:
 //   1. pure functions      -- layerIdForManifest, tileSetRows, formatBytes, shortSha,
 //                              errorLine, layerStateFor
+//   1a. layersPanelStateKey -- round 6 task 4's own change-key: equal for equal state,
+//                              different for every kind of change the tile-set list
+//                              shows, UNCHANGED across a budget-only change (the whole
+//                              point of the key).
 //   2. render() assembly   -- a fake DOM (this file's own, no jsdom -- the identical
 //                              posture web/js/command_panel_check.mjs's own section
 //                              7/8 and web/js/layout/layout_tree_check.mjs's LayoutManager
@@ -24,6 +28,12 @@
 //                              the "never loaded yet" state, the empty-list state, a
 //                              real table, and the toggle/refresh callbacks fire with the
 //                              exact row/no arguments
+//   2a. renderLayersPanel   -- round 6 task 4's own conditional entry point: an idle,
+//                              budget-only re-render touches zero tile-set-list nodes
+//                              (proven by NODE IDENTITY, not by re-reading text) and
+//                              never increments the real `structuralRebuildCount`;
+//                              a real state change (catalog or a layer's own status)
+//                              DOES rebuild and DOES increment it.
 //   3. addLayer/removeLayer through a REAL LayerManager + REAL GatewayImageryLayerAdapter
 //      -- the toggle sequence app.js's own toggleGatewayLayer performs, byte for byte:
 //      construct the adapter, AWAIT fetchManifest() BEFORE addLayer, read back
@@ -42,7 +52,15 @@ import { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError } from
 import { selectTiles, geodeticToEcef, tileKey } from './globe_lod.js';
 import {
   layerIdForManifest, tileSetRows, formatBytes, shortSha, errorLine, layerStateFor, render,
+  layersPanelStateKey, renderLayersPanel,
 } from './panels/layers_panel.js';
+// `structuralRebuildCount` is a live ES-module binding (a plain `export let`, incremented
+// inside render()) -- re-imported via a fresh `import()` wherever a check needs its
+// CURRENT value (a static `import {structuralRebuildCount}` binding would also stay
+// live, but re-reading it explicitly through the module namespace object below makes
+// each check's own "before"/"after" snapshot unambiguous rather than relying on binding
+// semantics the reader has to already know).
+const layersPanelModule = await import('./panels/layers_panel.js');
 import crypto from 'node:crypto';
 
 const checks = [];
@@ -89,6 +107,70 @@ function check(name, pass, detail) { checks.push({ name, pass: !!pass, detail: d
     layerStateFor('sha-a', {}).status === 'off' && layerStateFor('sha-a', null).status === 'off');
   check('layerStateFor: an existing entry is read back verbatim',
     layerStateFor('sha-a', { 'sha-a': { status: 'on' } }).status === 'on');
+}
+
+// ======================================================== 1a. layersPanelStateKey (round 6 task 4)
+// "Define 'state' precisely" -- these checks enumerate every kind of change
+// layersPanelStateKey() is documented (in layers_panel.js itself) to treat as real state,
+// PLUS the one thing it must NOT react to (a budget-only change), which is the entire
+// reason `renderLayersPanel()`'s conditional rebuild is correct at all.
+{
+  const baseTileSets = [
+    { assetId: 'a-asset', manifestSha256: 'sha-a', name: 'Tile Set A', marking: 'UNCLASSIFIED', caveats: [], sizeBytes: '1048576', jobId: 'job-a' },
+    { assetId: 'b-asset', manifestSha256: 'sha-b', name: 'Tile Set B', marking: 'CUI', caveats: ['NOFORN'], sizeBytes: '2048', jobId: 'job-b' },
+  ];
+  const baseState = () => ({
+    tileSets: JSON.parse(JSON.stringify(baseTileSets)), // a FRESH, distinct object graph each call
+    catalogError: null,
+    loading: false,
+    layerStates: { 'sha-b': { status: 'on', errorMessage: null } },
+  });
+
+  const k0 = layersPanelStateKey(baseState());
+  check('layersPanelStateKey: two calls over separately-constructed but EQUAL state produce the SAME key (never an identity/reference key)',
+    layersPanelStateKey(baseState()) === k0);
+
+  check('layersPanelStateKey: unaffected by layerStates OBJECT KEY ORDER (re-sorted internally)',
+    (() => {
+      const reordered = baseState();
+      reordered.layerStates = { 'sha-b': reordered.layerStates['sha-b'] };
+      // Rebuild the SAME single-entry object -- order cannot differ with one key, so
+      // prove re-ordering with a two-entry map instead, off() included this time.
+      const s1 = baseState(); s1.layerStates = { 'sha-a': { status: 'off', errorMessage: null }, 'sha-b': { status: 'on', errorMessage: null } };
+      const s2 = baseState(); s2.layerStates = { 'sha-b': { status: 'on', errorMessage: null }, 'sha-a': { status: 'off', errorMessage: null } };
+      return layersPanelStateKey(s1) === layersPanelStateKey(s2);
+    })());
+
+  check('layersPanelStateKey: UNCHANGED when only budget fields would differ (budget is not a key input at all -- the whole point of the split)',
+    (() => {
+      const s = baseState();
+      // layersPanelStateKey() takes no budget argument -- passing extra fields through
+      // (as renderLayersPanel() itself does, destructuring the caller's full data object)
+      // must not perturb the key.
+      const withExtra = { ...s, budget: { residentBytes: 999, memoryBudgetBytes: 1, deferredCount: 7, failedCount: 3, failureNames: ['X'] } };
+      return layersPanelStateKey(withExtra) === layersPanelStateKey(s);
+    })());
+
+  // ---- every enumerated kind of REAL change must move the key -----------------------
+  const changed = (mutate, label) => {
+    const s = baseState();
+    mutate(s);
+    const differs = layersPanelStateKey(s) !== k0;
+    check(`layersPanelStateKey: ${label} changes the key`, differs);
+  };
+  changed((s) => { s.tileSets.push({ assetId: 'c-asset', manifestSha256: 'sha-c', name: 'C', marking: '', caveats: [], sizeBytes: '0', jobId: '' }); }, 'a tile set being ADDED to the catalog');
+  changed((s) => { s.tileSets.pop(); }, 'a tile set being REMOVED from the catalog');
+  changed((s) => { s.tileSets[0].name = 'Renamed'; }, "a tile set's own NAME changing");
+  changed((s) => { s.tileSets[0].sizeBytes = '999999999'; }, "a tile set's own SIZE changing");
+  changed((s) => { s.tileSets[0].marking = 'CUI'; }, "a tile set's own MARKING changing");
+  changed((s) => { s.catalogError = { status: 503, message: 'gateway unreachable' }; }, 'catalogError appearing (null -> real error)');
+  changed((s) => { s.catalogError = { status: 500, message: 'x' }; }, 'a DIFFERENT catalogError status/message than a sibling case');
+  changed((s) => { s.loading = true; }, 'loading flipping true');
+  changed((s) => { s.layerStates['sha-b'].status = 'off'; }, "an existing row's own status changing (on -> off)");
+  changed((s) => { s.layerStates['sha-a'] = { status: 'loading', errorMessage: null }; }, 'a row transitioning to loading for the first time (new key in layerStates)');
+  changed((s) => { s.layerStates['sha-b'].errorMessage = 'TileHttpError: 503'; }, "a row's own error MESSAGE changing while its status field is untouched");
+  changed((s) => { delete s.layerStates['sha-b']; }, 'a row being toggled off entirely (its key removed from layerStates)');
+  changed((s) => { s.tileSets = null; }, 'the catalog itself going from a real (even empty-of-this-change) array to null (never-fetched-yet)');
 }
 
 // =========================================================================== 2. render() + DOM
@@ -225,6 +307,159 @@ withFakeDocument(() => {
     check('render: deferred/failed counts from the manager are shown verbatim', text.includes('3') && text.includes('2'));
     check('render: every distinct failure NAME the manager remembered is listed',
       text.includes('TileHttpError') && text.includes('TileEtagMismatchError'));
+  }
+});
+
+// ==================================================== 2a. renderLayersPanel (round 6 task 4)
+// The proof this task's own brief calls "half the task", at the node-harness level (the
+// REAL browser drive lives in tests/test_viewer_layers_panel.py, which reads the SAME
+// `structuralRebuildCount` off the live page): an idle, budget-only re-render through
+// `renderLayersPanel()` touches ZERO tile-set-list nodes -- proven by NODE IDENTITY
+// (`===`), not by re-reading rendered text, which a full rebuild would also satisfy -- and
+// never increments the real `structuralRebuildCount`; a genuine state change DOES rebuild
+// and DOES increment it. `structuralRebuildCount` is read through `layersPanelModule`
+// (the SAME module namespace `render`/`renderLayersPanel` above were imported from) so
+// every read here reflects the module's own live binding, not a snapshot.
+withFakeDocument(() => {
+  const rebuildCount = () => layersPanelModule.structuralRebuildCount;
+  const ddNodes = (container) => findAll(container, (n) => n.tagName === 'DD');
+
+  // ---- first-ever call: always a real rebuild, exactly once -------------------------
+  {
+    const container = makeEl('div');
+    const before = rebuildCount();
+    renderLayersPanel(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      catalogError: null,
+      loading: false,
+      layerStates: { 'sha-b': { status: 'on', errorMessage: null } },
+      budget: { residentBytes: 1000, memoryBudgetBytes: 67108864, deferredCount: 0, failedCount: 0, failureNames: [] },
+    });
+    check('renderLayersPanel: the FIRST call against a fresh container always performs one real rebuild',
+      rebuildCount() === before + 1, { before, after: rebuildCount() });
+    check('renderLayersPanel: the first call produces the real table (toggle buttons present)',
+      findAll(container, (n) => hasClass(n, 'av-layers-toggle')).length === 2);
+  }
+
+  // ---- idle tick: SAME structural state, budget numbers change -- must NOT rebuild --
+  {
+    const container = makeEl('div');
+    const dataStructural = {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      catalogError: null,
+      loading: false,
+      layerStates: { 'sha-b': { status: 'on', errorMessage: null } },
+    };
+    renderLayersPanel(container, { ...dataStructural, budget: { residentBytes: 1000, memoryBudgetBytes: 67108864, deferredCount: 0, failedCount: 0, failureNames: [] } });
+    const afterFirst = rebuildCount();
+
+    const toggleButtonsBefore = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+    const refreshButtonBefore = findAll(container, (n) => hasClass(n, 'av-layers-refresh'))[0];
+    const ddBefore = ddNodes(container);
+    check('renderLayersPanel: setup -- two toggle buttons, one refresh button, three dd value nodes captured before the idle tick',
+      toggleButtonsBefore.length === 2 && !!refreshButtonBefore && ddBefore.length === 3);
+
+    // The idle-tick call: identical structural fields, ONLY the budget numbers differ --
+    // exactly what web/js/app.js's own ~2 Hz animation-loop tick does every time nothing
+    // about the catalog or a toggle actually changed.
+    renderLayersPanel(container, { ...dataStructural, budget: { residentBytes: 2_500_000, memoryBudgetBytes: 67108864, deferredCount: 4, failedCount: 1, failureNames: [] } });
+
+    check('renderLayersPanel: a budget-only re-render (idle tick) performs ZERO structural rebuilds',
+      rebuildCount() === afterFirst, { afterFirst, after: rebuildCount() });
+
+    const toggleButtonsAfter = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+    const refreshButtonAfter = findAll(container, (n) => hasClass(n, 'av-layers-refresh'))[0];
+    check('renderLayersPanel: every toggle button is the SAME node after an idle tick (identity, not just equal text) -- a coordinate/ref click would still be valid',
+      toggleButtonsAfter.length === 2 && toggleButtonsAfter[0] === toggleButtonsBefore[0] && toggleButtonsAfter[1] === toggleButtonsBefore[1]);
+    check('renderLayersPanel: the refresh button is the SAME node after an idle tick',
+      refreshButtonAfter === refreshButtonBefore);
+
+    const ddAfter = ddNodes(container);
+    check('renderLayersPanel: the budget dd VALUE NODES are the SAME nodes after an idle tick (patched via textContent, never recreated)',
+      ddAfter.length === 3 && ddAfter[0] === ddBefore[0] && ddAfter[1] === ddBefore[1] && ddAfter[2] === ddBefore[2]);
+    check('renderLayersPanel: the budget numbers DID actually update in place (resident bytes, deferred, failed)',
+      ddAfter[0].textContent.includes('2.4 MB') && ddAfter[1].textContent === '4' && ddAfter[2].textContent === '1');
+  }
+
+  // ---- idle tick where the SET of failure names changes -- still no structural rebuild,
+  // the failures host reconciles itself in place, scoped to that one small div ----------
+  {
+    const container = makeEl('div');
+    const dataStructural = {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      catalogError: null,
+      loading: false,
+      layerStates: {},
+    };
+    renderLayersPanel(container, { ...dataStructural, budget: { residentBytes: 0, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 0, failureNames: [] } });
+    const afterFirst = rebuildCount();
+    const toggleButtonsBefore = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+
+    renderLayersPanel(container, { ...dataStructural, budget: { residentBytes: 0, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 1, failureNames: ['TileHttpError'] } });
+
+    check('renderLayersPanel: a NEW failure name appearing is still a budget-only change -- no structural rebuild',
+      rebuildCount() === afterFirst);
+    check('renderLayersPanel: the toggle buttons are still the SAME nodes when only the failure list changed',
+      findAll(container, (n) => hasClass(n, 'av-layers-toggle')).every((n, i) => n === toggleButtonsBefore[i]));
+    check('renderLayersPanel: the new failure name is actually visible',
+      container.textContent.includes('TileHttpError') && !container.textContent.includes('No load failures recorded'));
+
+    // Same failure set again -- proves `failuresKey` genuinely short-circuits rather than
+    // rebuilding this small subtree on every call regardless of content.
+    const failuresHostBefore = findAll(container, (n) => hasClass(n, 'av-layers-failures'))[0];
+    renderLayersPanel(container, { ...dataStructural, budget: { residentBytes: 5, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 1, failureNames: ['TileHttpError'] } });
+    const failuresHostAfter = findAll(container, (n) => hasClass(n, 'av-layers-failures'))[0];
+    check('renderLayersPanel: an UNCHANGED failure set is not touched again (same <ul> node) even though other budget numbers moved',
+      failuresHostAfter === failuresHostBefore);
+  }
+
+  // ---- a REAL state change (a toggle's own status) DOES rebuild, and DOES increment --
+  {
+    const container = makeEl('div');
+    const layerStates = { 'sha-b': { status: 'on', errorMessage: null } };
+    renderLayersPanel(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD, catalogError: null, loading: false, layerStates,
+      budget: { residentBytes: 1000, memoryBudgetBytes: 67108864, deferredCount: 0, failedCount: 0, failureNames: [] },
+    });
+    const afterFirst = rebuildCount();
+    const toggleButtonsBefore = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+
+    renderLayersPanel(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD, catalogError: null, loading: false,
+      layerStates: { 'sha-b': { status: 'off', errorMessage: null } }, // the real change: sha-b toggled off
+      budget: { residentBytes: 1000, memoryBudgetBytes: 67108864, deferredCount: 0, failedCount: 0, failureNames: [] },
+    });
+
+    check('renderLayersPanel: a REAL layerStates change DOES perform exactly one structural rebuild',
+      rebuildCount() === afterFirst + 1, { afterFirst, after: rebuildCount() });
+    const toggleButtonsAfter = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+    check('renderLayersPanel: after a real rebuild, the toggle buttons are FRESH nodes (not the stale pre-rebuild references)',
+      toggleButtonsAfter[0] !== toggleButtonsBefore[0] && toggleButtonsAfter[1] !== toggleButtonsBefore[1]);
+    check('renderLayersPanel: the label actually reflects the new state ("Turn on" for the now-off row)',
+      toggleButtonsAfter.some((b) => b.textContent === 'Turn on') && !toggleButtonsAfter.some((b) => b.textContent === 'Turn off'));
+  }
+
+  // ---- the hasManager edge: budget presence flipping with an otherwise-unchanged
+  // structural key is NOT patchable in place and correctly forces a real rebuild --------
+  {
+    const container = makeEl('div');
+    renderLayersPanel(container, { tileSets: null, catalogError: null, loading: false, layerStates: {}, budget: null });
+    const afterFirst = rebuildCount();
+    check('renderLayersPanel: with no budget yet, the honest "No layer manager available yet." notice renders',
+      container.textContent.includes('No layer manager available yet.'));
+
+    renderLayersPanel(container, { tileSets: null, catalogError: null, loading: false, layerStates: {}, budget: null });
+    check('renderLayersPanel: an unchanged null-budget re-render still performs no structural rebuild',
+      rebuildCount() === afterFirst);
+
+    renderLayersPanel(container, {
+      tileSets: null, catalogError: null, loading: false, layerStates: {},
+      budget: { residentBytes: 0, memoryBudgetBytes: 100, deferredCount: 0, failedCount: 0, failureNames: [] },
+    });
+    check('renderLayersPanel: budget presence flipping null -> real forces exactly one real rebuild (the in-place patch cannot swap the notice for the real dl)',
+      rebuildCount() === afterFirst + 1);
+    check('renderLayersPanel: after that forced rebuild, the real budget dl actually renders',
+      !container.textContent.includes('No layer manager available yet.'));
   }
 });
 
