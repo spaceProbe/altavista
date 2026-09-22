@@ -49,7 +49,7 @@ nobody has done. No tolerance anywhere in this crate was loosened to accommodate
 number is carried in `crates/av-orbital/tests/drag_srp_m5.rs`'s own doc comment and asserted
 against a measured-plus-margin bound (110 m), not against a tightened golden.
 
-## The six goldens question 230 named as carrying no tolerance in the file
+## The goldens question 230 named as carrying no tolerance in the file (it says six; there are seven)
 
 Round 3's own inventory (`docs/native-dynamics-plan.md`'s round-3 open items, ratified in
 `docs/open-questions.md` question 230) named the goldens whose tolerance lived only in a Rust
@@ -81,10 +81,11 @@ file and is still not read from it, and a follow-up inside `gmat-sys` is what cl
 
 ## The table
 
-Columns: the golden; its generator; the reason it exists, from the golden's own `reason` field
-(or, for the three `expr_*` goldens, the generator's own module doc, since those files' `reason`
-field is a copy-paste of one unrelated M9.3 note — see the `expr_*` rows' own footnote); the
-tolerance in force and where it lives; the measured residual and its source.
+Columns: the golden; its generator; the reason it exists, from the golden's own `reason` field;
+the tolerance in force and where it lives; the measured residual and its source. The three
+`expr_*` goldens used to share one unrelated M9.3 `reason` note between them, which is why the
+rows below once cited the generator's module doc instead; question 230's task gave each its own,
+taken from those same doc comments, so the `reason` field is now the source for all of them.
 
 | Golden | Generator | Reason (from the golden's own `reason` field unless noted) | Tolerance (value; where it lives) | Measured residual (value; source) |
 |---|---|---|---|---|
@@ -113,12 +114,13 @@ tolerance in force and where it lives; the measured residual and its source.
 | `expr_fault_split_accel` | `crates/av-kernel/examples/gen_expr_goldens.rs` | Demonstrates `event.<name>.t`/`count(event.<kind>)` expression forms against the DRM executor's own real `EVENT_KIND_FAULT` event for one applied `FAULT_TARGET_KIND_DYNAMICS` fault (question 95, M9.3). The deliberately-failing objective `final_vx_near_5` belongs to `expr_straight_accel`, not to this golden; the generator's own honesty rule — "do not pin a golden score you know is wrong" — is about not silently changing what a run actually produces, not about only ever pinning passing objectives. | Same as `expr_straight_accel` (1e-6, now in the file) | Same re-run note as `expr_straight_accel` |
 | `expr_range_duration` | `crates/av-kernel/examples/gen_expr_goldens.rs` | Pins the ADR-005 sec 6 amendment's own worked example, `duration(range(a, b) < 100 m)`, against a real two-entity DRM. | Same as `expr_straight_accel` (1e-6, now in the file) | Same re-run note as `expr_straight_accel` |
 
-**Footnote on the three `expr_*` goldens' `reason` field and their generator.** Their committed
-`reason` field is identical, verbatim, across all three files, and describes M9.3's CDM-events
-change (question 95) rather than each golden's own specific worked example — the Reason column
-above instead summarises each generator's own module doc comment, which does describe the
-individual case; this is recorded here rather than silently worked around, per this task's own
-brief. Separately, and worth documenting because it has never been documented anywhere before
+**Footnote on the three `expr_*` goldens' `reason` field and their generator.** Until question
+230's task this round, their committed `reason` field was identical, verbatim, across all three
+files, and described M9.3's CDM-events change (question 95) rather than each golden's own worked
+example — one `--reason` string written into all three by a single generator run, and true of
+only one of them. Each now carries its own purpose statement, fixed in the generator and no
+longer overwritten by `--reason`, which fills `golden_regeneration_reason` instead. Separately,
+and worth documenting because it has never been documented anywhere before
 this file: **the three `expr_*` goldens have no Python generator.** Every other golden in this
 table is produced by a `goldens/gen_*.py` script; these three are produced by
 `crates/av-kernel/examples/gen_expr_goldens.rs`, a Rust example run with `cargo run -p av-kernel

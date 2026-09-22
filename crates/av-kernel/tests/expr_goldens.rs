@@ -39,9 +39,7 @@ struct PinnedMoe {
 #[derive(Deserialize)]
 struct GoldenComparisonTolerance {
     value: f64,
-    #[allow(dead_code)]
     unit: String,
-    #[allow(dead_code)]
     source: String,
 }
 #[derive(Deserialize)]
@@ -69,11 +67,17 @@ fn check_case(case: &GoldenCase) {
     // lesson, restated in this task). Does NOT cover the separate 1e-9 RunProducts.scores-vs-
     // evaluate_objective/evaluate_moe self-consistency checks below, which compare two values
     // this test computes fresh in the same run and never touch the golden at all.
-    let tol = golden
+    let recorded_tol = golden
         .golden_comparison_tolerance
         .as_ref()
-        .unwrap_or_else(|| panic!("case {:?}: goldens/{}.json is missing golden_comparison_tolerance -- regenerate it with `cargo run -p av-kernel --example gen_expr_goldens -- --reason \"...\"` (question 230: this field must be present, never defaulted)", case.name, case.name))
-        .value;
+        .unwrap_or_else(|| panic!("case {:?}: goldens/{}.json is missing golden_comparison_tolerance -- regenerate it with `cargo run -p av-kernel --example gen_expr_goldens -- --reason \"...\"` (question 230: this field must be present, never defaulted)", case.name, case.name));
+    // `unit` and `source` are asserted rather than carried as dead fields (no `#[allow]` in this
+    // repository to silence a lint): a tolerance whose provenance is blank records nothing, and
+    // recording where the number came from is half of what question 230 asked for.
+    assert!(!recorded_tol.unit.is_empty(), "case {:?}: golden_comparison_tolerance.unit must name the unit the bound is in", case.name);
+    assert!(!recorded_tol.source.is_empty(), "case {:?}: golden_comparison_tolerance.source must say where the number came from", case.name);
+    eprintln!("[expr_goldens] case {:?}: tolerance {} ({}) -- {}", case.name, recorded_tol.value, recorded_tol.unit, recorded_tol.source);
+    let tol = recorded_tol.value;
 
     let _engine = gmat_sys::engine_lock();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");

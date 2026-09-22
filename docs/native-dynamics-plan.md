@@ -7,6 +7,76 @@ needs a ZCU102/104 on the bench, which this host does not have). Decisions in
 GMAT goldens" in `architecture.md`, under ADR-002: one dynamics contract, GMAT at three
 depths, goldens as the proof, the integrator ours.
 
+## Delivered
+
+Closed 2026-09-22, at the end of round 4. Every milestone N1 to N6 is delivered and the exit
+criteria below are met or recorded as not met, with the measurement in each case. Four rounds,
+twenty-eight commits on `edge` (ten, nine, four, and five including this one). The four
+round-status sections below are the record; this section is what a reader who has not followed
+the track needs.
+
+**What exists that did not before.** `crates/av-orbital` is a native Rust orbital force model
+behind ADR-002's `DynamicsModel` contract: spherical-harmonic gravity from GMAT's own `.cof`
+files to degree 70, a JPL DE binary ephemeris reader, third-body perturbations, cannonball SRP
+with GMAT's own conical shadow, MSISE90 and Jacchia-Roberts drag from GMAT's own space-weather
+files, the state transition matrix through `StmAugmented`, and a native IAU-76/FK5 reduction
+with EOP from GMAT's own files. It is selectable per DRM as `orbital.<name>` beside a
+`gmat.<name>` instance with the same parameter names, and `av-kernel` built with
+`--no-default-features` links no GMAT library and still propagates the demo DRM for one day
+with that model. The derivative function is exported over a C ABI and proved bit-identical
+against a real C caller.
+
+**Against the exit criteria, one line each.**
+
+- *The demo DRM propagates one day with the native model alone in a kernel built without GMAT.*
+  Met. `crates/av-kernel/tests/orbital_no_gmat_demo.rs`, with `otool -L` on that test's own
+  binary as the proof rather than the compile.
+- *Every force has a golden against GMAT with a recorded tolerance and residual.* Met, with one
+  named exception: Jacchia-Roberts drag. Its golden exists and its residual is recorded at
+  1.4e-3 against MSISE90's 1.5e-6 through the same harness, and no tolerance was loosened to
+  accommodate it. See below.
+- *The native STM propagates the covariance runs within the recorded tolerance.* Met; 5.6e-7
+  relative against GMAT's own 42-state run.
+- *The native frame reduction matches the convert shim within the recorded tolerance.* Met;
+  1.52e-9 rad maximum over a thousand epochs, 0.31 mas, 9.7 mm at the surface, with the
+  tolerance recorded at three times the measurement.
+- *The derivative function is callable over a C ABI.* Met, bit-exact.
+- *Every number in the status sections is traceable to a golden's generator script and a
+  commit.* Met; `goldens/README.md` is the index, and it names each cell it could not fill with
+  a committed number rather than filling it with an invented one.
+
+**Jacchia-Roberts, honestly.** The native Jacchia-Roberts density agrees with GMAT's to 1.4e-3
+where MSISE90 through the same harness agrees to 1.5e-6, and that three-order gap is what the
+M5 drag arc's 68.32 m native residual is made of, against 7 mm through the `gmat-sys` shim.
+Round 3 decomposed it definitively and did not locate it: least squares over 114 altitudes
+gives opposite-signed per-species biases (N₂ −4.5e-4, He −1.5e-3, O +6.7e-4) explaining 90.7 %
+of the residual's RMS, and every shared-input cause is ruled out by proof rather than
+assertion, since `base = (T∞ − T)/(T∞ − tx)` lies in (0,1) for every species above 125 km and
+every γᵢ is positive, so a shared perturbation cannot produce opposite signs. Every constant was
+re-verified against `JacchiaRobertsAtmosphere.cpp` digit for digit and re-derived independently
+in Python, which reproduces this crate's output bit for bit. **No line of ours has been shown to
+differ, and no defect has been attributed to GMAT** — question 225's lesson is that a suspected
+upstream defect is reproduced in the vendor's own tool before it is named. The native model's
+drag is fit for design work and is not a golden-grade claim until this closes. The remaining
+lever is instrumenting GMAT's own `rho_high` term by term.
+
+**The open question that blocks it, and that nobody owns.** Instrumenting `rho_high` needs a
+local build of `third_party/gmat-src`, and **it has never been established whether that mirror
+is the source tree the shipped `libGmatBase.R2026a.dylib` was built from.** Until someone shows
+it is — a reproducible build, a version banner, a symbol or layout comparison, anything better
+than the assumption — an instrumented build proves a property of *some* GMAT, not of the one
+every golden in this repository was generated against. That is a provenance question about the
+vendor drop, not a dynamics question, and it is the single thing standing between the
+Jacchia-Roberts decomposition and a located line.
+
+**What a later reader should expect.** The `gmat` cargo feature on `av-kernel` and `av-run` is
+default-on and the default build is unchanged in behaviour; `--no-default-features` is a real
+build that refuses GMAT-bound work by typed error rather than by panic or silent substitution.
+`scripts/dev/cargo-slot` belongs in front of every cargo command on this host. The seven
+goldens that used to inherit a tolerance from a test constant now carry it in the file, and a
+reader that finds it missing fails by name rather than defaulting — which is the rule this
+track would most like to see applied to the goldens it never opened.
+
 ## Goal
 
 A native Rust orbital force model behind ADR-002's `DynamicsModel` contract, selectable per
@@ -999,3 +1069,432 @@ worth the lead's attention as a standing rule rather than a per-round note.
 - **`NUTATION.DAT`'s unused "2000 IAU" section has a corrupted line.** Harmless today because
   GMAT's own substring search lands past it. If anyone ever switches `nutationSrc` to
   `NUTATION_1996`/2000, this breaks first.
+## Status (native-dynamics manager, 2026-09-22) — round 4
+
+N6 is delivered, the kernel builds and runs a DRM with no GMAT library linked, the
+`cargo-slot` mechanism question 229 chartered exists, and the seven goldens question 230
+named now carry their tolerance in the file. **Five commits on `edge`, each its own task,
+none pushed.**
+
+| Commit | What |
+|---|---|
+| `2b0ca1a` | question 229: `scripts/dev/cargo-slot`, two host-wide `flock` slots in front of every cargo command, with the three-into-two serialisation proved from measured intervals |
+| `fbb3af2` | question 230's widened exemption: a default-on `gmat` feature on `av-kernel` and `av-run`, every `gmat_sys` site behind a cfg attribute |
+| `bd2ae40` | N6: `execute` working without GMAT, the additive `ModelKind::Orbital`, the demo DRM propagating with the native model alone, the C ABI export with a C caller test, `goldens/README.md` |
+| `80acfb8` | question 230: the seven goldens with no tolerance in the file get one, through their own generators, no value changing |
+| this commit | the plan's `## Delivered` section, this status section, and three review fixes: four `#[allow(dead_code)]` attributes removed in favour of assertions, and `goldens/README.md`'s cells that the golden regeneration made stale |
+
+The fifth row names no hash on purpose: a commit cannot record its own hash, which is
+question 214's lesson and the reason `scripts/kit/regenerate_compliance.py` does its work
+in two commits rather than one.
+
+### `scripts/dev/cargo-slot`, and a measurement that changes the recipe
+
+The wrapper takes one of two host-wide `flock` slots under
+`$HOME/.altavista/locks/cargo-slot-{0,1}.lock` and then `os.execvp`s into cargo **in the same
+process**, with the locked descriptor explicitly marked inheritable across the exec (PEP 446
+closes it otherwise). That is the whole design: there is no wrapper process beside cargo that
+could be lost independently of it, so the kernel releases the slot on any exit path including
+SIGKILL, and cargo's exit status is the wrapper's by construction rather than by relaying a
+`wait()` result. Two slots because question 229's measurement is that this host tolerates two
+concurrent cargo jobs and not three.
+
+**A measurement worth the record, because the obvious recipe is wrong on this host.** The
+natural way to wait on *either* of two locks without polling is a `SIGALRM`-bounded blocking
+`flock`. With a plain no-op signal handler that does not work at all: the alarm fires (the
+handler demonstrably runs), but CPython's PEP 475 EINTR auto-retry resumes the interrupted
+`flock()` inside the C implementation and never returns control to Python. Measured directly —
+alarms at 1 s, 2 s and 3 s against a lock held for 4 s produced no `InterruptedError` at all.
+A handler that **raises** bypasses that retry; measured with it, three real interrupts and
+acquisition at 3.98 s, the process parked in the kernel between alarms rather than spinning.
+Both measurements are in the script's own doc comment so the next reader does not rediscover
+them.
+
+The manager's review found one race in that loop: a Python signal handler runs at the next
+bytecode boundary, so the alarm can land after `flock` has already succeeded and before
+`signal.alarm(0)` cancels it, at which point the naive `except` abandons a slot this process
+already holds and goes on to block on the other one — possibly for a whole other build. The
+loop now probes rather than assumes: on every interrupt it re-attempts the same descriptor
+non-blocking, which succeeds both when the lock was in fact just acquired and when it has
+since become free, and only switches slots when the probe reports it genuinely still held.
+
+`tests/test_cargo_slot.py` proves the serialisation from the children's own measured
+intervals, not from exit codes: two children are confirmed holding slots by blocking on their
+own stdout, a third is launched and observed announcing its wait, and a sweep-line count over
+the three `[start, end]` intervals measures a peak concurrency of exactly 2. It runs against a
+private lock directory passed through `subprocess`'s `env=` (questions 212(b) and 199) and
+asserts `$HOME/.altavista/locks/` is unchanged by it.
+
+### The GMAT-free kernel: what the boundary actually is
+
+Round 3's open item measured ten `av-kernel` files naming `gmat_sys` and named five as the
+real code sites. **That measurement, taken by grep, undercounts the boundary, and the compiler
+found the real one.** `RunConfig.gmat: &Gmat` was a mandatory field, so nothing reachable only
+from `executor::execute` could exist without GMAT: about forty-five executor helpers and the
+whole container-materialization cluster in `binding.rs`, none of which any grep for `gmat_sys`
+ever names. The boundary was established by iterating `cargo check --no-default-features` to
+convergence.
+
+`fbb3af2` took the first answer — gate `execute` out — and **that answer is wrong, which is
+the round's main review finding.** A GMAT-free kernel that cannot run a DRM proves amputation,
+not portability, and the plan's own exit criterion is the demo DRM propagating with the native
+model alone. `bd2ae40` fixes it: `RunConfig.gmat` becomes the struct's one
+`#[cfg(feature = "gmat")]` field, `execute` and every helper that does not itself call GMAT
+are ungated, and only the genuinely GMAT-bound branches keep an attribute. A `GmatHandle<'a>`
+alias (`&'a Gmat` with the feature, `&'a ()` without) keeps the materializer signatures
+unconditional. The container cluster comes back: a lockstep container speaks gRPC and never
+needed GMAT at all — its gating was collateral damage.
+
+`convert_gmat_trajectory_to_declared_frame` is the one place where a silent skip would have
+been the worst outcome this change could produce — a trajectory labelled with a frame it is
+not in. It splits into an ungated dispatcher and a gated GMAT half; the native and orbital
+plans take a passthrough that is a **proven** no-op, because classify time refuses a declared
+`spacecraft.CoordinateSystem` those models cannot produce
+(`orbital_instance_declaring_a_non_integration_frame_coordinate_system_is_refused_at_classify_time`),
+and the statically unreachable `Gmat` arm is a typed refusal rather than a fallthrough.
+
+What the `--no-default-features` build refuses, typed and by name rather than by panic or
+silent substitution: a `"gmat."`-prefixed dynamics model
+(`DrmError::GmatFeatureDisabled`, naming the instance, the model and the cargo feature), and
+the same refusal from `av-run`'s own DRM entry point.
+
+**Two `#[cfg]` attributes landed outside the five files question 230's parenthetical names,
+and the lead should know exactly which.** `crates/av-kernel/src/drm/fault.rs` gains one
+`#[cfg(feature = "gmat")]` on the string constant `DISPLAY_STATE_TYPE_FIELD`, whose only
+consumer (`binding::gmat_settings`) is gated, and one new `BindingPlan::Orbital` match arm in
+`apply_dynamics_fault`, which an exhaustive match on an additive variant cannot avoid. Nothing
+else in that file moved and the router modules were not opened. Question 230's ruling is
+"`#[cfg(feature = "gmat")]` attributes and feature-gated `use` lines **across `av-kernel`**",
+with the five files as the predecessor's measured list rather than a boundary, so the manager
+took these as inside the exemption; both are named here so the lead can disagree cheaply.
+
+### N6: the native model selected by name
+
+`ModelKind::Orbital`, prefix `"orbital."`, beside `ModelKind::Gmat`. `ModelKind::Native` was
+already taken — it means `ConstantAccelSpec`, a constant-acceleration toy — so the real
+orbital force model needed its own variant rather than a reinterpretation of an existing one,
+which is what "additive" has to mean.
+
+`parse_orbital_spec` reads the **same parameter names** a GMAT instance uses for the same
+physics, so a DRM author changes one word to swap models:
+
+| Quantity | GMAT instance | Native orbital instance |
+|---|---|---|
+| dynamics model | `gmat.<anything>` | `orbital.<anything>` |
+| central body | `force_model.central_body` | identical (Earth only; anything else is refused) |
+| gravity field | `force_model.gravity_file` | identical |
+| degree, order | `force_model.gravity_degree`, `.gravity_order` | identical |
+| third bodies | `force_model.point_masses` | identical, resolved to `av_orbital::DeBody` |
+| frame | `spacecraft.CoordinateSystem` | identical; must equal the integration frame |
+| state | `spacecraft.X`…`VZ` (km, km/s) | identical |
+| state representation | `spacecraft.DisplayStateType` | must be `Cartesian` |
+| integrator | GMAT's own propagator | `Dopri5::default()` |
+
+The last two rows are typed refusals, not silent defaults: `DrmError::OrbitalRequiresCartesianState`
+(there is no GMAT to convert Keplerian elements) and the classify-time frame refusal above.
+One friction against the "change one word" claim, found in review and recorded rather than
+patched: `parse_orbital_spec` refuses `force_model.golden_ref`, which `parse_gmat_spec` accepts,
+so a real GMAT system file carrying that key needs the key removed as well as the prefix
+changed. It is not physics and nothing in this round pins a golden through that spec, so it was
+left refused rather than silently accepted and ignored — but it is a one-line follow-up if the
+swap is ever meant to be literal.
+The body-fixed rotation in both feature states is `crates/av-orbital/src/fk5.rs`'s native
+IAU-76/FK5 reduction, never the GMAT-backed one — a portable form that calls GMAT is not one.
+
+`av-kernel` gains a dependency edge on `av-orbital` with `default-features = false`, forwarded
+by `gmat = ["dep:gmat-sys", "av-orbital/gmat-frames"]`, because `av-orbital`'s own default
+feature would otherwise pull `gmat-sys` straight back in through the new edge. That is why the
+`cargo tree` check below is run **after** the edge exists rather than before.
+
+**The demo DRM, propagated with the native model alone**
+(`crates/av-kernel/tests/orbital_no_gmat_demo.rs`): the golden LEO arc's own physics, JGM2 8×8
+with Sun and Moon, one day, through the real `execute` pipeline with
+`dynamics_model: "orbital.jgm2_8x8_sun_moon"`. It asserts a real trajectory rather than
+`is_ok()`: one segment, 288 to 290 samples on the 300 s output grid, every component finite,
+every sample's position magnitude within 200 km of the declared 6 878 km semi-major axis, the
+osculating semi-major axis from two-body specific energy drifting under 1 % end to end, and
+the provenance carrying this run's own id and the DRM's own hash so it cannot be a stub. The
+segment's `ModelInfo.depth` reads `"native"`, so a consumer reading the products back can tell
+from data alone that the dynamics never touched GMAT.
+
+### The proof, which is the linked libraries and not the compile
+
+```
+target/debug/deps/orbital_no_gmat_demo-0230f465ea6d7c43   (--no-default-features)
+        /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib
+        /opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib
+        /usr/lib/libiconv.2.dylib
+        /usr/lib/libSystem.B.dylib
+
+target/debug/deps/orbital_no_gmat_demo-4e31e39615d1e1e2   (default features)
+        @rpath/libGmatBase.R2026a.dylib
+        @rpath/libGmatUtil.R2026a.dylib
+        /usr/lib/libc++.1.dylib
+        /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib
+        ...
+
+target/debug/deps/av_kernel-16879cef6d501ec1              (lib tests, --no-default-features)
+        libssl, libcrypto, libiconv, libSystem — no GMAT
+target/debug/deps/av_kernel-5a1dabd60d39f549              (lib tests, default)
+        @rpath/libGmatBase.R2026a.dylib, @rpath/libGmatUtil.R2026a.dylib
+
+target/debug/av-run                                       (--no-default-features)
+        libssl, libcrypto, libiconv, libSystem — no GMAT
+```
+
+The same query against the dependency graph, after the `av-orbital` edge exists:
+
+```
+cargo tree -p av-kernel --no-default-features -i gmat-sys
+  error: package ID specification `gmat-sys` did not match any packages
+cargo tree -p av-kernel -i gmat-sys
+  gmat-sys v0.1.0 └── av-kernel v0.1.0
+```
+
+The contrast is the whole evidence. A passing `--no-default-features` compile proves only that
+the code type-checks; the absent `libGmatBase.R2026a.dylib` is what proves the library is not
+there.
+
+### The integration tests, and a macOS cost that decided the mechanism
+
+35 `av-kernel` integration tests and the expression-golden example need GMAT. They are gated
+with `required-features = ["gmat"]` on explicit `[[test]]`/`[[example]]` entries rather than
+`#![cfg(feature = "gmat")]` at the top of each file, and the reason is measured rather than
+stylistic: an inner `cfg` that evaluates false still produces a binary Cargo links and runs,
+and every freshly linked binary on this host costs one to three minutes in macOS's
+`syspolicyd` scan (question 226). Thirty-five empty binaries would be an hour of nothing.
+`required-features` means those targets are never built.
+
+### The C ABI hedge (question 9, charter decision 222(e))
+
+`crates/av-orbital/src/ffi.rs` with a hand-written `crates/av-orbital/include/av_orbital.h`:
+an opaque handle over `EarthGravityModel<Fk5BodyFixedRotation>`, `av_orbital_model_new` /
+`_free` / `_derivatives` / `_state_dim`, eight named status codes, explicit lengths, null
+checks that return an error rather than dereferencing, and `catch_unwind` at every entry point
+as defence in depth over a crate whose own contract is already "typed errors, no panic on any
+input a DRM could supply". No `controls` parameter, because the model has none.
+
+`crates/av-orbital/tests/c/av_orbital_ffi_test.c` is a real C caller, compiled by the system
+`cc` at test time against the crate's own `staticlib` and run as its own executable. The
+comparison is **bit-exact**, `f64::to_bits`, not a tolerance:
+
+```
+C path:    [0000000000000000, 40bd4c0000000000, 408f400000000000,
+            c020e00cd92664d4, bf1289b493006bc0, bf08f5d40c01a400]
+Rust path: identical
+```
+
+It skips visibly when `cc` is absent (question 194) and adds no dependency — `av-lockstep`'s
+skip helper was reimplemented locally rather than imported, so `cargo deny` sees nothing new.
+
+**A finding worth recording:** under the `gmat-frames` feature the static archive needs GMAT's
+own link libraries even for a C caller that never touches `frame_gmat`, because Rust's
+codegen-unit partitioning does not isolate those symbols into an unused object. A genuinely
+GMAT-free static archive is the `--no-default-features` one. That is a property of the
+toolchain, not of the API, and it is exactly the sort of thing a compile-only proof would have
+missed.
+
+### The seven goldens question 230 named
+
+Question 230's sentence says "six" and then lists seven files. The list is right and the count
+is wrong; all seven are done.
+
+| Golden | Generator | Reason (the file's own, restored) | Tolerance now in the file | Measured residual |
+|---|---|---|---|---|
+| `covariance_bodyfixed_leo_2h` | `goldens/gen_covariance_bodyfixed_leo_2h.py` | M21.4 (question 138): rotate covariance into a declared frame — pins GMAT's own `OrbitErrorCovariance` report in `EarthFixed` against a fresh anisotropic diagonal P0 | 1e-9 relative, position block, scaled by the largest declared position variance (0.04 km²) | not recorded in committed text; the reader only `eprintln!`s `pos_diff`/`scale`. Needs `cargo test -p gmat-sys --test convert_rotation -- --nocapture` |
+| `ground_contact_gmat` | `goldens/gen_ground_contact_gmat.py` | M25.1 acceptance pin: ground contact windows against GMAT's own `ContactLocator`, self-consistent epoch reference | 10.0 s (one third of the golden's own 30 s sampling cadence, reasoned rather than measured — recorded as such) | AOS 0.398 s, LOS 0.434 s against GMAT's AOS 5960.386 s / LOS 6371.995 s, recorded in the test's own module doc |
+| `leo_1day_jgm2_8x8_sunmoon_planetodetic_lon` | `goldens/gen_leo_1day_planetodetic_lon.py` | question 105/M12.2: independent GMAT ReportFile ground truth for the epoch write-back test | 1e-5 deg | not in committed text; bounded by two named terms (a 252 ns A.1MJD write ≈ 1e-9 deg; the 5 cm position gap ≈ 4e-7 deg). Needs `cargo test -p gmat-sys --test epoch_writeback -- --nocapture` |
+| `leo_1day_jgm2_8x8_sunmoon_rmag` | `goldens/gen_leo_1day_rmag.py` | M11.1 (question 99): `GmatModel::step` reads RMAG through `gmatffi_get_real_parameter`, confirmed against GMAT's own script engine | 0.1 m | not in committed text; the reader computes and prints it. Needs `cargo test -p av-kernel --test drm_executor -- --nocapture` |
+| `expr_straight_accel` | `crates/av-kernel/examples/gen_expr_goldens.rs` | pins one evaluated objective/measure score for a GMAT-free `native.constant_accel` DRM against a closed-form constant-acceleration solution; deliberately includes one objective pinned to fail | 1e-6 absolute, in each score's own `computed_unit` | the reader recomputes and compares; no historical number printed |
+| `expr_range_duration` | same | pins ADR-005 §6's own worked example, `duration(range(a, b) < 100 m)`, against a real two-entity DRM | 1e-6 absolute | same |
+| `expr_fault_split_accel` | same | pins the `event.<name>.t` / `count(event.<kind>)` forms against the executor's own real `EVENT_KIND_FAULT` event (question 95, M9.3) | 1e-6 absolute | same |
+
+Every recorded value is byte-identical before and after. Each diff contains the new
+`golden_comparison_tolerance` object, the new `golden_regeneration_reason`, the `generated`
+timestamp, and — for the three `expr_*` only — the `sha256` the generator computes over the
+golden's own body, which any added field necessarily moves. Those three hashes were re-derived
+independently from the committed bytes rather than trusted from the generator (ADR-004,
+platform OpenSSL):
+
+```
+expr_straight_accel     2c2bd60acd9618dac66ca8e21b5b3fcf806fc21c5841f360a833d9612e3ded84
+expr_fault_split_accel  f39b81d8fe3e1001a950a4a0e03687781e1701aaf69a12930ae6fb218e59fa70
+expr_range_duration     1e1bb7beb28cd7745ae2de3db931f295e94a7d0474ad67f4b98da44fd3e2671a
+```
+
+`source` in each tolerance object says honestly where the number came from: for all seven it
+is the constant the reader has asserted with since the platform's initial import, cited by
+file and line, never a measurement nobody made. The readers this track owns read it from the
+file and fail loudly by name when it is absent, with no default fallback. That panic was
+driven, not read:
+
+```
+case "expr_straight_accel": goldens/expr_straight_accel.json is missing
+golden_comparison_tolerance -- regenerate it with `cargo run -p av-kernel --example
+gen_expr_goldens -- --reason "..."` (question 230: this field must be present, never defaulted)
+```
+
+`expr_goldens.rs` asserts a second constant, `1e-9`, deliberately **not** moved into the file:
+it compares `RunProducts.scores` against a score re-evaluated in the same run, so it is a
+self-consistency check between two executor paths and never touches the golden.
+
+### Defects found in review, and their root causes
+
+1. **`fbb3af2` gated `execute` out of the GMAT-free build entirely.** Root cause: the first
+   worker took `RunConfig.gmat: &Gmat` as a fixed constraint and gated everything that
+   transitively needed it, rather than asking whether the field itself had to be
+   unconditional. The cure is the one cfg attribute the widened exemption most obviously
+   allows — on the field. Recorded prominently because the commit is on `edge` and a reader of
+   the history will otherwise see a GMAT-free kernel and assume it could run something.
+2. **The four Python golden generators overwrote each golden's `reason`** with the reason for
+   that particular regeneration, destroying the statement of why the golden exists — which
+   ADR-002 requires the file to carry and which `goldens/README.md` reads as the golden's
+   purpose. Root cause: `--reason` wrote straight into the `reason` field, a shape every
+   earlier regeneration had inherited. Fixed at the generator: `reason` is now a fixed
+   per-golden constant, immune to `--reason`, which fills `golden_regeneration_reason`
+   instead.
+3. **The three `expr_*` goldens shared one identical `reason`, true of only one of them** —
+   the same defect, older, visible as an M9.3 sentence about fault-split events sitting on a
+   constant-acceleration golden. Root cause: the same single `--reason` string written into
+   all three by one generator run. Each now carries its own purpose, taken from the
+   generator's own per-case doc comments. **This is a deliberate change to a recorded field
+   that is not the tolerance, and the lead should see it as such**: the old text was
+   demonstrably wrong for two of the three, so restoring it verbatim would have preserved a
+   falsehood.
+4. **A race in `cargo-slot`'s alarm loop** (manager review, described above): the wrapper could
+   abandon a slot it already held and block on the other. Root cause: a Python signal handler
+   runs at the next bytecode boundary, so the alarm can land after the syscall has already
+   succeeded. Fixed by probing the same descriptor non-blocking instead of assuming.
+5. **A worker's `cargo check` "hang" was the host, and the diagnosis was made by measurement.**
+   `ps` showed roughly 3.4 s of cumulative CPU across thirty minutes of wall time, with a
+   browser helper above 700 % and `syspolicyd` between 40 and 90 %. Recorded because the
+   correct conclusion — starvation, not a deadlock — is not the one a timeout would have
+   drawn.
+6. **An orphaned process from another track held the host-wide Docker-test lock indefinitely**
+   and blocked this round's kernel gate. A `python3 -c` probe from `/Users/probe/code/AltaVista-aiplane`
+   sat in `sys.stdin.readline()` on a pipe with no writer, PPID 1 (its parent long dead), for
+   over two hours. The manager killed it — `flock`'s whole design property is that a kill
+   releases the lock with no userspace code running — and recorded it here rather than
+   touching anything else of that track's. **Worth a standing rule**: a lock-holding probe
+   that blocks on stdin must not be spawned detached, and question 207's lock could carry a
+   holder-identifying line so the next person does not have to reconstruct it from `lsof`.
+7. **Two workers ended their turns on a wait**, one on a self-armed "monitor", despite the
+   standing instruction question 221 added to every brief. The manager swept both and finished
+   their work with follow-up workers. The instruction is in every brief this round and it is
+   still not enough on its own.
+
+### Decisions taken
+
+1. **The charter's task 2 and task 3 were resequenced, because the charter's own order has a
+   dependency inversion.** Task 2 was to include a test that propagates the demo DRM with the
+   native model; that test needs the additive `ModelKind`, which the charter puts in task 3.
+   The feature and the gating landed as task 2 (`fbb3af2`) and the `ModelKind` with the demo
+   test landed as task 3 (`bd2ae40`). Nothing was dropped; the commit boundary moved.
+2. **`RunConfig.gmat` is the one cfg-gated struct field, and `execute` is not gated.** A
+   GMAT-free kernel that cannot run a DRM does not satisfy this plan's exit criterion.
+3. **Two `#[cfg]`-shaped changes landed in `drm/fault.rs`** (the constant, and a match arm an
+   additive `BindingPlan` variant forces). Taken as inside question 230's "across `av-kernel`",
+   named here so the lead can rule otherwise.
+4. **`required-features` rather than `#![cfg]` for the 35 GMAT-needing test targets**, for the
+   measured macOS scan cost above.
+5. **The native orbital model refuses rather than defaults** on a non-Cartesian
+   `DisplayStateType` and on a declared frame it cannot produce. A model that silently
+   substitutes a frame is worse than one that will not run.
+6. **`Fk5BodyFixedRotation` in both feature states**, including through the C ABI. A portable
+   form that calls GMAT is not a portable form.
+7. **The seven goldens' `reason` is now fixed in the generator** and the run's own note goes in
+   `golden_regeneration_reason`. Defect 2's cure, applied to all seven so they are consistent.
+8. **The three `expr_*` goldens' `reason` text was corrected rather than restored**, defect 3.
+9. **`crates/gmat-sys` was not touched**, so two of the seven goldens have their tolerance in
+   the file with nothing reading it from there. Round 3's manager refused to widen a ban on its
+   own authority and the lead ratified that; the same answer applies here. The follow-up is
+   small and named below.
+10. **An orphaned lock holder belonging to another track was killed**, decision 6's incident.
+    Nothing else of that track's was touched.
+11. **The manager fixed `cargo-slot`'s alarm race and `goldens/README.md`'s stale cells
+    directly** rather than dispatching a further worker, both being single-edit corrections to
+    finished work whose author had already reported.
+
+### Gates (manager, no worker active, every cargo command through `scripts/dev/cargo-slot`)
+
+| Gate | Result |
+|---|---|
+| `cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings` | clean, zero warnings |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, zero warnings, 21m 11s |
+| `cargo clippy -p av-kernel --all-targets -- -D warnings` (re-run after the review fixes) | clean, zero warnings |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` — exactly the six spoore wildcard warnings (`spoore-assoc`, `spoore-math`, `spoore-ml`, `spoore-models`, `spoore-tree`, `spoore-engine`), plus the pre-existing duplicate and licence-not-encountered notes |
+| `cargo test -p av-orbital --no-default-features` | **141 passed, 0 failed, 0 ignored** — round 3's 136 plus the five new C-ABI tests, including the C caller, with no GMAT linked |
+| `cargo test -p av-orbital -p av-dynamics -p av-cdm -p av-run` | **307 passed, 0 failed, 2 ignored** |
+| `cargo test -p av-kernel --no-default-features --no-fail-fast` | **649 passed, 0 failed, 0 ignored** — up from `fbb3af2`'s 619, the difference being the tests `execute`'s un-gating restored plus this round's new ones |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **1479 passed, 0 failed, 4 ignored** (round 3: 1444) |
+| `cargo test -p av-kernel --no-fail-fast` (default) | **882 passed, 0 failed, 2 ignored** — exactly the 876 baseline plus this change's six new default-build tests: the four in `tests/orbital_no_gmat_demo.rs` and `fault.rs`'s two `a_dynamics_fault_on_an_orbital_instance_*`. No existing kernel test changed in outcome |
+| `.venv/bin/python -m pytest -q -rs` | **821 passed, 8 failed, 16 skipped.** Seven of the eight are this round's own SBOM epoch move (below) and the eighth is not this track's |
+
+**The seven SBOM failures are expected and are question 220's own mechanism, not a defect.**
+`sbom.RUST_EPOCH_PATHS` is `["Cargo.lock", "Cargo.toml", "crates/*/Cargo.toml"]`, and this round
+edited `Cargo.lock` and three crate manifests, so the epoch moved to `bd2ae40`'s committer date:
+`test_the_epoch_is_never_wall_clock` fails once for each of the six Rust components and
+`test_all_six_rust_components_share_exactly_one_epoch_from_git` once more. No workspace member
+was added, so per this round's charter the generated compliance documents were left alone;
+`scripts/kit/regenerate_compliance.py` (this track's own, question 227) is the remedy and the
+lead runs it after the merge.
+
+**The eighth failure is the heavy track's, and it fails alone.**
+`tests/test_viewer_layers_stream.py::test_eviction_and_cancellation_both_actually_happened`
+asserts `evictedCount > 0` and measures 0. Re-run alone on a quiet host it fails identically
+(`1 failed, 5 passed in 3.35s`), so question 207's contention rule does not excuse it. Nothing
+this round touched is read by that test (it drives `web/js/layers/`, last changed by the heavy
+track's `dd48495`). The failure's own message names the consequence exactly: with no eviction the
+budget was never approached, so `budgetRespected` is true for the wrong reason — the same "a
+frame budget that could not fail" shape question 227 already recorded for that track.
+
+Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`, `GATE_CLIPPY_WS`,
+`GATE_CLIPPY_KERNEL_FINAL`, `GATE_DENY`, `GATE2_ORBITAL_NODEF`, `GATE1`, `GATE_KERNEL_NODEF`,
+`GATE_WORKSPACE`, `GATE_KERNEL_DEFAULT`, `GATE_PYTEST` and `GATE_PY_RERUN`.
+
+Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`,
+`GATE_CLIPPY_WS`, `GATE_DENY`, `GATE1`, `GATE2_ORBITAL_NODEF`, `GATE_KERNEL_NODEF`,
+`GATE_WORKSPACE`, `GATE_KERNEL_DEFAULT` and `GATE_PYTEST`.
+
+### Open items
+
+- **N6's two-model comparison score is not delivered.** N6 asks for "a run of the demo DRM
+  with each and the difference reported in the run products as a score". The demo DRM runs
+  with the native model and is proved to; running it with both in one products set and
+  emitting the difference as a `Score` is not written. The machinery is all present —
+  `RunProducts.scores` and the expression evaluator already exist, and an `orbital.` and a
+  `gmat.` instance can sit side by side in one DRM — so this is a small, self-contained task,
+  and it is the one piece of N6 that is missing.
+- **N6's control-matrix row for the model's provenance** (which data files, which hashes) is
+  not written. `EarthGravityModel`'s `settings_hash` already covers the gravity file's name and
+  SHA-256, the degree and order, `mu`, the reference radius, the frame names and the integrator
+  settings, so the inputs exist; the row does not.
+- **Two goldens carry a tolerance nothing reads.** `covariance_bodyfixed_leo_2h` is asserted at
+  `crates/gmat-sys/tests/convert_rotation.rs:226` (bare `1e-9`) and
+  `leo_1day_jgm2_8x8_sunmoon_planetodetic_lon` at `crates/gmat-sys/tests/epoch_writeback.rs:209-210`
+  (bare `1e-5`, twice). Both constants equal the value now in the golden, so nothing disagrees.
+  The follow-up is two struct fields and three literals, inside `gmat-sys`, which this track
+  may not edit.
+- **An eighth tolerance still lives only in a test constant, and the README inventory found it.**
+  `goldens/leo_1day_jgm2_8x8_sunmoon.json`'s trajectory tolerance (0.05 m) is in the file, but
+  the `stm` block's is not: it is in `crates/av-orbital/tests/stm_goldens.rs`'s own constants.
+  Round 2 recorded this as an open item and it is still open. It was outside question 230's
+  named list, so this round did not move it; it is the same defect class and the same one-task
+  fix.
+- **Jacchia-Roberts is where round 3 left it.** A definitive per-species decomposition, no
+  located line, the M5 arc at 68.32 m / 0.0803 m/s recorded with no tolerance loosened. The one
+  remaining lever is still instrumenting GMAT's own `rho_high` from a build of
+  `third_party/gmat-src` — and **that still needs someone to establish whether that mirror is
+  the tree the shipped `libGmatBase.dylib` was built from, which nobody has done.** It is the
+  blocker, not the instrumentation.
+- **`av-run --no-default-features` builds and refuses cleanly, but is not exercised in CI**
+  beyond the build and the `otool -L` check. No test runs the binary in that state.
+- **`goldens/README.md` names every cell it could not fill** with a committed number and the
+  `--nocapture` command that would produce it. Those are all GMAT-linked tests in crates this
+  round did not need to run; filling them is a cheap follow-up for whoever runs the suite next.
+- **`NUTATION.DAT`'s unused "2000 IAU" section still has a corrupted line** (round 3), harmless
+  today because GMAT's own substring search lands past it.
+- **`GetUt1UtcOffset`'s leap-second-jump correction is still not implemented**, exact only
+  inside leap-second-free windows.
+- **A live `Earth.NutationUpdateInterval` readback** still needs an entry point `gmat-sys` does
+  not expose.

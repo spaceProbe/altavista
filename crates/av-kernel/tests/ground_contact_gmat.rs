@@ -82,9 +82,7 @@ struct Site {
 #[derive(Deserialize)]
 struct GoldenComparisonTolerance {
     value: f64,
-    #[allow(dead_code)]
     unit: String,
-    #[allow(dead_code)]
     source: String,
 }
 
@@ -110,11 +108,17 @@ fn contact_windows_matches_gmats_own_contact_locator_for_the_same_site_and_arc()
     // Question 230: read from the golden itself, never a bare Rust constant -- a reader that
     // silently fell back to a default tolerance here would pin nothing (round 1's own review
     // lesson, restated in this task).
-    let tolerance_s = golden
+    let tol = golden
         .golden_comparison_tolerance
         .as_ref()
-        .unwrap_or_else(|| panic!("goldens/ground_contact_gmat.json is missing golden_comparison_tolerance -- regenerate it with goldens/gen_ground_contact_gmat.py (question 230: this field must be present, never defaulted)"))
-        .value;
+        .unwrap_or_else(|| panic!("goldens/ground_contact_gmat.json is missing golden_comparison_tolerance -- regenerate it with goldens/gen_ground_contact_gmat.py (question 230: this field must be present, never defaulted)"));
+    // `unit` and `source` are asserted rather than carried as dead fields (no `#[allow]` in this
+    // repository to silence a lint): a tolerance whose provenance is blank records nothing, and
+    // recording where the number came from is half of what question 230 asked for.
+    assert!(!tol.unit.is_empty(), "golden_comparison_tolerance.unit must name the unit the bound is in");
+    assert!(!tol.source.is_empty(), "golden_comparison_tolerance.source must say where the number came from");
+    eprintln!("[ground_contact_gmat] tolerance {} {} -- {}", tol.value, tol.unit, tol.source);
+    let tolerance_s = tol.value;
 
     let site = GroundStationSpec {
         body: "Earth".to_string(),
