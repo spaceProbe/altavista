@@ -225,5 +225,5 @@ def test_tiles_gateway_container_serves_a_real_tile_counts_a_refusal_and_is_remo
         f"container {container_name!r} should have been removed when tiles_gateway_container's "
         f"own `with` block exited, but `docker inspect {container_name}` still succeeded:\n{result.stdout}"
     )
-    assert "No such object" in result.stderr, f"expected docker's own 'No such object', got: {result.stderr!r}"
+    assert "no such object" in result.stderr.lower(), f"expected docker's own 'No such object', got: {result.stderr!r}"
     print(f"\n--- container gone after teardown (question 148) ---\ndocker inspect {container_name}: {result.stderr.strip()}")
