@@ -1,8 +1,14 @@
 {
   "epoch_a1mjd": 31042.50042863867,
   "frame": "EarthMJ2000Eq",
-  "generated": "2026-09-04T02:11:37+00:00",
+  "generated": "2026-09-22T05:52:45+00:00",
   "gmat_version": "R2026a",
+  "golden_comparison_tolerance": {
+    "source": "the constant crates/gmat-sys/tests/epoch_writeback.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/epoch_writeback.rs:209-210 -- applied identically to both longitude_deg and latitude_deg there; reasoned (not measured) as generous relative to that file's own measured ~1e-9 deg rotation-rate term and ~4e-7 deg position-tolerance-derived angle term (see its own doc comment)",
+    "unit": "deg",
+    "value": 1e-05
+  },
+  "golden_regeneration_reason": "question 230: move the tolerance crates/gmat-sys/tests/epoch_writeback.rs already asserted (1e-5 deg) into this golden as golden_comparison_tolerance, no value changing; fixes this round's own defect where the prior regeneration overwrote the golden's reason field with a regeneration note instead of preserving its purpose statement",
   "latitude_deg": 51.65916100382592,
   "longitude_deg": 14.79393893747989,
   "name": "leo_1day_jgm2_8x8_sunmoon_planetodetic_lon",

@@ -54,6 +54,26 @@ FORCE_MODEL_POINT_MASSES = ["Luna", "Sun"]
 PROP = {"integrator": "PrinceDormand78", "accuracy": 1e-13, "initial_step_s": 60.0, "min_step_s": 0.0, "max_step_s": 600.0}
 DURATION_S = 86400.0
 
+# The golden's own purpose statement (question 230, ADR-002's goldens rule: the file's "reason"
+# field states why the golden exists, not why it was last regenerated). Fixed here rather than
+# taken from --reason so a tolerance-only or metadata-only regeneration never erases it.
+#
+# Question 230 checked whether this particular text is right to carry forward verbatim, since
+# unlike the other three goldens this one's own committed "reason" was itself a regeneration
+# note (M11.1, question 99) rather than a from-scratch purpose statement. This file has exactly
+# one commit in its git history (474b76a932a76cd96a5f45f20832f3e7af5b48c2, "Initial import of
+# the Alta Vista platform" -- a squashed import, so no earlier, truer "reason" exists to recover
+# instead) and this M11.1 text is the only "reason" this golden has ever carried; the golden's
+# actual purpose narrative lives in the "note" field below, independently and at more length, so
+# nothing is lost by keeping "reason" as this repository has always recorded it here. Restored
+# verbatim rather than replaced.
+GOLDEN_REASON = (
+    "M11.1 (question 99): gmat_sys::model::GmatModel::step now reads RMAG through "
+    "gmatffi_get_real_parameter instead of computing it in Rust; regenerating only to update "
+    "this golden's own note/reason text to match -- the ReportFile mechanism, script, and "
+    "golden arc are unchanged, so the numeric value is expected to reproduce exactly"
+)
+
 SCRIPT_TEMPLATE = """\
 %----------------------------------------------------------------------------
 % M10.2 ground truth: GMAT's own RMAG real parameter for goldens/leo_1day_jgm2_8x8_sunmoon.json
@@ -114,7 +134,15 @@ Propagate GoldenProp(Golden) {{Golden.ElapsedSecs = {duration_s}}};
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reason", required=True, help="why this golden is (re)generated; recorded in the file")
+    ap.add_argument(
+        "--reason",
+        required=True,
+        help=(
+            "why this run regenerates the golden; recorded in golden_regeneration_reason. "
+            "The file's own 'reason' field is fixed below (the golden's purpose) and is never "
+            "overwritten by this flag -- see GOLDEN_REASON."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(__file__).parent
@@ -162,7 +190,8 @@ def main():
     golden = {
         "name": "leo_1day_jgm2_8x8_sunmoon_rmag",
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "reason": args.reason,
+        "reason": GOLDEN_REASON,
+        "golden_regeneration_reason": args.reason,
         "gmat_version": "R2026a",
         "source_golden": "leo_1day_jgm2_8x8_sunmoon",
         "note": (
@@ -191,6 +220,20 @@ def main():
         "rmag_m": rmag_km * 1000.0,
         "rmag_self_check_km": rmag_self_check_km,
         "rmag_self_check_note": "rmag_km - sqrt(x_km^2 + y_km^2 + z_km^2) from the same report row; should be floating-point noise, confirming RMAG is defined as the position-vector magnitude.",
+        # Question 230: the tolerance crates/av-kernel/tests/drm_executor.rs's
+        # drm_rmag_output_matches_a_genuine_gmat_reportfile actually asserts
+        # output.leo_rmag.rmag@end against this golden's own rmag_m with, moved here (not
+        # changed) from that test's own hardcoded 0.1 m bound. Not measured by this generator:
+        # this is the constant that test has asserted since commit
+        # 474b76a932a76cd96a5f45f20832f3e7af5b48c2 ("Initial import of the Alta Vista
+        # platform"), reasoned there (same order of magnitude as the base golden's own 0.05 m
+        # position tolerance, loosened for this run's own km<->m and epoch round-trips), not
+        # measured against any specific run.
+        "golden_comparison_tolerance": {
+            "value": 0.1,
+            "unit": "m",
+            "source": "the constant crates/av-kernel/tests/drm_executor.rs's drm_rmag_output_matches_a_genuine_gmat_reportfile has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/drm_executor.rs:308 -- reasoned (not measured) as the same order of magnitude as goldens/leo_1day_jgm2_8x8_sunmoon.json's own 0.05 m position tolerance, loosened for round-trip km<->m and epoch noise",
+        },
     }
     body = json.dumps(golden, indent=2, sort_keys=True)
     out = out_dir / (golden["name"] + ".json")

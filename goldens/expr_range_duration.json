@@ -1,7 +1,8 @@
 {
   "name": "expr_range_duration",
-  "generated": "1788454414.395774s",
-  "reason": "M9.3 (question 95): the DRM executor now emits real CDM Events (EVENT_KIND_LIFECYCLE run start/end, EVENT_KIND_FAULT for every applied DYNAMICS fault) instead of always returning RunProducts.events == []; expr_fault_split_accel's three event.*-referencing expressions move onto DesignReferenceMission.objectives/.measures now that they resolve against real events (renamed the fault id / event name from f1 to accel_change, and the maneuver_count measure to fault_count / count(event.fault), since a DYNAMICS parameter fault is EVENT_KIND_FAULT, not EVENT_KIND_MANEUVER); removes the synthetic caller-supplied Event this generator previously stood in with",
+  "generated": "1790056389.811877s",
+  "reason": "Pins the ADR-005 sec 6 amendment's own worked example (docs/adr/005-simulation-kernel.md's amendment 2026-09-02), duration(range(a, b) < 100 m), against a real two-entity DRM (entities literally named a/b, matching the amendment's own variable names); closed-form duration = 5.8 s -- see range_duration_case's own doc comment for the derivation.",
+  "golden_regeneration_reason": "question 230: move the tolerance tests/expr_goldens.rs already asserted (1e-6, absolute, on the evaluated score value) into each golden as golden_comparison_tolerance, no value changing; also splits each golden's own reason field, which a prior version of this generator always overwrote with the shared --reason text (the source of the identical, wrong-for-two-of-three-cases M9.3 copy-paste goldens/README.md's own footnote records), into a fixed per-case purpose statement (reason) plus this run's own note (golden_regeneration_reason)",
   "drm_id": "range_duration_drm",
   "drm_hash": "67e744e8d23f820f6907cb6f63ca204ed787738e6876a3095ac805802d562a63",
   "instance": "a,b",
@@ -47,5 +48,10 @@
       "computed_unit": "m"
     }
   ],
-  "sha256": "1217c888cbb8a69c5f9bc5d9bceafdc3bf187e959820f7c3269b055989ecab83"
+  "golden_comparison_tolerance": {
+    "value": 1e-6,
+    "unit": "absolute, in each objective/measure's own computed_unit (this golden's own pinned value and the freshly re-evaluated value are compared directly, not scaled)",
+    "source": "the constant tests/expr_goldens.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/expr_goldens.rs:76,93"
+  },
+  "sha256": "1e1bb7beb28cd7745ae2de3db931f295e94a7d0474ad67f4b98da44fd3e2671a"
 }

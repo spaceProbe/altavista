@@ -31,11 +31,25 @@ struct PinnedMoe {
     name: String,
     value: f64,
 }
+/// Question 230: the golden-comparison tolerance this file actually checks pinned objective/
+/// measure `value`s against (the `1e-6` bound below), moved into the golden itself by
+/// `examples/gen_expr_goldens.rs` -- NOT the same thing as `PinnedObjective::tolerance` above,
+/// which is each `Objective`'s own DRM-declared pass/fail acceptance band. This struct's `unit`/
+/// `source` fields are read only to prove the field parses; the check itself only needs `value`.
+#[derive(Deserialize)]
+struct GoldenComparisonTolerance {
+    value: f64,
+    #[allow(dead_code)]
+    unit: String,
+    #[allow(dead_code)]
+    source: String,
+}
 #[derive(Deserialize)]
 struct Golden {
     drm_hash: String,
     objectives: Vec<PinnedObjective>,
     measures: Vec<PinnedMoe>,
+    golden_comparison_tolerance: Option<GoldenComparisonTolerance>,
 }
 
 fn goldens_path(name: &str) -> PathBuf {
@@ -50,6 +64,16 @@ fn load_golden(name: &str) -> Golden {
 fn check_case(case: &GoldenCase) {
     let golden = load_golden(case.name);
     assert_eq!(golden.drm_hash, case.drm.hash, "case {:?}: DRM hash drifted from the pinned golden's own recorded hash", case.name);
+    // Question 230: read from the golden itself, never a bare Rust constant -- a reader that
+    // silently fell back to a default tolerance here would pin nothing (round 1's own review
+    // lesson, restated in this task). Does NOT cover the separate 1e-9 RunProducts.scores-vs-
+    // evaluate_objective/evaluate_moe self-consistency checks below, which compare two values
+    // this test computes fresh in the same run and never touch the golden at all.
+    let tol = golden
+        .golden_comparison_tolerance
+        .as_ref()
+        .unwrap_or_else(|| panic!("case {:?}: goldens/{}.json is missing golden_comparison_tolerance -- regenerate it with `cargo run -p av-kernel --example gen_expr_goldens -- --reason \"...\"` (question 230: this field must be present, never defaulted)", case.name, case.name))
+        .value;
 
     let _engine = gmat_sys::engine_lock();
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
@@ -73,7 +97,7 @@ fn check_case(case: &GoldenCase) {
     for (obj, pinned) in case.objectives.iter().zip(&golden.objectives) {
         assert_eq!(obj.name, pinned.name, "case {:?}: objective ordering drifted from the pinned golden", case.name);
         let result = evaluate_objective(obj, &run).unwrap_or_else(|e| panic!("case {:?}, objective {:?}: {e}", case.name, obj.name));
-        assert!((result.value - pinned.value).abs() < 1e-6, "case {:?}, objective {:?}: got {}, pinned {}", case.name, obj.name, result.value, pinned.value);
+        assert!((result.value - pinned.value).abs() < tol, "case {:?}, objective {:?}: got {}, pinned {}", case.name, obj.name, result.value, pinned.value);
         assert_eq!(result.pass, pinned.pass, "case {:?}, objective {:?}: pass/fail drifted from the pinned golden", case.name, obj.name);
         // execute()'s own RunProducts.scores (question 93) must agree exactly with evaluating
         // the same objective independently against execute()'s trajectories/events -- proves
@@ -90,7 +114,7 @@ fn check_case(case: &GoldenCase) {
     for (moe, pinned) in case.measures.iter().zip(&golden.measures) {
         assert_eq!(moe.name, pinned.name, "case {:?}: measure ordering drifted from the pinned golden", case.name);
         let result = evaluate_moe(moe, &run).unwrap_or_else(|e| panic!("case {:?}, measure {:?}: {e}", case.name, moe.name));
-        assert!((result.value - pinned.value).abs() < 1e-6, "case {:?}, measure {:?}: got {}, pinned {}", case.name, moe.name, result.value, pinned.value);
+        assert!((result.value - pinned.value).abs() < tol, "case {:?}, measure {:?}: got {}, pinned {}", case.name, moe.name, result.value, pinned.value);
         // See the objectives loop above -- every measure is declared on the DRM itself now too.
         let score = &products.scores[&moe.name];
         assert!((score.value - result.value).abs() < 1e-9, "case {:?}, measure {:?}: RunProducts.scores disagrees with evaluate_moe", case.name, moe.name);

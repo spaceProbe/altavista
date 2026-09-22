@@ -74,6 +74,16 @@ FORCE_MODEL_POINT_MASSES = ["Luna", "Sun"]
 PROP = {"integrator": "PrinceDormand78", "accuracy": 1e-13, "initial_step_s": 60.0, "min_step_s": 0.0, "max_step_s": 600.0}
 DURATION_S = 86400.0
 
+# The golden's own purpose statement (question 230, ADR-002's goldens rule: the file's "reason"
+# field states why the golden exists, not why it was last regenerated). Fixed here rather than
+# taken from --reason so a tolerance-only or metadata-only regeneration never erases it; carried
+# verbatim from this golden's original question-105/M12.2 commit.
+GOLDEN_REASON = (
+    "question 105/M12.2: independent GMAT ReportFile ground truth for the epoch write-back test "
+    "(crates/gmat-sys/tests/epoch_writeback.rs), an Earth-fixed longitude genuinely dependent on "
+    "epoch unlike RMAG/Cd"
+)
+
 SCRIPT_TEMPLATE = """\
 %----------------------------------------------------------------------------
 % M12.2 ground truth: GMAT's own Earth-fixed Longitude/Latitude for goldens/leo_1day_jgm2_8x8_sunmoon.json
@@ -134,7 +144,15 @@ Propagate GoldenProp(Golden) {{Golden.ElapsedSecs = {duration_s}}};
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reason", required=True, help="why this golden is (re)generated; recorded in the file")
+    ap.add_argument(
+        "--reason",
+        required=True,
+        help=(
+            "why this run regenerates the golden; recorded in golden_regeneration_reason. "
+            "The file's own 'reason' field is fixed below (the golden's purpose) and is never "
+            "overwritten by this flag -- see GOLDEN_REASON."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(__file__).parent
@@ -176,7 +194,8 @@ def main():
     golden = {
         "name": "leo_1day_jgm2_8x8_sunmoon_planetodetic_lon",
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "reason": args.reason,
+        "reason": GOLDEN_REASON,
+        "golden_regeneration_reason": args.reason,
         "gmat_version": "R2026a",
         "source_golden": "leo_1day_jgm2_8x8_sunmoon",
         "note": (
@@ -205,6 +224,20 @@ def main():
         "epoch_a1mjd": a1mjd,
         "longitude_deg": longitude_deg,
         "latitude_deg": latitude_deg,
+        # Question 230: the tolerance crates/gmat-sys/tests/epoch_writeback.rs actually asserts
+        # PlanetodeticLON/PlanetodeticLAT against this golden's own longitude_deg/latitude_deg
+        # with, moved here (not changed) from that test's own hardcoded 1e-5 deg bound.
+        # crates/gmat-sys is out of the native-dynamics track's isolation (docs/
+        # native-dynamics-plan.md), so this worker could not also make that reader load this
+        # field -- see this task's own report for the follow-up gmat-sys still needs. Not
+        # measured by this generator: this is the constant that test has asserted since commit
+        # 474b76a932a76cd96a5f45f20832f3e7af5b48c2 ("Initial import of the Alta Vista
+        # platform"), applied identically to both longitude_deg and latitude_deg there.
+        "golden_comparison_tolerance": {
+            "value": 1e-5,
+            "unit": "deg",
+            "source": "the constant crates/gmat-sys/tests/epoch_writeback.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/epoch_writeback.rs:209-210 -- applied identically to both longitude_deg and latitude_deg there; reasoned (not measured) as generous relative to that file's own measured ~1e-9 deg rotation-rate term and ~4e-7 deg position-tolerance-derived angle term (see its own doc comment)",
+        },
     }
     body = json.dumps(golden, indent=2, sort_keys=True)
     out = out_dir / (golden["name"] + ".json")

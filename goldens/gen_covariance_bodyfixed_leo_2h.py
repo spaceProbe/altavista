@@ -98,6 +98,15 @@ DURATION_S = 7200.0  # same arc as bodyfixed_leo_2h.json / icrf_leo_2h.json
 P0_POS_VAR_KM2 = [0.01, 0.0225, 0.04]  # (100 m)^2, (150 m)^2, (200 m)^2
 P0_VEL_VAR_KM2_S2 = [1.0e-8, 2.25e-8, 4.0e-8]  # (0.1 m/s)^2, (0.15 m/s)^2, (0.2 m/s)^2
 
+# The golden's own purpose statement (question 230, ADR-002's goldens rule: the file's "reason"
+# field states why the golden exists, not why it was last regenerated). Fixed here rather than
+# taken from --reason so a tolerance-only or metadata-only regeneration never erases it; carried
+# verbatim from this golden's original M21.4 commit.
+GOLDEN_REASON = (
+    "M21.4: rotate covariance into a declared frame (question 138) -- new golden pinning GMAT's "
+    "own OrbitErrorCovariance report in EarthFixed against a fresh anisotropic diagonal P0"
+)
+
 SCRIPT_TEMPLATE = """\
 %----------------------------------------------------------------------------
 % M21.4 ground truth: GMAT's own OrbitErrorCovariance report, converted to EarthFixed,
@@ -197,7 +206,15 @@ Propagate GoldenProp(Golden) {{Golden.ElapsedSecs = {duration_s}}};
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reason", required=True, help="why this golden is (re)generated; recorded in the file")
+    ap.add_argument(
+        "--reason",
+        required=True,
+        help=(
+            "why this run regenerates the golden; recorded in golden_regeneration_reason. "
+            "The file's own 'reason' field is fixed below (the golden's purpose) and is never "
+            "overwritten by this flag -- see GOLDEN_REASON."
+        ),
+    )
     args = ap.parse_args()
 
     out_dir = Path(__file__).parent
@@ -275,7 +292,8 @@ def main():
     golden = {
         "name": "covariance_bodyfixed_leo_2h",
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "reason": args.reason,
+        "reason": GOLDEN_REASON,
+        "golden_regeneration_reason": args.reason,
         "gmat_version": "R2026a",
         "note": (
             "GMAT's own OrbitErrorCovariance Parameter, reported in EarthFixed (GMAT's built-in "
@@ -313,6 +331,21 @@ def main():
         "cov_mj2000eq_report_km_row_major_6x6": p0_mj2000eq_km,
         "cov_bodyfixed_gmat_report_km_row_major_6x6": cov_bodyfixed_gmat_report_km,
         "max_identity_check_abs_diff": max_identity_err,
+        # Question 230: the tolerance crates/gmat-sys/tests/convert_rotation.rs's
+        # convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance
+        # actually asserts the rotated-covariance position block against this golden's own
+        # cov_bodyfixed_gmat_report_km_row_major_6x6 with, moved here (not changed) from that
+        # test's own hardcoded 1e-9-relative bound. crates/gmat-sys is out of the
+        # native-dynamics track's isolation (docs/native-dynamics-plan.md), so this worker could
+        # not also make that reader load this field -- see this task's own report for the
+        # follow-up gmat-sys still needs. Not measured by this generator: this is the constant
+        # that test has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 ("Initial
+        # import of the Alta Vista platform").
+        "golden_comparison_tolerance": {
+            "value": 1e-9,
+            "unit": "relative (position block max-abs-diff, scaled by the largest declared position variance, 0.04 km^2)",
+            "source": "the constant (the 'scale'-normalized bound) crates/gmat-sys/tests/convert_rotation.rs's convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/convert_rotation.rs:222-226 -- applies only to the position block (rows/cols 0-2), the one block a missing Rdot term cannot affect; see that file's own module doc comment for why the velocity/cross blocks are checked as a disagreement floor instead, not a match tolerance",
+        },
     }
     body = json.dumps(golden, indent=2, sort_keys=True)
     out = out_dir / (golden["name"] + ".json")

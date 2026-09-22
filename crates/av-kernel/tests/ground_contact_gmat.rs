@@ -75,12 +75,26 @@ struct Site {
     height_m: f64,
 }
 
+/// Question 230: the golden-comparison tolerance, moved into the golden itself (no longer a bare
+/// Rust constant here) -- the one-third-of-sampling-interval justification this file's own
+/// module doc comment (top of file) gives is unchanged, and now also lives in
+/// `goldens/gen_ground_contact_gmat.py`'s own written copy of it.
+#[derive(Deserialize)]
+struct GoldenComparisonTolerance {
+    value: f64,
+    #[allow(dead_code)]
+    unit: String,
+    #[allow(dead_code)]
+    source: String,
+}
+
 #[derive(Deserialize)]
 struct Golden {
     site: Site,
     elevation_mask_deg: f64,
     position_series: Vec<PositionSample>,
     gmat_contact_windows_s: Vec<GmatContactWindow>,
+    golden_comparison_tolerance: Option<GoldenComparisonTolerance>,
 }
 
 fn load_golden() -> Golden {
@@ -89,13 +103,18 @@ fn load_golden() -> Golden {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {path:?}: {e}"))
 }
 
-/// The one-third-of-sampling-interval tolerance this file's own doc comment justifies.
-const TOLERANCE_S: f64 = 10.0;
-
 #[test]
 fn contact_windows_matches_gmats_own_contact_locator_for_the_same_site_and_arc() {
     let golden = load_golden();
     assert_eq!(golden.gmat_contact_windows_s.len(), 1, "expected exactly one GMAT-reported contact window in this golden's own 3h arc (stated before measuring, see this golden's own generation output)");
+    // Question 230: read from the golden itself, never a bare Rust constant -- a reader that
+    // silently fell back to a default tolerance here would pin nothing (round 1's own review
+    // lesson, restated in this task).
+    let tolerance_s = golden
+        .golden_comparison_tolerance
+        .as_ref()
+        .unwrap_or_else(|| panic!("goldens/ground_contact_gmat.json is missing golden_comparison_tolerance -- regenerate it with goldens/gen_ground_contact_gmat.py (question 230: this field must be present, never defaulted)"))
+        .value;
 
     let site = GroundStationSpec {
         body: "Earth".to_string(),
@@ -130,6 +149,6 @@ fn contact_windows_matches_gmats_own_contact_locator_for_the_same_site_and_arc()
     println!("AOS: ours={got_start_s:.3}s  GMAT={want_start_s:.3}s  delta={start_delta_s:.3}s");
     println!("LOS: ours={got_end_s:.3}s  GMAT={want_end_s:.3}s  delta={end_delta_s:.3}s");
 
-    assert!(start_delta_s < TOLERANCE_S, "AOS delta {start_delta_s:.3}s exceeds the {TOLERANCE_S}s tolerance (ours={got_start_s:.3}s, GMAT={want_start_s:.3}s)");
-    assert!(end_delta_s < TOLERANCE_S, "LOS delta {end_delta_s:.3}s exceeds the {TOLERANCE_S}s tolerance (ours={got_end_s:.3}s, GMAT={want_end_s:.3}s)");
+    assert!(start_delta_s < tolerance_s, "AOS delta {start_delta_s:.3}s exceeds the {tolerance_s}s tolerance (ours={got_start_s:.3}s, GMAT={want_start_s:.3}s)");
+    assert!(end_delta_s < tolerance_s, "LOS delta {end_delta_s:.3}s exceeds the {tolerance_s}s tolerance (ours={got_end_s:.3}s, GMAT={want_end_s:.3}s)");
 }

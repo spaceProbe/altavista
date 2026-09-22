@@ -127,6 +127,15 @@ fn two_instance_sos(id: &str, name_a: &str, system_id_a: &str, name_b: &str, sys
 struct GoldenCase {
     /// `goldens/expr_<name>.json`.
     name: &'static str,
+    /// This golden's own purpose statement, written into the file's `reason` field. Fixed per
+    /// case here rather than taken from `--reason` (question 230: before this fix, every run of
+    /// this generator overwrote all three goldens' `reason` with one shared CLI string, which is
+    /// how the committed files ended up with an identical, wrong-for-two-of-three-cases M9.3
+    /// note copy-pasted across all three in the first place -- see `goldens/README.md`'s own
+    /// footnote on this generator, and this task's own report for why this is fixed going
+    /// forward rather than the copy-paste preserved). `--reason` instead now only fills the
+    /// separate `golden_regeneration_reason` field.
+    reason: &'static str,
     drm: DesignReferenceMission,
     sos: SosConfiguration,
     systems: BTreeMap<String, SystemDefinition>,
@@ -163,7 +172,11 @@ fn straight_accel_case() -> GoldenCase {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
 
-    GoldenCase { name: "expr_straight_accel", drm, sos, systems, instance_name: "veh", objectives, measures }
+    GoldenCase {
+        name: "expr_straight_accel",
+        reason: "Pins one evaluated Objective/MeasureOfEffectiveness score (not a trajectory) for a GMAT-free \"native.constant_accel\" DRM (ax = 1 m/s^2 constant, 10 s at 10 Hz), checked against a closed-form constant-acceleration solution by hand at generation time (x(10) = 50 m, vx(10) = 10 m/s). Deliberately includes one objective pinned to fail (final_vx_near_5, target 5 m/s against an actual 10 m/s): the honesty rule this generator's own module doc states -- \"do not pin a golden score you know is wrong\" -- is about not silently changing what a run actually produces, not about only ever pinning passing objectives; a golden that could never fail would not catch a regression that broke pass/fail itself.",
+        drm, sos, systems, instance_name: "veh", objectives, measures,
+    }
 }
 
 /// The same `"accel.x"` fault-split arc `tests/drm_executor.rs`'s own required test 5 pins by
@@ -214,7 +227,11 @@ fn fault_split_accel_case() -> GoldenCase {
     let mut systems = BTreeMap::new();
     systems.insert(sys.id.clone(), sys);
 
-    GoldenCase { name: "expr_fault_split_accel", drm, sos, systems, instance_name: "veh", objectives, measures }
+    GoldenCase {
+        name: "expr_fault_split_accel",
+        reason: "Demonstrates the event.<name>.t / count(event.<kind>) expression forms against the DRM executor's own real EVENT_KIND_FAULT event for one applied FAULT_TARGET_KIND_DYNAMICS fault (question 95, M9.3): ax = 1 m/s^2 for [0, 1) s, a fault named accel_change at t = 1 s changes it to 5 m/s^2 through t = 2 s, 10 Hz, sample_interval_s = 0.1 -- closed form x(1s) = 0.5, vx(1s) = 1.0, x(2s) = 4.0, vx(2s) = 6.0. All five expressions, including the three that reference event.*, are declared on DesignReferenceMission.objectives/.measures itself now that execute() emits a real EVENT_KIND_FAULT event for this fault, named after Fault.id.",
+        drm, sos, systems, instance_name: "veh", objectives, measures,
+    }
 }
 
 /// The amended grammar's own worked example (`docs/adr/005-simulation-kernel.md`'s amendment
@@ -252,7 +269,11 @@ fn range_duration_case() -> GoldenCase {
     systems.insert(sys_a.id.clone(), sys_a);
     systems.insert(sys_b.id.clone(), sys_b);
 
-    GoldenCase { name: "expr_range_duration", drm, sos, systems, instance_name: "a,b", objectives, measures }
+    GoldenCase {
+        name: "expr_range_duration",
+        reason: "Pins the ADR-005 sec 6 amendment's own worked example (docs/adr/005-simulation-kernel.md's amendment 2026-09-02), duration(range(a, b) < 100 m), against a real two-entity DRM (entities literally named a/b, matching the amendment's own variable names); closed-form duration = 5.8 s -- see range_duration_case's own doc comment for the derivation.",
+        drm, sos, systems, instance_name: "a,b", objectives, measures,
+    }
 }
 
 #[derive(Serialize)]
@@ -276,20 +297,45 @@ struct PinnedMoe {
     computed_unit: String,
 }
 
+/// Question 230: the tolerance `tests/expr_goldens.rs` actually asserts each pinned
+/// objective/measure `value` against with (`(result.value - pinned.value).abs() < 1e-6`),
+/// moved here (not changed) from that file's own hardcoded `1e-6` constant -- NOT the
+/// `objectives[].tolerance` field above (that is each `Objective`'s own DRM-declared acceptance
+/// band, a completely different thing; see this struct field's own doc comment). Not measured
+/// by this generator: this is the constant that file has asserted since commit
+/// `474b76a932a76cd96a5f45f20832f3e7af5b48c2` ("Initial import of the Alta Vista platform").
+/// `tests/expr_goldens.rs` also compares `RunProducts.scores` against this same freshly
+/// re-evaluated `result.value` at a separate, tighter `1e-9` bound (lines 85/96 there) -- that
+/// check never reads anything from this golden file at all (both sides are computed fresh, in
+/// the same test run), so it is a self-consistency check of the executor's two internal paths,
+/// not a golden-comparison tolerance, and is deliberately left out of this field.
+#[derive(Serialize)]
+struct GoldenComparisonTolerance {
+    value: f64,
+    unit: String,
+    source: String,
+}
+
 #[derive(Serialize)]
 struct Golden {
     name: String,
     generated: String,
     reason: String,
+    /// Question 230: why this *run* regenerated the golden, from `--reason`. Separate from
+    /// `reason` (the golden's own fixed purpose statement, from `GoldenCase::reason`) so a
+    /// tolerance-only or metadata-only regeneration never erases the purpose text -- see
+    /// `GoldenCase::reason`'s own doc comment for why this generator used to conflate the two.
+    golden_regeneration_reason: String,
     drm_id: String,
     drm_hash: String,
     instance: String,
     objectives: Vec<PinnedObjective>,
     measures: Vec<PinnedMoe>,
+    golden_comparison_tolerance: GoldenComparisonTolerance,
     sha256: String,
 }
 
-fn run_case(gmat: &Gmat, case: &GoldenCase, reason: &str) -> Result<Golden, DrmError> {
+fn run_case(gmat: &Gmat, case: &GoldenCase, regeneration_reason: &str) -> Result<Golden, DrmError> {
     let cfg = RunConfig { gmat, drm: &case.drm, sos: &case.sos, systems: &case.systems, run_id: format!("gen-{}", case.name), error_mode: Default::default() , products_dir: None, replay: None, command_source: None };
     let products = execute(cfg)?;
     let scenario = case.drm.scenario.as_ref().expect("every case declares a scenario");
@@ -324,12 +370,18 @@ fn run_case(gmat: &Gmat, case: &GoldenCase, reason: &str) -> Result<Golden, DrmE
     Ok(Golden {
         name: case.name.to_string(),
         generated: "recorded-by-generator".to_string(), // overwritten below with a real timestamp
-        reason: reason.to_string(),
+        reason: case.reason.to_string(),
+        golden_regeneration_reason: regeneration_reason.to_string(),
         drm_id: case.drm.id.clone(),
         drm_hash: case.drm.hash.clone(),
         instance: case.instance_name.to_string(),
         objectives,
         measures,
+        golden_comparison_tolerance: GoldenComparisonTolerance {
+            value: 1e-6,
+            unit: "absolute, in each objective/measure's own computed_unit (this golden's own pinned value and the freshly re-evaluated value are compared directly, not scaled)".to_string(),
+            source: "the constant tests/expr_goldens.rs has asserted since commit 474b76a932a76cd96a5f45f20832f3e7af5b48c2 (Initial import of the Alta Vista platform), tests/expr_goldens.rs:76,93".to_string(),
+        },
         sha256: String::new(),
     })
 }
