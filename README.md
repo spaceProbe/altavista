@@ -89,6 +89,36 @@ container (`services/cfs/`) and the RTEMS toolchain (`third_party/rtems-containe
 their own recorded build recipes, each fetching over the network exactly once at image
 build time.
 
+**`scripts/dev/cargo-slot`.** This host gets slow when too many `cargo` jobs run at once --
+`docs/open-questions.md` question 229 measured the cause as three concurrent cargo jobs of one
+team serialising on one shared target-directory lock plus macOS's own per-binary security scan
+(question 226), not memory (64 GB RAM, 78 percent free, measured while that contention was
+happening). The fix is a mechanism, not a convention to remember: `scripts/dev/cargo-slot` takes
+one of exactly two host-wide `flock(2)` slots before running `cargo`, holds it for the whole
+build, and releases it the instant that `cargo` process exits, by any means including a kill.
+Put it in front of every `cargo` command, in this section and elsewhere:
+
+```bash
+scripts/dev/cargo-slot build --workspace
+scripts/dev/cargo-slot test --workspace --exclude av-kernel
+scripts/dev/cargo-slot test -p av-kernel
+scripts/dev/cargo-slot clippy --workspace --all-targets -- -D warnings
+```
+
+There are two slots, not one, because question 229's own measurement is that this host
+tolerates two concurrent cargo jobs, not three -- so a third caller waits for whichever of the
+two frees first, rather than every `cargo` invocation on the host serialising to one at a time.
+The slot files are `$HOME/.altavista/locks/cargo-slot-0.lock` and
+`$HOME/.altavista/locks/cargo-slot-1.lock`, the same path family and `flock`-not-PID-file
+mechanism as the existing Docker-test lock (`crates/av-lockstep/src/docker_test_lock.rs` /
+`altavista/docker_test_lock.py`), for the same reason: a lock attached to an open file
+description is released by the kernel the instant a killed process's descriptors close, with no
+cleanup code required. When both slots are already held, `cargo-slot` never blocks silently --
+it writes one line to stderr naming both lock paths and citing question 229 before waiting, and
+one more line reporting the real, measured wait once a slot is acquired. See the script's own
+module doc comment for the full mechanism, including why a two-line `SIGALRM` recipe alone was
+not enough on this host and what actually made it work.
+
 ## Edge track
 
 The edge ingest, its plugin, and the tracker are part of the same Rust workspace ("Building

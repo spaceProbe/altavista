@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""cargo-slot -- take one of two host-wide cargo build slots, then run cargo.
+
+# What this is
+
+`docs/open-questions.md` question 229 (the lead's ruling, round 4): three concurrent
+`cargo`/`cargo test` jobs on this host serialise on one shared target-directory lock plus
+macOS's own per-binary security scan (question 226) -- that is what makes the host slow, not
+memory (the lead measured 64 GB RAM, 78 percent free, while three cargo jobs of one team ran
+concurrently). The fix ratified there is a MECHANISM, not a convention every brief has to
+remember on its own: `scripts/dev/cargo-slot` takes one of exactly two host-wide `flock(2)`
+slots before running `cargo`, blocks (announcing the wait, never silently) if both are held, and
+releases the slot the instant the `cargo` process it ran exits -- by any means, including
+SIGKILL. Every brief uses it from round 5 on, in front of every `cargo` invocation:
+
+    scripts/dev/cargo-slot test -p av-orbital
+    scripts/dev/cargo-slot build --workspace
+    scripts/dev/cargo-slot clippy --workspace --all-targets -- -D warnings
+
+Arguments after `cargo-slot` are passed to `cargo` unchanged; this script's own exit status IS
+cargo's exit status (see "How this releases the slot" below -- it `exec`s into cargo, it does
+not fork a child and relay).
+
+# Why TWO slots, not one
+
+One shared lock (the docker-test lock's own pattern, `crates/av-lockstep/src/
+docker_test_lock.rs` / `altavista/docker_test_lock.py`) would serialise ALL cargo jobs on the
+host to one at a time. Question 229's own measurement says the host tolerates ONE FEWER than
+the three jobs that were slow, not one: two concurrent cargo jobs is the ratified budget. So
+there are two slot files, and a third caller waits for whichever of the two frees first.
+
+# The lock paths
+
+    $HOME/.altavista/locks/cargo-slot-0.lock
+    $HOME/.altavista/locks/cargo-slot-1.lock
+
+Created if absent, `flock(2) LOCK_EX`-locked exclusively -- the identical path family and
+mechanism as `$HOME/.altavista/locks/docker-tests.lock` (`docker_test_lock.rs`'s own module
+doc has the full case for `$HOME` specifically: Colima mounts only `$HOME` into its VM, and
+macOS itself periodically reclaims `/tmp`/`/private/var/tmp`, so a lock outside `$HOME` is
+unusable or transient for exactly the processes that need to agree on it forever). Read that
+module in full before touching this one; this script is the same pattern with a second slot.
+
+Why `flock` and not a PID-file scheme: a `flock` is attached to the *open file description*,
+which the kernel tears down (releasing the lock) the instant a killed process's descriptors are
+closed, with no userspace cleanup code involved at all. A PID file survives a SIGKILL as a
+false "still held" record; `flock` does not have that failure mode. See `docker_test_lock.rs`'s
+own "Why flock, not a lock-file-with-a-PID scheme" section for the full argument -- it applies
+here unchanged.
+
+# How this releases the slot (including on kill)
+
+This script does NOT fork a child and wait on it. After it acquires a slot's `flock`, it calls
+`os.execvp` -- replacing ITS OWN process image with `cargo`'s, in the same PID, keeping the
+locked file descriptor open (explicitly marked inheritable across `exec` first; Python opens
+file descriptors close-on-exec by default since PEP 446, which would otherwise drop the lock
+the instant `cargo` started). There is deliberately no separate wrapper process left running
+beside `cargo` that could be reaped or lost independently of it: whatever becomes of the process
+running `cargo-slot test -p av-orbital` -- it runs to completion, or it is SIGKILLed -- IS what
+happens to the process holding the lock, because after the `exec` they are the same process.
+The kernel releases the `flock` the instant that process's file descriptors close, on any exit
+path, with zero userspace code needing to run. Cargo's own exit status is therefore this
+script's exit status, by construction, not by relaying one process's wait() result into another.
+
+# The wait is announced, never silent (question 229's own citation of the docker-lock pattern)
+
+Two non-blocking attempts happen first, in order: slot 0, then slot 1. If either succeeds,
+that is the WHOLE acquisition -- silent, exactly as an uncontended `cargo` invocation looks
+today. Only when BOTH are already held does this script say anything: ONE line to real stderr,
+unbuffered (a raw `os.write(2, ...)`, never a `print`/`sys.stderr.write` that could sit in a
+buffer -- the same reason `docker_test_lock.rs`'s `write_real_stderr` bypasses libtest's output
+capture), naming both lock paths and citing `docs/open-questions.md` question 229, before this
+script blocks. Once a slot is actually acquired, one more line reports the REAL, MEASURED
+elapsed wait (`time.monotonic()`, never assumed, never the alarm's own tick count) -- so a human
+watching a `cargo` run through this wrapper never mistakes a queued build for a hang.
+
+# The blocking mechanism, and why it is NOT the plain SIGALRM recipe
+
+The obvious approach -- install a `SIGALRM` handler, `signal.alarm(1)`, call the blocking
+`fcntl.flock(fd, LOCK_EX)`, and let the alarm interrupt it with `InterruptedError`/`EINTR` so
+the wait can alternate between the two slots -- was tried and MEASURED not to work on this host
+(macOS, the system `/usr/bin/python3`, 3.9.6) with a plain, non-raising signal handler: the
+alarm fires (confirmed: the handler DOES run), but CPython's own PEP 475 EINTR auto-retry logic
+silently resumes the interrupted `flock()` syscall inside the C implementation of
+`fcntl.flock`, without ever returning control to Python. Measured directly: a waiter process
+with a no-op `SIGALRM` handler, alarming every 1s against a lock held for 4s by another process,
+never raised `InterruptedError` even once and simply returned "ACQUIRED" the moment the holder
+released -- indistinguishable, from the waiter's own code, from a plain blocking call with no
+alarm at all. A busy-poll was therefore never needed and was never measured as a fallback: the
+actual fix is one line different from the naive recipe, not a different mechanism --
+
+    def _on_alarm(signum, frame):
+        raise _AlarmInterrupt()
+
+A signal handler that RAISES bypasses PEP 475's retry (the retry loop only swallows EINTR when
+the Python-level handler returns normally; an exception raised from the handler propagates out
+of the interrupted syscall instead). Measured with this fix: the same 4s-held-lock scenario
+produced three real interrupts at ~1.0s, ~2.0s, ~3.0s (each logged), then acquisition at ~3.98s
+-- the process is parked in the kernel between alarms, not spinning, and alternates cleanly
+between the two slot fds so whichever slot frees first is the one taken. No CPU-burning
+`sleep`-poll loop exists anywhere in this script.
+
+One race this costs, and how it is closed (found in the manager's round-4 review): a Python
+signal handler runs at the next BYTECODE boundary, not inside the syscall, so the alarm can land
+after `flock` has already returned successfully and before `signal.alarm(0)` cancels it. The
+naive `except` then abandons a slot this process already holds and goes on to block on the other
+one -- possibly for a whole other build's duration, while holding a slot it could have used.
+`_blocking_wait_for_either_slot` therefore PROBES rather than assumes: on every interrupt it
+re-attempts the same fd non-blocking, which succeeds both when the lock was in fact just acquired
+(re-locking an fd this process already holds is a no-op) and when it has since become free, and
+only switches slots when that probe genuinely reports the slot still held by someone else.
+
+# Test-only overrides (never read by, or meant for, a production `cargo-slot` invocation)
+
+`AV_CARGO_SLOT_DIR` -- overrides the lock directory (default `$HOME/.altavista/locks`) so a
+test can point this script at a private scratch directory it owns instead of the real,
+host-wide slots (`docs/open-questions.md` question 212(b): a test must never depend on, or
+contend for, the real shared lock).
+
+`AV_CARGO_SLOT_EXE` -- overrides the executable this script `exec`s into (default `cargo`), so
+a test can hold a slot for a controlled, measurable duration with a harmless stand-in command
+instead of a real build. Production use never sets this.
+
+# Hard failures, never a silent no-lock fallback
+
+If `$HOME` is unset (and `AV_CARGO_SLOT_DIR` was not given), or the lock directory/files cannot
+be created or opened, this script fails loudly and exits non-zero before ever running `cargo` --
+the same "refuse, never silently proceed unlocked" rule `docker_test_lock.rs`'s own
+`lock_file_path`/`lock_docker_tests` state and this task's own binding rule restates.
+"""
+from __future__ import annotations
+
+import fcntl
+import os
+import signal
+import sys
+import time
+
+SLOT_COUNT = 2
+DEFAULT_LOCK_SUBDIR = os.path.join(".altavista", "locks")
+SLOT_FILENAME_TEMPLATE = "cargo-slot-{}.lock"
+DIR_OVERRIDE_ENV = "AV_CARGO_SLOT_DIR"
+EXE_OVERRIDE_ENV = "AV_CARGO_SLOT_EXE"
+ALARM_INTERVAL_S = 1
+
+
+def _fail(message: str) -> "None":
+    """Hard error, never a silent no-lock fallback -- see this script's own module doc comment's
+    "Hard failures" section."""
+    _write_real_stderr(f"cargo-slot: {message}\n")
+    sys.exit(1)
+
+
+def _write_real_stderr(text: str) -> None:
+    """A raw, unbuffered write to real stderr (fd 2) -- never `print`/`sys.stderr.write`, which
+    can sit behind Python's own buffering or a test harness's output capture. Mirrors
+    `crates/av-lockstep/src/docker.rs`'s `write_real_stderr` for the identical reason."""
+    os.write(2, text.encode("utf-8"))
+
+
+def _lock_dir() -> str:
+    """`$HOME/.altavista/locks`, or `AV_CARGO_SLOT_DIR` (test-only, see module doc comment) if
+    set. Reading the environment is fine (question 199 forbids only *mutating* it); never falls
+    back to any other directory if `$HOME` is unset -- a lock this script cannot actually reach
+    is worse than a hard failure at the call site."""
+    override = os.environ.get(DIR_OVERRIDE_ENV)
+    if override:
+        return override
+    home = os.environ.get("HOME")
+    if not home:
+        _fail(
+            "$HOME is not set -- cannot locate the cargo-slot lock directory "
+            f"({DEFAULT_LOCK_SUBDIR}); this is a hard error, not a silent no-lock fallback "
+            "(docs/open-questions.md question 229). Set $HOME, or set "
+            f"{DIR_OVERRIDE_ENV} (test-only) to a private directory."
+        )
+    return os.path.join(home, DEFAULT_LOCK_SUBDIR)
+
+
+def _slot_paths(lock_dir: str) -> "list[str]":
+    return [os.path.join(lock_dir, SLOT_FILENAME_TEMPLATE.format(i)) for i in range(SLOT_COUNT)]
+
+
+def _open_slot_fds(lock_dir: str, paths: "list[str]") -> "list[int]":
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+    except OSError as e:
+        _fail(f"could not create the lock directory {lock_dir!r}: {e}")
+    fds = []
+    for path in paths:
+        try:
+            fds.append(os.open(path, os.O_CREAT | os.O_RDWR, 0o644))
+        except OSError as e:
+            _fail(f"could not open/create the cargo-slot lock file {path!r}: {e}")
+    return fds
+
+
+class _AlarmInterrupt(Exception):
+    """Raised from the `SIGALRM` handler installed in `_blocking_wait_for_either_slot` -- see
+    this script's own module doc comment's "The blocking mechanism" section for why the handler
+    must RAISE rather than merely return (a no-op handler's alarm is silently swallowed by
+    CPython's PEP 475 EINTR auto-retry inside `fcntl.flock` itself, measured directly)."""
+
+
+def _blocking_wait_for_either_slot(fds: "list[int]") -> int:
+    """Blocks until EITHER slot's `flock(LOCK_EX)` can be taken, alternating a 1-second
+    `SIGALRM`-bounded blocking attempt between the two slot file descriptors so whichever frees
+    first is the one acquired. Returns the index of the acquired slot. The process is parked in
+    the kernel between alarms (a real blocking syscall), never spinning in a `sleep` loop -- see
+    the module doc comment for the measurement that ruled out the naive no-op-handler recipe."""
+
+    def _on_alarm(signum, frame):
+        raise _AlarmInterrupt()
+
+    old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    try:
+        idx = 0
+        while True:
+            signal.alarm(ALARM_INTERVAL_S)
+            try:
+                fcntl.flock(fds[idx], fcntl.LOCK_EX)
+                signal.alarm(0)
+                return idx
+            except _AlarmInterrupt:
+                # The alarm can land in the window BETWEEN `flock` returning successfully and
+                # `signal.alarm(0)` running -- a Python-level signal handler only runs at the
+                # next bytecode boundary, which is after the syscall has already succeeded. In
+                # that case this process ALREADY HOLDS `fds[idx]`, and blindly moving on to the
+                # other slot would leave it blocking (possibly for a whole other build) on slot
+                # `1 - idx` while holding slot `idx` it could have used. So probe, never assume:
+                # a non-blocking re-attempt on the SAME fd succeeds both when the lock was in
+                # fact just acquired (re-locking an fd this process already holds is a no-op)
+                # and when it has since become free -- either way this process holds it and the
+                # wait is over. No alarm is pending here: it is the one that just fired.
+                try:
+                    fcntl.flock(fds[idx], fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return idx
+                except BlockingIOError:
+                    pass
+                idx = (idx + 1) % SLOT_COUNT
+                continue
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+def _acquire_a_slot(fds: "list[int]", paths: "list[str]") -> int:
+    """Tries slot 0 then slot 1 non-blocking. If both are already held, announces the wait
+    (naming both paths, citing question 229) before blocking, then announces the real, measured
+    elapsed wait once a slot is actually acquired. Never blocks silently."""
+    for idx, fd in enumerate(fds):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return idx
+        except BlockingIOError:
+            continue
+        except OSError as e:
+            _fail(f"flock(LOCK_EX|LOCK_NB) on {paths[idx]!r} failed for a reason other than blocking: {e}")
+
+    _write_real_stderr(
+        "WAITING for a cargo-slot ({} , {}): both host-wide slots are currently held by other "
+        "processes on this host -- blocking until one releases (docs/open-questions.md question "
+        "229: two cargo jobs may run concurrently on this host, not three; a third waits for "
+        "whichever of the two slots frees first)\n".format(paths[0], paths[1])
+    )
+    waited_since = time.monotonic()
+    idx = _blocking_wait_for_either_slot(fds)
+    waited_s = time.monotonic() - waited_since
+    _write_real_stderr(
+        f"ACQUIRED cargo-slot {idx} ({paths[idx]}) after waiting {waited_s:.3f}s\n"
+    )
+    return idx
+
+
+def main() -> "None":
+    args = sys.argv[1:]
+
+    lock_dir = _lock_dir()
+    paths = _slot_paths(lock_dir)
+    fds = _open_slot_fds(lock_dir, paths)
+
+    acquired_idx = _acquire_a_slot(fds, paths)
+
+    # Close every slot fd this process did not acquire -- only the winning lock should be held,
+    # and nothing else needs to travel into the exec'd process.
+    for idx, fd in enumerate(fds):
+        if idx != acquired_idx:
+            os.close(fd)
+
+    acquired_fd = fds[acquired_idx]
+    # Python opens file descriptors close-on-exec by default (PEP 446). Explicitly mark this one
+    # inheritable so the flock it holds survives into the exec'd cargo process -- see the module
+    # doc comment's "How this releases the slot" section.
+    os.set_inheritable(acquired_fd, True)
+
+    exe = os.environ.get(EXE_OVERRIDE_ENV, "cargo")
+    try:
+        os.execvp(exe, [exe] + args)
+    except OSError as e:
+        _fail(f"could not exec {exe!r}: {e}")
+
+
+if __name__ == "__main__":
+    main()
