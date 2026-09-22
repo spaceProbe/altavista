@@ -217,6 +217,30 @@ export const FEASIBILITY_PANEL_ID = 'feasibility';
 // (`attachCommandPanel` below) reference the exact same constant.
 export const COMMAND_PANEL_ID = 'command-console';
 
+// Round 5 (question 228 finding 2, browser half): the Layers panel's own id
+// (web/js/panels/layers_panel.js) -- a user selects a catalogued tile set here and sees
+// it drawn through the shared `LayerManager` (web/js/scene.js's `viewer.layerManager`).
+// Singleton, like every other non-viewport REGISTERED_PANEL_TYPES entry (see that
+// list's own comment); declared here, ahead of REGISTERED_PANEL_TYPES, for the same
+// reason COMMAND_PANEL_ID is.
+//
+// Deliberately NOT threaded into `defaultLayoutTreeForScenario` below (unlike
+// COMMAND_PANEL_ID's own `attachCommandPanel`): doing so unconditionally would change
+// `defaultLayoutTreeForScenario`'s output shape for EVERY scenario, including the
+// ordinary/no-profile case web/js/layout/layout_tree_check.mjs's own
+// "defaultLayoutTreeForScenario.ordinaryScenarioIsByteIdenticalToAttachM264PanelsOf
+// DefaultLayoutForScenario(noRegression)" and "...nullScenarioDegradesToTheOrdinary
+// DefaultRatherThanThrowing" checks (tests/test_viewer_layout.py) pin as an explicit,
+// named regression guard for a DIFFERENT feature (F5.1's sweep default) -- neither of
+// those files is this task's to modify (see this round's own brief). This mirrors
+// FEASIBILITY_PANEL_ID's own precedent exactly (that constant's own comment, above):
+// registered here so the panel is reachable from the pane chooser/header-menu in EVERY
+// profile and EVERY layout ("that alone makes it reachable ... everywhere", this
+// round's own brief, verbatim), without changing any existing default layout's shape.
+// See this task's own report for the full reasoning and what the manager should
+// confirm if default-visibility (not just chooser-reachability) is wanted after all.
+export const LAYERS_PANEL_ID = 'layers';
+
 export const REGISTERED_PANEL_TYPES = [
   { panelId: 'viewport', label: '3D Viewport', factory: true },
   { panelId: MAP_PANEL_ID, label: '2D Map' },
@@ -232,6 +256,9 @@ export const REGISTERED_PANEL_TYPES = [
   // swapped to the command console through the M26.5 chooser/header-menu, exactly like
   // FEASIBILITY_PANEL_ID above already is outside its own one profile-shaped default.
   { panelId: COMMAND_PANEL_ID, label: 'Command Console' },
+  // Round 5: the Layers panel -- see LAYERS_PANEL_ID's own comment above for why this
+  // is chooser-reachable everywhere but not threaded into any default layout.
+  { panelId: LAYERS_PANEL_ID, label: 'Layers' },
 ];
 
 /**

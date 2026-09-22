@@ -39,6 +39,21 @@ import { render as renderFeasibility } from './panels/feasibility_panel.js';
 // that module's own top comment for why, mirroring `openFeasibilitySample` above being
 // the one place THAT panel's one network action lives).
 import { render as renderCommandPanel } from './panels/command_panel.js';
+// Round 5 (question 228 finding 2, browser half): the "Layers" panel. Like
+// command_panel.js above, this panel never fetches and never holds state of its own --
+// this file owns the one `GET /api/catalog/tilesets` fetch, the real
+// `GatewayImageryLayerAdapter` construction/registration on the ONE shared
+// `viewer.layerManager` (never a second manager, never a direct fetch that bypasses
+// it), and reads that manager's own counters for the panel's "streaming budget"
+// section. `layerIdForManifest` is imported (not re-derived here) so app.js and the
+// panel's own pure functions/checks agree on the exact same stable, per-tile-set layer
+// id -- the identical "one place a format is computed, never two independently-typed
+// copies" discipline `web/js/layers/tileset_manifest.js`'s own module doc states for
+// `manifestTileKey`.
+import { render as renderLayers, layerIdForManifest } from './panels/layers_panel.js';
+// `GatewayImageryLayerAdapter` -- the only `web/js/layers/` import in this file for
+// this feature (the panel itself never imports `layers/`, per its own top comment).
+import { GatewayImageryLayerAdapter } from './layers/index.js';
 
 const SEC_PER_DAY = 86400;
 const SPEEDS = [
@@ -62,6 +77,9 @@ const els = {
   feasibilityPanel: $('panel-feasibility'),
   // R3.5b: the command console panel's pane content (index.html's #panel-command-console).
   commandPanel: $('panel-command-console'),
+  // Round 5 (question 228 finding 2): the Layers panel's pane content
+  // (index.html's #panel-layers).
+  layersPanel: $('panel-layers'),
 };
 
 // M26.4: the console/log panel accumulates a message log across the whole page lifetime
@@ -332,6 +350,99 @@ async function authorizeCommand(commandId, token) {
   if (result.ok) refreshCommandDecisionAndTrail(commandId); // the trail just grew by one transition
 }
 
+// ---------------------------------------------------------------- Round 5: Layers panel
+// All state layers_panel.js's render() needs, owned here (same split as
+// `commandPanelState` above). `layerStates` is keyed by `manifestSha256` (never by the
+// derived layer id -- the panel's own rows are keyed by manifestSha256 too, per the
+// catalog route's own wire shape), one entry per tile set that has EVER been toggled on
+// this page load; a tile set with no entry renders as `'off'` (layers_panel.js's own
+// `layerStateFor`).
+const layersState = {
+  tileSets: null, catalogError: null, loading: false, layerStates: {},
+};
+
+function renderLayersPanelNow() {
+  const lm = viewer.layerManager;
+  const budget = lm ? {
+    residentBytes: lm.residentBytes,
+    memoryBudgetBytes: lm.memoryBudgetBytes,
+    deferredCount: lm.deferredCount,
+    failedCount: lm.failedCount,
+    failureNames: lm.failureNames(),
+  } : null;
+  renderLayers(els.layersPanel, {
+    tileSets: layersState.tileSets,
+    catalogError: layersState.catalogError,
+    loading: layersState.loading,
+    layerStates: layersState.layerStates,
+    budget,
+    onToggleLayer: toggleGatewayLayer,
+    onRefreshCatalog: refreshTileSetCatalog,
+  });
+}
+
+// GET /api/catalog/tilesets -- deliberately NEVER called automatically (see
+// layers_panel.js's own top comment, "why the catalog is NOT auto-fetched": an eager
+// fetch of an optionally-configured route at page boot is exactly the defect
+// `renderCommandPanelNow()`'s own doc comment records for `/api/command/*`, and the
+// catalog route is unconfigured by the identical `python -m altavista serve` default).
+// Only ever invoked by the panel's own "Refresh catalog" button, a real user click.
+async function refreshTileSetCatalog() {
+  layersState.loading = true;
+  renderLayersPanelNow();
+  try {
+    const resp = await fetch('/api/catalog/tilesets');
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null);
+      const message = body && typeof body.detail === 'string' ? body.detail : `HTTP ${resp.status}`;
+      layersState.tileSets = null;
+      layersState.catalogError = { status: resp.status, message };
+    } else {
+      const body = await resp.json();
+      layersState.tileSets = Array.isArray(body && body.tileSets) ? body.tileSets : [];
+      layersState.catalogError = null;
+    }
+  } catch (e) {
+    layersState.tileSets = null;
+    layersState.catalogError = { status: 0, message: e.message };
+  }
+  layersState.loading = false;
+  renderLayersPanelNow();
+}
+
+// The toggle: `addLayer` on, `removeLayer` off, ALWAYS through `viewer.layerManager` --
+// the one shared manager (web/js/scene.js's `Viewer` constructor) -- never a second
+// manager, never a direct fetch that bypasses it. `layer.fetchManifest()` is awaited to
+// completion BEFORE `addLayer` (gateway_imagery_layer.js's own non-negotiable
+// requirement: round 4's budget invariant depends on the manifest's real per-tile
+// `size_bytes` being available from the first `plan()` call, not the fallback
+// estimate). A failure at any point (the manifest fetch itself, a malformed manifest)
+// is caught and surfaced through `layerStates` -- typed name and message both kept
+// (never swallowed, per this task's own brief) -- rather than left as an unhandled
+// rejection or a silently-stuck 'loading' row.
+async function toggleGatewayLayer(row) {
+  const layerId = layerIdForManifest(row.manifestSha256);
+  const current = layersState.layerStates[row.manifestSha256];
+  if (current && current.status === 'on') {
+    viewer.layerManager.removeLayer(layerId);
+    delete layersState.layerStates[row.manifestSha256];
+    renderLayersPanelNow();
+    return;
+  }
+  if (current && current.status === 'loading') return; // already in flight -- ignore a double click
+  layersState.layerStates[row.manifestSha256] = { status: 'loading', errorMessage: null };
+  renderLayersPanelNow();
+  try {
+    const layer = new GatewayImageryLayerAdapter({ id: layerId, manifestSha256: row.manifestSha256 });
+    await layer.fetchManifest();
+    viewer.layerManager.addLayer(layer);
+    layersState.layerStates[row.manifestSha256] = { status: 'on', errorMessage: null };
+  } catch (e) {
+    layersState.layerStates[row.manifestSha256] = { status: 'error', errorMessage: `${e.name || 'Error'}: ${e.message}` };
+  }
+  renderLayersPanelNow();
+}
+
 // Initial (empty) scaffold only -- NO fetch at page boot. Most profiles/test servers
 // run with no command service configured at all (`--command-endpoint` is optional,
 // `altavista/command_client.py`'s own module doc), and this panel is only ever in the
@@ -345,11 +456,15 @@ async function authorizeCommand(commandId, token) {
 // command service.) `loadScenario()` below is the one real trigger: it refreshes
 // proposals/counters exactly when an execution-profile scenario actually loads.
 renderCommandPanelNow();
+// Round 5: the Layers panel's own initial (empty, unfetched) scaffold -- same "no fetch
+// at page boot" posture as renderCommandPanelNow() above, for the identical reason.
+renderLayersPanelNow();
 
 let lastFrame = performance.now();
 let lastClockSend = 0;
 let suppressSync = false;
 let lastMapRenderWall = 0; // M26.4: throttles the 2D map panel's current-position redraw
+let lastLayersRenderWall = 0; // Round 5: throttles the Layers panel's budget-counter redraw
 
 // ---------------------------------------------------------------- network
 const net = new Net({
@@ -834,6 +949,19 @@ function frame(now) {
     }
   } else {
     viewer.update(0);
+  }
+  // Round 5: refresh the Layers panel's "resident bytes against the budget" /
+  // deferred / failed counters at ~2 Hz, the same throttle the 2D map panel's own
+  // current-position redraw uses above and for the identical reason -- these numbers
+  // change every tick `viewer.layerManager.update()` actually runs (driven by the
+  // globe or the 3D Tiles overlay, see web/js/scene.js's own update()), so redrawing
+  // on every requestAnimationFrame tick would be pure waste with no visible benefit.
+  // Runs regardless of whether a scenario is loaded -- `viewer.layerManager` exists
+  // for the whole lifetime of `viewer` (web/js/scene.js's constructor), not only once
+  // a scenario streams in.
+  if (now - lastLayersRenderWall > 500) {
+    lastLayersRenderWall = now;
+    renderLayersPanelNow();
   }
   // Question 169: every viewport pane's title derives from the frame it is ACTUALLY
   // showing right now, never a static label baked into the layout -- cheap to call

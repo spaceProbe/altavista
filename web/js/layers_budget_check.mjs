@@ -96,7 +96,7 @@
 // cap only, generous relative to what 32 tiles at `MAX_CONCURRENT_LOADS` concurrency
 // actually need (`settled` in the printed JSON says whether the real condition was
 // reached, exactly like `web/js/layers_stream_check.mjs`'s own `settledBeforeMaxFrames`).
-import { LayerManager, compareAdmission } from './layers/layer.js';
+import { LayerManager, compareAdmission, globalKeyFor } from './layers/layer.js';
 
 // -------------------------------------------------------------------- deterministic clock
 // Design constraint g ("no clocks slept, ever"): a plain incrementing counter, never a
@@ -567,6 +567,168 @@ const phase3Recoverable = await runReconcilePhase('R3a', 10);
 // 3b: 20 * 3,147,060 = 62,941,200 > 41,943,040, everything still wanted -- irreconcilable, must honestly soft-violate.
 const phase3Irreconcilable = await runReconcilePhase('R3b', 20);
 
+// ------------------------------------------------------------------------- phase 4
+// Round 5, this task's item D (docs/open-questions.md question 229: "removeLayer is
+// added with the panel"): `LayerManager.removeLayer` (layer.js line ~403) was added
+// in round 4 alongside the panel work and is already called by web/js/globe.js, but
+// no test anywhere pinned its own documented semantics before this phase. Round 5's
+// panel task depends on it being correct. This phase drives the REAL
+// `LayerManager.removeLayer` and pins, against its own doc comment (layer.js, right
+// above the method), all four things that comment claims:
+//   1. pending loads belonging to the removed layer are aborted, `pendingBytes` is
+//      debited by exactly their byteCost, and `cancelledCount` moves;
+//   2. resident entries belonging to the removed layer are evicted through
+//      `_evictEntry` -- so the layer's own `release(localKey)` is called and
+//      `evictedCount` moves, never a bare `Map.delete`;
+//   3. `_failed`-blacklisted globalKeys belonging to the removed layer's id are
+//      dropped, so a FRESH layer registered under the SAME id afterward starts clean
+//      -- proven directly below (`freshLayerAdmittedF`), not merely inferred from the
+//      blacklist Map's own contents;
+//   4. none of the above touches any OTHER registered layer's pending/resident/
+//      failed entries; and, separately, that `removeLayer` on an id that was never
+//      registered is a genuine no-op (the doc comment's own explicit clause).
+//
+// Own isolated manager/layers (never touching phase 1/2/3's own instances): two
+// layers share one manager -- `rl-target` (the one this phase removes) and
+// `rl-other` (the control that must come out untouched) -- exactly this file's
+// module docstring's own "one manager, one budget" design, applied here to prove a
+// SECOND layer's state survives the first one's removal.
+class RemoveLayerProbeFailure extends Error {
+  constructor(msg) { super(msg); this.name = 'RemoveLayerProbeFailure'; }
+}
+
+/** A `Layer` whose `load()` rejects immediately (`RemoveLayerProbeFailure`) for any
+ * request key in `failKeys`, and otherwise queues indefinitely until this harness's
+ * own `completeOldest` resolves it -- the same FIFO/abort-respecting shape as
+ * `makeReconcileLayer`/`makeBudgetLayer`, above, plus `released` (an ordered log of
+ * every `localKey` this layer's own `release()` was called with -- phase 4's own
+ * proof that eviction goes through `_evictEntry`, which is the only thing in
+ * layer.js that ever calls `release()`, rather than a bare Map delete that would
+ * never call it at all).
+ *
+ * `plan()` returns THIS layer's own closed-over `requests` (set by `setRequests`,
+ * below), never `view` -- unlike every other stub in this file, which shares one
+ * `view.requests` array identically across every registered layer (fine when every
+ * layer wants the SAME keys, which is what those scenarios model). Phase 4 needs
+ * `rl-target` and `rl-other` to want two DIFFERENT, disjoint sets of keys at once
+ * (its own control requires a layer whose keys `removeLayer` must NOT touch), so
+ * each stub here plans only what this harness explicitly told it to. */
+function makeRemoveLayerProbeLayer(id, failKeys) {
+  const inflight = [];
+  const released = [];
+  let requests = [];
+  return {
+    layer: {
+      id,
+      plan(_view) { return requests; },
+      load(request, signal) {
+        return new Promise((resolve, reject) => {
+          if (failKeys.has(request.key)) { reject(new RemoveLayerProbeFailure(`${id} ${request.key}`)); return; }
+          if (signal.aborted) { reject(signal.reason); return; }
+          const entry = { request, resolve };
+          inflight.push(entry);
+          signal.addEventListener('abort', () => {
+            const idx = inflight.indexOf(entry);
+            if (idx >= 0) inflight.splice(idx, 1);
+            reject(signal.reason);
+          }, { once: true });
+        });
+      },
+      release(localKey) { released.push(localKey); },
+    },
+    setRequests(reqs) { requests = reqs; },
+    released,
+    completeOldest(n) {
+      const batch = inflight.splice(0, Math.max(0, n));
+      for (const entry of batch) entry.resolve({ kind: 'remove-layer-probe-stub', key: entry.request.key });
+      return batch.length;
+    },
+  };
+}
+
+const RL_REQ = (key, byteCost) => ({ key, level: 0, sseError: 10, viewDistanceM: 10, byteCost });
+
+async function runRemoveLayerPhase() {
+  const target = makeRemoveLayerProbeLayer('rl-target', new Set(['F']));
+  const other = makeRemoveLayerProbeLayer('rl-other', new Set(['OF']));
+  const mgr = new LayerManager({ memoryBudgetBytes: MEMORY_BUDGET_BYTES, now: fakeNow, maxConcurrentLoads: MAX_CONCURRENT_LOADS });
+  mgr.addLayer(target.layer);
+  mgr.addLayer(other.layer);
+
+  // Step 1: one resident-to-be key per layer ('R'/'OR'), admitted and loaded.
+  target.setRequests([RL_REQ('R', 1000)]);
+  other.setRequests([RL_REQ('OR', 1000)]);
+  mgr.update({});
+  target.completeOldest(1);
+  other.completeOldest(1);
+  await flushMicrotasks();
+
+  // Step 2: keep R/OR wanted, add each layer's own fail key ('F'/'OF') -- each
+  // layer's own failKeys rejects its own on THIS SAME update()'s admission,
+  // blacklisting it in that layer's own `_failed` entry once the rejection
+  // microtask settles.
+  target.setRequests([RL_REQ('R', 1000), RL_REQ('F', 1000)]);
+  other.setRequests([RL_REQ('OR', 1000), RL_REQ('OF', 1000)]);
+  mgr.update({});
+  await flushMicrotasks();
+
+  // Step 3: keep R/OR/F/OF wanted (F/OF MUST stay in this step's requests too, or
+  // update()'s own failure-memory upkeep -- "a blacklisted key is forgotten the
+  // moment it drops out of the wanted set", layer.js's constructor doc comment --
+  // would clear them before removeLayer ever got a chance to), and add each layer's
+  // own pending key ('P'/'OP'), whose loads this harness deliberately never
+  // completes before removeLayer runs below -- they must still be genuinely in
+  // flight at that point.
+  target.setRequests([RL_REQ('R', 1000), RL_REQ('F', 1000), RL_REQ('P', 2000)]);
+  other.setRequests([RL_REQ('OR', 1000), RL_REQ('OF', 1000), RL_REQ('OP', 2000)]);
+  mgr.update({});
+
+  const snapshot = () => ({
+    residentHasR: mgr.resident.has(globalKeyFor('rl-target', 'R')),
+    residentHasOR: mgr.resident.has(globalKeyFor('rl-other', 'OR')),
+    pendingHasP: mgr.pending.has(globalKeyFor('rl-target', 'P')),
+    pendingHasOP: mgr.pending.has(globalKeyFor('rl-other', 'OP')),
+    failedHasF: mgr._failed.has(globalKeyFor('rl-target', 'F')),
+    failedHasOF: mgr._failed.has(globalKeyFor('rl-other', 'OF')),
+    pendingBytes: mgr.pendingBytes,
+    residentBytes: mgr.residentBytes,
+    cancelledCount: mgr.cancelledCount,
+    evictedCount: mgr.evictedCount,
+    targetReleased: target.released.slice(),
+    otherReleased: other.released.slice(),
+    layersRegistered: [...mgr._layers.keys()].sort(),
+  });
+
+  const before = snapshot();
+  mgr.removeLayer('rl-target');
+  const after = snapshot();
+
+  // The doc comment's own explicit clause: "No-op if `id` is not registered" -- a
+  // second call, on an id that was never registered, must change nothing at all.
+  mgr.removeLayer('rl-nonexistent-id');
+  const afterNoopOnUnknownId = snapshot();
+
+  // "a future layer under the same id starts clean, never inheriting a stale
+  // blacklist" (layer.js's own doc comment on removeLayer): register a FRESH layer
+  // object under 'rl-target' (never the removed one) whose OWN failKeys is empty,
+  // and prove 'F' is admitted this time -- if the old blacklist entry had survived,
+  // update()'s own `if (this._failed.has(r.globalKey)) continue;` would skip
+  // admitting it forever, regardless of what this fresh layer itself declares.
+  const freshTarget = makeRemoveLayerProbeLayer('rl-target', new Set());
+  freshTarget.setRequests([RL_REQ('F', 1000)]);
+  mgr.addLayer(freshTarget.layer);
+  // `other` is still registered and must keep declaring its own last wanted set
+  // (its own 'OR'/'OF'/'OP') here too -- otherwise this update() would see other's
+  // plan() as empty and treat OR/OF/OP as dropped out of the wanted set, which is
+  // not what this final step is trying to prove.
+  mgr.update({});
+  const freshLayerAdmittedF = mgr.pending.has(globalKeyFor('rl-target', 'F'));
+
+  return { before, after, afterNoopOnUnknownId, freshLayerAdmittedF };
+}
+
+const phase4RemoveLayer = await runRemoveLayerPhase();
+
 // --------------------------------------------------------------------- overall (both phases)
 // The REQUIRED top-level numbers (see this file's own module docstring and tests/
 // test_viewer_layers_budget.py) are computed over the WHOLE run (both phases
@@ -663,6 +825,10 @@ const result = {
     recoverable: phase3Recoverable,
     irreconcilable: phase3Irreconcilable,
   },
+  // Round 5, item D: LayerManager.removeLayer's own pinned semantics -- see this
+  // file's own "phase 4" section, above, for the full scenario. Its own isolated
+  // manager, never mixed with phase 1/2/3's.
+  phase4RemoveLayer,
   // Distinct tiles ever loaded/cancelled/evicted/failed, over the WHOLE run (module
   // docstring's own required report) -- cancelledCount/failedCount are expected 0
   // (this harness never lets a request outlive the SAME static wanted set it was

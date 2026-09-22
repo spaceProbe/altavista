@@ -24,7 +24,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "dea163a1bad929b53c27498e182dadc62ef0f63cb6a63ac73dd1ac31bf6cded2"
+          "content": "04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a"
         }
       ],
       "name": "cfs-image",
@@ -41,9 +41,9 @@
       "type": "container",
       "version": "altavista-cfs-lockstep:local"
     },
-    "timestamp": "2026-09-15T12:43:32Z"
+    "timestamp": "2026-09-22T00:59:11Z"
   },
-  "serialNumber": "urn:uuid:ea6bc9e8-cee5-a96f-a8bb-10f98c963a92",
+  "serialNumber": "urn:uuid:9827b112-e498-c09a-04a1-e766262d9b80",
   "specVersion": "1.5",
   "version": 1
 }

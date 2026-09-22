@@ -471,6 +471,115 @@ def test_reconciliation_irreconcilable_case_is_reported_honestly(budget_data):
     assert p["evictedCount"] == 0, "nothing was evictable (every tile stays wanted), so nothing should have been evicted"
 
 
+# ------------------------------------------------------------- LayerManager.removeLayer (round 5, item D)
+def test_remove_layer_setup_is_sound(budget_data):
+    """Sanity-check phase 4's own setup, before trusting anything `removeLayer`
+    itself did: both layers' resident/pending/failed keys must be present exactly as
+    the scenario intends, BEFORE `removeLayer` runs. A setup bug here (e.g. a shared
+    `view.requests` object letting one layer's plan() see the other's keys, the exact
+    bug an earlier draft of this harness had -- see web/js/layers_budget_check.mjs's
+    own `makeRemoveLayerProbeLayer` doc comment) would make every assertion below
+    pass or fail for the wrong reason.
+    """
+    before = budget_data["phase4RemoveLayer"]["before"]
+    assert before["residentHasR"] is True and before["residentHasOR"] is True
+    assert before["pendingHasP"] is True and before["pendingHasOP"] is True
+    assert before["failedHasF"] is True and before["failedHasOF"] is True
+    assert before["pendingBytes"] == 4000  # P (2000) + OP (2000)
+    assert before["residentBytes"] == 2000  # R (1000) + OR (1000)
+    assert before["cancelledCount"] == 0 and before["evictedCount"] == 0
+    assert before["targetReleased"] == [] and before["otherReleased"] == []
+    assert before["layersRegistered"] == ["rl-other", "rl-target"]
+
+
+def test_remove_layer_aborts_its_own_pending_loads(budget_data):
+    """Doc comment claim 1: pending loads belonging to the removed layer are
+    aborted, `pendingBytes` is debited by exactly their byteCost, and
+    `cancelledCount` moves. A `removeLayer` that only did `this._layers.delete(id)`
+    (a plausible naive implementation) would fail every assertion here: 'P' would
+    stay in `pending` forever, `pendingBytes` would stay at 4000, and
+    `cancelledCount` would stay 0.
+    """
+    before, after = budget_data["phase4RemoveLayer"]["before"], budget_data["phase4RemoveLayer"]["after"]
+    assert after["pendingHasP"] is False, "the removed layer's own pending load ('P') must be gone"
+    assert after["pendingBytes"] == before["pendingBytes"] - 2000 == 2000, (
+        "pendingBytes must be debited by EXACTLY P's byteCost (2000), leaving only "
+        "OP's own 2000"
+    )
+    assert after["cancelledCount"] == before["cancelledCount"] + 1 == 1
+
+
+def test_remove_layer_evicts_its_own_resident_entries_through_evict_entry(budget_data):
+    """Doc comment claim 2: resident entries belonging to the removed layer are
+    evicted through `_evictEntry` -- so the layer's own `release(localKey)` is
+    called and `evictedCount` moves, never a bare `Map` delete (which would drop the
+    entry from `resident` but never call `release()`, leaking whatever the layer's
+    own release() is responsible for freeing -- a GPU texture, an AbortController,
+    etc). `targetReleased == ['R']` is the direct proof `release()` was actually
+    invoked, with the correct LOCAL key (not the globalKey) -- a naive
+    `this.resident.delete(globalKey)` would leave `targetReleased` empty forever.
+    """
+    before, after = budget_data["phase4RemoveLayer"]["before"], budget_data["phase4RemoveLayer"]["after"]
+    assert after["residentHasR"] is False, "the removed layer's own resident entry ('R') must be gone"
+    assert after["residentBytes"] == before["residentBytes"] - 1000 == 1000, (
+        "residentBytes must be debited by EXACTLY R's byteCost (1000), leaving only "
+        "OR's own 1000"
+    )
+    assert after["evictedCount"] == before["evictedCount"] + 1 == 1
+    assert after["targetReleased"] == ["R"], (
+        f"expected the removed layer's own release() to have been called with "
+        f"EXACTLY its own local key 'R' -- got {after['targetReleased']}"
+    )
+
+
+def test_remove_layer_drops_its_own_failed_blacklist_entries(budget_data):
+    """Doc comment claim 3: `_failed`-blacklisted globalKeys belonging to the removed
+    layer's id are dropped. Checked two ways: the blacklist Map itself
+    (`failedHasF`), and -- the stronger, load-bearing proof -- that a FRESH layer
+    registered under the SAME id afterward is actually able to load that same key,
+    which only a real blacklist-drop (not just a Map-contents illusion) can produce.
+    """
+    after = budget_data["phase4RemoveLayer"]["after"]
+    assert after["failedHasF"] is False, "the removed layer's own blacklist entry ('F') must be dropped"
+    assert budget_data["phase4RemoveLayer"]["freshLayerAdmittedF"] is True, (
+        "a FRESH layer registered under the SAME id ('rl-target') afterward must be "
+        "able to have 'F' admitted -- a surviving blacklist entry would make "
+        "update()'s own `if (this._failed.has(r.globalKey)) continue;` skip it "
+        "forever, regardless of what the fresh layer's own load() would have done"
+    )
+
+
+def test_remove_layer_never_touches_another_registered_layer(budget_data):
+    """Doc comment claim 4 (the control): none of `removeLayer`'s bookkeeping may
+    touch a DIFFERENT registered layer's pending/resident/failed entries.
+    `rl-other`'s own 'OR' (resident)/'OP' (pending)/'OF' (failed) must all still be
+    exactly as they were, and `otherReleased` must stay empty (`rl-other`'s own
+    `release()` must never be called by removing a DIFFERENT layer).
+    """
+    before, after = budget_data["phase4RemoveLayer"]["before"], budget_data["phase4RemoveLayer"]["after"]
+    assert after["residentHasOR"] is True
+    assert after["pendingHasOP"] is True
+    assert after["failedHasOF"] is True
+    assert after["otherReleased"] == before["otherReleased"] == []
+    assert after["layersRegistered"] == ["rl-other"], (
+        "expected only 'rl-target' to have been removed from the manager's own "
+        "registered-layer set"
+    )
+
+
+def test_remove_layer_on_an_unregistered_id_is_a_genuine_noop(budget_data):
+    """The doc comment's own explicit clause: "No-op if `id` is not registered." A
+    second `removeLayer` call, on an id that was never registered, must leave every
+    counter and every layer's own state byte-for-byte identical to right before it.
+    """
+    after = budget_data["phase4RemoveLayer"]["after"]
+    noop = budget_data["phase4RemoveLayer"]["afterNoopOnUnknownId"]
+    assert noop == after, (
+        f"removeLayer() on an unregistered id changed manager state -- before: "
+        f"{after}, after: {noop}"
+    )
+
+
 # ------------------------------------------------------------------------------ report
 def test_budget_report(budget_data, capsys):
     """Not a correctness assertion -- prints the measured numbers so `pytest -q -s`

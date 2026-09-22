@@ -44,6 +44,7 @@ unblocking) -- never a fixed-duration `time.sleep` guess.
 from __future__ import annotations
 
 import os
+import select
 import subprocess
 import sys
 from pathlib import Path
@@ -285,3 +286,186 @@ def test_lock_path_matches_the_documented_home_relative_convention():
     from altavista.docker_test_lock import lock_path
 
     assert lock_path() == Path(os.environ["HOME"]) / ".altavista" / "locks" / "docker-tests.lock"
+
+
+# --------------------------------------------------------------- re-entrancy (heavy round 5)
+# `flock(2)` attaches its lock to the OPEN FILE DESCRIPTION, so a nested acquisition that
+# `os.open`s the path a second time blocks on a lock its OWN process already holds -- forever.
+# Measured on this host before the fix: a `tests/test_tiles_container.py` run sat 110 minutes
+# with 1.3s of CPU and no children, blocked in `flock` with two descriptors on the lock file,
+# while another team's docker-gated test and a workspace `cargo test` queued behind it.
+# `tests/heavy_stack.py` wraps two different fixtures in this context manager, and a test
+# needing both holds both at once -- ordinary, legitimate nesting.
+
+# Runs inside a CHILD process: two NESTED `lock_docker_tests()` blocks. Before the
+# re-entrancy fix this child never reaches "NESTED_OK" -- it blocks in `flock` forever and the
+# `timeout=` below fires, which is exactly how this test would have caught the defect.
+_NESTED_SCRIPT = """
+from altavista.docker_test_lock import lock_docker_tests
+
+with lock_docker_tests():
+    with lock_docker_tests():
+        print("NESTED_OK", flush=True)
+"""
+
+# Runs inside a CHILD process: takes the lock, enters AND LEAVES an inner block, then
+# announces and waits. While it waits it is still inside the OUTER block, so the lock must
+# still be held against other processes -- a re-entrancy counter that released on the INNER
+# exit would hand the lock away early, which is a worse bug than the deadlock it replaced.
+_INNER_RELEASE_SCRIPT = """
+import sys
+from altavista.docker_test_lock import lock_docker_tests
+
+with lock_docker_tests():
+    with lock_docker_tests():
+        pass
+    print("INNER_EXITED", flush=True)
+    sys.stdin.readline()
+print("OUTER_RELEASED", flush=True)
+"""
+
+
+# Runs inside a CHILD process (private `$HOME`, like every other child here): two THREADS
+# each take `lock_docker_tests()` around a short critical section and append enter/exit
+# markers to one list. Same-process cross-thread exclusion is a REAL property of `flock` --
+# a second, independently-opened descriptor blocks even within one process, which the Rust
+# half measures in
+# `docker_test_lock::tests::flock_serializes_two_threads_of_the_same_process_on_separate_open_file_descriptions`
+# -- and the re-entrancy counter must not quietly take it away. It does not, because the
+# counter is thread-local: a process-global one would let thread B see thread A's non-zero
+# depth, skip locking entirely, and run its critical section concurrently.
+# Thread B is started only AFTER thread A is observed inside its critical section, so B's
+# check of the counter is guaranteed to happen while A's depth is non-zero. Ordering this
+# explicitly is what gives the test teeth: an earlier draft started both threads at once and
+# PASSED against a deliberately process-global counter, because B usually reached the check
+# before A had finished acquiring. A race that usually goes the right way proves nothing.
+_TWO_THREADS_SCRIPT = """
+import threading, time
+from altavista.docker_test_lock import lock_docker_tests
+
+events = []
+events_lock = threading.Lock()
+a_inside = threading.Event()
+b_done = threading.Event()
+
+def record(s):
+    with events_lock:
+        events.append(s)
+
+def worker_a():
+    with lock_docker_tests():
+        record("enter-a")
+        a_inside.set()
+        # Hold well past the point where B, if it were not properly excluded, would have
+        # entered and left its own section.
+        b_done.wait(timeout=2.0)
+        record("exit-a")
+
+def worker_b():
+    with lock_docker_tests():
+        record("enter-b")
+        record("exit-b")
+    b_done.set()
+
+ta = threading.Thread(target=worker_a)
+ta.start()
+assert a_inside.wait(timeout=30), "thread A never entered its critical section"
+tb = threading.Thread(target=worker_b)
+tb.start()
+for t in (ta, tb):
+    t.join(timeout=30)
+assert not ta.is_alive() and not tb.is_alive(), "a thread never finished -- deadlock"
+
+# Serialised iff A's section closes before B's opens.
+ok = events == ["enter-a", "exit-a", "enter-b", "exit-b"]
+print("SERIALISED" if ok else "INTERLEAVED:" + ",".join(events), flush=True)
+"""
+
+
+def test_two_threads_of_one_process_still_serialise_despite_the_reentrancy_counter(tmp_path):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+
+    result = subprocess.run(
+        [sys.executable, "-c", _TWO_THREADS_SCRIPT],
+        cwd=REPO_ROOT,
+        env=_child_env(private_home),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.stdout.strip() == "SERIALISED", (
+        "the re-entrancy counter must be THREAD-local: a process-global one lets a second "
+        "thread see the first thread's depth, skip its own flock, and run concurrently "
+        f"(stdout={result.stdout!r})"
+    )
+
+
+def test_nested_acquisition_in_one_process_does_not_deadlock(tmp_path):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+
+    result = subprocess.run(
+        [sys.executable, "-c", _NESTED_SCRIPT],
+        cwd=REPO_ROOT,
+        env=_child_env(private_home),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.stdout.strip() == "NESTED_OK", (
+        "a nested lock_docker_tests() must be counted, not re-acquired -- re-acquiring "
+        "opens a second file description and blocks on this process's own flock forever "
+        f"(stdout={result.stdout!r} stderr={result.stderr!r})"
+    )
+
+
+def test_leaving_an_inner_block_does_not_release_the_lock_for_other_processes(tmp_path):
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _INNER_RELEASE_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdin is not None
+        # Bounded, never a bare readline(): against a NON-re-entrant lock this child
+        # deadlocks inside its inner block and never writes a line, and a bare readline()
+        # would hang this test instead of failing it. A test that hangs on the defect it
+        # exists to catch reports nothing.
+        ready, _, _ = select.select([holder.stdout], [], [], 30)
+        assert ready, (
+            "the holder child never reached its inner-block exit within 30s -- it is "
+            "deadlocked on its own flock, which is exactly the non-re-entrant defect"
+        )
+        first = holder.stdout.readline().strip()
+        assert first == "INNER_EXITED", f"child did not reach the inner exit: {first!r}"
+
+        # Still inside the OUTER block: another process must NOT be able to take the lock.
+        assert _run_probe_child(env) == "BLOCKED", (
+            "leaving an INNER lock_docker_tests() block released the host-wide lock while "
+            "the outer block was still open -- only the outermost exit may release it"
+        )
+
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "OUTER_RELEASED"
+        holder.wait(timeout=30)
+
+        # And once the OUTER block has exited, it really is free again.
+        assert _run_probe_child(env) == "ACQUIRED"
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            drain_after_terminate(holder)

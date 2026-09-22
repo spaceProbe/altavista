@@ -84,6 +84,7 @@ import contextlib
 import fcntl
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
@@ -92,6 +93,37 @@ from typing import Iterator
 # why crates/av-lockstep/src/docker_test_lock.rs's LOCK_RELATIVE_PATH must name the identical
 # path.
 _LOCK_RELATIVE_PATH = Path(".altavista") / "locks" / "docker-tests.lock"
+
+
+class _HeldState(threading.local):
+    """This THREAD's current hold on the lock. See `lock_docker_tests`'s "Re-entrancy".
+
+    `depth` counts nested `with lock_docker_tests():` blocks on THIS thread: 0 when this
+    thread holds nothing, 1 while its outermost block is open, more while nested ones are.
+
+    **Thread-local, deliberately, and this is the load-bearing detail.** `flock` on a
+    second, independently-opened descriptor in the SAME process genuinely does block against
+    the first -- the Rust half measures exactly that in
+    `docker_test_lock::tests::flock_serializes_two_threads_of_the_same_process_on_separate_open_file_descriptions`,
+    and `crate::docker::prune_stale_test_resources` takes a `&DockerTestLock` precisely so
+    that same-process serialization is never accidentally relied on to nest. So
+    same-process, cross-THREAD exclusion is a real property that this module must keep. A
+    process-global counter would destroy it: a second thread would see a non-zero depth,
+    conclude the lock was already held on its behalf, and walk straight into Docker while
+    the first thread was still using it. Per-thread, each thread takes its own real `flock`
+    and the two serialize exactly as before; only genuine nesting ON ONE THREAD is counted.
+
+    The descriptor itself is deliberately NOT stored here. The outermost `lock_docker_tests`
+    frame owns it in a local and closes it in its own `finally`, which is what preserves the
+    "released by the kernel on process death, with no userspace code involved" property this
+    module's own "Why `flock`, not a PID file" section depends on. A copy here would be a
+    second reference that nothing reads and that could only ever disagree with the real one.
+    """
+
+    depth: int = 0
+
+
+_state = _HeldState()
 
 
 def lock_path() -> Path:
@@ -123,7 +155,54 @@ def lock_docker_tests() -> Iterator[None]:
     never a shared Python "prune everything labeled" function. So there is no second function
     here whose signature needs to demand a token; the ONE rule is the one stated above: hold
     this context manager for the test's entire body.
+
+    # Re-entrancy (heavy round 5) -- why this is counted rather than re-acquired
+
+    `flock(2)` attaches its lock to the OPEN FILE DESCRIPTION, which is exactly why this
+    module chose it (see "Why `flock`, not a PID file" above). The same property makes a
+    naive nested acquisition a guaranteed self-deadlock: an inner call would `os.open` a
+    SECOND description of the same path and then block in `LOCK_EX` against a lock THIS
+    process already holds on the first one -- forever, because nothing will ever release it.
+
+    That is not hypothetical. It was measured on this host: a run of
+    `tests/test_tiles_container.py` sat for 110 minutes with 1.3 seconds of CPU and no
+    children, `sample` showing it blocked in `flock`, with TWO descriptors open on this
+    lock file -- while a second team's docker-gated test and a third team's workspace
+    `cargo test` queued behind it. The nesting is ordinary and legitimate:
+    `tests/heavy_stack.py` wraps two different fixtures in this context manager, and a test
+    that needs both has both open at once.
+
+    Note precisely what this does and does not change, because the distinction is the whole
+    design. The counter is PER THREAD ([`_HeldState`] is a `threading.local`), so only a
+    nested acquisition on the SAME thread is counted. Same-process, cross-THREAD exclusion is
+    a real property -- `flock` on a second, independently-opened descriptor blocks even
+    within one process, which the Rust half measures directly in
+    `docker_test_lock::tests::flock_serializes_two_threads_of_the_same_process_on_separate_open_file_descriptions`
+    -- and it is preserved untouched: a second thread's depth is its own 0, so it takes its
+    own real `flock` and serialises against the first exactly as before. Cross-process,
+    cross-language exclusion (the property question 207 actually asks for, and the one
+    `crates/av-lockstep/src/docker_test_lock.rs`'s cross-language test pins) is likewise
+    untouched: per holding thread, exactly one `flock` on exactly one descriptor, released
+    only when that thread's OUTERMOST block exits.
+
+    The Rust half solves the same nesting problem a different way, by types rather than by
+    counting: `crate::docker::prune_stale_test_resources` takes a `&DockerTestLock`, so "the
+    caller already holds it" is a compile-time fact and nothing ever re-acquires. Python has
+    no equivalent-by-construction resource here (this module's own doc says so), which is why
+    the Python half counts instead.
     """
+    if _state.depth > 0:
+        # Already held by THIS THREAD (an outer `with lock_docker_tests():` is still open).
+        # Re-acquiring would `os.open` a SECOND file description and block on `flock`
+        # forever against our own lock -- see this function's own "Re-entrancy" section.
+        # Count the nesting and hand the caller the lock this thread already holds.
+        _state.depth += 1
+        try:
+            yield
+        finally:
+            _state.depth -= 1
+        return
+
     path = lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
@@ -145,8 +224,10 @@ def lock_docker_tests() -> Iterator[None]:
             waited_s = time.monotonic() - waited_since
             sys.stderr.write(f"ACQUIRED the docker-test lock ({path}) after waiting {waited_s:.3f}s\n")
             sys.stderr.flush()
+        _state.depth = 1
         yield
     finally:
+        _state.depth = 0
         # Explicit unlock for clarity in the ordinary (non-killed) case; the actual SIGKILL-safe
         # guarantee comes from the kernel closing this fd on process death regardless of whether
         # this `finally` block ever runs at all -- see this module's own "Why flock, not a PID

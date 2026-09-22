@@ -35,7 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
-import { QuaternionTrackInterp, classifyStateSpace, interpolateByStateSpace, InterpolationError } from './interp.js';
+import { QuaternionTrackInterp, classifyStateSpace, interpolateByStateSpace, InterpolationError, BodyInterp } from './interp.js';
 import { FrameGraph } from './frames.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -209,6 +209,71 @@ if (fineVsCoarse !== null) {
     worst = Math.max(worst, d);
   }
   check('FrameNode.update() orientation matches QuaternionTrackInterp.at() exactly (real code path)', worst < 1e-9);
+}
+
+// --------------------------------------------------------------------------- 4. BodyInterp.orientation guards a missing quat
+// Round 4, defect 4 (docs/heavy-plan.md round-4 status; question 229's ruling this is
+// the heavy team's to fix -- "the fix is two lines and a headless check"):
+// `BodyInterp`'s constructor (interp.js) just assigns `this.quat = body.quat`
+// unconditionally, and `orientation()` used to read `this.quat.length` with no guard
+// -- a scenario body published with no `quat` key made `this.quat` `undefined`, and
+// `undefined.length` threw a TypeError on EVERY frame. The globe drew nothing, with
+// no other signal anything was wrong -- found by round 4's `Runtime.exceptionThrown`
+// collector in a real browser (see tests/test_viewer_globe_layer_manager.py, whose
+// proof scenario deliberately supplies `quat` for exactly this reason). This section
+// proves both halves of the fix directly against the real `BodyInterp`: a body with
+// no `quat` must not throw, and must give the identity orientation (the same
+// fallback `n === 0` already used, not a new one invented for this case) -- and, so
+// the guard is proven not to have disabled real behaviour, a body WITH a `quat`
+// still slerps normally.
+{
+  // Deliberately no `quat` key at all -- the exact shape round 4's own defect
+  // scenario used (a body dict built by hand, not through a code path that would
+  // always populate it).
+  const bodyNoQuat = { t: [0, 1], pos: [0, 0, 0, 1000, 1000, 1000] };
+  const biNoQuat = new BodyInterp(bodyNoQuat);
+  const outNoQuat = new THREE.Quaternion();
+  let threwForMissingQuat = false;
+  let resultNoQuat = null;
+  try {
+    resultNoQuat = biNoQuat.orientation(0.5, outNoQuat);
+  } catch (e) {
+    threwForMissingQuat = true;
+  }
+  check('BodyInterp.orientation does not throw for a body with no quat (question 229, round-4 defect 4)', !threwForMissingQuat);
+  check(
+    'BodyInterp.orientation gives the identity quaternion for a body with no quat',
+    !threwForMissingQuat && resultNoQuat.x === 0 && resultNoQuat.y === 0 && resultNoQuat.z === 0 && resultNoQuat.w === 1,
+  );
+
+  // Control: a body WITH a real quat track must still slerp exactly as before --
+  // proves the guard above only catches the missing/malformed case, never the normal
+  // one. Reuses this file's own halfAngleQuat (section 2, above): 5 deg and 10 deg
+  // about Z from identity, at t=0 and t=1 respectively.
+  const qStart = halfAngleQuat(5);
+  const qEnd = halfAngleQuat(10);
+  const bodyWithQuat = { t: [0, 1], pos: [0, 0, 0, 1000, 1000, 1000], quat: [...qStart, ...qEnd] };
+  const biWithQuat = new BodyInterp(bodyWithQuat);
+  const outStart = new THREE.Quaternion();
+  const outEnd = new THREE.Quaternion();
+  const outMid = new THREE.Quaternion();
+  biWithQuat.orientation(0, outStart);
+  biWithQuat.orientation(1, outEnd);
+  biWithQuat.orientation(0.5, outMid);
+  check(
+    'BodyInterp.orientation still reproduces the recorded sample exactly at t=0 with a real quat',
+    quatAngleDeg([outStart.x, outStart.y, outStart.z, outStart.w], qStart) < 1e-9,
+  );
+  check(
+    'BodyInterp.orientation still reproduces the recorded sample exactly at t=1 with a real quat',
+    quatAngleDeg([outEnd.x, outEnd.y, outEnd.z, outEnd.w], qEnd) < 1e-9,
+  );
+  const midNorm = Math.hypot(outMid.x, outMid.y, outMid.z, outMid.w);
+  check('BodyInterp.orientation mid-slerp stays unit norm with a real quat', Math.abs(midNorm - 1) < 1e-12);
+  check(
+    'BodyInterp.orientation mid-slerp is strictly between the two samples (not identity, not either endpoint) with a real quat',
+    quatAngleDeg([outMid.x, outMid.y, outMid.z, outMid.w], [0, 0, 0, 1]) > 1e-6,
+  );
 }
 
 const allPass = checks.every(c => c.pass);

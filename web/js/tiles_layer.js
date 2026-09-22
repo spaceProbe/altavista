@@ -82,6 +82,37 @@ import { TilesRenderer } from '../vendor/3d-tiles-renderer/build/index.three.js'
 import {
   geodeticToEcef, dist, sseFromGeometricError, SCENE_UNITS_PER_METRE, TileLoadScheduler,
 } from './globe_lod.js';
+import { Tiles3DLayerAdapter, ManagerGatedTilesFetchPlugin } from './layers/tiles3d_layer.js';
+
+// ---------------------------------------------------------------------------- Round 5
+// Closes round 4's decision 9 deferral (ratified in question 229): the overlay's real
+// per-tile content fetch now goes through the one per-viewer `LayerManager`
+// (`web/js/layers/layer.js`), not the `TileLoadScheduler` instance below alone --
+// `TilesOverlayLayer` still builds one (unchanged) for a caller that constructs it
+// without a `layerManager` (every existing headless check/test does exactly that; see
+// `web/js/tiles3d_check.mjs`, which never touches this class at all -- it drives
+// `selectTiles3D`/`TileLoadScheduler` directly), so nothing about that path moves, and
+// this file's own docstring above ("Reused budget/cancellation") is unaffected. When a
+// caller DOES pass `opts.layerManager` (`web/js/scene.js`'s `loadTilesOverlay()`, live
+// wiring), this class instead: registers a `Tiles3DLayerAdapter` on it under a stable
+// id once the tileset tree is ready, registers `ManagerGatedTilesFetchPlugin`
+// (web/js/layers/tiles3d_layer.js -- see that file's own module docstring for the full
+// fetch-gating mechanism) on the live vendored `TilesRenderer`, and every `update()`
+// tick either drives `layerManager.update()` itself or -- when a globe is ALSO
+// registered on the SAME shared manager -- lets the caller drive it once, merged with
+// the globe's own view (`opts.selfDriveManager`/`getManagedView()`, below).
+//
+// Why "merged, one call" matters, concretely (not a style preference): `LayerManager.
+// update(view)` calls EVERY registered layer's `plan(view)` and treats the UNION of
+// their outputs as this tick's entire wanted set (layer.js's own module docstring) --
+// a caller that calls `update()` twice per rendered frame, once with a view carrying
+// only the globe's fields and once with a view carrying only the overlay's, makes each
+// call see the OTHER's content as "not wanted", which cancels the other's in-flight
+// loads and makes its resident entries evictable, every single frame. Not hypothetical:
+// `tests/test_viewer_tiles3d_manager.py`'s own live-browser assertion (`enableGlobe()`
+// + `loadTilesOverlay()` together, both driven through the SAME manager) is this task's
+// own proof that it does not happen -- see that test and `web/js/scene.js`'s `update()`
+// for the merge `selfDriveManager: false` mode makes possible.
 
 // ------------------------------------------------------------- tileset.json parsing
 /** @typedef {{west:number, south:number, east:number, north:number, minHeight:number, maxHeight:number}} Region3D radians/metres, 3D Tiles spec convention */
@@ -274,10 +305,31 @@ const _scratchVec3 = new THREE.Vector3();
 export class TilesOverlayLayer {
   /**
    * @param {string} tilesetUrl
-   * @param {{residentBudget?: number}} [opts] `residentBudget` (default 48) is *our
-   *   own* TileLoadScheduler's tile-count budget for this overlay -- independent of,
-   *   and smaller-scope than, the vendored TilesRenderer's own internal LRU byte
-   *   cache (`lruCache`), which still runs underneath (see module docstring).
+   * @param {{residentBudget?: number, layerManager?: import('./layers/layer.js').LayerManager, layerId?: string, selfDriveManager?: boolean}} [opts]
+   *   `residentBudget` (default 48): without `layerManager`, *our own*
+   *   `TileLoadScheduler`'s tile-count budget for this overlay, unchanged from before
+   *   round 5 (see module docstring's "Reused budget/cancellation"). WITH
+   *   `layerManager`, this number is repurposed as the local "pending+resident tile
+   *   count" pressure threshold `_applyErrorTargetFromManager` (below) uses for its
+   *   own `errorTarget` nudge -- the manager itself owns the real, byte-denominated
+   *   budget (`layerManager.memoryBudgetBytes`); this is a SEPARATE, smaller-scope
+   *   knob, same relationship the old scheduler always had to the vendored renderer's
+   *   own internal `lruCache` (see module docstring).
+   *   `layerManager` (round 5, question 228/decision 9): when given, this overlay's
+   *   real content fetch is routed through it (see this file's own "Round 5" module
+   *   docstring for the full mechanism and `web/js/layers/tiles3d_layer.js` for the
+   *   fetch-gating detail) instead of `TileLoadScheduler`.
+   *   `layerId` (default `'tiles3d'`): the stable id this overlay registers its
+   *   adapter under -- mirrors `GlobeLayer`'s own `imageryLayerId`/`terrainLayerId`
+   *   (globe.js), so `dispose()` can `removeLayer()` cleanly and a caller that
+   *   replaces one `TilesOverlayLayer` with a fresh one (same pattern as
+   *   `scene.js`'s `loadTilesOverlay()`) never collides with a stale registration.
+   *   `selfDriveManager` (default `true`): whether THIS class's own `update()` calls
+   *   `layerManager.update()` itself. Set `false` when a caller will merge this
+   *   overlay's view into another `layerManager.update()` call it already drives
+   *   itself THIS SAME TICK (see this file's "Round 5" module docstring for why that
+   *   merge matters) -- `web/js/scene.js`'s `Viewer.update()` does exactly this when
+   *   a globe is also enabled on the same manager, via `getManagedView()`, below.
    */
   constructor(tilesetUrl, opts = {}) {
     this.tilesetUrl = tilesetUrl;
@@ -285,22 +337,38 @@ export class TilesOverlayLayer {
     /** @type {import('three').Group} add this to the scene graph wherever it should render. */
     this.group = this.renderer.group;
     this._baselineErrorTarget = this.renderer.errorTarget;
-    // M16.4: our own reused budget/cancellation scheduler (see module docstring) --
-    // the exact class globe_lod.js's TileLoadScheduler is, not a second
-    // implementation. `_tree`/`_camera` are unset until `loadGeoReference()`/
-    // `attachCamera()` are called; `update()` below no-ops the schedule/budget half
-    // until both are present, while still driving the real vendored fetch/parse/LOD
-    // pipeline unconditionally (never stubbed).
+    // Pre-round-5 path, fully unchanged (see module docstring): the exact class
+    // globe_lod.js's TileLoadScheduler is, not a second implementation. Still built
+    // unconditionally -- `getScheduleStats()` (below) reports from it whenever
+    // `layerManager` was not given, and `web/js/tiles3d_check.mjs`'s own harness uses
+    // `TileLoadScheduler`/`selectTiles3D` directly, never through this class at all,
+    // so it is unaffected by anything in this constructor either way.
     this._scheduler = new TileLoadScheduler({ residentBudget: opts.residentBudget ?? 48 });
+    this._pressureBudget = opts.residentBudget ?? 48;
     this._tree = null;
     this._selection = [];
     this._camera = null;
     this._threeRenderer = null;
+
+    // Round 5 (question 228/decision 9) -- see this file's own module docstring.
+    this._layerManager = opts.layerManager || null;
+    this._layerId = opts.layerId || 'tiles3d';
+    this._selfDriveManager = opts.selfDriveManager !== false;
+    this._adapter = null;
+    this._fetchPlugin = null;
+
     /** Resolves once `tilesetUrl` has been fetched and parsed (parseTileset3D) --
      * exposed so a caller (or a test) can await real geo-reference/selection data
      * being ready, without polling. Never awaited by `update()` itself: a slow or
-     * failed fetch must not block the vendored renderer's own real loading. */
-    this.ready = this._loadTree(tilesetUrl);
+     * failed fetch must not block the vendored renderer's own real loading. Round 5:
+     * also the point at which the manager-routed adapter/plugin are registered (the
+     * adapter needs a real `tree` synchronously, see `Tiles3DLayerAdapter`'s own
+     * constructor) -- `update()` no-ops the manager half until this has resolved,
+     * exactly like it already no-ops the pre-round-5 scheduler half (`_tree` null). */
+    this.ready = this._loadTree(tilesetUrl).then((tree) => {
+      if (this._layerManager) this._registerManagedAdapter(tree);
+      return tree;
+    });
   }
 
   async _loadTree(tilesetUrl) {
@@ -316,6 +384,36 @@ export class TilesOverlayLayer {
     return this._tree;
   }
 
+  /** The SAME absolute URL the vendored `TilesRenderer` itself resolves a tile's raw
+   * `content.uri` to -- checked directly against the pinned source's own
+   * `preprocessTileset`/`requestTileContents` (see `web/js/layers/tiles3d_layer.js`'s
+   * module docstring): resolve `tilesetUrl` to absolute against the document, strip to
+   * its directory, then resolve `contentUri` against THAT. Required so
+   * `Tiles3DLayerAdapter._urlToKey` recognises the renderer's own `fetchData(url, ...)`
+   * calls as the same tile `plan()` already described -- a mismatch here would make
+   * `ManagerGatedTilesFetchPlugin` treat every real tile as "outside the plan" and
+   * fall back to an ungated fetch for all of them, silently defeating the gate (which
+   * is exactly why `web/js/tiles3d_manager_check.mjs` proves this resolution against a
+   * `URL`-parsed expectation independently, not merely by trusting this method). */
+  _resolveContentUrl(contentUri) {
+    const docBase = (typeof window !== 'undefined' && window.location) ? window.location.href : 'http://localhost/';
+    const tilesetAbsUrl = new URL(this.tilesetUrl, docBase).toString();
+    const basePath = tilesetAbsUrl.replace(/\/[^/]*$/, '');
+    return new URL(contentUri, `${basePath}/`).toString();
+  }
+
+  _registerManagedAdapter(tree) {
+    this._adapter = new Tiles3DLayerAdapter({
+      id: this._layerId,
+      tree,
+      loader: (request, signal) => fetch(request.url, { signal }),
+      resolveContentUrl: (uri) => this._resolveContentUrl(uri),
+    });
+    this._layerManager.addLayer(this._adapter);
+    this._fetchPlugin = new ManagerGatedTilesFetchPlugin({ adapter: this._adapter });
+    this.renderer.registerPlugin(this._fetchPlugin);
+  }
+
   /** Must be called once before the first `update()` -- 3DTilesRendererJS derives
    * screen-space error (which tiles to load) from the camera and the renderer's
    * resolution. `threeRenderer` is the live `THREE.WebGLRenderer` (scene.js's
@@ -327,16 +425,58 @@ export class TilesOverlayLayer {
     this._threeRenderer = threeRenderer;
   }
 
+  /** Pure: this tick's camera-derived view fragment for THIS overlay's own
+   * `Tiles3DLayerAdapter.plan()` (`cameraEcef`/`screenHeightPx`/`fovYRad`) -- `null`
+   * before the tree/camera are ready. Never calls `layerManager.update()` itself and
+   * has no other side effect (besides the `updateMatrixWorld` every reader of
+   * `group`'s world transform this tick needs regardless) -- what lets a caller
+   * (`web/js/scene.js`) read it BEFORE driving the shared manager's own `update()`
+   * once, merged with another layer's view (see this file's "Round 5" module
+   * docstring), instead of this class driving a second, independent call. */
+  getManagedView() {
+    if (!this._tree || !this._camera) return null;
+    this.group.updateMatrixWorld(true);
+    // Three's Vector3.getWorldPosition()/worldToLocal() both mutate-and-return their
+    // argument -- one shared scratch vector, no per-tick allocation (same convention
+    // frames.js/scene.js use for their own scratch objects).
+    this._camera.getWorldPosition(_scratchVec3);
+    this.group.worldToLocal(_scratchVec3);
+    const cameraEcef = { x: _scratchVec3.x, y: _scratchVec3.y, z: _scratchVec3.z };
+    const screenHeightPx = (this._threeRenderer && this._threeRenderer.domElement
+      && this._threeRenderer.domElement.clientHeight) || 900;
+    const fovYRad = ((this._camera.fov || 50) * Math.PI) / 180;
+    return { cameraEcef, screenHeightPx, fovYRad };
+  }
+
   /** Call once per render frame (mirrors `Viewer.update(t)`'s per-tick shape). Drives
-   * the vendored library's own tile fetch/parse/LOD pipeline (real, not stubbed),
-   * then -- once `_loadTree` has resolved and a camera is attached -- runs *our own*
-   * selection+scheduler over the same tileset and uses it to throttle the vendored
-   * renderer's `errorTarget` (see `_applyBudgetToVendorRenderer`'s docstring for
-   * exactly what this does and does not guarantee live, versus what
-   * `web/js/tiles3d_check.mjs`/`tests/test_viewer_globe.py` prove headlessly). */
-  update() {
+   * the vendored library's own tile fetch/parse/LOD pipeline (real, not stubbed) --
+   * unconditionally, in every mode -- then either the pre-round-5 scheduler/errorTarget
+   * path (no `layerManager`) or the round-5 manager-routed path (see module
+   * docstring): `layerManager.update()` itself, ONLY when `_selfDriveManager` (i.e.
+   * no caller is merging this tick's view into its own call elsewhere), and either
+   * way reads the manager's own state back to apply the same kind of `errorTarget`
+   * nudge the old path used (`_applyErrorTargetFromManager`, below). */
+  /** @param {boolean} [selfDriveManager] per-call override of the constructor's own
+   *   `opts.selfDriveManager` (default `true`) -- a PER-TICK choice, not fixed at
+   *   construction, because whether a globe is active on the SAME manager can change
+   *   at runtime (`enableGlobe()`/`disableGlobe()` called in either order relative to
+   *   `loadTilesOverlay()`/`clearTilesOverlay()`). `undefined` (every call site that
+   *   does not need to override it) falls back to the constructor's own default. */
+  update(selfDriveManager) {
     this.renderer.update();
-    this._updateScheduleAndBudget();
+    if (this._layerManager && this._adapter) {
+      this._updateFromManager(selfDriveManager === undefined ? this._selfDriveManager : selfDriveManager);
+    } else {
+      this._updateScheduleAndBudget();
+    }
+  }
+
+  _updateFromManager(selfDrive) {
+    if (selfDrive) {
+      const view = this.getManagedView();
+      if (view) this._layerManager.update(view);
+    }
+    this._applyErrorTargetFromManager();
   }
 
   _updateScheduleAndBudget() {
@@ -364,29 +504,14 @@ export class TilesOverlayLayer {
    * pipeline this project deliberately vendors rather than rewrites (Q44's ratified
    * decision), and that library cannot even run headlessly under `node` to test such
    * a replacement against (it needs `window`/`requestAnimationFrame` -- confirmed
-   * directly while building this, not assumed). What genuinely moves to being this
-   * codebase's *own*, tested-to-the-same-bar-as-the-globe policy is *which tiles are
-   * wanted* (`selectTiles3D`, our own screen-space-error selection over the real
-   * tileset tree, not the vendor's internal traversal) and the resident/pending/
-   * cancelled bookkeeping against *our own* budget (`TileLoadScheduler`, reused
-   * verbatim). Here, that policy is applied to the vendored renderer via its public
-   * `errorTarget` (default captured once as `_baselineErrorTarget`, a real,
-   * documented knob -- doubling it makes the vendored renderer accept more screen-
-   * space error, i.e. request fewer/coarser tiles): when our own scheduler reports
-   * more resident+pending tiles than its budget, `errorTarget` is raised to relieve
-   * the vendored renderer's own load; otherwise it relaxes back to baseline. This is
-   * a real, causal lever, not a cosmetic one -- but it is a coarser, indirect
-   * enforcement than the globe's own scheduler gets (globe.js builds/disposes each
-   * tile's geometry itself, directly gated by `TileLoadScheduler.resident`): without
-   * a public "tile finished loading" event from the vendored library, this file
-   * cannot call `TileLoadScheduler.completeLoads()` from live camera movement, so
-   * live `resident`/`evictedCount` never advance the way the headless harness's
-   * simulated completion does. The budget/cancellation *guarantee* this task
-   * requires ("respected", "cancelled on camera move", "same bar as the globe") is
-   * proved by `web/js/tiles3d_check.mjs` driving the exact same scheduler headlessly
-   * with simulated completion, exactly as `globe_lod_check.mjs` does for the globe --
-   * this method is the live, best-effort application of that same policy on top of a
-   * vendored renderer that does not expose the hooks needed to make it exact live.
+   * directly while building this, not assumed). This is the PRE-ROUND-5 path (no
+   * `layerManager` given, see module docstring): *which tiles are wanted*
+   * (`selectTiles3D`) and the resident/pending/cancelled bookkeeping against *our
+   * own* budget (`TileLoadScheduler`, reused verbatim) stays exactly as before.
+   * `errorTarget` (default captured once as `_baselineErrorTarget`) is the same real,
+   * documented knob `_applyErrorTargetFromManager` (round 5's counterpart, below)
+   * also drives: doubling it makes the vendored renderer accept more screen-space
+   * error, i.e. request fewer/coarser tiles.
    */
   _applyBudgetToVendorRenderer() {
     const pressure = this._scheduler.pending.size + this._scheduler.resident.size;
@@ -395,8 +520,48 @@ export class TilesOverlayLayer {
       : this._baselineErrorTarget;
   }
 
-  /** Read-only snapshot of the scheduler's current bookkeeping -- for debugging/tests. */
+  /**
+   * Round 5's counterpart to `_applyBudgetToVendorRenderer` -- same `errorTarget`
+   * lever, same "pressure vs a local threshold" shape, but reading REAL manager-owned
+   * state (`layerManager.countsByLayer()[this._layerId]`) instead of a private
+   * scheduler's own count. This is still the SAME disclosed, best-effort, INDIRECT
+   * live nudge the pre-round-5 path always was, not the thing this task's own
+   * headless proof rests on: the genuine, provable guarantee -- the manager's byte
+   * budget gates the overlay's real network fetches, cancellation is real, `release()`
+   * genuinely frees this adapter's own resource, and there is no duplicate fetch -- is
+   * proved directly against `Tiles3DLayerAdapter`/`ManagerGatedTilesFetchPlugin`
+   * themselves in `web/js/tiles3d_manager_check.mjs` (a fresh `LayerManager`, exactly
+   * as `web/js/layers_check.mjs`/`web/js/layers_budget_check.mjs` already do for the
+   * globe), never by reading this method's own `errorTarget` side effect back.
+   */
+  _applyErrorTargetFromManager() {
+    const counts = this._layerManager.countsByLayer()[this._layerId] || { resident: 0, pending: 0 };
+    const pressure = counts.resident + counts.pending;
+    this.renderer.errorTarget = pressure > this._pressureBudget
+      ? this._baselineErrorTarget * 2
+      : this._baselineErrorTarget;
+  }
+
+  /** Read-only snapshot of this overlay's own bookkeeping -- for debugging/tests.
+   * Round 5: when routed through a `layerManager`, sourced from its OWN real state
+   * (`countsByLayer()` for this layer's resident/pending; `cancelledCount`/
+   * `evictedCount` are the manager's GLOBAL running totals across every layer it owns
+   * -- the "one manager, one budget" design this task routes the overlay into on
+   * purpose, see `web/js/layers/layer.js`'s own module docstring -- never a
+   * per-layer figure the manager does not itself keep) rather than the pre-round-5
+   * private scheduler. */
   getScheduleStats() {
+    if (this._layerManager && this._adapter) {
+      const counts = this._layerManager.countsByLayer()[this._layerId] || { resident: 0, pending: 0 };
+      return {
+        residentBudget: this._pressureBudget,
+        residentSize: counts.resident,
+        pendingSize: counts.pending,
+        cancelledCount: this._layerManager.cancelledCount,
+        evictedCount: this._layerManager.evictedCount,
+        selection: this._adapter._urlToKey ? [...this._adapter._urlToKey.values()].sort() : [],
+      };
+    }
     return {
       residentBudget: this._scheduler.residentBudget,
       residentSize: this._scheduler.resident.size,
@@ -409,5 +574,6 @@ export class TilesOverlayLayer {
 
   dispose() {
     this.renderer.dispose();
+    if (this._layerManager) this._layerManager.removeLayer(this._layerId);
   }
 }

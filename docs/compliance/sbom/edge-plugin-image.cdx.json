@@ -5,7 +5,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "707415b3e5b7fbdeb41e4a2efb9ea63946bf6c197b8ae09e955c46837200c510"
+          "content": "d5853e8520438a6aad9e95063b9f3bb193b800f8ea0131eb1cd15dd4c0b9437c"
         }
       ],
       "name": "av-edge-plugin",
@@ -39,10 +39,10 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4"
+          "content": "3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f"
         }
       ],
-      "name": "rust:1.85-bookworm",
+      "name": "rust:1.90-bookworm",
       "properties": [
         {
           "name": "altavista:sbom:no-licence-metadata",
@@ -58,16 +58,16 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "38062a487a4346dc5a23eb26dcf00fe7d06e3fec9d6813e003fe612fcaef234e"
+          "content": "2ef531caaf8d4f84491f292f80f3df757e9e7ee2beb8a65a3af46fdc28be73f2"
         }
       ],
       "name": "edge-plugin-image",
       "type": "container",
       "version": "av-edge-plugin:local"
     },
-    "timestamp": "2026-09-15T14:45:39Z"
+    "timestamp": "2026-09-22T00:21:02Z"
   },
-  "serialNumber": "urn:uuid:f558b515-1b0c-4e56-5c4c-91d8ed6ea7c8",
+  "serialNumber": "urn:uuid:142ca50f-2928-ec33-3298-8f8a66781dc7",
   "specVersion": "1.5",
   "version": 1
 }

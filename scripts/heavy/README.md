@@ -63,6 +63,61 @@ docker port "$CONTAINER_ID" 9000/tcp
 # 127.0.0.1:<MINIO_PORT>
 ```
 
+### 0.5. Register the generated tile set in the catalog (round 5, question 228 finding 2)
+**-- steps below NOT RUN this round (see this task's own report: no docker container may be
+started this round, question 207's host-wide lock is held by another team, and this task's
+budget explicitly excludes building the catalog tier's own Rust binaries). Every flag named
+below was verified to exist by reading the real, on-disk source this round's server-half
+worker landed (`crates/av-jobs/src/bin/av-tile-fixture.rs`) and the pre-existing
+`crates/av-gateway/src/bin/av-gateway.rs` -- never guessed, and never copied from a doc
+comment without checking the flag parser itself.**
+
+This is the only step that makes a generated tile set visible to `GET /api/catalog/tilesets`
+(and therefore to the Layers panel) -- step 0 above never registers anything; it only writes
+tile objects into the MinIO store. It needs a real PostGIS catalog reachable
+(`services/catalog/IMAGE_DIGEST.md` -- the image is present, by digest, on this host this
+round) and belongs after step 0 (it needs step 0's own `manifest_sha256`/`key_prefix`, and it
+re-runs the exact same `av-tile-fixture` binary step 0 already used) and before the browser is
+opened.
+
+```sh
+# a. Start the real, digest-verified PostGIS catalog container (a developer convenience
+#    script, never invoked by a test -- see that script's own header comment).
+services/catalog/run-dev-catalog.sh
+# prints the container id and the host port it published 5432/tcp on, e.g.:
+#   container <id> listening on 127.0.0.1:<CATALOG_PORT>
+
+# b. Apply the catalog schema. THIS IS A REAL GAP, not merely unrun: as of this round,
+#    `av_catalog::migrate::Migrator::apply_pending` (crates/av-catalog/src/migrate.rs) is a
+#    LIBRARY function with no standalone CLI wrapping it anywhere in this workspace --
+#    services/catalog/run-dev-catalog.sh's own header comment says exactly this ("a developer
+#    who wants the catalog schema applied runs Migrator::apply_pending themselves, e.g. from a
+#    small cargo run/test harness"). Until one exists, this step is a small Rust program (or a
+#    `cargo test -p av-catalog` run against `--catalog-host 127.0.0.1 --catalog-port
+#    <CATALOG_PORT>`, if that crate's own test suite is willing to run against an
+#    externally-started container rather than one it manages itself -- NOT verified either
+#    way this round) that calls `Migrator::apply_pending(&mut client, applied_tai_ns)` once
+#    against the container `a.` started. The manager should confirm whether such a harness
+#    already exists elsewhere before a human re-derives one from scratch.
+
+# c. Re-run av-tile-fixture (cargo build -p av-jobs --bin av-tile-fixture --features
+#    store-fixture, the SAME binary and the SAME --store-*/--key-prefix/--job-id values step
+#    0's ten_gigabyte_proof.py used internally -- content-addressed, so re-running it against
+#    the identical inputs is idempotent, never a second, diverging tile set), this time WITH
+#    the catalog flags so it ALSO registers the manifest as a CatalogAsset:
+target/debug/av-tile-fixture \
+  --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
+  --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
+  --store-endpoint "http://127.0.0.1:<MINIO_PORT>" --store-region us-east-1 \
+  --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
+  --store-bucket "<BUCKET>" --store-path-style \
+  --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
+  --catalog-user "<the PostGIS image's own default user/password -- see services/catalog/IMAGE_DIGEST.md/run-dev-catalog.sh>" \
+  --catalog-password "<same>" --catalog-database "<same>"
+# (flag names verified at crates/av-jobs/src/bin/av-tile-fixture.rs lines ~192-197/274-279;
+# NOT run -- depends on a. and b. actually being up, which this round did not attempt)
+```
+
 ### 1. Mint a real RS256 bearer token (no new dependency: the system `openssl` CLI)
 
 `av-tiles` verifies a real OIDC-shaped RS256 JWT against a configured public key -- there is
@@ -118,21 +173,78 @@ target/debug/av-tiles \
   --store-path-style \
   --group-clearance "tile-readers=CUI" \
   --bind "127.0.0.1:18080" \
-  --admin-bind "127.0.0.1:18081" &
+  --admin-bind "127.0.0.1:18081" \
+  --admin-role "stackup-admins" &
 ```
 
 Wait for its own `av-tiles: LISTENING 127.0.0.1:18080` line on stdout before continuing (this
 is the identical readiness signal `tests/heavy_stack.py::_wait_for_listening_line` polls for
 -- never a fixed sleep).
 
-### 3. Start the viewer server against that gateway
+**On `--admin-role` (round 5).** `GET /admin/api/counters` on the admin bind now
+authenticates, exactly as `av-gateway`'s admin surface does (question 229's ruling;
+`crates/av-tiles/src/admin.rs`). It is deny-by-default: with **no** `--admin-role` flag the
+port binds and refuses every caller, so the flag is given here to keep this recipe's admin
+port actually usable. Note the group is `stackup-admins`, **not** the `tile-readers` group
+step 1's token carries -- an admin credential and a tile-clearance credential are
+deliberately never the same token (`tests/heavy_stack.py` keeps the same separation). Step
+1's token therefore gets `403` here, which is the correct answer, not a fault. To read the
+counters, mint a second token with step 1's block changing only
+`"groups": ["stackup-admins"]`, and send it as `Authorization: Bearer <token>`
+(unlike step 4's response headers, this block is derived from the implementation and from
+`tests/heavy_stack.py`'s equivalent fixture rather than pasted from a live run):
+
+```sh
+curl -sS -H "Authorization: Bearer $(cat "$WORKDIR/admin_token.txt")" \
+  http://127.0.0.1:18081/admin/api/counters
+```
+
+### 2b. Start the real `av-gateway` DataGatewayService (round 5, question 228 finding 2)
+**-- NOT RUN this round, same reason as step 0.5 above (no PostGIS/catalog tier actually
+stood up).** Flags verified against `crates/av-gateway/src/bin/av-gateway.rs`'s own CLI
+parser (not merely its doc comment): `--oidc-issuer`/`--oidc-audience`/
+`--oidc-public-key-path` are REQUIRED (R5.1) -- reuse step 1's SAME issuer/public key/ladder,
+a second, independent token mint is not needed, `av-gateway` verifies against the same
+`issuer_public.pem`. The bind address is an environment variable, `AV_GATEWAY_BIND`
+(default `127.0.0.1:50071`), not a flag -- set explicitly here to avoid colliding with
+`av-tiles`' own `18080`/`18081` and the viewer's `18090`.
+
+```sh
+cargo build -p av-gateway --bin av-gateway
+AV_GATEWAY_BIND=127.0.0.1:18082 target/debug/av-gateway \
+  --oidc-issuer "https://sso.test.example/" \
+  --oidc-audience "av-tiles" \
+  --oidc-public-key-path "$WORKDIR/issuer_public.pem" \
+  --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from step 0.5a>" \
+  --catalog-user "<same as step 0.5c>" --catalog-password "<same>" --catalog-database "<same>" &
+```
+
+(`--oidc-audience "av-tiles"` here deliberately reuses step 1's SAME token/audience -- both
+services trust the identical issuer/audience/ladder in this recipe, matching
+`altavista.gateway_client`'s own module doc: "caller_clearance is always sent empty ... the
+token-derived clearance is used", so one real, valid token is sufficient for both proxied
+surfaces. A deployment that wants `av-gateway` and `av-tiles` behind genuinely different
+audiences would mint a second token here instead -- out of scope for this recipe.)
+
+### 3. Start the viewer server against the tiles gateway (and, new this round, the data
+gateway -- `--gateway-endpoint`/`--gateway-token-path`, `altavista/__main__.py`)
 
 ```sh
 .venv/bin/python -m altavista serve \
   --host 127.0.0.1 --port 18090 \
   --tiles-endpoint "127.0.0.1:18080" \
-  --tiles-token-path "$WORKDIR/token.txt" &
+  --tiles-token-path "$WORKDIR/token.txt" \
+  --gateway-endpoint "127.0.0.1:18082" \
+  --gateway-token-path "$WORKDIR/token.txt" &
 ```
+
+The two new flags on the last line are unverified end-to-end this round (they depend on
+step 2b, which was not run) -- but the flags themselves, and that this command starts and
+serves every OTHER route normally with them present, ARE verified: every test in
+`tests/test_viewer_layers_panel.py` (this task's own new pytest file) starts exactly this
+binary with `--gateway-endpoint`/`--gateway-token-path` pointed at a real (fixture) gateway
+and confirms `GET /api/health` still answers, the page still loads with zero exceptions, and
+`GET /api/catalog/tilesets` answers for real.
 
 Open `http://127.0.0.1:18090/` in a browser -- this is the URL the lead drives.
 
@@ -174,12 +286,60 @@ content-type: image/png
 `crates/av-jobs/tests/store_tiler.rs`'s own assertions require of every tile this pipeline
 ever serves.
 
-### 5. Tear down
+### 4b. Prove the catalog route with `curl`, the same "before trusting the browser" discipline
 
 ```sh
-kill %1 %2                 # av-tiles, then the viewer server (job control, in the SAME shell)
+curl -sS -D - "http://127.0.0.1:18090/api/catalog/tilesets"
+```
+
+With step 2b actually up, expect `200` and `{"tileSets": [{"manifestSha256": "<MANIFEST
+from step 0>", ...}, ...]}`. **Not run this round** (step 2b was not run) -- but the SAME
+route, against a real (fixture) gateway, was measured by this task's own
+`tests/test_viewer_layers_panel.py`: a real `200` with `{"tileSets": [...]}` when configured,
+and a real `503` with body `{"detail": "no data gateway is configured for this viewer
+server (pass --gateway-endpoint/--gateway-token-path to \`python -m altavista serve\`)"}`
+when it is not -- verified by that test's own second case, which asserts the Layers panel
+shows that exact message, never "No tile sets in the catalog."
+
+### 5. Open the Layers panel and toggle the tile set on -- select it "as a user would"
+**This exact sequence IS verified** (`tests/test_viewer_layers_panel.py::
+test_selecting_a_catalogued_tile_set_from_the_layers_panel_requests_its_tiles`, a real
+headless Chrome against a real running `python -m altavista serve` this task started with
+these same two flags) -- against that test's own fixture gateway/tiles-gateway pair, not
+against this README's own live stack (which needs step 0.5/2b, not run this round; see this
+task's own report for the full "what was and was not run" account).
+
+1. In the browser at `http://127.0.0.1:18090/`, open an empty pane's chooser (or a pane
+   header's swap menu) and pick **"Layers"** -- `web/js/layout/default_layouts.js`'s
+   `REGISTERED_PANEL_TYPES` makes it reachable from there in every layout/profile (it is
+   NOT in any default layout -- see that file's own `LAYERS_PANEL_ID` comment for why, and
+   this task's own report for the trade-off).
+2. Click **"Refresh catalog"**. The panel fetches `GET /api/catalog/tilesets` for real and
+   lists every tile set the gateway's catalog returned (name, marking, size, and the
+   manifest sha256 abbreviated -- full value in that cell's own tooltip).
+3. Check **"Tiled globe (Earth)"** in the sidebar if it is not already on -- the Layers panel
+   registers its layer on the SAME shared `LayerManager` the globe uses
+   (`viewer.layerManager`, `web/js/scene.js`), and that manager is only DRIVEN (`update()`
+   called) once per tick while the globe or a 3D Tiles overlay is active (see
+   `web/js/globe.js`'s own note and `web/js/tiles_layer.js`'s "Round 5" module docstring --
+   this task deliberately did not add a third, independent driver).
+4. Click **"Turn on"** next to the desired tile set. The row's own status cell shows
+   "fetching manifest…" then "active"; the "Streaming budget" section (same panel, below the
+   table) shows real resident-bytes-against-budget, deferred, and failed counts, refreshed
+   about twice a second as the view streams.
+5. Click **"Turn off"** to remove it -- `viewer.layerManager.removeLayer(...)`, releasing its
+   resident bytes; toggling it back on again re-registers under the identical, stable,
+   manifest-sha256-derived layer id with no collision.
+
+### 6. Tear down
+
+```sh
+kill %1 %2 %3               # av-tiles, av-gateway (if step 2b was run), then the viewer server
+                             # (job control, in the SAME shell -- adjust job numbers to match
+                             # whichever of the three you actually started)
 rm -rf "$WORKDIR"
 .venv/bin/python scripts/heavy/ten_gigabyte_proof.py --out-dir out/heavy-stackup-demo --teardown
+docker rm -f "<the PostGIS container id from step 0.5a, if it was started>"
 ```
 
 ## What this README does NOT cover
@@ -189,3 +349,11 @@ rm -rf "$WORKDIR"
   this task's own author was instructed not to run it.
 - `docs/heavy-plan.md`: owned by the manager; this file exists specifically so the exact
   commands above have a home that is NOT that document.
+- **Round 5 (question 228 finding 2) additions -- steps 0.5, 2b, and 4b's live-stack half are
+  UNVERIFIED this round**, clearly marked inline above: no docker container may be started
+  this round (question 207's host-wide lock), and building `av-gateway`/`av-catalog`'s own
+  migration path was out of this task's own budget. Every flag those steps name was still
+  verified against the real, on-disk CLI parsers (never copied from a doc comment alone) --
+  see this task's own report for exactly what that verification did and did not cover, and
+  `tests/test_viewer_layers_panel.py` for the equivalent proof against a real (fixture, not
+  docker/cargo) gateway pair instead.

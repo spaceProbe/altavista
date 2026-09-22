@@ -69,12 +69,31 @@ openssl = "0.10"
 av-store = { path = "../av-store", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net"], optional = true }
 bytes = { version = "1", optional = true }
+# Question 228's finding 2 (pipeline half): src/bin/av-tile-fixture.rs registers the tile-set
+# manifest it just produced as a CatalogAsset (crates/av-catalog::model::CatalogAsset) when --
+# and ONLY when -- new, optional `--catalog-*` flags were given on the command line (see that
+# binary's own module doc). Gated behind `store-fixture` EXACTLY the way `av-store` above is,
+# for the identical reason: catalog registration only ever runs on the real-store path (a
+# `--dry-run` tile set's own AssetRef carries no Provenance -- crate::runner::
+# MemoryObjectSink::put's own `provenance: None` -- so `CatalogAsset::from_asset_ref` would
+# refuse it outright; `parse_cli_args` below refuses `--catalog-host` together with `--dry-run`
+# before any job ever runs, mirroring the existing `--store-*`/`--dry-run` mutual exclusion),
+# and gating it here keeps this crate's LIBRARY (src/**) and every OTHER bin exactly as free of
+# `av-catalog` as they already are of `av-store` -- verified with `cargo tree -p av-jobs` (no
+# features: neither `av-store` nor `av-catalog` appear at all) vs `cargo tree -p av-jobs
+# --features store-fixture` (both appear) -- see this task's own report for the quoted output.
+# `av-catalog` is NOT promoted to an unconditional dependency for the same "Deliberately NOT a
+# dependency" reasoning below already gives `av-store`: this round's own `Runner`/library code
+# still never queries the catalog (only this one binary, only behind this one feature, does).
+av-catalog = { path = "../av-catalog", optional = true }
 
 [features]
 # H5b-1: enables src/bin/av-tile-fixture.rs's real-MinIO path (the `--dry-run` path needs
 # none of this -- it uses this crate's own always-available MemoryObjectSource/
 # MemoryObjectSink). Never a default feature -- see the av-store dependency comment above.
-store-fixture = ["dep:av-store", "dep:tokio", "dep:bytes"]
+# `dep:av-catalog` added by question 228's finding 2 (pipeline half) -- see that dependency's
+# own comment above for why it rides the same feature rather than getting a second one.
+store-fixture = ["dep:av-store", "dep:tokio", "dep:bytes", "dep:av-catalog"]
 
 [[bin]]
 name = "av-tile-fixture"
@@ -98,7 +117,10 @@ required-features = ["store-fixture"]
 #   av-command is a hot-path crate (crates/av-command/src/clock.rs's own module doc: "every
 #   epoch this crate writes... comes from a Clock passed in by the caller") and av-jobs has
 #   no business anywhere in its dependency tree.
-# - av-catalog: this round's runner never queries the catalog; H3b/H4 may need it, not H3a.
+# - av-catalog: as an UNCONDITIONAL dependency -- this round's `Runner`/library code never
+#   queries the catalog; only src/bin/av-tile-fixture.rs does, and only behind `--catalog-*`
+#   flags, gated the identical way `av-store` above is (question 228's finding 2 -- see that
+#   dependency's own comment above for the full reasoning and the `cargo tree` proof).
 # - sha2/hmac/ring: ADR-004 (see openssl above).
 # - serde: this crate's own wire shapes are still exactly the JobLogRecord protobuf encoding
 #   (src/log.rs) -- serde_json IS now a real [dependencies] entry (above), but only for

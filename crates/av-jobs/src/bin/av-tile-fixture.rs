@@ -116,6 +116,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use av_catalog::{CatalogAsset, PgClient, PgConfig, PgTls};
 use av_cdm::pb;
 use av_jobs::clock::{Clock, SystemClock};
 use av_jobs::hash::hex_encode;
@@ -136,7 +137,15 @@ const USAGE: &str = "usage: av-tile-fixture --key-prefix PREFIX --ladder MARKING
                       [--queue-dir PATH] [--dry-run] [--streaming] \
                       [--store-endpoint URL --store-region REGION --store-access-key-id ID \
                        --store-secret-access-key KEY --store-bucket BUCKET \
-                       [--store-path-style] [--store-ca-file PATH]]";
+                       [--store-path-style] [--store-ca-file PATH]] \
+                      [--catalog-host HOST --catalog-user USER --catalog-password PASSWORD \
+                       --catalog-database DB [--catalog-port PORT] [--catalog-tls-ca-file PATH]]";
+
+/// `--catalog-*`'s own default port -- `crates/av-gateway/src/bin/av-gateway.rs::
+/// DEFAULT_CATALOG_PORT`'s identical value, restated here rather than imported (that binary
+/// does not expose it as a library constant, and this task's own brief calls for no proto or
+/// shared-crate change to get one).
+const DEFAULT_CATALOG_PORT: u16 = 5432;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
@@ -168,6 +177,24 @@ struct CliArgs {
     store_bucket: Option<String>,
     store_path_style: bool,
     store_ca_file: Option<PathBuf>,
+    /// Question 228's finding 2 (pipeline half): `Some` only when `--catalog-host` was given
+    /// -- the presence signal for "register the manifest this run produces in the catalog",
+    /// mirroring `crates/av-gateway/src/bin/av-gateway.rs::CliArgs::catalog_host`'s own
+    /// identical "presence is the switch" doc. When present, `--catalog-user`/`--catalog-
+    /// password`/`--catalog-database` are all REQUIRED together (`parse_cli_args` refuses to
+    /// return `Ok` otherwise) -- a partially-specified catalog connection is a configuration
+    /// defect this binary reports at startup, never a silently incomplete `PgConfig`. Also
+    /// refused together with `--dry-run` (see this binary's own module doc): a dry run's own
+    /// manifest `AssetRef` carries no `Provenance` (`crate::runner::MemoryObjectSink::put`),
+    /// which `CatalogAsset::from_asset_ref` refuses outright, so a `--dry-run --catalog-host`
+    /// combination could never succeed -- refused at parse time rather than failing deep
+    /// inside a job that already ran.
+    catalog_host: Option<String>,
+    catalog_port: u16,
+    catalog_user: Option<String>,
+    catalog_password: Option<String>,
+    catalog_database: Option<String>,
+    catalog_tls_ca_file: Option<PathBuf>,
 }
 
 /// Parses `"WIDTHxHEIGHT"` (both positive decimal `u32`s) -- the exact shape `--synthetic-
@@ -202,6 +229,12 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
         store_bucket: None,
         store_path_style: false,
         store_ca_file: None,
+        catalog_host: None,
+        catalog_port: DEFAULT_CATALOG_PORT,
+        catalog_user: None,
+        catalog_password: None,
+        catalog_database: None,
+        catalog_tls_ca_file: None,
     };
 
     let mut args = args.skip(1);
@@ -238,6 +271,12 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
             "--store-bucket" => out.store_bucket = Some(value()?),
             "--store-path-style" => out.store_path_style = true,
             "--store-ca-file" => out.store_ca_file = Some(PathBuf::from(value()?)),
+            "--catalog-host" => out.catalog_host = Some(value()?),
+            "--catalog-port" => out.catalog_port = value()?.parse::<u16>().map_err(|e| format!("--catalog-port: {e}"))?,
+            "--catalog-user" => out.catalog_user = Some(value()?),
+            "--catalog-password" => out.catalog_password = Some(value()?),
+            "--catalog-database" => out.catalog_database = Some(value()?),
+            "--catalog-tls-ca-file" => out.catalog_tls_ca_file = Some(PathBuf::from(value()?)),
             other => return Err(format!("unrecognised argument {other:?}. {USAGE}")),
         }
     }
@@ -263,6 +302,20 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
     } else if out.store_endpoint.is_none() || out.store_region.is_none() || out.store_access_key_id.is_none() || out.store_secret_access_key.is_none() || out.store_bucket.is_none() {
         return Err(format!(
             "--store-endpoint, --store-region, --store-access-key-id, --store-secret-access-key and --store-bucket are all required unless --dry-run is given. {USAGE}"
+        ));
+    }
+    // Question 228's finding 2: catalog registration is refused together with --dry-run (see
+    // CliArgs::catalog_host's own doc for why -- a dry run's own manifest AssetRef carries no
+    // Provenance, which CatalogAsset::from_asset_ref refuses outright), and a partially-
+    // specified catalog connection is refused at startup rather than silently ignored --
+    // mirrors crates/av-gateway/src/bin/av-gateway.rs::parse_cli_args's identical two rules
+    // for its own --catalog-* flags.
+    if out.catalog_host.is_some() && out.dry_run {
+        return Err(format!("--catalog-host and --dry-run are mutually exclusive -- a dry run's own manifest carries no Provenance, so it can never be catalogued. {USAGE}"));
+    }
+    if out.catalog_host.is_some() && (out.catalog_user.is_none() || out.catalog_password.is_none() || out.catalog_database.is_none()) {
+        return Err(format!(
+            "--catalog-host was given but --catalog-user/--catalog-password/--catalog-database were not all also given (a partially-specified catalog connection is refused at startup, never silently incomplete). {USAGE}"
         ));
     }
     Ok(out)
@@ -755,6 +808,74 @@ fn run(cli: CliArgs) -> Result<FixtureResult, String> {
         None => eprintln!("av-tile-fixture: job complete: {tile_count} tile(s), {total_stored_bytes} byte(s) stored, peak RSS unavailable on this platform, manifest_sha256={}", completion.manifest_sha256),
     }
 
+    // Question 228's finding 2 (pipeline half): register the manifest this run just produced
+    // as a CatalogAsset -- ONLY when --catalog-host was given (parse_cli_args has already
+    // refused --catalog-host together with --dry-run, and refused a partially-specified
+    // catalog connection, so every field this block reads is real). With no --catalog-* flags
+    // at all, this whole block never runs and this binary's behaviour/output is byte-for-byte
+    // what it was before this task -- every existing test of it (this file's own `mod tests`,
+    // none of which pass a --catalog-* flag) stays honest.
+    if let Some(catalog_host) = &cli.catalog_host {
+        // completion.manifest_sha256 is already verified (the streaming branch above
+        // re-hashed the fetched manifest bytes against it directly; the buffered branch's own
+        // manifest_sha256 comes from Runner::run_one's own hash-chained JobCompletion, which
+        // this binary already refused above at "the job completed ok but produced no
+        // manifest_sha256" if it were ever missing) -- this block runs after both, and before
+        // FixtureResult is built, exactly where this task's own brief calls for it.
+        let manifest_asset = completion
+            .outputs
+            .iter()
+            .find(|a| a.media_type == av_jobs::tiler::MANIFEST_MEDIA_TYPE)
+            .ok_or_else(|| format!("--catalog-host was given but the completion carried no manifest output to register: {completion:?}"))?;
+
+        let catalog_user = cli.catalog_user.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_user absent");
+        let catalog_password = cli.catalog_password.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_password absent");
+        let catalog_database = cli.catalog_database.clone().expect("parse_cli_args refuses to return Ok with catalog_host set but catalog_database absent");
+        let catalog_tls = match &cli.catalog_tls_ca_file {
+            Some(ca_file) => PgTls::Required { ca_file: Some(ca_file.clone()) },
+            None => PgTls::Disabled,
+        };
+        let pg_config = PgConfig {
+            host: catalog_host.clone(),
+            port: cli.catalog_port,
+            user: catalog_user,
+            password: catalog_password,
+            database: catalog_database,
+            application_name: "av-tile-fixture".to_string(),
+            connect_timeout: std::time::Duration::from_secs(5),
+            tls: catalog_tls,
+        };
+
+        // This catalog's own identifier (never the sha256 -- crates/av-catalog/migrations/
+        // 0001_init.sql's own COMMENT ON COLUMN assets.asset_id: "the same bytes can be
+        // catalogued twice under different labels/provenance"), deterministic in the job_id
+        // and the manifest's own real sha256 so re-running the identical job against the
+        // identical inputs is idempotent-in-intent (a second real INSERT of the identical
+        // asset_id still fails on the PRIMARY KEY, which is the correct, honest behaviour for
+        // "this exact tile set is already catalogued" -- this binary does not paper over that
+        // with an upsert).
+        let asset_id = format!("tileset:{job_id}:{}", completion.manifest_sha256);
+        eprintln!("av-tile-fixture: registering the tile-set manifest in the catalog at {catalog_host}:{} (asset_id={asset_id:?}) ...", cli.catalog_port);
+
+        let catalog_asset = CatalogAsset::from_asset_ref(manifest_asset, asset_id.clone(), None, Some(job_id.clone()), clock.now_tai_ns())
+            .map_err(|e| format!("building a CatalogAsset from the manifest output: {e}"))?;
+
+        // A fresh Runtime and a fresh PgClient connection for this one registration -- never
+        // reusing the store's own Runtime/connection (this binary's own module doc, "Why
+        // hand-rolled" in crates/av-catalog's own crate doc explains the wire client;
+        // crates/av-gateway/src/catalog_selector.rs's own "Connection lifecycle: connect fresh
+        // per call, no pool" is the identical precedent this block follows, restated here for
+        // a one-shot CLI tool that has no reason to hold a connection open any longer than
+        // this one INSERT needs it).
+        let catalog_runtime = tokio::runtime::Runtime::new().map_err(|e| format!("building the catalog tokio Runtime: {e}"))?;
+        catalog_runtime.block_on(async {
+            let mut client = PgClient::connect(&pg_config).await.map_err(|e| format!("connecting to the catalog at {catalog_host}:{}: {e}", cli.catalog_port))?;
+            catalog_asset.insert(&mut client).await.map_err(|e| format!("inserting the tile-set manifest into the catalog: {e}"))?;
+            client.close().await.map_err(|e| format!("closing the catalog connection: {e}"))
+        })?;
+        eprintln!("av-tile-fixture: registered the tile-set manifest in the catalog (asset_id={asset_id:?})");
+    }
+
     Ok(FixtureResult {
         manifest_sha256: completion.manifest_sha256,
         tile_count,
@@ -844,6 +965,148 @@ mod tests {
     fn dry_run_and_any_store_flag_are_mutually_exclusive() {
         let err = parse_cli_args(args(&["--store-endpoint", "http://127.0.0.1:9000"])).unwrap_err();
         assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    // -- question 228's finding 2: --catalog-* flags -----------------------------------------
+
+    #[test]
+    fn with_no_catalog_flags_cli_args_catalog_host_is_none() {
+        // The presence signal this binary's own registration code gates on (`if let Some(
+        // catalog_host) = &cli.catalog_host`) -- every existing test in this file passes no
+        // --catalog-* flag at all, so this is the one explicit assertion tying "no flags"
+        // directly to "the new code path can never run" for a future reader, rather than
+        // leaving it merely implied by every other test's own continued, unchanged behaviour.
+        let cli = parse_cli_args(args(&[])).unwrap();
+        assert!(cli.catalog_host.is_none());
+        assert_eq!(cli.catalog_port, DEFAULT_CATALOG_PORT);
+    }
+
+    #[test]
+    fn a_dry_run_with_no_catalog_flags_is_byte_for_byte_unaffected() {
+        // Guards the brief's own "behaviour with no flags is byte-for-byte unchanged" bar
+        // directly against a real run, not just the parsed CliArgs -- a regression that made
+        // this binary'S new code silently run even with catalog_host absent would still leave
+        // this test's own manifest_sha256/tile_count/total_stored_bytes assertions intact
+        // (they do not depend on the catalog at all), but the point is this test exercises the
+        // exact same REQUIRED_ARGS-only command line every pre-existing test in this file
+        // already does.
+        let result = run(parse_cli_args(args(&[])).unwrap()).expect("a fully-specified --dry-run must still succeed with no --catalog-* flags");
+        assert_eq!(result.manifest_sha256.len(), 64);
+        assert!(result.tile_count > 0);
+    }
+
+    #[test]
+    fn catalog_host_and_dry_run_are_mutually_exclusive() {
+        let err = parse_cli_args(args(&["--catalog-host", "127.0.0.1", "--catalog-user", "u", "--catalog-password", "p", "--catalog-database", "d"])).unwrap_err();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn a_partially_specified_catalog_connection_is_refused_at_startup() {
+        // --catalog-host without --catalog-user/--catalog-password/--catalog-database is
+        // refused up front, never silently incomplete -- mirrors crates/av-gateway/src/bin/
+        // av-gateway.rs's identical rule for the same four flags. This command line is also,
+        // separately, a --dry-run one (REQUIRED_ARGS's own default) -- the "requires all
+        // catalog fields" check must fire regardless of what a caller does or does not also
+        // get wrong about --dry-run, so this test only asserts on that one message.
+        let err = parse_cli_args(args(&["--catalog-host", "127.0.0.1"])).unwrap_err();
+        assert!(err.contains("--catalog-user"), "{err}");
+    }
+
+    #[test]
+    fn a_fully_specified_catalog_command_line_parses_with_the_default_port() {
+        let base: Vec<&str> = vec![
+            "av-tile-fixture",
+            "--key-prefix",
+            "tiles",
+            "--ladder",
+            "UNCLASSIFIED,CUI",
+            "--label-marking",
+            "CUI",
+            "--job-id",
+            "job-1",
+            "--min-level",
+            "0",
+            "--max-level",
+            "1",
+            "--synthetic-source",
+            "4x2",
+            "--store-endpoint",
+            "http://127.0.0.1:9000",
+            "--store-region",
+            "us-east-1",
+            "--store-access-key-id",
+            "id",
+            "--store-secret-access-key",
+            "secret",
+            "--store-bucket",
+            "bucket",
+            "--catalog-host",
+            "127.0.0.1",
+            "--catalog-user",
+            "catalog_user",
+            "--catalog-password",
+            "catalog_password",
+            "--catalog-database",
+            "altavista_catalog",
+        ];
+        let cli = parse_cli_args(base.into_iter().map(str::to_string)).unwrap();
+        assert_eq!(cli.catalog_host, Some("127.0.0.1".to_string()));
+        assert_eq!(cli.catalog_port, DEFAULT_CATALOG_PORT);
+        assert_eq!(cli.catalog_user, Some("catalog_user".to_string()));
+        assert_eq!(cli.catalog_password, Some("catalog_password".to_string()));
+        assert_eq!(cli.catalog_database, Some("altavista_catalog".to_string()));
+        assert!(cli.catalog_tls_ca_file.is_none());
+        assert!(!cli.dry_run);
+    }
+
+    #[test]
+    fn a_manifest_asset_ref_builds_a_real_catalog_asset_with_the_manifests_own_sha256_and_the_jobs_label() {
+        // A pure, docker-free unit test of exactly the conversion the registration block in
+        // `run` performs (`CatalogAsset::from_asset_ref(manifest_asset, asset_id, None,
+        // Some(job_id), created_tai_ns)`), against a manifest-shaped `pb::AssetRef` built the
+        // same way the real store path's `av_store::client::StoreClient::put` builds one (a
+        // real `label` and a real, if empty-fielded, `Some(Provenance)` -- never `None`, which
+        // is what `--dry-run`'s own `MemoryObjectSink::put` would leave it at, and exactly why
+        // --catalog-host and --dry-run are refused together above). A real round-trip against
+        // a real PostGIS container is NOT covered by this test -- see this task's own report.
+        let manifest_sha256 = hex_encode(&sha256(b"a fixture manifest's own bytes"));
+        let manifest_asset = pb::AssetRef {
+            uri: "s3://altavista-heavy/tiles/prefix/manifest".to_string(),
+            sha256: manifest_sha256.clone(),
+            size_bytes: 4096,
+            media_type: av_jobs::tiler::MANIFEST_MEDIA_TYPE.to_string(),
+            label: Some(pb::Label { marking: "CUI".to_string(), caveats: vec![] }),
+            provenance: Some(pb::Provenance::default()),
+            ..Default::default()
+        };
+        let asset_id = format!("tileset:{}:{}", "job-42", manifest_sha256);
+        let catalog_asset = CatalogAsset::from_asset_ref(&manifest_asset, asset_id.clone(), None, Some("job-42".to_string()), 1_820_000_000_000_000_000).expect("a manifest AssetRef with real label+provenance must convert");
+        assert_eq!(catalog_asset.asset_id, asset_id);
+        assert_eq!(catalog_asset.sha256, manifest_sha256);
+        assert_eq!(catalog_asset.media_type, av_jobs::tiler::MANIFEST_MEDIA_TYPE);
+        assert_eq!(catalog_asset.job_id, Some("job-42".to_string()));
+        assert_eq!(catalog_asset.label.marking, "CUI");
+        assert_eq!(catalog_asset.created_tai_ns, 1_820_000_000_000_000_000);
+    }
+
+    #[test]
+    fn a_dry_run_style_manifest_asset_ref_with_no_provenance_is_refused_by_catalog_asset_conversion() {
+        // Documents (and proves, not just asserts in a comment) exactly why --catalog-host and
+        // --dry-run are mutually exclusive: crate::runner::MemoryObjectSink::put's own
+        // `provenance: None` is real, and CatalogAsset::from_asset_ref refuses a `None`
+        // provenance outright rather than defaulting it.
+        let manifest_asset = pb::AssetRef {
+            uri: "memory://tiles/manifest".to_string(),
+            sha256: hex_encode(&sha256(b"dry-run manifest bytes")),
+            size_bytes: 128,
+            media_type: av_jobs::tiler::MANIFEST_MEDIA_TYPE.to_string(),
+            label: Some(pb::Label { marking: "CUI".to_string(), caveats: vec![] }),
+            provenance: None,
+            ..Default::default()
+        };
+        let err = CatalogAsset::from_asset_ref(&manifest_asset, "asset-1", None, None, 1).unwrap_err();
+        assert!(matches!(err, av_catalog::CatalogError::AssetRefMissingField { field: "provenance" }), "{err:?}");
     }
 
     #[test]

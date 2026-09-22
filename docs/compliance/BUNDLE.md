@@ -40,7 +40,7 @@ rather than a silent hole (see `scripts/kit/evidence.py`'s own top doc, "Bundle 
 ## The bundle's own SHA-256, at this commit
 
 ```
-e116b9822f73a8a6d2a5efac37c139895fb82760a9330b0607754c1ec5e88855
+fb6a2fe94a0d3153277275f5ea4d07e1029bb1d03bb44fd2889bc5f145f41335
 ```
 
 Measured by running the command above with no `--kit`/`--ledger-dir` (both offline-declared
@@ -73,6 +73,7 @@ so it is not duplicated here.
 
 | Date | Hash | Commit | Cause |
 |---|---|---|---|
+| 2026-09-21 | `fb6a2fe94a0d3153277275f5ea4d07e1029bb1d03bb44fd2889bc5f145f41335` | `a8278e1` | scripts/kit/regenerate_compliance.py: SBOM regeneration changed `av-command.cdx.json`, `av-dynamics-service.cdx.json`, `av-edge-plugin.cdx.json`, `av-gateway.cdx.json`, `av-ingest.cdx.json`, `av-proposer.cdx.json`, `cfs-image.cdx.json`, `edge-plugin-image.cdx.json`. |
 | 2026-09-18 | `e116b9822f73a8a6d2a5efac37c139895fb82760a9330b0607754c1ec5e88855` | `bceec44` | scripts/kit/regenerate_compliance.py: `bundle_sha256` moved with no SBOM byte changed -- some other evidence-dependent input (e.g. a control matrix) changed; see this commit's own diff. |
 | 2026-09-18 | `ae0dd61a355bdd72e698f27a5aeff1c71401dee144148ff9413a6efa02b3f6aa` | `2aced3e` | Regenerated the two Python SBOMs so their epoch reflects the newly-committed `python-lock.json` (the SBOMs had briefly predated that file, so their epoch was stale on landing). |
 | 2026-09-17 | `2c306b76b89bd1701af0b542843873ebe866ac25813f9020de62777c6a4e0a32` | `6fe41d7` | Question 224 landed: the two Python SBOMs now source from the committed `python-lock.json`, not the live venv (dropped `pip`, updated the `python-packages-source` property). |

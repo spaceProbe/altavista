@@ -274,6 +274,26 @@ export class GlobeLayer {
    * selection. `screenHeightPx`/`fovYRad` are passed straight through to
    * `selectTiles()` (web/js/globe_lod.js) -- the real screen-space-error LOD
    * computation, not reimplemented here.
+   *
+   * Round 5 (question 228/decision 9) note, not a signature change: when a
+   * `web/js/tiles_layer.js` `TilesOverlayLayer` is ALSO registered on this SAME
+   * `layerManager` (`web/js/scene.js`'s `loadTilesOverlay()`), the `layerManager.
+   * update()` call below already carries everything `Tiles3DLayerAdapter.plan()`
+   * needs (`cameraEcef`/`screenHeightPx`/`fovYRad`, the same field names and the same
+   * body-centred-ECEF-metres convention that adapter uses -- see tiles_layer.js's own
+   * module docstring, "both ECEF-metre consumers in this codebase agree on scale") --
+   * so `scene.js` deliberately does NOT also drive a second, independent
+   * `layerManager.update()` call for the overlay that tick (`TilesOverlayLayer`'s own
+   * `selfDriveManager: false` mode, used exactly when a globe is active). Two
+   * independent per-tick calls on ONE shared manager would each see the OTHER
+   * layer's content as "not wanted" (`LayerManager.update(view)` treats every
+   * registered layer's `plan(view)` output as THIS tick's entire wanted set, layer.js's
+   * own module docstring) -- cancelling in-flight loads and evicting resident entries
+   * that are still genuinely wanted, every single frame. See `web/js/tiles_layer.js`'s
+   * own "Round 5" module docstring and `tests/test_viewer_tiles3d_manager.py` for the
+   * live proof this does not happen. This method itself needs no change for any of
+   * that: it already builds and sends exactly the view a co-registered `Tiles3D
+   * LayerAdapter` needs, it simply did not have one registered before this task.
    */
   update(cameraLocalPos, screenHeightPx, fovYRad) {
     const cameraEcef = {

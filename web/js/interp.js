@@ -372,7 +372,17 @@ export class BodyInterp {
 
   orientation(t, out) {
     const n = this.n;
-    if (n === 0 || this.quat.length < 4) return out.identity();
+    // Question 229 / round-4 defect 4: `body.quat` is not guaranteed -- a scenario
+    // body with no `quat` key left `this.quat` `undefined` (the constructor above
+    // just assigns whatever `body.quat` was), and reading `.length` off `undefined`
+    // threw a TypeError on EVERY frame, with the globe drawing nothing and no other
+    // signal anything was wrong (found by round 4's `Runtime.exceptionThrown`
+    // collector in a real browser -- see tests/test_viewer_globe_layer_manager.py's
+    // proof scenario, which deliberately supplies `quat` for exactly this reason).
+    // The fix is the guard below, `!this.quat ||`, ahead of the length check that was
+    // already there -- a missing/malformed attitude track falls back to the identity
+    // orientation, same as the `n === 0` case already handled, never a redesign.
+    if (n === 0 || !this.quat || this.quat.length < 4) return out.identity();
     if (n === 1 || t <= this.t[0]) return this._sampleQuat(0, t, out);
     if (t >= this.t[n - 1]) return this._sampleQuat(n - 1, t, out);
     const i = findSegment(t, this.t);
