@@ -25,8 +25,9 @@
     "srp": false
   },
   "frame": "EarthMJ2000Eq",
-  "generated": "2026-09-03T01:07:57+00:00",
+  "generated": "2026-09-22T15:02:24+00:00",
   "gmat_version": "R2026a",
+  "golden_regeneration_reason": "round 5, question 230's stm-block follow-up: move crates/av-orbital/tests/stm_goldens.rs's own six bare Rust tolerance constants into this golden's stm block as golden_comparison_tolerance (six named keys), no physics/value change",
   "initial_state": [
     5950.56620450214,
     3435.5609999999997,
@@ -44,7 +45,7 @@
     "min_step_s": 0.0
   },
   "reason": "question 81: STM spacecraft now carries the ballistic properties; plain arc unaffected physically, regenerated for the recorded ballistics field",
-  "sha256": "f8a82f9999bdcecd6536817b61dbe00aa062096d43fee6c8aab62324e7063f77",
+  "sha256": "07fbb4e531c9ba4a1eda349460b624ce63596208249dd7fbf0e67f6e182ab385",
   "spacecraft": {
     "AOP": 0.0,
     "Cd": 2.2,
@@ -138,6 +139,38 @@
       120.98703394238359,
       175.54979196436219
     ],
+    "golden_comparison_tolerance": {
+      "cov_rel_tolerance": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:201 -- bounds the relative Frobenius-norm disagreement between the native-propagated covariance (via av_dynamics::propagate_covariance) and this golden's own stm.cov_t1_si, set just above the measured value (5.748873148206185e-10, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "relative (Frobenius-norm propagated-covariance error)",
+        "value": 1e-06
+      },
+      "det_phi_tolerance": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:187 -- bounds the disagreement between the native det(Phi) and this golden's own stm.det_phi_t1, set just above the measured value (1.262279170077818e-11, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "dimensionless (det(Phi) abs-diff)",
+        "value": 1e-09
+      },
+      "stm_max_abs_tolerance": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:176 -- bounds the max absolute disagreement over all 36 elements of the native STM vs this golden's own final_stm, set just above the measured value (6.392269142452278e-5, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "dimensionless (STM element max-abs-diff)",
+        "value": 0.0001
+      },
+      "stm_max_rel_tolerance": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:177 -- bounds the max relative disagreement over all 36 elements of the native STM vs this golden's own final_stm, set just above the measured value (5.58039616036866e-7, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "relative (STM element max-rel-diff)",
+        "value": 1e-06
+      },
+      "traj_tolerance_m": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:148 -- bounds the native trajectory position residual vs this golden's own final_state, set just above the measured residual (2.7646366405146665e-3 m, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "m",
+        "value": 0.004
+      },
+      "traj_tolerance_mps": {
+        "source": "the constant crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit 101b81e (N4: the native state transition matrix, pinned against GMAT's own 42-state run), tests/stm_goldens.rs:149 -- bounds the native trajectory velocity residual vs this golden's own final_state, set just above the measured residual (3.063141046268765e-6 m/s, debug build, that commit's own host), never loosened past what was measured",
+        "unit": "m/s",
+        "value": 4e-06
+      }
+    },
     "max_abs_identity_error_t0": 0.0,
     "note": "GMAT's own PropagationStateManager('STM') propagation of the same x0/epoch/force model/propagator settings above; row-major, index row*6+col is Phi(row,col); this is the reference the kernel's independently-integrated STM (gmat-sys depth 2) is compared against, not the mechanism it uses (ADR-002 second amendment).",
     "p0_si": [

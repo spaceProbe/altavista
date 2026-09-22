@@ -31,11 +31,29 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Question 230: the golden-comparison tolerance
+/// `convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovariance` actually
+/// asserts the rotated-covariance position block against, moved into
+/// `goldens/covariance_bodyfixed_leo_2h.json` by `goldens/gen_covariance_bodyfixed_leo_2h.py`.
+/// `unit`/`source` are read (and asserted non-empty) only to prove the field parses and to
+/// disclose provenance; the check itself only needs `value`.
+#[derive(Deserialize)]
+struct GoldenComparisonTolerance {
+    value: f64,
+    unit: String,
+    source: String,
+}
+
 #[derive(Deserialize)]
 struct CovarianceGolden {
     report_last_row: ReportLastRow,
     p0_km: P0,
     cov_bodyfixed_gmat_report_km_row_major_6x6: Vec<f64>,
+    // Option, not a bare field with `#[serde(default)]`: absence must fail loudly and by name
+    // (below), never silently fall back to a default tolerance (round 1's own review lesson,
+    // restated by question 230) -- mirrors crates/av-kernel/tests/expr_goldens.rs's own
+    // established shape for this exact field.
+    golden_comparison_tolerance: Option<GoldenComparisonTolerance>,
 }
 
 #[derive(Deserialize)]
@@ -221,9 +239,37 @@ fn convert_with_rotation_position_block_matches_gmat_reportfile_orbiterrorcovari
     let pos_diff = block3_max_abs_diff(&computed, &golden.cov_bodyfixed_gmat_report_km_row_major_6x6, 0, 0);
     // P0's position variances are O(1e-2) km^2 (see gen_covariance_bodyfixed_leo_2h.py) -- 1e-12
     // relative to that scale.
+    //
+    // `scale` stays a local, not part of the moved tolerance: it is part of THIS METRIC's own
+    // definition (the position-block max-abs-diff is normalized by the largest declared position
+    // variance before being compared against the tolerance below), not itself a bound -- the
+    // golden's own `golden_comparison_tolerance.unit` says so in words ("...scaled by the largest
+    // declared position variance, 0.04 km^2").
     let scale = 0.04; // largest declared position variance (200 m)^2 = 0.04 km^2
-    eprintln!("[covariance position block] max abs diff vs GMAT's own EarthFixed report = {pos_diff:.3e} (scale {scale}, relative {:.3e})", pos_diff / scale);
-    assert!(pos_diff / scale < 1e-9, "position block relative error {:.3e} exceeds 1e-9 -- rotation itself may be wrong (independent of the Rdot question)", pos_diff / scale);
+
+    // Question 230: read the tolerance from the golden itself
+    // (goldens/gen_covariance_bodyfixed_leo_2h.py writes it), never a bare Rust constant -- a
+    // reader that silently fell back to a default tolerance here would pin nothing (round 1's
+    // own review lesson, restated by question 230).
+    let recorded_tol = golden.golden_comparison_tolerance.as_ref().unwrap_or_else(|| {
+        panic!(
+            "goldens/covariance_bodyfixed_leo_2h.json is missing golden_comparison_tolerance -- regenerate it with goldens/gen_covariance_bodyfixed_leo_2h.py (question 230: this field must be present, never defaulted)"
+        )
+    });
+    assert!(!recorded_tol.unit.is_empty(), "golden_comparison_tolerance.unit must name the unit the bound is in");
+    assert!(!recorded_tol.source.is_empty(), "golden_comparison_tolerance.source must say where the number came from");
+    let tol = recorded_tol.value;
+
+    eprintln!(
+        "[covariance position block] max abs diff vs GMAT's own EarthFixed report = {pos_diff:.3e} (scale {scale}, relative {:.3e}), tolerance = {tol:.3e} ({})",
+        pos_diff / scale,
+        recorded_tol.unit
+    );
+    assert!(
+        pos_diff / scale < tol,
+        "position block relative error {:.3e} exceeds the golden's own recorded tolerance {tol:.3e} -- rotation itself may be wrong (independent of the Rdot question)",
+        pos_diff / scale
+    );
 }
 
 /// **Required, measured disclosure: GMAT's own `OrbitErrorCovariance` report does NOT match the

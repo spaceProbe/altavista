@@ -58,6 +58,123 @@ P0_SI_DIAG = [100.0 ** 2] * 3 + [0.1 ** 2] * 3
 # Spacecraft physical properties that every seed must carry (question 81).
 BALLISTIC_FIELDS = ("DryMass", "Cd", "Cr", "DragArea", "SRPArea")
 
+# The golden's own purpose statement (round-4 pattern also used by gen_leo_1day_rmag.py/
+# gen_leo_1day_planetodetic_lon.py/gen_covariance_bodyfixed_leo_2h.py, ADR-002's goldens rule:
+# the file's "reason" field states why the golden exists, not why it was last regenerated).
+# Fixed here rather than taken from --reason so a tolerance-only or metadata-only regeneration
+# never erases it -- question 230's own defect (round 4's task) was exactly this generator
+# overwriting "reason" with each run's own note. Neither leo_1day_jgm2_8x8_sunmoon.json nor
+# leo_1day_jgm2_8x8_sunmoon_drag_srp.json carries a separate "note" field with an independent
+# purpose narrative (unlike gen_leo_1day_rmag.py's golden), and each has exactly one commit in
+# its git history (474b76a932a76cd96a5f45f20832f3e7af5b48c2, "Initial import of the Alta Vista
+# platform" -- a squashed import, so no earlier, truer "reason" exists to recover instead); the
+# text below is the only "reason" each golden has ever carried, restored verbatim rather than
+# replaced.
+GOLDEN_REASON = (
+    "question 81: STM spacecraft now carries the ballistic properties; plain arc unaffected "
+    "physically, regenerated for the recorded ballistics field"
+)
+GOLDEN_REASON_DRAG_SRP = (
+    "question 81: STM spacecraft flew with GMAT default ballistics (850 kg, 15 m2, 1 m2); now "
+    "identical to the 6-state vehicle"
+)
+
+# Round 5, question 230's stm-block follow-up: the six tolerance constants
+# crates/av-orbital/tests/stm_goldens.rs's native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden
+# asserts, moved into this golden's own "stm" block as a single golden_comparison_tolerance
+# object with six named keys (not at this file's own top level, where they would be confusable
+# with the depth-2 gmat-sys tolerance_m/tolerance_mps already there -- a different comparison
+# entirely, see that test's own module doc comment). Each key is itself an object with its own
+# value/unit/source (rather than one shared unit/source for all six) because the six constants
+# bound genuinely different quantities in different units (m, m/s, a dimensionless STM-element
+# max-abs-diff, a relative STM-element max-diff, a dimensionless det(Phi) abs-diff, and a
+# relative Frobenius-norm covariance error) -- a single shared unit/source would either be wrong
+# for five of the six or reduced to a vague catch-all; six per-key objects let each one say
+# exactly what it bounds. All six have been asserted, unchanged, since commit 101b81e ("N4: the
+# native state transition matrix, pinned against GMAT's own 42-state run") -- confirmed with
+# `git log -S` against the exact "NAME: f64 = VALUE" text for each constant, not guessed.
+STM_TOLERANCE = {
+    "traj_tolerance_m": {
+        "value": 4e-3,
+        "unit": "m",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:148 -- bounds the native trajectory position "
+            "residual vs this golden's own final_state, set just above the measured residual "
+            "(2.7646366405146665e-3 m, debug build, that commit's own host), never loosened "
+            "past what was measured"
+        ),
+    },
+    "traj_tolerance_mps": {
+        "value": 4e-6,
+        "unit": "m/s",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:149 -- bounds the native trajectory velocity "
+            "residual vs this golden's own final_state, set just above the measured residual "
+            "(3.063141046268765e-6 m/s, debug build, that commit's own host), never loosened "
+            "past what was measured"
+        ),
+    },
+    "stm_max_abs_tolerance": {
+        "value": 1e-4,
+        "unit": "dimensionless (STM element max-abs-diff)",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:176 -- bounds the max absolute disagreement "
+            "over all 36 elements of the native STM vs this golden's own final_stm, set just "
+            "above the measured value (6.392269142452278e-5, debug build, that commit's own "
+            "host), never loosened past what was measured"
+        ),
+    },
+    "stm_max_rel_tolerance": {
+        "value": 1e-6,
+        "unit": "relative (STM element max-rel-diff)",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:177 -- bounds the max relative disagreement "
+            "over all 36 elements of the native STM vs this golden's own final_stm, set just "
+            "above the measured value (5.58039616036866e-7, debug build, that commit's own "
+            "host), never loosened past what was measured"
+        ),
+    },
+    "det_phi_tolerance": {
+        "value": 1e-9,
+        "unit": "dimensionless (det(Phi) abs-diff)",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:187 -- bounds the disagreement between the "
+            "native det(Phi) and this golden's own stm.det_phi_t1, set just above the measured "
+            "value (1.262279170077818e-11, debug build, that commit's own host), never loosened "
+            "past what was measured"
+        ),
+    },
+    "cov_rel_tolerance": {
+        "value": 1e-6,
+        "unit": "relative (Frobenius-norm propagated-covariance error)",
+        "source": (
+            "the constant crates/av-orbital/tests/stm_goldens.rs's "
+            "native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden has asserted since commit "
+            "101b81e (N4: the native state transition matrix, pinned against GMAT's own "
+            "42-state run), tests/stm_goldens.rs:201 -- bounds the relative Frobenius-norm "
+            "disagreement between the native-propagated covariance (via "
+            "av_dynamics::propagate_covariance) and this golden's own stm.cov_t1_si, set just "
+            "above the measured value (5.748873148206185e-10, debug build, that commit's own "
+            "host), never loosened past what was measured"
+        ),
+    },
+}
+
 
 def _matmul6(a, b):
     return [sum(a[i * 6 + k] * b[k * 6 + j] for k in range(6)) for i in range(6) for j in range(6)]
@@ -106,7 +223,15 @@ def _add_forces(fm, force_model, prefix):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--reason", required=True, help="why this golden is (re)generated; recorded in the file")
+    ap.add_argument(
+        "--reason",
+        required=True,
+        help=(
+            "why this run regenerates the golden; recorded in golden_regeneration_reason. "
+            "The file's own 'reason' field is fixed above (the golden's purpose) and is never "
+            "overwritten by this flag -- see GOLDEN_REASON/GOLDEN_REASON_DRAG_SRP."
+        ),
+    )
     ap.add_argument("--tolerance-m", type=float, default=0.05)
     ap.add_argument(
         "--drag-srp", action="store_true",
@@ -215,7 +340,8 @@ def main():
     golden = {
         "name": golden_name,
         "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "reason": args.reason,
+        "reason": GOLDEN_REASON_DRAG_SRP if args.drag_srp else GOLDEN_REASON,
+        "golden_regeneration_reason": args.reason,
         "gmat_version": "R2026a",
         "frame": "EarthMJ2000Eq", "units": {"position": "km", "velocity": "km/s"},
         "epoch_utc": EPOCH, "epoch_a1mjd": a1_epoch,
@@ -236,6 +362,12 @@ def main():
             "cov_t1_pre_symmetrization_asymmetry": cov_asymmetry,
             "cov_units": "SI (m^2 for position-position block, m^2/s^2 for velocity-velocity, m^2/s for the cross block)",
             "stm_spacecraft_ballistics": {k: stm_sat.GetRealParameter(k) for k in ("TotalMass", "DragArea", "SRPArea", "Cd", "Cr")},
+            # Round 5, question 230's stm-block follow-up (see STM_TOLERANCE's own comment
+            # above): the six tolerances crates/av-orbital/tests/stm_goldens.rs asserts as bare
+            # Rust constants, moved here -- inside the "stm" block, not this file's own top
+            # level, where they would be confusable with tolerance_m/tolerance_mps above (the
+            # gmat-sys depth-2 path's tolerances, a different comparison entirely).
+            "golden_comparison_tolerance": STM_TOLERANCE,
         },
     }
     body = json.dumps(golden, indent=2, sort_keys=True)
