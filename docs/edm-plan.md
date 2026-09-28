@@ -16,6 +16,26 @@ Status: draft for review. It is a sibling of spoore (the tracking CDM) and AltaV
 The working name is "EDM" and the proto package is `edm.v1`. Both are placeholders until
 ADR-E000.
 
+**Revision 2026-09-28 (second).** The user answered four scoping questions:
+
+- all engineering tools are modular, starting with FreeCAD over MCP;
+- the program must meet DoD **and** NASA expectations;
+- it is greenfield, with no incumbent tool;
+- the current phase is research and planning only.
+
+The companion documents are:
+
+| Document | Contents |
+|---|---|
+| `docs/edm/compliance-crosswalk.md` | DoD + NASA obligations merged into EDM capabilities C00–C19, the unified analysis credibility record, the tool accreditation lifecycle, known gaps, hosting implications |
+| `docs/edm/tool-modules.md` | The module and job contract every tool follows; `cad-freecad` as module #1; module roadmap; research spikes R1–R8 |
+| `docs/edm/research/freecad-mcp.md` | neka-nat, spkane and other FreeCAD MCP servers evaluated from source; FreeCAD as a platform |
+| `docs/edm/research/dod-requirements.md` | DoD sources → EDM obligations |
+| `docs/edm/research/nasa-requirements.md` | NASA sources → EDM obligations |
+
+Where this plan and those documents differ, those documents are newer. §7.2, §11 and §12 below
+have been amended to match.
+
 ---
 
 ## 1. Objectives (restated as requirements)
@@ -586,6 +606,7 @@ The outputs, all generated and hashed:
 |---|---|---|---|
 | `edm-graph` | Flexo MMS (SysML v2 API + SPARQL) | `query`, `trace(uid)`, `impact(digest)`, `closure(baseline)`, `plan(interface)` | Build on flexo-mms-sysmlv2-mcp (read-only mode) + our linker |
 | `edm-propose` | git forge | `propose_change(files, rationale)` → PR, `propose_requirement`, `propose_waiver` | Build (analogue of `av-gateway` `propose_command`) |
+| `cad-freecad` (module #1, *added 2026-09-28*) | FreeCAD 1.1.4 headless, own thin hermetic module | `build_model`, `mass_properties`, `extract_interfaces`, `fem_prepare`, `diff_models`, `export` (full list: `docs/edm/tool-modules.md` §4.4) | Build; ideas reused from neka-nat and spkane (MIT) |
 | `cad-code` | build123d/CadQuery on OCCT | `build(model, params)` → STEP + mass props, `query_features`, `check_interface(uid)` | Build (community servers as reference) |
 | `cad-vendor` | Onshape FeatureScript MCP, Fusion MCP | vendor-defined | Adopt where licensed |
 | `mesh` | gmsh | `mesh(step_digest, size_field)` → mesh + quality | Build |
@@ -667,7 +688,7 @@ edm/
 │   └── edm-gateway            # MCP + gRPC, OIDC, labels, propose-only
 ├── python/edm-jobkit/         # MCP tool-server SDK: job spec, digest I/O, attestation, extractors
 ├── tools/                     # one dir per MCP tool server + Dockerfile + IMAGE_DIGEST.md + goldens
-│   ├── cad-code/  mesh/  fea-structural/  thermal/  mfg/
+│   ├── cad-freecad/  cad-code/  mesh/  fea-structural/  thermal/  mfg/   (contract: docs/edm/tool-modules.md)
 ├── sysml/lib/                 # program-neutral SysML v2 libraries (interface kinds, TAID, units)
 ├── examples/cubesat-panel/    # the worked example (§11 P2)
 ├── deploy/                    # secdeploy fragment, Flexo + registry + lakeFS, air-gap bundle
@@ -724,14 +745,37 @@ edm/
   from spoore CI evidence (dogfood); ReqIF round-trips through StrictDoc without loss on
   a golden file.
 
+*Amended 2026-09-28: the phases now start with a research phase (R), and E0–E5 absorb the
+compliance capabilities. Capability IDs refer to `docs/edm/compliance-crosswalk.md`.*
+
+**R — Research and planning (current).**
+- Work:
+  - spikes R1–R8 in `docs/edm/tool-modules.md` §7 (FreeCAD headless coverage, determinism,
+    models-as-code usability, the PMI path, FCStd normalization, interface-extraction
+    robustness, the accreditation record shape, and a private Sigstore under FIPS);
+  - verifying the [U]/[P] items in the crosswalk (§7);
+  - drafting ADR-E000..E005 as Proposed.
+- Exit: every spike has a written finding, and the ADRs are ready for acceptance.
+
+**E0 additions.** The `ComplianceMatrix` / tailoring records (C00), the `Label` on every node
+(C14), the `ToolVersion` / `Accreditation` records (C07), and the toolchain supply-chain
+baseline (C15: SBOM, SLSA, STIG'd images).
+
 **E2 — Artifact thread + first tools (wk 6–12).**
-- Work: `edm-store` (ORAS + av-store); `edm-attest` with the predicates in §5.3;
-  `edm-jobkit`; `cad-code`, `mesh`, `fea-structural` and `thermal` servers with golden
-  benchmarks; staleness and impact.
+- Work:
+  - `edm-store` (ORAS + av-store);
+  - `edm-attest` with the predicates in §5.3 plus `edm.dev/job/v1`;
+  - the runner and module contract (`docs/edm/tool-modules.md` §2–3);
+  - **`cad-freecad` (module #1)**, then `fem-calculix` and `thermal-elmer`, each with its
+    accreditation suite;
+  - the `AnalysisRecord` (C06);
+  - staleness and impact.
 - Exit: **the worked example**, a small-sat radiator/equipment panel:
   - `REQ-THM-012` "board interface ≤ 60 °C in worst-hot case" and `REQ-STR-004` "first
     mode ≥ 100 Hz";
-  - build123d panel → STEP → gmsh → Elmer (thermal) and CalculiX (modal);
+  - FreeCAD panel (models as code) → `fem_prepare` → Elmer (thermal) and CalculiX (modal),
+    each result carrying an `AnalysisRecord` whose credibility is at or above the tailored
+    threshold;
   - both requirements closed with attestations;
   - a parameter change in the CAD shows the correct `edm impact` and re-opens both.
 
@@ -778,6 +822,10 @@ engineer is on the critical path from E2.
   building on code-CAD.
   - Default: code-CAD (build123d) for agent-driven work, with STEP AP242 as the neutral
     exchange for everything else.
+  - **Answer (2026-09-28):** every tool is a module, and **FreeCAD is first**. It is exposed
+    over MCP by our own thin, hermetic module. Neither the neka-nat nor the spkane server is
+    forked; ideas and code are reused from both under their MIT licences. See
+    `docs/edm/tool-modules.md` §4. build123d becomes module #5.
 - **Q-E4.** Which analysis tools are licensed? This decides whether PyAnsys MCP is
   adopted or open solvers only.
   - Default: open solvers first (CalculiX, Elmer), Ansys wrapped when available.
@@ -789,10 +837,15 @@ engineer is on the critical path from E2.
 - **Q-E6.** Which assurance regime governs? DO-178C/DO-254/ARP4754B, NASA NPR 7123.1,
   DoDI 5000.97, or commercial.
   - This sets the default closure rules and DAL handling.
+  - **Answer (2026-09-28): DoD and NASA.** The merged obligations are in
+    `docs/edm/compliance-crosswalk.md`. DO-178C/ARP4754B stay relevant only for airborne
+    items, through MIL-HDBK-516C.
 - **Q-E7.** Is there an existing requirements tool (DOORS, Jama, Polarion) that must remain
   master for some programs?
   - If so, the EDM syncs via ReqIF/OSLC and treats it as an external authority with
     aliases.
+  - **Answer (2026-09-28): no, the program is greenfield.** The EDM is the ASOT (DoDI
+    5000.97). ReqIF/OSLC are kept only for customer and supplier exchange.
 - **Q-E8.** Should Syside Automator (paid) be licensed for a fast Python SysML v2 API, or
   should we stay on the EPL pilot implementation plus our own linker?
 - **Q-E9.** Several survey items could not be verified directly (openmbee.org was
@@ -801,6 +854,24 @@ engineer is on the critical path from E2.
   ADR relies on them.
 - **Q-E10.** Should the program-level project name, repo and org (the §9 layout) be
   created now, or should this stay a plan in AltaVista until E0 is ratified?
+- **Q-E11.** Where will the enclave be hosted?
+  - Options: GovCloud-class hosting with GitHub Enterprise Server or GitLab, an OCI registry,
+    a private Sigstore, and enclave LLM inference.
+  - Program technical data (CAD, analyses, ICDs) is ITAR/EAR or CUI and **must not** live in
+    public GitHub. This planning repo stays free of it. See crosswalk §6.
+- **Q-E12.** What is the program model allow-list?
+  - The DoD research reports a FASCSA supply-chain-risk designation of Anthropic for DoW
+    contract work (effective 2026-03-03, upheld 2026-09-25).
+  - **Contracts and legal must confirm what applies per program**, including to the tools used
+    to write the EDM.
+  - The design is provider-agnostic regardless (`tool-modules.md` §6).
+- **Q-E13.** How is AP242 PMI / MBD produced, given that FreeCAD cannot yet do it?
+  - Default: carry PMI as EDM data and render it to 2D drawings, pending spike R4.
+- **Q-E14.** Which NASA payload risk class and which DoD acquisition pathway does the first
+  program fall under? These key the C00 tailoring records.
+- **Q-E15.** Who are the named human approvers, and in which roles?
+  - Roles: CCB chair, ICWG leads, MRB, Technical Authority, M&S accreditation authority.
+  - The CM layer needs them from E1 onward.
 
 ---
 
@@ -821,7 +892,9 @@ engineer is on the critical path from E2.
 
 ## 14. Immediate next actions
 
-1. Answer Q-E1…Q-E10, especially the CAD and analysis tool inventory and the assurance regime.
+1. Answer the remaining questions: Q-E1, E2, E4, E5 and E8–E15. Q-E11 (hosting), Q-E12
+   (model allow-list) and Q-E14 (risk class and pathway) block the most work.
+1a. Run research spikes R1–R8 (`docs/edm/tool-modules.md` §7), starting with R1, R2 and R4.
 2. Draft ADR-E000 (scope and lineage) and ADR-E001 (git as the authored truth; Flexo as the
    derived query server).
 3. Stand up pinned Flexo MMS and the SysML v2 pilot parser in a dev compose. Load the

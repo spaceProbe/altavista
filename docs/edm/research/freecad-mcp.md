@@ -63,12 +63,103 @@ CalculiX only and writes to a `mkdtemp` directory.
 
 <https://github.com/spkane/freecad-addon-robust-mcp-server>
 
-*Pending source review; this section is filled in by the follow-up evaluation.*
+The source was cloned and read.
 
-A same-named repository at `LordBoos/freecad-addon-robust-mcp-server` was found in the first
-pass. It is MIT-licensed and exposes XML-RPC on port 9875 plus JSON-RPC on 9876. It claims more
-than 150 tools, a headless mode and `execute_python`, and documents no authentication. Its
-relationship to spkane's repository (fork or upstream) is to be confirmed.
+**Lineage.** `LordBoos/freecad-addon-robust-mcp-server` is a fork of this repository with no
+independent activity. spkane's project itself builds on neka-nat's design:
+
+- `config.py` labels XML-RPC port 9875 "neka-nat compatible".
+- `bridge/xmlrpc.py` credits neka-nat.
+- Embedded mode uses neka-nat's ThreadPoolExecutor.
+
+**Project facts.**
+
+- **Licence and maintainers:** MIT (`LICENSE-CODE`), with a single maintainer.
+- **Activity:** about 240 stars, 55 forks, 49 commits and 15 open issues. The last commit was a
+  dependency bump on 2026-09-06; the last release was v0.6.2 on 2026-01-18. Feature work has
+  been slow since January.
+- **Requirements:** FreeCAD 0.21 or later, and Python 3.11 to match FreeCAD's ABI.
+- **Packaging:**
+  - PyPI package `freecad-robust-mcp`.
+  - Docker Hub image `spkane/freecad-robust-mcp`, built on `python:3.11-alpine` with the MCP
+    server only. **FreeCAD is not in the image**; it is reached on the host through
+    `host.docker.internal`.
+  - Addon Manager workbench "RobustMCPBridge".
+- **Version pinning:** CI downloads the **latest** FreeCAD AppImage, so the FreeCAD version is
+  not pinned.
+
+**Architecture.**
+
+- The FreeCAD-side bridge runs two servers, both bound to `localhost` by default:
+  - a stdlib `SimpleXMLRPCServer` on **9875**;
+  - an asyncio JSON-RPC TCP server on **9876**.
+- The bridge registers **only four RPC methods**: `execute`, `ping`, `get_instance_id` and
+  `get_view`.
+- Every MCP tool is assembled on the client side as a Python f-string and sent to `execute`.
+  Arguments are interpolated with `!r`, which is reasonably safe against injection.
+- **The curated tool set is therefore no security boundary.** Anything that can reach 9875 or
+  9876 gets full `exec`.
+
+**Headless: genuinely supported.**
+
+- `blocking_bridge.py` runs under `freecadcmd`, and CI starts it with `setsid freecadcmd …`.
+- A separate GUI CI job uses Xvfb with openbox.
+- An embedded mode (Linux only) imports FreeCAD into the MCP process. It is still stateful and
+  still uses `exec`.
+
+**Tools.** There are 152 `@mcp.tool` functions, plus 13 resources and 12 prompts:
+
+| Category | Count | Examples |
+|---|---|---|
+| execution | 5 | `execute_python`, `get_console_output` |
+| documents | 7 | `open_document`, `save_document`, `recompute_document` |
+| objects | 39 | primitives, booleans, loft, sweep, offset, section, `inspect_object` |
+| partdesign | 49 | bodies, sketches, 14 constraint tools, pad, pocket, fillet, chamfer, hole, patterns, datums |
+| spreadsheet | 10 | `spreadsheet_set_alias`, `spreadsheet_bind_property` |
+| draft | 6 | ShapeString |
+| export | 7 | `export_step`, `export_stl`, `export_3mf`, `export_iges`, `import_step` |
+| macros | 6 | `run_macro`, `create_macro` |
+| validation | 4 | `validate_object`, `validate_document`, `undo_if_invalid`, `safe_execute` |
+| view | 18 | screenshots, camera, undo/redo, parts library |
+
+**Code-execution surface.** Four tools execute arbitrary code: `execute_python`, `safe_execute`
+(`exec` inside an undo transaction), `create_macro` and `run_macro` (the code persists in the
+macro directory). There is no setting to disable `exec`.
+
+**Missing.** No FEM tools, no glTF export, and no dedicated mass-properties tool.
+
+**Security.**
+
+- The RPC ports have **no authentication, no TLS and no Host or Origin checks** (confirmed by
+  grep).
+- Reaching them from a browser by CSRF or DNS rebinding is plausible but was not tested.
+- The optional MCP HTTP transport binds **`0.0.0.0` without authentication**
+  (`src/freecad_mcp/server.py`, around line 431).
+- No outbound network use was found.
+
+**Provenance.** INFO logging only. Outputs go to paths the caller supplies, with no hashing and
+no job record.
+
+**Tests and CI: its strongest point.**
+
+- 47 test files: unit tests, plus headless and GUI integration tests covering thread safety,
+  shutdown crashes and workflows.
+- Workflows for test, test-gui (Xvfb), docker, CodeQL, pre-commit, docs and release.
+- It also runs gitleaks, trivy, safety, Ruff, MyPy and CodeRabbit.
+
+### A vs B vs our own thin server
+
+| Constraint | neka-nat | spkane | Own thin server |
+|---|---|---|---|
+| Hermetic per-job execution | No (long-lived GUI session) | No (long-lived bridge) | **Yes** (fresh `freecadcmd` container per job) |
+| No exec by default | No (3 exec tools; cannot disable) | No (the RPC *is* exec; 4 tools can exec) | **Yes** (curated tools; `run_macro` only for digest-allow-listed macros) |
+| Input/output digests | None | None | Built in: `job.json` with sha256 inputs, hashed outputs, attestation |
+| Headless container | Partial | Yes, but its image has no FreeCAD | Yes, with FreeCAD and OCCT pinned from a conda-forge lockfile |
+| Network | localhost RPC | Unauthenticated RPC; HTTP on 0.0.0.0 | `--network=none`; no listening ports |
+| Auth | Optional token, off by default | None | Not needed (no listener) |
+| FEM | CalculiX runner | None | `fem_prepare` writes decks; the solver is a separate module |
+| Tests/CI | Good | **Excellent** | To build, copying spkane's patterns |
+| Licence | MIT | MIT | Ours |
 
 ### C. Other servers (reference only)
 
@@ -106,21 +197,29 @@ FreeCAD 1.1.4 (2026-09-28) fixed two ZipSlip vulnerabilities that malicious FCSt
 trigger (<https://github.com/FreeCAD/FreeCAD/releases/tag/1.1.4>). **FCStd files are therefore
 untrusted input and are parsed only inside the sandbox.**
 
-**Recommendation (initial).** Write our own thin module on FreeCAD's Python API, and reuse ideas
-and code from the others under their licences:
+**Recommendation: write our own thin module on FreeCAD's Python API, and fork neither
+candidate.**
 
-- **From neka-nat (MIT):**
-  - the `fem_executor.py` pattern using ccxtools;
-  - shape serialization;
-  - the headless-subprocess approach;
-  - its token and Host-check code.
-- **From blwfish (LGPL-2.1):**
-  - the Dockerfile pattern;
-  - the `fixture_operations` and `geometric_verification` concepts;
-  - the assembly and varset handler logic.
-  - Any file copied from blwfish becomes LGPL, so each one must be tracked.
+Both candidates are interactive copilots: a stateful FreeCAD process driven by `exec`, with no
+job boundary and no digests. Adapting either one would mean removing its core bridge. We reuse
+the following, keeping each project's MIT notice:
 
-The final recommendation is in `docs/edm/tool-modules.md` §5, once the spkane review is in.
+- **From spkane:**
+  - its catalogue of FreeCAD API code templates (`bridge/xmlrpc.py`, `tools/*.py`), ported to
+    direct API calls in our job entrypoint instead of f-string `exec`;
+  - its validation and undo-on-invalid logic, which becomes our recompute gate;
+  - its headless `freecadcmd` and Xvfb CI jobs, and its CodeQL, gitleaks and trivy setup;
+  - its tool taxonomy, as the starting point for our tool schema.
+- **From neka-nat:**
+  - the `fem_executor` ccxtools flow, reduced to writing the solver deck only;
+  - `serialize.py`;
+  - the token and Host-check code, only if a GUI review link ever needs RPC.
+- **From blwfish (LGPL-2.1):** the Dockerfile pattern, and the `fixture_operations` and
+  `geometric_verification` concepts. Any file copied from blwfish becomes LGPL, so each one must
+  be tracked.
+
+Pin FreeCAD and OCCT ourselves with a conda-forge lockfile. Do not copy spkane's "download the
+latest AppImage" CI step. The module design is in `docs/edm/tool-modules.md`.
 
 ## 3. FreeCAD as a platform
 
