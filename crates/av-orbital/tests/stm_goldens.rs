@@ -50,12 +50,42 @@ struct GravityCfg {
     order: i32,
 }
 
+/// One entry of the `stm` block's own `golden_comparison_tolerance` object (question 230's
+/// stm-block follow-up, `goldens/gen_leo_1day.py`'s own `STM_TOLERANCE`). `unit`/`source` are
+/// read (and asserted non-empty) only to prove the field parses and to disclose provenance; each
+/// check itself only needs `value`.
+#[derive(Deserialize)]
+struct GoldenComparisonToleranceEntry {
+    value: f64,
+    unit: String,
+    source: String,
+}
+
+/// The `stm` block's own six named tolerances -- deliberately nested inside `stm`, not at this
+/// golden's own top level, where they would be confusable with `tolerance_m`/`tolerance_mps`
+/// (the `gmat-sys` depth-2 path's tolerances, a different comparison entirely; see this file's
+/// own module doc comment).
+#[derive(Deserialize)]
+struct StmGoldenComparisonTolerance {
+    traj_tolerance_m: GoldenComparisonToleranceEntry,
+    traj_tolerance_mps: GoldenComparisonToleranceEntry,
+    stm_max_abs_tolerance: GoldenComparisonToleranceEntry,
+    stm_max_rel_tolerance: GoldenComparisonToleranceEntry,
+    det_phi_tolerance: GoldenComparisonToleranceEntry,
+    cov_rel_tolerance: GoldenComparisonToleranceEntry,
+}
+
 #[derive(Deserialize)]
 struct StmBlock {
     final_stm: Vec<f64>,
     det_phi_t1: f64,
     p0_si: Vec<f64>,
     cov_t1_si: Vec<f64>,
+    // Option, not a bare field with `#[serde(default)]`: absence must fail loudly and by name
+    // (below), never silently fall back to a default tolerance (round 1's own review lesson,
+    // restated by question 230) -- mirrors crates/av-kernel/tests/expr_goldens.rs's own
+    // established shape for this exact field.
+    golden_comparison_tolerance: Option<StmGoldenComparisonTolerance>,
 }
 
 fn golden_path() -> PathBuf {
@@ -80,6 +110,16 @@ fn de_body_for(name: &str) -> DeBody {
         "Sun" => DeBody::Sun,
         other => panic!("golden names a point mass this test does not know how to map: {other}"),
     }
+}
+
+/// Question 230's stm-block follow-up: extract one tolerance entry's `value`, after asserting
+/// `unit`/`source` are non-empty (a tolerance whose provenance is blank records nothing) --
+/// mirrors `crates/av-kernel/tests/expr_goldens.rs`'s own established check for this exact
+/// pattern.
+fn check_tol(entry: &GoldenComparisonToleranceEntry, name: &str) -> f64 {
+    assert!(!entry.unit.is_empty(), "stm.golden_comparison_tolerance.{name}.unit must name the unit the bound is in");
+    assert!(!entry.source.is_empty(), "stm.golden_comparison_tolerance.{name}.source must say where the number came from");
+    entry.value
 }
 
 fn km_state_to_m(state_km: &[f64]) -> [f64; 6] {
@@ -115,6 +155,22 @@ fn native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden() {
     let golden = load_golden();
     let model = build_native_model(&golden, "N4Stm1");
 
+    // Question 230's stm-block follow-up: read all six tolerances from the golden's own "stm"
+    // block (goldens/gen_leo_1day.py writes them), never bare Rust constants -- a reader that
+    // silently fell back to a default tolerance here would pin nothing (round 1's own review
+    // lesson, restated by question 230).
+    let tol = golden.stm.golden_comparison_tolerance.as_ref().unwrap_or_else(|| {
+        panic!(
+            "goldens/leo_1day_jgm2_8x8_sunmoon.json's stm block is missing golden_comparison_tolerance -- regenerate it with goldens/gen_leo_1day.py (question 230: this field must be present, never defaulted)"
+        )
+    });
+    let traj_tolerance_m = check_tol(&tol.traj_tolerance_m, "traj_tolerance_m");
+    let traj_tolerance_mps = check_tol(&tol.traj_tolerance_mps, "traj_tolerance_mps");
+    let stm_max_abs_tolerance = check_tol(&tol.stm_max_abs_tolerance, "stm_max_abs_tolerance");
+    let stm_max_rel_tolerance = check_tol(&tol.stm_max_rel_tolerance, "stm_max_rel_tolerance");
+    let det_phi_tolerance = check_tol(&tol.det_phi_tolerance, "det_phi_tolerance");
+    let cov_rel_tolerance = check_tol(&tol.cov_rel_tolerance, "cov_rel_tolerance");
+
     let x0 = km_state_to_m(&golden.initial_state);
     let x1_golden = km_state_to_m(&golden.final_state);
     let t0_tai_ns = Tai::from_a1_mjd(golden.epoch_a1mjd).as_nanos();
@@ -141,14 +197,14 @@ fn native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden() {
     // to derivatives, see model.rs's own doc comment). ---
     let dr = (0..3).map(|i| (result.state[i] - x1_golden[i]).powi(2)).sum::<f64>().sqrt();
     let dv = (3..6).map(|i| (result.state[i] - x1_golden[i]).powi(2)).sum::<f64>().sqrt();
-    eprintln!("[n4-stm-golden] trajectory residual vs golden final_state: {dr:e} m / {dv:e} m/s, wall time {wall_s:.3} s");
+    eprintln!(
+        "[n4-stm-golden] trajectory residual vs golden final_state: {dr:e} m / {dv:e} m/s, wall time {wall_s:.3} s, tolerance {traj_tolerance_m:e} m / {traj_tolerance_mps:e} m/s"
+    );
     // MEASURED: 2.7646366405146665e-3 m / 3.063141046268765e-6 m/s (debug build, this host).
-    // Tolerance set just above it, matching `tests/thirdbody_goldens.rs`'s own identical-order
-    // (never loosened) convention.
-    const TRAJ_TOLERANCE_M: f64 = 4e-3;
-    const TRAJ_TOLERANCE_MPS: f64 = 4e-6;
-    assert!(dr < TRAJ_TOLERANCE_M, "position residual {dr:e} m exceeds this test's own {TRAJ_TOLERANCE_M:e} m tolerance");
-    assert!(dv < TRAJ_TOLERANCE_MPS, "velocity residual {dv:e} m/s exceeds this test's own {TRAJ_TOLERANCE_MPS:e} m/s tolerance");
+    // Tolerance (read from the golden above) set just above it, matching
+    // `tests/thirdbody_goldens.rs`'s own identical-order (never loosened) convention.
+    assert!(dr < traj_tolerance_m, "position residual {dr:e} m exceeds the golden's own recorded {traj_tolerance_m:e} m tolerance");
+    assert!(dv < traj_tolerance_mps, "velocity residual {dv:e} m/s exceeds the golden's own recorded {traj_tolerance_mps:e} m/s tolerance");
 
     // --- STM element agreement: final_stm is unit-invariant (position/velocity both scaled by
     // the identical km<->m factor, so d(pos)/d(pos0), d(pos)/d(vel0), etc. all carry the SAME
@@ -165,27 +221,32 @@ fn native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden() {
         max_abs = max_abs.max(abs_err);
         max_rel = max_rel.max(rel_err);
     }
-    eprintln!("[n4-stm-golden] STM (36 elements) vs GMAT's own final_stm: max abs = {max_abs:e}, max relative = {max_rel:e}");
+    eprintln!(
+        "[n4-stm-golden] STM (36 elements) vs GMAT's own final_stm: max abs = {max_abs:e}, max relative = {max_rel:e}, tolerance {stm_max_abs_tolerance:e} / {stm_max_rel_tolerance:e}"
+    );
     // MEASURED (debug build, this host, the golden's own arc, `--nocapture`): max abs
     // 6.392269142452278e-5, max relative 5.58039616036866e-7 -- essentially the SAME order as
     // round 1's own gmat-sys depth-2 reference point (ADR-002 second amendment: STM max abs
     // 6.3e-5, max relative 5.5e-7, driven by GMAT's OWN A-matrix), even though this native path
     // uses an entirely independently-computed A-matrix (this crate's own gravity-gradient/
-    // third-body partials, never GMAT's). Tolerance set just above the measured value, per this
-    // task's own rule -- NEVER loosened past what was measured.
-    const STM_MAX_ABS_TOLERANCE: f64 = 1e-4;
-    const STM_MAX_REL_TOLERANCE: f64 = 1e-6;
-    assert!(max_abs < STM_MAX_ABS_TOLERANCE, "STM max abs disagreement {max_abs:e} exceeds this test's own {STM_MAX_ABS_TOLERANCE:e} tolerance");
-    assert!(max_rel < STM_MAX_REL_TOLERANCE, "STM max relative disagreement {max_rel:e} exceeds this test's own {STM_MAX_REL_TOLERANCE:e} tolerance");
+    // third-body partials, never GMAT's). Tolerance (read from the golden above) set just above
+    // the measured value, per this task's own rule -- NEVER loosened past what was measured.
+    assert!(max_abs < stm_max_abs_tolerance, "STM max abs disagreement {max_abs:e} exceeds the golden's own recorded {stm_max_abs_tolerance:e} tolerance");
+    assert!(max_rel < stm_max_rel_tolerance, "STM max relative disagreement {max_rel:e} exceeds the golden's own recorded {stm_max_rel_tolerance:e} tolerance");
 
     // --- det(Phi) (Liouville) against the golden's own recorded value. ---
     let det = det6(&result.phi);
     let det_err = (det - golden.stm.det_phi_t1).abs();
-    eprintln!("[n4-stm-golden] det(Phi): ours = {det:.12}, golden's (GMAT) = {:.12}, |diff| = {det_err:e}", golden.stm.det_phi_t1);
+    eprintln!(
+        "[n4-stm-golden] det(Phi): ours = {det:.12}, golden's (GMAT) = {:.12}, |diff| = {det_err:e}, tolerance {det_phi_tolerance:e}",
+        golden.stm.det_phi_t1
+    );
     // MEASURED: ours = 1.000000000103, golden's (GMAT) = 1.000000000091, |diff| =
-    // 1.262279170077818e-11. Tolerance set just above it.
-    const DET_PHI_TOLERANCE: f64 = 1e-9;
-    assert!(det_err < DET_PHI_TOLERANCE, "det(Phi) disagreement {det_err:e} exceeds this test's own {DET_PHI_TOLERANCE:e} tolerance");
+    // 1.262279170077818e-11. Tolerance (read from the golden above) set just above it.
+    assert!(det_err < det_phi_tolerance, "det(Phi) disagreement {det_err:e} exceeds the golden's own recorded {det_phi_tolerance:e} tolerance");
+    // A separate, fixed Liouville sanity floor (not part of the moved golden_comparison_tolerance
+    // six -- this bounds det(Phi) itself against 1.0, not the native-vs-GMAT disagreement the
+    // assertion above bounds).
     assert!((det - 1.0).abs() < 1e-9, "det(Phi) = {det} is not near 1 on this conservative arc (Liouville)");
 
     // --- Propagated covariance, through av_dynamics::propagate_covariance (the SAME
@@ -195,9 +256,10 @@ fn native_stm_matches_leo_1day_jgm2_8x8_sunmoon_golden() {
     let cov_err: f64 = cov.iter().zip(golden.stm.cov_t1_si.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
     let golden_cov_norm: f64 = golden.stm.cov_t1_si.iter().map(|v| v.powi(2)).sum::<f64>().sqrt();
     let cov_rel_err = cov_err / golden_cov_norm;
-    eprintln!("[n4-stm-golden] propagated covariance vs golden cov_t1_si: Frobenius error = {cov_err:e} (relative {cov_rel_err:e}), pre-symmetrization asymmetry = {asym:e}");
+    eprintln!(
+        "[n4-stm-golden] propagated covariance vs golden cov_t1_si: Frobenius error = {cov_err:e} (relative {cov_rel_err:e}), pre-symmetrization asymmetry = {asym:e}, tolerance {cov_rel_tolerance:e}"
+    );
     // MEASURED: Frobenius error 8.45315391856248e-1 (relative 5.748873148206185e-10). Tolerance
-    // set just above it.
-    const COV_REL_TOLERANCE: f64 = 1e-6;
-    assert!(cov_rel_err < COV_REL_TOLERANCE, "covariance relative error {cov_rel_err:e} exceeds this test's own {COV_REL_TOLERANCE:e} tolerance");
+    // (read from the golden above) set just above it.
+    assert!(cov_rel_err < cov_rel_tolerance, "covariance relative error {cov_rel_err:e} exceeds the golden's own recorded {cov_rel_tolerance:e} tolerance");
 }

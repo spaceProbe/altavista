@@ -202,6 +202,9 @@ required-features = ["gmat"]
 name = "golden_acceptance"
 required-features = ["gmat"]
 [[test]]
+name = "orbital_vs_gmat_score"
+required-features = ["gmat"]
+[[test]]
 name = "port_command_events"
 required-features = ["gmat"]
 [[test]]

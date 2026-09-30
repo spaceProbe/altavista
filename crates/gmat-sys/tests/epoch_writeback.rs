@@ -76,11 +76,31 @@ struct Golden {
     duration_s: f64,
 }
 
+/// Question 230: the golden-comparison tolerance this file actually checks
+/// `PlanetodeticLON`/`PlanetodeticLAT` against, moved into
+/// `goldens/leo_1day_jgm2_8x8_sunmoon_planetodetic_lon.json` by
+/// `goldens/gen_leo_1day_planetodetic_lon.py`. The golden's own `source` field records that one
+/// constant is applied identically to both `longitude_deg` and `latitude_deg` there -- that is
+/// deliberate (see below), not an oversight. `unit`/`source` are read (and asserted non-empty)
+/// only to prove the field parses and to disclose provenance; the check itself only needs
+/// `value`.
+#[derive(Deserialize)]
+struct GoldenComparisonTolerance {
+    value: f64,
+    unit: String,
+    source: String,
+}
+
 #[derive(Deserialize)]
 struct LonGolden {
     epoch_a1mjd: f64,
     longitude_deg: f64,
     latitude_deg: f64,
+    // Option, not a bare field with `#[serde(default)]`: absence must fail loudly and by name
+    // (below), never silently fall back to a default tolerance (round 1's own review lesson,
+    // restated by question 230) -- mirrors crates/av-kernel/tests/expr_goldens.rs's own
+    // established shape for this exact field.
+    golden_comparison_tolerance: Option<GoldenComparisonTolerance>,
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -199,15 +219,40 @@ fn epoch_is_written_back_and_an_earth_fixed_longitude_matches_a_genuine_gmat_rep
         lon_golden.epoch_a1mjd, lon_golden.longitude_deg, lon_golden.latitude_deg,
     );
 
-    // 1e-5 deg is generous relative to the measured agreement (see the eprintln! above): the
-    // A1MJD f64 write costs at most 252 ns of epoch precision (question 81), which at Earth's
-    // ~4.178e-12 deg/ns rotation rate moves this longitude by roughly 1e-9 deg -- three orders
-    // of magnitude below this tolerance. The dominant term is the ~5 cm position-tolerance gap
-    // between this crate's own Dopri5/GetDerivatives arc and GMAT's own PrinceDormand78 script
-    // propagation (the same gap leo_golden.rs's own 0.05 m tolerance already accepts), translated
-    // to an angle: 0.05 m / 6.878e6 m radius ~ 4e-7 deg.
-    assert!(lon_diff_deg < 1e-5, "longitude {lon_deg} deg vs golden {} deg (diff {lon_diff_deg} deg)", lon_golden.longitude_deg);
-    assert!(lat_diff_deg < 1e-5, "latitude {lat_deg} deg vs golden {} deg (diff {lat_diff_deg} deg)", lon_golden.latitude_deg);
+    // Question 230: read the tolerance from the golden itself
+    // (goldens/gen_leo_1day_planetodetic_lon.py writes it), never a bare Rust constant -- a
+    // reader that silently fell back to a default tolerance here would pin nothing (round 1's
+    // own review lesson, restated by question 230). The recorded value (1e-5 deg) is generous
+    // relative to the measured agreement (see the eprintln! above): the A1MJD f64 write costs at
+    // most 252 ns of epoch precision (question 81), which at Earth's ~4.178e-12 deg/ns rotation
+    // rate moves this longitude by roughly 1e-9 deg -- three orders of magnitude below this
+    // tolerance. The dominant term is the ~5 cm position-tolerance gap between this crate's own
+    // Dopri5/GetDerivatives arc and GMAT's own PrinceDormand78 script propagation (the same gap
+    // leo_golden.rs's own 0.05 m tolerance already accepts), translated to an angle: 0.05 m /
+    // 6.878e6 m radius ~ 4e-7 deg. One field serving both the longitude and latitude assertions
+    // below is deliberate (the golden's own `source` says so): the same reasoned, not measured,
+    // bound applies to both.
+    let recorded_tol = lon_golden.golden_comparison_tolerance.as_ref().unwrap_or_else(|| {
+        panic!(
+            "goldens/leo_1day_jgm2_8x8_sunmoon_planetodetic_lon.json is missing golden_comparison_tolerance -- regenerate it with goldens/gen_leo_1day_planetodetic_lon.py (question 230: this field must be present, never defaulted)"
+        )
+    });
+    assert!(!recorded_tol.unit.is_empty(), "golden_comparison_tolerance.unit must name the unit the bound is in");
+    assert!(!recorded_tol.source.is_empty(), "golden_comparison_tolerance.source must say where the number came from");
+    let tol_deg = recorded_tol.value;
+    eprintln!("[gmat-sys epoch_writeback] golden_comparison_tolerance = {tol_deg:.3e} {} ({})", recorded_tol.unit, recorded_tol.source);
+    assert!(
+        lon_diff_deg < tol_deg,
+        "longitude {lon_deg} deg vs golden {} deg (diff {lon_diff_deg} deg, tolerance {tol_deg} {})",
+        lon_golden.longitude_deg,
+        recorded_tol.unit
+    );
+    assert!(
+        lat_diff_deg < tol_deg,
+        "latitude {lat_deg} deg vs golden {} deg (diff {lat_diff_deg} deg, tolerance {tol_deg} {})",
+        lon_golden.latitude_deg,
+        recorded_tol.unit
+    );
 
     // --- Prove the parameter is genuinely epoch-dependent (the trap this test exists to avoid):
     // reading it with the *stale* construction epoch and the *same correct* final position must

@@ -5,7 +5,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "f04908af8394ee42703850832d3af949569cc9e76cd60938a604862e8e644dea"
+          "content": "49739c9300eb889df320482cc1d62d2d744227e29a5a28c2d995fe10d48efcbc"
         }
       ],
       "name": "av-lockstep-shim",
@@ -24,7 +24,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "04611db9cb67346a787b7cca653c93664c80a4a7ed3a362b84c92f82858b5e5a"
+          "content": "3bef12a6f2d63ddc561383e0e40d1be04e7f5426fea61ad7272787b7c36953fd"
         }
       ],
       "name": "cfs-image",
@@ -35,15 +35,15 @@
         },
         {
           "name": "altavista:sbom:runtime-content-hash",
-          "value": "sha256:5049bf8f4ab9fd8424637c684d262f7f922d28022c7823e818ec0fe63efb4cef"
+          "value": "sha256:cc83bb68e53151baa86a1bb6dd16580108e4cbe565d133fa09bef307c4ae9031"
         }
       ],
       "type": "container",
       "version": "altavista-cfs-lockstep:local"
     },
-    "timestamp": "2026-09-22T00:59:11Z"
+    "timestamp": "2026-09-30T20:11:29Z"
   },
-  "serialNumber": "urn:uuid:9827b112-e498-c09a-04a1-e766262d9b80",
+  "serialNumber": "urn:uuid:aa832554-8085-e2e4-6d6d-f1e331a6d3e3",
   "specVersion": "1.5",
   "version": 1
 }

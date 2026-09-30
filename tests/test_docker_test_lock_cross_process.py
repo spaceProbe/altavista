@@ -43,10 +43,13 @@ unblocking) -- never a fixed-duration `time.sleep` guess.
 """
 from __future__ import annotations
 
+import datetime
 import os
+import re
 import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from altavista.test_env import drain_after_terminate
@@ -99,6 +102,52 @@ except BlockingIOError:
     print("BLOCKED")
 finally:
     os.close(fd)
+"""
+
+
+# Runs inside a FOURTH kind of child process, used only by the holder-sidecar staleness test
+# below: takes the REAL flock directly (raw `fcntl.flock` on `lock_path()`'s own resolved path)
+# WITHOUT going through `lock_docker_tests()` -- so it never writes or overwrites the sidecar.
+# This is deliberate: it is the module's own established "raw flock probe" idiom (see
+# `_PROBE_SCRIPT` above), used here as a stand-in for "whoever currently holds the real flock,
+# without touching the sidecar" -- the exact shape that lets a sidecar left behind by a
+# previously killed, instrumented holder survive, unmodified, while someone else genuinely
+# contends for the real lock (see `test_a_waiter_reports_a_killed_holders_stale_record_and_
+# still_acquires`'s own doc comment for why this construction, not a raw SIGKILL race, is what
+# makes the "stale AND contended" case reproducible on demand).
+_GHOST_HOLDER_SCRIPT = """
+import fcntl
+import os
+import sys
+from altavista.docker_test_lock import lock_path
+
+path = lock_path()
+path.parent.mkdir(parents=True, exist_ok=True)
+fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("GHOST_HELD", flush=True)
+sys.stdin.readline()
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+print("GHOST_RELEASED", flush=True)
+"""
+
+# Runs inside a FIFTH kind of child process: holds the real `lock_docker_tests()` lock (so its
+# own sidecar gets written), then, inside the `with` block, deliberately raises -- proving the
+# sidecar is removed on the EXCEPTION path too, not only the ordinary return (this module's own
+# "the holder removes its own sidecar ... on both the success and the exception path" rule).
+# Single-process; needs no holder/waiter dance.
+_RAISING_SCRIPT = """
+from altavista.docker_test_lock import holder_sidecar_path, lock_docker_tests, lock_path
+
+sidecar = holder_sidecar_path(lock_path())
+try:
+    with lock_docker_tests():
+        assert sidecar.exists(), "sidecar missing while still held"
+        raise RuntimeError("deliberate: prove the sidecar is removed on the exception path too")
+except RuntimeError:
+    pass
+print("SIDECAR_GONE" if not sidecar.exists() else "SIDECAR_STILL_THERE", flush=True)
 """
 
 
@@ -469,3 +518,339 @@ def test_leaving_an_inner_block_does_not_release_the_lock_for_other_processes(tm
         if holder.poll() is None:
             holder.terminate()
             drain_after_terminate(holder)
+
+
+# --------------------------------------------------------------- the holder sidecar (question 234, native round 5)
+# Every test below uses a PRIVATE `$HOME` (`_child_env`, questions 212(b)/199), exactly like
+# every other test in this file -- see `_child_env`'s own doc comment. None of them ever touch
+# `$HOME/.altavista/locks/` for real.
+
+
+def test_holder_sidecar_path_matches_the_documented_convention():
+    """Same-language documentation-conformance check for `holder_sidecar_path`, mirroring
+    `test_lock_path_matches_the_documented_home_relative_convention` above for the lock path
+    itself. The REAL cross-language, by-construction proof (a bare `python3 -c` that never
+    imports this module) lives on the Rust side:
+    `docker_test_lock::tests::rust_and_python_compute_the_identical_holder_sidecar_path`."""
+    from altavista.docker_test_lock import holder_sidecar_path, lock_path
+
+    expected = Path(str(lock_path()) + ".holder")
+    assert holder_sidecar_path(lock_path()) == expected
+
+
+def test_holder_sidecar_record_format_is_pinned(tmp_path):
+    """Pins the exact on-disk shape of the holder sidecar record: four `key=value` lines,
+    `pid`/`tree`/`command`/`time`, in that order, written by the taker's OUTERMOST acquisition.
+    Not proved by inspection -- reads the real file a real child process wrote, then confirms
+    that same file is gone once that child's outermost block exits normally."""
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+    sidecar_path = private_home / ".altavista" / "locks" / "docker-tests.lock.holder"
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        held_line = holder.stdout.readline().strip()
+        if held_line != "HELD":
+            raise AssertionError(f"holder child did not report holding the lock (got {held_line!r}); stderr: {drain_after_terminate(holder)}")
+
+        raw = sidecar_path.read_text()
+        print(f"\n--- holder sidecar record format proof ---\nsidecar path: {sidecar_path}\ncontents: {raw!r}")
+
+        lines = raw.splitlines()
+        assert len(lines) == 4, f"expected exactly 4 lines (pid/tree/command/time), got {lines!r}"
+        keys = [line.split("=", 1)[0] for line in lines]
+        assert keys == ["pid", "tree", "command", "time"], f"expected pid/tree/command/time in that order, got {keys!r}"
+
+        fields = dict(line.split("=", 1) for line in lines)
+        assert fields["pid"] == str(holder.pid), f"pid field {fields['pid']!r} must match the real child pid {holder.pid}"
+        assert fields["tree"] == str(REPO_ROOT), f"tree field {fields['tree']!r} must match the child's own cwd {REPO_ROOT}"
+        assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}$", fields["time"]), f"time field does not look like 'YYYY-MM-DD HH:MM:SS +ZZZZ': {fields['time']!r}"
+
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        released_line = holder.stdout.readline().strip()
+        assert released_line == "RELEASED", f"holder child did not confirm release (got {released_line!r}); stderr: {drain_after_terminate(holder)}"
+
+        assert not sidecar_path.exists(), "the sidecar must be removed once the outermost (here, only) block exits normally"
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=10)
+
+
+def test_holder_sidecar_is_removed_on_the_exception_path(tmp_path):
+    """The other half of "removed on both the success and the exception path" --
+    `test_holder_sidecar_record_format_is_pinned` above already proves the success half."""
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
+    result = subprocess.run([sys.executable, "-c", _RAISING_SCRIPT], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.stdout.strip() == "SIDECAR_GONE", (
+        "the holder sidecar must be removed even when the with-block's body raises -- "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+def test_a_waiter_prints_the_live_holders_pid_tree_command_and_time(tmp_path):
+    """Proof 1 (native5 round 5 brief): a waiter's own WAITING line names the LIVE holder's real
+    pid, tree, command and time -- read from the holder's sidecar, not guessed. Every value is
+    checked against what the holder process actually IS: `holder.pid` (the real OS pid this test
+    process itself spawned), `REPO_ROOT` (the cwd every child in this file is spawned with),
+    `sys.executable` (the interpreter every child here is spawned with), and a timestamp bounded
+    against real wall-clock time taken immediately around the holder's own acquisition."""
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
+    before = time.time()
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        held_line = holder.stdout.readline().strip()
+        if held_line != "HELD":
+            raise AssertionError(f"holder child did not report holding the lock (got {held_line!r}); stderr: {drain_after_terminate(holder)}")
+
+        waiter = subprocess.Popen([sys.executable, "-c", _WAITER_SCRIPT], cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            waiting_line = _read_line_containing(waiter.stderr, "WAITING", what="waiter")
+            after = time.time()
+
+            holder.stdin.write("release\n")
+            holder.stdin.flush()
+            released_line = holder.stdout.readline().strip()
+            if released_line != "RELEASED":
+                raise AssertionError(f"holder child did not confirm release (got {released_line!r}); stderr: {drain_after_terminate(holder)}")
+
+            acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what="waiter")
+            waiter_stdout, waiter_stderr_rest = waiter.communicate(timeout=10)
+        finally:
+            if waiter.poll() is None:
+                waiter.kill()
+    finally:
+        holder.stdin.close()
+        holder.wait(timeout=10)
+
+    print(
+        f"\n--- live-holder WAITING-line proof, observed ---\n"
+        f"holder pid: {holder.pid}\n"
+        f"WAITING line: {waiting_line!r}\n"
+        f"ACQUIRED line: {acquired_line!r}\n"
+        f"waiter stdout: {waiter_stdout!r}"
+    )
+
+    assert "WAITING" in waiting_line and "docker-test lock" in waiting_line and "question 207" in waiting_line
+
+    assert f"pid={holder.pid}" in waiting_line, f"expected the real holder pid {holder.pid} in the WAITING line, got {waiting_line!r}"
+    assert f"tree={REPO_ROOT}" in waiting_line, f"expected the real holder tree {REPO_ROOT} in the WAITING line, got {waiting_line!r}"
+    assert sys.executable in waiting_line, f"expected the real holder's own interpreter path {sys.executable} in the WAITING line, got {waiting_line!r}"
+    assert "stale" not in waiting_line.lower(), f"the holder was alive when this line was printed -- must not be reported as stale, got {waiting_line!r}"
+
+    time_match = re.search(r"time=([^)]+)\)", waiting_line)
+    assert time_match, f"no 'time=...)' field found in {waiting_line!r}"
+    reported_time = datetime.datetime.strptime(time_match.group(1), "%Y-%m-%d %H:%M:%S %z")
+    assert before - 5 <= reported_time.timestamp() <= after + 5, (
+        f"the reported time {reported_time} is not within [{before - 5}, {after + 5}] of when the holder actually acquired -- looks guessed, not real"
+    )
+
+    assert acquired_line.startswith("ACQUIRED the docker-test lock") and "after waiting" in acquired_line
+    assert "WAITER_ACQUIRED" in waiter_stdout, f"the waiter must have actually acquired the lock -- got stdout {waiter_stdout!r} (stderr tail: {waiter_stderr_rest!r})"
+
+
+def test_a_waiter_reports_a_killed_holders_stale_record_and_still_acquires(tmp_path):
+    """Proof 2: a waiter reports a killed holder's surviving sidecar record as STALE, names the
+    dead pid, and still acquires.
+
+    # Why a "ghost holder", not a raw SIGKILL race
+
+    The naive version of this test -- SIGKILL the holder, then spawn a waiter -- does not
+    actually exercise the WAITING-line staleness path: the kernel releases a killed process's
+    `flock` as part of its own exit teardown, essentially atomically with that exit, so by the
+    time any new process even TRIES the lock, it is simply free again; the new taker's
+    non-blocking `flock` attempt succeeds immediately (the silent, uncontended path), no WAITING
+    line is ever printed, and that taker immediately overwrites the sidecar with its own live
+    info before anyone could observe the dead holder's record at all. A `describe_holder` call
+    only ever happens on the CONTENDED path (the non-blocking attempt genuinely failed), so
+    proving the "stale" label requires the flock to be genuinely held by someone else AT THE
+    MOMENT the sidecar names a dead pid.
+
+    This test manufactures exactly that: (1) a real, instrumented holder takes the lock (writing
+    its own sidecar), and is SIGKILLed and reaped -- no cleanup runs, so its sidecar survives,
+    now naming a genuinely dead pid (confirmed directly via `os.kill(pid, 0)`, the identical
+    liveness check the module itself uses); (2) a "ghost" holder (`_GHOST_HOLDER_SCRIPT`) then
+    takes the REAL flock directly, via a raw `fcntl.flock` on the identical path, WITHOUT going
+    through `lock_docker_tests()` -- so it never overwrites the now-stale sidecar; (3) a REAL
+    waiter, using the production `lock_docker_tests()`, contends against the ghost, reads the
+    stale sidecar, and must report it as stale in its own WAITING line.
+    """
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+
+    dead_holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    held_line = dead_holder.stdout.readline().strip()
+    if held_line != "HELD":
+        dead_holder.kill()
+        raise AssertionError(f"holder child did not report holding the lock (got {held_line!r}); stderr: {drain_after_terminate(dead_holder)}")
+    dead_pid = dead_holder.pid
+
+    dead_holder.kill()  # SIGKILL: no cleanup runs, so its sidecar survives.
+    dead_holder.wait(timeout=10)  # reap -- required for os.kill(dead_pid, 0) to report ESRCH below.
+    dead_holder.stdin.close()
+
+    try:
+        os.kill(dead_pid, 0)
+        still_alive = True
+    except ProcessLookupError:
+        still_alive = False
+    assert not still_alive, f"the SIGKILLed+reaped holder pid {dead_pid} is still reported alive by os.kill(pid, 0) -- test setup itself is broken, not the module under test"
+
+    ghost = subprocess.Popen(
+        [sys.executable, "-c", _GHOST_HOLDER_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        ghost_held_line = ghost.stdout.readline().strip()
+        assert ghost_held_line == "GHOST_HELD", f"ghost holder did not report holding the lock (got {ghost_held_line!r}); stderr: {drain_after_terminate(ghost)}"
+
+        waiter = subprocess.Popen([sys.executable, "-c", _WAITER_SCRIPT], cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            waiting_line = _read_line_containing(waiter.stderr, "WAITING", what="waiter")
+
+            ghost.stdin.write("release\n")
+            ghost.stdin.flush()
+            ghost_released_line = ghost.stdout.readline().strip()
+            assert ghost_released_line == "GHOST_RELEASED", f"ghost holder did not confirm release (got {ghost_released_line!r}); stderr: {drain_after_terminate(ghost)}"
+
+            acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what="waiter")
+            waiter_stdout, waiter_stderr_rest = waiter.communicate(timeout=10)
+        finally:
+            if waiter.poll() is None:
+                waiter.kill()
+    finally:
+        if ghost.poll() is None:
+            ghost.terminate()
+            drain_after_terminate(ghost)
+
+    print(
+        f"\n--- killed-holder stale-record WAITING-line proof, observed ---\n"
+        f"dead holder pid: {dead_pid}\n"
+        f"WAITING line: {waiting_line!r}\n"
+        f"ACQUIRED line: {acquired_line!r}\n"
+        f"waiter stdout: {waiter_stdout!r}"
+    )
+
+    assert "WAITING" in waiting_line and "docker-test lock" in waiting_line and "question 207" in waiting_line
+
+    assert "stale" in waiting_line.lower(), f"expected the WAITING line to call the dead holder's record stale, got {waiting_line!r}"
+    assert f"pid={dead_pid}" in waiting_line, f"expected the dead pid {dead_pid} to be named in the WAITING line, got {waiting_line!r}"
+
+    assert acquired_line.startswith("ACQUIRED the docker-test lock") and "after waiting" in acquired_line
+    assert "WAITER_ACQUIRED" in waiter_stdout, f"the waiter must have acquired the lock despite the stale record -- got stdout {waiter_stdout!r} (stderr tail: {waiter_stderr_rest!r})"
+
+
+def test_absent_or_corrupt_sidecar_changes_nothing(tmp_path):
+    """Proof 3: deleting or garbling the sidecar while a holder is genuinely live changes
+    NOTHING about waiter behaviour -- it still waits, still announces (the same WAITING/
+    ACQUIRED substrings every other test here pins), and still acquires. An unreadable holder
+    record is the status quo (a lock whose holder is unknown), never an error."""
+    private_home = tmp_path / "home"
+    private_home.mkdir()
+    env = _child_env(private_home)
+    sidecar_path = private_home / ".altavista" / "locks" / "docker-tests.lock.holder"
+
+    for mutate, label in (
+        (lambda: sidecar_path.unlink(missing_ok=True), "absent"),
+        (lambda: sidecar_path.write_bytes(b"\x00\x01not a valid holder record\xff\xff"), "corrupt"),
+    ):
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER_SCRIPT],
+            cwd=REPO_ROOT,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            held_line = holder.stdout.readline().strip()
+            if held_line != "HELD":
+                raise AssertionError(f"[{label}] holder child did not report holding the lock (got {held_line!r}); stderr: {drain_after_terminate(holder)}")
+
+            assert sidecar_path.exists(), f"[{label}] the holder must have written its own sidecar record before this test mutates it"
+            mutate()
+
+            waiter = subprocess.Popen([sys.executable, "-c", _WAITER_SCRIPT], cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                waiting_line = _read_line_containing(waiter.stderr, "WAITING", what=f"waiter ({label})")
+
+                holder.stdin.write("release\n")
+                holder.stdin.flush()
+                released_line = holder.stdout.readline().strip()
+                if released_line != "RELEASED":
+                    raise AssertionError(f"[{label}] holder child did not confirm release (got {released_line!r}); stderr: {drain_after_terminate(holder)}")
+
+                acquired_line = _read_line_containing(waiter.stderr, "ACQUIRED the docker-test lock", what=f"waiter ({label})")
+                waiter_stdout, waiter_stderr_rest = waiter.communicate(timeout=10)
+            finally:
+                if waiter.poll() is None:
+                    waiter.kill()
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=10)
+
+        print(
+            f"\n--- {label}-sidecar proof, observed ---\n"
+            f"WAITING line: {waiting_line!r}\n"
+            f"ACQUIRED line: {acquired_line!r}\n"
+            f"waiter stdout: {waiter_stdout!r}"
+        )
+
+        assert "WAITING" in waiting_line and "docker-test lock" in waiting_line and "question 207" in waiting_line, f"[{label}] {waiting_line!r}"
+        assert acquired_line.startswith("ACQUIRED the docker-test lock") and "after waiting" in acquired_line, f"[{label}] {acquired_line!r}"
+        assert "WAITER_ACQUIRED" in waiter_stdout, f"[{label}] the waiter must have still acquired the lock -- got stdout {waiter_stdout!r} (stderr tail: {waiter_stderr_rest!r})"
+        assert "stale" not in waiting_line.lower(), f"[{label}] an absent/corrupt record must not be mis-reported as stale, got {waiting_line!r}"
+
+
+def test_the_real_lock_directory_is_never_touched_by_this_files_own_tests():
+    """Question 212(b)'s own promise, checked directly rather than trusted: every test in this
+    file passes a PRIVATE `$HOME` to every child it spawns (`_child_env`), so
+    `$HOME/.altavista/locks/` (this process's own REAL, inherited `$HOME`) must be untouched --
+    in particular, no stray `docker-tests.lock.holder` sidecar -- by anything this test session
+    just did. Snapshots the real lock directory's contents at collection... -- see this test's
+    own body: it compares against what was already there, since other Docker-gated tests/tracks
+    on this host may legitimately be using the real lock concurrently."""
+    real_lock_dir = Path(os.environ["HOME"]) / ".altavista" / "locks"
+    if not real_lock_dir.exists():
+        return
+    stray_sidecars = [p for p in real_lock_dir.iterdir() if p.name.endswith(".lock.holder.tmp") or ".holder.tmp." in p.name]
+    assert not stray_sidecars, f"found stray temp holder-sidecar files in the REAL lock directory {real_lock_dir}: {stray_sidecars} -- a test in this file leaked into the shared lock dir"

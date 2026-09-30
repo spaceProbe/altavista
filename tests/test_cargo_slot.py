@@ -44,11 +44,20 @@ Docker or GMAT, while still holding the real slot for a real, measurable duratio
 sleeps) the same way a real `cargo test` invocation would. This is exactly the "make the
 wrapper's command configurable" option this task's own brief offers, rather than trying to
 measure overlap against a real (multi-second, non-deterministic-length) compile.
+
+The second half of this file covers the two later additions, both without cargo: `--hold --
+<command>` (question 235: a slot held for a whole non-cargo run, released on exit or kill, the
+command's own exit status, hard usage errors before anything is taken, and a cargo argument list
+never read as `--hold`) and the `debug/deps` entry-count warning (question 231: present above the
+threshold, absent at it, silent without a workspace, one line if the check itself fails, never
+changing the build's exit status). The threshold is lowered with the test-only
+`AV_CARGO_SLOT_DEPS_THRESHOLD`, and the non-APFS branch is forced with `AV_CARGO_SLOT_DEPS_SCAN=1`.
 """
 from __future__ import annotations
 
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -243,3 +252,299 @@ def test_three_concurrent_invocations_serialise_to_two(tmp_path):
         f"this test must never touch the real, host-wide $HOME/.altavista/locks/ directory -- "
         f"before={before!r} after={after!r}"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Question 235: `--hold -- <command>` holds a slot for a whole non-cargo run.
+# Question 231: the `debug/deps` entry-count warning.
+#
+# Neither needs cargo (each child is `sys.executable`, via `AV_CARGO_SLOT_EXE` or `--hold`), so
+# neither carries the cargo-missing skip above. Synchronisation is the same as the test above:
+# block on the children's own stdout/stderr, never a fixed sleep.
+# ---------------------------------------------------------------------------------------------
+
+# A `--hold` child: says it is running (this only executes once `cargo-slot` has exec'd into it,
+# i.e. once it holds the slot), then blocks on its stdin, then exits with a status of its own.
+_HOLD_CHILD_SCRIPT = """
+import sys
+print("RUNNING", flush=True)
+sys.stdin.read()
+sys.exit(7)
+"""
+
+
+def _spawn_hold_child(env: dict) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(CARGO_SLOT), "--hold", "--", sys.executable, "-c", _HOLD_CHILD_SCRIPT],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _spawn_plain_child(env: dict, script: str) -> subprocess.Popen:
+    return subprocess.Popen(
+        [sys.executable, str(CARGO_SLOT), "-c", script],
+        cwd=REPO_ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _end(*procs: subprocess.Popen) -> None:
+    for p in procs:
+        if p.poll() is None:
+            p.kill()
+        for stream in (p.stdin, p.stdout, p.stderr):
+            if stream is not None:
+                stream.close()
+        p.wait()
+
+
+def test_hold_takes_a_slot_for_the_whole_command_and_exits_with_its_status(tmp_path):
+    env = _child_env(tmp_path / "locks")
+    real_home_locks = Path(os.environ["HOME"]) / ".altavista" / "locks"
+    before = sorted(real_home_locks.iterdir()) if real_home_locks.is_dir() else []
+
+    hold_a = _spawn_hold_child(env)
+    hold_b = _spawn_hold_child(env)
+    third = None
+    try:
+        _read_line_containing(hold_a.stdout, "RUNNING", what="hold A")
+        _read_line_containing(hold_b.stdout, "RUNNING", what="hold B")
+        # Both slots are now provably held, by two non-cargo commands that are still running.
+        third = _spawn_plain_child(env, "print('THIRD-RAN', flush=True)")
+        waiting = _read_line_containing(third.stderr, "WAITING", what="third")
+        assert "question 229" in waiting, waiting
+
+        # Let A finish: its stdin closes, it exits 7, and that releases its slot to the third.
+        hold_a.stdin.close()
+        assert hold_a.wait(timeout=10) == 7, "the exit status of `--hold` must be the command's own"
+        acquired = _read_line_containing(third.stderr, "ACQUIRED cargo-slot", what="third")
+        _read_line_containing(third.stdout, "THIRD-RAN", what="third")
+        assert third.wait(timeout=10) == 0
+        print(f"\n--- --hold observed ---\nWAITING: {waiting!r}\nACQUIRED: {acquired!r}\n")
+
+        hold_b.stdin.close()
+        assert hold_b.wait(timeout=10) == 7
+    finally:
+        _end(hold_a, hold_b, *([third] if third else []))
+
+    after = sorted(real_home_locks.iterdir()) if real_home_locks.is_dir() else []
+    assert after == before, f"--hold touched the real slots: before={before!r} after={after!r}"
+
+
+def test_hold_releases_its_slot_when_the_command_is_killed(tmp_path):
+    env = _child_env(tmp_path / "locks")
+    hold_a = _spawn_hold_child(env)
+    hold_b = _spawn_hold_child(env)
+    third = None
+    try:
+        _read_line_containing(hold_a.stdout, "RUNNING", what="hold A")
+        _read_line_containing(hold_b.stdout, "RUNNING", what="hold B")
+        third = _spawn_plain_child(env, "print('THIRD-RAN', flush=True)")
+        _read_line_containing(third.stderr, "WAITING", what="third")
+
+        # `--hold` exec'd: the process holding the slot IS the command, so killing it (no
+        # cleanup code runs) must free the slot for the waiter.
+        hold_a.kill()
+        assert hold_a.wait(timeout=10) == -signal.SIGKILL
+        _read_line_containing(third.stderr, "ACQUIRED cargo-slot", what="third")
+        assert third.wait(timeout=10) == 0
+    finally:
+        _end(hold_a, hold_b, *([third] if third else []))
+
+
+@pytest.mark.parametrize(
+    "hold_args",
+    [["--hold"], ["--hold", "--"], ["--hold", sys.executable], ["--hold", "-c", "pass"]],
+    ids=["bare", "no-command", "no-dashes", "command-without-dashes"],
+)
+def test_hold_usage_errors_are_hard_and_take_nothing(tmp_path, hold_args):
+    lock_dir = tmp_path / "locks"
+    proc = subprocess.run(
+        [sys.executable, str(CARGO_SLOT), *hold_args],
+        cwd=REPO_ROOT,
+        env=_child_env(lock_dir),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    assert "usage" in proc.stderr and "--hold" in proc.stderr, proc.stderr
+    assert not lock_dir.exists(), "a usage error must be reported before any lock directory is created"
+
+
+def test_a_cargo_argument_list_is_never_mistaken_for_hold(tmp_path):
+    # `--hold` anywhere but exactly first, or not exactly `--hold`, is passed through unchanged.
+    for args in (
+        ["-c", "import sys; print(sys.argv[1:])", "--", "--hold"],
+        ["-c", "import sys; print(sys.argv[1:])", "--hold=x"],
+    ):
+        proc = subprocess.run(
+            [sys.executable, str(CARGO_SLOT), *args],
+            cwd=REPO_ROOT,
+            env=_child_env(tmp_path / "locks"),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, (args, proc.stderr)
+        assert proc.stdout.strip() == repr(args[2:]), (args, proc.stdout)
+
+
+# ---- the deps warning ------------------------------------------------------------------------
+
+THRESHOLD = 20
+
+
+def _deps_env(tmp_path: Path, *, force_scan: bool = False, target: "Path | None" = None) -> dict:
+    env = _child_env(tmp_path / "locks")
+    env.pop("CARGO_TARGET_DIR", None)
+    env.pop("CARGO_BUILD_TARGET_DIR", None)
+    env["AV_CARGO_SLOT_DEPS_THRESHOLD"] = str(THRESHOLD)
+    if force_scan:
+        env["AV_CARGO_SLOT_DEPS_SCAN"] = "1"
+    else:
+        env.pop("AV_CARGO_SLOT_DEPS_SCAN", None)
+    if target is not None:
+        env["CARGO_TARGET_DIR"] = str(target)
+    return env
+
+
+def _make_deps(target: Path, entries: int) -> Path:
+    deps = target / "debug" / "deps"
+    deps.mkdir(parents=True)
+    for i in range(entries):
+        (deps / f"libx-{i:05d}.rlib").touch()
+    return deps
+
+
+def _run_slot(env: dict, cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(CARGO_SLOT), *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+_EXIT_3 = ["-c", "import sys; print('CARGO-RAN'); sys.exit(3)"]
+
+
+@pytest.mark.parametrize("force_scan", [False, True], ids=["derived-or-native", "forced-scan"])
+def test_deps_warning_appears_above_the_threshold_and_never_blocks_the_build(tmp_path, force_scan):
+    target = tmp_path / "target"
+    deps = _make_deps(target, THRESHOLD + 1)
+    proc = _run_slot(_deps_env(tmp_path, force_scan=force_scan, target=target), tmp_path, *_EXIT_3)
+
+    assert proc.returncode == 3, "the exec'd command's exit status must still be the script's"
+    assert "CARGO-RAN" in proc.stdout, "the command must still run after the warning"
+    warnings = [ln for ln in proc.stderr.splitlines() if "WARNING" in ln]
+    assert len(warnings) == 1, proc.stderr
+    line = warnings[0]
+    assert str(deps) in line and f"{THRESHOLD}-entry threshold" in line, line
+    assert "question 231" in line and "move it aside" in line, line
+    if force_scan:
+        assert f"at least {THRESHOLD + 1} entries (counted" in line, line
+    else:
+        # APFS derives the count from st_size; any other host counts it. Either way, a number.
+        assert re.search(rf"holds (at least )?{THRESHOLD + 1} entries", line), line
+    assert deps.is_dir() and len(list(deps.iterdir())) == THRESHOLD + 1, "the check must change nothing"
+
+
+@pytest.mark.parametrize("force_scan", [False, True], ids=["derived-or-native", "forced-scan"])
+def test_deps_warning_is_absent_at_or_below_the_threshold(tmp_path, force_scan):
+    target = tmp_path / "target"
+    _make_deps(target, THRESHOLD)  # exactly at the threshold: "passes" means strictly more
+    proc = _run_slot(_deps_env(tmp_path, force_scan=force_scan, target=target), tmp_path, *_EXIT_3)
+    assert proc.returncode == 3 and "CARGO-RAN" in proc.stdout
+    assert proc.stderr == "", proc.stderr
+
+
+def test_deps_check_finds_target_beside_the_nearest_cargo_lock(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "crates" / "x").mkdir(parents=True)
+    (ws / "Cargo.lock").write_text("")
+    deps = _make_deps(ws / "target", THRESHOLD + 1)
+    proc = _run_slot(_deps_env(tmp_path), ws / "crates" / "x", *_EXIT_3)  # no CARGO_TARGET_DIR
+    assert proc.returncode == 3
+    assert str(deps) in proc.stderr, proc.stderr
+
+
+def test_cargo_target_dir_takes_precedence_over_the_workspace_target(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "Cargo.lock").write_text("")
+    _make_deps(ws / "target", THRESHOLD + 1)  # over, but not the one cargo would use
+    small = tmp_path / "elsewhere"
+    _make_deps(small, 2)
+    proc = _run_slot(_deps_env(tmp_path, target=small), ws, *_EXIT_3)
+    assert proc.returncode == 3 and proc.stderr == "", proc.stderr
+
+
+def test_deps_check_is_silent_without_a_workspace_or_a_deps_directory(tmp_path):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    if any((p / "Cargo.lock").exists() for p in (bare, *bare.parents)):
+        pytest.skip(f"a Cargo.lock exists above {bare}; cannot construct a workspace-less cwd")
+    proc = _run_slot(_deps_env(tmp_path), bare, *_EXIT_3)
+    assert proc.returncode == 3 and "CARGO-RAN" in proc.stdout and proc.stderr == "", proc.stderr
+
+    # A workspace whose tree has not been built yet: no debug/deps at all.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    (fresh / "Cargo.lock").write_text("")
+    proc = _run_slot(_deps_env(tmp_path), fresh, *_EXIT_3)
+    assert proc.returncode == 3 and proc.stderr == "", proc.stderr
+
+
+def test_deps_check_failure_is_one_line_and_never_fails_the_build(tmp_path):
+    target = tmp_path / "target"
+    _make_deps(target, THRESHOLD + 1)
+    (target / "debug").chmod(0)  # stat of debug/deps now fails with EACCES
+    try:
+        proc = _run_slot(_deps_env(tmp_path, target=target), tmp_path, *_EXIT_3)
+    finally:
+        (target / "debug").chmod(0o755)
+    assert proc.returncode == 3 and "CARGO-RAN" in proc.stdout
+    lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+    assert len(lines) == 1 and "could not run" in lines[0] and "question 231" in lines[0], proc.stderr
+
+
+def test_deps_check_is_not_run_under_hold(tmp_path):
+    target = tmp_path / "target"
+    _make_deps(target, THRESHOLD + 1)
+    proc = _run_slot(
+        _deps_env(tmp_path, target=target), tmp_path, "--hold", "--", sys.executable, "-c", "raise SystemExit(5)"
+    )
+    assert proc.returncode == 5 and proc.stderr == "", (proc.returncode, proc.stderr)
+
+
+def test_the_non_apfs_screen_only_skips_directories_that_cannot_be_over(tmp_path):
+    from importlib.machinery import SourceFileLoader
+    from importlib.util import module_from_spec, spec_from_loader
+
+    loader = SourceFileLoader("cargo_slot_under_test", str(CARGO_SLOT))
+    module = module_from_spec(spec_from_loader("cargo_slot_under_test", loader))
+    loader.exec_module(module)
+    # ext4-style: a 4 KiB directory, and larger ones, against the default threshold.
+    assert module._screen_says_small(4096, 100_000) is True
+    assert module._screen_says_small(2 * 100_000 - 1, 100_000) is True
+    assert module._screen_says_small(2 * 100_000, 100_000) is False
+    assert module._screen_says_small(4 * 1024 * 1024, 100_000) is False
+    # The bounded count stops at the cap instead of reading everything.
+    d = tmp_path / "d"
+    d.mkdir()
+    for i in range(30):
+        (d / str(i)).touch()
+    assert module._count_capped(str(d), 10) == 11
+    assert module._count_capped(str(d), 100) == 30

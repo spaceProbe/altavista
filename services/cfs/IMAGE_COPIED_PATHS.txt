@@ -1,0 +1,96 @@
+# services/cfs/IMAGE_COPIED_PATHS.txt -- the paths altavista-cfs-lockstep:local's content is
+# derived from (question 232, extending question 212(a): every image records the commit it was
+# built from beside the digest, the build scripts write both, and a docker-gated test refuses
+# when a commit touching these paths has landed since). See services/tiles/IMAGE_COPIED_PATHS.txt's
+# own header comment for the full method and reasoning this applies here too; not repeated a
+# second time except where cFS's own COPY shape differs from the three Rust-crate images'.
+#
+# ONE list, read by BOTH services/cfs/build-image.sh (to compute whether the tree was dirty under
+# these paths at build time) and tests/heavy_stack.py's own verify_image_commit_provenance (to run
+# `git log <recorded_commit>..HEAD -- <these paths>`) -- never duplicated between the two.
+#
+# Derived, not guessed: services/cfs/tests/test_image_digest.py's own
+# compute_current_copy_manifest parses services/cfs/Dockerfile's actual COPY lines (directories
+# expanded recursively), and services/cfs/IMAGE_CONTEXT_MANIFEST.txt already records the SHA-256
+# of every one of those host paths -- this file starts from that exact, real set and collapses it
+# to the directory/file prefixes below that `git log -- <paths>` can use:
+#   - services/cfs/apps/{adcs,io_lockstep,sch_lockstep,shared}: each is COPYed as a whole
+#     directory (the Dockerfile has four separate `COPY services/cfs/apps/<name> ...` lines) --
+#     collapsed to the directory itself since every file under each one is a real COPY source.
+#   - services/cfs/psp-lockstep: COPYed as a whole directory (one `COPY services/cfs/psp-lockstep
+#     ...` line) -- same collapse, same reason.
+#   - services/cfs/build/cpu1_install_custom.cmake, generate_startup.cmake, targets.cmake: NOT
+#     collapsed to the services/cfs/build/ directory. The Dockerfile COPYs exactly these three
+#     files individually (the mission-config overrides), and services/cfs/build/ also holds
+#     RTEMS cross-build files (bsp_rtems_cfg.h, cfe_perfids.h, target-configs-append-rtems.mk,
+#     targets-rtems.cmake, toolchain-arm-rtems6-zynqmp_rpu_lock_step.cmake) this Dockerfile never
+#     reads at all -- collapsing to the whole directory would fire this check on commits to files
+#     that never touch this image's own bytes, exactly the over-broad trap this task's own brief
+#     warns against ("an over-broad set ... will be turned off by the next person").
+#   - services/cfs/container-entrypoint.sh: COPYed individually; listed as the one file.
+#   - third_party/fetch-cfs.sh: COPYed individually, and RUN by the builder stage to clone the
+#     pinned cFS bundle -- a real COPY source, so a real input to this image's bytes, exactly
+#     like services/proposer/IMAGE_COPIED_PATHS.txt's own fixture COPY source is covered there.
+#   - services/cfs/Dockerfile itself: not a COPY source, but included anyway -- matching all
+#     three existing IMAGE_COPIED_PATHS.txt files' own choice to cover their own Dockerfile. A
+#     change to the RUN/ENV/COPY instructions themselves (e.g. the BUILDDATE pin, the
+#     native_std.* targets, the base-image digest) changes this image's bytes just as surely as
+#     a change to a COPYed file does.
+#
+# Deliberately NOT covered, and why:
+#   - services/cfs/bin/av-lockstep-shim ITSELF: the one COPY source that is git-ignored (a
+#     compiled cross-build binary artifact -- see this Dockerfile's own header comment for the
+#     rebuild recipe, and services/cfs/tests/test_image_digest.py's own BUILD_ARTIFACT
+#     convention that already handles it for the digest/manifest checks). `git log -- <a
+#     git-ignored path>` always returns nothing, whatever actually changed, so listing the
+#     BINARY here would make this check silently vacuous for it.
+#
+#     Covered instead BY ITS SOURCES, which are tracked (manager review, round 5). This is the
+#     established shape, not a new one: services/tiles/IMAGE_COPIED_PATHS.txt covers a
+#     prebuilt av-tiles binary the same way -- by naming the crates it is compiled from and
+#     their local dependency closure, never the binary. Leaving the shim uncovered would have
+#     left this image's ONLY Rust binary outside the very check this file exists to provide,
+#     which is the whole defect question 232 names. The closure below was read out of the
+#     manifests rather than guessed, and dev-only edges were excluded deliberately:
+#       * crates/av-lockstep-shim -- the binary's own crate.
+#       * crates/av-cdm -- its one `[dependencies]` path edge; av-cdm itself declares no
+#         local path dependency of its own, so the closure ends there.
+#       * proto/altavista/v1 -- compiled into both crates by their own build.rs scripts
+#         (prost-build/tonic-build shelling out to protoc), so a proto change is a real change
+#         to this binary's bytes, exactly as it is for av-tiles.
+#       * crates/av-lockstep is NOT listed: it is a `[dev-dependencies]` edge only (read
+#         directly out of crates/av-lockstep-shim/Cargo.toml, not inferred from the name --
+#         the tiles header's own warning about exactly this trap), used by that crate's own
+#         tests and never reaching the shipped binary.
+#
+#     What this still does not catch, stated plainly: the shim binary in services/cfs/bin/ is
+#     produced by a recipe this repository does not pin (a moving `rust:1.90-bookworm` tag, no
+#     `--locked`, and the absolute build path embedded in the output), so two builds of the
+#     SAME commit do not produce the same bytes -- measured in round 5, see
+#     services/cfs/IMAGE_DIGEST.md's own 2026-09-22 section. The source paths above catch a
+#     source change; they cannot catch a toolchain change, and nothing here claims to.
+#   - The root Cargo.lock/Cargo.toml (question 233's ratified exclusion; same reasoning as the
+#     other three IMAGE_COPIED_PATHS.txt files' own headers). Moot for this image specifically --
+#     this Dockerfile has no Rust build step of its own at all; the one Rust binary it ships
+#     (av-lockstep-shim) is prebuilt outside this Dockerfile and is excluded above already.
+#     Recorded here anyway, for the same consistency those three files' headers state.
+#   - services/cfs/build-image.sh itself: it orchestrates the build; it is not a source the
+#     image's bytes are compiled from.
+#   - services/cfs/IMAGE_DIGEST.md, services/cfs/IMAGE_CONTEXT_MANIFEST.txt, and the rest of
+#     services/cfs/bin/: self-referential / the build's own output, never an input -- same
+#     reasoning as the other three files' headers, extended here to state the git-ignored point
+#     above explicitly for services/cfs/bin/av-lockstep-shim.
+crates/av-cdm
+crates/av-lockstep-shim
+proto/altavista/v1
+services/cfs/apps/adcs
+services/cfs/apps/io_lockstep
+services/cfs/apps/sch_lockstep
+services/cfs/apps/shared
+services/cfs/build/cpu1_install_custom.cmake
+services/cfs/build/generate_startup.cmake
+services/cfs/build/targets.cmake
+services/cfs/container-entrypoint.sh
+services/cfs/psp-lockstep
+services/cfs/Dockerfile
+third_party/fetch-cfs.sh

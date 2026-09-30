@@ -39,7 +39,21 @@
 #     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
 #     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
 #     -w /Users/probe/code/AltaVista-edge rust:1.90-bookworm \
-#     cargo build --release -p av-lockstep-shim --target-dir /Users/probe/code/AltaVista-edge/target-docker-linux
+#     sh -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev \
+#       && cargo build --release -p av-lockstep-shim --target-dir /Users/probe/code/AltaVista-edge/target-docker-linux"
+#
+# (Round 5, native5-cfs-image-provenance: this recipe used to omit the `apt-get install
+# protobuf-compiler` step, and following it verbatim failed with "Could not find `protoc`" --
+# `spoore-cdm`'s own build.rs and av-cdm's own build.rs both compile their protos with
+# prost-build, which shells out to the `protoc` binary; the plain `rust:1.90-bookworm` image
+# does not ship it. Every OTHER cross-build script in this repository that builds an
+# av-cdm-dependent crate already installs this package for the identical reason --
+# services/tiles/build-image.sh's own prebuild step installs `protobuf-compiler
+# libprotobuf-dev libssl-dev pkg-config` before its own `cargo build`. `av-lockstep-shim`
+# itself needs neither `libssl-dev` nor `pkg-config`: it depends on no OpenSSL-backed TLS
+# stack at all -- see crates/av-lockstep-shim/Cargo.toml's own comment on its `tonic`
+# dependency ("does NOT pull tokio-rustls/`ring`") -- so only `protobuf-compiler` and
+# `libprotobuf-dev` are added here, not tiles' full four-package set.)
 #
 # (the repository is mounted at a container path whose PARENT is literally `/Users/probe/code`,
 # not `/workspace` -- round 4's own worker report, `scripts/kit/build_kit.py`'s own

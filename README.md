@@ -129,6 +129,21 @@ one more line reporting the real, measured wait once a slot is acquired. See the
 module doc comment for the full mechanism, including why a two-line `SIGALRM` recipe alone was
 not enough on this host and what actually made it work.
 
+`scripts/dev/cargo-slot --hold -- <command> [args...]` takes a slot the same way and `exec`s
+`<command>` instead of `cargo`, so the slot is held for that command's whole life and released
+when it exits or is killed. It exists for the Python suite (question 235): a cargo gate relinking
+a workspace binary while the suite launches it makes `syspolicyd`'s first-launch scan (question
+226) blow every readiness budget, so any suite that launches workspace binaries holds a slot for
+its whole run. `--hold` without `--` and a command is a usage error (exit 2) before anything is
+taken.
+
+Before it runs `cargo`, `cargo-slot` also warns (one line, never refusing or changing anything)
+when the target directory's `debug/deps` holds more than 100 000 entries, because rustc spends
+its time in directory reads at that size (question 231: a million-entry directory turned a
+29-second rebuild into eight minutes). The count costs one `stat` on APFS, where a directory's
+size encodes it; elsewhere a screen and a scan that stops at the threshold. The remedy is to move
+the directory aside with no cargo running in that tree.
+
 ## Edge track
 
 The edge ingest, its plugin, and the tracker are part of the same Rust workspace ("Building
@@ -297,8 +312,12 @@ oriented with GMAT's body-fixed frames (Earth rotation, lunar libration, IAU pol
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest
+scripts/dev/cargo-slot --hold -- .venv/bin/python -m pytest
 ```
+
+The suite launches workspace binaries, so it holds a cargo slot for its whole run: a cargo build
+relinking a binary underneath it would trip macOS's first-launch scan and time out readiness
+checks (question 235).
 
 The unit tests cover script preparation and the JSON model and do not need GMAT.
 The examples double as integration tests against the real GMAT install.

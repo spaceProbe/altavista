@@ -218,6 +218,8 @@ pub enum DrmError {
     /// must supply `spacecraft.X/Y/Z/VX/VY/VZ` directly -- refused here, typed, naming what was
     /// declared instead, rather than silently reinterpreting the six numeric fields as if they
     /// were Cartesian (which would propagate a physically wrong state with no error at all).
+    /// `instance` carries `parse_orbital_spec`'s whole context string (`instance "leo" (system
+    /// "leo_sys")`), so `Display` prints it as is, the way `UnknownParameter`'s `context` is.
     OrbitalRequiresCartesianState { instance: String, declared: String },
     /// `av_kernel::schedule::ScheduleError` from the underlying kernel run, stringified (its
     /// own `M::Error` is `binding::AnyModelError`, which is not `Clone`/`'static`-simple
@@ -681,7 +683,7 @@ impl std::fmt::Display for DrmError {
             DrmError::OrbitalModel { instance, detail } => write!(f, "instance {instance:?}: could not construct the native orbital model: {detail}"),
             DrmError::OrbitalRequiresCartesianState { instance, declared } => write!(
                 f,
-                "instance {instance:?}: spacecraft.DisplayStateType={declared:?}, but a \"orbital.\"-dispatched instance requires \"Cartesian\" (declare spacecraft.X/Y/Z/VX/VY/VZ directly -- the native model has no GMAT to convert any other element set)"
+                "{instance}: spacecraft.DisplayStateType={declared:?}, but a \"orbital.\"-dispatched instance requires \"Cartesian\" (declare spacecraft.X/Y/Z/VX/VY/VZ directly -- the native model has no GMAT to convert any other element set)"
             ),
             DrmError::Schedule(e) => write!(f, "{e}"),
             DrmError::CovarianceHygiene(e) => write!(f, "{e}"),

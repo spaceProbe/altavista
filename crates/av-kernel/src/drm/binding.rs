@@ -2042,6 +2042,26 @@ pub struct OrbitalSystemSpec {
     /// same six names either way) -- converted to SI at materialization, mirroring every
     /// GMAT-bound instance's own km->m boundary (`crate::drm::units`).
     pub x0_km: [f64; 6],
+    /// `force_model.golden_ref` -- the name of the golden (under `goldens/`) this exact
+    /// configuration is pinned against, accepted here exactly as [`parse_gmat_spec`] accepts it
+    /// (a GMAT instance's value ends up in `GmatModelInfo.goldens`; this one ends up in
+    /// `EarthGravityModelInfo.goldens`, reported by `describe().goldens`). **A label, not
+    /// physics:** it enters neither `av_orbital`'s `settings_hash` nor its `provenance()` map
+    /// (hash parity would otherwise move the recorded `86ff995d...` row in
+    /// `docs/native-dynamics-plan.md` for a change that alters no number the model computes).
+    /// `gmat_settings` does not hash it either -- on a GMAT instance it too reaches only
+    /// `goldens` -- so the two paths agree.
+    pub golden_ref: Option<String>,
+    /// The declared `spacecraft.DryMass/Cd/Cr/DragArea/SRPArea` values (kg, dimensionless,
+    /// m^2 -- the golden's own recorded ballistic properties, question 81: "a seed is a vehicle,
+    /// not a state vector"), stored verbatim by name. **Inert in this path:** this binding kind
+    /// wires no drag and no SRP force, so nothing reads them -- as on a `"gmat."` instance whose
+    /// force model has no drag/SRP force, where gravity and point-mass accelerations are
+    /// mass-independent. They are deliberately kept out of `settings_hash`/`provenance()`
+    /// (unlike `gmat_settings`, which does hash them, so a GMAT instance's hash moves with a
+    /// changed `Cd` even though no force reads it): the native model's hash is a function of what
+    /// it actually computes.
+    pub ballistic: BTreeMap<String, f64>,
 }
 
 /// [`classify_binding`]'s actual return shape (M13.2, question 107): a `BINDING_KIND_MODEL`
@@ -2260,6 +2280,7 @@ fn parse_orbital_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Re
     let mut coordinate_system: Option<String> = None;
     let mut point_mass_names: Vec<String> = Vec::new();
     let mut seen_state = [false; 6];
+    let mut keplerian_seen: Vec<String> = Vec::new();
     for (name, p) in params {
         if let Some(field) = name.strip_prefix("force_model.") {
             match field {
@@ -2268,10 +2289,9 @@ fn parse_orbital_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Re
                 "gravity_degree" => spec.gravity_degree = p.value.round() as i32,
                 "gravity_order" => spec.gravity_order = p.value.round() as i32,
                 "point_masses" => point_mass_names = p.string_value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
-                // N6's own scope: unlike `parse_gmat_spec`, `golden_ref` is not a recognized
-                // name here (no test in this task pins a golden against this spec type) --
-                // refused as unknown, same as any other undeclared name, rather than silently
-                // accepted and ignored.
+                // A label naming the pinned golden, not physics -- see `OrbitalSystemSpec::
+                // golden_ref`. Never enters the model's settings hash.
+                "golden_ref" => spec.golden_ref = Some(p.string_value.clone()),
                 _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
             }
         } else if let Some(field) = name.strip_prefix("spacecraft.") {
@@ -2301,6 +2321,18 @@ fn parse_orbital_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Re
                 "VZ" => {
                     spec.x0_km[5] = p.value;
                     seen_state[5] = true;
+                }
+                // The six Keplerian element names a real system file (`drms/leo_1day_golden.
+                // system.yaml`) declares under `DisplayStateType: Keplerian`: recognised as
+                // "seen", never converted (there is no GMAT here to convert them, and `av_orbital`
+                // must not convert them silently). Their only effect is that the
+                // `DisplayStateType != "Cartesian"` check below refuses such a file with the typed
+                // `OrbitalRequiresCartesianState` naming the declared type, instead of this loop
+                // refusing it as an unknown parameter first.
+                "SMA" | "ECC" | "INC" | "RAAN" | "AOP" | "TA" => keplerian_seen.push(name.clone()),
+                // Declared spacecraft properties, inert here -- see `OrbitalSystemSpec::ballistic`.
+                "DryMass" | "Cd" | "Cr" | "DragArea" | "SRPArea" => {
+                    spec.ballistic.insert(field.to_string(), p.value);
                 }
                 _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
             }
@@ -2337,6 +2369,15 @@ fn parse_orbital_spec(context: &str, params: &BTreeMap<String, Parameter>) -> Re
     };
     if display_state_type != "Cartesian" {
         return Err(DrmError::OrbitalRequiresCartesianState { instance: context.to_string(), declared: display_state_type });
+    }
+    // A file that declares `Cartesian` and also carries a Keplerian element is ambiguous (which
+    // is the initial state?) -- refused as `UnknownParameter` naming the first such element
+    // (no new `DrmError` variant this round), never silently resolved in favour of either.
+    if let Some(name) = keplerian_seen.first() {
+        return Err(DrmError::UnknownParameter {
+            context: context.to_string(),
+            name: format!("{name} (a Keplerian element declared alongside spacecraft.DisplayStateType=\"Cartesian\" -- the initial state is ambiguous; declare only spacecraft.X/Y/Z/VX/VY/VZ)"),
+        });
     }
     if seen_state.iter().any(|&s| !s) {
         return Err(DrmError::MissingParameter { context: context.to_string(), name: "spacecraft.{X,Y,Z,VX,VY,VZ} (all six required -- a \"orbital.\"-dispatched instance's Cartesian state, no partial subset)".to_string() });
@@ -3349,12 +3390,27 @@ pub(crate) fn materialize_constant_accel(spec: &ConstantAccelSpec, epoch_tai_ns:
 /// `gmat_sys`'s own `GMAT_ROOT`) -- see that function's own doc comment for the environment
 /// variable / repo-relative-fallback rule (question 199: read-only, never written).
 ///
-/// `settings: BTreeMap::new()` (like [`materialize_constant_accel`]): `EarthGravityModel::
+/// `settings: model.provenance().clone()` (N6's provenance-row task, `docs/
+/// native-dynamics-plan.md`): superseded the previous `BTreeMap::new()` here. `EarthGravityModel::
 /// describe()` already reports its own `settings_hash`, computed at construction from the
 /// gravity/DE file names and digests, the degree/order, `mu`, the reference radius, the frame
 /// id and the integrator settings (`av_orbital::model::EarthGravityModel::new`'s own doc
-/// comment) -- this task's own brief's "match the same physical quantities `parse_gmat_spec`
-/// hashes" is satisfied there, not by a second, parallel settings map here.
+/// comment) -- so `settings: BTreeMap::new()` used to be reasoned as fine, on the theory that
+/// "match the same physical quantities `parse_gmat_spec` hashes" was already satisfied there,
+/// not by a second, parallel settings map here. That reasoning conflated two different jobs: a
+/// settings map a CALLER hashes further (which the orbital path genuinely has none of -- there
+/// is no second, parallel hash here, and `Materialized::settings`/`ModelHandle::settings` is
+/// never itself fed into any hash, golden, or product field -- see this task's own report for
+/// the reader-by-reader check) and a settings map a CALLER can simply *read* for provenance
+/// (which orbital was leaving empty for no reason -- `EarthGravityModel` was computing this
+/// exact map internally, in `new`/`with_third_bodies`/`with_srp`/`with_drag`, and then
+/// discarding it once each `settings_hash` was folded, so it was not recoverable from a
+/// constructed model at all). `EarthGravityModel::provenance()` now retains and exposes that
+/// accumulated map read-only, so this line can hand it straight through -- `ModelHandle.settings`
+/// for a `"orbital."`-dispatched instance is no longer empty, matching
+/// `crates/av-kernel/tests/registry.rs:67`'s shape for the GMAT path (an instance-specific test
+/// for the orbital path is `crates/av-kernel/tests/orbital_no_gmat_demo.rs`'s own
+/// `the_orbital_model_reports_its_own_data_file_provenance`).
 ///
 /// `pub(crate)`: only `crate::registry::ModelRegistry::construct_orbital` calls this, mirroring
 /// [`materialize_constant_accel`]/[`materialize_gmat`].
@@ -3368,7 +3424,7 @@ pub(crate) fn materialize_orbital(spec: &OrbitalSystemSpec, epoch_tai_ns: i64, m
     let gmat_root = av_orbital::cof::locate_gmat_root().map_err(|e| err(e.to_string()))?;
     let gravity_path = gmat_root.join("data/gravity/earth").join(&spec.gravity_file);
     let rotation = Fk5BodyFixedRotation::new(&gmat_root).map_err(|e| err(e.to_string()))?;
-    let info = EarthGravityModelInfo { id: model_id.to_string(), version: env!("CARGO_PKG_VERSION").to_string(), goldens: vec![] };
+    let info = EarthGravityModelInfo { id: model_id.to_string(), version: env!("CARGO_PKG_VERSION").to_string(), goldens: spec.golden_ref.clone().into_iter().collect() };
     let mut model = EarthGravityModel::new(&gravity_path, spec.gravity_degree as usize, spec.gravity_order as usize, &spec.central_body, rotation, info).map_err(|e| err(e.to_string()))?;
     if !spec.point_masses.is_empty() {
         // N2's own reference DE file (`docs/native-dynamics-plan.md`'s "N2: the DE ephemeris"
@@ -3379,7 +3435,8 @@ pub(crate) fn materialize_orbital(spec: &OrbitalSystemSpec, epoch_tai_ns: i64, m
         model = model.with_third_bodies(&de_path, &spec.point_masses).map_err(|e| err(e.to_string()))?;
     }
     let x0_si = units::state_km_to_m(spec.x0_km);
-    Ok(Materialized { model: AnyModel::Orbital(model), t0_tai_ns: epoch_tai_ns, x0_si: x0_si.to_vec(), settings: BTreeMap::new() })
+    let settings = model.provenance().clone();
+    Ok(Materialized { model: AnyModel::Orbital(model), t0_tai_ns: epoch_tai_ns, x0_si: x0_si.to_vec(), settings })
 }
 
 /// Build an [`AttitudeWheelsModel`] from `spec` and its instance's own declared/resolved

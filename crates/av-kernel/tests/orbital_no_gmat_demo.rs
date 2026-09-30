@@ -28,7 +28,11 @@
 use std::collections::BTreeMap;
 
 use av_cdm::pb::{Binding, BindingKind, DesignReferenceMission, DrmOptions, ModelBinding, Parameter, Scenario, SosConfiguration, StateComponent, StateSpace, SystemDefinition, SystemInstance, Unit};
+use av_kernel::drm::binding::{classify_binding, BindingPlan, Classification};
 use av_kernel::drm::{execute, hash, RunConfig};
+use av_kernel::registry::ModelRegistry;
+use av_orbital::cof;
+use openssl::sha::sha256;
 
 fn param(name: &str, value: f64) -> Parameter {
     Parameter { name: name.to_string(), value, ..Default::default() }
@@ -360,5 +364,274 @@ fn orbital_instance_declaring_a_non_integration_frame_coordinate_system_is_refus
             assert_eq!(integration_frame, "EarthMJ2000Eq");
         }
         other => panic!("expected DrmError::UnsupportedCoordinateSystem, got {other:?}"),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// N6's provenance-row task (`docs/native-dynamics-plan.md`'s "N6's control-matrix row for the
+/// orbital model's provenance" open item): proves `av_orbital::model::EarthGravityModel`'s
+/// retained provenance actually reaches a caller through the ORDINARY construction path, not
+/// merely `EarthGravityModel::provenance()` called in isolation -- `ModelRegistry::
+/// construct_orbital`, fed the exact same `OrbitalSystemSpec` `classify_binding` produces for
+/// this file's own demo bundle ([`orbital_demo_bundle`]), the identical path `crate::drm::
+/// executor::execute`'s own Pass 1/2 go through for a `"orbital."`-dispatched instance.
+///
+/// Deliberately GMAT-free -- no `#[cfg(feature = "gmat")]` gate anywhere in this test, and no
+/// `required-features` entry for this file in `Cargo.toml` (this file's own module doc, "This
+/// test compiles and runs in EITHER feature state") -- because the provenance of the native
+/// model is exactly the thing that must be readable without GMAT linked; this is the
+/// `--no-default-features` evidence command N6's control-matrix row names.
+#[test]
+fn the_orbital_model_reports_its_own_data_file_provenance() {
+    let (drm, sos, systems) = orbital_demo_bundle();
+    let sys = systems.get("leo_orbital_sys").expect("orbital_demo_bundle declares \"leo_orbital_sys\"");
+    let instance = sos.instances.iter().find(|i| i.name == "leo_orbital").expect("orbital_demo_bundle declares a \"leo_orbital\" instance");
+    let options = drm.options.expect("orbital_demo_bundle declares DrmOptions");
+    let scenario = drm.scenario.expect("orbital_demo_bundle declares a Scenario");
+
+    let plan = classify_binding(instance, sys, &options).expect("orbital_demo_bundle's own \"leo_orbital\" instance classifies");
+    let Classification::Model(BindingPlan::Orbital(spec)) = plan else {
+        panic!("orbital_demo_bundle's own \"leo_orbital\" instance must classify as BindingPlan::Orbital");
+    };
+
+    let handle = ModelRegistry::construct_orbital(&spec, scenario.start_tai_ns, &sys.dynamics_model, &sys.state_space_id)
+        .expect("construct_orbital succeeds against the demo bundle's own spec -- the ordinary construction path");
+
+    // Every key this row's Implementation column names, present and non-empty.
+    let required_keys = [
+        "gravity_file_name",
+        "gravity_file_sha256",
+        "degree",
+        "order",
+        "mu_m3_per_s2",
+        "reference_radius_m",
+        "central_body",
+        "frame_id",
+        "integrator_rtol",
+        "integrator_atol",
+        "integrator_initial_step_s",
+        "integrator_max_step_s",
+        "de_file_name",
+        "de_file_sha256",
+        "third_bodies",
+    ];
+    for key in required_keys {
+        let value = handle.settings.get(key).unwrap_or_else(|| panic!("provenance map is missing required key {key:?}; got keys {:?}", handle.settings.keys().collect::<Vec<_>>()));
+        assert!(!value.is_empty(), "provenance value for {key:?} must not be empty");
+    }
+
+    // Every *_sha256 value is 64 lowercase hex characters.
+    for key in ["gravity_file_sha256", "de_file_sha256"] {
+        let value = &handle.settings[key];
+        assert_eq!(value.len(), 64, "{key} must be a 64-character hex digest, got {} chars ({value:?})", value.len());
+        assert!(value.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{key} must be lowercase hex, got {value:?}");
+    }
+
+    // The recorded digests, checked against a SHA-256 computed independently in THIS test, from
+    // the actual files on disk -- not from av_orbital's own hex_sha256 helper (a provenance
+    // record that validates itself against itself proves nothing). `spec.gravity_file`/the DE
+    // filename are the same strings `av_orbital::model::EarthGravityModel::new`/`::
+    // with_third_bodies` resolved against `$GMAT_ROOT` to build the model this handle wraps.
+    let gmat_root = cof::locate_gmat_root().expect("GMAT_ROOT resolves on this host (this task's own environment rule)");
+    let gravity_path = gmat_root.join("data/gravity/earth").join(&spec.gravity_file);
+    let de_path = gmat_root.join("data/planetary_ephem/de/leDE1941.405");
+    let gravity_bytes = std::fs::read(&gravity_path).unwrap_or_else(|e| panic!("reading {}: {e}", gravity_path.display()));
+    let de_bytes = std::fs::read(&de_path).unwrap_or_else(|e| panic!("reading {}: {e}", de_path.display()));
+    let independent_gravity_sha256 = hex_encode(&sha256(&gravity_bytes));
+    let independent_de_sha256 = hex_encode(&sha256(&de_bytes));
+    assert_eq!(handle.settings["gravity_file_sha256"], independent_gravity_sha256, "recorded gravity_file_sha256 must match an independently computed SHA-256 of the actual file on disk");
+    assert_eq!(handle.settings["de_file_sha256"], independent_de_sha256, "recorded de_file_sha256 must match an independently computed SHA-256 of the actual file on disk");
+
+    // The row is re-derivable WITHOUT the code: recompute the hash chain from the printed map
+    // alone, with `av_dynamics::settings_hash`'s documented rule (SHA-256 over the key-sorted
+    // `key=value\n` concatenation) re-implemented here rather than called, so a change to that
+    // helper or to the chain's shape fails this test instead of silently orphaning the row.
+    // Step 1: `EarthGravityModel::new`'s twelve entries give the base the third-body step
+    // chained from. Step 2: that base plus `with_third_bodies`' own three entries give the final
+    // `settings_hash`. (Manager review, round 5: the plan's row claimed this from a one-off
+    // Python recomputation; it is now a test.)
+    let settings_rule_hash = |entries: &BTreeMap<String, String>| -> String {
+        let mut buf = Vec::new();
+        for (k, v) in entries {
+            buf.extend_from_slice(k.as_bytes());
+            buf.push(b'=');
+            buf.extend_from_slice(v.as_bytes());
+            buf.push(b'\n');
+        }
+        hex_encode(&sha256(&buf))
+    };
+    let new_keys = &required_keys[..12];
+    let base: BTreeMap<String, String> = new_keys.iter().map(|k| (k.to_string(), handle.settings[*k].clone())).collect();
+    assert_eq!(
+        settings_rule_hash(&base),
+        handle.settings["third_bodies_base_settings_hash"],
+        "the twelve `new` entries must re-derive the recorded third_bodies_base_settings_hash"
+    );
+    let mut step: BTreeMap<String, String> = ["de_file_name", "de_file_sha256", "third_bodies"].iter().map(|k| (k.to_string(), handle.settings[*k].clone())).collect();
+    step.insert("base_settings_hash".to_string(), handle.settings["third_bodies_base_settings_hash"].clone());
+    assert_eq!(
+        settings_rule_hash(&step),
+        handle.describe().settings_hash,
+        "the recorded chain key plus with_third_bodies' own entries must re-derive the final settings_hash"
+    );
+    assert_eq!(handle.settings.len(), 16, "exactly twelve `new` entries, three third-body entries and one chain key; got {:?}", handle.settings.keys().collect::<Vec<_>>());
+
+    // The evidence command (`--nocapture`): the whole map, printed as a two-column table, plus
+    // which GMAT install the data files came from and the final settings_hash they fold into.
+    println!("[the_orbital_model_reports_its_own_data_file_provenance] GMAT_ROOT = {}", gmat_root.display());
+    println!("{:<32} | value", "key");
+    println!("{:-<32}-+-{:-<64}", "", "");
+    for (key, value) in &handle.settings {
+        println!("{key:<32} | {value}");
+    }
+    println!("{:<32} | {}", "settings_hash (final)", handle.describe().settings_hash);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The one-word swap on the REAL system file (`drms/leo_1day_golden.system.yaml`): a DRM author
+// changes `gmat.` to `orbital.` in `dynamics_model` and the file either works or is refused for a
+// stated physics reason, typed -- never for bookkeeping (`force_model.golden_ref`, the ballistic
+// `spacecraft.*` properties, the Keplerian element names).
+// ---------------------------------------------------------------------------------------------
+
+/// The final `settings_hash` `docs/native-dynamics-plan.md`'s provenance table records for JGM2
+/// 8x8 + Luna/Sun through `leDE1941.405` (asserted in this file's own provenance test through the
+/// chain check, and here against the real system file's own physics).
+const RECORDED_ORBITAL_SETTINGS_HASH: &str = "86ff995dfae4152d42f65cf07dbcdbe32d598bb8ce138aa56e3e397f83fce3aa";
+
+const KEPLERIAN_NAMES: [&str; 6] = ["spacecraft.SMA", "spacecraft.ECC", "spacecraft.INC", "spacecraft.RAAN", "spacecraft.AOP", "spacecraft.TA"];
+
+/// The real demo system file, read from disk and parsed with the same YAML parser every other
+/// test uses, with ONLY `dynamics_model` swapped from `gmat.` to `orbital.` (re-hashed: the
+/// embedded `hash` covers `dynamics_model`, and `classify_binding` does not check it, but a
+/// swapped file carrying a stale hash would be a lie).
+fn real_golden_system_swapped_to_orbital() -> SystemDefinition {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../drms/leo_1day_golden.system.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let mut sys = av_kernel::drm::schema::parse_system_definition_yaml(&yaml).expect("the real system file parses");
+    let rest = sys.dynamics_model.strip_prefix("gmat.").unwrap_or_else(|| panic!("the real file's dynamics_model must start with \"gmat.\", got {:?}", sys.dynamics_model)).to_string();
+    sys.dynamics_model = format!("orbital.{rest}");
+    hashed_system(sys)
+}
+
+fn instance_of(sys: &SystemDefinition) -> SystemInstance {
+    SystemInstance {
+        name: "leo".to_string(),
+        system_id: sys.id.clone(),
+        binding: Some(Binding { kind: BindingKind::Model as i32, config: Some(av_cdm::pb::binding::Config::Model(ModelBinding { model_id: sys.id.clone() })) }),
+        ..Default::default()
+    }
+}
+
+fn declared(sys: &SystemDefinition, name: &str) -> f64 {
+    sys.parameters.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("the real file declares {name}")).value
+}
+
+/// The real file with its Keplerian state replaced by the equivalent Cartesian one (elements read
+/// from the file itself, converted by this test's own independent conversion) and
+/// `DisplayStateType: Cartesian`; every other parameter -- `golden_ref`, the ballistic
+/// properties, the force model -- verbatim from the file.
+fn real_golden_system_with_cartesian_state() -> SystemDefinition {
+    let mut sys = real_golden_system_swapped_to_orbital();
+    let e: Vec<f64> = KEPLERIAN_NAMES.iter().map(|n| declared(&sys, n)).collect();
+    let x0 = keplerian_to_cartesian_km(e[0], e[1], e[2], e[3], e[4], e[5], 3.986004415e14_f64);
+    sys.parameters.retain(|p| !KEPLERIAN_NAMES.contains(&p.name.as_str()));
+    for p in sys.parameters.iter_mut() {
+        if p.name == "spacecraft.DisplayStateType" {
+            assert_eq!(p.string_value, "Keplerian", "the real file declares a Keplerian state");
+            p.string_value = "Cartesian".to_string();
+        }
+    }
+    for (name, v) in ["spacecraft.X", "spacecraft.Y", "spacecraft.Z", "spacecraft.VX", "spacecraft.VY", "spacecraft.VZ"].iter().zip(x0) {
+        sys.parameters.push(param(name, v));
+    }
+    hashed_system(sys)
+}
+
+/// The real Keplerian file, `dynamics_model` swapped and nothing else, is refused with the typed
+/// `OrbitalRequiresCartesianState` naming `Keplerian` -- not `UnknownParameter("spacecraft.AOP")`,
+/// which is what `parse_orbital_spec` returned before it knew the element names (making the typed
+/// refusal unreachable for any real Keplerian file).
+#[test]
+fn the_real_keplerian_system_file_swapped_to_orbital_is_refused_for_its_state_representation() {
+    let sys = real_golden_system_swapped_to_orbital();
+    assert!(sys.dynamics_model.starts_with("orbital."));
+    let err = classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()).expect_err("a Keplerian file must be refused by the native model");
+    println!("[real Keplerian file, orbital.] refusal: {err}");
+    match &err {
+        av_kernel::drm::DrmError::OrbitalRequiresCartesianState { declared, .. } => assert_eq!(declared, "Keplerian"),
+        other => panic!("expected DrmError::OrbitalRequiresCartesianState naming Keplerian, got {other:?}"),
+    }
+}
+
+/// The same real file with the equivalent Cartesian state: accepted, constructed through the
+/// ordinary path, carrying `golden_ref` into `describe().goldens`, and -- because `golden_ref`,
+/// the ballistic properties and the Keplerian-free state are labels and inert properties, not
+/// physics -- reporting the recorded settings hash, identical to the same physics declared
+/// without them.
+#[test]
+fn the_real_system_file_with_a_cartesian_state_works_under_orbital_and_keeps_the_recorded_hash() {
+    let sys = real_golden_system_with_cartesian_state();
+    let instance = instance_of(&sys);
+    let epoch = 1_767_225_637_000_000_000_i64;
+
+    let Classification::Model(BindingPlan::Orbital(spec)) = classify_binding(&instance, &sys, &DrmOptions::default()).expect("the Cartesian real file classifies") else {
+        panic!("must classify as BindingPlan::Orbital");
+    };
+    assert_eq!(spec.golden_ref.as_deref(), Some("leo_1day_jgm2_8x8_sunmoon"));
+    assert_eq!(spec.ballistic.get("DryMass"), Some(&500.0));
+    assert_eq!(spec.ballistic.get("Cd"), Some(&2.2));
+    assert_eq!(spec.ballistic.get("Cr"), Some(&1.8));
+    assert_eq!(spec.ballistic.get("DragArea"), Some(&5.0));
+    assert_eq!(spec.ballistic.get("SRPArea"), Some(&5.0));
+
+    let handle = ModelRegistry::construct_orbital(&spec, epoch, &sys.dynamics_model, &sys.state_space_id).expect("construct_orbital on the real file's spec");
+    let info = handle.describe();
+    assert_eq!(info.goldens, vec!["leo_1day_jgm2_8x8_sunmoon".to_string()]);
+    assert_eq!(info.settings_hash, RECORDED_ORBITAL_SETTINGS_HASH, "same physics as the recorded provenance row: golden_ref and ballistic properties must not move the hash");
+    assert!(!handle.settings.keys().any(|k| k.contains("golden") || k.contains("Cd") || k.contains("DryMass") || k.contains("SRP") || k.contains("Drag")), "labels and inert properties must not appear in the provenance map: {:?}", handle.settings.keys().collect::<Vec<_>>());
+    println!("[real Cartesian file, orbital.] goldens = {:?}, settings_hash = {}", info.goldens, info.settings_hash);
+
+    // Same physics with the label and the ballistic properties removed: byte-identical hash, and
+    // no goldens.
+    let mut bare = sys.clone();
+    bare.parameters.retain(|p| p.name != "force_model.golden_ref" && !["DryMass", "Cd", "Cr", "DragArea", "SRPArea"].iter().any(|b| p.name == format!("spacecraft.{b}")));
+    let bare = hashed_system(bare);
+    let Classification::Model(BindingPlan::Orbital(bare_spec)) = classify_binding(&instance_of(&bare), &bare, &DrmOptions::default()).expect("the bare file classifies") else {
+        panic!("must classify as BindingPlan::Orbital");
+    };
+    let bare_info = ModelRegistry::construct_orbital(&bare_spec, epoch, &bare.dynamics_model, &bare.state_space_id).expect("construct bare").describe();
+    assert!(bare_info.goldens.is_empty());
+    assert_eq!(bare_info.settings_hash, info.settings_hash);
+}
+
+/// A file declaring `Cartesian` together with a Keplerian element is ambiguous, refused
+/// (`UnknownParameter` naming the element), and any name outside the recognised sets is still
+/// `UnknownParameter`.
+#[test]
+fn an_ambiguous_state_or_an_unknown_spacecraft_name_is_still_refused() {
+    let mut sys = real_golden_system_with_cartesian_state();
+    sys.parameters.push(param("spacecraft.SMA", 6878.0));
+    let sys = hashed_system(sys);
+    let err = classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()).expect_err("Cartesian plus a Keplerian element is ambiguous");
+    println!("[Cartesian + SMA, orbital.] refusal: {err}");
+    match &err {
+        av_kernel::drm::DrmError::UnknownParameter { name, .. } => assert!(name.starts_with("spacecraft.SMA"), "{name}"),
+        other => panic!("expected UnknownParameter naming spacecraft.SMA, got {other:?}"),
+    }
+
+    let mut sys = real_golden_system_with_cartesian_state();
+    sys.parameters.push(param("spacecraft.Bogus", 1.0));
+    let sys = hashed_system(sys);
+    match classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()) {
+        Err(av_kernel::drm::DrmError::UnknownParameter { name, .. }) => assert_eq!(name, "spacecraft.Bogus"),
+        other => panic!("expected UnknownParameter(spacecraft.Bogus), got {other:?}"),
     }
 }

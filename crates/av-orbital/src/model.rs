@@ -226,6 +226,19 @@ pub struct EarthGravityModel<R: BodyFixedRotation> {
     frame_id: String,
     info: EarthGravityModelInfo,
     settings_hash: String,
+    /// N6's provenance-row task (`docs/native-dynamics-plan.md`): the ACCUMULATED union of
+    /// every settings entry this model has ever folded into `settings_hash` -- `new`'s twelve
+    /// entries, then, as each `with_*` runs, that method's own new entries plus a
+    /// `<method>_base_settings_hash` key recording the `settings_hash` value the chain step
+    /// hashed alongside them (see [`EarthGravityModel::provenance`]'s own doc comment for why
+    /// that chain key is kept rather than discarded). **Never itself an input to
+    /// `settings_hash`** -- every `with_*` method below builds its own separate, local
+    /// `BTreeMap` and calls `av_dynamics::settings_hash` on THAT, exactly as before this field
+    /// existed; this field is populated strictly AFTER that call, from the same local map, so
+    /// adding it moves `settings_hash` by zero bytes (pinned by `tests::settings_hash_for_a_
+    /// fixed_full_configuration_is_pinned_to_a_recorded_literal`, a literal recorded from the
+    /// pre-this-change build).
+    provenance: BTreeMap<String, String>,
     third_bodies: Option<ThirdBodies>,
     srp: Option<SrpBinding>,
     drag: Option<DragBinding>,
@@ -309,13 +322,46 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("integrator_max_step_s".to_string(), format!("{:.17e}", integrator.max_step));
         let settings_hash = av_dynamics::settings_hash(&settings);
 
-        Ok(Self { gravity, rotation, frame_id, info, settings_hash, third_bodies: None, srp: None, drag: None })
+        Ok(Self { gravity, rotation, frame_id, info, settings_hash, provenance: settings, third_bodies: None, srp: None, drag: None })
     }
 
     /// The bound gravity model (degree, order, `mu`, reference radius, coefficients) -- for a
     /// caller (or test) that wants to inspect what this model actually loaded.
     pub fn gravity_model(&self) -> &GravityModel {
         &self.gravity
+    }
+
+    /// N6's provenance-row task (`docs/native-dynamics-plan.md`): the accumulated, read-only
+    /// union of every settings entry this model has ever folded into `describe().settings_hash`
+    /// -- `new`'s twelve entries (`gravity_file_name`/`gravity_file_sha256`/`degree`/`order`/
+    /// `mu_m3_per_s2`/`reference_radius_m`/`central_body`/`frame_id`/the four `integrator_*`
+    /// keys), plus, for each `with_*` this instance was actually built through, that method's own
+    /// new entries AND a `<method>_base_settings_hash` key.
+    ///
+    /// **Why the chain step is recorded rather than discarded.** Each `with_*` method
+    /// recomputes `settings_hash` from a small LOCAL map containing only its own new entries
+    /// plus the model's settings_hash so far (keyed `"base_settings_hash"` in that local map --
+    /// see e.g. [`EarthGravityModel::with_third_bodies`]'s own body). That local map is exactly
+    /// what `av_dynamics::settings_hash` hashed, so it is exactly what a reader needs to verify
+    /// the chain step by hand; if it were dropped (as it was before this task -- see this
+    /// module's own report for the "real obstacle" this task found), a control-matrix row could
+    /// name the final `settings_hash` but never reproduce it, because the intermediate hash it
+    /// chained from would be unrecoverable. Recording it under `<method>_base_settings_hash`
+    /// (e.g. `third_bodies_base_settings_hash`, `srp_base_settings_hash`,
+    /// `drag_base_settings_hash` -- renamed per method from the local map's own
+    /// `"base_settings_hash"` key so two chained methods' chain keys never collide in this one
+    /// accumulated map) means a reader of this row can recompute the FINAL `settings_hash` from
+    /// the row alone: re-run `av_dynamics::settings_hash` over `{"base_settings_hash":
+    /// <the recorded *_base_settings_hash value>, <that method's own other entries...>}` for
+    /// each `with_*` step this instance was built through, in order, each one's OWN output
+    /// becoming the NEXT step's `base_settings_hash` input.
+    ///
+    /// **Never itself an input to `settings_hash`** -- see the `provenance` field's own doc
+    /// comment (accumulation happens strictly after each `av_dynamics::settings_hash` call, from
+    /// the same local map that call already hashed, and this method only ever reads that
+    /// accumulated state back).
+    pub fn provenance(&self) -> &BTreeMap<String, String> {
+        &self.provenance
     }
 
     /// N2: adds third-body point-mass perturbations (Sun, Moon, or any other
@@ -353,6 +399,12 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("de_file_sha256".to_string(), de_sha256);
         settings.insert("third_bodies".to_string(), resolved.iter().map(|b| b.name.clone()).collect::<Vec<_>>().join(","));
         self.settings_hash = av_dynamics::settings_hash(&settings);
+
+        // N6's provenance-row task: accumulate, AFTER the hash above (never an input to it) --
+        // see EarthGravityModel::provenance's own doc comment for why the chain key is kept.
+        let base_settings_hash = settings.remove("base_settings_hash").expect("inserted above");
+        self.provenance.insert("third_bodies_base_settings_hash".to_string(), base_settings_hash);
+        self.provenance.extend(settings);
 
         self.third_bodies = Some(ThirdBodies { ephemeris, bodies: resolved });
         Ok(self)
@@ -408,6 +460,12 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("srp_mass_kg".to_string(), format!("{:.17e}", mass_kg));
         self.settings_hash = av_dynamics::settings_hash(&settings);
 
+        // N6's provenance-row task: accumulate, AFTER the hash above (never an input to it) --
+        // see EarthGravityModel::provenance's own doc comment for why the chain key is kept.
+        let base_settings_hash = settings.remove("base_settings_hash").expect("inserted above");
+        self.provenance.insert("srp_base_settings_hash".to_string(), base_settings_hash);
+        self.provenance.extend(settings);
+
         self.srp = Some(SrpBinding { constants, props: crate::srp::SrpProperties { cr, area_m2, mass_kg } });
         Ok(self)
     }
@@ -462,6 +520,12 @@ impl<R: BodyFixedRotation> EarthGravityModel<R> {
         settings.insert("drag_cd".to_string(), format!("{:.17e}", cd));
         settings.insert("drag_mass_kg".to_string(), format!("{:.17e}", mass_kg));
         self.settings_hash = av_dynamics::settings_hash(&settings);
+
+        // N6's provenance-row task: accumulate, AFTER the hash above (never an input to it) --
+        // see EarthGravityModel::provenance's own doc comment for why the chain key is kept.
+        let base_settings_hash = settings.remove("base_settings_hash").expect("inserted above");
+        self.provenance.insert("drag_base_settings_hash".to_string(), base_settings_hash);
+        self.provenance.extend(settings);
 
         self.drag = Some(DragBinding { atmosphere, weather, props: crate::drag::DragProperties { cd, area_m2, mass_kg } });
         Ok(self)
@@ -1013,6 +1077,30 @@ mod tests {
         let hash_without = without_drag.describe().settings_hash;
         let with_drag = point_mass_model_with_third_bodies().with_drag(AtmosphereChoice::JacchiaRoberts, weather, 5.0, 2.2, 500.0).expect("with_drag");
         assert_ne!(hash_without, with_drag.describe().settings_hash);
+    }
+
+    /// N6's own required proof (`docs/native-dynamics-plan.md`, the provenance-row task):
+    /// `settings_hash` for one fixed, fully-chained configuration (gravity, third bodies, SRP,
+    /// and drag, so every `with_*` method's own `settings_hash` recomputation runs) pinned
+    /// against a literal recorded **from the pre-change build** -- before `EarthGravityModel`
+    /// retained/exposed `provenance()` at all -- so this task's own report can show the
+    /// accumulation that change adds is genuinely additional state, never an input to the hash:
+    /// the identical 64-hex string both before and after. If this literal ever needs to change,
+    /// STOP and report; do not adjust it to make the test pass -- that is exactly the defect
+    /// this test exists to catch.
+    #[test]
+    fn settings_hash_for_a_fixed_full_configuration_is_pinned_to_a_recorded_literal() {
+        let weather = crate::jacchia_roberts::WeatherInputs::from(crate::weather::ConstantWeather::gmat_defaults());
+        let model = point_mass_model_with_third_bodies()
+            .with_srp(crate::srp::SrpConstants::gmat_earth_defaults(), 5.0, 1.8, 500.0)
+            .expect("with_srp")
+            .with_drag(AtmosphereChoice::JacchiaRoberts, weather, 5.0, 2.2, 500.0)
+            .expect("with_drag");
+        assert_eq!(
+            model.describe().settings_hash,
+            "bf6915adae45b868274e92f55edd9077b82c8555ee7a851ce48825876854c869",
+            "settings_hash for this fixed fixture must not move by one byte from the pre-change build's own recorded value"
+        );
     }
 
     /// Task 3b's own required test: "a model built without drag is bit-for-bit unchanged." A

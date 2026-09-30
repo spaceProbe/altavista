@@ -107,6 +107,59 @@
 //! mechanism (`AV_LOCKSTEP_PROBE_LOCK_PATH`, passed to the child's environment, never by
 //! mutating this process's own).
 //!
+//! ## The holder sidecar (question 234, native round 5)
+//!
+//! Round 4: an orphaned `python3 -c` probe, spawned detached from a DIFFERENT worktree
+//! (`AltaVista-aiplane`), sat in `sys.stdin.readline()` on a pipe with no writer, PPID 1,
+//! holding the real lock for over two hours -- blocking this track's kernel gate. Nothing about
+//! the lock itself said whose it was; the manager had to reconstruct the answer with `lsof`.
+//! Question 234's ruling: the taker writes pid/tree/command/time into a sidecar, so the next
+//! waiter reads it instead.
+//!
+//! - **Path**: [`holder_sidecar_path`] below -- [`lock_file_path`]'s own path with
+//!   [`HOLDER_SIDECAR_SUFFIX`] appended by plain string concatenation (never
+//!   [`PathBuf::with_extension`], which would replace an existing extension rather than append
+//!   after it, and never [`PathBuf::join`], which would insert a path separator). **Not the lock
+//!   file itself**: the lock file's only job is to be `flock`ed; its content is irrelevant to
+//!   the kernel, and truncating/rewriting a file another process holds an `flock` on would be
+//!   exactly the kind of subtlety that surprises the next reader for no gain. Like
+//!   [`LOCK_RELATIVE_PATH`] above, the two languages must name the IDENTICAL sidecar path by
+//!   construction, not by import: the Python side is `altavista/docker_test_lock.py`'s
+//!   `holder_sidecar_path`/`_HOLDER_SIDECAR_SUFFIX`. **If you change [`HOLDER_SIDECAR_SUFFIX`]
+//!   here, change the Python side's `_HOLDER_SIDECAR_SUFFIX` in the same commit.**
+//! - **Written by the taker, in the outermost acquisition only** ([`write_holder_record`],
+//!   called once [`lock_docker_tests_at`]'s own `flock` succeeds): `pid` (this process's own,
+//!   [`std::process::id`]), `tree` (the worktree it runs in -- [`current_tree`]'s own doc
+//!   comment says which of the task brief's two allowed choices this picks, and why), `command`
+//!   (this process's own command line, truncated -- [`current_command_line`]), `time`
+//!   (human-readable local time with a UTC offset, never a bare epoch --
+//!   [`format_current_local_time`]). One `key=value` line per field, in that order; pinned
+//!   exactly by `tests::holder_sidecar_record_format_is_pinned` below. Every acquisition through
+//!   [`lock_docker_tests_at`] is a genuinely fresh `flock` (unlike the Python side, this type has
+//!   no re-entrancy counter to skip: [`crate::docker::prune_stale_test_resources`]'s own
+//!   `&DockerTestLock` parameter is what prevents a caller from nesting acquisitions in the first
+//!   place -- see this module's own doc section on that), so there is no "already held, skip the
+//!   write" branch to reason about here.
+//! - **Read by the waiter, printed in the WAITING line** ([`describe_holder`]) -- but only after
+//!   a liveness check ([`pid_is_alive`], `libc::kill(pid, 0)`, `EPERM` counted as alive): the
+//!   sidecar is **advisory, not authoritative**, and this is the one place a careless
+//!   implementation would be worse than `lsof`. A `SIGKILL`ed holder never runs its own cleanup
+//!   (the identical gap this module's own "Why `flock`, not a lock-file-with-a-PID scheme"
+//!   section describes for the lock itself), so a sidecar can genuinely name a pid that is long
+//!   gone -- the waiter must never report a dead pid as though it still held the lock. A dead
+//!   recorded pid is reported as a **stale** record, in those words, naming the pid; a live one
+//!   is reported as the holder. An absent, empty, truncated, or unparsable sidecar
+//!   ([`read_holder_record`] returning [`None`]) is not an error -- it is exactly today's status
+//!   quo (a lock whose holder is unknown), and the waiter blocks precisely as it always has.
+//! - **Removed by the holder** ([`remove_holder_record`], best-effort) when its guard drops --
+//!   [`DockerTestLock`]'s own `Drop` impl covers the ordinary return path and an unwinding panic
+//!   alike (Rust runs `Drop` impls during unwind unless the crate is built `panic = "abort"`,
+//!   which this workspace is not). This is a courtesy for the ORDINARY case; it changes nothing
+//!   about the advisory-only guarantee above, which exists precisely because this cleanup does
+//!   NOT run on `SIGKILL`.
+//!
+//! The lock itself is still the `flock`; the sidecar is still only a note beside it.
+//!
 //! ## Why [`crate::docker::prune_stale_test_resources`] takes `&DockerTestLock` as a parameter
 //!
 //! See that function's own doc comment for the full "acquire-inside-the-function would
@@ -118,10 +171,11 @@
 //! prune call. Requiring a `&DockerTestLock` argument makes "the caller already holds the lock"
 //! a compile-time fact instead of a convention a future caller could forget.
 
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Relative to `$HOME` -- see this module's own doc comment for why under `$HOME` specifically,
 /// and why the Python implementation (`altavista/docker_test_lock.py`) must name the identical
@@ -145,19 +199,208 @@ fn lock_file_path() -> PathBuf {
     PathBuf::from(home).join(LOCK_RELATIVE_PATH)
 }
 
+/// Appended to [`lock_file_path`]'s own path by STRING concatenation -- see this module's own
+/// "The holder sidecar" doc section for why concatenation specifically (never
+/// [`PathBuf::with_extension`], never [`PathBuf::join`]) and why the Python side's
+/// `_HOLDER_SIDECAR_SUFFIX` (`altavista/docker_test_lock.py`) must name the identical string:
+/// **if you change this, change that, in the same commit.**
+const HOLDER_SIDECAR_SUFFIX: &str = ".holder";
+
+/// An unbounded command line in a lock-contention diagnostic is its own footgun -- truncate
+/// rather than write it whole. Same value as the Python side's `_COMMAND_MAX_LEN`, though
+/// nothing requires the two to match exactly; both just need to be "a stated length".
+const COMMAND_MAX_LEN: usize = 200;
+
+/// The advisory holder-record sidecar for `lock_path` -- see this module's own "The holder
+/// sidecar" doc section for the full shape and the advisory-only guarantee this function exists
+/// to compute the path for.
+fn holder_sidecar_path(lock_path: &Path) -> PathBuf {
+    let mut sidecar = lock_path.as_os_str().to_owned();
+    sidecar.push(HOLDER_SIDECAR_SUFFIX);
+    PathBuf::from(sidecar)
+}
+
+/// The worktree this process is running in, answered as the current working directory -- the
+/// cheaper of the two honest options this task's own brief allows (the other being
+/// `git rev-parse --show-toplevel`). Chosen deliberately: the field exists to tell worktrees
+/// apart (round 4's own incident: `AltaVista-edge` against `AltaVista-aiplane` against
+/// `AltaVista`), and every cwd a docker-gated test runs with already names its worktree as a
+/// path prefix. `pytest` runs at the repository root; `cargo test` runs each test binary with
+/// its cwd at the PACKAGE directory (e.g. `<worktree>/crates/av-lockstep`), not the repository
+/// root -- a correction made in review to this comment's first draft, which claimed the root in
+/// both cases. `git rev-parse --show-toplevel` would normalise that to the root at the cost of a
+/// subprocess spawn on every acquisition, including the uncontended silent path, for no gain in
+/// telling worktrees apart.
+fn current_tree() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown: current_dir() failed>".to_string())
+}
+
+/// This process's own command line: every argument [`std::env::args`] received (argv\[0\]
+/// included), space-joined, truncated to [`COMMAND_MAX_LEN`] *characters* (not bytes --
+/// `.chars().take(..)` so this can never panic by slicing a multi-byte UTF-8 boundary), with any
+/// embedded newlines flattened to spaces (the sidecar's own format is one field per line; a
+/// command line containing one must not be allowed to forge extra fields).
+fn current_command_line() -> String {
+    let joined = std::env::args().collect::<Vec<_>>().join(" ").replace(['\n', '\r'], " ");
+    if joined.chars().count() > COMMAND_MAX_LEN {
+        let mut truncated: String = joined.chars().take(COMMAND_MAX_LEN).collect();
+        truncated.push_str("...(truncated)");
+        truncated
+    } else {
+        joined
+    }
+}
+
+/// The current local time, human-readable without conversion -- includes the UTC offset, never
+/// a bare epoch. Formatted via a raw `libc::strftime` call (`"%Y-%m-%d %H:%M:%S %z"`) rather
+/// than adding a `chrono`/`time` dependency purely for this: the crate already depends on
+/// `libc` for [`libc::flock`] itself (see this crate's own `Cargo.toml` comment on that
+/// dependency), and `strftime(3)` is the same C library function CPython's own `time.strftime`
+/// wraps on POSIX -- the Python side's `_current_local_time_string`
+/// (`altavista/docker_test_lock.py`) passes the IDENTICAL format string, so the two languages
+/// produce the same shape by construction, both ultimately going through the same platform C
+/// library, not merely by choosing to write similar-looking code.
+fn format_current_local_time() -> String {
+    // SAFETY: `t` and `tm` are stack-local and fully initialised by `libc::time`/
+    // `libc::localtime_r` before any read; `buf` is a fixed-size, zero-initialised stack buffer
+    // whose length is passed to `strftime` as its own bound, so it can never write past the end
+    // of `buf`. `fmt` is a valid, NUL-terminated C string for the duration of the call (it
+    // outlives the `strftime` call itself, never freed early).
+    unsafe {
+        let mut t: libc::time_t = 0;
+        libc::time(&mut t);
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let fmt = CString::new("%Y-%m-%d %H:%M:%S %z").expect("format string has no interior NUL");
+        let mut buf = [0u8; 64];
+        let len = libc::strftime(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len(), fmt.as_ptr(), &tm);
+        String::from_utf8_lossy(&buf[..len]).into_owned()
+    }
+}
+
+/// True iff `pid` names a process that still exists on this host, checked the same way the
+/// Python side does (`os.kill(pid, 0)`): `libc::kill(pid, 0)` sends no signal, only asks. `0`
+/// means it exists. `ESRCH` means the process is genuinely gone. `EPERM` (e.g. a pid now owned
+/// by a different user) means it still exists -- the kernel checks existence before permission,
+/// so `EPERM` could only be raised for a live pid. Biased toward "alive" for anything else this
+/// syscall is not documented to return here: never report a live holder as stale.
+fn pid_is_alive(pid: libc::pid_t) -> bool {
+    // SAFETY: `kill` with signal `0` sends no signal at all; it is always safe to call with any
+    // pid value, including ones that do not exist.
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Writes this process's own holder record: pid, tree, command, time, one `key=value` line per
+/// field, in that order (see this module's own "The holder sidecar" doc section, and
+/// `tests::holder_sidecar_record_format_is_pinned` below, which pins this exact shape against a
+/// real file this process itself wrote). Written to a temp file in the SAME directory, then
+/// [`fs::rename`]d into place -- atomic on POSIX, so a concurrent reader
+/// ([`read_holder_record`], e.g. a waiter's own [`describe_holder`]) never observes a
+/// half-written record. That reader already tolerates a missing/corrupt sidecar regardless (the
+/// whole point of this module's own "the sidecar is advisory" doc section); this is cheap extra
+/// care, not a correctness requirement either way.
+fn write_holder_record(sidecar_path: &Path) {
+    let pid = std::process::id();
+    let record = format!(
+        "pid={pid}\ntree={}\ncommand={}\ntime={}\n",
+        current_tree(),
+        current_command_line(),
+        format_current_local_time(),
+    );
+    let mut tmp_os = sidecar_path.as_os_str().to_owned();
+    tmp_os.push(format!(".tmp.{pid}"));
+    let tmp_path = PathBuf::from(tmp_os);
+    fs::write(&tmp_path, record.as_bytes()).unwrap_or_else(|e| panic!("could not write the holder-record temp file {tmp_path:?}: {e}"));
+    fs::rename(&tmp_path, sidecar_path).unwrap_or_else(|e| panic!("could not install the holder record at {sidecar_path:?}: {e}"));
+}
+
+/// Best-effort only -- the sidecar is advisory (this module's own doc section on that), so a
+/// failure to remove it must never be treated as a failure to release the LOCK itself, which is
+/// the real `flock` release [`DockerTestLock`]'s own `Drop` impl performs unconditionally right
+/// after calling this.
+fn remove_holder_record(sidecar_path: &Path) {
+    let _ = fs::remove_file(sidecar_path);
+}
+
+/// One holder record, as read back from a sidecar file.
+struct HolderRecord {
+    pid: libc::pid_t,
+    tree: String,
+    command: String,
+    time: String,
+}
+
+/// The current holder record, or [`None`] if the sidecar is absent, empty, truncated, or missing
+/// any of the four expected fields, or if its `pid` field does not parse as an integer -- every
+/// one of those means "no information available", never an error (this module's own "the
+/// sidecar is advisory" doc section: an absent/corrupt sidecar changes nothing about how a
+/// waiter behaves).
+fn read_holder_record(sidecar_path: &Path) -> Option<HolderRecord> {
+    let text = fs::read_to_string(sidecar_path).ok()?;
+    let mut pid: Option<libc::pid_t> = None;
+    let mut tree: Option<String> = None;
+    let mut command: Option<String> = None;
+    let mut time: Option<String> = None;
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "pid" => pid = value.parse::<libc::pid_t>().ok(),
+                "tree" => tree = Some(value.to_string()),
+                "command" => command = Some(value.to_string()),
+                "time" => time = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    Some(HolderRecord { pid: pid?, tree: tree?, command: command?, time: time? })
+}
+
+fn format_holder_fields(record: &HolderRecord) -> String {
+    format!("pid={} tree={} command={:?} time={}", record.pid, record.tree, record.command, record.time)
+}
+
+/// A human-readable clause describing whoever the sidecar says currently holds the lock, for the
+/// WAITING line -- see this module's own "the sidecar is advisory" doc section for the liveness
+/// check performed before anyone is called the holder: a dead recorded pid is reported as a
+/// STALE record, in those words, naming the pid, never silently as though it were still holding
+/// the lock.
+fn describe_holder(sidecar_path: &Path) -> String {
+    let record = match read_holder_record(sidecar_path) {
+        Some(r) => r,
+        None => return "holder: unknown (no readable holder record)".to_string(),
+    };
+    let fields = format_holder_fields(&record);
+    if pid_is_alive(record.pid) {
+        format!("holder: {fields}")
+    } else {
+        format!("stale holder record ({fields}) -- pid {} is no longer running", record.pid)
+    }
+}
+
 /// An RAII guard over the host-wide `flock(LOCK_EX)` on [`lock_file_path`]. Holding one is proof
 /// (enforced at compile time via [`crate::docker::prune_stale_test_resources`]'s own `&
 /// DockerTestLock` parameter) that this process currently has exclusive claim to every
 /// Docker-gated test on this host -- see this module's own doc comment for the full account of
 /// why the scope is daemon-wide and cross-language.
 ///
-/// Deliberately holds only a [`File`] (the open file description the lock is attached to) --
-/// nothing else needs to be tracked; `Drop` releases the lock by closing that file descriptor
-/// (see [`Drop`]'s own doc comment on this type for why that is also what makes this survive a
-/// `SIGKILL`, unlike a `Drop`-based guard with no kernel-owned resource behind it).
+/// Holds the [`File`] (the open file description the lock is attached to) -- `Drop` releases the
+/// lock by closing that file descriptor (see [`Drop`]'s own doc comment on this type for why
+/// that is also what makes this survive a `SIGKILL`, unlike a `Drop`-based guard with no
+/// kernel-owned resource behind it). Also holds `sidecar_path`, this guard's own holder-record
+/// sidecar (question 234 -- see this module's own "The holder sidecar" doc section): unlike the
+/// lock itself, removing this on drop is a courtesy for the ordinary case, not a correctness
+/// requirement -- see that doc section for why a `SIGKILL` leaving it behind is expected and
+/// handled by the READER, not avoided by the holder.
 #[derive(Debug)]
 pub struct DockerTestLock {
     file: File,
+    sidecar_path: PathBuf,
 }
 
 /// Acquires the host-wide Docker-test lock, blocking until it is free. Every Docker-gated test
@@ -200,6 +443,7 @@ pub(crate) fn lock_docker_tests_at(path: PathBuf) -> DockerTestLock {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|e| panic!("could not create {parent:?} for the docker-test lock: {e}"));
     }
+    let sidecar_path = holder_sidecar_path(&path);
     // `truncate(false)` explicitly: this is a lock file, never a payload -- its (empty)
     // contents are irrelevant, and truncating it on every acquire would be needless I/O with no
     // benefit, not a correctness requirement either way.
@@ -218,8 +462,9 @@ pub(crate) fn lock_docker_tests_at(path: PathBuf) -> DockerTestLock {
             // acquire site, same as the blocking call's own failure path below.
             panic!("flock(LOCK_EX|LOCK_NB) on {path:?} failed for a reason other than blocking: {nb_err}");
         }
+        let holder_desc = describe_holder(&sidecar_path);
         crate::docker::write_real_stderr(&format!(
-            "WAITING for the docker-test lock ({}): another process on this host currently holds it -- \
+            "WAITING for the docker-test lock ({}): another process on this host currently holds it ({holder_desc}) -- \
              blocking until it releases (docs/open-questions.md question 207: this lock is host-wide, \
              not per-worktree, so waiting here under real contention is expected, not a hang)\n",
             path.display()
@@ -234,23 +479,36 @@ pub(crate) fn lock_docker_tests_at(path: PathBuf) -> DockerTestLock {
         let waited = waited_since.elapsed();
         crate::docker::write_real_stderr(&format!("ACQUIRED the docker-test lock ({}) after waiting {waited:?}\n", path.display()));
     }
-    DockerTestLock { file }
+    // Question 234: the taker writes its own holder record exactly once per real `flock` --
+    // every call to `lock_docker_tests_at` acquires a genuinely fresh lock (see this module's
+    // own "The holder sidecar" doc section for why Rust has no re-entrant "already held, skip
+    // the write" branch to reason about here, unlike the Python side).
+    write_holder_record(&sidecar_path);
+    DockerTestLock { file, sidecar_path }
 }
 
 impl Drop for DockerTestLock {
-    /// Releases the lock. Two redundant-looking things happen here, deliberately:
+    /// Releases the lock. Three things happen here, deliberately, in this order:
     ///
-    /// 1. An explicit `flock(LOCK_UN)` -- makes the release visible at exactly this point in the
+    /// 1. Best-effort removal of this guard's own holder-record sidecar
+    ///    ([`remove_holder_record`], question 234) -- done first so a waiter that unblocks
+    ///    immediately after this call never reads a stale record belonging to THIS process.
+    ///    Ordering does not matter for CORRECTNESS (the sidecar is advisory -- see this module's
+    ///    own "The holder sidecar" doc section), only for tidiness.
+    /// 2. An explicit `flock(LOCK_UN)` -- makes the release visible at exactly this point in the
     ///    code, rather than relying entirely on the implicit close below.
-    /// 2. `self.file`'s own `Drop` (run automatically right after this method returns) closes
+    /// 3. `self.file`'s own `Drop` (run automatically right after this method returns) closes
     ///    the file descriptor, which *also* releases the lock -- this is not belt-and-suspenders
     ///    against a bug, it is the actual mechanism that makes this lock survive `SIGKILL`: a
-    ///    killed process never runs this `Drop` impl at all, but the KERNEL still closes every
-    ///    file descriptor a killed process held, which releases every `flock` that process held
-    ///    -- with zero userspace code (this method included) ever running. The explicit
-    ///    `LOCK_UN` call exists only for the ordinary (non-killed) case's own clarity; the
-    ///    guarantee this whole module exists for comes from the second, kernel-driven release.
+    ///    killed process never runs this `Drop` impl at all (which means step 1 never runs
+    ///    either -- exactly why the sidecar is advisory only, and why a waiter must verify
+    ///    liveness before trusting it), but the KERNEL still closes every file descriptor a
+    ///    killed process held, which releases every `flock` that process held -- with zero
+    ///    userspace code (this method included) ever running. The explicit `LOCK_UN` call exists
+    ///    only for the ordinary (non-killed) case's own clarity; the guarantee this whole module
+    ///    exists for comes from the third, kernel-driven release.
     fn drop(&mut self) {
+        remove_holder_record(&self.sidecar_path);
         let fd = self.file.as_raw_fd();
         // SAFETY: `fd` is still open (this is the only place that closes it, via `self.file`'s
         // own Drop immediately after this method returns). Return value ignored: a `Drop` impl
@@ -717,6 +975,260 @@ print(os.path.join(os.environ["HOME"], ".altavista", "locks", "docker-tests.lock
         assert!(
             waiting_line.contains("WAITING") && waiting_line.contains("docker-test lock") && waiting_line.contains("question 207"),
             "expected a WAITING line naming the docker-test lock and citing question 207, got {waiting_line:?}"
+        );
+        assert!(
+            acquired_line.starts_with("ACQUIRED the docker-test lock") && acquired_line.contains("after waiting"),
+            "expected an ACQUIRED-after-waiting line reporting the real elapsed wait, got {acquired_line:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The holder sidecar (question 234, native round 5). No Docker needed for any of these --
+    // `holder_sidecar_record_format_is_pinned` and `holder_sidecar_is_removed_when_the_
+    // outermost_guard_drops_during_a_panic` run entirely in-process against a private lock path;
+    // the two `rust_and_python_*` tests below need only `python3` on PATH, same gate as the
+    // other cross-language tests above.
+    // -------------------------------------------------------------------------------------
+
+    /// Pins the exact on-disk shape of the holder sidecar record: four `key=value` lines,
+    /// `pid`/`tree`/`command`/`time`, in that order, written by the taker's outermost (here,
+    /// only) acquisition. Not proved by inspection -- reads the real file this very process's
+    /// own [`DockerTestLock`] guard wrote, via a private lock path (question 212(b)). Also
+    /// proves the sidecar is removed once the guard's outermost block exits on the ordinary
+    /// (non-panicking) path -- see `holder_sidecar_is_removed_when_the_outermost_guard_drops_
+    /// during_a_panic` below for the unwind path.
+    #[test]
+    fn holder_sidecar_record_format_is_pinned() {
+        let scratch = repo_scratch_dir("sidecar-format");
+        let private_lock_path = scratch.join("docker-tests.lock");
+        let sidecar_path = holder_sidecar_path(&private_lock_path);
+
+        let guard = lock_docker_tests_at(private_lock_path.clone());
+        let raw = fs::read_to_string(&sidecar_path).unwrap_or_else(|e| panic!("could not read the holder sidecar {sidecar_path:?} this guard just wrote: {e}"));
+
+        // Question 148: print what was actually observed, not a paraphrase.
+        println!("holder sidecar record format proof: sidecar path = {sidecar_path:?}, contents = {raw:?}");
+
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 4, "expected exactly 4 lines (pid/tree/command/time), got {lines:?}");
+        let keys: Vec<&str> = lines.iter().map(|l| l.split('=').next().unwrap_or("")).collect();
+        assert_eq!(keys, vec!["pid", "tree", "command", "time"], "expected pid/tree/command/time in that order, got {keys:?}");
+
+        let pid_field = lines[0].split_once('=').expect("pid line has an '='").1;
+        let pid_value: u32 = pid_field.parse().unwrap_or_else(|e| panic!("pid field {pid_field:?} did not parse as an integer: {e}"));
+        assert_eq!(pid_value, std::process::id(), "the sidecar's own pid field must be this process's real pid");
+
+        let tree_field = lines[1].split_once('=').expect("tree line has an '='").1;
+        assert_eq!(tree_field, current_tree(), "the sidecar's own tree field must match this process's own current_tree()");
+
+        let time_field = lines[3].split_once('=').expect("time line has an '='").1;
+        // "%Y-%m-%d %H:%M:%S %z" shape, checked without pulling in a regex dependency just for
+        // this: three space-separated parts of the expected lengths, the last starting with a
+        // sign.
+        let parts: Vec<&str> = time_field.split(' ').collect();
+        assert_eq!(parts.len(), 3, "expected 'date time tz', got {time_field:?}");
+        assert_eq!(parts[0].len(), 10, "date part {:?} of {time_field:?} should be YYYY-MM-DD", parts[0]);
+        assert_eq!(parts[1].len(), 8, "time part {:?} of {time_field:?} should be HH:MM:SS", parts[1]);
+        assert!(
+            parts[2].len() == 5 && (parts[2].starts_with('+') || parts[2].starts_with('-')),
+            "tz offset part {:?} of {time_field:?} should look like +ZZZZ/-ZZZZ",
+            parts[2]
+        );
+
+        drop(guard);
+        assert!(!sidecar_path.exists(), "the sidecar must be removed once the outermost (here, only) guard drops on the ordinary path");
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The sidecar removal on drop must run on an UNWINDING panic too, not only the ordinary
+    /// return path -- `Drop for DockerTestLock` runs during unwind because this workspace is not
+    /// built `panic = "abort"` (checked directly here: `catch_unwind` only ever catches an
+    /// unwinding panic, never an aborting one, so this test would itself abort the whole test
+    /// binary, not merely fail, if that assumption were ever wrong).
+    #[test]
+    fn holder_sidecar_is_removed_when_the_outermost_guard_drops_during_a_panic() {
+        let scratch = repo_scratch_dir("sidecar-panic-cleanup");
+        let private_lock_path = scratch.join("docker-tests.lock");
+        let sidecar_path = holder_sidecar_path(&private_lock_path);
+
+        let result = std::panic::catch_unwind(|| {
+            let _guard = lock_docker_tests_at(private_lock_path.clone());
+            assert!(sidecar_path.exists(), "the sidecar must exist while the guard is held, before this deliberate panic");
+            panic!("deliberate panic while still holding the DockerTestLock guard, to prove its Drop runs during unwind");
+        });
+
+        assert!(result.is_err(), "the inner closure must have actually panicked -- this test proves nothing if it did not");
+        assert!(!sidecar_path.exists(), "the sidecar must be removed even when the guard is dropped while unwinding a panic");
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The cross-language PATH-agreement claim for the sidecar, the same by-construction proof
+    /// `rust_and_python_compute_the_identical_lock_path` above already gives the lock path
+    /// itself: a bare `python3 -c` re-derives the sidecar path inline (never importing this
+    /// module or `altavista.docker_test_lock` -- proving agreement BY CONSTRUCTION), and this
+    /// test asserts it equals [`holder_sidecar_path`]'s own output. No locking at all, so this
+    /// can never be affected by contention. The Python-side equivalent is
+    /// `tests/test_docker_test_lock_cross_process.py::
+    /// test_holder_sidecar_path_matches_the_documented_convention`.
+    #[test]
+    fn rust_and_python_compute_the_identical_holder_sidecar_path() {
+        if let Some(line) = python3_skip_line("rust_and_python_compute_the_identical_holder_sidecar_path") {
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        const PYTHON_SIDECAR_PATH_PROBE: &str = r#"
+import os
+lock = os.path.join(os.environ["HOME"], ".altavista", "locks", "docker-tests.lock")
+print(lock + ".holder")
+"#;
+        let output = Command::new("python3").args(["-c", PYTHON_SIDECAR_PATH_PROBE]).output().expect("python3 was already confirmed present by this test's own gate");
+        assert!(output.status.success(), "the python3 sidecar-path probe itself must not error: stdout={:?} stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let python_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let rust_path = holder_sidecar_path(&lock_file_path());
+
+        println!("holder sidecar path agreement proof: Rust holder_sidecar_path(lock_file_path()) = {rust_path:?}, python3's own inline computation = {python_path:?}");
+
+        assert_eq!(
+            rust_path.to_string_lossy(),
+            python_path,
+            "Rust's holder_sidecar_path(lock_file_path()) and a bare python3's own inline computation must name the IDENTICAL path -- got Rust={rust_path:?}, python3={python_path:?}"
+        );
+    }
+
+    /// A REAL cross-language proof (not merely path agreement): a Rust [`DockerTestLock`] guard
+    /// holds a PRIVATE lock (question 212(b)) and writes its own holder sidecar; a Python child
+    /// running this repository's OWN production `altavista.docker_test_lock.lock_docker_tests()`
+    /// -- not a hand-rolled probe -- contends on the identical path, blocks, reads that sidecar,
+    /// and must report this Rust process as the (live, non-stale) holder in its own WAITING
+    /// line before it acquires.
+    ///
+    /// The Python child cannot simply `import altavista.docker_test_lock`: that triggers
+    /// `altavista/__init__.py`, which imports `numpy` (a real dependency this crate's own test
+    /// gate does not install for a bare `python3`) -- discovered while building this test,
+    /// recorded in this task's report as a defect in the ORIGINAL cross-language test design,
+    /// not in the module under test. `docker_test_lock.py` itself has no such dependency (only
+    /// stdlib imports), so this loads it directly via `importlib.util.spec_from_file_location`,
+    /// bypassing the package `__init__.py` entirely -- still the real, unmodified production
+    /// module code, just reached a different way.
+    ///
+    /// The other direction (a Python holder, a Rust waiter reading a Python-written sidecar) is
+    /// NOT covered by a dedicated test here -- see this test's own module-level "What to prove"
+    /// section in the task brief for why one direction, done for real against production code
+    /// on both ends, was judged sufficient together with the by-construction path-agreement
+    /// proof above (which already covers both directions of "do the two languages compute the
+    /// identical path").
+    #[test]
+    fn a_python_waiter_using_the_real_lock_docker_tests_reads_and_reports_this_rust_holders_sidecar() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::Stdio;
+
+        if let Some(line) = python3_skip_line("a_python_waiter_using_the_real_lock_docker_tests_reads_and_reports_this_rust_holders_sidecar") {
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        let scratch = repo_scratch_dir("cross-lang-sidecar");
+        // `scratch` plays the role of a private `$HOME` for the Python child below: its own
+        // `lock_path()`/`holder_sidecar_path()` resolve `$HOME/.altavista/locks/docker-tests.lock`
+        // (and `...lock.holder`) to exactly this path -- the identical `.altavista/locks/`
+        // convention `altavista/docker_test_lock.py`'s own module doc states, and the same
+        // private-`$HOME` pattern `tests/test_docker_test_lock_cross_process.py`'s own
+        // `_child_env` already uses (question 199/212(b)). Constructed here, independently of
+        // any Python code, so the two sides meeting at the SAME file is itself part of the
+        // by-construction proof.
+        let private_lock_path = scratch.join(".altavista").join("locks").join("docker-tests.lock");
+        let sidecar_path = holder_sidecar_path(&private_lock_path);
+
+        let guard = lock_docker_tests_at(private_lock_path.clone());
+
+        const PYTHON_REAL_WAITER: &str = r#"
+import importlib.util
+import os
+import sys
+
+repo_root = sys.argv[1]
+module_path = os.path.join(repo_root, "altavista", "docker_test_lock.py")
+spec = importlib.util.spec_from_file_location("docker_test_lock", module_path)
+docker_test_lock = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(docker_test_lock)
+
+with docker_test_lock.lock_docker_tests():
+    print("WAITER_ACQUIRED", flush=True)
+"#;
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut child = Command::new("python3")
+            .args(["-c", PYTHON_REAL_WAITER, &repo_root.to_string_lossy()])
+            .current_dir(&repo_root)
+            .env("HOME", &scratch)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("could not spawn the python3 waiter child: {e}"));
+
+        let mut child_stderr = BufReader::new(child.stderr.take().expect("piped stderr"));
+        let waiting_line = loop {
+            let mut line = String::new();
+            let n = child_stderr.read_line(&mut line).expect("read a line from the child's real stderr pipe");
+            assert_ne!(n, 0, "the python3 waiter's stderr pipe closed before ever printing a WAITING line");
+            if line.contains("WAITING") {
+                break line.trim().to_string();
+            }
+        };
+
+        // Release the Rust guard -- the Python child's own blocked fcntl.flock(LOCK_EX) can now
+        // proceed.
+        drop(guard);
+
+        let acquired_line = loop {
+            let mut line = String::new();
+            let n = child_stderr.read_line(&mut line).expect("read a line from the child's real stderr pipe");
+            assert_ne!(n, 0, "the python3 waiter's stderr pipe closed before ever printing an ACQUIRED line");
+            if line.contains("ACQUIRED the docker-test lock") {
+                break line.trim().to_string();
+            }
+        };
+
+        let output_status = child.wait().expect("the python3 waiter child must exit");
+        let mut child_stdout_buf = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            std::io::Read::read_to_string(&mut out, &mut child_stdout_buf).ok();
+        }
+        let mut remaining_stderr = String::new();
+        std::io::Read::read_to_string(&mut child_stderr, &mut remaining_stderr).ok();
+
+        fs::remove_dir_all(&scratch).ok();
+
+        std::io::stdout()
+            .write_all(
+                format!(
+                    "cross-language sidecar proof (Rust holder, Python waiter): sidecar path = {sidecar_path:?}; WAITING line = {waiting_line:?}; ACQUIRED line = {acquired_line:?}; child stdout = {child_stdout_buf:?}\n"
+                )
+                .as_bytes(),
+            )
+            .ok();
+
+        assert!(output_status.success(), "the python3 waiter child must itself exit successfully -- stderr tail: {remaining_stderr:?}, stdout: {child_stdout_buf:?}");
+        assert!(child_stdout_buf.contains("WAITER_ACQUIRED"), "the python3 waiter must have actually acquired the lock -- got stdout {child_stdout_buf:?}");
+
+        assert!(
+            waiting_line.contains("WAITING") && waiting_line.contains("docker-test lock") && waiting_line.contains("question 207"),
+            "expected a WAITING line naming the docker-test lock and citing question 207, got {waiting_line:?}"
+        );
+        assert!(
+            waiting_line.contains(&format!("pid={}", std::process::id())),
+            "expected the Python waiter's WAITING line to name THIS Rust process's own pid (read from the sidecar this guard wrote), got {waiting_line:?}"
+        );
+        assert!(
+            waiting_line.contains(&current_tree()),
+            "expected the Python waiter's WAITING line to name THIS Rust process's own tree (current_tree()), got {waiting_line:?}"
+        );
+        assert!(
+            !waiting_line.to_lowercase().contains("stale"),
+            "the Rust holder was alive and well when this WAITING line was printed -- it must not be reported as stale, got {waiting_line:?}"
         );
         assert!(
             acquired_line.starts_with("ACQUIRED the docker-test lock") && acquired_line.contains("after waiting"),

@@ -84,6 +84,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
 IMAGE_TAG="altavista-cfs-lockstep:local"
 MANIFEST_PATH="${SCRIPT_DIR}/IMAGE_CONTEXT_MANIFEST.txt"
+DIGEST_DOC="${SCRIPT_DIR}/IMAGE_DIGEST.md"
+# Question 232 (extending question 212(a)): the ONE place the paths this image's content is
+# derived from, for COMMIT-PROVENANCE purposes, are listed -- distinct from (coarser than) the
+# COPY_SRCS list step 3 below derives straight from the Dockerfile for IMAGE_CONTEXT_MANIFEST.txt.
+# This script reads it to compute whether the tree was dirty under these paths at build time;
+# tests/heavy_stack.py's own verify_image_commit_provenance reads the SAME file to run
+# `git log <recorded_commit>..HEAD -- <these paths>`. Never duplicated.
+COPIED_PATHS_FILE="${SCRIPT_DIR}/IMAGE_COPIED_PATHS.txt"
 # docs/open-questions.md question 194 (round 6): this script's own live `docker events` capture
 # for its own execution window, so the next tag/base-image disappearance is attributable. Fixed
 # name, overwritten each run -- reflects the MOST RECENT build-image.sh invocation, matching how
@@ -93,6 +101,73 @@ EVENTS_LOG="${SCRIPT_DIR}/build/last-build-events.jsonl"
 log() { printf '[build-image] %s\n' "$1" >&2; }
 warn() { printf '[build-image] WARNING: %s\n' "$1" >&2; }
 die() { printf '[build-image] ERROR: %s\n' "$1" >&2; exit 1; }
+
+# --- Question 232 (extending 212(a)): write the "Built from commit" record into IMAGE_DIGEST.md
+# -- the ONE field of that hand-narrated file this script writes itself, never hand-typed (a
+# hand-typed claim about git history is exactly what question 232's own dirty-build clause
+# refuses on principle). Every OTHER field in IMAGE_DIGEST.md (the whole-image digest, the
+# runtime-content hash, the dated narrative sections below them) stays exactly as this script has
+# always left it -- recorded by hand into a new dated section, same as always; this function
+# touches only the one "Built from commit" bullet and its fenced block, replacing it in place if
+# already present (idempotent re-runs) or inserting it once, right beside the runtime-content
+# hash (the "what this pin currently is" grouping question 232's own wording -- "records the
+# commit ... beside the digest" -- calls for), the first time this rule applies to this image.
+BUILT_FROM_COMMIT_MARKER="Built from commit (question 232, extending question 212(a) -- the paths this covers are \`services/cfs/IMAGE_COPIED_PATHS.txt\`):"
+BUILT_FROM_COMMIT_ANCHOR="Recorded runtime-content hash for this pin"
+
+update_built_from_commit_record() {
+    local digest_doc="$1" line_value="$2"
+    [ -f "${digest_doc}" ] || die "${digest_doc} does not exist -- this script never creates IMAGE_DIGEST.md from scratch; give it its initial hand-narrated sections first (see services/tiles/IMAGE_DIGEST.md for a from-scratch file's shape), then re-run."
+
+    local block_file="${digest_doc}.built-from-commit.tmp"
+    {
+        printf -- '- %s\n' "${BUILT_FROM_COMMIT_MARKER}"
+        printf '```\n%s\n```\n' "${line_value}"
+    } > "${block_file}"
+
+    local out_file="${digest_doc}.new"
+    if grep -qF "${BUILT_FROM_COMMIT_MARKER}" "${digest_doc}"; then
+        # Re-run: replace the existing block in place. Its shape is exactly the one this same
+        # function always writes -- marker line, then its immediately-following fenced code
+        # block (open ``` the very next line, close ``` the line after that) -- an invariant
+        # this function itself establishes and never violates.
+        local marker_line fence_open fence_close
+        marker_line="$(grep -nF "${BUILT_FROM_COMMIT_MARKER}" "${digest_doc}" | head -1 | cut -d: -f1)"
+        fence_open=$((marker_line + 1))
+        fence_close="$(awk -v start="$((fence_open + 1))" 'NR >= start && /^```$/ { print NR; exit }' "${digest_doc}")"
+        [ -n "${fence_close}" ] || die "found the 'Built from commit' marker at ${digest_doc}:${marker_line} but no closing fence after it -- ${digest_doc} was hand-edited into an unexpected shape; fix it by hand before re-running."
+        awk -v m="${marker_line}" -v c="${fence_close}" -v blockfile="${block_file}" '
+            NR < m { print; next }
+            NR == m {
+                while ((getline bline < blockfile) > 0) print bline
+                next
+            }
+            NR > m && NR <= c { next }
+            { print }
+        ' "${digest_doc}" > "${out_file}"
+    else
+        # First run under question 232 for this image: insert the new block right after the
+        # "Recorded runtime-content hash for this pin" section's own closing fence. Everything
+        # else in this hand-narrated file is left untouched.
+        local anchor_line anchor_fence_open anchor_fence_close
+        anchor_line="$(grep -nF "${BUILT_FROM_COMMIT_ANCHOR}" "${digest_doc}" | head -1 | cut -d: -f1)"
+        [ -n "${anchor_line}" ] || die "could not find '${BUILT_FROM_COMMIT_ANCHOR}' in ${digest_doc} to anchor the new 'Built from commit' block -- ${digest_doc}'s shape has changed; place the block by hand this once, then re-run."
+        anchor_fence_open="$(awk -v start="$((anchor_line + 1))" 'NR >= start && /^```$/ { print NR; exit }' "${digest_doc}")"
+        [ -n "${anchor_fence_open}" ] || die "found '${BUILT_FROM_COMMIT_ANCHOR}' at ${digest_doc}:${anchor_line} but no fenced block after it -- unexpected shape."
+        anchor_fence_close="$(awk -v start="$((anchor_fence_open + 1))" 'NR >= start && /^```$/ { print NR; exit }' "${digest_doc}")"
+        [ -n "${anchor_fence_close}" ] || die "found '${BUILT_FROM_COMMIT_ANCHOR}'s opening fence at ${digest_doc}:${anchor_fence_open} but no closing fence after it -- unexpected shape."
+        awk -v c="${anchor_fence_close}" -v blockfile="${block_file}" '
+            { print }
+            NR == c {
+                print ""
+                while ((getline bline < blockfile) > 0) print bline
+            }
+        ' "${digest_doc}" > "${out_file}"
+    fi
+
+    mv "${out_file}" "${digest_doc}"
+    rm -f "${block_file}"
+}
 
 # --- Docker-events capture (question 194) + temp-manifest cleanup, one combined EXIT trap so
 # neither cleanup step can clobber the other (a second `trap ... EXIT` call replaces the first,
@@ -181,6 +256,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 command -v git >/dev/null 2>&1 || die "git binary not found on PATH -- needed to mark build-artifact manifest entries (git check-ignore)."
 [ -f "${DOCKERFILE}" ] || die "Dockerfile not found at ${DOCKERFILE}"
+[ -f "${COPIED_PATHS_FILE}" ] || die "${COPIED_PATHS_FILE} not found -- question 232's commit-provenance record needs the same copied-paths list tests/heavy_stack.py's own verifier reads."
 
 # --- 0b. Start the docker-events capture (question 194) now that Docker is confirmed usable, and
 # before the build itself -- this script's own full execution window, not just the build call, so
@@ -214,6 +290,37 @@ RUNTIME_CONTENT_HASH="$(docker run --rm --entrypoint sh "${IMAGE_TAG}" -c \
     | shasum -a 256 | awk '{print $1}')"
 [ -n "${RUNTIME_CONTENT_HASH}" ] || die "runtime-content hash computation produced no output"
 log "runtime-content hash: sha256:${RUNTIME_CONTENT_HASH}"
+
+# --- 2c. Question 232 (extending 212(a)): the commit HEAD points at, and whether the tree was
+# dirty UNDER THIS IMAGE'S OWN COPIED PATHS (never the whole tree -- dirt elsewhere is not this
+# image's provenance concern) at build time. Read from COPIED_PATHS_FILE -- the ONE list this
+# script and tests/heavy_stack.py's own verify_image_commit_provenance both read, never
+# duplicated. bash 3.2 on this host (macOS's own /bin/bash) has no mapfile/readarray, so a plain
+# `while read` loop into an array, matching this script's own COPY_SRCS loop below.
+declare -a COPIED_PATHS=()
+while IFS= read -r copied_path; do
+    case "${copied_path}" in
+        ''|'#'*) continue ;;
+    esac
+    COPIED_PATHS+=("${copied_path}")
+done < "${COPIED_PATHS_FILE}"
+[ "${#COPIED_PATHS[@]}" -gt 0 ] || die "${COPIED_PATHS_FILE} names no paths"
+
+BUILD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+DIRTY_STATUS="$(git -C "${REPO_ROOT}" status --porcelain -- "${COPIED_PATHS[@]}")"
+DIRTY_COUNT=0
+if [ -n "${DIRTY_STATUS}" ]; then
+    DIRTY_COUNT="$(printf '%s\n' "${DIRTY_STATUS}" | grep -c .)"
+fi
+if [ "${DIRTY_COUNT}" -gt 0 ]; then
+    warn "working tree is dirty under ${DIRTY_COUNT} of this image's own copied path(s) at build time -- IMAGE_DIGEST.md will record this honestly, and tests/heavy_stack.py's own commit-provenance verifier (question 232) will refuse to trust this build until it is rebuilt from a clean tree."
+    BUILT_FROM_COMMIT_LINE="${BUILD_COMMIT} (working tree dirty: ${DIRTY_COUNT} modified paths under the copied paths)"
+else
+    BUILT_FROM_COMMIT_LINE="${BUILD_COMMIT}"
+fi
+log "recording build commit ${BUILD_COMMIT} (dirty count under copied paths: ${DIRTY_COUNT}) into ${DIGEST_DOC}"
+update_built_from_commit_record "${DIGEST_DOC}" "${BUILT_FROM_COMMIT_LINE}"
+log "wrote the 'Built from commit' record in ${DIGEST_DOC}"
 
 # --- 3. Parse the Dockerfile's COPY list (skip --from=... intra-image copies). -----------------
 # Each surviving COPY line has the form (after collapsing whitespace):
@@ -314,6 +421,7 @@ ENTRY_COUNT="$(grep -vc '^#' "${MANIFEST_PATH}")"
 log "wrote ${MANIFEST_PATH} (${ENTRY_COUNT} file entries)"
 log "done. Image ID: ${IMAGE_ID}"
 log "docker events for this run's build window (question 194): ${EVENTS_LOG} (if a WARNING above said the capture didn't start, this file may be absent or stale -- that WARNING is the honest record for that run, not a silent gap)"
-log "record both of the following in services/cfs/IMAGE_DIGEST.md's new dated section (by hand, same as always -- this script never edits that file):"
+log "record both of the following in services/cfs/IMAGE_DIGEST.md's new dated section, by hand, same as always (this script never edits either of them -- only the 'Built from commit' bullet above is script-written, question 232):"
 printf 'image_id=%s\n' "${IMAGE_ID}"
 printf 'runtime_content_hash=sha256:%s\n' "${RUNTIME_CONTENT_HASH}"
+printf 'built_from_commit=%s\n' "${BUILT_FROM_COMMIT_LINE}"

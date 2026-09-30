@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -74,6 +75,23 @@ DIGEST_DOC = REPO_ROOT / "services" / "cfs" / "IMAGE_DIGEST.md"
 MANIFEST_PATH = REPO_ROOT / "services" / "cfs" / "IMAGE_CONTEXT_MANIFEST.txt"
 IMAGE_TAG = "altavista-cfs-lockstep:local"
 BUILD_SCRIPT = "services/cfs/build-image.sh"
+IMAGE_DIR = REPO_ROOT / "services" / "cfs"
+
+# Question 232, extending question 212(a): the commit-provenance verifier is shared, not forked
+# -- it already exists and is proven for three other images
+# (tests/heavy_stack.py::verify_image_commit_provenance, imported by
+# tests/test_proposer_container.py and tests/test_edge_plugin_container.py). REPO_ROOT / "tests"
+# is the repository's own top-level test package, one directory above this file's own
+# services/cfs/tests/ package, and is not otherwise on sys.path for a test file collected from
+# inside services/cfs/tests/ -- inserted once, here, rather than duplicating any of
+# heavy_stack.py's own logic. Importing heavy_stack.py only evaluates its OWN module-level
+# skip-reason computations (a handful of `docker info`/`docker image inspect`/`git` subprocess
+# calls) -- every fixture that actually builds a Rust binary or starts a container
+# (rust_bins/minio/tile_set/av_tiles_service/...) is a pytest fixture, instantiated lazily only
+# when a test that requests it runs, never at import time -- so this import carries none of that
+# weight in here.
+sys.path.insert(0, str(REPO_ROOT / "tests"))
+from heavy_stack import verify_image_commit_provenance  # noqa: E402
 
 
 def docker_available() -> bool:
@@ -382,6 +400,18 @@ def _run_image_digest_matches_recorded_value() -> None:
     actual = built_digest()
     expected = recorded_digest()
     if actual == expected:
+        # Question 212(a)'s own gate has now passed (the image is present and its id matches
+        # the recorded digest) -- question 232 extends it: a present, digest-matched image can
+        # still be stale BY COMMIT (the round-5 defect this rule exists to catch: the recorded
+        # commit's own image predated a code change, yet its digest still matched exactly).
+        # verify_image_commit_provenance's own contract assumes exactly this gate has already
+        # passed. This is a visible FAILURE, never a skip, when it returns non-None -- a stale-
+        # by-commit image is a defect to report loudly, the same posture question 194 already
+        # takes for "found no image" (see tests/heavy_stack.py's own module docstring for the
+        # full reasoning this mirrors).
+        provenance_failure = verify_image_commit_provenance(IMAGE_DIR, BUILD_SCRIPT)
+        if provenance_failure is not None:
+            pytest.fail(provenance_failure)
         return
 
     recorded_manifest, build_artifacts = load_manifest()
