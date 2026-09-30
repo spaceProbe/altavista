@@ -171,18 +171,39 @@ fn run_cc(args: &[&str], step: &str) {
 ///
 /// **More than one match is a real, observed case, not a hypothetical.** The hash covers the
 /// feature set (among other things), so a `deps/` directory that has ever seen BOTH a
-/// `--no-default-features` and a default-features build of this crate genuinely contains two
-/// `libav_orbital-*.a` files at once (measured directly: this task's own report names both
-/// hashes from exactly that sequence). The one THIS test run just built is picked by last
-/// modification time (`SystemTime`, newest wins) rather than by trying to reconstruct Cargo's
-/// own fingerprint hash -- `cargo test` always rebuilds/relinks this crate's lib target
-/// immediately before running this test binary (it is a compile-time dependency of it), so that
-/// artifact's mtime is always the most recent among any candidates left over from an earlier,
-/// differently-configured run in the same target directory. Panics if zero candidates exist at
-/// all (nothing built).
+/// `--no-default-features` and a default-features build of this crate genuinely contains
+/// several `libav_orbital-*.a` files at once. Measured on this host in round 5: **eight**
+/// candidates coexisted, five carrying GMAT symbols and three not.
+///
+/// **Round 4 picked the newest by mtime, and that is a defect this round root-caused from a
+/// real gate failure.** The reasoning was: "`cargo test` always rebuilds/relinks this crate's
+/// lib target immediately before running this test binary, so that artifact's mtime is always
+/// the most recent among any candidates left over from an earlier, differently-configured run."
+/// Both halves of that are false on this host:
+///
+/// 1. **Two cargo jobs run concurrently by design** (`docs/open-questions.md` question 229's
+///    two host-wide slots, plus a second track building in its own worktree against the same
+///    `target/`), so another job can relink the OTHER feature state's archive in between this
+///    run's own link and this test's `read_dir`. The mtime ordering is then simply a race.
+/// 2. **Cargo's freshness check means it may not relink at all** when the artifact is already
+///    fresh, so "immediately before" does not hold even single-threaded.
+///
+/// When it loses that race, a `--no-default-features` run links the GMAT-built archive while
+/// passing none of [`gmat_frames_link_args`]'s flags, and `cc` fails with the page of
+/// `Undefined symbols` from `gmatffi.o` that this file's own `gmat_frames_link_args` doc
+/// comment already describes from the other direction. That is what it looked like when it bit:
+/// one failure in six otherwise-identical runs of an unchanged tree.
+///
+/// **So the archive is chosen by FEATURE IDENTITY, measured from the archive itself, and mtime
+/// is only the tiebreaker among archives that actually match.** A candidate either contains
+/// `crates/gmat-sys`'s `gmatffi.o` shim member or does not ([`archive_has_gmat_symbols`], which
+/// also records why that is read with `ar t` rather than `nm -g`), which is a direct property of
+/// the bytes about to be linked rather than an inference from a timestamp. Panics, naming every candidate and its GMAT-ness, when none
+/// matches this build's own feature state -- a wrong-archive link must fail loudly here rather
+/// than as an undefined-symbol wall one `cc` invocation later.
 fn find_staticlib(lib_dir: &Path) -> PathBuf {
     let deps_dir = lib_dir.join("deps");
-    let mut matches: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&deps_dir)
+    let candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&deps_dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", deps_dir.display()))
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
@@ -196,11 +217,72 @@ fn find_staticlib(lib_dir: &Path) -> PathBuf {
             }
         })
         .collect();
-    if matches.is_empty() {
+    if candidates.is_empty() {
         panic!("no libav_orbital-*.a found under {} -- expected the staticlib crate-type (this task's own Cargo.toml change) to have been built by `cargo test` before this test ran", deps_dir.display());
     }
-    matches.sort_by_key(|(modified, _)| *modified);
-    matches.pop().expect("checked non-empty above").1
+
+    // What THIS build needs the archive to be. `cfg!` (not `#[cfg]`) so both arms typecheck in
+    // either feature state and the value is a plain runtime bool to compare against.
+    let want_gmat = cfg!(feature = "gmat-frames");
+    let mut matching: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut inventory: Vec<String> = Vec::new();
+    for (modified, path) in candidates {
+        let has_gmat = archive_has_gmat_symbols(&path);
+        inventory.push(format!("{} (gmat symbols: {has_gmat})", path.file_name().and_then(|n| n.to_str()).unwrap_or("?")));
+        if has_gmat == want_gmat {
+            matching.push((modified, path));
+        }
+    }
+    if matching.is_empty() {
+        panic!(
+            "none of the {} libav_orbital-*.a archives under {} matches this build's own feature \
+             state (gmat-frames = {want_gmat}); candidates were: {}. Round 5 root-caused a gate \
+             failure to picking one of these by mtime instead of by feature identity -- see \
+             find_staticlib's own doc comment.",
+            inventory.len(),
+            deps_dir.display(),
+            inventory.join(", ")
+        );
+    }
+    matching.sort_by_key(|(modified, _)| *modified);
+    matching.pop().expect("checked non-empty above").1
+}
+
+/// Does this `libav_orbital-*.a` carry `gmat-frames`' own GMAT-calling object code? Answered
+/// from the archive's member list (`ar t`): a `gmat-frames` build contains `crates/gmat-sys`'s
+/// compiled C++ shim as a member named `<hash>-gmatffi.o`, a `--no-default-features` build
+/// contains no such member. Measured on this host across the eight archives in `deps/`: five
+/// with exactly one such member, three with none, and the split agrees archive for archive
+/// with `nm -g` finding 39 `gmatffi` references or zero. See [`find_staticlib`]'s own doc
+/// comment for why this is asked of the archive rather than inferred from its modification time.
+///
+/// **Why `ar t` and not `nm -g`** (the first draft's tool): Apple's `nm` exits 1 on EVERY one of
+/// these archives, because it tries to parse the Rust-produced objects and rejects them
+/// ("Unknown attribute kind (105) (Producer: 'LLVM22.1.6-rust-1.97.0-stable' Reader: 'LLVM
+/// APPLE_1_2100...')") -- rustc's LLVM is newer than Xcode's. The first draft read `nm`'s
+/// stdout and ignored its status, which happened to work because the C++ member still printed.
+/// The manager's review then made a non-zero `nm` a panic (treating a failed `nm` as "no GMAT"
+/// would hand a `--no-default-features` run straight back to mtime), and that panic fired on
+/// the very next run, which is how the exit status was found. `ar t` reads only the archive's
+/// member headers, never object contents, so it does not depend on which LLVM wrote them.
+///
+/// Any failure to list the archive panics in BOTH feature states: an archive whose identity
+/// cannot be read is never guessed at.
+fn archive_has_gmat_symbols(path: &Path) -> bool {
+    let out = Command::new("ar")
+        .arg("t")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("could not run `ar t {}` to identify the archive's feature state: {e}", path.display()));
+    if !out.status.success() {
+        panic!(
+            "`ar t {}` exited {} -- cannot identify the archive's feature state: {}",
+            path.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).lines().any(|member| member == "gmatffi.o" || member.ends_with("-gmatffi.o"))
 }
 
 /// Extra link flags needed ONLY when this crate was built with the `gmat-frames` feature (the
