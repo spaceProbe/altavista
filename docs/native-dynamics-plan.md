@@ -9,11 +9,12 @@ depths, goldens as the proof, the integrator ours.
 
 ## Delivered
 
-Closed 2026-09-22, at the end of round 4. Every milestone N1 to N6 is delivered and the exit
-criteria below are met or recorded as not met, with the measurement in each case. Four rounds,
-twenty-eight commits on `edge` (ten, nine, four, and five including this one). The four
-round-status sections below are the record; this section is what a reader who has not followed
-the track needs.
+Closed 2026-09-22 at the end of round 4 with two N6 pieces owed, and completed 2026-09-30 by
+round 5, the closing round, which delivered both and everything else question 234 listed.
+Every milestone N1 to N6 is delivered and the exit criteria below are met or recorded as not
+met, with the measurement in each case. Five rounds, forty commits on `edge` (ten, nine,
+four, five, and twelve including round 5's status). The round-status sections below are the
+record; this section is what a reader who has not followed the track needs.
 
 **What exists that did not before.** `crates/av-orbital` is a native Rust orbital force model
 behind ADR-002's `DynamicsModel` contract: spherical-harmonic gravity from GMAT's own `.cof`
@@ -24,7 +25,11 @@ with EOP from GMAT's own files. It is selectable per DRM as `orbital.<name>` bes
 `gmat.<name>` instance with the same parameter names, and `av-kernel` built with
 `--no-default-features` links no GMAT library and still propagates the demo DRM for one day
 with that model. The derivative function is exported over a C ABI and proved bit-identical
-against a real C caller.
+against a real C caller. One demo DRM run with both models reports their position difference
+as a `Score` (1.25e-5 m maximum over two hours), and the model's data-file provenance is a
+control-matrix row an auditor can re-derive from the row alone. A DRM author swaps `gmat.` for
+`orbital.` in a real system file and it runs, or is refused, typed, for its state
+representation and nothing else.
 
 **Against the exit criteria, one line each.**
 
@@ -60,22 +65,25 @@ upstream defect is reproduced in the vendor's own tool before it is named. The n
 drag is fit for design work and is not a golden-grade claim until this closes. The remaining
 lever is instrumenting GMAT's own `rho_high` term by term.
 
-**The open question that blocks it, and that nobody owns.** Instrumenting `rho_high` needs a
-local build of `third_party/gmat-src`, and **it has never been established whether that mirror
-is the source tree the shipped `libGmatBase.R2026a.dylib` was built from.** Until someone shows
-it is — a reproducible build, a version banner, a symbol or layout comparison, anything better
-than the assumption — an instrumented build proves a property of *some* GMAT, not of the one
-every golden in this repository was generated against. That is a provenance question about the
-vendor drop, not a dynamics question, and it is the single thing standing between the
-Jacchia-Roberts decomposition and a located line.
+**The open question that blocks it, half closed.** Instrumenting `rho_high` needs a local
+build of `third_party/gmat-src`, and an instrumented build proves a property of *some* GMAT
+unless that tree is the one the shipped `libGmatBase.R2026a.dylib` was built from. Round 5
+closed the mirror half: the mirror is byte for byte the `R2026a` tag's tree, commit
+`47f1a6eb`, and is now pinned and recorded. The binary half is the lead's (question 234): the
+shipped library embeds a build date of the same day as that commit, which is consistent with it
+and does not prove it. That provenance question, not a dynamics one, is the single thing
+standing between the Jacchia-Roberts decomposition and a located line.
 
 **What a later reader should expect.** The `gmat` cargo feature on `av-kernel` and `av-run` is
 default-on and the default build is unchanged in behaviour; `--no-default-features` is a real
 build that refuses GMAT-bound work by typed error rather than by panic or silent substitution.
-`scripts/dev/cargo-slot` belongs in front of every cargo command on this host. The seven
-goldens that used to inherit a tolerance from a test constant now carry it in the file, and a
-reader that finds it missing fails by name rather than defaulting — which is the rule this
-track would most like to see applied to the goldens it never opened.
+`scripts/dev/cargo-slot` belongs in front of every cargo command on this host, and
+`scripts/dev/cargo-slot --hold -- <command>` in front of any Python suite that launches
+workspace binaries; it warns when a `deps` directory grows past 100 000 entries. The eight
+golden tolerances that used to live in a test constant (round 4's seven and the `stm` block's)
+now live in their files, and every reader reads them from there, failing by name rather than
+defaulting — which is the rule this track would most like to
+see applied to the goldens it never opened.
 
 ## Goal
 
@@ -1452,10 +1460,6 @@ Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`, `
 `GATE_CLIPPY_KERNEL_FINAL`, `GATE_DENY`, `GATE2_ORBITAL_NODEF`, `GATE1`, `GATE_KERNEL_NODEF`,
 `GATE_WORKSPACE`, `GATE_KERNEL_DEFAULT`, `GATE_PYTEST` and `GATE_PY_RERUN`.
 
-Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`,
-`GATE_CLIPPY_WS`, `GATE_DENY`, `GATE1`, `GATE2_ORBITAL_NODEF`, `GATE_KERNEL_NODEF`,
-`GATE_WORKSPACE`, `GATE_KERNEL_DEFAULT` and `GATE_PYTEST`.
-
 ### Open items
 
 - **N6's two-model comparison score is not delivered.** N6 asks for "a run of the demo DRM
@@ -1498,6 +1502,68 @@ Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`,
   inside leap-second-free windows.
 - **A live `Earth.NutationUpdateInterval` readback** still needs an entry point `gmat-sys` does
   not expose.
+
+## Status (native-dynamics manager, 2026-09-30) — round 5, closing
+
+The closing round question 234 chartered: the two N6 pieces round 4 left owed, the tolerances
+still living in test constants, `parse_orbital_spec` accepting `force_model.golden_ref`, the
+lock's holder line, the kit test's docker tags, the cFS image's provenance by commit, the GMAT
+mirror's provenance, and question 231's and 235's two `cargo-slot` checks. **Everything owed is
+delivered.** Twelve commits on `edge`, none pushed, none merged. The round ran under two
+managers: the first took it to five commits and three reviewed but uncommitted tasks and stopped
+running; the second (this section's author) re-proved those three, committed them, and did the
+rest.
+
+| Commit | What |
+|---|---|
+| `69de194` | question 234: the kit test never leaves a docker tag it did not own |
+| `9d1350e` | question 234: the GMAT source mirror pinned to a commit and recorded |
+| `48728b0` | question 232: image provenance by commit for the cFS image |
+| `a33275c` | N6: the demo DRM with both models, the position difference as a `Score` |
+| `70090dd` | question 230: the last three tolerances read from their goldens (two in `gmat-sys`, the eighth in `stm_goldens.rs`) |
+| `143101a` | N6: the orbital model's provenance row, re-derivable from the row alone |
+| `8f7f4bd` | question 234: the docker-test lock records its holder beside it |
+| `bf7c4af` | questions 231 and 235: `cargo-slot` warns on a huge `deps` directory and can hold a slot for a non-cargo run |
+| `a1d732d` | N6: the C caller links the archive its own feature state built, chosen by the archive's members |
+| `4f6ce1b` | N6: the one-word model swap on the real system file, refused only for physics |
+| `c29530f` | question 232: the cFS image's build commit re-recorded at the round's head (same image; the gate found the record stale) |
+| this commit | this status section, `## Delivered` brought up to date, and a duplicated paragraph in round 4's gates removed |
+
+Each commit message carries its own proofs; this section records what a reader of the plan
+needs, not the commit bodies again.
+
+### N6's two-model `Score`
+
+`crates/av-kernel/tests/orbital_vs_gmat_score.rs`: one `execute` call, one products set, two
+instances declaring field-for-field identical physics from one shared closure, one bound to
+`orbital.jgm2_8x8_sun_moon` and one to `gmat.earth.jgm2_8x8.sun_moon`, and two measures over
+ADR-005 §6's `range(a, b)`: `native_vs_gmat_position_difference_max_m` and `..._final_m`.
+Measured over a 7200 s arc: **max 1.24971901366127523e-5 m, final 1.21115561183108794e-5 m**,
+both in `RunProducts.scores` with `Unit::Meter` propagated by the evaluator rather than declared.
+The range series is also rebuilt from the two trajectories' own position triples without touching
+`crate::expr`, and agrees to all 17 significant figures. The arc is two hours, not the golden's
+day, disclosed in the file with its wall time; tolerance 0.012 m, a thousand times the
+measurement. `required-features = ["gmat"]`, so it runs only in the default build.
+
+### The GMAT source mirror: what `9d1350e` establishes, and what it does not
+
+The Jacchia-Roberts decomposition's last lever is instrumenting GMAT's own `rho_high`, and
+question 234 made that wait on whether `third_party/gmat-src` is the tree the shipped
+`libGmatBase.R2026a.dylib` was built from. **The mirror half is closed.** `git ls-remote` puts
+both `refs/tags/R2026a` and `refs/heads/GMAT-R2026a` at `47f1a6eb89f3653a542195d42c225c6b0d6746a9`
+(2026-03-26 16:00:34 +0000), and all 1128 files of this host's mirror hash byte-identically to
+that commit's blobs, with none missing either way under `src/base`/`src/gmatutil`. The fetch
+script now clones the immutable tag, verifies the commit, and writes
+`third_party/gmat-src.REVISION` from the checkout itself.
+
+**The binary half is not, and it is the lead's.** The shipped `libGmatUtil.R2026a.dylib`
+embeds `__DATE__`/`__TIME__` of `Mar 26 2026 19:40:07` (and `:08`, one per architecture) and
+`gmatVersion = "R2026a"`: the same calendar day as the release commit (`__TIME__` carries no
+time zone, so the order within the day is not established). That is
+consistent with the library having been built from that commit and does not prove it; the
+Mach-O load commands carry nothing further (`LC_SOURCE_VERSION` 0.0, the `LC_ID_DYLIB` timestamp
+zeroed). A reproducible build compared symbol for symbol is what would close it. No instrumented
+build was chartered and none was made.
 
 ### N6's control-matrix row for the orbital model's provenance
 
@@ -1589,3 +1655,273 @@ earns its place, since without it the intermediate hash would be unrecoverable a
 digest could be quoted but never reproduced. It also found the one error in the first draft of
 this section and of `EarthGravityModel`'s own doc comments, now corrected: `new` inserts
 **twelve** settings entries, not eleven.
+
+The second manager then made that recomputation a test rather than a one-off:
+`the_orbital_model_reports_its_own_data_file_provenance` re-implements
+`av_dynamics::settings_hash`'s documented rule and re-derives `0fbdaa86…` and then `86ff995d…`
+from the printed map, and pins the map at sixteen keys, so a change to the helper or to the
+chain's shape fails a test instead of orphaning the row. Run on 2026-09-30 with `GMAT_ROOT` at
+`/Users/probe/code/AltaVista/GMAT R2026a` (the gate's install, not the worktree-local one the
+table was first measured against), both feature states print the table above byte for byte.
+
+### The one-word swap, and a ratified refusal that could never fire
+
+`parse_orbital_spec` now accepts `force_model.golden_ref` and carries it into
+`EarthGravityModelInfo.goldens`, the place a GMAT instance's value reaches; it is a label and
+enters neither `settings_hash` nor `provenance()`, as on the GMAT path. That was the line
+question 234 asked for, and it was not enough to make the swap true.
+
+**Round 4's decision 5 was unreachable for every real system file.**
+`drms/leo_1day_golden.system.yaml` is Keplerian, and `parse_orbital_spec` refused the first
+parameter name it did not know, iterating in `BTreeMap` order, so the swapped file was refused as
+`UnknownParameter("spacecraft.AOP")` before the typed `OrbitalRequiresCartesianState` check could
+run. The six element names are now recognised and never converted, so that check is what refuses
+a Keplerian file; `Cartesian` together with any element is refused as ambiguous.
+`spacecraft.DryMass/Cd/Cr/DragArea/SRPArea` are stored and inert, because the orbital path wires
+no drag or SRP force. They are not hashed, and that is a recorded divergence from the GMAT
+path: `gmat_settings` hashes them, so a GMAT instance's hash moves with `Cd` although no force
+reads it, while the native model's hash stays a function of what it computes.
+
+The test reads the real file from disk and changes one word: the refusal is
+`OrbitalRequiresCartesianState` naming `Keplerian`. The same file with its state converted to
+Cartesian (by the test file's own conversion, not `av_orbital`) and every other parameter
+verbatim classifies, constructs, reports `goldens == ["leo_1day_jgm2_8x8_sunmoon"]`, and carries
+the recorded `86ff995d…`, identical with the label and ballistic properties removed.
+
+### `cargo-slot`: the `deps` warning and `--hold`
+
+**The warning (question 231)** fires when the target's `debug/deps` passes 100 000 entries,
+names the directory, the count, the question and the remedy, and never refuses or moves
+anything. Counting was the problem, measured on this worktree's own 890 835-entry directory:
+`ls -f | wc -l` took 38 s and an `os.scandir` count 20 s. On APFS a directory's `st_size` is
+exactly `64 + 32 × entries` (measured from 0 to 890 835 entries, exact against `os.scandir`), so
+the ordinary path is one `stat`, 2.5 ms against that directory. Elsewhere a screen of two bytes of
+size per entry and a scan that stops at the threshold; that screen bound comes from documented
+layouts and was not measured, because this host has only APFS.
+
+**`--hold` (question 235):** `scripts/dev/cargo-slot --hold -- <command>` takes a slot and execs
+the command instead of cargo, so the slot lives exactly as long as the command. README's test
+recipe is now `scripts/dev/cargo-slot --hold -- .venv/bin/python -m pytest`, and this round's
+gate ran its Python suite that way.
+
+### The lock's holder line (question 234)
+
+Both implementations write `<lock>.holder` (pid, tree, command, time), from the outermost
+acquisition only, and remove it when that guard exits. A waiter prints it in its WAITING line
+after a liveness check, and reports a dead pid as a stale record, never as the holder. It
+degraded as designed in the round's own proof: `av-lockstep`'s `docker_lifecycle` met the real
+host lock held by another tree's older code and printed "holder: unknown (no readable holder
+record)" before waiting and acquiring.
+
+### The C caller's archive, and a tool that could not read it
+
+`find_staticlib` picked the newest `libav_orbital-*.a` by mtime; with both feature states in one
+`target/` and two cargo jobs allowed at once, that is a race, and it bit once in six runs (a
+`--no-default-features` run linked a GMAT archive). The first fix chose by `nm -g` for `gmatffi`
+symbols. **The second manager's review made a non-zero `nm` a panic, and it fired on the next
+run:** Apple's `nm` exits 1 on every one of these archives, rejecting objects written by
+rustc's newer LLVM ("Unknown attribute kind (105)"); the first draft had worked only by ignoring
+the status. The identity is now read with `ar t`, which lists member headers and parses nothing:
+a `gmat-frames` archive has one `<hash>-gmatffi.o` member and a GMAT-free one none, agreeing
+archive for archive with `nm`'s 39-or-0 across the eight in this tree. Perturbed (the feature
+match bypassed), a `--no-default-features` run linked `libav_orbital-383fcb7c….a` and stopped on
+"Undefined symbols" from its `gmatffi.o`: the original defect on demand. Restored, it passes.
+
+### Defects found in review, and their root causes
+
+1. **`find_staticlib` chose the archive by mtime** (first manager, from a real gate failure).
+   Root cause: "cargo always relinks this immediately before the test" is false both under
+   concurrency and under cargo's freshness check.
+2. **The fix's first draft read `nm`'s stdout and ignored its status, and would have treated a
+   failed `nm` as "GMAT-free"** in a `--no-default-features` run, handing the choice back to
+   mtime. Root cause of the status being ignorable at all: Apple's `nm` cannot parse
+   newer-LLVM objects and exits 1 on every archive, which nobody had seen because nothing looked.
+   Fixed with `ar t`, above.
+3. **The typed Keplerian refusal was unreachable** (found by the second manager while writing the
+   golden_ref brief). Root cause: first-unknown-name refusal in `BTreeMap` order reaches
+   `spacecraft.AOP` before the representation check. Round 4 ratified a refusal no real file
+   could trigger, and no test had fed it a real file.
+4. **A `UnicodeDecodeError` escaped the holder sidecar's graceful degradation.** Root cause: it is
+   not an `OSError`, so a sidecar of raw non-UTF-8 bytes crashed the Python waiter before it
+   printed WAITING. Found by the worker's own corrupt-sidecar test, fixed by catching it
+   explicitly; the second manager re-drove it by reverting the clause (the test fails) and
+   restoring it (it passes).
+5. **Both `current_tree` doc comments claimed every docker-gated test runs at the repository
+   root.** `cargo test` runs a test binary in its package directory. The field still names the
+   worktree, which is its job; the comments now say what is true.
+6. **`OrbitalRequiresCartesianState` printed `instance "instance \"leo\" …"`.** Root cause: the
+   variant's `instance` field carries the whole context string and `Display` quoted it again.
+7. **The provenance row said "eleven" settings entries in three places** where `new` inserts
+   twelve (first manager, found by its own recomputation).
+8. **Round 4's gates section printed its "Full outputs" paragraph twice.** Removed.
+9. **Two gate results were lost by piping a gate through `tail`/`grep`** (first manager). A
+   filtered pipe discards exactly the lines that would have shown the failure; the second
+   manager's brief made "capture whole, filter afterwards" a rule for every run, and every
+   output this round is a whole file.
+10. **A review argument was falsified by measurement** (first manager, `a33275c`). It argued the
+    `max >= final` assertion was vacuous because two integrators from one state diverge
+    monotonically; printed at full precision the series has an orbital-period ripple, the
+    maximum falls inside the window, and a swapped aggregate fails the assertion. The comment
+    records the measurement and the wrong reading before it.
+11. **Worker briefs lacked the environment lines** (`PATH` for rustup, `GMAT_ROOT`), and a first
+    gate run without them proved nothing and was discarded (first manager, `48728b0`). Every brief
+    this round carries them.
+12. **Three workers ended their turns on waits** (first manager's workers), despite the standing
+    instruction. The second manager's two workers ended on blocking commands; the instruction is
+    in every brief, and it held this time.
+13. **A worker wrote scratch to the repository root** (`.covariance_bak.json`, first manager's
+    worker, `70090dd`), a fallback after a `cp` to `/` failed silently, not named in its report.
+    The golden was verified byte-identical to `HEAD` and the file removed.
+14. **The second manager's own brief for the `cargo-slot` worker quoted an arithmetic error** (the
+    `st_size` formula checked against 890 837, which counts `.` and `..`), caught before dispatch.
+15. **The first manager's round brief, `brief-native-round5.md`, was not in the scratchpad** when
+    the second manager took over; the round was finished from the finish brief, questions
+    229–235 and this plan.
+16. **The cFS image's build-commit record was stale from the commit that wrote it** (`48728b0`,
+    found by this round's gate). Root cause: the image was built at `9d1350e`, then the
+    Dockerfile's header recipe was corrected (a comment), then both were committed together, so a
+    copied path changed after the recorded build commit. Question 232's verifier refused it as
+    designed. `build-image.sh` re-run at `4f6ce1b` hit the cache end to end and gave the same
+    image id and runtime-content hash; only the record moved (`c29530f`).
+17. **`av-edge-plugin:local` moved back to the proof kit's 2026-09-15 image (`sha256:38062a48…`)
+    between the two Python runs**, so the second run's plugin container test refused it visibly
+    (question 212(a)'s skip) where the first had passed. **Not attributed, and the reason is
+    stated rather than guessed.** The only copies of that image's tarball on this host are this
+    worktree's `out/kit/proof`, `out/kit-gate1` and `out/kit-gate2` (searched under `$HOME` and
+    `/private/tmp`), and the only test that loads a kit is `test_kit_zero_egress_install.py`, which
+    passed in both runs and asserts the host's tags unchanged at its end. Re-driven alone after
+    restoring the tag to the recorded `sha256:4a43e35b…`, it passed and left the tag where it
+    was. Nothing else this round ran between the runs touches that tag (the cFS rebuild's
+    captured events show only its own `tag`). Docker's daemon keeps its last 256 events, and by
+    the time this was looked at they began at 15:37:59, after the window, overwritten by container
+    `exec_*` events. The manager restored the tag to the recorded digest (question 234's remedy),
+    and the plugin container test then passed alone (1 passed, 42.48 s).
+
+### Decisions taken
+
+1. **The first manager's decisions stand as its commits record them:** the `Score` over a two-hour
+   arc with a 0.012 m tolerance; the GMAT mirror cloned by immutable tag and verified by commit;
+   the cFS image rebuilt rather than a build commit written down after the fact, and its shim
+   covered by naming the crates it compiles from; the kit test untagging by name and never
+   `docker rmi -f` by id; the eighth tolerance nested in the golden's `stm` block; each frozen
+   `reason` transcribed verbatim rather than improved; `scale = 0.04` kept a local in
+   `convert_rotation.rs` because it defines the metric and does not bound it.
+2. **The three uncommitted tasks were committed only after the second manager re-ran their proofs**
+   in both feature states, one commit per task, split by file.
+3. **The archive's feature identity is read with `ar t`, not `nm`**, and any failure to list an
+   archive panics in both feature states; an archive whose identity cannot be read is never
+   guessed at.
+4. **The provenance row's re-derivability is a test**, not a claim resting on one recomputation.
+5. **`golden_ref` is not hashed** on the orbital path, matching the GMAT path.
+6. **Ballistic properties are accepted inert and not hashed** on the orbital path, which differs
+   from `gmat_settings` and is recorded as a divergence rather than copied. The worker's brief
+   said to stop if the GMAT path "does something" with them; it read that as physics, the second
+   manager agrees, and nothing reads them without a drag or SRP force.
+7. **An ambiguous Cartesian-plus-Keplerian file is refused as `UnknownParameter` naming the
+   element**, with no new `DrmError` variant this round.
+8. **The `deps` check is not run under `--hold`**, and `AV_CARGO_SLOT_EXE` does not apply there;
+   the held command is not compiling, and any cargo it runs goes through `cargo-slot` itself.
+9. **The lock's `tree` field is the cwd**, which for a Rust test is its package directory; a
+   `git rev-parse` per acquisition was judged not worth its cost for a field whose job is to
+   tell worktrees apart.
+10. **The provenance row stays in this plan, not under `docs/compliance/`**, which no component
+    there covers and which moves the bundle hash (the lead's to regenerate).
+11. **The Python suite ran after every cargo phase, under `cargo-slot --hold`**, question 235's
+    rule applied to this round's own gate.
+12. **`target/debug/deps` was moved aside at the end of the round, not the start**, as the brief
+    ordered, although its 890 835 entries slowed every build: the `ffi_c_caller` perturbation needs
+    both feature states' archives coexisting, which is exactly what a fresh directory would not
+    have held.
+13. **The stale cFS record was fixed by re-running `build-image.sh`, not written by hand**, and
+    only because a comment-only Dockerfile change let the layer cache prove the image identical;
+    a rebuild that had moved the image id would have been left to the lead.
+14. **`av-edge-plugin:local` was re-tagged to its recorded digest** (defect 17) once the kit
+    test had been re-driven and cleared, the remedy the lead applied under question 234.
+
+### Gates (second manager, no worker active, every cargo command through `scripts/dev/cargo-slot`)
+
+Run at `4f6ce1b` (clean apart from three untracked `third_party/` checkouts that are not this
+track's), in the brief's environment (`PATH` with rustup, `GMAT_ROOT` at
+`/Users/probe/code/AltaVista/GMAT R2026a`, `CARGO_BUILD_JOBS=4`), each phase's whole output
+captured to its own file before anything filtered it, phases strictly in sequence, the Python
+suite last and under `cargo-slot --hold`.
+
+| Gate | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | clean, no output |
+| `buf lint proto` | clean, no output |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **1499 passed, 0 failed, 4 ignored** over 151 test binaries (round 4: 1479), 3 h 57 min |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean, zero warnings, 14 min |
+| `cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings` | clean, zero warnings |
+| `scripts/lint/required_features_clippy.sh` (under `--hold`) | 2 (package, feature set) groups, all clean |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok`; the same six spoore wildcard warnings as round 4, plus the pre-existing duplicate and licence-not-encountered notes |
+| `cargo test -p av-orbital --no-default-features --no-fail-fast` | **142 passed, 0 failed, 0 ignored** (round 4: 141; plus the pinned `settings_hash` literal) |
+| `cargo test -p av-kernel --no-default-features --no-fail-fast` | **653 passed, 0 failed, 0 ignored** (round 4: 649; plus the provenance test and the one-word swap's three) |
+| `cargo test -p av-kernel --no-fail-fast` (default) | **887 passed, 0 failed, 2 ignored** (round 4: 882; plus the two-model `Score`, the provenance test and the swap's three). No existing kernel test changed in outcome |
+| Python suite, `CFS_MIRROR_DIR=/Users/probe/code/AltaVista/third_party/mirrors`, at `4f6ce1b` | **931 passed, 11 failed, 14 skipped**, every failure attributed below |
+| Python suite again at the final content (`c29530f` plus this section) | **932 passed, 9 failed, 15 skipped**: exactly the nine SBOM epoch failures below; the cFS digest test and the proposer test pass. The one new skip is the plugin container test, refusing a moved tag (below) |
+
+The proofs of each task, in both feature states where the task has two, are in their commit
+messages; the manager re-ran every one.
+
+**The eleven Python failures at `4f6ce1b`, attributed:**
+
+- **Nine are question 220's SBOM epoch mechanism, the lead's to regenerate at the merge.**
+  `test_the_epoch_is_never_wall_clock` for the six Rust components and
+  `test_all_six_rust_components_share_exactly_one_epoch_from_git`: the committed SBOMs carry
+  `2026-09-22T12:49:42Z` and git now gives `2026-09-22T16:52:59Z`, the committer date of
+  `a33275c`, which added a `[[test]]` entry to `crates/av-kernel/Cargo.toml`. The `cfs-image`
+  SBOM (its epoch test and `test_two_generations_are_byte_identical[cfs-image]`) moved with
+  `48728b0`'s edits to that image's inputs. Nothing under `docs/compliance/` was touched.
+- **One was this round's own defect**, the cFS build-commit record (defect 16), fixed in
+  `c29530f`; `services/cfs/tests/test_image_digest.py` then 5 passed.
+- **One is the heavy track's, and it passes alone.**
+  `tests/test_proposer_container.py::test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority`
+  waits for two readiness lines from two processes sharing one container's log, and the log
+  shows them interleaved mid-line ("…ModelProposeService on av-command: 0…"), so the
+  substring never appears whole. Both processes print with `eprintln!`, and Rust's stderr is
+  unbuffered, so a line whose format arguments are written piece by piece can be split by
+  another process's write. Re-run alone under `--hold`: 1 passed in 182.77 s. Nothing this round
+  touched `av-gateway`, `av-command` or that test.
+
+**`target/debug/deps`** held 913 908 entries by the end of the gate (the new warning printed
+it on every cargo phase), 938 870 once the Python runs had built what they build, and was then
+moved aside, with no cargo running in the tree, to
+`target/debug/deps.stale-round5-938870` (count from the directory's size, APFS's
+`64 + 32 × entries`). This worktree's next build is cold; the old directory can be deleted at
+leisure.
+
+Whole outputs are under the manager's scratchpad, `gate-native5f/`: `G01_buf_breaking` to
+`G11_pytest`, `G12_pytest_final`, the proofs `P_*`, `F_*` and `Q_*`, the perturbations
+`perturb_unicode`, `perturb_cargo_slot_old` and `F_perturb_nodef`, `cfs_rebuild` and
+`proposer_rerun`.
+
+### What remains
+
+Nothing this plan owes is left undone. What stays open, each with its reason:
+
+- **Jacchia-Roberts**, where round 3 left it, now blocked only on the binary half of the
+  provenance question (above), which is the lead's.
+- **`leo_1day_jgm2_8x8_sunmoon_drag_srp.json` has not been through the fixed generator**, so it
+  carries no `golden_regeneration_reason`; closing it needs another full GMAT drag+SRP run. Both
+  frozen `reason` constants describe a regeneration rather than a purpose, which a later round
+  should write deliberately (`70090dd`).
+- **The cFS image's runtime-content hash is reproducible for its cFS half and not its shim half**:
+  a moving `rust:1.90-bookworm` tag, no `--locked` and no `--remap-path-prefix` (`48728b0`).
+- **`cargo-slot`'s non-APFS screen is unmeasured** on a real ext4, xfs or btrfs directory, and the
+  check reads neither `.cargo/config.toml`'s `target-dir` nor `--target-dir`.
+- **The lock's reverse direction** (a Python holder read by a Rust waiter) is covered by path
+  agreement, not by a dedicated cross-process test.
+- **`av-run --no-default-features`** builds and refuses cleanly and is still not run by a test.
+- **`NUTATION.DAT`'s corrupted line, `GetUt1UtcOffset`'s leap-second jump, and a live
+  `Earth.NutationUpdateInterval` readback** stand as round 4 recorded them.
+- **The SBOMs' epochs moved** (nine Python failures, above) and are the lead's to regenerate at
+  the merge with `scripts/kit/regenerate_compliance.py`, question 227's rule.
+- **The heavy track's proposer container test can split a readiness line** between two
+  processes' unbuffered `eprintln!` writes; recorded for that track, not fixed here.
+- **Who moved `av-edge-plugin:local` between the two Python runs** (defect 17) is unknown; the
+  daemon's 256-event buffer is too short to keep a record across a gate on this host, and a
+  persistent `docker events` capture running for a whole gate would be the way to know next
+  time.
+- **This worktree's next build is cold:** `target/debug/deps` was moved aside at the round's end
+  (count and name in the gate section).
