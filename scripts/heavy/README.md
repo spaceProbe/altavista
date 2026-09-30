@@ -50,6 +50,12 @@ manifest_sha256 = <MANIFEST_SHA256>          # <- THIS is where the manifest has
                                               #    never chosen or guessed by a caller.
 ```
 
+(Round 7 task 5a: `ten_gigabyte_proof.py` itself has no `--synthetic-source-style` pass-through
+flag of its own -- it always builds the default `gradient` raster internally, unaffected by
+this task either way. Step 0.5c below is where this recipe's own `--synthetic-source-style
+labelled` variant lives, because it is the only step that registers anything the browser drive
+can actually see -- see that step's own note.)
+
 The MinIO container's own access key / secret key are not printed by the proof script (they
 never need to be, for that script's own purposes -- it holds them in memory and uses them
 itself); read them back off the running container when you need them for the next step:
@@ -153,6 +159,49 @@ target/release/av-tile-fixture \
 # (flag names verified at crates/av-jobs/src/bin/av-tile-fixture.rs lines ~192-197/274-279, and
 # run for real this round -- see this task's own report)
 ```
+
+**Round 7 task 5a: make the switch visible with `--synthetic-source-style labelled`.** The
+command above is byte for byte what it always was, and still produces exactly the same
+`gradient` raster -- `--synthetic-source-style` is a new, OPT-IN flag, and every command in
+this file that omits it (including the one above) is completely unaffected by this task. The
+gradient raster reads as a smooth teal/brown-ish ramp that looks close enough to the offline
+fixture Earth texture's own teal/brown palette that a person driving the browser could not
+actually SEE the switch step 0.5's own registration proves happened. This step is where that
+switch becomes visible, because it is the only step in this whole recipe that ever registers a
+manifest in the catalog (step 0 above writes tiles to MinIO but registers nothing) -- so
+whichever style this command renders is the entire tile set the Layers panel ever lists.
+
+Pass `--synthetic-source-style labelled` on the SAME command to render a high-contrast
+magenta/black checkerboard with a baked lat/lon grid and the word `SYNTHETIC` stamped on it
+instead (`crates/av-jobs/src/bin/av-tile-fixture.rs`'s own module doc, "round 7 task 5a", has
+the exact colours/formula and why per-tile `level/x/y` text specifically cannot be baked in).
+Because this changes the raster's own bytes, it is deliberately NOT the same content-addressed
+re-registration the paragraph above describes: it performs a genuine second write (new tile
+objects, a new manifest, both under the SAME `--key-prefix`/`--job-id`) and registers THAT
+manifest instead. Nothing already recorded by digest moves -- step 0's own gradient-style
+objects and manifest are untouched on MinIO, just no longer the one thing the catalog points
+at:
+
+```sh
+target/release/av-tile-fixture \
+  --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
+  --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
+  --synthetic-source 64x32 --synthetic-source-style labelled \
+  --store-endpoint "http://127.0.0.1:<MINIO_PORT>" --store-region us-east-1 \
+  --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
+  --store-bucket "<BUCKET>" --store-path-style \
+  --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
+  --catalog-user postgres \
+  --catalog-password "<CATALOG_PASSWORD from a.>" --catalog-database "<CATALOG_DATABASE from a.>"
+```
+
+Run ONE of the two variants above, not both, for a given drive -- whichever ran LAST is the one
+the catalog (and therefore step 5's Layers panel) will show. Not run against the live stack
+this round (this task's own report says exactly what WAS run: the real binary, real PNG tiles,
+real manifest, all via `--dry-run`, plus every unit test in `av-tile-fixture.rs`'s own `mod
+tests`) -- see that report for the measured per-tile byte cost of each style (identical to each
+other, and to the gradient style's own -- this crate's hand-rolled PNG encoder never compresses,
+so file size is a pure function of `--tile-size`, never of pixel content).
 
 ### 1. Mint a real RS256 bearer token (no new dependency: the system `openssl` CLI)
 

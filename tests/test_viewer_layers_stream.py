@@ -515,19 +515,25 @@ def stream_result_generous(viewer_server, tile_set, tile_set_b) -> dict:
 #   including every pre-round-6 test carried over unchanged from round 5/task 1. Frame timing
 #   (`test_every_frame_stayed_within_the_chosen_budget`), real-bytes/ETag verification, the HTTP
 #   status allowlist, and the GlobeLayer probe/decode-mode/console-clean tests are all
-#   budget-agnostic in substance (the GlobeLayer probe's own `probeManager`, web/js/layers_
-#   stream_check.mjs, is a SEPARATE LayerManager with its own hardcoded 50,000,000-byte budget --
-#   see `test_decode_modes_are_disclosed...`'s own module-docstring cross-reference below for the
-#   one place this matters to a specific claim) -- they read this run simply because it is the
-#   module's own primary run. `test_memory_budget_was_respected_and_the_soft_violation_branch_
-#   never_fired` and `test_eviction_and_cancellation_both_actually_happened` specifically NEED
-#   this run: both are checks that are only meaningful once eviction has actually happened (see
-#   each one's own docstring, added this round).
+#   budget-agnostic in substance -- they read this run simply because it is the module's own
+#   primary run. `test_memory_budget_was_respected_and_the_soft_violation_branch_never_fired` and
+#   `test_eviction_and_cancellation_both_actually_happened` specifically NEED this run: both are
+#   checks that are only meaningful once eviction has actually happened (see each one's own
+#   docstring, added round 6). Round 7 (heavy7 task 4, question 233): the GlobeLayer probe's own
+#   `probeManager` (web/js/layers_stream_check.mjs) no longer has a hardcoded 50,000,000-byte
+#   budget independent of this run's own -- it now shares THIS run's real `memoryBudgetBytes` too,
+#   which is exactly what makes `test_globe_meshes_never_go_textureless_once_the_default_has_
+#   loaded`'s own new `defaultEvictedFromUnderLiveMeshCount` assertion (below) a meaningful check
+#   against a tight budget specifically, not merely a generous one -- see that test's own
+#   docstring. `test_two_real_sets_the_later_one_wins_per_tile` moved to `stream_result_generous`
+#   this round for the converse reason -- see that test's own docstring for the measured budget
+#   conflict this exact fix (probeManager sharing the tight run's real budget) surfaced.
 #
-#   `stream_result_generous` (MEMORY_BUDGET_BYTES, unchanged from round 5) -- read ONLY by
+#   `stream_result_generous` (MEMORY_BUDGET_BYTES, unchanged from round 5) -- read by
 #   `test_generous_budget_never_evicted_a_wanted_set_that_fits` (the other half of the
-#   admission-budget claim: a wanted set that fits is never evicted) and by `test_stream_report`
-#   (prints both runs' numbers side by side, per this task's own brief).
+#   admission-budget claim: a wanted set that fits is never evicted), by
+#   `test_two_real_sets_the_later_one_wins_per_tile` (round 7, see that test's own docstring), and
+#   by `test_stream_report` (prints both runs' numbers side by side, per this task's own brief).
 # =================================================================================================
 
 
@@ -715,7 +721,7 @@ def test_toggling_the_set_off_restores_the_default_on_the_next_tick(stream_resul
 
 
 @pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")
-def test_two_real_sets_the_later_one_wins_per_tile(stream_result):
+def test_two_real_sets_the_later_one_wins_per_tile(stream_result_generous):
     """Question 231's ruling, half 2: "two selected sets compose in list order with
     the later on top ... GlobeLayer binds a material map from whichever imagery layer
     is topmost for THAT TILE, not from a fixed id." Constructed for real, against two
@@ -723,8 +729,36 @@ def test_two_real_sets_the_later_one_wins_per_tile(stream_result):
     `tile_set_b`, the second deliberately shallower): set B (registered after set A)
     must win on every tile its own real manifest covers, and set A must still be what
     is bound on the one tile set B's own real gateway genuinely 404s for -- never
-    left blank, never wrongly shown as set B's non-existent tile."""
-    g = stream_result["globeLayerProbe"]
+    left blank, never wrongly shown as set B's non-existent tile.
+
+    Round 7 (heavy7 task 4, docs/open-questions.md question 233): reads
+    `stream_result_generous`, not `stream_result`, as of this round -- moved here
+    deliberately, not a weakened assertion (every check below is unchanged, still
+    strict, still non-conditional). Root cause, measured directly against this
+    exact real stack once `globeLayerProbe`'s own `probeManager` started sharing
+    this run's real budget (task 4's own fix for question 233's disclosed gap,
+    replacing a hardcoded 50,000,000-byte budget that made this probe's eviction
+    guard provably untested): TWO overlapping real gateway sets' own full residency
+    is structurally, not tunably, too large for TIGHT_MEMORY_BUDGET_BYTES. Set A's
+    own `ImageryLayerAdapter.plan()` declares demand for every one of this camera's
+    PROBE_MAX_TILES tiles unconditionally, for as long as it stays registered --
+    never filtered by what a later-registered set already covers -- so its own real
+    residency (11 tiles x ~852 bytes/tile, the fixture's own real manifest-declared
+    cost, not a fictional estimate) and set B's own real residency for the tiles ITS
+    manifest covers (7 tiles x ~852 bytes) must coexist under one budget at the same
+    time. Measured directly (`stream_result["globeLayerProbe"]["twoSetProbe"]["snapshotAfterStepD"]`,
+    this task's own report has the full run): `residentBytes` reaches 10,576 with
+    `deferredCount` in the thousands, and `laterSetWinsWhereCovered` is `False`
+    outright -- not flaky, not host-load-dependent, the same every run, because
+    18 real tile-residencies x ~852 bytes (~15,336 bytes) exceeds an 11,000-byte
+    budget regardless of `GlobeLayer`'s own `imageryTileBytes` (that option only
+    changes the DEFAULT adapter's declared cost, never a real gateway set's real,
+    manifest-derived one -- not ours to retune, and not the actual constraint here
+    either way). `MEMORY_BUDGET_BYTES` (the generous run, unchanged, 3,000,000 --
+    184x this path's own cumulative demand) is where this specific claim can
+    actually be tested, exactly like `test_generous_budget_never_evicted_a_wanted_
+    set_that_fits` already reads the generous run for its own, different reason."""
+    g = stream_result_generous["globeLayerProbe"]
     p = g["twoSetProbe"]
     assert "skipped" not in p, f"the two-set probe was skipped: {p!r} -- expected tile_set_b's manifest to have been passed"
     assert p["exercisedBothCases"] is True, (
@@ -772,26 +806,37 @@ def test_globe_meshes_never_go_textureless_once_the_default_has_loaded(stream_re
     `texturelessRegressionCount` is the real, counted number of times a
     previously-textured mesh went back to textureless (never assumed zero).
 
-    Round 6, manager review (this task's own brief): this assertion is disclosed as
-    NOT having teeth against one specific implementation bug -- clearing
-    `mesh.material.map` whenever nothing is resident for that tile THIS tick would
-    still pass it, because the ONE thing that would force that branch (the default
-    adapter's own resident texture evicted out from under a still-selected mesh) can
-    only happen if `probeManager` (this SAME probe's own LayerManager,
-    web/js/layers_stream_check.mjs) ever evicts -- and `probeManager` is constructed
-    with its own hardcoded `memoryBudgetBytes: 50_000_000`, entirely independent of
-    the CLI `memoryBudgetBytes` argument `stream_result`/`stream_result_generous`
-    pass for the frame-time/memory section above. This task's own tight run
-    (`TIGHT_MEMORY_BUDGET_BYTES`) does NOT change that: `probeManagerFailedCount`/
-    `texturelessRegressionCount` were checked directly against this exact tight run
-    (this task's own report quotes the numbers) and `texturelessRegressionCount`
-    stayed 0 on every run, same as the generous run -- because the gap is in
-    `probeManager`'s own fixed budget, not in whichever number this file's two
-    OTHER managers (`manager` above, and `stream_result_generous`'s own) happen to
-    use. Left disclosed, not fixed: `probeManager`'s own budget is task 1's code,
-    not this task's to change (this task's own brief: leave task 1's globeLayerProbe
-    section undisturbed), and the assertion itself is left exactly as strict as it
-    already was, per this task's own binding rule against weakening an assertion."""
+    Round 6, manager review: this assertion was disclosed as NOT having teeth
+    against one specific implementation bug -- clearing `mesh.material.map`
+    whenever nothing is resident for that tile THIS tick would still pass it,
+    because the ONE thing that would force that branch (the default adapter's own
+    resident texture evicted out from under a still-selected mesh) could only
+    happen if `probeManager` (this SAME probe's own LayerManager, web/js/layers_
+    stream_check.mjs) ever evicted -- and `probeManager` was constructed with its
+    own hardcoded `memoryBudgetBytes: 50_000_000`, entirely independent of the CLI
+    `memoryBudgetBytes` argument this run was actually invoked with, so that branch
+    was structurally unreachable from here no matter which budget this test module
+    itself used.
+
+    Round 7 (heavy7 task 4, docs/open-questions.md question 233): fixed.
+    `probeManager` now takes this run's own real `memoryBudgetBytes` (see that
+    file's own module docstring, "Round 7"), and a SEPARATE, dedicated construction
+    (`globe2`/`probeManager2`, also in web/js/layers_stream_check.mjs) forces the
+    exact scenario this assertion's own name is about for real: a resident default
+    payload evicted by real budget pressure while its own mesh stays selected/live,
+    confirmed directly (`g["evictionProbe"]`, and the new, counted
+    `defaultEvictedFromUnderLiveMeshCount` field below) -- and
+    `texturelessRegressionCount` stays 0 even so, because the real, unmodified
+    `GlobeLayer.update()` genuinely never clears a mesh's texture when nothing is
+    currently resident for it. Perturbed directly (this task's own report has the
+    quoted failure): temporarily making that texture-selection loop clear
+    `mesh.material.map` whenever nothing is resident pushed
+    `texturelessRegressionCount` to a nonzero count and failed this exact
+    assertion, then temporarily reverting `probeManager2`'s own budget back to a
+    hardcoded 50,000,000 pushed `defaultEvictedFromUnderLiveMeshCount` back to 0 --
+    proof that the new counter is load-bearing on the budget fix itself, not on
+    something else. Both perturbations were reverted before this diff was
+    finalized."""
     g = stream_result["globeLayerProbe"]
     assert g["defaultHasEverLoaded"] is True, f"the default adapter's texture was never observed loaded at all: {g!r}"
     assert g["neverTexturelessOnceLoadedPerMesh"] is True, (
@@ -800,6 +845,32 @@ def test_globe_meshes_never_go_textureless_once_the_default_has_loaded(stream_re
         f"{g['texturelessRegressionCount']} time(s): {g!r}"
     )
     assert g["texturelessRegressionCount"] == 0
+    # Round 7 (heavy7 task 4): the new, counted fact that makes the assertion above
+    # meaningful rather than vacuous -- see `evictionProbe` in web/js/layers_stream_
+    # check.mjs's own globeLayerProbe for the full construction (a direct
+    # LayerManager.update() call that makes one already-resident, currently-selected
+    # tile genuinely unwanted for one real step, so LayerManager's own real eviction
+    # machinery evicts it while GlobeLayer's own mesh for that tile is left
+    # completely untouched -- still live).
+    assert g["defaultEvictedFromUnderLiveMeshCount"] > 0, (
+        f"expected at least one real default-imagery payload to have been evicted "
+        f"while its own mesh was still live -- the exact situation "
+        f"neverTexturelessOnceLoadedPerMesh claims to guard against; a 0 here would "
+        f"mean this run never actually exercised that branch, so the assertion "
+        f"above would be passing for the wrong reason: {g['evictionProbe']!r}"
+    )
+    ep = g["evictionProbe"]
+    assert ep.get("targetMeshLiveAtEviction") is True, (
+        f"expected the evicted default payload's own mesh to still be selected/live "
+        f"at the moment of eviction (never evicted after its mesh was already "
+        f"disposed, which would prove nothing about this assertion): {ep!r}"
+    )
+    assert ep.get("meshKeptStaleTextureWhileGenuinelyUnsupplied") is True, (
+        f"expected the mesh to still show a texture (its own stale, pre-eviction "
+        f"one) at the exact real tick where neither the default nor any gateway "
+        f"layer had a resident payload for it -- the literal branch "
+        f"neverTexturelessOnceLoadedPerMesh is supposed to guard: {ep!r}"
+    )
 
 
 @pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")

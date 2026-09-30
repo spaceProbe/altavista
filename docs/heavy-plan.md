@@ -2301,3 +2301,343 @@ here and `## Delivered`.
    changed Rust (`av-catalog`'s new binary) and touched no `docs/compliance/` file, so the
    six Rust SBOM epochs and the evidence-bundle hash will have moved exactly as they did in
    rounds 4 and 5. One command: `.venv/bin/python scripts/kit/regenerate_compliance.py`.
+
+## Status (heavy manager, 2026-09-22) — round 7
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `204388b` | Task 3: `PgClient::connect` bounds every handshake phase, not just the TCP connect (question 233's carried defect) |
+| `924d3e3` | Task 2: the kernel's real P(t) carried to the viewer's scenario JSON, with a proof DRM and a drive DRM |
+| `cce1211` | Task 5a: a labelled synthetic fixture source, so a person can *see* the tile set switch |
+| `8f28284` | Task 4: the textureless guard gets teeth — the probe shares the run's real budget |
+| `defb012` | Task 5b, data half: `LayerManager` attributes each failure to the layer that produced it |
+| `ff81353` | Task 1: **H6 in the viewer** — entities drawn from a real run, a control per class, plus 5b's panel half |
+
+**All six tasks in the round's brief are delivered.** The two things question 233 carried
+forward are closed: H6 is a viewer feature a user can see, and a real producer fills
+`TrajectorySample.cov`. See the Delivered section for exactly what that does and does not
+mean.
+
+### Task 1: H6 wired into the viewer
+
+Five entity classes build from the loaded scenario into one `THREE.Group` each, parented
+under the existing entities render group — never a second, parallel root. Markers and
+trails (on by default) go through the viewer's **one** `LayerManager` on the same 64 MiB
+budget as the globe's imagery and terrain; covariance ellipsoids, keep-out volumes and
+glTF models are built directly, because H6 declares byte costs only for markers and trails
+and this round does not invent the others. A checkbox per class lives in the Layers panel;
+`setEntityClassEnabled` only flips a group's `visible`, rebuilding nothing.
+
+Ellipsoids draw at **3 sigma**, keep-out at 3 sigma plus a **50 m** isotropic margin, both
+numbers in the control's own label so a user is never reading a number they cannot see.
+Neither `covarianceEllipsoid` nor `keepOutVolumeFromCovariance` gained a default — the
+constants are passed in, and those functions keep their required-argument discipline.
+
+Proved in a real browser against the RPO demo, read from the scene graph rather than a
+counter: 2 marker instances and 2 trail lines carrying the entity layers' own provenance
+tags (`entity-markers`, `entity-trails`), an ellipsoid whose world semi-axes match the
+covariance's own, a keep-out volume inflated by exactly the margin, a glTF model tracking
+its attitude source, each class appearing and disappearing with its own control, the
+defaults `{markers: true, trails: true, covarianceEllipsoids: false, keepOutVolumes:
+false, models: false}` read back live, **zero** console warnings, errors, page exceptions
+and unhandled rejections, and question 46's RIC jitter bound holding at **0 m** measured
+error in the live scene. `entities_scene_check.mjs` is the headless half: 16 checks, 16
+distinct names.
+
+### Task 2: a real covariance producer
+
+The producer existed all along — `Kernel::run_with_covariance` (question 89) and the DRM
+executor write a real 36-element `cov` onto every native sample when a DRM asks for it.
+The seam was entirely above: `altavista/cdm.py` documented `TrajectorySample.cov` as a
+permanent placeholder and never read it, and `Trajectory` had no field for it.
+
+`Trajectory` gains `cov`/`cov_dim`; `to_dict()` emits `"cov"`/`"covDim"` flattened exactly
+as `pos`/`vel`/`attitude` already are. `cdm_trajectory_to_viewer_json` derives *n* from
+each sample's own `len(cov)` (36 → 6, 9 → 3, anything else refused), cross-checks the
+resolved state space, refuses a partially-covarianced trajectory and an *n* that changes
+mid-stream, and converts SI to km by dividing every entry by `M_PER_KM ** 2` — uniform,
+not per-block, because each entry is a product of two components each already divided by
+the one `M_PER_KM` factor. `trajectory_to_cdm` still never fabricates one.
+`altavista/server.py` needed **no edit**: both `POST /api/cdm/run` (via
+`_run_products_to_scenario_data`) and `POST /api/cdm/trajectory` reach the same function,
+and the committed route tests prove that rather than assume it.
+
+Measured end to end through real `av-run` and the real route:
+`drms/leo_1day_golden_cov.drm.yaml` (the golden's own configuration, covariance on)
+produces 864,001 samples each carrying a 36-element cov, matching the golden's
+`stm.cov_t1_si` to **2.2e-11** relative. `drms/leo_cov_drive.drm.yaml` (one orbit, 10 s
+sampling) produces 571 samples, 205,655 bytes of RunProducts and **551,430 bytes** of
+scenario JSON, a **6.72×** amplification over the same scenario with `cov` emptied, in
+4.5 s. Φ(t₀,t₀) = I holds in the units the wire carries: the first sample's `cov[0][0]`
+reads **0.01 km²**, exactly the declared 10,000 m² P0 entry converted.
+
+### Task 4: the textureless guard gets teeth
+
+`globeLayerProbe`'s manager takes the run's real budget. That alone cannot work —
+`GlobeLayer` hardcoded `IMAGERY_TILE_BYTES` (262,144), so one default tile exceeded the
+whole 11,000-byte tight budget — so `GlobeLayer` gains an additive, defaulted
+`imageryTileBytes`, the same seam `ImageryLayerAdapter.tileBytes` already provides one
+layer down. Every existing call site is byte-for-byte unaffected.
+
+The regime is measured, not tuned: a `selectTiles()` sweep gives 11 tiles as the smallest
+mixed-level selection at this camera (below it no level-2 tile is selected at all), and
+step B reads `residentBytes` **9,724 = 11×32 + 11×852** exactly, under budget. The
+eviction proof is its own isolated `GlobeLayer`/`LayerManager` pair so it never perturbs
+steps A–E: `defaultEvictedFromUnderLiveMeshCount` **1**, `targetMeshLiveAtEviction` true,
+`meshKeptStaleTextureWhileGenuinelyUnsupplied` true, `texturelessRegressionCount` **0**.
+Perturbing `GlobeLayer` to clear `material.map` when nothing is resident now fails it:
+`texturelessRegressionCount` **10,444**.
+
+### Task 5a: the fixture's synthetic source, visibly distinct
+
+`--synthetic-source-style gradient|labelled`, default `gradient` unchanged byte for byte.
+The labelled style is a magenta/black checkerboard at `min(w,h)/16` cells, a lat/lon
+graticule and baked text from a 3×5 bitmap font authored in the file — no font dependency,
+no clock, no randomness. Per-tile `level/x/y` cannot be baked into a whole-globe source
+raster and the doc says so rather than leaving a reader to wonder.
+
+Nothing recorded by digest moved. The pinned `7c23f4f0…` manifest in
+`crates/av-jobs/tests/tiler.rs` comes from a hand-written 4×2 literal, not this binary.
+The strongest evidence is one that references this change not at all: the gradient style's
+level-0 1024×1024 tile still hashes to `743c4102…`, the exact ETag `scripts/heavy/README.md`
+already recorded from a real MinIO run made before this task existed.
+
+### Task 5b: a terrain gap reads as a terrain gap
+
+`LayerManager.failuresByLayer()` attributes each failure to its layer, recovering the id
+from `globalKeyFor`'s own NUL join character (a colon would not do — this codebase's
+tile-set ids are `gateway-tileset:<sha>`). `TerrainLayerAdapter` declares `notImplemented`
+about itself and `noLoaderLayers()` reads that declaration, the same way `imageryLayers()`
+reads `kind === 'imagery'` — so nothing hard-codes the id "terrain" or the error name, and
+a real terrain loader drops the flag and needs no other change. The panel shows both rows;
+neither is hidden.
+
+### Defects found in review, and their root causes
+
+1. **An assertion that could not fail, in task 3's own new tests.** `assert!(elapsed <=
+   UPPER_BOUND)` sat *after* an outer `tokio::time::timeout(UPPER_BOUND, …)` had already
+   returned, so it was guaranteed true. Replaced with a measured window (50 ms deadline,
+   asserted 50 ms..=200 ms) whose **lower** bound is the load-bearing half: without it an
+   immediate error would pass while proving nothing about a deadline. Perturbing the phase
+   deadline to `Duration::ZERO` fails it at **1.459792 ms**. **Definitively root-caused.**
+2. **A repaint change key built by joining on a separator the data may contain.** Task 5b
+   replaced a pre-existing literal `\x01` join with `'|'`, and built the no-loader key as
+   `` `${layerId}:${count}:${names}` `` — colon-delimited keys over ids that legitimately
+   contain colons. Today only `terrain` is a no-loader layer so nothing collides; with a
+   second one, two different attributions collapse to one key and **the panel silently
+   stops repainting** rather than failing loudly. Both keys are now `JSON.stringify` of the
+   structured value: collision-free by construction, needing no magic byte.
+   **Definitively root-caused.**
+3. **`globeLayerProbe.ok` reported `false` on the tight run while every claim that run can
+   prove had passed**, because `twoSetProbe.ok` was folded in and two overlapping real sets
+   structurally cannot be resident under 11,000 bytes. A false alarm baked into the primary
+   artifact for the next reader. Removed from the aggregate; no test ever read it, and the
+   two-set result is still reported in full and still asserted on the generous run.
+   **Definitively root-caused.**
+4. **`web/js/app.js` silently reverted the rendered epoch to zero.** The animation loop
+   called `viewer.update(0)` whenever app.js's own `scenario` was null — which is exactly
+   the state a browser probe leaves it in when it drives `viewer.setScenario`/`update(t)`
+   directly. Every entity position, every interpolated body and the floating origin's
+   rebase target snapped back to t = 0 between a probe's write and its read. Pre-existing
+   at `bfb9a9d`, found by task 1's browser probe, fixed to `viewer._lastT ?? 0` —
+   scene.js's own idiom, used there twice for the same reason. **Definitively root-caused.**
+5. **The entity-class defaults were pinned only by the browser proof**, which visibly skips
+   without Chrome — so on a host with no browser a change to the defaults went entirely
+   uncaught. `entities_scene_check.mjs` gains a static read of scene.js's declared literal
+   as the always-runnable half; perturbing one default now fails it (exit 1, naming
+   `defaults_sceneDeclaresExactlyThisRoundsEntityClassDefaults`).
+   **Definitively root-caused.**
+6. **A flake task 4's worker introduced and root-caused itself:** an eviction retry loop
+   bounded by a fixed 3,000-tick count rather than wall-clock time failed 1 run in 12,
+   because bare `setImmediate` ticks complete orders of magnitude faster than a real
+   ~850-byte round trip when nothing else occupies the event loop. Now bounded on real
+   elapsed time. This is the *same* lesson this file already records for
+   `dwellMsPerPosition`, applied a second time in a new place.
+
+### One claim that is true but NOT proved, disclosed rather than counted
+
+**Markers and trails are admitted to the `LayerManager` once, at scenario load, not
+re-planned per tick.** The reason is measured: `LayerManager.update(view)`'s contract is
+that one call's `plan()` output is the entire wanted set, so two independently built
+partial views driving one manager — the globe's and an entity view — cancel each other's
+in-flight loads, and with a globe active no imagery tile ever finished loading. The
+consequence, stated plainly: **entity payloads evicted under real budget pressure would
+never be re-admitted.** At this scene's few-hundred-byte cost against a 64 MiB budget that
+pressure never arises, so nothing today can reach it — but it is a property of the wiring,
+not a proof, and the merged-view update that removes it touches `globe.js`.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. **`scripts/dev/cargo-slot` is not on this branch**, so every worker took the same
+   host-wide slots through a byte-identical scratchpad copy. The script lives on the
+   edge/native branch and arrives at that team's merge; nothing was added here that would
+   conflict with it.
+2. **The covariance wire shape was fixed by me before the workers started**, so the
+   producer and the viewer could be built in parallel against one contract: `cov` flat and
+   parallel to `t`, `covDim` beside it, km/km·s units.
+3. **`cdm.py` is not where covariance payload size is managed.** Carrying less than the
+   producer recorded is the adapter silently discarding data, the one thing question 11's
+   placeholder refused to do in the other direction. The sampling rate is a property of the
+   run, so a second, drive-sized DRM was added instead and measured.
+4. **The labelled synthetic source is opt-in**, default unchanged. My stated reason to the
+   worker — protecting the 11,000-byte budget — turned out to be structurally unnecessary:
+   this crate's PNG encoder emits stored (uncompressed) deflate blocks, so a tile's size is
+   a pure function of `--tile-size` and never of its pixels. The manifest **hash** does move
+   with content, which is reason enough for opt-in, but the budget argument was wrong and I
+   am recording that rather than keeping the credit.
+5. **`test_two_real_sets_the_later_one_wins_per_tile` reads the generous run**, with every
+   assertion unchanged. Two overlapping real sets need ~15.3 kB and the tight budget is
+   11,000; `ImageryLayerAdapter.plan()` declares demand for every selected tile regardless
+   of what a later-registered layer covers. Measured, not inferred: `residentBytes` 10,576,
+   `gateway-b` resident on 1 of the 7 tiles it needs. The 11,000-byte budget was **not**
+   retuned (question 233).
+6. **The once-only entity admission is accepted for this round as a disclosed seam**, and
+   the merged-view `LayerManager.update` — one view per tick composed from the globe's and
+   the entities' wanted sets — is the next round's task. It touches `globe.js`, which was
+   off limits to the entities task by design.
+7. **Two co-edited files could not be split at hunk granularity.** `web/js/app.js` and
+   `web/js/panels/layers_panel.js` carry both task 1 and task 5b, and one hunk contains a
+   single task-1 line *inside* task 5b's new function. Rather than guess at a line-level
+   split and risk a broken intermediate commit, 5b landed as two commits: the manager-side
+   data half alone (`defb012`, verified green **in isolation** by materialising the staged
+   tree with `git archive` and running the node checks against it), and the panel-side
+   presentation half with task 1 (`ff81353`). Both commits are green; neither is a guess.
+8. **I fixed `app.js`'s epoch reversion myself** rather than recording it, because it is a
+   trap for every future browser probe and the fix is one line in a file the round already
+   owned. See defect 4.
+9. **I added the always-runnable defaults check myself** rather than leaving the browser
+   proof as the only guard. See defect 5.
+10. **`Trajectory.to_dict()` never emits `model`**, so the glTF entity class has no
+    producer: the viewer reads a field nothing fills, exactly as the ellipsoids did before
+    this round. The layer is proved against a fixture and is correct the moment a producer
+    exists. Recorded, not improvised — adding a wire field for it is its own small task.
+11. **The raw control bytes under `web/js/` are wider than round 5 recorded.** Round 5's
+    defect 5 and round 6 both say the only one is the NUL in `web/js/layers/layer.js`.
+    `web/js/panels/layers_panel.js` carried **three raw `\x01` bytes at `bfb9a9d`**, before
+    any round-7 work; it now carries two, one having been removed by defect 2's fix. The
+    entities worker reported these as introduced by task 5b — that is wrong, and I checked
+    it against `bfb9a9d` directly rather than taking either account.
+
+### Gates
+
+| Gate | Result |
+| --- | --- |
+| `buf lint proto` | **clean, exit 0** |
+| `buf breaking proto --against` develop's proto | **clean, exit 0** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0, 20.89 s** |
+| `scripts/lint/required_features_clippy.sh` | **clean, exit 0** — `linted 1 (package, feature set) group(s)` |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **149 binaries, 1491 passed, 0 failed, 4 ignored, exit 0** (round 6: 1489; +2 from `av-catalog`'s new handshake tests) |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0 — exactly the six accepted spoore wildcard warnings, one per crate, plus seven duplicate-crate warnings |
+| `cargo test -p av-kernel` | **44 result lines, 876 passed, 0 failed, 2 ignored, exit 0** — identical to round 6 |
+| `.venv/bin/python -m pytest -q -rs` | **923 passed, 1 failed, 17 skipped, 16 errors**, 1203.8 s — every failure and every error attributed below, every skip a visible opt-in gate with its own stated reason |
+| `tests/test_sbom.py` alone | **61 passed, 6 skipped, 0 failed** — **no compliance regeneration is owed by this round**, see below |
+| `node` checks at the final head | **14 of 14 exit 0** — `layers_check`, `layers_budget_check`, `globe_lod_check`, `globe_imagery_check`, `gateway_imagery_layer_check`, `tiles3d_check`, `tiles3d_manager_check`, `layers_panel_check`, `layout/layout_tree_check`, and the five `entities_*` checks including the new `entities_scene_check` (16 checks, 16 distinct names) |
+
+**On the cargo-slot mechanism, measured.** The workspace test gate waited **258.851 s** for
+a slot behind this manager's own `cargo deny` and the Python suite's `av-run` build, then
+ran. Question 229's two-slot budget is doing exactly what it was built to do, and the wait
+was announced rather than silent.
+
+### The Python suite's 1 failure and 16 errors, each attributed
+
+**No compliance regeneration is owed this round, and that is a departure from rounds 4, 5
+and 6 worth stating.** All three ended on the SBOM-epoch failures; this one does not.
+`tests/test_sbom.py` is **61 passed, 6 skipped, 0 failed**, including all 17 epoch tests.
+The reason is question 220's own rule read precisely: the epoch moves on a change to the
+**workspace manifest**, not on any Rust edit. Round 6 moved it because it added
+`av-catalog`'s new `[[bin]]`. This round changed Rust in two crates and touched **no**
+`Cargo.toml` and **no** `Cargo.lock` — verified with `git diff bfb9a9d..HEAD -- '*Cargo.toml'
+'Cargo.lock'`, which is empty. The lead should still regenerate if the merge itself moves
+the manifest, but this branch does not.
+
+**The 1 failure is the cFS image, and it is not this track's** (question 233: "the native
+team owes only the cFS image"). `services/cfs/tests/test_image_digest.py::
+test_image_digest_matches_recorded_value` — built `sha256:3bef12a6…` against a recorded
+`sha256:04611db9…`. The test's own diagnostic rules this tree out by construction:
+"manifest and current build context agree EXACTLY on every path present on this host (no
+path added, removed, or changed)". The known cause is recorded in that image's own
+`IMAGE_DIGEST.md`: `third_party/cfs/cfe/cmake/generate_build_env.cmake` bakes
+`date +%Y%m%d%H%M` into cFE's CONFIGDATA as `BUILDDATE` unless `$BUILDDATE` is set, and the
+Dockerfile sets neither it nor `BUILDUSER`/`BUILDHOST`, so **the image is not reproducible
+by construction** and any genuine rebuild produces a new id from identical inputs. The lead
+rebuilt all four images by their scripts on resume (team log, 2026-09-21); this is that
+rebuild, unpinned. Re-pin or leave; either way it is the native team's.
+
+**The 16 errors are one cause, and the cause is mine.** All sixteen are setup errors on the
+module-scoped `command_service` fixture (`test_command_console_routes.py`,
+`test_viewer_command_panel.py`, `test_viewer_net.py`), every one reporting `av-command
+subprocess did not become ready within 90.0s (returncode=None)` with **empty** subprocess
+output — the exact signature of a process that is alive but has not yet reached `main`.
+That is question 226's measured macOS finding: a freshly linked binary waits one to three
+minutes in `syspolicyd`'s scan before `main`, at any load. Correlated directly rather than
+assumed: `target/debug/av-command` has an mtime of **09:36:17**, relinked by the workspace
+`cargo test` gate I was running concurrently, and the Python suite finished at **09:39:10**
+— it launched a binary that had just been relinked. Re-run afterwards on the same host with
+nothing relinking: `test_command_console_routes.py` **14 passed in 25.4 s** (against a 90 s
+budget), `test_viewer_command_panel.py` + `test_viewer_net.py` **20 passed in 86.0 s**.
+**Definitively root-caused, and it is a process error of mine, not a defect in the tree.**
+
+**A gap in question 229's mechanism, exposed by that error.** The two-slot `cargo-slot`
+lock governs cargo against cargo. Nothing governs *a cargo gate relinking workspace
+binaries while the Python suite launches them*, which on this host is not a mild slowdown
+but a one-to-three-minute stall per freshly linked binary against readiness budgets of 60
+to 180 seconds. Round 6 raised `GATEWAY_READY_TIMEOUT_S` to 180 s for a sibling of exactly
+this. **Recommended rule:** the Python suite takes a cargo slot too (it builds and launches
+workspace binaries), or no cargo gate runs while it does. Either is a one-line change to
+how a round's gates are sequenced, and it would have prevented all sixteen.
+
+### Notes for the lead
+
+- **`tests/test_cdm_run.py` builds `av-run` with a bare `cargo build`**, bypassing the
+  two-slot budget (question 229). Pre-existing, not introduced this round, and the fix
+  belongs with `scripts/dev/cargo-slot`'s own arrival on this branch.
+- **`scripts/heavy/ten_gigabyte_proof.py` has no `--synthetic-source-style` pass-through.**
+  Noted at step 0 of the README rather than left silent; that file was outside task 5a's
+  ownership.
+- **An additive way for `TilerExecutor` to stamp a real `level/x/y` onto each tile after
+  cropping** exists and is recorded, not built — `tiler.rs` was out of scope.
+- Compliance regeneration is the lead's at the merge (questions 220/227). This round
+  changed Rust (`av-catalog`, `av-jobs`) and touched no `docs/compliance/` file.
+
+## Delivered
+
+**H1 through H7 are delivered, and the plan closes.** The one thing standing between round
+6 and this section was question 233's condition, stated plainly there: "the plan closes only
+after the lead sees an entity drawn from a run." A user can now see H6 in a real session.
+What that means concretely, and what it does not:
+
+- **Markers and trails** draw from any loaded scenario, on by default. `examples/05_rpo_ric.py`
+  shows two of each, measured in a real browser from the scene graph, each carrying the entity
+  layer's own provenance tag.
+- **Covariance ellipsoids and keep-out volumes** draw wherever a trajectory carries a
+  covariance — which, as of this round, a real run actually does:
+  `drms/leo_cov_drive.drm.yaml` through `av-run` and `POST /api/cdm/run` puts a real,
+  kernel-propagated P(t) on the wire, 571 samples at 0.55 MB, `cov[0][0]` growing from
+  0.01 km² to 0.87 km² along one orbit. The full-rate proof DRM matches the golden's
+  `stm.cov_t1_si` to 2.2e-11 relative.
+- **glTF models with attitude** draw wherever a trajectory declares a model, and nothing
+  declares one: `Trajectory.to_dict()` never emits `model` (decision 10). The layer is built,
+  proved against a fixture, and correct the moment a producer exists — but ticking that
+  control against today's scenarios shows nothing, and no one should be told otherwise.
+- **The seam under the markers and trails** is the once-only admission (decision 6, and the
+  disclosed-claim section above): they are admitted to the `LayerManager` at scenario load
+  rather than re-planned per tick, because two partial views driving one manager cancel each
+  other's in-flight loads. Nothing today can reach the failure mode, and it is a property of
+  the wiring rather than a proof.
+
+The exit criteria were met across rounds 1 to 6 and are unchanged by this round: a fixture
+payload in the store by hash, catalogued with extent and label, tiled by a job whose
+completion carries the manifest hash, served by the gateway with refusals counted, and
+streamed into the viewer at scale — 10,922 tiles and 34.4 GB in 393 s at a 68 MB peak, every
+frame under 6 ms of a 16.7 ms budget (round 3); a hot-track message carrying only the asset
+reference; store, catalog and gateway as tiers with their digests, matrices and SBOMs.
+
+**Two things this track hands on rather than closes**, neither of them H-milestone work:
+
+1. The merged-view `LayerManager.update` that would remove the once-only-admission seam. It
+   touches `web/js/globe.js` and is a small, well-understood task with a measured
+   justification already written down.
+2. A producer for `Trajectory.model`, so the glTF entity class has live input — the same
+   shape the covariance gap had before this round, and closed the same way.

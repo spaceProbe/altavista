@@ -59,13 +59,23 @@
 //! round, per `common.md`) and is named here rather than pretended to be covered, per this
 //! task's own binding rule 14.
 //!
-//! # `connect_timeout` is a deadline, never a sleep
+//! # `connect_timeout` is a deadline, never a sleep -- and it is per PHASE, not per connection
 //!
-//! [`PgClient::connect`] wraps the `TcpStream::connect` future in `tokio::time::timeout`,
-//! which races it against a deadline and returns as soon as either resolves -- never a
-//! `tokio::time::sleep` used to wait out a fixed duration before proceeding (rule 7: no sleep
-//! as a synchronisation device). Every other wait in this module (reading the next backend
-//! message) blocks on real I/O completing, not a clock.
+//! [`PgClient::connect`] wraps each of its three phases -- the TCP connect, the TLS
+//! negotiation (`SSLRequest` write + response read + the TLS upgrade itself, when
+//! [`PgTls::Required`]), and [`PgClient::startup`] (`StartupMessage`/authentication/
+//! `ReadyForQuery`) -- in its OWN `tokio::time::timeout(config.connect_timeout, ..)`, each
+//! racing that phase against a fresh `config.connect_timeout` budget and returning as soon as
+//! either resolves -- never a `tokio::time::sleep` used to wait out a fixed duration before
+//! proceeding (rule 7: no sleep as a synchronisation device). The deadline is per phase, not
+//! summed across the connection: a server that is merely slow at each step is not punished for
+//! the sum of its phases, while a peer that accepts the TCP connection and then never writes
+//! another byte -- in TLS negotiation or in startup -- is caught by that phase's own deadline
+//! and reported as [`crate::error::CatalogError::HandshakeTimeout`], which names the phase that
+//! stalled ([`crate::error::CatalogError::ConnectTimeout`] is raised only by the TCP connect
+//! phase itself, and keeps its own exact meaning). Every other wait in this module (reading the
+//! next backend message once a phase's own timeout has already passed) blocks on real I/O
+//! completing, not a clock.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,9 +116,11 @@ pub struct PgConfig {
     pub password: String,
     pub database: String,
     pub application_name: String,
-    /// A deadline on the TCP connect step only (see this module's own doc, "`connect_timeout`
-    /// is a deadline, never a sleep") -- not a per-query timeout; this crate's query methods
-    /// wait on the server's own reply for as long as the server takes.
+    /// A deadline on each phase of [`PgClient::connect`] -- the TCP connect, the TLS
+    /// negotiation, and the startup/authentication handshake each get their own budget of this
+    /// same duration (see this module's own doc, "`connect_timeout` is a deadline, never a
+    /// sleep -- and it is per PHASE, not per connection") -- not a per-query timeout; this
+    /// crate's query methods wait on the server's own reply for as long as the server takes.
     pub connect_timeout: Duration,
     pub tls: PgTls,
 }
@@ -284,6 +296,29 @@ async fn upgrade_to_tls(tcp: TcpStream, host: &str, ca_file: Option<&std::path::
     Ok(BlockingTlsStream(Some(ssl_stream)))
 }
 
+/// The `SSLRequest`/`'S'`-or-`'N'` exchange and, on `'S'`, the TLS upgrade itself
+/// ([`upgrade_to_tls`]) -- one phase of [`PgClient::connect`], bounded by its own
+/// `deadline` budget (module doc: "`connect_timeout` is a deadline, never a sleep -- and it is
+/// per PHASE, not per connection"). A peer that accepts the TCP connection and then never
+/// writes the `'S'`/`'N'` response byte is caught here, by THIS phase's own timeout, and
+/// reported as [`CatalogError::HandshakeTimeout`] naming `"tls-negotiation"` -- never left to
+/// hang on the unbounded `read_exact` this phase used to perform.
+async fn negotiate_tls(mut tcp: TcpStream, host: &str, port: u16, ca_file: Option<&std::path::Path>, deadline: Duration) -> Result<PgStream, CatalogError> {
+    const PHASE: &str = "tls-negotiation";
+    tokio::time::timeout(deadline, async {
+        tcp.write_all(&protocol::encode_ssl_request()).await.map_err(|e| io_err("writing SSLRequest", e))?;
+        let mut resp = [0u8; 1];
+        tcp.read_exact(&mut resp).await.map_err(|e| io_err("reading the SSLRequest response", e))?;
+        match resp[0] {
+            b'S' => Ok(PgStream::Tls(upgrade_to_tls(tcp, host, ca_file).await?)),
+            b'N' => Err(CatalogError::ServerDeclinedTls { host: host.to_string(), port }),
+            other => Err(CatalogError::InvalidSslResponse { byte: other }),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(CatalogError::HandshakeTimeout { host: host.to_string(), port, timeout: deadline, phase: PHASE }))
+}
+
 /// Names a [`BackendMessage`] variant for [`CatalogError::UnexpectedMessage`]'s `got` field --
 /// deliberately not `{:?}` on the whole message (which could embed a row's actual data values
 /// in an error string a caller might log).
@@ -344,7 +379,11 @@ impl PgClient {
     /// Connects to `config.host:config.port`, negotiates TLS if `config.tls` is
     /// [`PgTls::Required`], and runs the startup/authentication handshake (SCRAM-SHA-256 only
     /// -- `AuthenticationCleartextPassword`/`AuthenticationMD5Password` are refused, per this
-    /// crate's own doc). Returns once `ReadyForQuery` is received after authentication.
+    /// crate's own doc). Returns once `ReadyForQuery` is received after authentication. Every
+    /// phase after the TCP connect -- TLS negotiation, then startup -- gets its own
+    /// `config.connect_timeout` budget (module doc: "per PHASE, not per connection"), so a peer
+    /// that accepts the TCP connection and then never writes another byte cannot hang this call
+    /// forever: it is reported as [`CatalogError::HandshakeTimeout`], naming the phase.
     pub async fn connect(config: &PgConfig) -> Result<PgClient, CatalogError> {
         let tcp = tokio::time::timeout(config.connect_timeout, TcpStream::connect((config.host.as_str(), config.port)))
             .await
@@ -353,21 +392,19 @@ impl PgClient {
 
         let stream = match &config.tls {
             PgTls::Disabled => PgStream::Plain(tcp),
-            PgTls::Required { ca_file } => {
-                let mut tcp = tcp;
-                tcp.write_all(&protocol::encode_ssl_request()).await.map_err(|e| io_err("writing SSLRequest", e))?;
-                let mut resp = [0u8; 1];
-                tcp.read_exact(&mut resp).await.map_err(|e| io_err("reading the SSLRequest response", e))?;
-                match resp[0] {
-                    b'S' => PgStream::Tls(upgrade_to_tls(tcp, &config.host, ca_file.as_deref()).await?),
-                    b'N' => return Err(CatalogError::ServerDeclinedTls { host: config.host.clone(), port: config.port }),
-                    other => return Err(CatalogError::InvalidSslResponse { byte: other }),
-                }
-            }
+            PgTls::Required { ca_file } => negotiate_tls(tcp, &config.host, config.port, ca_file.as_deref(), config.connect_timeout).await?,
         };
 
         let mut client = PgClient { stream };
-        client.startup(config).await?;
+        // `startup()` itself is unmodified (module doc: "per PHASE, not per connection") --
+        // bounded here, from the outside, by its own fresh `config.connect_timeout` budget, so
+        // a peer that accepts the TCP connection (and, for `PgTls::Required`, completes TLS
+        // negotiation) and then never writes another byte is caught by ITS OWN phase's
+        // deadline rather than hanging forever.
+        const STARTUP_PHASE: &str = "startup";
+        tokio::time::timeout(config.connect_timeout, client.startup(config))
+            .await
+            .unwrap_or_else(|_| Err(CatalogError::HandshakeTimeout { host: config.host.clone(), port: config.port, timeout: config.connect_timeout, phase: STARTUP_PHASE }))?;
         Ok(client)
     }
 

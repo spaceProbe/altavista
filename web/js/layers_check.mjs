@@ -536,6 +536,114 @@ async function probeStarvationDoesNotBlockGoodLayer() {
 
 const starvationProbe = await probeStarvationDoesNotBlockGoodLayer();
 
+/** Named, typed rejection for this probe's own imagery-SHAPED "bad" layer -- stands
+ * in for a real gateway tile set's own transient failure (e.g. TileHttpError), with
+ * its own distinct name so this probe can prove it is never confused with terrain's
+ * own typed refusal. */
+class ProbeGatewayFailureError extends Error {
+  constructor(key) {
+    super(`probeFailureAttribution: bad-imagery-attribution-probe always fails to load '${key}'`);
+    this.name = 'ProbeGatewayFailureError';
+  }
+}
+
+/** Task 5b (panel-failure-attribution): the proof that file's own brief calls for
+ * directly -- "a headless check that drives the real LayerManager with a real
+ * TerrainLayerAdapter and a real failing imagery-shaped adapter, and asserts the two
+ * are attributed separately, with the totals still adding up to the unchanged
+ * failedCount". Runs on a FRESH manager, isolated from the main camera-path run
+ * below (so this probe's own numbers are never perturbed by it, and vice versa):
+ *   - `terrain` is a REAL `TerrainLayerAdapter` (not a stub) -- its `load()` always
+ *     rejects with the real, typed `TerrainLoaderNotImplementedError` (see
+ *     terrain_layer.js), and its `plan()` is driven over the SAME real 'far' camera
+ *     tiles the main run itself uses, so `terrainRequestCount` is genuine demand, not
+ *     an arbitrary probe number.
+ *   - `badImagery` is imagery-SHAPED (`kind: 'imagery'`, the real Request shape a
+ *     gateway tile set's own adapter would plan) but its `load()` always rejects with
+ *     a DIFFERENT typed error (`ProbeGatewayFailureError`, above), standing in for a
+ *     real gateway tile set's own transient failure.
+ * `maxConcurrentLoads` is set generously above both layers' combined request count so
+ * every request admits and fails within ONE `update()` -- this probe is about
+ * attribution, not the concurrency cap (`probeQueueIsLoadBearing`, above, already
+ * proves that separately).
+ *
+ * What a WRONG implementation would fail here: an implementation that merely kept a
+ * second running total (not actually keyed by layer) would pass `totalsMatch` but
+ * fail `noCrossContamination` the instant both layers' names landed in the same
+ * bucket; an implementation that recovered the layer id with a naive `split(' ')` or
+ * `split(':')` instead of `globalKeyFor`'s own ` ` join character would either
+ * throw or silently misattribute the moment a real `gateway-tileset:<sha>` layer id
+ * (which contains ':') was involved -- this probe's own ids are deliberately plain
+ * here, so the perturbation this task's report records against a wrong `split` is run
+ * as a separate, explicit step, not folded into this proof.
+ */
+async function probeFailureAttribution() {
+  const terrain = new TerrainLayerAdapter({ id: 'terrain-attribution-probe' });
+  const badImagery = {
+    id: 'bad-imagery-attribution-probe',
+    kind: 'imagery',
+    plan(_view) {
+      const reqs = [];
+      for (let i = 0; i < 4; i += 1) {
+        reqs.push({ key: `b${i}`, sseError: 10, viewDistanceM: 100, byteCost: 1024 });
+      }
+      return reqs;
+    },
+    load(request, _signal) { return Promise.reject(new ProbeGatewayFailureError(request.key)); },
+    release(_key) {},
+  };
+
+  const cameraEcef = cameraEcefFromEnu(0, 0, 3000000); // 'far' -- see CAMERA_PATH above
+  const view = {
+    cameraEcef, screenHeightPx: IMG_SCREEN.screenHeightPx, fovYRad: IMG_SCREEN.fovYRad, tiles: selectTiles(cameraEcef, IMG_SCREEN),
+  };
+  const terrainRequestCount = terrain.plan(view).length; // real demand, same real tiles the main run sees at 'far'
+  const badImageryRequestCount = badImagery.plan(view).length;
+
+  const mgr = new LayerManager({
+    memoryBudgetBytes: 999_000_000_000,
+    maxConcurrentLoads: terrainRequestCount + badImageryRequestCount + 2,
+    now: fakeNow,
+  });
+  mgr.addLayer(terrain);
+  mgr.addLayer(badImagery);
+
+  mgr.update(view);
+  await flushMicrotasks();
+
+  const byLayer = mgr.failuresByLayer();
+  const sumCounts = Object.values(byLayer).reduce((s, e) => s + e.count, 0);
+  const terrainEntry = byLayer[terrain.id] || { count: 0, names: [] };
+  const badEntry = byLayer[badImagery.id] || { count: 0, names: [] };
+
+  const totalsMatch = sumCounts === mgr.failedCount;
+  const terrainAttributedCorrectly = terrainEntry.count === terrainRequestCount
+    && JSON.stringify(terrainEntry.names) === JSON.stringify(['TerrainLoaderNotImplementedError']);
+  const badAttributedCorrectly = badEntry.count === badImageryRequestCount
+    && JSON.stringify(badEntry.names) === JSON.stringify(['ProbeGatewayFailureError']);
+  // The actual attribution proof, not merely two independent running totals: neither
+  // layer's bucket may contain the OTHER layer's typed name.
+  const noCrossContamination = !terrainEntry.names.includes('ProbeGatewayFailureError')
+    && !badEntry.names.includes('TerrainLoaderNotImplementedError');
+
+  return {
+    terrainLayerId: terrain.id,
+    badImageryLayerId: badImagery.id,
+    terrainRequestCount,
+    badImageryRequestCount,
+    failedCount: mgr.failedCount,
+    failuresByLayer: byLayer,
+    sumCounts,
+    totalsMatch,
+    terrainAttributedCorrectly,
+    badAttributedCorrectly,
+    noCrossContamination,
+    ok: totalsMatch && terrainAttributedCorrectly && badAttributedCorrectly && noCrossContamination,
+  };
+}
+
+const failureAttributionProbe = await probeFailureAttribution();
+
 // ------------------------------------------------------------------------- run it
 const steps = [];
 let maxResidentBytesObserved = 0;
@@ -646,6 +754,15 @@ const result = {
   imageryTileBytes: IMAGERY_TILE_BYTES,
   defaultTile3DBytes: DEFAULT_TILE3D_BYTES,
   tilesetTileCount: tree.nodes.size,
+  // Task 5b (panel-failure-attribution, round 7): the main camera-path run's own
+  // attributed failures (read defensively, same reasoning as failedCount/
+  // failureNames just above -- this file is also run against a pre-task layer.js in
+  // this task's own "remove the accessor" perturbation) and which registered layers
+  // declared they have no loader (today: 'terrain' alone). See failureAttributionProbe
+  // below for the dedicated, isolated proof of attribution correctness itself.
+  failuresByLayer: typeof manager.failuresByLayer === 'function' ? manager.failuresByLayer() : null,
+  noLoaderLayerIds: typeof manager.noLoaderLayers === 'function' ? manager.noLoaderLayers().map((l) => l.id) : null,
+  failureAttributionProbe,
 };
 
 process.stdout.write(JSON.stringify(result));

@@ -1,0 +1,69 @@
+# DesignReferenceMission (proto/altavista/v1/system.proto), YAML transcoding -- heavy round 7,
+# the DRIVE-sized sibling of leo_1day_golden_cov.drm.yaml.
+#
+# Why this file exists, measured rather than asserted (heavy round 7 decision 3). The
+# covariance proof DRM (leo_1day_golden_cov.drm.yaml) reproduces the golden exactly: one day
+# at sample_interval_s 0.1, which is 864,001 samples. That is the right shape for PROVING the
+# producer against goldens/leo_1day_jgm2_8x8_sunmoon.json's own stm.cov_t1_si, and the wrong
+# shape for a browser: each sample's covariance is a 6x6, so `cov` alone carries 864,001 * 36 =
+# 31,104,036 doubles and the published scenario JSON measures ~758 MB. The amplification is
+# real and worth stating plainly -- a covariance stream is 36 doubles per sample against the
+# state's own 6, i.e. about 6x the trajectory's whole existing wire cost -- but the underlying
+# payload was already unreasonable before covariance existed: the same run's t/pos/vel alone
+# are ~6.05 M doubles, ~120 MB. A one-day 10 Hz run is not, and never was, a viewer payload.
+#
+# The adapter is deliberately NOT the place to fix that. `altavista/cdm.py` carries exactly
+# what the producer recorded; a downsampling rule there would be the adapter silently throwing
+# away a producer's data, which is the one thing this codebase refuses to do (see that module's
+# own "Covariance: still never fabricated on the way in, now carried on the way out" section,
+# and question 11's original placeholder reasoning). The sampling rate is a property of the
+# run, so the run is where it is chosen -- which is what this file is.
+#
+# What is different from leo_1day_golden_cov.drm.yaml, and only this:
+#   - scenario.end_tai_ns: start + 5,700 s (95 minutes, a little over one LEO orbital period
+#     at this SMA -- one full closed ellipse for a person to look at, not an arbitrary slice);
+#   - options.sample_interval_s: 10.0 instead of 0.1.
+# Everything else -- the same leo_sos SosConfiguration (whose sole "leo" instance already
+# declares the golden's own P0, see leo_1day_golden.sos.yaml's header), the same
+# leo_1day_golden.system.yaml, the same 10 Hz native step, the same covariance: true -- is
+# unchanged, so this run propagates on the identical native grid and merely records fewer of
+# its samples.
+#
+# Measured at this configuration (heavy round 7, the manager's own run, GMAT R2026a on the
+# development host): 4.5 s of wall clock, 571 native propagated covariance samples, 205,655
+# bytes of RunProducts, and -- through the real POST /api/cdm/run route -- a published
+# scenario JSON of 551,430 bytes (0.55 MB), of which the covariance is 20,556 doubles. The
+# same scenario with `cov` emptied is 82,019 bytes, so the measured covariance amplification
+# is 6.72x, against 6.31x predicted by the 36-vs-6 doubles-per-sample ratio alone (the rest
+# is JSON's own per-number punctuation). Half a megabyte is a payload a browser can actually
+# hold, which is the entire point of this file.
+#
+# The run also confirms Phi(t0,t0) = I end to end in the units this wire carries: the first
+# sample's cov[0][0] reads 0.01 km^2, which is exactly leo_1day_golden.sos.yaml's declared
+# P0 entry of 10,000 m^2 converted by altavista/cdm.py's M_PER_KM**2 factor; by the last
+# sample it has grown to 0.8709077091672504 km^2.
+#
+# start_tai_ns: identical to leo_1day_golden.drm.yaml -- see that file's own header comment
+# for the exact arithmetic (2026-01-01T00:00:00Z, TAI-UTC = 37 s).
+# end_tai_ns = start_tai_ns + 5700 s.
+id: drm_leo_cov_drive
+version: "1"
+name: LEO one orbit, JGM2 8x8 + Sun/Moon, covariance on (browser drive)
+sos_configuration_id: leo_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767231337000000000
+options:
+  covariance: true
+  default_step_rate_hz: 10.0
+  sample_interval_s: 10.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (heavy round 7, question 233, drive fixture)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/leo_cov_drive.drm.yaml
+hash: "c95554c0378ab1be2f0697c29a49338b3ae54dd3924d6aeb356ee0e7fe13e9ac"

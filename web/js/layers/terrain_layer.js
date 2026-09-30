@@ -56,6 +56,21 @@ export class TerrainLoaderNotImplementedError extends Error {
 export class TerrainLayerAdapter {
   constructor({ id = 'terrain' } = {}) {
     this.id = id;
+    // Task 5b (panel-failure-attribution, round 7): this layer declares, about
+    // ITSELF, that it has no loader -- the same "a layer states a fact about itself,
+    // the manager only reads it" pattern `./imagery_layer.js`'s `this.kind =
+    // 'imagery'` already establishes (see `LayerManager.imageryLayers()`). It lives
+    // here, on the adapter, rather than as a name/error-string check in the Layers
+    // panel, for the same reason `kind` does: the panel would otherwise have to know
+    // -- and keep re-guessing correctly -- which layer ids or error names currently
+    // mean "no loader", which breaks the instant a second no-loader layer exists or
+    // this one's id changes; the adapter that actually made the decision to always
+    // reject (`load()`, below) is the one honest place to declare it. A future real
+    // terrain loader drops this flag (and updates `load()` to actually load), and
+    // every caller reading it via `LayerManager.noLoaderLayers()` -- today only the
+    // Layers panel's "not a fault of the selected set" attribution -- needs no change
+    // at all.
+    this.notImplemented = true;
   }
 
   /**

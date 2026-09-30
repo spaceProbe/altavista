@@ -52,14 +52,35 @@ ambiguity at a positive leap second to the *post*-insertion reading. None of thi
 :func:`a1mjd_to_tai_ns` / :func:`tai_ns_to_a1mjd` (no table lookup happens there at all);
 it only applies to :func:`utc_ns_to_tai_ns` / :func:`tai_ns_to_utc_ns`.
 
-The covariance placeholder (question 11)
-------------------------------------------
-:func:`trajectory_to_cdm` never fills ``TrajectorySample.cov``. Covariance is always
-optional and explicitly requested by a DRM -- never a profile default -- and this adapter
-has no DRM to consult, so it leaves ``cov`` empty rather than fabricating one (e.g. from
-GMAT's own error covariance, which altavista's ``Scenario`` does not even propagate today).
-A caller that has real covariance can set ``TrajectorySample.cov`` on the returned message
-itself; this module will not silently invent zeros or an identity matrix.
+Covariance: still never fabricated on the way in, now carried on the way out
+------------------------------------------------------------------------------
+:func:`trajectory_to_cdm` (an altavista :class:`~altavista.model.Trajectory` -> CDM) still
+never fills ``TrajectorySample.cov``, and this remains true unconditionally: covariance is
+always optional and explicitly requested by a DRM -- never a profile default -- and this
+adapter has no DRM to consult when going in this direction, so it leaves ``cov`` empty
+rather than fabricating one (e.g. from GMAT's own error covariance, which altavista's
+``Scenario`` does not even propagate today). A scenario built from a plain GMAT script
+still has no covariance, and a caller of :func:`trajectory_to_cdm` that has real covariance
+must set ``TrajectorySample.cov`` on the returned message itself; this module still will
+not silently invent zeros or an identity matrix on that path.
+
+The other direction is different (heavy round 7, question 233). The DRM executor's own
+kernel (``crates/av-kernel/src/kernel.rs::run_with_covariance``, question 89) computes a
+real ``P(t)`` on the STM path when a DRM sets ``DrmOptions.covariance: true``, and writes it
+onto every native ``TrajectorySample.cov`` the executor emits -- a real producer, not a
+placeholder. :func:`cdm_trajectory_to_viewer_json` (CDM -> viewer JSON) now *carries* that
+covariance through to :class:`~altavista.model.Trajectory`'s own additive ``cov``/``cov_dim``
+fields rather than dropping it on the floor: ``n`` is derived from each sample's own
+``len(cov)`` (36 -> 6, 9 -> 3; any other length is a typed refusal, never padded, truncated
+or guessed at), cross-checked against the trajectory's own resolved state space when one
+resolves (a trajectory with a declared position/velocity class always carries its
+covariance over exactly that 6-component block, never a mismatched 3x3), and every one of
+the 36 (or 9) SI entries (m^2, m^2/s, m^2/s^2) is divided by ``M_PER_KM ** 2`` -- uniform,
+not a per-block conversion, because ``mean``'s own position *and* velocity components are
+both already scaled by the same ``M_PER_KM`` factor above, so their covariance's entries
+(products of two such components) all scale by ``M_PER_KM ** 2`` alike. ``cov`` is
+all-or-nothing across a trajectory's samples, exactly like ``attitude`` (see that field's
+own contract below): present on every sample or none, refused by name otherwise.
 
 Event ``values`` (no guessing)
 ---------------------------------
@@ -149,6 +170,14 @@ A1_MINUS_TAI_NS = 34_381_700
 # MJD = JD - 2430000.0, so GMAT_MJD(unix epoch) = 10587.5. Matches time.rs's
 # `GMAT_MJD_AT_UNIX_EPOCH`.
 GMAT_MJD_AT_UNIX_EPOCH = 10_587.5
+
+# Heavy round 7 (question 233): the only two row-major n x n covariance shapes
+# `cdm_trajectory_to_viewer_json` accepts -- n=3 (pure position) or n=6 (altavista's own
+# STATE_SPACE_ID_CARTESIAN_POS_VEL_6 position+velocity convention), matching
+# `web/js/entities/covariance_ellipsoid.js`'s own `positionCovarianceBlock`, which knows
+# how to place exactly these two n values and no others. Any `len(cov)` not a key here is
+# refused, never guessed at.
+_COV_LEN_TO_N = {9: 3, 36: 6}
 
 
 # --------------------------------------------------------------------------- exceptions
@@ -730,6 +759,28 @@ def cdm_trajectory_to_viewer_json(cdm: trajectory_pb2.Trajectory, *, name: Optio
     ``s.attitude.length === s.t.length * 4`` to decide whether to trust the stream), so
     a partially-attituded CDM trajectory is rejected rather than silently truncated or
     padded.
+
+    **Covariance (heavy round 7, question 233).** A sample's own ``cov`` (SI, row-major
+    n x n, per ``proto/altavista/v1/trajectory.proto``'s doc comment) is copied into the
+    returned :class:`~altavista.model.Trajectory`'s additive ``cov``/``cov_dim``, divided
+    entry-by-entry by ``M_PER_KM ** 2`` -- uniform, not a per-block conversion, because
+    every entry of a position/velocity covariance is a product of two components each
+    already scaled by ``M_PER_KM`` above (position*position, position*velocity, or
+    velocity*velocity all scale the same way when both factors carry that one conversion
+    factor). ``n`` is derived from ``len(s.cov)`` alone: 36 -> 6, 9 -> 3; any other length
+    is a typed refusal (never padded, truncated, or guessed at) naming the trajectory, the
+    sample's epoch and the offending length. When ``resolved_space`` is known (i.e. this
+    function has not already returned ``None`` above, so any resolved space here
+    necessarily *has* a position class -- see the non-physical-instances paragraph), that
+    class is always the first six components, so a sample's covariance must be exactly
+    6x6 here too; an unresolvable ``state_space_id`` (the same "no cross-check possible"
+    case :func:`state_space_for` already tolerates elsewhere in this function) accepts
+    either 3x3 or 6x6 with no further check. ``n`` must also stay identical across every
+    sample in one trajectory -- a sample declaring a different ``n`` than an earlier one
+    in the same trajectory is refused by name, never silently re-dimensioned. Exactly like
+    ``attitude``, ``cov`` is all-or-nothing: present (non-empty) on every sample or none;
+    a partially-covarianced CDM trajectory raises :class:`CdmAdapterError` naming the
+    counts.
     """
     if cdm.interpolation not in (trajectory_pb2.INTERPOLATION_UNSPECIFIED, trajectory_pb2.INTERPOLATION_HERMITE_VELOCITY):
         raise CdmAdapterError(
@@ -746,6 +797,8 @@ def cdm_trajectory_to_viewer_json(cdm: trajectory_pb2.Trajectory, *, name: Optio
     tr = Trajectory(name=name or cdm.entity_id or cdm.id or "cdm_trajectory", color=color, label=label)
     samples = sorted(cdm.samples, key=lambda sample: sample.tai_ns)
     n_with_attitude = 0
+    n_with_cov = 0
+    cov_dim = 0
     for s in samples:
         if len(s.mean) < 6:
             raise CdmAdapterError(
@@ -757,11 +810,51 @@ def cdm_trajectory_to_viewer_json(cdm: trajectory_pb2.Trajectory, *, name: Optio
         if len(s.mean) >= 10:
             tr.attitude.append([s.mean[6], s.mean[7], s.mean[8], s.mean[9]])
             n_with_attitude += 1
+        if len(s.cov) > 0:
+            sample_n = _COV_LEN_TO_N.get(len(s.cov))
+            if sample_n is None:
+                raise CdmAdapterError(
+                    f"Trajectory {cdm.id!r} sample at tai_ns={s.tai_ns} has a {len(s.cov)}-"
+                    f"element cov; only a 3x3 (9 values) or 6x6 (36 values) row-major "
+                    f"covariance is supported, never padded, truncated or guessed at")
+            if resolved_space is not None and sample_n != 6:
+                raise CdmAdapterError(
+                    f"Trajectory {cdm.id!r} sample at tai_ns={s.tai_ns} carries a "
+                    f"{sample_n}x{sample_n} cov, but its declared state space "
+                    f"{cdm.state_space_id!r} has a 6-component position/velocity class "
+                    f"(pos xyz + vel xyz) -- a covariance alongside it must be exactly "
+                    f"that matching 6x6 block, not {sample_n}x{sample_n}")
+            if cov_dim == 0:
+                cov_dim = sample_n
+            elif cov_dim != sample_n:
+                raise CdmAdapterError(
+                    f"Trajectory {cdm.id!r} sample at tai_ns={s.tai_ns} carries a "
+                    f"{sample_n}x{sample_n} cov, but an earlier sample in this same "
+                    f"trajectory carried a {cov_dim}x{cov_dim} cov -- n must stay "
+                    f"consistent across every sample, never re-dimensioned mid-stream")
+            # SI (m^2, m^2/s, m^2/s^2) -> km/km-s units: every entry divided by the same
+            # M_PER_KM ** 2 factor -- uniform, not a per-block conversion, because each
+            # entry is a product of two mean components (position and/or velocity) that
+            # were themselves both divided by the single M_PER_KM factor above, so their
+            # product's conversion factor is M_PER_KM ** 2 regardless of which block
+            # (pos-pos, pos-vel, vel-vel) the entry belongs to.
+            tr.cov.append([v / (M_PER_KM ** 2) for v in s.cov])
+            n_with_cov += 1
+        else:
+            tr.cov.append([])
     if n_with_attitude not in (0, len(samples)):
         raise CdmAdapterError(
             f"Trajectory {cdm.id!r} has {n_with_attitude} sample(s) with a >=10-component "
             f"mean (attitude) out of {len(samples)} total; attitude must be present on "
             f"every sample or none")
+    if n_with_cov not in (0, len(samples)):
+        raise CdmAdapterError(
+            f"Trajectory {cdm.id!r} has {n_with_cov} sample(s) with a cov out of "
+            f"{len(samples)} total; cov must be present on every sample or none")
+    if n_with_cov == 0:
+        tr.cov = []
+    else:
+        tr.cov_dim = cov_dim
     return tr
 
 

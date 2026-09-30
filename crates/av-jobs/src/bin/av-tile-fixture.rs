@@ -47,6 +47,41 @@
 //! -- duplicated here rather than called, because `av_jobs::raster::encode` is `#[cfg(test)]`
 //! only in that module, compiled for `cargo test`, never for this binary's own `cargo build`).
 //!
+//! # `--synthetic-source-style gradient|labelled` (round 7 task 5a): making the switch visible
+//!
+//! The formula above (`gradient`, the default) reads as a smooth teal/brown-ish ramp at a
+//! glance -- close enough to the offline fixture Earth texture's own teal/brown palette that a
+//! person watching a browser drive cannot see that the tile set they toggled on is really this
+//! synthetic source and not the default imagery, even though the manifest's own identity
+//! proves it. `--synthetic-source-style labelled` is a second, purely additive rendering of
+//! the exact same `--synthetic-source WxH` input; every pre-existing invocation with no style
+//! flag at all still takes the `gradient` arm ([`synthetic_pixels`] below, BYTE FOR BYTE
+//! UNCHANGED by this task -- see this file's own `mod tests`,
+//! `the_default_synthetic_style_is_gradient_and_its_bytes_are_pinned_from_before_this_task`,
+//! for the actual before/after hash proof). Two reasons the default could not simply change to
+//! something more visible instead of gaining a second, opt-in style:
+//!
+//! - The gradient raster's own compressed tile size is load-bearing elsewhere in this round:
+//!   the streaming proof measured its tiles at exactly 852 bytes each, and the tight-budget
+//!   run's 11,000-byte budget was sized off that empirical record (question 233: that budget
+//!   "is not to be retuned without one"). A different default raster would silently move those
+//!   bytes and invalidate another worker's proof in this same round.
+//! - `crates/av-jobs/tests/tiler.rs` and `crates/av-jobs/tests/store_tiler.rs` pin a manifest
+//!   hash (`7c23f4f0...`) for their own fixture source -- checked (this task's own report)
+//!   to be a **file-based** `--source-path` fixture raster, not this binary's own synthetic
+//!   one, so it is unaffected either way; recorded here so a future reader does not have to
+//!   re-derive that.
+//!
+//! [`labelled_pixels`] below is what `labelled` renders: a high-contrast magenta/black
+//! checkerboard (colours nowhere in the offline fixture's own teal/brown palette) plus a baked
+//! lat/lon coordinate grid and the word `SYNTHETIC`, using a tiny 3x5 bitmap font hand-authored
+//! in this file (see [`glyph_rows`]'s own doc -- no font file, no font crate, no new
+//! dependency). Deterministic exactly like `gradient`: **no randomness, no clock read, byte-
+//! identical output for identical flags on every run and every host** -- see
+//! [`labelled_pixels`]'s own doc for why per-tile `level`/`x`/`y` text specifically cannot be
+//! baked in here (this function renders the whole-globe SOURCE raster, before the tiler slices
+//! it into tiles) and what this function does instead.
+//!
 //! # Byte accounting is real, and levels/tile size are real tuning knobs
 //!
 //! `total_stored_bytes` in this binary's own JSON output ([`FixtureResult::total_stored_bytes`]) is the sum of
@@ -133,7 +168,8 @@ const MEMORY_RASTER_URI: &str = "memory://av-tile-fixture-source-raster";
 
 const USAGE: &str = "usage: av-tile-fixture --key-prefix PREFIX --ladder MARKING[,MARKING...] \
                       --label-marking MARKING --job-id ID --min-level N --max-level N \
-                      [--tile-size N] (--source-path PATH | --synthetic-source WxH) \
+                      [--tile-size N] (--source-path PATH | --synthetic-source WxH \
+                      [--synthetic-source-style gradient|labelled]) \
                       [--queue-dir PATH] [--dry-run] [--streaming] \
                       [--store-endpoint URL --store-region REGION --store-access-key-id ID \
                        --store-secret-access-key KEY --store-bucket BUCKET \
@@ -150,7 +186,28 @@ const DEFAULT_CATALOG_PORT: u16 = 5432;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
     Path(PathBuf),
-    Synthetic { width: u32, height: u32 },
+    Synthetic { width: u32, height: u32, style: SyntheticStyle },
+}
+
+/// `--synthetic-source-style`'s two values -- see this binary's own module doc, "round 7 task
+/// 5a: making the switch visible", for the full story. `Default` is `Gradient`: every existing
+/// `--synthetic-source WxH` invocation with no style flag at all takes this arm, and
+/// [`synthetic_pixels`] (this arm's own renderer) is untouched by this task -- the same
+/// function, same formula, same output for the same width/height as before this task existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SyntheticStyle {
+    #[default]
+    Gradient,
+    Labelled,
+}
+
+/// Parses `--synthetic-source-style`'s value.
+fn parse_synthetic_style(raw: &str) -> Result<SyntheticStyle, String> {
+    match raw {
+        "gradient" => Ok(SyntheticStyle::Gradient),
+        "labelled" => Ok(SyntheticStyle::Labelled),
+        other => Err(format!("--synthetic-source-style {other:?} must be \"gradient\" or \"labelled\". {USAGE}")),
+    }
 }
 
 #[derive(Debug)]
@@ -163,6 +220,13 @@ struct CliArgs {
     max_level: Option<u32>,
     tile_size: u32,
     source: Option<Source>,
+    /// `--synthetic-source-style`'s raw presence, applied onto `source`'s own `Synthetic`
+    /// variant after the whole command line is parsed (`parse_cli_args`'s own post-loop
+    /// validation block) -- kept separate from `Source::Synthetic` while parsing is in
+    /// progress specifically so `--synthetic-source-style` may come before OR after
+    /// `--synthetic-source` on the command line and still take effect (this binary's own
+    /// `mod tests` exercises both orders).
+    synthetic_style: Option<SyntheticStyle>,
     dry_run: bool,
     /// `--streaming`: see this binary's own module doc, "`--streaming`: the open item from
     /// H5b-1 closed". Orthogonal to `dry_run` -- both a `--dry-run --streaming` combination
@@ -219,6 +283,7 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
         max_level: None,
         tile_size: av_jobs::tiler::DEFAULT_TILE_SIZE,
         source: None,
+        synthetic_style: None,
         dry_run: false,
         streaming: false,
         queue_dir: None,
@@ -259,8 +324,9 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
                     return Err(format!("--source-path and --synthetic-source are mutually exclusive. {USAGE}"));
                 }
                 let (width, height) = parse_wxh(&value()?)?;
-                out.source = Some(Source::Synthetic { width, height });
+                out.source = Some(Source::Synthetic { width, height, style: SyntheticStyle::default() });
             }
+            "--synthetic-source-style" => out.synthetic_style = Some(parse_synthetic_style(&value()?)?),
             "--queue-dir" => out.queue_dir = Some(PathBuf::from(value()?)),
             "--dry-run" => out.dry_run = true,
             "--streaming" => out.streaming = true,
@@ -289,6 +355,18 @@ fn parse_cli_args(args: impl Iterator<Item = String>) -> Result<CliArgs, String>
     }
     if out.source.is_none() {
         return Err(format!("exactly one of --source-path or --synthetic-source is required. {USAGE}"));
+    }
+    // --synthetic-source-style only means anything for a Synthetic source -- applied here,
+    // after the whole command line is parsed, so it works regardless of whether it came before
+    // or after --synthetic-source on the command line (see CliArgs::synthetic_style's own doc).
+    if let Some(style) = out.synthetic_style {
+        match &mut out.source {
+            Some(Source::Synthetic { style: s, .. }) => *s = style,
+            Some(Source::Path(_)) => {
+                return Err(format!("--synthetic-source-style was given together with --source-path, which has no synthetic style at all. {USAGE}"));
+            }
+            None => unreachable!("out.source.is_none() was already refused above"),
+        }
     }
     let store_flags_given = out.store_endpoint.is_some()
         || out.store_region.is_some()
@@ -363,10 +441,218 @@ fn synthetic_pixels(width: u32, height: u32) -> Vec<u8> {
     pixels
 }
 
+// -----------------------------------------------------------------------------------------
+// `--synthetic-source-style labelled` (round 7 task 5a) -- a high-contrast checkerboard, a
+// baked lat/lon coordinate grid, and a tiny hand-authored bitmap font. See this binary's own
+// module doc, "`--synthetic-source-style gradient|labelled` (round 7 task 5a)", for why this
+// exists and why it could not simply become the new default.
+// -----------------------------------------------------------------------------------------
+
+/// Colours nowhere in the offline fixture Earth texture's own teal (roughly `[0,128,128]`) or
+/// brown (roughly `[139,69,19]`) palette -- pure magenta and pure black share no channel with
+/// either, so the two are unmistakable next to that fixture at a glance, not merely "different
+/// enough on paper".
+const LABELLED_CHECKER_A: [u8; 3] = [255, 0, 255];
+const LABELLED_CHECKER_B: [u8; 3] = [0, 0, 0];
+/// Baked-in grid/text colour: pure white -- the one colour with the maximum possible
+/// per-channel distance from BOTH checkerboard colours above, so a line or a glyph is legible
+/// sitting on either one.
+const LABELLED_TEXT_COLOR: [u8; 3] = [255, 255, 255];
+
+/// The checkerboard's own cell size, in raster pixels, as a stated FRACTION of the raster
+/// (`1/16` of its own smaller dimension, per this task's own brief) rather than a fixed pixel
+/// count -- clamped to a minimum of 1 pixel, and naturally never larger than the raster itself,
+/// so the pattern is well-defined even for this file's own smallest test rasters (down to
+/// 1x1). A fraction, not a constant, is what keeps the pattern showing multiple cells (staying
+/// a checkerboard, not washing out to one flat colour) however small a `--tile-size` crop the
+/// tiler cuts from this raster at whatever level it is asked to cut.
+fn checker_cell_size(width: u32, height: u32) -> u32 {
+    (width.min(height) / 16).max(1)
+}
+
+/// This file's own tiny bitmap font -- 3 pixels wide, 5 pixels tall, one row per array entry,
+/// that entry's low 3 bits its own pixels (bit 2 = the glyph's own leftmost column, bit 0 =
+/// its rightmost). **Hand-authored for this file, row by row, by this task's own author --
+/// not derived from any font file, font crate, or published glyph dataset** (this task's own
+/// brief: "no font dependency to add and you must not add one"). Only the characters this
+/// binary's own labels ever need: the ten digits, `-`, `.`, and the nine letters
+/// `C E H I N S T W Y` -- enough to spell `SYNTHETIC` and every `N`/`S`/`E`/`W`-prefixed
+/// latitude/longitude label [`labelled_pixels`] draws.
+fn glyph_rows(c: char) -> Option<[u8; 5]> {
+    Some(match c {
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b110, 0b001, 0b010, 0b100, 0b111],
+        '3' => [0b110, 0b001, 0b010, 0b001, 0b110],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b110, 0b001, 0b110],
+        '6' => [0b011, 0b100, 0b110, 0b101, 0b010],
+        '7' => [0b111, 0b001, 0b010, 0b100, 0b100],
+        '8' => [0b010, 0b101, 0b010, 0b101, 0b010],
+        '9' => [0b010, 0b101, 0b011, 0b001, 0b010],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
+        'N' => [0b101, 0b110, 0b010, 0b011, 0b101],
+        'S' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        'E' => [0b111, 0b100, 0b110, 0b100, 0b111],
+        'W' => [0b101, 0b101, 0b101, 0b111, 0b101],
+        'Y' => [0b101, 0b010, 0b010, 0b010, 0b010],
+        'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+        'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+        'C' => [0b111, 0b100, 0b100, 0b100, 0b111],
+        _ => return None,
+    })
+}
+
+const GLYPH_WIDTH: u32 = 3;
+const GLYPH_HEIGHT: u32 = 5;
+/// One glyph's own width plus one column of spacing before the next.
+const GLYPH_PITCH_X: u32 = GLYPH_WIDTH + 1;
+
+/// Writes one pixel, silently clipping (a no-op, never a panic) if `(x, y)` falls outside
+/// `[0, width) x [0, height)` -- every pixel-writing function in this section goes through
+/// this one function for that bounds check, so a label or a grid line placed near (or past)
+/// the raster's own edge simply truncates rather than panicking or wrapping.
+fn set_pixel(pixels: &mut [u8], width: u32, height: u32, x: i64, y: i64, color: [u8; 3]) {
+    if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
+        return;
+    }
+    let idx = (y as usize * width as usize + x as usize) * 3;
+    pixels[idx] = color[0];
+    pixels[idx + 1] = color[1];
+    pixels[idx + 2] = color[2];
+}
+
+/// Draws one glyph's own "on" pixels in `color` with its top-left corner at `(x0, y0)`,
+/// through [`set_pixel`] (so it is clipped exactly the same way every other pixel write here
+/// is). An unknown character ([`glyph_rows`] returning `None`) draws nothing.
+fn draw_glyph(pixels: &mut [u8], width: u32, height: u32, x0: i64, y0: i64, c: char, color: [u8; 3]) {
+    let Some(rows) = glyph_rows(c) else { return };
+    for (row_idx, row_bits) in rows.iter().enumerate() {
+        for col_idx in 0..GLYPH_WIDTH {
+            let bit = GLYPH_WIDTH - 1 - col_idx; // column 0 is this row's own most-significant bit.
+            if (row_bits >> bit) & 1 == 0 {
+                continue;
+            }
+            set_pixel(pixels, width, height, x0 + col_idx as i64, y0 + row_idx as i64, color);
+        }
+    }
+}
+
+/// Draws `text` left to right starting at `(x0, y0)`, [`GLYPH_PITCH_X`] pixels per character.
+/// Entirely clipped by [`draw_glyph`]/[`set_pixel`], so a string that runs off the raster's
+/// own right or bottom edge simply truncates.
+fn draw_text(pixels: &mut [u8], width: u32, height: u32, x0: i64, y0: i64, text: &str, color: [u8; 3]) {
+    for (i, c) in text.chars().enumerate() {
+        draw_glyph(pixels, width, height, x0 + i as i64 * GLYPH_PITCH_X as i64, y0, c, color);
+    }
+}
+
+/// `text`'s own drawn pixel width (no trailing gap after the last glyph) -- used to centre
+/// the baked `SYNTHETIC` word.
+fn text_pixel_width(text: &str) -> i64 {
+    let count = text.chars().count() as i64;
+    if count == 0 {
+        0
+    } else {
+        count * GLYPH_PITCH_X as i64 - 1
+    }
+}
+
+/// `--synthetic-source-style labelled`'s own renderer -- see this binary's own module doc for
+/// the full rationale. Three layers, drawn in this order onto a fresh `width * height * 3`
+/// RGB8 buffer (each layer unconditionally attempted; a raster too small for a given element
+/// just has that element clipped away by [`set_pixel`], never a panic -- this file's own tests
+/// exercise rasters as small as 2x2):
+///
+/// 1. A high-contrast magenta/black checkerboard, [`checker_cell_size`] pixels per cell.
+/// 2. A lat/lon coordinate grid: one white pixel-wide line every 90 degrees of longitude and
+///    every 45 degrees of latitude, over this raster's own fixed whole-globe bounds
+///    (`-180,-90,180,90` -- [`synthetic_raster_bytes`]'s own bounds).
+/// 3. Baked text, in [`glyph_rows`]'s own tiny font: each longitude line is labelled with its
+///    own value (e.g. `E090`, `W180`) near the raster's own north edge, each latitude line
+///    with its own value (e.g. `N45`, `S90`) near the raster's own west edge, and the word
+///    `SYNTHETIC` once, centred on the equator/prime-meridian intersection.
+///
+/// # Why a coordinate grid, not per-tile `level`/`x`/`y` text
+///
+/// This function renders ONE whole-globe SOURCE raster; the tiler (`crate::tiler`, a file this
+/// task's own brief forbids touching) slices arbitrary crops of it into tiles only AFTER this
+/// function has already returned, so no per-tile `level`/`x`/`y` identity exists yet at the
+/// point this function runs -- baking a specific tile's own coordinates into the source raster
+/// is structurally impossible here, and this doc says so explicitly rather than leaving it
+/// implied. The lat/lon grid is the next-best thing this function CAN do: every tile's own
+/// bounds are a known crop of this raster's fixed whole-globe extent, so a person looking at a
+/// tile can already read off roughly where in the globe it sits from which grid lines/labels
+/// appear inside it, without a devtools read. (Separately: a clean, ADDITIVE way for the
+/// TILER itself to stamp a real `level/x/y` label onto each tile after cropping -- e.g. an
+/// opt-in post-render step on `TilerExecutor`, never touching the non-labelled path -- looks
+/// feasible from this raster's own resampling code, but is out of this task's own scope and
+/// not built here; see this task's own report.)
+fn labelled_pixels(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = vec![0u8; width as usize * height as usize * 3];
+
+    // Layer 1: the checkerboard.
+    let cell = checker_cell_size(width, height);
+    for row in 0..height {
+        for col in 0..width {
+            let parity = (col / cell + row / cell) % 2;
+            let color = if parity == 0 { LABELLED_CHECKER_A } else { LABELLED_CHECKER_B };
+            set_pixel(&mut pixels, width, height, col as i64, row as i64, color);
+        }
+    }
+
+    // Whole-globe bounds -- fixed, exactly synthetic_raster_bytes's own.
+    const WEST: f64 = -180.0;
+    const SOUTH: f64 = -90.0;
+    const EAST: f64 = 180.0;
+    const NORTH: f64 = 90.0;
+    let col_for_lon = |lon: f64| -> i64 { (((lon - WEST) / (EAST - WEST)) * width as f64).round() as i64 };
+    let row_for_lat = |lat: f64| -> i64 { (((NORTH - lat) / (NORTH - SOUTH)) * height as f64).round() as i64 };
+
+    // Layer 2 + 3: longitude grid lines, each labelled near the north edge.
+    let mut lon = -180i64;
+    while lon <= 180 {
+        let x = col_for_lon(lon as f64).clamp(0, width as i64 - 1);
+        for row in 0..height as i64 {
+            set_pixel(&mut pixels, width, height, x, row, LABELLED_TEXT_COLOR);
+        }
+        let label = format!("{}{:03}", if lon >= 0 { "E" } else { "W" }, lon.unsigned_abs());
+        draw_text(&mut pixels, width, height, x + 1, 1, &label, LABELLED_TEXT_COLOR);
+        lon += 90;
+    }
+
+    // Layer 2 + 3: latitude grid lines, each labelled near the west edge.
+    let mut lat = -90i64;
+    while lat <= 90 {
+        let y = row_for_lat(lat as f64).clamp(0, height as i64 - 1);
+        for col in 0..width as i64 {
+            set_pixel(&mut pixels, width, height, col, y, LABELLED_TEXT_COLOR);
+        }
+        let label = format!("{}{:02}", if lat >= 0 { "N" } else { "S" }, lat.unsigned_abs());
+        draw_text(&mut pixels, width, height, 1, y + 1, &label, LABELLED_TEXT_COLOR);
+        lat += 45;
+    }
+
+    // Layer 3: the word SYNTHETIC, centred on the equator/prime-meridian intersection.
+    let word = "SYNTHETIC";
+    let word_x = width as i64 / 2 - text_pixel_width(word) / 2;
+    let word_y = height as i64 / 2 - GLYPH_HEIGHT as i64 / 2;
+    draw_text(&mut pixels, width, height, word_x, word_y, word, LABELLED_TEXT_COLOR);
+
+    pixels
+}
+
 /// Whole-globe bounds -- fixed, always, for a synthetic source: the only inputs that can
-/// change a synthetic source's own bytes (and therefore its SHA-256) are `width`/`height`.
-fn synthetic_raster_bytes(width: u32, height: u32) -> Vec<u8> {
-    encode_raster(width, height, -180.0, -90.0, 180.0, 90.0, &synthetic_pixels(width, height))
+/// change a synthetic source's own bytes (and therefore its SHA-256) are `width`/`height`/
+/// `style`.
+fn synthetic_raster_bytes(width: u32, height: u32, style: SyntheticStyle) -> Vec<u8> {
+    let pixels = match style {
+        SyntheticStyle::Gradient => synthetic_pixels(width, height),
+        SyntheticStyle::Labelled => labelled_pixels(width, height),
+    };
+    encode_raster(width, height, -180.0, -90.0, 180.0, 90.0, &pixels)
 }
 
 /// Reads the source raster's bytes -- either verbatim off disk, or freshly generated by
@@ -374,7 +660,7 @@ fn synthetic_raster_bytes(width: u32, height: u32) -> Vec<u8> {
 fn source_bytes(source: &Source) -> Result<Vec<u8>, String> {
     match source {
         Source::Path(path) => std::fs::read(path).map_err(|e| format!("--source-path {path:?}: {e}")),
-        Source::Synthetic { width, height } => Ok(synthetic_raster_bytes(*width, *height)),
+        Source::Synthetic { width, height, style } => Ok(synthetic_raster_bytes(*width, *height, *style)),
     }
 }
 
@@ -951,7 +1237,7 @@ mod tests {
         assert_eq!(cli.min_level, Some(0));
         assert_eq!(cli.max_level, Some(1));
         assert_eq!(cli.tile_size, av_jobs::tiler::DEFAULT_TILE_SIZE);
-        assert_eq!(cli.source, Some(Source::Synthetic { width: 4, height: 2 }));
+        assert_eq!(cli.source, Some(Source::Synthetic { width: 4, height: 2, style: SyntheticStyle::Gradient }));
         assert!(cli.dry_run);
     }
 
@@ -1172,34 +1458,75 @@ mod tests {
 
     #[test]
     fn the_same_synthetic_source_flags_produce_byte_identical_bytes_every_time() {
-        let a = synthetic_raster_bytes(37, 19);
-        let b = synthetic_raster_bytes(37, 19);
-        assert_eq!(a, b, "the same --synthetic-source WxH must produce byte-identical raster bytes every run");
-        let a_hash = hex_encode(&sha256(&a));
-        let b_hash = hex_encode(&sha256(&b));
-        assert_eq!(a_hash, b_hash);
+        for style in [SyntheticStyle::Gradient, SyntheticStyle::Labelled] {
+            let a = synthetic_raster_bytes(37, 19, style);
+            let b = synthetic_raster_bytes(37, 19, style);
+            assert_eq!(a, b, "the same --synthetic-source WxH --synthetic-source-style {style:?} must produce byte-identical raster bytes every run");
+            let a_hash = hex_encode(&sha256(&a));
+            let b_hash = hex_encode(&sha256(&b));
+            assert_eq!(a_hash, b_hash);
+        }
     }
 
     #[test]
     fn different_synthetic_source_dimensions_produce_different_source_hashes() {
-        let a = hex_encode(&sha256(&synthetic_raster_bytes(4, 2)));
-        let b = hex_encode(&sha256(&synthetic_raster_bytes(4, 3)));
+        let a = hex_encode(&sha256(&synthetic_raster_bytes(4, 2, SyntheticStyle::Gradient)));
+        let b = hex_encode(&sha256(&synthetic_raster_bytes(4, 3, SyntheticStyle::Gradient)));
         assert_ne!(a, b, "a different height must change the source raster's own bytes, and therefore its hash");
+    }
+
+    #[test]
+    fn the_two_styles_produce_different_bytes_for_the_identical_width_and_height() {
+        // The one new assertion round 7 task 5a exists to add: the whole point of a second
+        // style is that it is NOT the same raster as the default.
+        let gradient = synthetic_raster_bytes(64, 32, SyntheticStyle::Gradient);
+        let labelled = synthetic_raster_bytes(64, 32, SyntheticStyle::Labelled);
+        assert_ne!(gradient, labelled, "gradient and labelled must render different bytes for the identical WxH");
+        assert_eq!(gradient.len(), labelled.len(), "both styles encode the same width/height, so their AVRASTER byte length must still match");
+    }
+
+    #[test]
+    fn the_default_synthetic_style_is_gradient_and_its_bytes_are_pinned_from_before_this_task() {
+        // "The default has not moved" -- these two hex hashes were computed BEFORE this task's
+        // own code change existed, by independently re-implementing this file's own documented
+        // gradient formula (r/g/b arithmetic + the AVRASTER header) in Python, matching Rust's
+        // f64::round() "round half away from zero" behaviour exactly (Python's builtin round()
+        // rounds half to even instead, which this task's own author confirmed actually changes
+        // the 37x19 case's hash -- see this task's own report). Recorded here, in a comment, as
+        // the pre-change reference this task's brief calls for; not derived from this file's
+        // own post-change code in any way.
+        let a = synthetic_raster_bytes(37, 19, SyntheticStyle::default());
+        assert_eq!(hex_encode(&sha256(&a)), "9bf8afccccc6b1f902d0aa884b72e312a84a90725a92498f98734415252b82b6");
+        assert_eq!(a.len(), 2165);
+
+        // 64x32 -- this crate's own README recipe's real --synthetic-source value.
+        let b = synthetic_raster_bytes(64, 32, SyntheticStyle::default());
+        assert_eq!(hex_encode(&sha256(&b)), "ddcf7d471778abfa900030b18fc7fd638e5d272a3cfba20ecef372470f6fc2cf");
+        assert_eq!(b.len(), 6200);
+
+        // And the CLI's own default (no --synthetic-source-style flag at all) takes the
+        // identical Gradient arm -- proven against the real parser, not just SyntheticStyle's
+        // own Default impl.
+        let cli = parse_cli_args(args(&[])).unwrap();
+        assert_eq!(cli.source, Some(Source::Synthetic { width: 4, height: 2, style: SyntheticStyle::Gradient }));
     }
 
     #[test]
     fn synthetic_raster_bytes_decode_as_a_well_formed_raster() {
         // Round-trips through this crate's own real decoder -- proves encode_raster's hand-
         // written header really matches av_jobs::raster's documented layout, not merely this
-        // file's own belief that it does.
-        let bytes = synthetic_raster_bytes(8, 4);
-        let raster = av_jobs::raster::decode(&bytes).expect("encode_raster must produce a raster av_jobs::raster::decode accepts");
-        assert_eq!(raster.width, 8);
-        assert_eq!(raster.height, 4);
-        assert_eq!(raster.west, -180.0);
-        assert_eq!(raster.south, -90.0);
-        assert_eq!(raster.east, 180.0);
-        assert_eq!(raster.north, 90.0);
+        // file's own belief that it does. Both styles: the header is style-independent, only
+        // the pixel payload differs.
+        for style in [SyntheticStyle::Gradient, SyntheticStyle::Labelled] {
+            let bytes = synthetic_raster_bytes(8, 4, style);
+            let raster = av_jobs::raster::decode(&bytes).expect("encode_raster must produce a raster av_jobs::raster::decode accepts");
+            assert_eq!(raster.width, 8);
+            assert_eq!(raster.height, 4);
+            assert_eq!(raster.west, -180.0);
+            assert_eq!(raster.south, -90.0);
+            assert_eq!(raster.east, 180.0);
+            assert_eq!(raster.north, 90.0);
+        }
     }
 
     #[test]
@@ -1215,6 +1542,212 @@ mod tests {
         assert_eq!(px(2, 0), [255, 0, 2]); // r=2/2*255=255, g=0, b=(2+0)%256=2
         assert_eq!(px(0, 2), [0, 255, 2]); // r=0, g=2/2*255=255, b=(0+2)%256=2
         assert_eq!(px(2, 2), [255, 255, 4]); // r=255, g=255, b=(2+2)%256=4
+    }
+
+    // -- --synthetic-source-style CLI parsing (round 7 task 5a) -----------------------------
+
+    #[test]
+    fn synthetic_source_style_accepts_gradient_and_labelled_and_refuses_anything_else() {
+        let gradient = parse_cli_args(args(&["--synthetic-source-style", "gradient"])).unwrap();
+        assert_eq!(gradient.source, Some(Source::Synthetic { width: 4, height: 2, style: SyntheticStyle::Gradient }));
+
+        let labelled = parse_cli_args(args(&["--synthetic-source-style", "labelled"])).unwrap();
+        assert_eq!(labelled.source, Some(Source::Synthetic { width: 4, height: 2, style: SyntheticStyle::Labelled }));
+
+        let err = parse_cli_args(args(&["--synthetic-source-style", "psychedelic"])).unwrap_err();
+        assert!(err.contains("\"gradient\" or \"labelled\""), "{err}");
+    }
+
+    #[test]
+    fn synthetic_source_style_takes_effect_regardless_of_flag_order() {
+        // CliArgs::synthetic_style's own doc: applied after the whole command line is parsed,
+        // specifically so this works whichever flag came first.
+        let style_first: Vec<&str> = vec![
+            "av-tile-fixture",
+            "--synthetic-source-style",
+            "labelled",
+            "--key-prefix",
+            "tiles",
+            "--ladder",
+            "CUI",
+            "--label-marking",
+            "CUI",
+            "--job-id",
+            "job-1",
+            "--min-level",
+            "0",
+            "--max-level",
+            "1",
+            "--synthetic-source",
+            "4x2",
+            "--dry-run",
+        ];
+        let cli = parse_cli_args(style_first.into_iter().map(str::to_string)).unwrap();
+        assert_eq!(cli.source, Some(Source::Synthetic { width: 4, height: 2, style: SyntheticStyle::Labelled }));
+    }
+
+    #[test]
+    fn synthetic_source_style_with_a_file_source_is_refused() {
+        let base: Vec<&str> = vec![
+            "av-tile-fixture",
+            "--key-prefix",
+            "tiles",
+            "--ladder",
+            "CUI",
+            "--label-marking",
+            "CUI",
+            "--job-id",
+            "job-1",
+            "--min-level",
+            "0",
+            "--max-level",
+            "1",
+            "--source-path",
+            "/dev/null",
+            "--synthetic-source-style",
+            "labelled",
+            "--dry-run",
+        ];
+        let err = parse_cli_args(base.into_iter().map(str::to_string)).unwrap_err();
+        assert!(err.contains("--source-path"), "{err}");
+    }
+
+    // -- labelled_pixels: a person can see it (checkerboard, grid, baked text) --------------
+
+    #[test]
+    fn labelled_checkerboard_uses_only_the_two_documented_colours_in_a_roughly_even_split() {
+        // The lat/lon grid + baked text is a FIXED number of lines/glyphs regardless of raster
+        // size, while the checkerboard area grows with width*height -- so a large-enough
+        // raster is what makes the overlay a small minority of pixels; this file's own README
+        // recipe size (64x32) is checked separately, by fraction alone, in the next test.
+        let (width, height) = (256u32, 128u32);
+        let pixels = labelled_pixels(width, height);
+        let mut count_a = 0u32;
+        let mut count_b = 0u32;
+        let mut count_other = 0u32;
+        for chunk in pixels.chunks_exact(3) {
+            let px = [chunk[0], chunk[1], chunk[2]];
+            if px == LABELLED_CHECKER_A {
+                count_a += 1;
+            } else if px == LABELLED_CHECKER_B {
+                count_b += 1;
+            } else {
+                count_other += 1; // grid lines / glyph pixels (LABELLED_TEXT_COLOR, white).
+            }
+        }
+        let total = (width * height) as f64;
+        assert!((count_a as f64 / total) > 0.40, "checker colour A must cover a substantial fraction, got {count_a}/{total}");
+        assert!((count_b as f64 / total) > 0.40, "checker colour B must cover a substantial fraction, got {count_b}/{total}");
+        assert!((count_other as f64 / total) < 0.15, "grid+text overlay must stay a minority of pixels, got {count_other}/{total}");
+        // No pixel at all is teal/brown (the offline fixture's own palette) or a smooth
+        // gradient value that only synthetic_pixels itself could have produced.
+        assert!(count_a > 0 && count_b > 0 && count_other > 0, "all three pixel classes must actually appear: a={count_a} b={count_b} other={count_other}");
+    }
+
+    #[test]
+    fn labelled_at_the_readmes_own_64x32_recipe_size_still_shows_both_checker_colours_and_the_overlay() {
+        // The exact WxH scripts/heavy/README.md's own drive recipe uses -- both checker
+        // colours must appear (the pattern is real, not degenerated to one flat colour) and
+        // SOME overlay pixels must appear too (the grid/text is real, not silently skipped).
+        let (width, height) = (64u32, 32u32);
+        let pixels = labelled_pixels(width, height);
+        let mut count_a = 0u32;
+        let mut count_b = 0u32;
+        let mut count_other = 0u32;
+        for chunk in pixels.chunks_exact(3) {
+            let px = [chunk[0], chunk[1], chunk[2]];
+            if px == LABELLED_CHECKER_A {
+                count_a += 1;
+            } else if px == LABELLED_CHECKER_B {
+                count_b += 1;
+            } else {
+                count_other += 1;
+            }
+        }
+        let total = width * height;
+        assert!(count_a > 0 && count_b > 0 && count_other > 0, "all three pixel classes must appear at the real recipe size: a={count_a} b={count_b} other={count_other} total={total}");
+    }
+
+    #[test]
+    fn labelled_bakes_the_word_synthetic_centred_and_a_glyph_is_present_at_its_expected_bounding_box() {
+        let (width, height) = (64u32, 32u32);
+        let pixels = labelled_pixels(width, height);
+        let word = "SYNTHETIC";
+        let word_x = width as i64 / 2 - text_pixel_width(word) / 2;
+        let word_y = height as i64 / 2 - GLYPH_HEIGHT as i64 / 2;
+
+        // Decode: render the SAME word with the SAME font/placement logic into a scratch
+        // buffer of LABELLED_TEXT_COLOR-on-black, and confirm every "on" pixel this produces
+        // is ALSO LABELLED_TEXT_COLOR in the real labelled_pixels output at the identical
+        // coordinate -- i.e. the baked text really is there, at the position the doc comment
+        // claims, not merely "some white pixels exist somewhere".
+        let mut expected = vec![0u8; width as usize * height as usize * 3];
+        draw_text(&mut expected, width, height, word_x, word_y, word, LABELLED_TEXT_COLOR);
+        let mut glyph_pixel_count = 0u32;
+        for i in 0..(width as usize * height as usize) {
+            let e = [expected[i * 3], expected[i * 3 + 1], expected[i * 3 + 2]];
+            if e == LABELLED_TEXT_COLOR {
+                glyph_pixel_count += 1;
+                let got = [pixels[i * 3], pixels[i * 3 + 1], pixels[i * 3 + 2]];
+                assert_eq!(got, LABELLED_TEXT_COLOR, "pixel index {i} (word {word:?} at ({word_x},{word_y})) must be baked-text-white in the real render");
+            }
+        }
+        assert!(glyph_pixel_count > 0, "the word {word:?} must actually draw at least one pixel at this raster size");
+
+        // Bounding box sanity: the word's own first and last columns/rows fall within the
+        // computed placement, and nowhere near the raster's own edges for this 64x32 size.
+        assert!(word_x >= 0 && word_x + text_pixel_width(word) <= width as i64, "word_x={word_x} must fit inside width={width}");
+        assert!(word_y >= 0 && word_y + GLYPH_HEIGHT as i64 <= height as i64, "word_y={word_y} must fit inside height={height}");
+    }
+
+    #[test]
+    fn labelled_decodes_a_named_latitude_label_at_its_documented_position() {
+        // The equator line (lat=0) is labelled "N00" starting at pixel (1, row_for_lat(0)+1) --
+        // decode it back with the SAME font this file bakes it with, character by character,
+        // proving the actual rendered pixels really spell "N00" at that exact position (not
+        // merely "some text exists somewhere near there").
+        let (width, height) = (64u32, 32u32);
+        let pixels = labelled_pixels(width, height);
+        let row_for_lat_0 = (((90.0 - 0.0) / 180.0) * height as f64).round() as i64;
+        let label_y = row_for_lat_0 + 1;
+        let label = "N00";
+        for (i, expected_char) in label.chars().enumerate() {
+            let glyph_x = 1 + i as i64 * GLYPH_PITCH_X as i64;
+            let rows = glyph_rows(expected_char).unwrap();
+            for (row_idx, row_bits) in rows.iter().enumerate() {
+                for col_idx in 0..GLYPH_WIDTH {
+                    let bit = GLYPH_WIDTH - 1 - col_idx;
+                    let expected_on = (row_bits >> bit) & 1 != 0;
+                    let x = glyph_x + col_idx as i64;
+                    let y = label_y + row_idx as i64;
+                    if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
+                        continue;
+                    }
+                    let idx = (y as usize * width as usize + x as usize) * 3;
+                    let got_white = [pixels[idx], pixels[idx + 1], pixels[idx + 2]] == LABELLED_TEXT_COLOR;
+                    assert_eq!(got_white, expected_on, "glyph {expected_char:?} pixel (col {col_idx}, row {row_idx}) at raster ({x},{y}): decoded {got_white}, expected {expected_on}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checker_cell_size_is_a_stated_fraction_of_the_smaller_dimension_and_never_zero() {
+        assert_eq!(checker_cell_size(64, 32), 2); // 32/16
+        assert_eq!(checker_cell_size(320, 640), 20); // 320/16
+        assert_eq!(checker_cell_size(1, 1), 1); // clamped, never zero
+        assert_eq!(checker_cell_size(4, 2), 1); // 2/16 == 0, clamped to 1
+    }
+
+    #[test]
+    fn labelled_pixels_never_panics_on_the_tiny_rasters_this_files_own_tests_already_use() {
+        // 2x2, 4x2, 3x3, 8x4 -- exactly the sizes this file's own pre-existing tests already
+        // exercise for the gradient style; labelled must be equally well-defined (checkerboard
+        // still renders; text/grid simply clip away).
+        for (w, h) in [(1u32, 1u32), (2, 2), (4, 2), (3, 3), (8, 4)] {
+            let pixels = labelled_pixels(w, h);
+            assert_eq!(pixels.len(), (w * h * 3) as usize);
+        }
     }
 
     // -- the end-to-end dry-run itself (no store, no container) -----------------------------

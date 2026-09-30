@@ -57,6 +57,25 @@ import { LayerManager } from './layers/index.js';
 // trajectory/footprint lines so it is symmetric with every viewport `addViewport()`
 // creates later and never double-renders against one.
 import { Viewport, PRIMARY_LAYER, pickAlongCamera } from './viewport.js';
+// Heavy round 7 (question 233, H6 wiring -- "the plan closes only after the lead sees
+// an entity drawn from a run"): the entity module's own barrel export
+// (web/js/entities/index.js's own doc comment: "a caller outside this directory
+// imports from here, never reaching into an individual file directly"). See this
+// file's new "entities" section, below, for the wiring itself and the module doc
+// comment above `ENTITY_ELLIPSOID_SIGMA` for why the ellipsoid/keep-out/trail
+// rendering here does NOT reuse the module's own `buildEllipsoidMesh`/`buildTrailGroup`
+// position data verbatim (floating-origin safety, question 46).
+import {
+  MarkerLayerAdapter, TrailLayerAdapter,
+  covarianceEllipsoid, keepOutVolumeFromCovariance, buildEllipsoidMesh,
+  ModelEntity, parseGLTFAsset,
+} from './entities/index.js';
+// `ModelEntity`/`parseGLTFAsset` above are the only pieces of the vendored GLTFLoader
+// path this file needs directly imported -- `parseGLTFAsset` (web/js/entities/
+// model_entity.js) is what actually calls `.parse()`; this file constructs the loader
+// itself so a real asset fetch (`_loadEntityModel`, below) never needs a second,
+// independent glTF-loading path.
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export const SCALE = 1e-3;          // scene units per km (1 unit = 1000 km)
 // Camera distance `_fitOrigin()` ("Reset view" in the entities frame) places the
@@ -101,6 +120,44 @@ const AXES_KIND_MAP = { AXES_KIND_RIC: 'ric', AXES_KIND_VNB: 'vnb', AXES_KIND_VV
 // ships with today -- not a claim that 64 MiB is enough for a real ten-gigabyte tile
 // set (H5's own full exit criterion, explicitly out of this task's scope).
 const DEFAULT_LAYER_MEMORY_BUDGET_BYTES = 64 * 1024 * 1024;
+
+// ------------------------------------------------------------- heavy round 7: entities
+// Question 233's own wording: "H6 is accepted as a module with proofs, not as a viewer
+// feature... the plan closes only after the lead sees an entity drawn from a run." This
+// section wires web/js/entities/ (H6) into the ONE live Viewer/LayerManager -- five
+// entity classes, one per Layers-panel checkbox (web/js/panels/layers_panel.js's new
+// "Entities" section): instanced markers and trails (on by default, one per current
+// spacecraft), covariance ellipsoids/keep-out volumes (off by default, drawn only for a
+// spacecraft whose trajectory carries `cov`/`covDim`), and glTF models with attitude
+// (off by default, drawn only for a spacecraft whose trajectory declares `model`).
+//
+// Sigma/margin (this task's brief, verbatim: "Both numbers appear in the control's own
+// label in the panel... so a user is never looking at a number they cannot see"):
+// defaults chosen for VISIBILITY, not a mission parameter -- covarianceEllipsoid/
+// keepOutVolumeFromCovariance keep their own no-default, required-argument discipline
+// (web/js/entities/covariance_ellipsoid.js's/keepout_volume.js's own module docstrings);
+// these constants are what this file passes in, echoed verbatim in
+// web/js/panels/layers_panel.js's own control labels so the two can never silently
+// drift apart (both owned by this same task/round).
+const ENTITY_ELLIPSOID_SIGMA = 3;
+const ENTITY_KEEPOUT_MARGIN_KM = 0.050; // 50 m
+const ENTITY_MARKER_LAYER_ID = 'entity-markers';
+const ENTITY_TRAIL_LAYER_ID = 'entity-trails';
+const ENTITY_ELLIPSOID_LAYER_ID = 'entity-ellipsoids'; // not LayerManager-registered (no byteCost declared for this class) -- a provenance/userData id only, see _updateEntityCovariance()
+const ENTITY_KEEPOUT_LAYER_ID = 'entity-keepout';       // same
+const ENTITY_MODEL_LAYER_ID = 'entity-models';           // same
+// "Trails ... every spacecraft's recent track" (this task's brief) -- a visibility
+// default (how much history to show), not a mission parameter, same discipline as the
+// sigma/margin constants above. Admission byteCost is declared honestly against this
+// same cap (see setScenario()'s entity-trail view building) so the LayerManager's own
+// budget reflects what is actually drawn, never an undeclared amount.
+const ENTITY_TRAIL_RECENT_SAMPLES = 50;
+// Constant per-instance marker size (scene units) -- entity markers are a SEPARATE,
+// budgeted representation from the existing per-spacecraft `s.marker` mesh (unbudgeted,
+// always drawn); both may legitimately be visible at once, so this uses its own small,
+// fixed on-screen footprint rather than reusing MARKER_PX's pixel-constant formula,
+// keeping the two visually distinguishable rather than exact duplicates.
+const ENTITY_MARKER_RADIUS_SCENE_UNITS = 3e-4;
 
 export class Viewer {
   constructor(canvas, labelLayer) {
@@ -200,6 +257,32 @@ export class Viewer {
     // scenario reload (which calls `enableGlobe()` again) never creates a second
     // manager or a second budget.
     this.layerManager = new LayerManager({ memoryBudgetBytes: DEFAULT_LAYER_MEMORY_BUDGET_BYTES });
+    // Heavy round 7 (H6 wiring, question 233): per-entity-class visibility, one flag
+    // per Layers-panel checkbox -- markers/trails on by default, the other three off
+    // (this round's own table). setEntityClassEnabled() (below) is the one setter;
+    // web/js/app.js's checkbox handler calls it, never touching this object directly.
+    this.entityOptions = {
+      markers: true, trails: true, covarianceEllipsoids: false, keepOutVolumes: false, models: false,
+    };
+    // Shared geometry, constructed once (never per-tick/per-scenario) -- the same
+    // convention this.stars/this.axes already use in this constructor. Ellipsoid/
+    // keep-out meshes reuse web/js/entities/ellipsoid_mesh.js's own module-level shared
+    // unit sphere instead (buildEllipsoidMesh); this one is entity MARKERS' own, since
+    // markers are built directly here, not through that module's mesh helper (see
+    // _buildEntityGroups()'s own comment for why).
+    this._entityMarkerGeometry = new THREE.SphereGeometry(1, 10, 8);
+    // Everything else entity-related is rebuilt fresh per scenario in setScenario()
+    // (mirroring this.bodies/this.spacecraft/this.footprints) and torn down in clear()
+    // -- see both methods' own "heavy round 7" comments. Null/empty until the first
+    // setScenario() call.
+    this._entityGroups = null;           // {markers, trails, covarianceEllipsoids, keepOutVolumes, models}: THREE.Group
+    this._entityMarkerMesh = null;       // one THREE.InstancedMesh, rebuilt per scenario
+    this._entityMarkerResidentNames = [];// spacecraft names, in the SAME order as _entityMarkerMesh's instances
+    this._entityTrailLines = new Map();  // spacecraft name -> {line, positions:Float32Array, maxPoints}
+    this._entityCovarianceMeshes = new Map();  // spacecraft name -> {mesh, lastIndex}
+    this._entityKeepoutMeshes = new Map();     // spacecraft name -> {mesh, lastIndex}
+    this._entityModelEntities = new Map();     // spacecraft name -> ModelEntity
+    this._entityModelLoadTokens = new Map();   // spacecraft name -> token object, guards a stale async attach after a reload (see setScenario())
     this.options = { labels: true, trail: 'full', stars: true };
     this.focus = null;             // object name or null (= frame origin)
     this._focusPrev = new THREE.Vector3();
@@ -334,6 +417,42 @@ export class Viewer {
     // (geometry/texture/material).
     if (this.globeLayer) { this.globeLayer.dispose(); this.globeLayer = null; this.globeBodyName = null; }
     if (this.tilesOverlay) { this.tilesOverlay.dispose(); this.tilesOverlay = null; this._tilesOverlayBodyName = null; }
+    // Heavy round 7 (H6 wiring): entity layers are exactly as per-scenario as the globe
+    // above -- torn down the identical way `enableGlobe()`'s own re-registration
+    // already documents (question 233's own required proof: "a reload must not leave a
+    // stale adapter registered under the same id"). `removeLayer` is a documented no-op
+    // when the id was never registered (layer.js's own docstring), so this is safe to
+    // call unconditionally on the very first setScenario() -> clear() too, before any
+    // entity adapter has ever been added. It disposes every resident entry via each
+    // adapter's own release() and drops any _failed blacklist entries for these ids --
+    // never a stale registration or a stale blacklist surviving into the next scenario.
+    this.layerManager.removeLayer(ENTITY_MARKER_LAYER_ID);
+    this.layerManager.removeLayer(ENTITY_TRAIL_LAYER_ID);
+    if (this._entityGroups) {
+      // `disposeGeometry: false` for markers/ellipsoids/keep-out -- their geometry is
+      // SHARED (this._entityMarkerGeometry, constructed once in the constructor; and
+      // ellipsoid_mesh.js's own module-level unit sphere via buildEllipsoidMesh)
+      // disposing it here would corrupt every FUTURE mesh built from that same shared
+      // object, the next scenario included. Trails/models genuinely own their geometry
+      // per-object (a trail's own BufferGeometry; a loaded glTF's own mesh geometries).
+      disposeEntityGroup(this._entityGroups.markers, false);
+      disposeEntityGroup(this._entityGroups.trails, true);
+      disposeEntityGroup(this._entityGroups.covarianceEllipsoids, false);
+      disposeEntityGroup(this._entityGroups.keepOutVolumes, false);
+      disposeEntityGroup(this._entityGroups.models, true);
+      this._entityGroups = null;
+    }
+    // Entity marker/trail meshes' own GPU resources: the marker mesh's material is
+    // this scenario's own (disposeEntityGroup, just above, already removed+disposed it
+    // from the group -- the geometry is the SHARED this._entityMarkerGeometry, deliberately
+    // never disposed here). Trail lines are disposed the same way through their group.
+    this._entityMarkerMesh = null;
+    this._entityMarkerResidentNames = [];
+    this._entityTrailLines.clear();
+    this._entityCovarianceMeshes.clear();
+    this._entityKeepoutMeshes.clear();
+    this._entityModelEntities.clear();
+    this._entityModelLoadTokens.clear();
     // Fresh, EMPTY frame graph per scenario -- drops the previous scenario's frames
     // (and every body/spacecraft/event object parented under them, whose GPU
     // resources were just disposed above) in one step, the same way
@@ -427,6 +546,11 @@ export class Viewer {
       rootObj.add(line);
       this.footprints.set(fp.name, { line, data: fp, lastIndex: -1 });
     }
+    // Heavy round 7 (H6 wiring, question 233): five entity classes, drawn through the
+    // ONE shared `this.layerManager` for the two that go through it -- see this
+    // method's own doc comment above and _buildEntities()'s, below, for the full
+    // per-class contract.
+    this._buildEntities(sc, rootObj);
     // M20.2 (question 134): the whole-scenario framing radius, computed by the same
     // exported, headlessly-testable function on both the Python-scenario and the
     // CDM-ingest path (they share this one JS consumer either way) -- see
@@ -1578,6 +1702,425 @@ export class Viewer {
     return out.set(0, 0, 0);
   }
 
+  // --------------------------------------------------------------- heavy round 7: entities
+  /**
+   * Build all five entity classes for the just-loaded scenario `sc` (`setScenario()`
+   * calls this after bodies/spacecraft/footprints are built, so `this.spacecraft`'s
+   * live per-tick marker positions -- read by every _updateEntity*() method below --
+   * already exist). One `THREE.Group` per class, parented under `rootObj`
+   * (`this._entitiesGroup`, the same render group bodies/spacecraft/footprints use --
+   * never a second, parallel entities root), visibility set from
+   * `this.entityOptions` (never rebuilt on a checkbox toggle -- `setEntityClassEnabled`
+   * below only flips `group.visible`).
+   *
+   * Markers/trails go through `this.layerManager` (`addLayer`, a single admission call
+   * below): "the entity adapters' declared byte costs go on the SAME 64 MiB budget as
+   * the globe's imagery/terrain... never a second LayerManager" (this task's own
+   * brief). Deliberately admitted ONCE here, not re-`update()`-d every render tick --
+   * see the doc comment on `this.layerManager.update(...)`, below, for why: `GlobeLayer`
+   * (web/js/globe.js, a file this task may not edit) drives this SAME shared manager
+   * with its OWN `{tiles, cameraEcef, screenHeightPx, fovYRad}` view every tick it is
+   * active, and `LayerManager.update(view)`'s own contract (web/js/layers/layer.js) is
+   * that EVERY registered layer's `plan(view)` output is that call's entire wanted set
+   * -- two independently-built partial views driving one manager, once each per tick,
+   * would each treat the OTHER call's layers as "not wanted", cancelling
+   * still-in-flight pending loads before they can ever resolve (measured: with a globe
+   * active, alternating globe-view/entity-view calls at 60 Hz never let a single
+   * imagery tile finish loading -- see this task's own report). A one-time admission at
+   * scenario load avoids that entirely: entity markers/trails become resident before
+   * any globe tile is even pending, and (at this codebase's 64 MiB budget against a
+   * demo/RPO scene's few-hundred-byte entity cost) are never evicted afterward, since
+   * eviction only fires under real budget pressure this scene never creates.
+   *
+   * Covariance ellipsoids/keep-out volumes and glTF models are NOT run through
+   * `this.layerManager` -- H6's own module never declared a byte cost for them (only
+   * `MARKER_INSTANCE_BYTES`/`TRAIL_POINT_BYTES`/`TRAIL_FIXED_OVERHEAD_BYTES` exist,
+   * `web/js/entities/entities_instanced_layer.js`), and this task does not invent one;
+   * they are built directly, gated on the scenario actually declaring `cov`/`covDim`
+   * (ellipsoid/keep-out) or `model` (models) for that spacecraft.
+   */
+  _buildEntities(sc, rootObj) {
+    this._entityGroups = {
+      markers: new THREE.Group(), trails: new THREE.Group(), covarianceEllipsoids: new THREE.Group(),
+      keepOutVolumes: new THREE.Group(), models: new THREE.Group(),
+    };
+    this._entityGroups.markers.name = 'entity-markers-group';
+    this._entityGroups.trails.name = 'entity-trails-group';
+    this._entityGroups.covarianceEllipsoids.name = 'entity-covariance-ellipsoids-group';
+    this._entityGroups.keepOutVolumes.name = 'entity-keepout-volumes-group';
+    this._entityGroups.models.name = 'entity-models-group';
+    for (const cls of Object.keys(this._entityGroups)) {
+      this._entityGroups[cls].visible = !!this.entityOptions[cls];
+      rootObj.add(this._entityGroups[cls]);
+    }
+
+    const spacecraftList = sc.spacecraft || [];
+
+    // ---- markers + trails: register fresh adapters, admit once (see this method's own
+    // doc comment for why once, not per-tick).
+    this.layerManager.addLayer(new MarkerLayerAdapter({ id: ENTITY_MARKER_LAYER_ID }));
+    this.layerManager.addLayer(new TrailLayerAdapter({ id: ENTITY_TRAIL_LAYER_ID }));
+    const markerView = spacecraftList
+      .filter((s) => s.t && s.t.length)
+      .map((s) => ({
+        id: s.name,
+        positionKm: [s.pos[0] || 0, s.pos[1] || 0, s.pos[2] || 0],
+        color: s.color || '#ffffff',
+        sseError: 1,
+        viewDistanceM: 1,
+      }));
+    const trailView = spacecraftList
+      .filter((s) => s.t && s.t.length)
+      .map((s) => ({
+        id: s.name,
+        pointsKm: recentTrailPointsKm(s, ENTITY_TRAIL_RECENT_SAMPLES),
+        color: s.color || '#ffffff',
+        sseError: 1,
+        viewDistanceM: 1,
+      }));
+    this.layerManager.update({ markers: markerView, trails: trailView });
+    // `_entitySceneGen`: bumped once per `setScenario()` call (see the top of this
+    // method... actually incremented just below) -- both adapters' own `load()`
+    // (entities_instanced_layer.js's `microtaskLoad`) resolve ONE MICROTASK after
+    // `update()` returns, and `LayerManager._onLoaded` (the admission's own `.then()`)
+    // runs a SECOND microtask after that -- so nothing is actually resident yet at
+    // this exact line, only pending. `_finishEntityMarkerTrailBuild`, below, is
+    // deliberately deferred a few microtask ticks so it reads the manager's REAL,
+    // settled resident set, not an empty one -- and re-checks this generation token
+    // before touching anything, in case a second `setScenario()` call (or clear())
+    // ran before this settles.
+    this._entitySceneGen = (this._entitySceneGen || 0) + 1;
+    const gen = this._entitySceneGen;
+    this._finishEntityMarkerTrailBuild(spacecraftList, gen);
+
+    // ---- covariance ellipsoids + keep-out volumes: built only for a spacecraft whose
+    // trajectory carries real `cov`/`covDim` (question 233's own wire contract, see
+    // this file's top-of-module import comment and covariance_ellipsoid.js's own
+    // module docstring) -- a clean no-op for every spacecraft without it, exactly the
+    // brief's own requirement ("must be a clean no-op with zero console noise when cov
+    // is absent"). Mesh objects are built once here; _updateEntityCovariance (below)
+    // only updates position every tick and scale/quaternion when the nearest native
+    // sample index actually changes (the same cheap "only on index change" discipline
+    // _updateFootprint already uses).
+    for (const s of spacecraftList) {
+      if (!Array.isArray(s.cov) || s.cov.length === 0 || !(s.covDim === 3 || s.covDim === 6)) continue;
+      if (!s.t || !s.t.length) continue;
+      const ellMesh = buildEllipsoidMesh(
+        { semiAxesKm: [1, 1, 1], quaternion: [0, 0, 0, 1] }, // placeholder scale/rotation -- set for real on the first _updateEntityCovariance() tick
+        { color: 0xff9f43, opacity: 0.25, wireframe: false },
+      );
+      ellMesh.userData.sourceLayerId = ENTITY_ELLIPSOID_LAYER_ID;
+      ellMesh.userData.spacecraft = s.name;
+      ellMesh.visible = false; // stays hidden until the first tick actually places it (never an unstyled unit sphere at the origin)
+      this._entityGroups.covarianceEllipsoids.add(ellMesh);
+      this._entityCovarianceMeshes.set(s.name, { mesh: ellMesh, lastIndex: -1 });
+
+      const koMesh = buildEllipsoidMesh(
+        { semiAxesKm: [1, 1, 1], keepOutSemiAxesKm: [1, 1, 1], quaternion: [0, 0, 0, 1] },
+        { color: 0xff3b30, opacity: 0.15, wireframe: true },
+      );
+      koMesh.userData.sourceLayerId = ENTITY_KEEPOUT_LAYER_ID;
+      koMesh.userData.spacecraft = s.name;
+      koMesh.visible = false;
+      this._entityGroups.keepOutVolumes.add(koMesh);
+      this._entityKeepoutMeshes.set(s.name, { mesh: koMesh, lastIndex: -1 });
+    }
+
+    // ---- glTF models: built only for a spacecraft whose trajectory declares `model`
+    // (a URL string, resolved against the page origin). See this file's top-of-module
+    // import comment for why the wire field is named `model` even though
+    // `altavista/model.py`'s `Trajectory.to_dict()` does not emit it today (this
+    // task's own report covers that gap) -- reading it here costs nothing when it is
+    // absent (the common case for every real run this round), and works unchanged the
+    // moment a producer starts emitting it.
+    const loadToken = {}; // one token per setScenario() call -- see _loadEntityModel()'s own guard
+    this._entityModelLoadTokens.set('__scenario__', loadToken);
+    for (const s of spacecraftList) {
+      if (!s.model || typeof s.model !== 'string') continue;
+      if (!s.t || !s.t.length) continue;
+      const entity = new ModelEntity({
+        id: s.name,
+        attitudeSource: this._entityAttitudeSourceFor(s.name),
+      });
+      entity.group.userData.sourceLayerId = ENTITY_MODEL_LAYER_ID;
+      entity.group.userData.spacecraft = s.name;
+      entity.group.visible = false; // stays hidden until attachModel() resolves -- never an empty placeholder group shown as "the model"
+      this._entityGroups.models.add(entity.group);
+      this._entityModelEntities.set(s.name, entity);
+      this._loadEntityModel(s.name, s.model, loadToken);
+    }
+  }
+
+  /** The deferred second half of `_buildEntities`'s marker/trail admission -- see that
+   * method's own comment on `_entitySceneGen` for why this must wait a few microtask
+   * ticks before reading `this.layerManager.resident` (the entity adapters' own
+   * `load()` is deliberately microtask-deferred, `entities_instanced_layer.js`'s own
+   * module docstring: "so a request that gets cancelled between admission and
+   * settlement is genuinely observable"). Awaits enough real microtask turns for BOTH
+   * `microtaskLoad`'s own internal `.then()` AND `LayerManager`'s outer
+   * `.then(_onLoaded)` (chained onto `load()`'s own promise) to have run -- `await
+   * Promise.resolve()` twice, not once, is what makes that reliable regardless of
+   * engine microtask-queue implementation details (never a fixed-duration
+   * `setTimeout`, per design constraint g -- "no clocks slept, ever").
+   *
+   * Builds the marker `THREE.InstancedMesh` and one `THREE.Line` per resident trail
+   * from whatever admission actually produced (at this codebase's 64 MiB budget, that
+   * is "every spacecraft" for any real scenario this round exercises, but this reads
+   * the manager's own truth rather than assuming it) -- capacity fixed at
+   * construction; `_updateEntityMarkers`/`_updateEntityTrails` (per-tick, below) only
+   * ever overwrite an existing instance's matrix/buffer contents, never reallocate.
+   *
+   * Bails silently (no console noise -- a genuine, ordinary "the scenario changed
+   * again before this settled" race, not an error) if `gen` no longer matches
+   * `this._entitySceneGen` -- bumped by every `_buildEntities()` call -- meaning this
+   * viewer has already moved on to a different (or no) scenario by the time this
+   * would have touched the scene graph.
+   */
+  async _finishEntityMarkerTrailBuild(spacecraftList, gen) {
+    await Promise.resolve();
+    await Promise.resolve();
+    if (this._entitySceneGen !== gen || !this._entityGroups) return;
+
+    const residentMarkerNames = [];
+    for (const entry of this.layerManager.resident.values()) {
+      if (entry.layerId === ENTITY_MARKER_LAYER_ID) residentMarkerNames.push(entry.localKey);
+    }
+    this._entityMarkerResidentNames = residentMarkerNames;
+    if (residentMarkerNames.length) {
+      const material = new THREE.MeshBasicMaterial({ vertexColors: true });
+      const mesh = new THREE.InstancedMesh(this._entityMarkerGeometry, material, residentMarkerNames.length);
+      mesh.count = residentMarkerNames.length;
+      mesh.userData.sourceLayerId = ENTITY_MARKER_LAYER_ID;
+      mesh.userData.residentKeys = residentMarkerNames;
+      residentMarkerNames.forEach((name, i) => {
+        const s = spacecraftList.find((sc0) => sc0.name === name);
+        mesh.setColorAt(i, new THREE.Color((s && s.color) || '#ffffff'));
+      });
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      this._entityGroups.markers.add(mesh);
+      this._entityMarkerMesh = mesh;
+    } else {
+      this._entityMarkerMesh = null;
+    }
+
+    for (const entry of this.layerManager.resident.values()) {
+      if (entry.layerId !== ENTITY_TRAIL_LAYER_ID) continue;
+      const name = entry.localKey;
+      const s = spacecraftList.find((sc0) => sc0.name === name);
+      const positions = new Float32Array(ENTITY_TRAIL_RECENT_SAMPLES * 3);
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geometry.setDrawRange(0, 0);
+      const material = new THREE.LineBasicMaterial({ color: new THREE.Color((s && s.color) || '#ffffff') });
+      const line = new THREE.Line(geometry, material);
+      line.userData.sourceLayerId = ENTITY_TRAIL_LAYER_ID;
+      line.userData.spacecraft = name;
+      line.frustumCulled = false;
+      this._entityGroups.trails.add(line);
+      this._entityTrailLines.set(name, { line, positions, maxPoints: ENTITY_TRAIL_RECENT_SAMPLES });
+    }
+  }
+
+  /** Reuse the SAME `${name}_body` frame node `_buildFrameGraph` already synthesizes
+   * for every spacecraft (a real attitude quaternion stream when the scenario supplies
+   * one, else a nadir-pointing VVLH fallback -- see that method's own doc comment) --
+   * "attitude comes from the spacecraft's attitude stream when present, else from the
+   * per-spacecraft body-frame node... reuse that node, never a second attitude
+   * implementation" (this task's own brief, verbatim). `this.frameGraph.update(t,
+   * SCALE)` (the very first line of `update()`, below) already refreshes that node's
+   * quaternion before any entity per-tick method runs, so this adapter needs no `t` of
+   * its own -- it just reads the node's current, already-correct orientation.
+   * @param {string} name
+   * @returns {{orientation:(t:number, out:THREE.Quaternion)=>THREE.Quaternion}}
+   */
+  _entityAttitudeSourceFor(name) {
+    const frameId = `${name}_body`;
+    return {
+      orientation: (t, out) => {
+        if (!this.frameGraph.has(frameId)) return out.identity();
+        return out.copy(this.frameGraph.frame(frameId).object3D.quaternion);
+      },
+    };
+  }
+
+  /** Fetch+parse `url` (resolved against the page origin) into a real glTF asset and
+   * attach it to `name`'s already-constructed `ModelEntity` (`_buildEntities`, above)
+   * -- `web/js/entities/model_entity.js`'s own `createModelEntityFromGLTF`/GLTFLoader,
+   * never a second parse implementation. `token` guards against a reload that happens
+   * while this fetch is still in flight: if `this._entityModelLoadTokens.get(
+   * '__scenario__')` no longer === `token` by the time this resolves, the scenario
+   * has already been cleared (or reloaded again) and attaching would touch a disposed
+   * group / resurrect a stale entity -- silently (not an error condition; a genuine
+   * mid-flight scenario change) drops the result instead. A real fetch/parse failure
+   * is a single `console.warn` naming the spacecraft and URL (never swallowed
+   * entirely, never a console.error -- this is a missing/broken optional asset, not a
+   * page fault), matching `makeBodyMesh`'s own texture-load-failure precedent in this
+   * file (`loader.load(b.texture, ..., () => { material.color = color; })`). */
+  async _loadEntityModel(name, url, token) {
+    try {
+      const resolved = new URL(url, window.location.href).toString();
+      const resp = await fetch(resolved);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.arrayBuffer();
+      if (this._entityModelLoadTokens.get('__scenario__') !== token) return; // scenario changed under us -- see this method's own doc comment
+      const entity = this._entityModelEntities.get(name);
+      if (!entity) return;
+      const gltf = await parseGLTFAsset(new GLTFLoader(), data, resolved);
+      if (this._entityModelLoadTokens.get('__scenario__') !== token) return;
+      entity.attachModel(gltf);
+      entity.group.visible = this.entityOptions.models;
+    } catch (e) {
+      console.warn(`altavista: entity model for '${name}' ('${url}') failed to load: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  /** The Layers panel's per-entity-class checkbox handler (web/js/app.js). Flips
+   * `this.entityOptions[cls]` and the corresponding group's own `.visible` -- never
+   * rebuilds anything (mirrors `setOptions()`'s own "flip a flag, don't rebuild"
+   * discipline for trail/label/axes/grid/stars toggles, just below). A no-op before
+   * the first scenario has ever loaded (`this._entityGroups` is null).
+   * @param {'markers'|'trails'|'covarianceEllipsoids'|'keepOutVolumes'|'models'} cls
+   * @param {boolean} enabled
+   */
+  setEntityClassEnabled(cls, enabled) {
+    if (!(cls in this.entityOptions)) throw new Error(`unknown entity class '${cls}'`);
+    this.entityOptions[cls] = !!enabled;
+    if (this._entityGroups) this._entityGroups[cls].visible = !!enabled;
+  }
+
+  /** Per-tick: overwrite every resident entity marker's instance matrix from the
+   * SAME already-computed, origin-relative, scaled position this tick's own
+   * body/spacecraft loop (below) just wrote into `s.marker.position` -- never
+   * `entry.payload.matrix` (`MarkerLayerAdapter.load()`'s own baked matrix is a RAW
+   * ABSOLUTE km coordinate with no scale/origin-subtraction at all, by that module's
+   * own deliberate design -- see this file's top-of-module import comment; using it
+   * directly here would reintroduce exactly the float32-precision jitter question 46's
+   * bound exists to catch). `this.layerManager`'s own resident/admission bookkeeping
+   * is untouched by this method -- it is read-only here (which spacecraft are
+   * currently admitted), never re-driven per tick (see `_buildEntities`'s own doc
+   * comment for why). */
+  _updateEntityMarkers() {
+    const mesh = this._entityMarkerMesh;
+    if (!mesh) return;
+    const m4 = this._tmpEntityMatrix || (this._tmpEntityMatrix = new THREE.Matrix4());
+    const scaleVec = this._tmpEntityScale || (this._tmpEntityScale = new THREE.Vector3());
+    const q = this._tmpEntityQuat || (this._tmpEntityQuat = new THREE.Quaternion());
+    let any = false;
+    this._entityMarkerResidentNames.forEach((name, i) => {
+      const s = this.spacecraft.get(name);
+      if (!s) return;
+      any = true;
+      scaleVec.setScalar(ENTITY_MARKER_RADIUS_SCENE_UNITS);
+      m4.compose(s.marker.position, q.identity(), scaleVec);
+      mesh.setMatrixAt(i, m4);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.visible = any;
+  }
+
+  /** Per-tick: rebuild each resident trail's "recent track" -- the last
+   * `ENTITY_TRAIL_RECENT_SAMPLES` polyline samples up to (and including) the sample
+   * nearest `t` -- into its PREALLOCATED position buffer, via `trajectoryRenderPositions`
+   * (this file, above): the SAME origin-safe scale+subtract+single-fround pipeline the
+   * primary trajectory line already uses, never `entry.payload.line`'s own raw-absolute
+   * geometry (identical reasoning to `_updateEntityMarkers`'s own doc comment). */
+  _updateEntityTrails(t) {
+    for (const [name, rec] of this._entityTrailLines) {
+      const s = this.spacecraft.get(name);
+      if (!s || !s.poly || !s.poly.times.length) { rec.line.visible = false; continue; }
+      const idx = nearestSampleIndex(t, s.poly.times);
+      if (idx < 0) { rec.line.visible = false; continue; }
+      const start = Math.max(0, idx - rec.maxPoints + 1);
+      const count = idx - start + 1;
+      const slicePoly = { points: s.poly.points.slice(start * 3, (idx + 1) * 3) };
+      const rendered = trajectoryRenderPositions(slicePoly, this.floatingOrigin, this._originFrameId);
+      // `trajectoryRenderPositions` degrades a <2-point input to a fixed 2-point
+      // placeholder (its own documented "never throw" contract for a too-short
+      // polyline) -- only trust/copy it when it genuinely covers `count` points.
+      if (count >= 2 && rendered.length === count * 3) {
+        rec.positions.set(rendered, 0);
+        rec.line.geometry.setDrawRange(0, count);
+        rec.line.geometry.attributes.position.needsUpdate = true;
+        rec.line.geometry.computeBoundingSphere();
+        rec.line.visible = true;
+      } else {
+        rec.line.visible = false;
+      }
+    }
+  }
+
+  /** Per-tick: covariance ellipsoids + keep-out volumes. Position follows the SAME
+   * live, continuous `s.marker.position` every tick (like `_updateEntityMarkers`);
+   * SHAPE (semi-axes/orientation) only recomputes when the nearest native sample
+   * index changes (never interpolated -- see `nearestSampleIndex`'s own doc comment),
+   * the same split `_updateFootprint` already uses for ring geometry vs. this file's
+   * continuous marker motion. `mesh.scale`/`worldSemiAxesKm(mesh)` are in SCENE UNITS
+   * (`semiAxesKm * SCALE`, consistent with every other km->scene-unit conversion in
+   * this file, e.g. `b.data.radius * SCALE`) -- never raw km, so a parent transform
+   * composes correctly. */
+  _updateEntityCovariance(t) {
+    for (const [name, rec] of this._entityCovarianceMeshes) {
+      const s = this.spacecraft.get(name);
+      const koRec = this._entityKeepoutMeshes.get(name);
+      if (!s) { rec.mesh.visible = false; if (koRec) koRec.mesh.visible = false; continue; }
+      rec.mesh.position.copy(s.marker.position);
+      if (koRec) koRec.mesh.position.copy(s.marker.position);
+      const idx = nearestSampleIndex(t, s.data.t);
+      if (idx !== rec.lastIndex) {
+        rec.lastIndex = idx;
+        if (koRec) koRec.lastIndex = idx;
+        const block = covBlockAtSample(s.data.cov, s.data.covDim, idx);
+        if (block) {
+          try {
+            const ell = covarianceEllipsoid(block, s.data.covDim, { sigma: ENTITY_ELLIPSOID_SIGMA });
+            rec.mesh.scale.set(ell.semiAxesKm[0] * SCALE, ell.semiAxesKm[1] * SCALE, ell.semiAxesKm[2] * SCALE);
+            rec.mesh.quaternion.set(...ell.quaternion);
+            rec.mesh.userData.ellipsoid = ell;
+            rec.hasShape = true;
+            if (koRec) {
+              const ko = keepOutVolumeFromCovariance(block, s.data.covDim, { sigma: ENTITY_ELLIPSOID_SIGMA, marginKm: ENTITY_KEEPOUT_MARGIN_KM });
+              koRec.mesh.scale.set(
+                ko.keepOutSemiAxesKm[0] * SCALE, ko.keepOutSemiAxesKm[1] * SCALE, ko.keepOutSemiAxesKm[2] * SCALE,
+              );
+              koRec.mesh.quaternion.set(...ko.quaternion);
+              koRec.mesh.userData.keepOut = ko;
+              koRec.hasShape = true;
+            }
+          } catch (e) {
+            // CovarianceShapeError (or any other malformed-matrix refusal) -- never
+            // fabricate a shape from bad data; stay hidden and say why, once per
+            // index change (never every tick -- this branch only runs on an index
+            // change to begin with).
+            console.warn(`altavista: covariance ellipsoid for '${name}' at sample ${idx} refused: ${e.message}`);
+            rec.hasShape = false;
+            if (koRec) koRec.hasShape = false;
+          }
+        } else {
+          rec.hasShape = false;
+          if (koRec) koRec.hasShape = false;
+        }
+      }
+      rec.mesh.visible = this.entityOptions.covarianceEllipsoids && !!rec.hasShape;
+      if (koRec) koRec.mesh.visible = this.entityOptions.keepOutVolumes && !!koRec.hasShape;
+    }
+  }
+
+  /** Per-tick: glTF model entities -- position from the live spacecraft marker
+   * (like `_updateEntityMarkers`), attitude driven by `ModelEntity.update(t)` via the
+   * shared body-frame attitude source (`_entityAttitudeSourceFor`, above). A no-op for
+   * an entity whose model has not finished loading yet (`entity.modelLoaded` false --
+   * `_loadEntityModel` is async; this stays invisible, never a placeholder shown as
+   * "the model", until it genuinely has content). */
+  _updateEntityModels(t) {
+    for (const [name, entity] of this._entityModelEntities) {
+      const s = this.spacecraft.get(name);
+      if (!s || !entity.modelLoaded) { entity.group.visible = false; continue; }
+      entity.group.position.copy(s.marker.position);
+      entity.update(t);
+      entity.group.visible = this.entityOptions.models;
+    }
+  }
+
   // ------------------------------------------------------------------ per frame
   update(t) {
     this._lastT = t;
@@ -1703,6 +2246,17 @@ export class Viewer {
     for (const e of this.events) {
       const d = this._markerReferenceDistance(e.mesh.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
       e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, 1e-6));
+    }
+    // Heavy round 7 (H6 wiring): entity per-tick update, AFTER the spacecraft loop
+    // above (every _updateEntity*() method below reads `s.marker.position`, which that
+    // loop just wrote fresh this tick) and BEFORE render() -- see each method's own
+    // doc comment. Cheap, unconditional no-ops before the first scenario loads
+    // (`this._entityGroups` null) or when a class has nothing resident/qualifying.
+    if (this._entityGroups) {
+      this._updateEntityMarkers();
+      this._updateEntityTrails(t);
+      this._updateEntityCovariance(t);
+      this._updateEntityModels(t);
     }
     this.renderer.render(this.scene, cam);
     if (this.options.labels) this._updateLabels();
@@ -2072,4 +2626,95 @@ function disposeMesh(mesh) {
     if (mesh.material.map) mesh.material.map.dispose();
     mesh.material.dispose();
   }
+}
+
+// --------------------------------------------------------------- heavy round 7: entities
+/**
+ * Dispose every child object currently in entity group `group` (recursively -- a glTF
+ * model's own scene graph is nested) and empty the group. `disposeGeometry` is false
+ * for a group whose objects share geometry owned OUTSIDE this group (entity markers:
+ * `Viewer._entityMarkerGeometry`, constructed once in the constructor; covariance
+ * ellipsoids/keep-out volumes: `web/js/entities/ellipsoid_mesh.js`'s own module-level
+ * shared unit sphere, via `buildEllipsoidMesh`) -- disposing a SHARED geometry here
+ * would corrupt every future mesh built from that same object, not only this
+ * scenario's. Materials are always genuinely per-object (each `buildEllipsoidMesh`/
+ * per-tick marker/trail build constructs its own), so they are always disposed.
+ * @param {THREE.Object3D} group
+ * @param {boolean} disposeGeometry
+ */
+function disposeEntityGroup(group, disposeGeometry) {
+  for (const child of group.children.slice()) {
+    child.traverse((obj) => {
+      if (disposeGeometry && obj.geometry) obj.geometry.dispose();
+      if (obj.material) {
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) { if (m.map) m.map.dispose(); m.dispose(); }
+      }
+    });
+    group.remove(child);
+  }
+}
+
+/**
+ * Nearest-recorded-sample index of `t` against `times` -- the identical discipline
+ * `Viewer._updateFootprint` already uses for sensor footprint rings (this file, above):
+ * covariance, like a footprint ring, exists only at NATIVE samples (this module's own
+ * top comment; web/js/entities/covariance_ellipsoid.js's own module docstring, quoting
+ * `web/js/interp.js`'s `classifyStateSpace`: "a consumer must treat it as a
+ * per-native-sample-only quantity, never Hermite/slerp-blended") -- never interpolated,
+ * never a second, independently-written nearest-sample rule.
+ * @param {number} t
+ * @param {number[]} times
+ * @returns {number} -1 if `times` is empty
+ */
+function nearestSampleIndex(t, times) {
+  if (!times || times.length === 0) return -1;
+  let idx = findSegment(t, times);
+  if (idx < times.length - 1 && (t - times[idx]) > (times[idx + 1] - t)) idx += 1;
+  return idx;
+}
+
+/**
+ * Extract the `n`-th row-major `n x n` covariance block at native sample `idx` out of
+ * a flattened, per-sample-concatenated `covFlat` (`altavista/model.py`'s
+ * `Trajectory.to_dict()`'s own `cov` field: "flat row-major n x n covariance per
+ * sample, concatenated -- length == len(t) * cov_dim * cov_dim"). Returns `null` (never
+ * throws) when `idx` is out of range or `covFlat` is too short for it -- a caller
+ * degrades to "no covariance this tick", the same never-fabricate discipline
+ * `covarianceEllipsoid`/`keepOutVolumeFromCovariance` themselves already apply to a
+ * malformed matrix.
+ * @param {number[]} covFlat
+ * @param {number} n
+ * @param {number} idx
+ * @returns {number[]|null}
+ */
+function covBlockAtSample(covFlat, n, idx) {
+  if (idx < 0 || !Array.isArray(covFlat) || n <= 0) return null;
+  const start = idx * n * n;
+  const end = start + n * n;
+  if (end > covFlat.length) return null;
+  return covFlat.slice(start, end);
+}
+
+/**
+ * The last (up to) `maxPoints` samples of wire-shaped spacecraft `s`'s own `pos`
+ * (`altavista/model.py`'s `Trajectory.to_dict()`: flat `[x0,y0,z0,x1,y1,z1,...]` km,
+ * absolute), as an array of `[x,y,z]` triples -- exactly `TrailLayerAdapter.plan()`'s
+ * own documented `pointsKm` shape (`web/js/entities/entities_instanced_layer.js`).
+ * Used ONLY to declare this trail's honest admission byteCost against the SAME
+ * `ENTITY_TRAIL_RECENT_SAMPLES` cap `_updateEntityTrails` actually renders (see
+ * `_buildEntities`'s own doc comment) -- never used for rendering itself (that reads
+ * `s.poly`/`trajectoryRenderPositions`, origin-safe; see `_updateEntityTrails`'s own
+ * doc comment for why this raw-absolute array is admission-only).
+ * @param {{pos?: number[]}} s
+ * @param {number} maxPoints
+ * @returns {number[][]}
+ */
+function recentTrailPointsKm(s, maxPoints) {
+  const flat = s.pos || [];
+  const total = Math.floor(flat.length / 3);
+  const start = Math.max(0, total - maxPoints);
+  const out = [];
+  for (let i = start; i < total; i++) out.push([flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]]);
+  return out.length ? out : [[0, 0, 0], [0, 0, 0]]; // never an empty pointsKm -- byteCost math (fixedOverheadBytes + length*pointBytes) is fine at 2, and TrailLayerAdapter.load() builds a degenerate-but-valid Line from it
 }

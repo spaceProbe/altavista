@@ -129,6 +129,17 @@ pub enum CatalogError {
     /// never a `sleep` used as a synchronisation device (rule 7).
     #[error("connecting to {host}:{port}: timed out after {timeout:?}")]
     ConnectTimeout { host: String, port: u16, timeout: std::time::Duration },
+    /// [`crate::client::PgClient::connect`]: `PgConfig::connect_timeout` elapsed during a phase
+    /// of the handshake that runs AFTER the TCP connect completes -- `"tls-negotiation"` (the
+    /// `SSLRequest`/`'S'`-or-`'N'` exchange and, on `'S'`, the TLS upgrade itself) or
+    /// `"startup"` (the `StartupMessage`/authentication/`ReadyForQuery` exchange
+    /// [`crate::client::PgClient::startup`] runs). Distinct from [`Self::ConnectTimeout`]
+    /// (which is the TCP connect step only, and keeps its own exact meaning): this variant is
+    /// what a peer that accepts the TCP connection and then never writes another byte produces,
+    /// naming exactly which phase stalled so a caller reading a log does not have to guess
+    /// whether the peer is unreachable or merely silent after accepting.
+    #[error("connecting to {host}:{port}: {phase} timed out after {timeout:?} (the peer accepted the TCP connection but did not complete this phase in time)")]
+    HandshakeTimeout { host: String, port: u16, timeout: std::time::Duration, phase: &'static str },
     /// [`crate::client::PgClient::connect`]: the server replied to `SSLRequest` with neither
     /// `'S'` nor `'N'` -- not a protocol PostgreSQL 3.0 defines.
     #[error("server replied to SSLRequest with byte {byte:#04x} (expected 'S' or 'N')")]

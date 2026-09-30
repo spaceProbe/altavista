@@ -139,6 +139,25 @@ class Trajectory:
     # producer populates this yet (GMAT attitude realization is explicitly P2 per that
     # proto field's own comment); this is schema groundwork only.
     attitude: List[List[float]] = field(default_factory=list)
+    # Additive, heavy round 7 (question 233): a real spacecraft-state covariance stream,
+    # one row-major n x n list per sample (n == 3 or 6), parallel to `t` -- the wire shape
+    # `altavista.v1.TrajectorySample.cov` already declares (proto/altavista/v1/
+    # trajectory.proto: "Row-major n x n covariance, SPD; empty when the DRM did not
+    # request covariance"), threaded here from `altavista.cdm.cdm_trajectory_to_viewer_json`
+    # (the only place that ever populates it -- see that function's own doc comment for
+    # the SI-to-km unit conversion and the all-or-nothing/consistent-n rules). Already in
+    # km / km/s squared units by the time it reaches this dataclass (this module has no
+    # protobuf/SI dependency of its own, matching `pos`/`vel`/`attitude` above). Empty
+    # (the default) means "no covariance recorded for this spacecraft" -- symmetric with
+    # `attitude`'s own "no producer yet" precedent, except a producer now exists (the DRM
+    # executor's own P(t), `crates/av-kernel/src/kernel.rs::run_with_covariance`) once a
+    # DRM requests it (`DrmOptions.covariance: true`).
+    cov: List[List[float]] = field(default_factory=list)
+    # The `n` every entry in `cov` is (3 or 6) -- 0 when `cov` is empty. Carried
+    # separately from a flattened sample's own length so a consumer
+    # (`web/js/entities/covariance_ellipsoid.js`'s `positionCovarianceBlock`) never has to
+    # re-derive it.
+    cov_dim: int = 0
 
     def append(self, t: float, state) -> None:
         s = [float(state[i]) for i in range(6)]
@@ -163,6 +182,14 @@ class Trajectory:
             "pos": [c for p in self.pos for c in p],
             "vel": [c for v in self.vel for c in v],
             "attitude": [c for q in self.attitude for c in q],
+            # Additive, heavy round 7 (question 233): flat row-major n x n covariance per
+            # sample, concatenated -- length == len(t) * cov_dim * cov_dim, [] when this
+            # trajectory carries no covariance (see the field's own doc comment above and
+            # altavista/cdm.py's module docstring, "Covariance: still never fabricated on
+            # the way in, now carried on the way out" section, for the full contract and
+            # the SI->km unit-conversion reasoning).
+            "cov": [c for row in self.cov for c in row],
+            "covDim": self.cov_dim,
             # Additive, M7.1 (question 88): which declared StateSpace (see the module-level
             # STATE_SPACE_ID_* constants and ScenarioData.state_spaces below) this
             # trajectory's `pos`/`vel`/`attitude` shape corresponds to -- derived from

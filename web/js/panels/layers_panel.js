@@ -82,6 +82,82 @@
 
 const LAYER_ID_PREFIX = 'gateway-tileset:';
 
+// -------------------------------------------------------- heavy round 7: Entities section
+// Question 233: "a per-entity-class control lives in the Layers panel, one checkbox per
+// class, off by default except markers and trails." This section is additive and
+// LOCALIZED (its own `<div class="av-panel-section">`, appended after the tile-set
+// section, below the streaming-budget section's own building block in `render()`) --
+// never touching the "failed requests" row another worker is changing in a later
+// commit this same round (this file's own top comment, round-6 repaint-cadence
+// contract: `render()` still tears down/rebuilds whole, unchanged; only
+// `layersPanelStateKey()` gains one more field below so a checkbox toggle triggers a
+// real rebuild rather than being silently absorbed into the ~2 Hz budget-only patch).
+//
+// Sigma/margin numbers are LITERAL here (3σ / 50 m), matching web/js/scene.js's own
+// `ENTITY_ELLIPSOID_SIGMA`/`ENTITY_KEEPOUT_MARGIN_KM` constants exactly -- both owned by
+// this same task/round, so there is one place (this task's own report) that states they
+// must never drift apart, rather than a shared import (this panel's own top comment:
+// "never imports scene.js").
+const ENTITY_CLASSES = [
+  { id: 'markers', label: 'Instanced markers' },
+  { id: 'trails', label: 'Trails' },
+  { id: 'covarianceEllipsoids', label: 'Covariance ellipsoids (3σ)' },
+  { id: 'keepOutVolumes', label: 'Keep-out volumes (3σ + 50 m)' },
+  { id: 'models', label: 'glTF models (attitude-driven)' },
+];
+
+/**
+ * `{markers, trails, covarianceEllipsoids, keepOutVolumes, models}` (the caller's
+ * `viewer.entityOptions`, or `null`/`undefined` before any scenario has loaded) -> the
+ * "Entities" section's DOM. One checkbox per class, in `ENTITY_CLASSES`' own fixed
+ * order (never `Object.keys()` on the caller's object, which is not order-guaranteed
+ * across engines for this shape and would make two renders with the same state
+ * potentially disagree on row order).
+ * @param {{markers?:boolean, trails?:boolean, covarianceEllipsoids?:boolean,
+ *   keepOutVolumes?:boolean, models?:boolean}|null|undefined} entityOptions
+ * @param {(cls:string, enabled:boolean)=>void} [onToggleEntity]
+ */
+function buildEntitiesSection(entityOptions, onToggleEntity) {
+  const section = document.createElement('div');
+  section.className = 'av-panel-section';
+  section.appendChild(el('h4', null, 'Entities'));
+  if (!entityOptions) {
+    section.appendChild(noticeEl('No scenario loaded yet.'));
+    return section;
+  }
+  const list = document.createElement('ul');
+  list.className = 'av-layers-entities';
+  for (const cls of ENTITY_CLASSES) {
+    const li = document.createElement('li');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!entityOptions[cls.id];
+    cb.addEventListener('change', () => onToggleEntity && onToggleEntity(cls.id, cb.checked));
+    const nm = document.createElement('span');
+    nm.className = 'name';
+    nm.textContent = cls.label;
+    li.append(cb, nm);
+    list.appendChild(li);
+  }
+  section.appendChild(list);
+  return section;
+}
+
+/**
+ * A cheap, TOTAL change key over `entityOptions` alone -- the same "state, precisely"
+ * discipline `layersPanelStateKey()` (below) already documents for the tile-set list,
+ * applied here so `layersPanelStateKey()` can fold this in without re-deriving its own
+ * comparison rule. Order-independent (`ENTITY_CLASSES`' own fixed order, never object
+ * key order) for the identical reason `buildEntitiesSection()` above uses it.
+ * @param {{markers?:boolean, trails?:boolean, covarianceEllipsoids?:boolean,
+ *   keepOutVolumes?:boolean, models?:boolean}|null|undefined} entityOptions
+ * @returns {string}
+ */
+export function entityOptionsKey(entityOptions) {
+  if (!entityOptions) return 'null';
+  return ENTITY_CLASSES.map((cls) => `${cls.id}${!!entityOptions[cls.id]}`).join(',');
+}
+
 /** Real production counter, incremented by `render()` (below) every time it performs a
  * full teardown/rebuild of this panel's DOM -- never incremented, never touched, by
  * `updateBudgetSection()`'s in-place budget patch. Exists so a test can read a REAL
@@ -228,7 +304,9 @@ export function layerStateFor(manifestSha256, layerStates) {
  * @returns {string}
  */
 export function layersPanelStateKey(data) {
-  const { tileSets, catalogError, loading, layerStates } = data || {};
+  const {
+    tileSets, catalogError, loading, layerStates, entityOptions,
+  } = data || {};
   const layerStateEntries = layerStates
     ? Object.keys(layerStates).sort().map((k) => `${k}${layerStates[k].status || 'off'}${layerStates[k].errorMessage || ''}`)
     : [];
@@ -237,7 +315,52 @@ export function layersPanelStateKey(data) {
     catalogError ? [catalogError.status ?? null, catalogError.message ?? null] : null,
     !!loading,
     layerStateEntries,
+    entityOptionsKey(entityOptions),
   ]);
+}
+
+/**
+ * Task 5b (panel-failure-attribution, heavy round 7): splits
+ * `LayerManager.failuresByLayer()`'s per-layer failure counts into the two buckets a
+ * user actually needs to tell apart -- "the tile set(s) I selected" vs. "a layer that
+ * declares it has no loader at all" (today only `web/js/layers/terrain_layer.js`'s
+ * `notImplemented` terrain adapter, but this function never hard-codes that id or any
+ * error name: `noLoaderLayerIds` is the ONLY thing that decides membership, exactly
+ * `LayerManager.noLoaderLayers()`'s own ids, read by `web/js/app.js`'s
+ * `renderLayersPanelNow()` and passed straight through). A layer id not in
+ * `noLoaderLayerIds` is, by construction, a layer whose loader is real -- the
+ * selected gateway tile set(s) today, and honestly still counted here even if some
+ * OTHER real-loader layer (e.g. the globe's own default, non-toggled imagery) ever
+ * failed too, so a failure is never silently dropped by this split (question 228's
+ * rule restated for attribution: "visible", not "correctly bucketed by guesswork").
+ *
+ * The partition is total: every `failuresByLayer` entry lands in exactly one bucket,
+ * so `tileSetCount + sum(noLoader[*].count) === failedCount` always (proven directly
+ * in `web/js/layers_panel_check.mjs`).
+ * @param {Object<string,{count:number,names:string[]}>|null|undefined} failuresByLayer
+ * @param {string[]|null|undefined} noLoaderLayerIds
+ * @returns {{tileSetCount:number, tileSetNames:string[],
+ *   noLoader:Array<{layerId:string, count:number, names:string[]}>}}
+ */
+export function attributeFailures(failuresByLayer, noLoaderLayerIds) {
+  const noLoaderIds = new Set(Array.isArray(noLoaderLayerIds) ? noLoaderLayerIds : []);
+  const byLayer = failuresByLayer && typeof failuresByLayer === 'object' ? failuresByLayer : {};
+
+  let tileSetCount = 0;
+  const tileSetNames = new Set();
+  const noLoader = [];
+  for (const layerId of Object.keys(byLayer).sort()) {
+    const entry = byLayer[layerId] || {};
+    const count = Number.isFinite(entry.count) ? entry.count : 0;
+    const names = Array.isArray(entry.names) ? [...entry.names].sort() : [];
+    if (noLoaderIds.has(layerId)) {
+      noLoader.push({ layerId, count, names });
+    } else {
+      tileSetCount += count;
+      for (const name of names) tileSetNames.add(name);
+    }
+  }
+  return { tileSetCount, tileSetNames: [...tileSetNames].sort(), noLoader };
 }
 
 // -------------------------------------------------------------------------------- DOM
@@ -354,15 +477,23 @@ function buildTileSetsSection(rows, catalogError, loading, neverFetched, layerSt
  *
  * Round 6 task 4: builds the section's DOM structure exactly ONCE (the labels, the `dl`,
  * the empty value `dd`s, a host `div` for the failure list/notice) and returns a HANDLE
- * -- `{section, residentDd, deferredDd, failedDd, failuresHost, noManager}` -- that
- * `updateBudgetSection()` (below) reuses on every later animation-loop tick to patch
- * VALUES in place, never rebuilding this structure again. The handle is stashed on the
- * container by `render()` (below); this function itself never touches the container.
+ * -- `{section, residentDd, deferredDd, failedDd, failuresHost, noLoaderHost, noManager}`
+ * -- that `updateBudgetSection()` (below) reuses on every later animation-loop tick to
+ * patch VALUES in place, never rebuilding this structure again. The handle is stashed on
+ * the container by `render()` (below); this function itself never touches the container.
+ *
+ * Task 5b (panel-failure-attribution, round 7): the "failed requests" row is now
+ * labelled "failed requests (tile sets)" and counts only failures NOT attributed to a
+ * declared-no-loader layer (see `attributeFailures`, above) -- a second, independent
+ * host (`noLoaderHost`) carries the "terrain: N requests, no loader is implemented"
+ * notice, shown only while nonzero, so a terrain gap reads as a terrain gap rather
+ * than inflating the tile-set number the user actually toggled on.
  * @param {{residentBytes:number, memoryBudgetBytes:number, deferredCount:number,
- *   failedCount:number, failureNames:string[]}|null|undefined} budget
+ *   failedCount:number, failureNames:string[], failuresByLayer?:Object<string,
+ *   {count:number,names:string[]}>, noLoaderLayerIds?:string[]}|null|undefined} budget
  * @returns {{section:HTMLElement, noManager:boolean, residentDd?:HTMLElement,
  *   deferredDd?:HTMLElement, failedDd?:HTMLElement, failuresHost?:HTMLElement,
- *   failuresKey?:string}}
+ *   failuresKey?:string, noLoaderHost?:HTMLElement, noLoaderKey?:string}}
  */
 function buildBudgetSection(budget) {
   const section = document.createElement('div');
@@ -385,7 +516,7 @@ function buildBudgetSection(budget) {
   };
   handle.residentDd = addRow('resident / budget');
   handle.deferredDd = addRow('deferred requests');
-  handle.failedDd = addRow('failed requests');
+  handle.failedDd = addRow('failed requests (tile sets)');
   section.appendChild(dl);
 
   // A dedicated, button-free host for the failure-name list/notice -- the ONLY part of
@@ -397,6 +528,13 @@ function buildBudgetSection(budget) {
   handle.failuresHost.className = 'av-layers-failures-host';
   section.appendChild(handle.failuresHost);
 
+  // Task 5b: a second, equally scoped host for the no-loader attribution notice
+  // (terrain today) -- built once here, patched in place by `updateBudgetSection`
+  // exactly like `failuresHost`, and never touched by anything else in this section.
+  handle.noLoaderHost = document.createElement('div');
+  handle.noLoaderHost.className = 'av-layers-no-loader-host';
+  section.appendChild(handle.noLoaderHost);
+
   updateBudgetSection(handle, budget);
   return handle;
 }
@@ -407,19 +545,28 @@ function buildBudgetSection(budget) {
  * `failedDd` get a plain `.textContent =` assignment (a text-node mutation; the `dt`
  * labels and the `dd` elements themselves are never touched, added, or removed here).
  *
- * The failure-name list is the one value that is not a single scalar: it is patched by
- * comparing a cheap join of the current `failureNames` array against the join stashed
- * from the last update (`handle.failuresKey`) and, ONLY on a real change, rebuilding
- * `failuresHost`'s own small subtree (never the `dl`, never the tile-set list). In
- * practice this fires exactly when a NEW distinct failure type is first recorded --
+ * The failure-name list and the no-loader notice are the two values that are not a
+ * single scalar: each is patched by comparing a cheap key over its OWN current
+ * content against the key stashed from the last update (`handle.failuresKey` /
+ * `handle.noLoaderKey`) and, ONLY on a real change, rebuilding that one host's own
+ * small subtree (never the `dl`, never each other, never the tile-set list) -- the
+ * two hosts are independent, so a change in one never touches the other. In practice
+ * this fires exactly when a NEW distinct failure type is first recorded --
  * `web/js/layers/layer.js`'s own failure-memory policy means the SET of typed failure
  * names is small and rarely grows -- so on every ordinary idle tick (the case this task's
- * own proof measures) `failuresKey` is unchanged and this function touches zero nodes at
+ * own proof measures) both keys are unchanged and this function touches zero nodes at
  * all beyond the three `textContent` assignments above.
+ *
+ * Task 5b (panel-failure-attribution, round 7): `failedDd`/`failuresHost` now show
+ * only TILE-SET failures (`attributeFailures`'s `tileSetCount`/`tileSetNames`, above)
+ * -- never a declared-no-loader layer's own failures, which get their own
+ * `noLoaderHost` notice instead, visible only while nonzero.
  * @param {{noManager:boolean, residentDd?:HTMLElement, deferredDd?:HTMLElement,
- *   failedDd?:HTMLElement, failuresHost?:HTMLElement, failuresKey?:string}|null|undefined} handle
+ *   failedDd?:HTMLElement, failuresHost?:HTMLElement, failuresKey?:string,
+ *   noLoaderHost?:HTMLElement, noLoaderKey?:string}|null|undefined} handle
  * @param {{residentBytes:number, memoryBudgetBytes:number, deferredCount:number,
- *   failedCount:number, failureNames:string[]}|null|undefined} budget
+ *   failedCount:number, failureNames:string[], failuresByLayer?:Object<string,
+ *   {count:number,names:string[]}>, noLoaderLayerIds?:string[]}|null|undefined} budget
  */
 function updateBudgetSection(handle, budget) {
   // `noManager` (the "No layer manager available yet." notice) and a null `budget` here
@@ -429,20 +576,72 @@ function updateBudgetSection(handle, budget) {
   if (!handle || handle.noManager || !budget) return;
   handle.residentDd.textContent = `${formatBytes(String(budget.residentBytes ?? 0))} / ${formatBytes(String(budget.memoryBudgetBytes ?? 0))}`;
   handle.deferredDd.textContent = String(budget.deferredCount ?? 0);
-  handle.failedDd.textContent = String(budget.failedCount ?? 0);
 
-  const failureNames = Array.isArray(budget.failureNames) ? budget.failureNames : [];
-  const failuresKey = failureNames.join('');
-  if (handle.failuresKey === failuresKey) return; // identical set of failures -- zero further DOM touch
-  handle.failuresKey = failuresKey;
-  handle.failuresHost.innerHTML = ''; // scoped to this one small, button-free div only
-  if (failureNames.length === 0) {
-    handle.failuresHost.appendChild(noticeEl('No load failures recorded.'));
-  } else {
-    const list = document.createElement('ul');
-    list.className = 'av-layers-failures';
-    for (const name of failureNames) list.appendChild(el('li', null, name));
-    handle.failuresHost.appendChild(list);
+  // Task 5b (panel-failure-attribution, round 7): split into "tile sets" vs.
+  // "declared no loader" ONLY when the caller supplies `failuresByLayer` -- every
+  // pre-existing caller of this function (predating this task) does not, and falls
+  // back to the OLD, pre-attribution meaning below (everything counted as tile-set),
+  // so nothing this task did not touch ever sees a different number.
+  const attribution = budget.failuresByLayer
+    ? attributeFailures(budget.failuresByLayer, budget.noLoaderLayerIds)
+    : {
+      tileSetCount: budget.failedCount ?? 0,
+      tileSetNames: Array.isArray(budget.failureNames) ? [...budget.failureNames].sort() : [],
+      noLoader: [],
+    };
+  handle.failedDd.textContent = String(attribution.tileSetCount);
+
+  // `JSON.stringify` of the array itself, never `join(<separator>)` (manager review,
+  // round 7). A change key built by joining is only correct while the separator cannot
+  // occur inside the joined values, which is a property of the DATA, not of this code --
+  // and the values here are error `.name` strings and, below, real layer ids, over which
+  // this module has no say. `JSON.stringify` is collision-free by construction for any
+  // string content, so this key stays correct no matter what a future layer or error is
+  // called, and it needs no unprintable magic byte to do it (the version this replaced
+  // joined on a literal control character for exactly that reason; the remaining ones in
+  // this file are pre-existing and not this task's to touch).
+  const failuresKey = JSON.stringify(attribution.tileSetNames);
+  if (handle.failuresKey !== failuresKey) { // identical set of tile-set failures -- zero further DOM touch
+    handle.failuresKey = failuresKey;
+    handle.failuresHost.innerHTML = ''; // scoped to this one small, button-free div only
+    if (attribution.tileSetNames.length === 0) {
+      handle.failuresHost.appendChild(noticeEl('No load failures recorded.'));
+    } else {
+      const list = document.createElement('ul');
+      list.className = 'av-layers-failures';
+      for (const name of attribution.tileSetNames) list.appendChild(el('li', null, name));
+      handle.failuresHost.appendChild(list);
+    }
+  }
+
+  // Task 5b: the no-loader notice -- built ONLY from entries with count > 0 ("only
+  // when nonzero", this task's own brief), each naming the layer that produced it
+  // (its real `id`, never a hard-coded 'terrain' string) and the typed error
+  // name(s), so a terrain gap reads as a terrain gap and says plainly it is not the
+  // selected tile set's fault. Scoped to its own host, patched via the same
+  // key-comparison discipline as `failuresHost` above, so an unchanged attribution
+  // never touches the DOM on an idle tick.
+  const noLoaderEntries = attribution.noLoader.filter((entry) => entry.count > 0);
+  // Same reasoning as `failuresKey` above, and it bites harder here: these keys embed a
+  // real layer id, and this codebase's own tile-set ids ARE colon-separated
+  // (`gateway-tileset:<sha>`), so a `${id}:${count}:${names}` template joined on '|'
+  // would be ambiguous the moment a second no-loader layer had a colon or a pipe in its
+  // id -- two genuinely different attributions collapsing to one key, which would make
+  // this panel silently stop repainting rather than fail loudly.
+  const noLoaderKey = JSON.stringify(noLoaderEntries.map((entry) => [entry.layerId, entry.count, entry.names]));
+  if (handle.noLoaderKey !== noLoaderKey) { // identical no-loader attribution -- zero further DOM touch
+    handle.noLoaderKey = noLoaderKey;
+    handle.noLoaderHost.innerHTML = ''; // scoped to this one small, button-free div only
+    if (noLoaderEntries.length > 0) {
+      const list = document.createElement('ul');
+      list.className = 'av-layers-no-loader';
+      for (const entry of noLoaderEntries) {
+        const count = entry.count === 1 ? '1 request' : `${entry.count} requests`;
+        const text = `${entry.layerId}: ${count}, no loader is implemented -- not a fault of the selected tile set (${entry.names.join(', ')})`;
+        list.appendChild(el('li', null, text));
+      }
+      handle.noLoaderHost.appendChild(list);
+    }
   }
 }
 
@@ -468,7 +667,8 @@ function updateBudgetSection(handle, budget) {
  * @param {{tileSets?: Array<object>|null, catalogError?: {status:number,message:string}|null,
  *   loading?: boolean, layerStates?: Object<string, {status:string, errorMessage?:string|null}>,
  *   budget?: {residentBytes:number, memoryBudgetBytes:number, deferredCount:number,
- *     failedCount:number, failureNames:string[]}|null,
+ *     failedCount:number, failureNames:string[], failuresByLayer?:Object<string,
+ *     {count:number,names:string[]}>, noLoaderLayerIds?:string[]}|null,
  *   onToggleLayer?: (row:object)=>void, onRefreshCatalog?: ()=>void}} data
  */
 export function render(container, data) {
@@ -476,6 +676,7 @@ export function render(container, data) {
   structuralRebuildCount += 1;
   const {
     tileSets, catalogError, loading, layerStates, budget, onToggleLayer, onRefreshCatalog,
+    entityOptions, onToggleEntity,
   } = data || {};
 
   const neverFetched = tileSets == null && !catalogError && !loading;
@@ -484,10 +685,15 @@ export function render(container, data) {
   ));
   const budgetHandle = buildBudgetSection(budget);
   container.appendChild(budgetHandle.section);
+  // Heavy round 7 (question 233): the "Entities" section, appended last -- see its own
+  // "heavy round 7" comment block above for why it is additive/localized.
+  container.appendChild(buildEntitiesSection(entityOptions, onToggleEntity));
 
   container.__avLayersPanelBudgetHandle = budgetHandle;
   container.__avLayersPanelState = {
-    key: layersPanelStateKey({ tileSets, catalogError, loading, layerStates }),
+    key: layersPanelStateKey({
+      tileSets, catalogError, loading, layerStates, entityOptions,
+    }),
     hasManager: !!budget,
   };
 }
@@ -514,8 +720,12 @@ export function render(container, data) {
  * @param {Parameters<typeof render>[1]} data
  */
 export function renderLayersPanel(container, data) {
-  const { tileSets, catalogError, loading, layerStates, budget } = data || {};
-  const key = layersPanelStateKey({ tileSets, catalogError, loading, layerStates });
+  const {
+    tileSets, catalogError, loading, layerStates, budget, entityOptions,
+  } = data || {};
+  const key = layersPanelStateKey({
+    tileSets, catalogError, loading, layerStates, entityOptions,
+  });
   const prev = container.__avLayersPanelState;
   if (!prev || prev.key !== key || prev.hasManager !== !!budget) {
     render(container, data);

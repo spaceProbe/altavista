@@ -12,7 +12,7 @@
 //! `protocol` module -- so a bug in either direction's framing would make these tests fail,
 //! not silently pass.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use av_catalog::protocol;
 use av_catalog::{CatalogError, Param, PgClient, PgConfig, PgTls};
@@ -447,4 +447,138 @@ async fn tls_required_but_server_declines_ssl_is_a_typed_refusal_not_a_silent_do
     assert!(matches!(err, CatalogError::ServerDeclinedTls { .. }), "{err:?}");
 
     server.await.unwrap();
+}
+
+// -------------------------------------------------------------------------------------------
+// 7. A peer that accepts the TCP connection and then never writes another byte does not hang
+//    `PgClient::connect` forever -- each phase after the TCP connect (TLS negotiation, then
+//    startup) is bounded by its own `connect_timeout` budget, and the typed error names which
+//    phase stalled (question 233 / round 6 defect 5).
+// -------------------------------------------------------------------------------------------
+
+/// The per-phase deadline every test below configures. Short enough to keep the suite fast,
+/// long enough that ordinary scheduler jitter on a loopback socket does not itself cause a
+/// false failure.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_millis(50);
+
+/// Upper bound on how long `PgClient::connect` may take to return once `HANDSHAKE_DEADLINE`
+/// has elapsed for a stalled phase. Measured locally (debug build, `cargo-slot test -p
+/// av-catalog --test wire_protocol -- --nocapture`, five consecutive runs of each test below,
+/// against the 50ms `HANDSHAKE_DEADLINE` above): `startup_phase_times_out_...` returned in
+/// 52.89ms / 53.80ms / 53.52ms / 53.85ms / 53.46ms, and
+/// `tls_negotiation_phase_times_out_...` in 51.90ms / 53.58ms / 53.52ms / 52.46ms / 53.59ms --
+/// i.e. within ~4ms of the deadline itself, all scheduler jitter. 10x the deadline (500ms) is a
+/// bound that is still tight enough to fail immediately if the timeout wrapper were removed
+/// (this task's perturbation: with the wrapper removed, or the phase deadline set to
+/// `Duration::MAX`, the call does not return at all within this bound and the outer
+/// `tokio::time::timeout` below fires instead).
+const UPPER_BOUND: Duration = Duration::from_millis(500);
+
+/// The window each test below asserts the REAL measured `PgClient::connect` duration falls in.
+/// `UPPER_BOUND` above cannot serve as that assertion: it is already enforced by the outer
+/// `tokio::time::timeout`, so an `elapsed <= UPPER_BOUND` assert after that timeout has
+/// returned can never fail -- and an assertion that cannot fail is not a proof (manager review,
+/// round 7). These two CAN fail, independently of the outer timeout:
+///
+/// - the LOWER bound says the call actually waited the deadline out rather than returning
+///   instantly. Without it, a connection refused at once, a deadline accidentally set to zero,
+///   or any other immediate error that happened to be typed `HandshakeTimeout` would pass the
+///   test while proving nothing about a deadline;
+/// - the UPPER bound, at 4x the deadline (200ms), is five times tighter than the outer
+///   timeout's 500ms, so a phase whose deadline fired late enough to matter fails HERE, with
+///   the measured duration in the message, rather than being absorbed by the outer wait.
+///
+/// The measured spread the worker recorded against this 50ms deadline (five consecutive runs
+/// of each test: 51.90ms to 53.85ms, i.e. within ~4ms of the deadline itself) sits comfortably
+/// inside this window with about 3.7x of headroom on the upper side.
+const MIN_ELAPSED: Duration = HANDSHAKE_DEADLINE;
+const MAX_ELAPSED: Duration = Duration::from_millis(200);
+
+#[tokio::test]
+async fn startup_phase_times_out_when_peer_accepts_and_never_writes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Accepts the connection and then does nothing at all: no read, no write. `PgClient`'s own
+    // `StartupMessage` write still succeeds (it lands in the kernel's receive buffer on this
+    // end, unread), but the read that follows -- waiting for `Authentication*` -- never gets a
+    // reply. Held alive well past `UPPER_BOUND` so the peer is still "accepted, silent", not
+    // "gone", for the whole assertion window; never joined, since it is expected to still be
+    // sleeping when the test finishes.
+    let _server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let _socket = socket;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let mut config = test_config(port, PASSWORD);
+    config.connect_timeout = HANDSHAKE_DEADLINE;
+    let started = Instant::now();
+    // A bounded outer wait, not a production sleep (rule 7 is about production synchronisation,
+    // not a test guarding itself against its own assertion hanging the suite): this is what
+    // actually fails the test (with a clear panic message) if `PgClient::connect` does not
+    // return within `UPPER_BOUND` at all, rather than the process hanging silently.
+    let outcome = tokio::time::timeout(UPPER_BOUND, PgClient::connect(&config)).await.expect("PgClient::connect did not return within UPPER_BOUND after the peer accepted and never wrote -- the startup-phase deadline did not fire");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= MIN_ELAPSED && elapsed <= MAX_ELAPSED,
+        "PgClient::connect returned in {elapsed:?}, outside the measured window \
+         {MIN_ELAPSED:?}..={MAX_ELAPSED:?} for a {HANDSHAKE_DEADLINE:?} per-phase deadline \
+         (below the lower bound means it did not wait the deadline out at all; above the upper \
+         bound means the deadline fired late)"
+    );
+
+    let err = outcome.expect_err("a peer that accepts and never writes must be a typed handshake timeout, never a successful connect");
+    match &err {
+        CatalogError::HandshakeTimeout { host, port: err_port, timeout, phase } => {
+            assert_eq!(host, "127.0.0.1");
+            assert_eq!(*err_port, port);
+            assert_eq!(*timeout, HANDSHAKE_DEADLINE);
+            assert_eq!(*phase, "startup");
+        }
+        other => panic!("expected CatalogError::HandshakeTimeout {{ phase: \"startup\", .. }}, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tls_negotiation_phase_times_out_when_peer_accepts_and_never_answers_ssl_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Accepts the connection, reads the 8-byte SSLRequest so the client's own write completes
+    // normally, then never sends the `'S'`/`'N'` response byte the client is waiting on --
+    // exactly "accepts and never writes" for the TLS-negotiation phase specifically. Never
+    // joined, for the same reason as the startup-phase test above.
+    let _server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header).await.unwrap();
+        protocol::decode_ssl_request_code(&header[4..8]).expect("fake server: SSLRequest code");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let mut config = test_config(port, PASSWORD);
+    config.tls = PgTls::Required { ca_file: None };
+    config.connect_timeout = HANDSHAKE_DEADLINE;
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(UPPER_BOUND, PgClient::connect(&config)).await.expect("PgClient::connect did not return within UPPER_BOUND after the peer accepted and never answered SSLRequest -- the tls-negotiation-phase deadline did not fire");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= MIN_ELAPSED && elapsed <= MAX_ELAPSED,
+        "PgClient::connect returned in {elapsed:?}, outside the measured window \
+         {MIN_ELAPSED:?}..={MAX_ELAPSED:?} for a {HANDSHAKE_DEADLINE:?} per-phase deadline \
+         (below the lower bound means it did not wait the deadline out at all; above the upper \
+         bound means the deadline fired late)"
+    );
+
+    let err = outcome.expect_err("a peer that accepts and never answers SSLRequest must be a typed handshake timeout, never a successful connect");
+    match &err {
+        CatalogError::HandshakeTimeout { host, port: err_port, timeout, phase } => {
+            assert_eq!(host, "127.0.0.1");
+            assert_eq!(*err_port, port);
+            assert_eq!(*timeout, HANDSHAKE_DEADLINE);
+            assert_eq!(*phase, "tls-negotiation");
+        }
+        other => panic!("expected CatalogError::HandshakeTimeout {{ phase: \"tls-negotiation\", .. }}, got {other:?}"),
+    }
 }

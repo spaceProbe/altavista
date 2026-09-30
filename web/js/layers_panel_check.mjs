@@ -49,10 +49,11 @@
 
 import { LayerManager } from './layers/layer.js';
 import { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError } from './layers/gateway_imagery_layer.js';
+import { TerrainLayerAdapter } from './layers/terrain_layer.js';
 import { selectTiles, geodeticToEcef, tileKey } from './globe_lod.js';
 import {
   layerIdForManifest, tileSetRows, formatBytes, shortSha, errorLine, layerStateFor, render,
-  layersPanelStateKey, renderLayersPanel,
+  layersPanelStateKey, renderLayersPanel, attributeFailures,
 } from './panels/layers_panel.js';
 // `structuralRebuildCount` is a live ES-module binding (a plain `export let`, incremented
 // inside render()) -- re-imported via a fresh `import()` wherever a check needs its
@@ -107,6 +108,55 @@ function check(name, pass, detail) { checks.push({ name, pass: !!pass, detail: d
     layerStateFor('sha-a', {}).status === 'off' && layerStateFor('sha-a', null).status === 'off');
   check('layerStateFor: an existing entry is read back verbatim',
     layerStateFor('sha-a', { 'sha-a': { status: 'on' } }).status === 'on');
+}
+
+// ============================================ 1z. attributeFailures (task 5b, round 7)
+// Pure-function proof of the "tile sets vs. declared no loader" split, independent of
+// any DOM -- see layers_panel.js's own doc comment on attributeFailures for the full
+// contract. Each check names the wrong implementation it would catch.
+{
+  const byLayer = {
+    'terrain': { count: 3, names: ['TerrainLoaderNotImplementedError'] },
+    'gateway-tileset:sha-a': { count: 2, names: ['TileHttpError'] },
+    'gateway-tileset:sha-b': { count: 1, names: ['TileEtagMismatchError'] },
+  };
+  const a1 = attributeFailures(byLayer, ['terrain']);
+  check('attributeFailures: tileSetCount sums every layer NOT in noLoaderLayerIds, excluding the no-loader layer entirely',
+    a1.tileSetCount === 3, { tileSetCount: a1.tileSetCount });
+  check('attributeFailures: tileSetNames is the union of only the tile-set layers\' own names, sorted',
+    JSON.stringify(a1.tileSetNames) === JSON.stringify(['TileEtagMismatchError', 'TileHttpError']));
+  check('attributeFailures: noLoader carries the no-loader layer\'s own id/count/names, never merged into tileSetCount',
+    a1.noLoader.length === 1 && a1.noLoader[0].layerId === 'terrain' && a1.noLoader[0].count === 3
+    && JSON.stringify(a1.noLoader[0].names) === JSON.stringify(['TerrainLoaderNotImplementedError']));
+  check('attributeFailures: the partition is total -- tileSetCount + sum(noLoader counts) === every input count summed (nothing lost, nothing double-counted)',
+    a1.tileSetCount + a1.noLoader.reduce((s, e) => s + e.count, 0)
+      === Object.values(byLayer).reduce((s, e) => s + e.count, 0));
+
+  check('attributeFailures: an empty/missing noLoaderLayerIds puts EVERY layer in the tile-set bucket (never silently drops a failure with no attribution data)',
+    (() => {
+      const r = attributeFailures(byLayer, []);
+      return r.tileSetCount === 6 && r.noLoader.length === 0;
+    })());
+  check('attributeFailures: null/undefined failuresByLayer -> zero counts, never a throw',
+    (() => {
+      const r1 = attributeFailures(null, ['terrain']);
+      const r2 = attributeFailures(undefined, undefined);
+      return r1.tileSetCount === 0 && r1.noLoader.length === 0 && r2.tileSetCount === 0 && r2.noLoader.length === 0;
+    })());
+
+  // ---- PERTURBATION (task 5b's own required proof): a caller that mistakenly leaves
+  // the no-loader layer's id OUT of noLoaderLayerIds -- e.g. the exact bug this task
+  // exists to prevent, a terrain failure counted as a tile-set failure -- must be
+  // OBSERVABLE as a real difference here, not silently absorbed.
+  {
+    const correct = attributeFailures(byLayer, ['terrain']);
+    const wronglyAttributedToTileSets = attributeFailures(byLayer, []); // 'terrain' missing from the list
+    const perturbationCaught = wronglyAttributedToTileSets.tileSetCount !== correct.tileSetCount
+      && wronglyAttributedToTileSets.tileSetCount === 6 // terrain's 3 wrongly folded into the tile-set bucket
+      && wronglyAttributedToTileSets.noLoader.length === 0;
+    check('attributeFailures: PERTURBATION -- omitting the no-loader layer id from noLoaderLayerIds visibly inflates tileSetCount (proves this function would fail if terrain\'s failures were ever attributed to the tile-set row)',
+      perturbationCaught, { correctTileSetCount: correct.tileSetCount, perturbedTileSetCount: wronglyAttributedToTileSets.tileSetCount });
+  }
 }
 
 // ======================================================== 1a. layersPanelStateKey (round 6 task 4)
@@ -308,6 +358,86 @@ withFakeDocument(() => {
     check('render: every distinct failure NAME the manager remembered is listed',
       text.includes('TileHttpError') && text.includes('TileEtagMismatchError'));
   }
+
+  // ---- task 5b (panel-failure-attribution, round 7): the rendered TEXT a user reads
+  // for both buckets, from a budget object carrying `failuresByLayer`/
+  // `noLoaderLayerIds` the way web/js/app.js's own `renderLayersPanelNow()` now does.
+  {
+    const container = makeEl('div');
+    render(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      layerStates: { 'sha-a': { status: 'error', errorMessage: 'TileHttpError: placeholder' } },
+      budget: {
+        residentBytes: 0,
+        memoryBudgetBytes: 1,
+        deferredCount: 0,
+        failedCount: 5, // the OLD, unattributed total -- must NOT be what failedDd shows any more
+        failureNames: ['TileHttpError', 'TerrainLoaderNotImplementedError'],
+        failuresByLayer: {
+          terrain: { count: 2, names: ['TerrainLoaderNotImplementedError'] },
+          'gateway-tileset:sha-a': { count: 3, names: ['TileHttpError'] },
+        },
+        noLoaderLayerIds: ['terrain'],
+      },
+    });
+    const text = container.textContent;
+    check('render: the "failed requests" row is now labelled "(tile sets)"',
+      text.includes('failed requests (tile sets)'));
+    const failedDd = findAll(container, (n) => hasClass(n, 'av-layers-budget')).length
+      ? findAll(findAll(container, (n) => hasClass(n, 'av-layers-budget'))[0], (n) => n.tagName === 'DD')[2]
+      : null;
+    check('render: the "failed requests (tile sets)" VALUE counts only the tile-set failures (3), never the unattributed total (5) and never terrain\'s own 2',
+      !!failedDd && failedDd.textContent === '3', { failedDdText: failedDd && failedDd.textContent });
+    const failuresList = findAll(container, (n) => hasClass(n, 'av-layers-failures'));
+    check('render: the scoped tile-set failure list (av-layers-failures) contains TileHttpError and NOT TerrainLoaderNotImplementedError',
+      failuresList.length === 1 && failuresList[0].textContent.includes('TileHttpError') && !failuresList[0].textContent.includes('TerrainLoaderNotImplementedError'));
+    check('render: a separate "terrain" notice names the terrain layer, its count (2), and says plainly this is not a fault of the selected tile set',
+      text.includes('terrain: 2 requests, no loader is implemented') && text.includes('not a fault of the selected tile set'));
+    check('render: the no-loader notice still names the typed error (TerrainLoaderNotImplementedError), never swallowed',
+      text.includes('TerrainLoaderNotImplementedError'));
+    const noLoaderList = findAll(container, (n) => hasClass(n, 'av-layers-no-loader'));
+    check('render: the no-loader notice lives in its OWN host (av-layers-no-loader), never inside av-layers-failures',
+      noLoaderList.length === 1 && !failuresList[0].textContent.includes('no loader is implemented'));
+  }
+
+  // ---- the no-loader notice is ABSENT entirely when nothing is attributed to it
+  // ("only when nonzero", this task's own brief) -- never a "0 requests" line.
+  {
+    const container = makeEl('div');
+    render(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      budget: {
+        residentBytes: 0,
+        memoryBudgetBytes: 1,
+        deferredCount: 0,
+        failedCount: 3,
+        failureNames: ['TileHttpError'],
+        failuresByLayer: { 'gateway-tileset:sha-a': { count: 3, names: ['TileHttpError'] } },
+        noLoaderLayerIds: ['terrain'], // declared, but NOTHING attributed to it this time
+      },
+    });
+    const text = container.textContent;
+    check('render: with zero no-loader failures, the notice is absent entirely (no "0 requests" line, never a blank section either)',
+      !text.includes('no loader is implemented') && findAll(container, (n) => hasClass(n, 'av-layers-no-loader')).length === 0);
+  }
+
+  // ---- backward compatibility: a caller that supplies the OLD budget shape (no
+  // failuresByLayer at all -- every render()/renderLayersPanel() check ABOVE this one
+  // in this file uses exactly that shape) must see EXACTLY the old behaviour: the
+  // full failedCount in the tile-set row, no no-loader notice ever appearing.
+  {
+    const container = makeEl('div');
+    render(container, {
+      tileSets: REAL_TILE_SETS_PAYLOAD,
+      budget: { residentBytes: 0, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 4, failureNames: ['TileHttpError'] },
+    });
+    const text = container.textContent;
+    check('render: backward compatibility -- an old-shape budget (no failuresByLayer) still shows the full failedCount in the tile-set row',
+      findAll(container, (n) => hasClass(n, 'av-layers-budget'))[0]
+      && findAll(findAll(container, (n) => hasClass(n, 'av-layers-budget'))[0], (n) => n.tagName === 'DD')[2].textContent === '4');
+    check('render: backward compatibility -- an old-shape budget never shows a no-loader notice',
+      !text.includes('no loader is implemented') && findAll(container, (n) => hasClass(n, 'av-layers-no-loader')).length === 0);
+  }
 });
 
 // ==================================================== 2a. renderLayersPanel (round 6 task 4)
@@ -411,6 +541,50 @@ withFakeDocument(() => {
     const failuresHostAfter = findAll(container, (n) => hasClass(n, 'av-layers-failures'))[0];
     check('renderLayersPanel: an UNCHANGED failure set is not touched again (same <ul> node) even though other budget numbers moved',
       failuresHostAfter === failuresHostBefore);
+  }
+
+  // ---- task 5b (panel-failure-attribution, round 7): an idle tick where a NEW
+  // no-loader (terrain) failure appears is STILL a budget-only change -- no structural
+  // rebuild, the tile-set failures host untouched, and the no-loader host reconciles
+  // itself independently in its own small div.
+  {
+    const container = makeEl('div');
+    const dataStructural = {
+      tileSets: REAL_TILE_SETS_PAYLOAD, catalogError: null, loading: false, layerStates: {},
+    };
+    const noAttribution = {
+      residentBytes: 0, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 0, failureNames: [],
+      failuresByLayer: {}, noLoaderLayerIds: ['terrain'],
+    };
+    renderLayersPanel(container, { ...dataStructural, budget: noAttribution });
+    const afterFirst = rebuildCount();
+    const toggleButtonsBefore = findAll(container, (n) => hasClass(n, 'av-layers-toggle'));
+    const failuresHostNode = findAll(container, (n) => hasClass(n, 'av-layers-failures-host'))[0];
+
+    const terrainNowFailing = {
+      residentBytes: 0, memoryBudgetBytes: 1, deferredCount: 0, failedCount: 2, failureNames: ['TerrainLoaderNotImplementedError'],
+      failuresByLayer: { terrain: { count: 2, names: ['TerrainLoaderNotImplementedError'] } },
+      noLoaderLayerIds: ['terrain'],
+    };
+    renderLayersPanel(container, { ...dataStructural, budget: terrainNowFailing });
+
+    check('renderLayersPanel: a NEW no-loader (terrain) failure appearing is still a budget-only change -- no structural rebuild',
+      rebuildCount() === afterFirst);
+    check('renderLayersPanel: the toggle buttons are still the SAME nodes when only the no-loader attribution changed',
+      findAll(container, (n) => hasClass(n, 'av-layers-toggle')).every((n, i) => n === toggleButtonsBefore[i]));
+    check('renderLayersPanel: the tile-set failures host (av-layers-failures-host) is the SAME node -- a no-loader-only change never touches it',
+      findAll(container, (n) => hasClass(n, 'av-layers-failures-host'))[0] === failuresHostNode);
+    check('renderLayersPanel: the tile-set failures host still shows "No load failures recorded" -- terrain\'s failures never leak into it',
+      container.textContent.includes('No load failures recorded'));
+    check('renderLayersPanel: the new no-loader notice is actually visible, naming the terrain layer and "not a fault of the selected tile set"',
+      container.textContent.includes('terrain: 2 requests, no loader is implemented') && container.textContent.includes('not a fault of the selected tile set'));
+
+    // Same attribution again -- proves `noLoaderKey` genuinely short-circuits.
+    const noLoaderHostBefore = findAll(container, (n) => hasClass(n, 'av-layers-no-loader'))[0];
+    renderLayersPanel(container, { ...dataStructural, budget: { ...terrainNowFailing, residentBytes: 999 } });
+    const noLoaderHostAfter = findAll(container, (n) => hasClass(n, 'av-layers-no-loader'))[0];
+    check('renderLayersPanel: an UNCHANGED no-loader attribution is not touched again (same <ul> node) even though other budget numbers moved',
+      noLoaderHostAfter === noLoaderHostBefore);
   }
 
   // ---- a REAL state change (a toggle's own status) DOES rebuild, and DOES increment --
@@ -688,6 +862,93 @@ async function toggleOn(manager, manifestSha256) {
   }
   check('integration: a tile whose recomputed SHA-256 disagrees with the gateway\'s own ETag rejects with the real, typed TileEtagMismatchError',
     etagMismatchError instanceof TileEtagMismatchError, { tilesetForMismatch: [...tilesetForMismatch.keys()] });
+}
+
+// ======================= 4. task 5b: end-to-end failure attribution through a REAL manager
+// The proof this task's own brief calls "half the task": a REAL `LayerManager`, a REAL
+// `TerrainLayerAdapter` (not a stub -- its own permanent, typed refusal), and a real
+// gateway-imagery-shaped layer (id prefixed `gateway-tileset:`, exactly what a real
+// toggled-on tile set's id looks like -- `layerIdForManifest`'s own format) that always
+// fails with the real, typed `TileHttpError`. Drives one real `update()` tick to
+// settlement, reads the manager's own `failuresByLayer()`/`noLoaderLayers()` (never
+// fabricated), feeds them straight into `render()` exactly as `web/js/app.js`'s
+// `renderLayersPanelNow()` now does, and asserts the RENDERED TEXT a user actually
+// reads -- both from the returned data structure AND the DOM, per this task's own
+// proof requirement ("not from one or the other").
+{
+  const cameraEcef = geodeticToEcef(0, 0, 3_000_000);
+  const screenParams = { screenHeightPx: 900, fovYRad: (50 * Math.PI) / 180, sseThreshold: 24, maxLevel: 0, maxTiles: 20 };
+  const tiles = selectTiles(cameraEcef, screenParams);
+  const view = { tiles, cameraEcef, ...screenParams };
+
+  const terrainId = 'terrain'; // the real, stable id GlobeLayer registers TerrainLayerAdapter under
+  const terrain = new TerrainLayerAdapter({ id: terrainId });
+  const badTileSetId = layerIdForManifest('sha-real-failure'); // 'gateway-tileset:sha-real-failure'
+  const badTileSet = {
+    id: badTileSetId,
+    kind: 'imagery',
+    plan: (v) => (v.tiles || []).map((t) => ({ key: tileKey(t), sseError: 10, viewDistanceM: 100, byteCost: 1024, tile: t })),
+    load: (request, _signal) => Promise.reject(new TileHttpError(503, `simulated gateway 503 for ${request.key}`)),
+    release: (_key) => {},
+  };
+
+  const endToEndManager = new LayerManager({ memoryBudgetBytes: 999_000_000_000, maxConcurrentLoads: 64, now: () => 1 });
+  endToEndManager.addLayer(terrain);
+  endToEndManager.addLayer(badTileSet);
+  endToEndManager.update(view);
+  await flushMicrotasks();
+
+  check('end-to-end setup: both layers actually failed at least once (otherwise this proof tests nothing)',
+    endToEndManager.failedCount > 0 && Object.keys(endToEndManager.failuresByLayer()).length === 2,
+    { failedCount: endToEndManager.failedCount, failuresByLayer: endToEndManager.failuresByLayer() });
+
+  const realFailuresByLayer = endToEndManager.failuresByLayer();
+  const realNoLoaderIds = endToEndManager.noLoaderLayers().map((l) => l.id);
+  check('end-to-end: LayerManager.noLoaderLayers() reports exactly the terrain adapter (its own notImplemented self-declaration, never a hard-coded id)',
+    JSON.stringify(realNoLoaderIds) === JSON.stringify([terrainId]));
+
+  // The DATA-STRUCTURE half of the proof (before ever touching the DOM).
+  const dataAttribution = attributeFailures(realFailuresByLayer, realNoLoaderIds);
+  check('end-to-end (data): tileSetCount equals exactly the real gateway-shaped layer\'s own failure count, terrain\'s excluded',
+    dataAttribution.tileSetCount === realFailuresByLayer[badTileSetId].count);
+  check('end-to-end (data): the tile-set bucket\'s names are exactly ["TileHttpError"], terrain\'s typed name absent',
+    JSON.stringify(dataAttribution.tileSetNames) === JSON.stringify(['TileHttpError']));
+  check('end-to-end (data): the no-loader bucket carries terrain\'s own id/count/typed name',
+    dataAttribution.noLoader.length === 1 && dataAttribution.noLoader[0].layerId === terrainId
+    && dataAttribution.noLoader[0].count === realFailuresByLayer[terrainId].count
+    && JSON.stringify(dataAttribution.noLoader[0].names) === JSON.stringify(['TerrainLoaderNotImplementedError']));
+  check('end-to-end (data): totals still add up to the unchanged, real LayerManager.failedCount',
+    dataAttribution.tileSetCount + dataAttribution.noLoader.reduce((s, e) => s + e.count, 0) === endToEndManager.failedCount,
+    { failedCount: endToEndManager.failedCount, dataAttribution });
+
+  // The DOM half of the proof -- the exact panel a user would see for this real run.
+  withFakeDocument(() => {
+    const container = makeEl('div');
+    render(container, {
+      tileSets: [{ assetId: 'real', manifestSha256: 'sha-real-failure', name: 'Real Failing Tile Set', sizeBytes: '0' }],
+      layerStates: { 'sha-real-failure': { status: 'on' } },
+      budget: {
+        residentBytes: endToEndManager.residentBytes,
+        memoryBudgetBytes: endToEndManager.memoryBudgetBytes,
+        deferredCount: endToEndManager.deferredCount,
+        failedCount: endToEndManager.failedCount,
+        failureNames: endToEndManager.failureNames(),
+        failuresByLayer: realFailuresByLayer,
+        noLoaderLayerIds: realNoLoaderIds,
+      },
+    });
+    const text = container.textContent;
+    check('end-to-end (DOM): the tile-set failure row shows exactly the real gateway layer\'s own count',
+      findAll(container, (n) => hasClass(n, 'av-layers-budget'))[0]
+      && findAll(findAll(container, (n) => hasClass(n, 'av-layers-budget'))[0], (n) => n.tagName === 'DD')[2].textContent
+        === String(realFailuresByLayer[badTileSetId].count));
+    check('end-to-end (DOM): the tile-set failure list shows TileHttpError and never TerrainLoaderNotImplementedError',
+      findAll(container, (n) => hasClass(n, 'av-layers-failures'))[0].textContent.includes('TileHttpError')
+      && !findAll(container, (n) => hasClass(n, 'av-layers-failures'))[0].textContent.includes('TerrainLoaderNotImplementedError'));
+    check('end-to-end (DOM): a real terrain gap reads as a terrain gap -- names the terrain layer, its real count, and says it is not the selected tile set\'s fault',
+      text.includes(`terrain: ${realFailuresByLayer[terrainId].count} request`) && text.includes('no loader is implemented')
+      && text.includes('not a fault of the selected tile set') && text.includes('TerrainLoaderNotImplementedError'));
+  });
 }
 
 const allPass = checks.every((c) => c.pass);
