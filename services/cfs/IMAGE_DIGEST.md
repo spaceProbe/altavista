@@ -106,8 +106,19 @@ sha256:cc83bb68e53151baa86a1bb6dd16580108e4cbe565d133fa09bef307c4ae9031
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-9d1350e1bb315c531de83e008ab5841a7705b251
+4f6ce1bed33af1ae8b5dda1d2b9ed346fc540a03
 ```
+
+## Re-recorded 2026-09-30 (round 5, closing gate): same image, the build commit moved
+
+The round's gate failed `test_image_digest_matches_recorded_value`: the record named
+`9d1350e`, and `48728b0` (the commit that wrote that record) also changed
+`services/cfs/Dockerfile`, a copied path, so the record was stale from the moment it was
+committed. The image had been built before the Dockerfile's header recipe was corrected. The
+change is comment-only, so `build-image.sh` re-run at `4f6ce1b` from a clean tree hit the layer
+cache end to end: **the same image id `sha256:3bef12a6…` and the same runtime-content hash
+`sha256:cc83bb68…`**, with only the recorded build commit moving. `services/cfs/tests/test_image_digest.py`:
+5 passed afterwards.
 
 ## Re-pinned 2026-09-22 (round 5, native5-cfs-image-provenance: question 232 commit-provenance record; first build on this worktree)
 
