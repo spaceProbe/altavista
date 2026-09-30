@@ -1498,3 +1498,94 @@ Full outputs are under the manager's scratchpad as `GATE_CLIPPY_KERNEL_NODEF`,
   inside leap-second-free windows.
 - **A live `Earth.NutationUpdateInterval` readback** still needs an entry point `gmat-sys` does
   not expose.
+
+### N6's control-matrix row for the orbital model's provenance
+
+Round 4 recorded this as open: `EarthGravityModel::new`/`::with_third_bodies`/`::with_srp`/
+`::with_drag` each build a local `BTreeMap`, fold it into `settings_hash` via
+`av_dynamics::settings_hash`, and discard the map -- so the provenance a row needs to name
+("which data files, which hashes") was not recoverable from a constructed model at all, only the
+folded 64-hex digest was, and `crate::drm::binding::materialize_orbital` passed
+`settings: BTreeMap::new()` into `Materialized`, so `ModelHandle.settings` was empty for the
+orbital path too. This round fixed the retention, not just the row: `EarthGravityModel` now
+carries an accumulated `provenance: BTreeMap<String, String>` alongside `settings_hash`
+(`crates/av-orbital/src/model.rs`), populated strictly AFTER each method's own
+`av_dynamics::settings_hash` call from the SAME local map that call already hashed -- so the
+accumulation is additional state, never an input to the hash (proved below) -- and
+`materialize_orbital` now hands `model.provenance().clone()` to `Materialized::settings` instead
+of an empty map (`crates/av-kernel/src/drm/binding.rs`).
+
+**Why the row is written here, not under `docs/compliance/`:** no component there covers
+`crates/av-orbital` or `crates/av-kernel` (the nearest, `av-dynamics-service`, is ADR-002 depth
+2, the GMAT shim -- not this model), and an edit under `docs/compliance/` moves the evidence
+bundle hash, which questions 220/227 make the lead's to regenerate at the merge, not this
+track's. The table below is written in the control-matrix format the existing matrices use so it
+can be lifted verbatim once a home exists.
+
+| Family | ID | Requirement | Status | Implementation | Evidence |
+|---|---|---|---|---|---|
+| Configuration Management | 3.4.1 | Baseline configuration and inventory | Met | `crates/av-orbital/src/model.rs::EarthGravityModel::new`/`::with_third_bodies`/`::provenance`, `crates/av-kernel/src/drm/binding.rs::materialize_orbital` | `cargo test -p av-kernel --no-default-features --test orbital_no_gmat_demo the_orbital_model_reports_its_own_data_file_provenance -- --nocapture` |
+
+**No byte moved in `settings_hash`.** `crates/av-orbital/src/model.rs`'s own
+`tests::settings_hash_for_a_fixed_full_configuration_is_pinned_to_a_recorded_literal` pins
+`settings_hash` for one fixed, fully-chained fixture (gravity + third bodies + SRP + drag, so
+every `with_*` method's own recomputation runs) against a literal recorded from an actual
+pre-change build (the provenance retention temporarily reverted out of the working tree, leaving
+only the pinned test itself, then rebuilt) and again from the post-change build. Both gave the
+identical 64-hex string:
+
+```
+bf6915adae45b868274e92f55edd9077b82c8555ee7a851ce48825876854c869
+```
+
+**The measured provenance table.** Printed by the evidence command named above, for the demo
+DRM's own orbital instance (`crates/av-kernel/tests/orbital_no_gmat_demo.rs`'s
+`orbital_demo_bundle`: JGM2 8x8 Earth gravity, Moon + Sun third bodies), run on this host with
+`GMAT_ROOT` resolved (`av_orbital::cof::locate_gmat_root`'s env-var branch, pointed at this
+repo's own `GMAT R2026a` install -- the identical directory its repo-relative fallback branch
+would have found) to `/Users/probe/code/AltaVista-edge/GMAT R2026a`, on 2026-09-22:
+
+```
+key                              | value
+---------------------------------+-----------------------------------------------------------------
+central_body                     | Earth
+de_file_name                     | leDE1941.405
+de_file_sha256                   | f8695149bc54be449788f4d6007d1f6a7053f5be16eae60229dc89c661f6fe4d
+degree                           | 8
+frame_id                         | EarthMJ2000Eq
+gravity_file_name                | JGM2.cof
+gravity_file_sha256              | bf182b1208e33be3716c8292a3947c1f87d4041ad6663a0c9ae621f65cafc20d
+integrator_atol                  | 9.99999999999999980e-13
+integrator_initial_step_s        | 3.00000000000000000e1
+integrator_max_step_s            | 6.00000000000000000e2
+integrator_rtol                  | 9.99999999999999980e-13
+mu_m3_per_s2                     | 3.98600441500000000e14
+order                            | 8
+reference_radius_m               | 6.37813629999999981e6
+third_bodies                     | Moon,Sun
+third_bodies_base_settings_hash  | 0fbdaa8636a926919fc93d0747218d5fc3f7f7708d9c8cb778625483dc3ca5ac
+settings_hash (final)            | 86ff995dfae4152d42f65cf07dbcdbe32d598bb8ce138aa56e3e397f83fce3aa
+```
+
+The test that printed this table also asserts, independently of `av_orbital`'s own SHA-256
+helper, that `gravity_file_sha256`/`de_file_sha256` equal a SHA-256 computed in the test itself
+from `JGM2.cof`/`leDE1941.405` as read off disk under that same `GMAT_ROOT`.
+
+**The row is self-sufficient, and the manager checked that rather than the rebuild.** The claim
+a control-matrix row has to support is that an auditor can re-derive it *without the code*. So
+the chain was recomputed from the table above alone, in plain Python, using only
+`av_dynamics::settings_hash`'s documented rule (SHA-256 over the sorted map's `k=v\n`
+concatenation, `crates/av-dynamics/src/lib.rs`): hashing the twelve `new` entries reproduces
+`third_bodies_base_settings_hash` exactly, and hashing `{base_settings_hash, de_file_name,
+de_file_sha256, third_bodies}` from that reproduces the final `settings_hash` exactly:
+
+```
+recomputed base  0fbdaa8636a926919fc93d0747218d5fc3f7f7708d9c8cb778625483dc3ca5ac  (row's chain key: identical)
+recomputed final 86ff995dfae4152d42f65cf07dbcdbe32d598bb8ce138aa56e3e397f83fce3aa  (row's final:     identical)
+```
+
+That is stronger evidence than the pre/post rebuild on its own: it proves the retained chain key
+earns its place, since without it the intermediate hash would be unrecoverable and the final
+digest could be quoted but never reproduced. It also found the one error in the first draft of
+this section and of `EarthGravityModel`'s own doc comments, now corrected: `new` inserts
+**twelve** settings entries, not eleven.

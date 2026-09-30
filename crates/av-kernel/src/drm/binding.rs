@@ -3349,12 +3349,27 @@ pub(crate) fn materialize_constant_accel(spec: &ConstantAccelSpec, epoch_tai_ns:
 /// `gmat_sys`'s own `GMAT_ROOT`) -- see that function's own doc comment for the environment
 /// variable / repo-relative-fallback rule (question 199: read-only, never written).
 ///
-/// `settings: BTreeMap::new()` (like [`materialize_constant_accel`]): `EarthGravityModel::
+/// `settings: model.provenance().clone()` (N6's provenance-row task, `docs/
+/// native-dynamics-plan.md`): superseded the previous `BTreeMap::new()` here. `EarthGravityModel::
 /// describe()` already reports its own `settings_hash`, computed at construction from the
 /// gravity/DE file names and digests, the degree/order, `mu`, the reference radius, the frame
 /// id and the integrator settings (`av_orbital::model::EarthGravityModel::new`'s own doc
-/// comment) -- this task's own brief's "match the same physical quantities `parse_gmat_spec`
-/// hashes" is satisfied there, not by a second, parallel settings map here.
+/// comment) -- so `settings: BTreeMap::new()` used to be reasoned as fine, on the theory that
+/// "match the same physical quantities `parse_gmat_spec` hashes" was already satisfied there,
+/// not by a second, parallel settings map here. That reasoning conflated two different jobs: a
+/// settings map a CALLER hashes further (which the orbital path genuinely has none of -- there
+/// is no second, parallel hash here, and `Materialized::settings`/`ModelHandle::settings` is
+/// never itself fed into any hash, golden, or product field -- see this task's own report for
+/// the reader-by-reader check) and a settings map a CALLER can simply *read* for provenance
+/// (which orbital was leaving empty for no reason -- `EarthGravityModel` was computing this
+/// exact map internally, in `new`/`with_third_bodies`/`with_srp`/`with_drag`, and then
+/// discarding it once each `settings_hash` was folded, so it was not recoverable from a
+/// constructed model at all). `EarthGravityModel::provenance()` now retains and exposes that
+/// accumulated map read-only, so this line can hand it straight through -- `ModelHandle.settings`
+/// for a `"orbital."`-dispatched instance is no longer empty, matching
+/// `crates/av-kernel/tests/registry.rs:67`'s shape for the GMAT path (an instance-specific test
+/// for the orbital path is `crates/av-kernel/tests/orbital_no_gmat_demo.rs`'s own
+/// `the_orbital_model_reports_its_own_data_file_provenance`).
 ///
 /// `pub(crate)`: only `crate::registry::ModelRegistry::construct_orbital` calls this, mirroring
 /// [`materialize_constant_accel`]/[`materialize_gmat`].
@@ -3379,7 +3394,8 @@ pub(crate) fn materialize_orbital(spec: &OrbitalSystemSpec, epoch_tai_ns: i64, m
         model = model.with_third_bodies(&de_path, &spec.point_masses).map_err(|e| err(e.to_string()))?;
     }
     let x0_si = units::state_km_to_m(spec.x0_km);
-    Ok(Materialized { model: AnyModel::Orbital(model), t0_tai_ns: epoch_tai_ns, x0_si: x0_si.to_vec(), settings: BTreeMap::new() })
+    let settings = model.provenance().clone();
+    Ok(Materialized { model: AnyModel::Orbital(model), t0_tai_ns: epoch_tai_ns, x0_si: x0_si.to_vec(), settings })
 }
 
 /// Build an [`AttitudeWheelsModel`] from `spec` and its instance's own declared/resolved
