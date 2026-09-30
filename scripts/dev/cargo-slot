@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""cargo-slot -- take one of two host-wide cargo build slots, then run cargo.
+"""cargo-slot -- take one of two host-wide cargo build slots, then run cargo (or, with
+`--hold`, a whole non-cargo command).
 
 # What this is
 
@@ -20,6 +21,90 @@ SIGKILL. Every brief uses it from round 5 on, in front of every `cargo` invocati
 Arguments after `cargo-slot` are passed to `cargo` unchanged; this script's own exit status IS
 cargo's exit status (see "How this releases the slot" below -- it `exec`s into cargo, it does
 not fork a child and relay).
+
+# `--hold`: a slot for a whole non-cargo run (question 235)
+
+The two slots govern cargo against cargo, but nothing stopped a cargo gate relinking a workspace
+binary while the Python suite was launching it, and on this host `syspolicyd`'s first-launch
+scan of a freshly written binary (question 226) then exceeds every readiness budget: the sixteen
+`command_service` errors in heavy round 7's gate were exactly that (question 235). The rule
+that came out of it: a Python suite that launches workspace binaries takes a cargo slot for its
+WHOLE run, so no relink can land under it. The form is
+
+    scripts/dev/cargo-slot --hold -- .venv/bin/python -m pytest [args...]
+
+which takes a slot exactly as above (same two attempts, same announced wait) and then `exec`s
+`<command> [args...]` instead of `cargo`. It is the SAME exec design, not a fork-and-wait: the
+slot's file descriptor is inheritable across the exec, the command IS this process, so the slot
+is held for the command's whole life and released the instant it exits, by any means including
+SIGKILL, and the command's exit status is this script's. A subprocess the command starts with
+`close_fds=True` (Python's default) does not inherit the slot; one started without it does, and
+would keep the slot until it exits -- the right behaviour for a workspace binary the suite
+deliberately leaves running, and something to know for a stray one.
+
+Only an EXACT first argument of `--hold` selects this mode; a cargo argument list can never be
+mistaken for it (`cargo-slot test -- --hold` and `cargo-slot --hold=x` still exec `cargo`, since
+`--hold` is not first / not exact, and cargo has no first-position flag of that name). After
+`--hold` there must be a literal `--` and at least one word: anything else is a hard usage
+error (exit 2) reported BEFORE any lock directory or slot is touched. `AV_CARGO_SLOT_EXE` does
+not apply under `--hold`: the command is the one given.
+
+The deps-count check below is NOT run under `--hold`: it is a warning about cargo's own compile
+speed (rustc's directory reads), the held command is not compiling, and its working directory
+need not be inside a workspace at all. A suite that itself runs cargo does so through
+`cargo-slot` (a nested slot: the parent holds one, the child takes the other or waits), and
+that invocation does the check.
+
+# The `deps` directory warning (question 231)
+
+`docs/open-questions.md` question 231 found `target/debug/deps` grown past a MILLION entries in
+every tree, rustc spending its time in directory reads rather than compiling: a cold rebuild of
+one crate went from eight minutes of nothing to twenty-nine seconds once the directory was
+reset. So once it holds a slot and before it execs `cargo` (not under `--hold`, above), this
+script checks the target directory's `debug/deps` and, when it holds more than 100 000 entries
+(`DEPS_THRESHOLD`), writes ONE line to real stderr naming the directory, the count, the
+threshold, question 231 and the remedy (move the directory aside). It only warns: it never
+refuses, deletes or moves anything, and the build proceeds. Any error inside the check is
+swallowed after at most one line saying the check could not run -- the check can never fail the
+build.
+
+Which directory: `CARGO_TARGET_DIR` (or `CARGO_BUILD_TARGET_DIR`) if set, else `target/` beside
+the nearest ancestor of the cwd holding a `Cargo.lock`; if there is none (a fresh clone, or a
+run outside a workspace) or the `debug/deps` directory does not exist, the check is silent.
+Not read: `build.target-dir` in `.cargo/config.toml`, a `--target-dir` argument, and profiles
+other than `debug` (a `--release` or `--target <triple>` build keeps its files elsewhere).
+
+Why not just count it -- MEASURED on this tree's real `deps` (890 835 entries): a full
+`os.scandir` count took 20 s (`ls -f | wc -l`: 38 s), an unacceptable tax on every build. So
+the ordinary path is ONE `stat` (2.5 ms against that same directory; `stat` does not depend on
+the directory's size), and a scan is only ever the FALLBACK:
+
+  * APFS (this host, macOS): a directory's `st_size` is exactly `64 + 32 x entries`
+    (measured: 0 -> 64, 1 -> 96, 5000 -> 160 064, 100 001 -> 3 200 096, and the real `deps`
+    28 506 784 = 64 + 32 x 890 835, which is exactly `os.scandir`'s count -- `ls -f` shows two
+    more, `.` and `..`; it shrinks again as entries are deleted). The count is DERIVED from
+    `st_size`, and the warning says so ("derived from the directory size"). APFS is confirmed
+    with `statfs(2)`'s `f_fstypename` (through `ctypes`, a 20 microsecond call), and the
+    formula is only trusted when `st_size - 64` is a multiple of 32; otherwise it falls
+    through. `st_nlink` (`entries + 2`) is not used: it saturates at 65 535.
+  * Any other filesystem: `st_size` need not encode the count (ext4 and friends report block
+    multiples). A conservative screen first: skip when `st_size < 2 x threshold`, because no
+    filesystem this author knows of spends fewer than two bytes of directory size per entry
+    (ext4's smallest directory entry is 12 bytes, tmpfs charges 20, APFS 32; btrfs's two bytes
+    per name character is the tightest known). Past the screen, a REAL count with an early exit:
+    `os.scandir` stops at `threshold + 1` entries, so the scan never reads more than 100 001
+    entries (86 ms hot on this APFS host, measured), and the warning says "at least N
+    (counted, stopped at the threshold)".
+
+WHAT WAS AND WAS NOT MEASURED: this host has only APFS. The APFS formula, the `statfs` probe,
+the cost of the `stat`, the full count and the bounded scan were all measured here. The
+non-APFS branch's screen bound (two bytes of directory size per entry) comes from those
+filesystems' documented directory layouts, NOT from a measurement on an ext4/xfs/btrfs
+directory; on this host that branch is exercised only by forcing it (`AV_CARGO_SLOT_DEPS_SCAN`,
+below) on an APFS directory, which proves the scan's counting and early exit but not the
+screen's bound on a real ext4 directory. The branch errs one way -- a directory it cannot
+classify goes to the scan, never to a silent skip -- so the only way to miss an over-threshold
+directory is a filesystem spending under two bytes of directory size per entry.
 
 # Why TWO slots, not one
 
@@ -121,6 +206,13 @@ contend for, the real shared lock).
 a test can hold a slot for a controlled, measurable duration with a harmless stand-in command
 instead of a real build. Production use never sets this.
 
+`AV_CARGO_SLOT_DEPS_THRESHOLD` -- overrides the deps-count threshold (default 100000) so a test
+can cross it with a few dozen files rather than 100 001. Not an integer: the default.
+
+`AV_CARGO_SLOT_DEPS_SCAN` -- set to `1`, skips the APFS `st_size` derivation and takes the
+generic screen-then-bounded-scan path, so a test on this APFS-only host can exercise the branch
+every other filesystem takes.
+
 # Hard failures, never a silent no-lock fallback
 
 If `$HOME` is unset (and `AV_CARGO_SLOT_DIR` was not given), or the lock directory/files cannot
@@ -130,13 +222,26 @@ the same "refuse, never silently proceed unlocked" rule `docker_test_lock.rs`'s 
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import fcntl
 import os
 import signal
 import sys
 import time
 
+DEPS_THRESHOLD = 100_000
+DEPS_THRESHOLD_ENV = "AV_CARGO_SLOT_DEPS_THRESHOLD"
+DEPS_SCAN_ENV = "AV_CARGO_SLOT_DEPS_SCAN"
+# APFS directory `st_size` == APFS_DIR_BASE_BYTES + APFS_DIR_ENTRY_BYTES * entries (measured).
+APFS_DIR_BASE_BYTES = 64
+APFS_DIR_ENTRY_BYTES = 32
+# No known filesystem charges fewer bytes of directory `st_size` per entry (btrfs: 2 per name
+# character); the generic screen skips a directory smaller than threshold * this.
+MIN_DIR_BYTES_PER_ENTRY = 2
 SLOT_COUNT = 2
+HOLD_FLAG = "--hold"
+USAGE_EXIT_STATUS = 2
 DEFAULT_LOCK_SUBDIR = os.path.join(".altavista", "locks")
 SLOT_FILENAME_TEMPLATE = "cargo-slot-{}.lock"
 DIR_OVERRIDE_ENV = "AV_CARGO_SLOT_DIR"
@@ -272,8 +377,140 @@ def _acquire_a_slot(fds: "list[int]", paths: "list[str]") -> int:
     return idx
 
 
+def _deps_threshold() -> int:
+    raw = os.environ.get(DEPS_THRESHOLD_ENV)
+    try:
+        return int(raw) if raw else DEPS_THRESHOLD
+    except ValueError:
+        return DEPS_THRESHOLD
+
+
+def _target_dir() -> "str | None":
+    """`CARGO_TARGET_DIR` (or `CARGO_BUILD_TARGET_DIR`), else `target/` beside the nearest
+    ancestor of the cwd that holds a `Cargo.lock`; `None` if there is no workspace."""
+    for name in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"):
+        value = os.environ.get(name)
+        if value:
+            return os.path.abspath(value)
+    here = os.getcwd()
+    while True:
+        if os.path.isfile(os.path.join(here, "Cargo.lock")):
+            return os.path.join(here, "target")
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def _is_apfs(path: str) -> bool:
+    """True only if `statfs(2)` says `path` is on APFS (`f_fstypename`, at offset 72 of
+    macOS's `struct statfs`). Any failure, or a non-Darwin host, is `False`, which routes the
+    caller to the generic path -- never to a silent skip."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = ctypes.create_string_buffer(4096)  # sizeof(struct statfs) is 2168
+        if libc.statfs(os.fsencode(path), buf) != 0:
+            return False
+        return buf.raw[72:88].split(b"\0", 1)[0] == b"apfs"
+    except Exception:
+        return False
+
+
+def _screen_says_small(st_size: int, threshold: int) -> bool:
+    """The non-APFS screen: True if a directory of this `st_size` cannot hold more than
+    `threshold` entries on any known filesystem (see the module doc comment)."""
+    return st_size < MIN_DIR_BYTES_PER_ENTRY * threshold
+
+
+def _count_capped(path: str, cap: int) -> int:
+    """A real count, stopping as soon as it passes `cap` (returns `cap + 1` then), so it never
+    reads more than `cap + 1` entries."""
+    n = 0
+    with os.scandir(path) as it:
+        for _ in it:
+            n += 1
+            if n > cap:
+                break
+    return n
+
+
+def _deps_over_threshold(deps: str, threshold: int) -> "str | None":
+    """One `stat` on the ordinary path. Returns a description of the count (for the warning)
+    if `deps` holds more than `threshold` entries, else `None`."""
+    st = os.stat(deps)
+    if not os.path.isdir(deps):
+        return None
+    forced_scan = os.environ.get(DEPS_SCAN_ENV) == "1"
+    if (
+        not forced_scan
+        and _is_apfs(deps)
+        and st.st_size >= APFS_DIR_BASE_BYTES
+        and (st.st_size - APFS_DIR_BASE_BYTES) % APFS_DIR_ENTRY_BYTES == 0
+    ):
+        n = (st.st_size - APFS_DIR_BASE_BYTES) // APFS_DIR_ENTRY_BYTES
+        if n > threshold:
+            return f"{n} entries (derived from the directory size, APFS: 64 + 32 x entries; not counted)"
+        return None
+    if _screen_says_small(st.st_size, threshold):
+        return None
+    n = _count_capped(deps, threshold)
+    if n > threshold:
+        return f"at least {n} entries (counted, stopped at the threshold)"
+    return None
+
+
+def _check_deps_count() -> None:
+    """Question 231's warning -- see the module doc comment. Never raises, never refuses,
+    never touches the directory; at most one line to real stderr."""
+    try:
+        target = _target_dir()
+        if target is None:
+            return
+        deps = os.path.join(target, "debug", "deps")
+        threshold = _deps_threshold()
+        try:
+            found = _deps_over_threshold(deps, threshold)
+        except (FileNotFoundError, NotADirectoryError):
+            return  # no such directory yet (a fresh tree): nothing to warn about
+        if found is None:
+            return
+        _write_real_stderr(
+            f"cargo-slot: WARNING: {deps} holds {found}, past the {threshold}-entry threshold "
+            "(docs/open-questions.md question 231: a million-entry deps directory made rustc "
+            "spend its time in directory reads; a cold rebuild of a crate went from eight "
+            "minutes to twenty-nine seconds once it was reset). Proceeding unchanged. Remedy, "
+            f"with no cargo running in this tree: move it aside (mv {deps} {deps}.old), delete "
+            "the copy at leisure, and let cargo rebuild.\n"
+        )
+    except Exception as e:
+        try:
+            _write_real_stderr(f"cargo-slot: note: the deps-count check (question 231) could not run: {e}\n")
+        except Exception:
+            pass
+
+
+def _usage_error(message: str) -> "None":
+    _write_real_stderr(
+        f"cargo-slot: {message}\n"
+        "usage: cargo-slot <cargo arguments...>\n"
+        "       cargo-slot --hold -- <command> [arguments...]   "
+        "(a slot for a whole non-cargo run, docs/open-questions.md question 235)\n"
+    )
+    sys.exit(USAGE_EXIT_STATUS)
+
+
 def main() -> "None":
     args = sys.argv[1:]
+
+    # `--hold` is recognised ONLY as the exact first argument; every other argument list,
+    # whatever it contains, is cargo's. Validated before anything is created or locked.
+    hold = bool(args) and args[0] == HOLD_FLAG
+    if hold:
+        if len(args) < 3 or args[1] != "--":
+            _usage_error("--hold needs `--` and then a command: cargo-slot --hold -- <command> [arguments...]")
+        command = args[2:]
 
     lock_dir = _lock_dir()
     paths = _slot_paths(lock_dir)
@@ -293,9 +530,14 @@ def main() -> "None":
     # doc comment's "How this releases the slot" section.
     os.set_inheritable(acquired_fd, True)
 
-    exe = os.environ.get(EXE_OVERRIDE_ENV, "cargo")
+    if hold:
+        exe, argv = command[0], command
+    else:
+        _check_deps_count()
+        exe = os.environ.get(EXE_OVERRIDE_ENV, "cargo")
+        argv = [exe] + args
     try:
-        os.execvp(exe, [exe] + args)
+        os.execvp(exe, argv)
     except OSError as e:
         _fail(f"could not exec {exe!r}: {e}")
 
