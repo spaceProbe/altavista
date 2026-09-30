@@ -493,3 +493,145 @@ fn the_orbital_model_reports_its_own_data_file_provenance() {
     }
     println!("{:<32} | {}", "settings_hash (final)", handle.describe().settings_hash);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The one-word swap on the REAL system file (`drms/leo_1day_golden.system.yaml`): a DRM author
+// changes `gmat.` to `orbital.` in `dynamics_model` and the file either works or is refused for a
+// stated physics reason, typed -- never for bookkeeping (`force_model.golden_ref`, the ballistic
+// `spacecraft.*` properties, the Keplerian element names).
+// ---------------------------------------------------------------------------------------------
+
+/// The final `settings_hash` `docs/native-dynamics-plan.md`'s provenance table records for JGM2
+/// 8x8 + Luna/Sun through `leDE1941.405` (asserted in this file's own provenance test through the
+/// chain check, and here against the real system file's own physics).
+const RECORDED_ORBITAL_SETTINGS_HASH: &str = "86ff995dfae4152d42f65cf07dbcdbe32d598bb8ce138aa56e3e397f83fce3aa";
+
+const KEPLERIAN_NAMES: [&str; 6] = ["spacecraft.SMA", "spacecraft.ECC", "spacecraft.INC", "spacecraft.RAAN", "spacecraft.AOP", "spacecraft.TA"];
+
+/// The real demo system file, read from disk and parsed with the same YAML parser every other
+/// test uses, with ONLY `dynamics_model` swapped from `gmat.` to `orbital.` (re-hashed: the
+/// embedded `hash` covers `dynamics_model`, and `classify_binding` does not check it, but a
+/// swapped file carrying a stale hash would be a lie).
+fn real_golden_system_swapped_to_orbital() -> SystemDefinition {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../drms/leo_1day_golden.system.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let mut sys = av_kernel::drm::schema::parse_system_definition_yaml(&yaml).expect("the real system file parses");
+    let rest = sys.dynamics_model.strip_prefix("gmat.").unwrap_or_else(|| panic!("the real file's dynamics_model must start with \"gmat.\", got {:?}", sys.dynamics_model)).to_string();
+    sys.dynamics_model = format!("orbital.{rest}");
+    hashed_system(sys)
+}
+
+fn instance_of(sys: &SystemDefinition) -> SystemInstance {
+    SystemInstance {
+        name: "leo".to_string(),
+        system_id: sys.id.clone(),
+        binding: Some(Binding { kind: BindingKind::Model as i32, config: Some(av_cdm::pb::binding::Config::Model(ModelBinding { model_id: sys.id.clone() })) }),
+        ..Default::default()
+    }
+}
+
+fn declared(sys: &SystemDefinition, name: &str) -> f64 {
+    sys.parameters.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("the real file declares {name}")).value
+}
+
+/// The real file with its Keplerian state replaced by the equivalent Cartesian one (elements read
+/// from the file itself, converted by this test's own independent conversion) and
+/// `DisplayStateType: Cartesian`; every other parameter -- `golden_ref`, the ballistic
+/// properties, the force model -- verbatim from the file.
+fn real_golden_system_with_cartesian_state() -> SystemDefinition {
+    let mut sys = real_golden_system_swapped_to_orbital();
+    let e: Vec<f64> = KEPLERIAN_NAMES.iter().map(|n| declared(&sys, n)).collect();
+    let x0 = keplerian_to_cartesian_km(e[0], e[1], e[2], e[3], e[4], e[5], 3.986004415e14_f64);
+    sys.parameters.retain(|p| !KEPLERIAN_NAMES.contains(&p.name.as_str()));
+    for p in sys.parameters.iter_mut() {
+        if p.name == "spacecraft.DisplayStateType" {
+            assert_eq!(p.string_value, "Keplerian", "the real file declares a Keplerian state");
+            p.string_value = "Cartesian".to_string();
+        }
+    }
+    for (name, v) in ["spacecraft.X", "spacecraft.Y", "spacecraft.Z", "spacecraft.VX", "spacecraft.VY", "spacecraft.VZ"].iter().zip(x0) {
+        sys.parameters.push(param(name, v));
+    }
+    hashed_system(sys)
+}
+
+/// The real Keplerian file, `dynamics_model` swapped and nothing else, is refused with the typed
+/// `OrbitalRequiresCartesianState` naming `Keplerian` -- not `UnknownParameter("spacecraft.AOP")`,
+/// which is what `parse_orbital_spec` returned before it knew the element names (making the typed
+/// refusal unreachable for any real Keplerian file).
+#[test]
+fn the_real_keplerian_system_file_swapped_to_orbital_is_refused_for_its_state_representation() {
+    let sys = real_golden_system_swapped_to_orbital();
+    assert!(sys.dynamics_model.starts_with("orbital."));
+    let err = classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()).expect_err("a Keplerian file must be refused by the native model");
+    println!("[real Keplerian file, orbital.] refusal: {err}");
+    match &err {
+        av_kernel::drm::DrmError::OrbitalRequiresCartesianState { declared, .. } => assert_eq!(declared, "Keplerian"),
+        other => panic!("expected DrmError::OrbitalRequiresCartesianState naming Keplerian, got {other:?}"),
+    }
+}
+
+/// The same real file with the equivalent Cartesian state: accepted, constructed through the
+/// ordinary path, carrying `golden_ref` into `describe().goldens`, and -- because `golden_ref`,
+/// the ballistic properties and the Keplerian-free state are labels and inert properties, not
+/// physics -- reporting the recorded settings hash, identical to the same physics declared
+/// without them.
+#[test]
+fn the_real_system_file_with_a_cartesian_state_works_under_orbital_and_keeps_the_recorded_hash() {
+    let sys = real_golden_system_with_cartesian_state();
+    let instance = instance_of(&sys);
+    let epoch = 1_767_225_637_000_000_000_i64;
+
+    let Classification::Model(BindingPlan::Orbital(spec)) = classify_binding(&instance, &sys, &DrmOptions::default()).expect("the Cartesian real file classifies") else {
+        panic!("must classify as BindingPlan::Orbital");
+    };
+    assert_eq!(spec.golden_ref.as_deref(), Some("leo_1day_jgm2_8x8_sunmoon"));
+    assert_eq!(spec.ballistic.get("DryMass"), Some(&500.0));
+    assert_eq!(spec.ballistic.get("Cd"), Some(&2.2));
+    assert_eq!(spec.ballistic.get("Cr"), Some(&1.8));
+    assert_eq!(spec.ballistic.get("DragArea"), Some(&5.0));
+    assert_eq!(spec.ballistic.get("SRPArea"), Some(&5.0));
+
+    let handle = ModelRegistry::construct_orbital(&spec, epoch, &sys.dynamics_model, &sys.state_space_id).expect("construct_orbital on the real file's spec");
+    let info = handle.describe();
+    assert_eq!(info.goldens, vec!["leo_1day_jgm2_8x8_sunmoon".to_string()]);
+    assert_eq!(info.settings_hash, RECORDED_ORBITAL_SETTINGS_HASH, "same physics as the recorded provenance row: golden_ref and ballistic properties must not move the hash");
+    assert!(!handle.settings.keys().any(|k| k.contains("golden") || k.contains("Cd") || k.contains("DryMass") || k.contains("SRP") || k.contains("Drag")), "labels and inert properties must not appear in the provenance map: {:?}", handle.settings.keys().collect::<Vec<_>>());
+    println!("[real Cartesian file, orbital.] goldens = {:?}, settings_hash = {}", info.goldens, info.settings_hash);
+
+    // Same physics with the label and the ballistic properties removed: byte-identical hash, and
+    // no goldens.
+    let mut bare = sys.clone();
+    bare.parameters.retain(|p| p.name != "force_model.golden_ref" && !["DryMass", "Cd", "Cr", "DragArea", "SRPArea"].iter().any(|b| p.name == format!("spacecraft.{b}")));
+    let bare = hashed_system(bare);
+    let Classification::Model(BindingPlan::Orbital(bare_spec)) = classify_binding(&instance_of(&bare), &bare, &DrmOptions::default()).expect("the bare file classifies") else {
+        panic!("must classify as BindingPlan::Orbital");
+    };
+    let bare_info = ModelRegistry::construct_orbital(&bare_spec, epoch, &bare.dynamics_model, &bare.state_space_id).expect("construct bare").describe();
+    assert!(bare_info.goldens.is_empty());
+    assert_eq!(bare_info.settings_hash, info.settings_hash);
+}
+
+/// A file declaring `Cartesian` together with a Keplerian element is ambiguous, refused
+/// (`UnknownParameter` naming the element), and any name outside the recognised sets is still
+/// `UnknownParameter`.
+#[test]
+fn an_ambiguous_state_or_an_unknown_spacecraft_name_is_still_refused() {
+    let mut sys = real_golden_system_with_cartesian_state();
+    sys.parameters.push(param("spacecraft.SMA", 6878.0));
+    let sys = hashed_system(sys);
+    let err = classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()).expect_err("Cartesian plus a Keplerian element is ambiguous");
+    println!("[Cartesian + SMA, orbital.] refusal: {err}");
+    match &err {
+        av_kernel::drm::DrmError::UnknownParameter { name, .. } => assert!(name.starts_with("spacecraft.SMA"), "{name}"),
+        other => panic!("expected UnknownParameter naming spacecraft.SMA, got {other:?}"),
+    }
+
+    let mut sys = real_golden_system_with_cartesian_state();
+    sys.parameters.push(param("spacecraft.Bogus", 1.0));
+    let sys = hashed_system(sys);
+    match classify_binding(&instance_of(&sys), &sys, &DrmOptions::default()) {
+        Err(av_kernel::drm::DrmError::UnknownParameter { name, .. }) => assert_eq!(name, "spacecraft.Bogus"),
+        other => panic!("expected UnknownParameter(spacecraft.Bogus), got {other:?}"),
+    }
+}
