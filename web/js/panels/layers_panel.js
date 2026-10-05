@@ -308,7 +308,7 @@ export function layersPanelStateKey(data) {
     tileSets, catalogError, loading, layerStates, entityOptions,
   } = data || {};
   const layerStateEntries = layerStates
-    ? Object.keys(layerStates).sort().map((k) => `${k}${layerStates[k].status || 'off'}${layerStates[k].errorMessage || ''}`)
+    ? Object.keys(layerStates).sort().map((k) => `${k}\u0001${layerStates[k].status || 'off'}\u0001${layerStates[k].errorMessage || ''}`)
     : [];
   return JSON.stringify([
     tileSets ?? null,

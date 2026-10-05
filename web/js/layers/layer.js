@@ -477,7 +477,7 @@ export class LayerManager {
     for (const [globalKey, entry] of this.resident) {
       if (entry.layerId === id) this._evictEntry(globalKey, entry);
     }
-    const prefix = `${id} `; // globalKeyFor's own join -- see that function's doc comment
+    const prefix = `${id}\u0000`; // globalKeyFor's own join -- see that function's doc comment
     for (const globalKey of this._failed.keys()) {
       if (globalKey.startsWith(prefix)) this._failed.delete(globalKey);
     }

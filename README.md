@@ -81,7 +81,13 @@ cargo test -p av-kernel
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/lint/required_features_clippy.sh
 cargo deny check
+node web/js/control_bytes_check.mjs
 ```
+
+`web/js/control_bytes_check.mjs` refuses any raw control byte (0x00–0x08, 0x0B, 0x0C,
+0x0E–0x1F, 0x7F) in `web/js/` source: a separator that must be a NUL or SOH is written as its
+escape (`\u0000`, `\u0001`), never as the invisible byte itself (questions 235 and 237). The
+same check also runs in the pytest suite (`tests/test_web_js_control_bytes.py`).
 
 `cargo clippy --workspace --all-targets` never builds a `[[bin]]`, `[[example]]`, `[[test]]`
 or `[[bench]]` that declares `required-features` (Cargo skips it unless those features are

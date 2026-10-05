@@ -134,7 +134,7 @@ function flushMicrotasks() {
 function trueBytesFromFreshPlan(mgr, layer, view) {
   const fresh = new Map();
   for (const r of layer.plan(view)) {
-    fresh.set(`${layer.id} ${r.key}`, r.byteCost);
+    fresh.set(`${layer.id}\u0000${r.key}`, r.byteCost);
   }
   let residentSum = 0;
   for (const [globalKey, entry] of mgr.resident) {
@@ -342,7 +342,7 @@ function levelHistogram(requests, layerId) {
     if (!byLevel.has(r.level)) byLevel.set(r.level, { level: r.level, wanted: 0, resident: 0 });
     const bucket = byLevel.get(r.level);
     bucket.wanted += 1;
-    const globalKey = `${layerId} ${r.key}`; // globalKeyFor's own join rule, restated (see layer.js)
+    const globalKey = `${layerId}\u0000${r.key}`; // globalKeyFor's own join rule, restated (see layer.js)
     if (manager.resident.has(globalKey)) bucket.resident += 1;
   }
   return [...byLevel.values()].sort((a, b) => a.level - b.level);
@@ -394,7 +394,7 @@ const phase2CoarseBeforeFineOk = coarseBeforeFineHolds(phase2Histogram);
 // the concrete, countable form of "no deadlock": the old wanted set's own resident
 // footprint reached exactly zero, not merely "the new one grew somehow".
 const phase1TilesStillResidentAfterPhase2 = phase1Requests.filter(
-  (r) => manager.resident.has(`${stub.layer.id} ${r.key}`),
+  (r) => manager.resident.has(`${stub.layer.id}\u0000${r.key}`),
 ).length;
 const phase2MaxResident = phase2.samples.reduce((m, s) => (s.residentBytes > m.value ? { value: s.residentBytes, iteration: s.iteration, event: s.event } : m), { value: -Infinity, iteration: null, event: null });
 const phase2MaxResidentPlusPending = phase2.samples.reduce((m, s) => (s.residentPlusPendingBytes > m.value ? { value: s.residentPlusPendingBytes, iteration: s.iteration, event: s.event } : m), { value: -Infinity, iteration: null, event: null });
