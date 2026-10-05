@@ -362,14 +362,20 @@ def main():
             "cov_t1_pre_symmetrization_asymmetry": cov_asymmetry,
             "cov_units": "SI (m^2 for position-position block, m^2/s^2 for velocity-velocity, m^2/s for the cross block)",
             "stm_spacecraft_ballistics": {k: stm_sat.GetRealParameter(k) for k in ("TotalMass", "DragArea", "SRPArea", "Cd", "Cr")},
-            # Round 5, question 230's stm-block follow-up (see STM_TOLERANCE's own comment
-            # above): the six tolerances crates/av-orbital/tests/stm_goldens.rs asserts as bare
-            # Rust constants, moved here -- inside the "stm" block, not this file's own top
-            # level, where they would be confusable with tolerance_m/tolerance_mps above (the
-            # gmat-sys depth-2 path's tolerances, a different comparison entirely).
-            "golden_comparison_tolerance": STM_TOLERANCE,
         },
     }
+    # Round 5, question 230's stm-block follow-up (see STM_TOLERANCE's own comment above): the
+    # six tolerances crates/av-orbital/tests/stm_goldens.rs asserts as bare Rust constants,
+    # moved here -- inside the "stm" block, not this file's own top level, where they would be
+    # confusable with tolerance_m/tolerance_mps above (the gmat-sys depth-2 path's tolerances,
+    # a different comparison entirely). Plain golden only: that test asserts them against
+    # leo_1day_jgm2_8x8_sunmoon.json's own final_stm/det_phi_t1/cov_t1_si, and their `source`
+    # strings quote residuals measured on that arc. No test asserts them against the drag+SRP
+    # golden (its native residual is a different, recorded number -- goldens/README.md's
+    # "Jacchia-Roberts / M5 residual"), so writing them there would put false provenance ("this
+    # golden's own final_stm") into a file that is not the one they bound.
+    if not args.drag_srp:
+        golden["stm"]["golden_comparison_tolerance"] = STM_TOLERANCE
     body = json.dumps(golden, indent=2, sort_keys=True)
     golden["sha256"] = hashlib.sha256(body.encode()).hexdigest()
     out = Path(__file__).with_name(golden["name"] + ".json")
