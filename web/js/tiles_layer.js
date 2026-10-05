@@ -98,9 +98,12 @@ import { Tiles3DLayerAdapter, ManagerGatedTilesFetchPlugin } from './layers/tile
 // id once the tileset tree is ready, registers `ManagerGatedTilesFetchPlugin`
 // (web/js/layers/tiles3d_layer.js -- see that file's own module docstring for the full
 // fetch-gating mechanism) on the live vendored `TilesRenderer`, and every `update()`
-// tick either drives `layerManager.update()` itself or -- when a globe is ALSO
-// registered on the SAME shared manager -- lets the caller drive it once, merged with
-// the globe's own view (`opts.selfDriveManager`/`getManagedView()`, below).
+// tick either drives `layerManager.update()` itself (a standalone overlay, the
+// `selfDriveManager` default) or -- when other participants share the SAME manager, as
+// in `web/js/scene.js`'s `Viewer` (the globe's tiles, the entity markers/trails) --
+// lets the caller drive it once per tick with everyone's keys merged into one view: the
+// overlay contributes its camera fields through `getManagedView()`, below, and is
+// itself ticked with `update(false)`.
 //
 // Why "merged, one call" matters, concretely (not a style preference): `LayerManager.
 // update(view)` calls EVERY registered layer's `plan(view)` and treats the UNION of
@@ -111,8 +114,10 @@ import { Tiles3DLayerAdapter, ManagerGatedTilesFetchPlugin } from './layers/tile
 // loads and makes its resident entries evictable, every single frame. Not hypothetical:
 // `tests/test_viewer_tiles3d_manager.py`'s own live-browser assertion (`enableGlobe()`
 // + `loadTilesOverlay()` together, both driven through the SAME manager) is this task's
-// own proof that it does not happen -- see that test and `web/js/scene.js`'s `update()`
-// for the merge `selfDriveManager: false` mode makes possible.
+// own proof that it does not happen, and `web/js/merged_view_check.mjs` proves the
+// same for the globe + entities pair -- see `web/js/scene.js`'s `_updateLayerManager()`
+// for the one merged call (`selfDriveManager: false` mode is what lets it own the
+// update).
 
 // ------------------------------------------------------------- tileset.json parsing
 /** @typedef {{west:number, south:number, east:number, north:number, minHeight:number, maxHeight:number}} Region3D radians/metres, 3D Tiles spec convention */
@@ -328,8 +333,9 @@ export class TilesOverlayLayer {
    *   `layerManager.update()` itself. Set `false` when a caller will merge this
    *   overlay's view into another `layerManager.update()` call it already drives
    *   itself THIS SAME TICK (see this file's "Round 5" module docstring for why that
-   *   merge matters) -- `web/js/scene.js`'s `Viewer.update()` does exactly this when
-   *   a globe is also enabled on the same manager, via `getManagedView()`, below.
+   *   merge matters) -- `web/js/scene.js`'s `Viewer.update()` does exactly this every
+   *   tick (the manager's one update merges the globe's, the entities' and this
+   *   overlay's `getManagedView()` fragments), always passing `false` per call.
    */
   constructor(tilesetUrl, opts = {}) {
     this.tilesetUrl = tilesetUrl;
@@ -458,10 +464,9 @@ export class TilesOverlayLayer {
    * nudge the old path used (`_applyErrorTargetFromManager`, below). */
   /** @param {boolean} [selfDriveManager] per-call override of the constructor's own
    *   `opts.selfDriveManager` (default `true`) -- a PER-TICK choice, not fixed at
-   *   construction, because whether a globe is active on the SAME manager can change
-   *   at runtime (`enableGlobe()`/`disableGlobe()` called in either order relative to
-   *   `loadTilesOverlay()`/`clearTilesOverlay()`). `undefined` (every call site that
-   *   does not need to override it) falls back to the constructor's own default. */
+   *   construction, so a caller whose set of manager participants changes at runtime
+   *   can decide each tick. `undefined` (every call site that does not need to
+   *   override it) falls back to the constructor's own default. */
   update(selfDriveManager) {
     this.renderer.update();
     if (this._layerManager && this._adapter) {

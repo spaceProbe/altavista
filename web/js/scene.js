@@ -47,7 +47,7 @@ import { TilesOverlayLayer, placeOverlayInBodyFixedFrame } from './tiles_layer.j
 // Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe through
 // the LayerManager"): imported from the barrel (`./layers/index.js`), per that
 // module's own convention -- see `Viewer`'s constructor and `enableGlobe()`, below.
-import { LayerManager } from './layers/index.js';
+import { LayerManager, updateComposed } from './layers/index.js';
 // M26.3 (docs/ui-rework-plan.md): the multiple-3D-viewports data model. See viewport.js's
 // own module docstring for the full design (per-viewport camera/frame/focus/floating
 // origin/line-clones, THREE.Layers instead of a second THREE.Scene) -- this file is the
@@ -66,7 +66,7 @@ import { Viewport, PRIMARY_LAYER, pickAlongCamera } from './viewport.js';
 // rendering here does NOT reuse the module's own `buildEllipsoidMesh`/`buildTrailGroup`
 // position data verbatim (floating-origin safety, question 46).
 import {
-  MarkerLayerAdapter, TrailLayerAdapter,
+  MarkerLayerAdapter, TrailLayerAdapter, ResidentEntityScene,
   covarianceEllipsoid, keepOutVolumeFromCovariance, buildEllipsoidMesh,
   ModelEntity, parseGLTFAsset,
 } from './entities/index.js';
@@ -149,7 +149,7 @@ const ENTITY_MODEL_LAYER_ID = 'entity-models';           // same
 // "Trails ... every spacecraft's recent track" (this task's brief) -- a visibility
 // default (how much history to show), not a mission parameter, same discipline as the
 // sigma/margin constants above. Admission byteCost is declared honestly against this
-// same cap (see setScenario()'s entity-trail view building) so the LayerManager's own
+// same cap (see _buildEntities()'s entity list) so the LayerManager's own
 // budget reflects what is actually drawn, never an undeclared amount.
 const ENTITY_TRAIL_RECENT_SAMPLES = 50;
 // Constant per-instance marker size (scene units) -- entity markers are a SEPARATE,
@@ -158,6 +158,10 @@ const ENTITY_TRAIL_RECENT_SAMPLES = 50;
 // fixed on-screen footprint rather than reusing MARKER_PX's pixel-constant formula,
 // keeping the two visually distinguishable rather than exact duplicates.
 const ENTITY_MARKER_RADIUS_SCENE_UNITS = 3e-4;
+
+// A shared-manager participant that never contributes a fragment (`updateComposed`, layers/layer.js) --
+// stands in for the entity scene before the first scenario has loaded.
+const NO_PARTICIPANT = { planView: () => null };
 
 export class Viewer {
   constructor(canvas, labelLayer) {
@@ -276,9 +280,11 @@ export class Viewer {
     // -- see both methods' own "heavy round 7" comments. Null/empty until the first
     // setScenario() call.
     this._entityGroups = null;           // {markers, trails, covarianceEllipsoids, keepOutVolumes, models}: THREE.Group
-    this._entityMarkerMesh = null;       // one THREE.InstancedMesh, rebuilt per scenario
-    this._entityMarkerResidentNames = [];// spacecraft names, in the SAME order as _entityMarkerMesh's instances
-    this._entityTrailLines = new Map();  // spacecraft name -> {line, positions:Float32Array, maxPoints}
+    // The marker InstancedMesh, the names its instances stand for and the trail lines are
+    // owned by this ResidentEntityScene (entities_instanced_layer.js), which mirrors the
+    // shared manager's residency into the scene graph every tick; `_entityMarkerMesh`/
+    // `_entityMarkerResidentNames`/`_entityTrailLines` (accessors, below) read through it.
+    this._entityResidency = null;
     this._entityCovarianceMeshes = new Map();  // spacecraft name -> {mesh, lastIndex}
     this._entityKeepoutMeshes = new Map();     // spacecraft name -> {mesh, lastIndex}
     this._entityModelEntities = new Map();     // spacecraft name -> ModelEntity
@@ -379,6 +385,13 @@ export class Viewer {
     return 600;
   }
 
+  /** The marker `THREE.InstancedMesh` (null before a scenario with entities loads). */
+  get _entityMarkerMesh() { return this._entityResidency ? this._entityResidency.markerMesh : null; }
+  /** Spacecraft names whose marker payload is resident, in the order of the mesh's instances. */
+  get _entityMarkerResidentNames() { return this._entityResidency ? this._entityResidency.markerNames : []; }
+  /** spacecraft name -> {line, positions:Float32Array, maxPoints}, resident trails only. */
+  get _entityTrailLines() { return this._entityResidency ? this._entityResidency.trailLines : new Map(); }
+
   clear() {
     for (const b of this.bodies.values()) { disposeMesh(b.mesh); disposeMesh(b.dot); b.label.remove(); }
     for (const s of this.spacecraft.values()) { s.line.geometry.dispose(); s.line.material.dispose(); s.label.remove(); }
@@ -428,6 +441,9 @@ export class Viewer {
     // never a stale registration or a stale blacklist surviving into the next scenario.
     this.layerManager.removeLayer(ENTITY_MARKER_LAYER_ID);
     this.layerManager.removeLayer(ENTITY_TRAIL_LAYER_ID);
+    // The marker mesh and the resident trail lines belong to the residency scene: it removes
+    // and disposes them (the shared marker geometry is left alone) before the group sweep below.
+    if (this._entityResidency) { this._entityResidency.dispose(); this._entityResidency = null; }
     if (this._entityGroups) {
       // `disposeGeometry: false` for markers/ellipsoids/keep-out -- their geometry is
       // SHARED (this._entityMarkerGeometry, constructed once in the constructor; and
@@ -442,13 +458,6 @@ export class Viewer {
       disposeEntityGroup(this._entityGroups.models, true);
       this._entityGroups = null;
     }
-    // Entity marker/trail meshes' own GPU resources: the marker mesh's material is
-    // this scenario's own (disposeEntityGroup, just above, already removed+disposed it
-    // from the group -- the geometry is the SHARED this._entityMarkerGeometry, deliberately
-    // never disposed here). Trail lines are disposed the same way through their group.
-    this._entityMarkerMesh = null;
-    this._entityMarkerResidentNames = [];
-    this._entityTrailLines.clear();
     this._entityCovarianceMeshes.clear();
     this._entityKeepoutMeshes.clear();
     this._entityModelEntities.clear();
@@ -1441,24 +1450,60 @@ export class Viewer {
   }
 
   /**
-   * Per-tick globe upkeep, called from update() below once the current body
-   * positions/quaternions are known. Tracks `body.mesh`'s already origin-relative
-   * transform exactly (plain position/quaternion copy -- see globe.js's module
-   * docstring for why the globe never needs its own floating-origin treatment), then
-   * computes the camera's position **in that body's local frame** (scene units) via
-   * `worldToLocal` and hands it to `GlobeLayer.update()`, which does the real
-   * screen-space-error tile selection (web/js/globe_lod.js).
+   * Per-tick globe upkeep, first half: called from `_updateLayerManager()` below once
+   * the current body positions/quaternions are known. Tracks `body.mesh`'s already
+   * origin-relative transform exactly (plain position/quaternion copy -- see globe.js's
+   * module docstring for why the globe never needs its own floating-origin treatment),
+   * then computes the camera's position **in that body's local frame** (scene units) via
+   * `worldToLocal` and asks `GlobeLayer.planView()` for the globe's fragment of this
+   * tick's view (the real screen-space-error tile selection, web/js/globe_lod.js). It
+   * does NOT call `layerManager.update()`: the globe's fragment is merged with the
+   * entities' and the overlay's into the tick's one update call, and the globe's
+   * meshes/textures are then reconciled by `GlobeLayer.commitPlannedView()`.
+   * Returns `null` (not participating) with no globe or no body to attach it to.
    */
   _syncGlobeLayer(cam) {
     const layer = this.globeLayer;
     const b = this.bodies.get(this.globeBodyName);
-    if (!layer || !b) return;
+    if (!layer || !b) return null;
     layer.group.position.copy(b.mesh.position);
     layer.group.quaternion.copy(b.mesh.quaternion);
     layer.group.updateMatrixWorld(true);
     const camLocal = layer.group.worldToLocal(cam.getWorldPosition(this._tmpAbs));
     const h = this._referenceCanvasHeight();
-    layer.update(camLocal, h, THREE.MathUtils.degToRad(cam.fov));
+    return layer.planView(camLocal, h, THREE.MathUtils.degToRad(cam.fov));
+  }
+
+  /**
+   * The ONE `layerManager.update()` call of this render tick (heavy cleanup round 1,
+   * questions 235/237). `LayerManager.update(view)` treats every registered layer's
+   * `plan(view)` output as that call's ENTIRE wanted set, so every participant on this
+   * viewer's shared manager contributes a fragment to a single merged view instead of
+   * calling the manager itself (two partial calls per tick each see the other's content
+   * as "not wanted" and cancel its in-flight loads -- measured in round 7: with a globe
+   * active no imagery tile ever finished). The participants, in precedence order (the
+   * earliest fragment wins a shared key, `composeView`):
+   *   - the globe: `tiles`, `cameraEcef`, `screenHeightPx`, `fovYRad` (`_syncGlobeLayer`);
+   *   - the 3D-Tiles overlay: `cameraEcef`/`screenHeightPx`/`fovYRad` from its own
+   *     `getManagedView()` -- the globe's values win when both are present, exactly the
+   *     camera the overlay's adapter read from the globe's view before this merge;
+   *   - the entities: `markers`, `trails` (`this._entityResidency`), re-planned every
+   *     tick with stable keys and costs, so an entity payload that was evicted is
+   *     re-admitted once it is wanted and fits again.
+   * After the update, each participant applies its own consequence (`GlobeLayer.
+   * commitPlannedView()` binds the textures that are now resident; the entity scene reads
+   * residency into the scene graph). `tilesOverlay.update(false)` always runs, because
+   * the vendored renderer's own fetch/parse pipeline and its `errorTarget` nudge need a
+   * tick whether or not the overlay is a manager participant this frame; `false` because
+   * the manager is driven here, never by the overlay itself.
+   */
+  _updateLayerManager(cam) {
+    updateComposed(this.layerManager, [
+      { planView: () => this._syncGlobeLayer(cam), commit: () => this.globeLayer.commitPlannedView() },
+      { planView: () => (this.tilesOverlay ? this.tilesOverlay.getManagedView() : null) },
+      this._entityResidency || NO_PARTICIPANT,
+    ]);
+    if (this.tilesOverlay) this.tilesOverlay.update(false);
   }
 
   // ------------------------------------------------------------- M15.4/M16.4: 3D Tiles overlay
@@ -1532,10 +1577,11 @@ export class Viewer {
    * `layerManager: this.layerManager` -- THIS viewer's one shared manager, same
    * invariant `enableGlobe()` already documents above -- routes the overlay's real
    * content fetch through it (`web/js/tiles_layer.js`'s own "Round 5" module
-   * docstring has the full mechanism). Per-tick driving of that shared manager stays
-   * coordinated with the globe (`update()`, below): `TilesOverlayLayer`'s own
-   * `selfDriveManager` is decided fresh every tick from whether `this.globeLayer` is
-   * currently set, never fixed here at construction time.
+   * docstring has the full mechanism). Per-tick driving of that shared manager is the
+   * viewer's, never the overlay's: the overlay contributes its camera fragment to the
+   * tick's ONE merged `layerManager.update()` (`_updateLayerManager`, above) and is
+   * itself ticked with `update(false)`, whether or not a globe or entities are also
+   * participants.
    * @param {string} url
    * @param {string} [bodyName] which body's body-fixed frame to geo-reference
    *   against -- defaults to 'Earth', matching every example scenario that loads a
@@ -1713,24 +1759,21 @@ export class Viewer {
    * `this.entityOptions` (never rebuilt on a checkbox toggle -- `setEntityClassEnabled`
    * below only flips `group.visible`).
    *
-   * Markers/trails go through `this.layerManager` (`addLayer`, a single admission call
-   * below): "the entity adapters' declared byte costs go on the SAME 64 MiB budget as
-   * the globe's imagery/terrain... never a second LayerManager" (this task's own
-   * brief). Deliberately admitted ONCE here, not re-`update()`-d every render tick --
-   * see the doc comment on `this.layerManager.update(...)`, below, for why: `GlobeLayer`
-   * (web/js/globe.js, a file this task may not edit) drives this SAME shared manager
-   * with its OWN `{tiles, cameraEcef, screenHeightPx, fovYRad}` view every tick it is
-   * active, and `LayerManager.update(view)`'s own contract (web/js/layers/layer.js) is
-   * that EVERY registered layer's `plan(view)` output is that call's entire wanted set
-   * -- two independently-built partial views driving one manager, once each per tick,
-   * would each treat the OTHER call's layers as "not wanted", cancelling
-   * still-in-flight pending loads before they can ever resolve (measured: with a globe
-   * active, alternating globe-view/entity-view calls at 60 Hz never let a single
-   * imagery tile finish loading -- see this task's own report). A one-time admission at
-   * scenario load avoids that entirely: entity markers/trails become resident before
-   * any globe tile is even pending, and (at this codebase's 64 MiB budget against a
-   * demo/RPO scene's few-hundred-byte entity cost) are never evicted afterward, since
-   * eviction only fires under real budget pressure this scene never creates.
+   * Markers/trails go through `this.layerManager` (`addLayer` once per scenario):
+   * "the entity adapters' declared byte costs go on the SAME 64 MiB budget as the
+   * globe's imagery/terrain... never a second LayerManager" (this task's own brief).
+   * They are NOT admitted once: a `ResidentEntityScene` (web/js/entities/
+   * entities_instanced_layer.js) is the entities' participant in the render tick's ONE
+   * merged `layerManager.update()` (`_updateLayerManager`, this class), so markers and
+   * trails are re-planned every frame next to the globe's tiles. Their requests are
+   * stable (same keys, same declared costs), so a resident payload's re-plan is a
+   * no-op; a payload the manager evicted under budget pressure is wanted again on the
+   * next tick and re-admitted as soon as it fits; and the scene graph follows the
+   * manager's residency (`ResidentEntityScene.sync()`), so an evicted marker/trail
+   * stops being drawn and is drawn again when re-admitted. `clear()` disposes the
+   * scene and unregisters the adapters; the adapters' loads are microtask-deferred and
+   * the manager ignores a load that settles after its layer was removed, so no stale
+   * callback can reach a disposed group.
    *
    * Covariance ellipsoids/keep-out volumes and glTF models are NOT run through
    * `this.layerManager` -- H6's own module never declared a byte cost for them (only
@@ -1756,42 +1799,29 @@ export class Viewer {
 
     const spacecraftList = sc.spacecraft || [];
 
-    // ---- markers + trails: register fresh adapters, admit once (see this method's own
-    // doc comment for why once, not per-tick).
+    // ---- markers + trails: register fresh adapters; the ResidentEntityScene plans their
+    // requests into every tick's merged update (see this method's own doc comment) and
+    // mirrors their residency into the two groups created above.
     this.layerManager.addLayer(new MarkerLayerAdapter({ id: ENTITY_MARKER_LAYER_ID }));
     this.layerManager.addLayer(new TrailLayerAdapter({ id: ENTITY_TRAIL_LAYER_ID }));
-    const markerView = spacecraftList
-      .filter((s) => s.t && s.t.length)
-      .map((s) => ({
-        id: s.name,
-        positionKm: [s.pos[0] || 0, s.pos[1] || 0, s.pos[2] || 0],
-        color: s.color || '#ffffff',
-        sseError: 1,
-        viewDistanceM: 1,
-      }));
-    const trailView = spacecraftList
-      .filter((s) => s.t && s.t.length)
-      .map((s) => ({
-        id: s.name,
-        pointsKm: recentTrailPointsKm(s, ENTITY_TRAIL_RECENT_SAMPLES),
-        color: s.color || '#ffffff',
-        sseError: 1,
-        viewDistanceM: 1,
-      }));
-    this.layerManager.update({ markers: markerView, trails: trailView });
-    // `_entitySceneGen`: bumped once per `setScenario()` call (see the top of this
-    // method... actually incremented just below) -- both adapters' own `load()`
-    // (entities_instanced_layer.js's `microtaskLoad`) resolve ONE MICROTASK after
-    // `update()` returns, and `LayerManager._onLoaded` (the admission's own `.then()`)
-    // runs a SECOND microtask after that -- so nothing is actually resident yet at
-    // this exact line, only pending. `_finishEntityMarkerTrailBuild`, below, is
-    // deliberately deferred a few microtask ticks so it reads the manager's REAL,
-    // settled resident set, not an empty one -- and re-checks this generation token
-    // before touching anything, in case a second `setScenario()` call (or clear())
-    // ran before this settles.
-    this._entitySceneGen = (this._entitySceneGen || 0) + 1;
-    const gen = this._entitySceneGen;
-    this._finishEntityMarkerTrailBuild(spacecraftList, gen);
+    this._entityResidency = new ResidentEntityScene({
+      manager: this.layerManager,
+      markerLayerId: ENTITY_MARKER_LAYER_ID,
+      trailLayerId: ENTITY_TRAIL_LAYER_ID,
+      markerGroup: this._entityGroups.markers,
+      trailGroup: this._entityGroups.trails,
+      markerGeometry: this._entityMarkerGeometry,
+      trailMaxPoints: ENTITY_TRAIL_RECENT_SAMPLES,
+      isEnabled: (cls) => !!this.entityOptions[cls],
+      entities: spacecraftList
+        .filter((s) => s.t && s.t.length)
+        .map((s) => ({
+          name: s.name,
+          positionKm: [s.pos[0] || 0, s.pos[1] || 0, s.pos[2] || 0],
+          color: s.color || '#ffffff',
+          trailPointsKm: recentTrailPointsKm(s, ENTITY_TRAIL_RECENT_SAMPLES),
+        })),
+    });
 
     // ---- covariance ellipsoids + keep-out volumes: built only for a spacecraft whose
     // trajectory carries real `cov`/`covDim` (question 233's own wire contract, see
@@ -1851,76 +1881,6 @@ export class Viewer {
     }
   }
 
-  /** The deferred second half of `_buildEntities`'s marker/trail admission -- see that
-   * method's own comment on `_entitySceneGen` for why this must wait a few microtask
-   * ticks before reading `this.layerManager.resident` (the entity adapters' own
-   * `load()` is deliberately microtask-deferred, `entities_instanced_layer.js`'s own
-   * module docstring: "so a request that gets cancelled between admission and
-   * settlement is genuinely observable"). Awaits enough real microtask turns for BOTH
-   * `microtaskLoad`'s own internal `.then()` AND `LayerManager`'s outer
-   * `.then(_onLoaded)` (chained onto `load()`'s own promise) to have run -- `await
-   * Promise.resolve()` twice, not once, is what makes that reliable regardless of
-   * engine microtask-queue implementation details (never a fixed-duration
-   * `setTimeout`, per design constraint g -- "no clocks slept, ever").
-   *
-   * Builds the marker `THREE.InstancedMesh` and one `THREE.Line` per resident trail
-   * from whatever admission actually produced (at this codebase's 64 MiB budget, that
-   * is "every spacecraft" for any real scenario this round exercises, but this reads
-   * the manager's own truth rather than assuming it) -- capacity fixed at
-   * construction; `_updateEntityMarkers`/`_updateEntityTrails` (per-tick, below) only
-   * ever overwrite an existing instance's matrix/buffer contents, never reallocate.
-   *
-   * Bails silently (no console noise -- a genuine, ordinary "the scenario changed
-   * again before this settled" race, not an error) if `gen` no longer matches
-   * `this._entitySceneGen` -- bumped by every `_buildEntities()` call -- meaning this
-   * viewer has already moved on to a different (or no) scenario by the time this
-   * would have touched the scene graph.
-   */
-  async _finishEntityMarkerTrailBuild(spacecraftList, gen) {
-    await Promise.resolve();
-    await Promise.resolve();
-    if (this._entitySceneGen !== gen || !this._entityGroups) return;
-
-    const residentMarkerNames = [];
-    for (const entry of this.layerManager.resident.values()) {
-      if (entry.layerId === ENTITY_MARKER_LAYER_ID) residentMarkerNames.push(entry.localKey);
-    }
-    this._entityMarkerResidentNames = residentMarkerNames;
-    if (residentMarkerNames.length) {
-      const material = new THREE.MeshBasicMaterial({ vertexColors: true });
-      const mesh = new THREE.InstancedMesh(this._entityMarkerGeometry, material, residentMarkerNames.length);
-      mesh.count = residentMarkerNames.length;
-      mesh.userData.sourceLayerId = ENTITY_MARKER_LAYER_ID;
-      mesh.userData.residentKeys = residentMarkerNames;
-      residentMarkerNames.forEach((name, i) => {
-        const s = spacecraftList.find((sc0) => sc0.name === name);
-        mesh.setColorAt(i, new THREE.Color((s && s.color) || '#ffffff'));
-      });
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      this._entityGroups.markers.add(mesh);
-      this._entityMarkerMesh = mesh;
-    } else {
-      this._entityMarkerMesh = null;
-    }
-
-    for (const entry of this.layerManager.resident.values()) {
-      if (entry.layerId !== ENTITY_TRAIL_LAYER_ID) continue;
-      const name = entry.localKey;
-      const s = spacecraftList.find((sc0) => sc0.name === name);
-      const positions = new Float32Array(ENTITY_TRAIL_RECENT_SAMPLES * 3);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setDrawRange(0, 0);
-      const material = new THREE.LineBasicMaterial({ color: new THREE.Color((s && s.color) || '#ffffff') });
-      const line = new THREE.Line(geometry, material);
-      line.userData.sourceLayerId = ENTITY_TRAIL_LAYER_ID;
-      line.userData.spacecraft = name;
-      line.frustumCulled = false;
-      this._entityGroups.trails.add(line);
-      this._entityTrailLines.set(name, { line, positions, maxPoints: ENTITY_TRAIL_RECENT_SAMPLES });
-    }
-  }
-
   /** Reuse the SAME `${name}_body` frame node `_buildFrameGraph` already synthesizes
    * for every spacecraft (a real attitude quaternion stream when the scenario supplies
    * one, else a nadir-pointing VVLH fallback -- see that method's own doc comment) --
@@ -1977,8 +1937,11 @@ export class Viewer {
   /** The Layers panel's per-entity-class checkbox handler (web/js/app.js). Flips
    * `this.entityOptions[cls]` and the corresponding group's own `.visible` -- never
    * rebuilds anything (mirrors `setOptions()`'s own "flip a flag, don't rebuild"
-   * discipline for trail/label/axes/grid/stars toggles, just below). A no-op before
-   * the first scenario has ever loaded (`this._entityGroups` is null).
+   * discipline for trail/label/axes/grid/stars toggles, just below). For `markers`/
+   * `trails` it also changes what the next tick's merged update WANTS (a switched-off
+   * class plans nothing and stops spending the shared byte budget, `ResidentEntityScene.
+   * planView()` reads `entityOptions` every tick). A no-op before the first scenario
+   * has ever loaded (`this._entityGroups` is null).
    * @param {'markers'|'trails'|'covarianceEllipsoids'|'keepOutVolumes'|'models'} cls
    * @param {boolean} enabled
    */
@@ -1997,8 +1960,9 @@ export class Viewer {
    * directly here would reintroduce exactly the float32-precision jitter question 46's
    * bound exists to catch). `this.layerManager`'s own resident/admission bookkeeping
    * is untouched by this method -- it is read-only here (which spacecraft are
-   * currently admitted), never re-driven per tick (see `_buildEntities`'s own doc
-   * comment for why). */
+   * currently resident, via `this._entityMarkerResidentNames`, which
+   * `ResidentEntityScene.sync()` refreshed from the manager earlier this tick in
+   * `_updateLayerManager`). */
   _updateEntityMarkers() {
     const mesh = this._entityMarkerMesh;
     if (!mesh) return;
@@ -2198,23 +2162,13 @@ export class Viewer {
         b.dot.scale.setScalar(Math.max(1.5 / pxPerUnitAt(d), 1e-6));
       }
     }
-    // M15.4/M16.4: globe tiles + 3D Tiles overlay, both no-ops when neither is
-    // enabled. The body-fixed frame sync must run after the bodies loop above (it
-    // copies b.mesh's just-updated local transform) and before the overlay's own
-    // update() (which reads camera position through that same frame's world matrix).
+    // M15.4/M16.4 + heavy cleanup round 1: globe tiles, 3D Tiles overlay and entity
+    // markers/trails all plan into the ONE `layerManager.update()` this tick makes
+    // (`_updateLayerManager`, see its doc comment). The body-fixed frame sync must run
+    // after the bodies loop above (it copies b.mesh's just-updated local transform) and
+    // before the overlay's own camera read (through that same frame's world matrix).
     if (this._tilesOverlayBodyName) this._syncBodyFixedFrame(this._tilesOverlayBodyName);
-    if (this.globeLayer) this._syncGlobeLayer(cam);
-    // Round 5 (question 228/decision 9): `selfDriveManager = !this.globeLayer` --
-    // when a globe is ALSO active on this viewer's one shared `layerManager`,
-    // `_syncGlobeLayer` above has ALREADY called `layerManager.update()` this tick
-    // with a view that already carries everything a co-registered `Tiles3DLayerAdapter`
-    // needs (see `globe.js`'s own `update()` docstring), so `tilesOverlay.update()`
-    // here must NOT drive the manager a second, independent time -- see
-    // `web/js/tiles_layer.js`'s "Round 5" module docstring for why a second call
-    // would wrongly cancel/evict the other layer's own still-wanted content every
-    // frame. When no globe is active, the overlay is the sole registrant and safely
-    // self-drives.
-    if (this.tilesOverlay) this.tilesOverlay.update(!this.globeLayer);
+    this._updateLayerManager(cam);
     // lighting from the Sun (direction only; the small origin shift folded into
     // b.mesh.position above is negligible next to interplanetary distance, so the
     // normalized direction is unaffected)

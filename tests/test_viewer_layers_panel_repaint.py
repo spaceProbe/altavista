@@ -447,9 +447,10 @@ _PROBE_JS = r"""
     const panel = document.getElementById('panel-layers');
     if (!panel) { out.error = 'no #panel-layers'; return out; }
 
-    // ---- enable the real globe: viewer.layerManager.update() only ever runs while a
-    // globe or 3D-Tiles overlay is active (web/js/globe.js's own note), so this is what
-    // makes the streaming-budget numbers genuinely change over real time below --
+    // ---- enable the real globe: imagery only streams through viewer.layerManager while a
+    // globe or 3D-Tiles overlay is active (the entities alone admit a few hundred bytes
+    // once and then stay put), so this is what makes the streaming-budget numbers
+    // genuinely change over real time below --
     // otherwise "budget kept updating" would have nothing real to observe.
     const globeCb = document.getElementById('opt-globe');
     if (!globeCb) { out.error = 'no #opt-globe checkbox'; return out; }

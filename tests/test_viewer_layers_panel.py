@@ -473,10 +473,10 @@ async def _drive(url: str, chrome_path: str, eval_js: str, wait_s: float = 6.0):
 
 # The page script: drive the REAL page exactly as a user would --
 #   1. click the REAL "Tiled globe (Earth)" checkbox (#opt-globe) so the shared
-#      LayerManager actually ticks every frame (web/js/scene.js's update() only calls
-#      layerManager.update() while a globe or 3D-Tiles overlay is active -- see
-#      web/js/globe.js's own note and this task's own report for why a THIRD,
-#      independent driver must never be added instead);
+#      LayerManager streams imagery every frame (web/js/scene.js's `_updateLayerManager()`
+#      makes ONE merged layerManager.update() per tick for the globe, the 3D-Tiles overlay
+#      and the entities -- see web/js/layers/layer.js's `updateComposed` for why a
+#      second, independent driver must never be added instead);
 #   2. click the Layers panel's own real "Refresh catalog" button (never fetch
 #      /api/catalog/tilesets directly from this probe -- that would prove nothing about
 #      app.js's own wiring);

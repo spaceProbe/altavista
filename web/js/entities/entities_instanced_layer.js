@@ -14,14 +14,18 @@
 // `web/js/layers/layer.js`'s own module docstring, "no second, independently-maintained
 // copy of a budget/eviction rule").
 //
-// What this file deliberately does NOT do, and why (this task's own report covers
-// this in full): it does not wire these adapters into `web/js/scene.js`'s live
-// `Viewer`/`LayerManager` instance, because this round's own file-ownership rule
-// forbids editing `web/js/scene.js`, `web/js/app.js` and `web/js/panels/layers_panel.js`
-// (owned by other concurrent workers this round). Registration and budget discipline
-// are proven instead against a STANDALONE `LayerManager` in
-// `web/js/entities_layer_check.mjs` -- the identical class real wiring would use, just
-// not yet driven by the live `Viewer`'s own per-frame `update(view)` call.
+// How the live viewer uses these (heavy cleanup round 1, questions 235/237): `web/js/
+// scene.js`'s `Viewer` registers both adapters on its ONE shared `LayerManager` and, every
+// render tick, makes exactly one `LayerManager.update(view)` call whose `view` merges the
+// globe's, the 3D-Tiles overlay's and this file's `ResidentEntityScene` fragments
+// (`../layers/layer.js`'s `updateComposed`) -- so markers and trails are re-planned
+// every frame like imagery is, an entity payload the manager evicted is re-admitted
+// when it is wanted and fits again, and the scene graph follows what is resident.
+// `ResidentEntityScene`, below, is that per-tick participant. The same classes are
+// proven headlessly against a real `LayerManager` in `web/js/entities_layer_check.mjs`,
+// `web/js/entities_scene_check.mjs` and `web/js/merged_view_check.mjs`, and in a real
+// browser by `tests/test_viewer_entities_browser.py` and
+// `tests/test_viewer_globe_layer_manager.py`.
 //
 // "Loading" a marker or trail is not a network fetch -- there is nothing to download,
 // the instance data is built from already-in-memory entity state (a position, a
@@ -34,6 +38,7 @@
 // `cancellationReal` proof exercises for network loads) is genuinely observable here
 // too, not merely assumed impossible because "it's all synchronous anyway".
 import * as THREE from 'three';
+import { globalKeyFor } from '../layers/layer.js';
 
 /** One marker instance's declared resident byte cost: a `THREE.InstancedMesh`
  * per-instance entry is a 4x4 matrix (16 floats, `instanceMatrix`) plus an RGB color
@@ -221,4 +226,165 @@ export function buildTrailGroup(manager, layerId) {
     if (entry.layerId === layerId) group.add(entry.payload.line);
   }
   return group;
+}
+
+const NO_ENTITY_REQUESTS = Object.freeze([]);
+
+/**
+ * The entity markers' and trails' participant in the merged per-tick view, and the
+ * scene-graph side of their residency (heavy cleanup round 1, questions 235/237). One
+ * instance per loaded scenario; `web/js/scene.js` builds it in `_buildEntities()` and
+ * disposes it in `clear()`, and `../layers/layer.js`'s `updateComposed` drives it:
+ *
+ *   - `planView()` is this scene's fragment of the composed view, `{markers, trails}`.
+ *     The two lists are built ONCE, in the constructor, from `entities`, and handed back
+ *     unchanged every tick: same local keys (the entity names), same declared byte
+ *     costs (each adapter's own `plan()` derives them from the unchanged data), so for
+ *     an already-resident payload the manager's re-plan is a no-op (`LayerManager.
+ *     update()` refreshes `lastUsedStep` and finds the stored `byteCost` equal -- no
+ *     load, no revision), never a reload per tick. A class that `isEnabled('markers')`/
+ *     `isEnabled('trails')` reports off (the viewer passes its `entityOptions`)
+ *     contributes an empty list: its requests are then not wanted, so it stops
+ *     spending the shared budget -- its resident payloads stay until the manager
+ *     actually needs the room (then it evicts them, `LayerManager._evictEntry`), and
+ *     switching the class back on re-plans them (still resident: free; evicted:
+ *     re-admitted like any other request once it fits).
+ *   - `commit()` (= `sync()`) runs after the composed update and reads the manager's
+ *     own `resident` map into the scene graph: a marker is an instance of the
+ *     `InstancedMesh` -- and a trail a `THREE.Line` in `trailGroup` -- exactly while its
+ *     payload is resident. No second residency record is kept: the instance order
+ *     (`markerNames`), the mesh's `count` and the set of trail lines are recomputed
+ *     from `manager.resident` every tick and only rewritten when that read differs.
+ *
+ * Why instances are compacted rather than hidden in place: the mesh is allocated once
+ * with capacity for every entity (the number of entities is fixed for a scenario), and
+ * `mesh.count` is set to the number of resident markers with their colours rewritten in
+ * resident order. That keeps `markerNames[i]` <-> instance `i` a plain parallel pair,
+ * which is what `Viewer._updateEntityMarkers` and the browser proofs index by, and a
+ * hidden-in-place instance (scale 0) would still be a drawn instance. A trail's
+ * `THREE.Line` is created when its payload becomes resident and disposed when it stops
+ * being, so GPU memory follows residency too. Positions are NOT taken from the payloads
+ * (they bake raw absolute km, see `web/js/scene.js`'s `_updateEntityMarkers`); the
+ * viewer overwrites each resident instance/line every tick through the floating-origin
+ * pipeline, reading `markerNames`/`trailLines` back from here.
+ *
+ * @param {object} opts
+ * @param {import('../layers/layer.js').LayerManager} opts.manager the shared manager; the
+ *   adapters must already be registered on it under `markerLayerId`/`trailLayerId`
+ * @param {string} opts.markerLayerId
+ * @param {string} opts.trailLayerId
+ * @param {THREE.Object3D} opts.markerGroup receives the marker `InstancedMesh`
+ * @param {THREE.Object3D} opts.trailGroup receives one `THREE.Line` per resident trail
+ * @param {THREE.BufferGeometry} opts.markerGeometry SHARED per-instance geometry; never
+ *   disposed here
+ * @param {Array<{name:string, positionKm:number[], color?:string, trailPointsKm:number[][]}>} opts.entities
+ * @param {number} opts.trailMaxPoints capacity of each trail line's position buffer
+ * @param {(cls: 'markers'|'trails') => boolean} [opts.isEnabled] read fresh every tick (default: both on)
+ */
+export class ResidentEntityScene {
+  constructor({
+    manager, markerLayerId, trailLayerId, markerGroup, trailGroup, markerGeometry, entities, trailMaxPoints,
+    isEnabled = () => true,
+  }) {
+    this.manager = manager;
+    this.markerLayerId = markerLayerId;
+    this.trailLayerId = trailLayerId;
+    this.markerGroup = markerGroup;
+    this.trailGroup = trailGroup;
+    this.trailMaxPoints = trailMaxPoints;
+    this._entities = entities;
+    this._isEnabled = isEnabled;
+    this._markerView = entities.map((e) => ({
+      id: e.name, positionKm: e.positionKm, color: e.color || '#ffffff', sseError: 1, viewDistanceM: 1,
+    }));
+    this._trailView = entities.map((e) => ({
+      id: e.name, pointsKm: e.trailPointsKm, color: e.color || '#ffffff', sseError: 1, viewDistanceM: 1,
+    }));
+    this._colorByName = new Map(entities.map((e) => [e.name, new THREE.Color(e.color || '#ffffff')]));
+
+    /** Names whose marker payload is resident, in `entities` order; instance `i` of
+     * `markerMesh` is `markerNames[i]`. */
+    this.markerNames = [];
+    /** @type {THREE.InstancedMesh|null} null only when the scenario has no entities */
+    this.markerMesh = null;
+    if (entities.length) {
+      const mesh = new THREE.InstancedMesh(markerGeometry, new THREE.MeshBasicMaterial({ vertexColors: true }), entities.length);
+      mesh.count = 0;
+      entities.forEach((e, i) => mesh.setColorAt(i, this._colorByName.get(e.name)));
+      mesh.userData.sourceLayerId = markerLayerId;
+      mesh.userData.residentKeys = this.markerNames;
+      markerGroup.add(mesh);
+      this.markerMesh = mesh;
+    }
+    /** @type {Map<string, {line: THREE.Line, positions: Float32Array, maxPoints: number}>} resident trails only */
+    this.trailLines = new Map();
+  }
+
+  /** This scene's fragment of the composed view; `null` (not participating) when the
+   * scenario has no entities at all. */
+  planView() {
+    if (!this._entities.length) return null;
+    return {
+      markers: this._isEnabled('markers') ? this._markerView : NO_ENTITY_REQUESTS,
+      trails: this._isEnabled('trails') ? this._trailView : NO_ENTITY_REQUESTS,
+    };
+  }
+
+  commit() { this.sync(); }
+
+  /** Make the scene graph match `manager.resident` -- see the class docstring. */
+  sync() {
+    const resident = this.manager.resident;
+    const names = [];
+    this._entities.forEach((e) => {
+      if (resident.has(globalKeyFor(this.markerLayerId, e.name))) names.push(e.name);
+    });
+    const mesh = this.markerMesh;
+    if (mesh && (names.length !== this.markerNames.length || names.some((n, i) => n !== this.markerNames[i]))) {
+      this.markerNames = names;
+      mesh.userData.residentKeys = names;
+      mesh.count = names.length;
+      names.forEach((n, i) => mesh.setColorAt(i, this._colorByName.get(n)));
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+
+    for (const e of this._entities) {
+      const isResident = resident.has(globalKeyFor(this.trailLayerId, e.name));
+      const rec = this.trailLines.get(e.name);
+      if (isResident && !rec) {
+        const positions = new Float32Array(this.trailMaxPoints * 3);
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setDrawRange(0, 0);
+        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: new THREE.Color(e.color || '#ffffff') }));
+        line.userData.sourceLayerId = this.trailLayerId;
+        line.userData.spacecraft = e.name;
+        line.frustumCulled = false;
+        this.trailGroup.add(line);
+        this.trailLines.set(e.name, { line, positions, maxPoints: this.trailMaxPoints });
+      } else if (!isResident && rec) {
+        this._disposeTrail(e.name, rec);
+      }
+    }
+  }
+
+  _disposeTrail(name, rec) {
+    this.trailGroup.remove(rec.line);
+    rec.line.geometry.dispose();
+    rec.line.material.dispose();
+    this.trailLines.delete(name);
+  }
+
+  /** Remove everything this scene put in the graph (the shared marker geometry is left
+   * alone). Safe to call more than once. */
+  dispose() {
+    if (this.markerMesh) {
+      this.markerGroup.remove(this.markerMesh);
+      this.markerMesh.material.dispose();
+      this.markerMesh.dispose();
+      this.markerMesh = null;
+    }
+    this.markerNames = [];
+    for (const [name, rec] of [...this.trailLines]) this._disposeTrail(name, rec);
+  }
 }

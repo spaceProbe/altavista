@@ -894,7 +894,13 @@ body mesh's own `(r,r,r*(1-flattening))` factor -- flattening is instead baked d
 into each vertex via `WGS84_A_M`/`WGS84_B_M`). The globe therefore never writes into
 the *entities* frame's shared, origin-relative trajectory vertex buffers that the RPO
 precision bound is about -- it is architecturally incapable of disturbing them, not
-merely tested not to.
+merely tested not to. Since the heavy cleanup round, `_syncGlobeLayer()` also returns the
+globe's fragment of the tick's view (`GlobeLayer.planView()`) instead of driving the
+shared `LayerManager` itself: `Viewer._updateLayerManager()` merges it with the 3D-Tiles
+overlay's and the entity markers'/trails' fragments into ONE `layerManager.update()` per
+tick (`web/js/layers/layer.js`'s `updateComposed`), then `GlobeLayer.commitPlannedView()`
+reconciles the tile meshes and textures. Two partial updates per tick would cancel each
+other's loads (`web/js/merged_view_check.mjs`).
 
 **Proved, not just argued** -- `web/js/scene_jitter_harness.mjs`'s additive
 `measureRpoWithGlobePresent()` (invoked by `tests/test_viewer_globe.py`, extending the

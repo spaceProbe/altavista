@@ -4,7 +4,7 @@
 // form of "no caller outside web/js/layers/ has to know which of the three it is
 // talking to" for *this* module's own public surface (see layer.js's module
 // docstring for the interface itself).
-export { LayerManager, comparePriority, compareAdmission, globalKeyFor } from './layer.js';
+export { LayerManager, comparePriority, compareAdmission, globalKeyFor, composeView, updateComposed } from './layer.js';
 export { ImageryLayerAdapter, IMAGERY_TILE_BYTES } from './imagery_layer.js';
 export { GatewayImageryLayerAdapter, TileHttpError, TileEtagMismatchError, decodeTileBytesToTexture } from './gateway_imagery_layer.js';
 export { decodeTileSetManifest, manifestTileKey, ManifestDecodeError } from './tileset_manifest.js';
