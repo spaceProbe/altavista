@@ -79,6 +79,8 @@ cargo build --workspace
 cargo test --workspace --exclude av-kernel
 cargo test -p av-kernel
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings
+cargo clippy -p av-run --all-targets --no-default-features -- -D warnings
 scripts/lint/required_features_clippy.sh
 cargo deny check
 node web/js/control_bytes_check.mjs
