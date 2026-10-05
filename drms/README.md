@@ -195,6 +195,18 @@ any calendar-parsing code in this crate. The DRM executor converts this TAI inst
 A1MJD numerically (`av_cdm::time::Tai::to_a1_mjd`) when it binds the GMAT spacecraft, and
 cross-checks GMAT's own read-back epoch against the declared value.
 
+## `leo_1day_orbital_native` (heavy cleanup round, question 237)
+
+The native-model counterpart of `leo_1day_golden`: the same JGM2 8x8 + Sun/Moon physics, epoch and
+one-day window, with `dynamics_model` swapped from `gmat.` to `orbital.` so the bundle names no
+GMAT model at all. The swap alone is refused (`DrmError::OrbitalRequiresCartesianState`: the
+golden's state is Keplerian and the native model has no GMAT to convert it), so the system file
+carries the same orbit as a Cartesian state converted offline at JGM2's mu, as
+`crates/av-kernel/tests/orbital_no_gmat_demo.rs` does; the step is 300 s. Hashes from
+`cargo run -p av-kernel --example drm_hash`. `tests/test_av_run_no_gmat.py` runs it through an
+`av-run` built with `--no-default-features` and checks that the default build gives a
+bit-identical result on it.
+
 ## `leo_1day_maneuver_vnb` (M10.1, question 97)
 
 The impulsive-maneuver golden: the *same* vehicle and force model as `leo_1day_golden`

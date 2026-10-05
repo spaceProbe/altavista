@@ -1,0 +1,21 @@
+# SosConfiguration: one instance of leo_1day_orbital_native.system.yaml, bound by
+# BINDING_KIND_MODEL. step_rate_hz = 1/300 (a 300 s native step, the av_orbital integrator's own
+# default max step, 288 steps over the day) rather than the golden's 10 Hz: this bundle's job is
+# a native-model run that finishes quickly in a GMAT-free binary, not golden-grade sampling.
+# No initial_covariance: the DRM below requests no covariance.
+id: leo_orbital_native_sos
+version: "1"
+name: LEO golden physics, single native orbital instance
+instances:
+  - name: leo
+    system_id: leo_orbital_native_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_orbital_native_sys
+    step_rate_hz: 0.0033333333333333335
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "hand-authored from leo_1day_golden.sos.yaml (N6 native model)"
+# `cargo run -p av-kernel --example drm_hash -- sos drms/leo_1day_orbital_native.sos.yaml`.
+hash: "d7ca6b5e0fedb943ba0287812cff87f7ac9104472762dba32e005ada2568e1b9"
