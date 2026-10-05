@@ -42,6 +42,10 @@ chaser = sc.spacecraft(
     "Chaser", epoch="01 Jan 2026 00:00:00.000",
     cartesian=[tx + SEPARATION_KM * ux, ty + SEPARATION_KM * uy, tz + SEPARATION_KM * uz, tvx, tvy, tvz],
     DryMass=450.0, color="#ff6b6b",
+    # A glTF the viewer draws on the chaser when the Layers panel's "glTF models" control is on
+    # (the fixture the viewer already serves statically, a URL the browser resolves against
+    # the page origin; Python never fetches it). Its attitude is the chaser's body frame.
+    model="/js/fixtures/entity_model_fixture.gltf",
 )
 
 # ~1.5 orbits (LEO period ~93 min), sampled finely enough to resolve the metre-scale

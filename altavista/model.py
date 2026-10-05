@@ -106,6 +106,26 @@ DEFAULT_COLORS = [
 ]
 
 
+def check_model_ref(model, what: str = "model"):
+    """Validate a spacecraft's 3D model reference and return it unchanged.
+
+    ``None`` means "no model declared" and passes through. Anything else must be a
+    non-empty ``str`` (the viewer, ``web/js/scene.js::_buildEntities``, resolves it as a
+    URL against the page origin and fetches it as glTF/GLB); a non-``str`` is a
+    ``TypeError``, an empty or whitespace-only ``str`` a ``ValueError``. Deliberately
+    nothing else is checked: the URL is never fetched, resolved or probed from Python --
+    whether it is reachable is the viewer's to find out and to report.
+    """
+    if model is None:
+        return None
+    if not isinstance(model, str):
+        raise TypeError(f"{what} must be a non-empty str (a URL the viewer can fetch), "
+                        f"got {type(model).__name__}: {model!r}")
+    if not model.strip():
+        raise ValueError(f"{what} must be a non-empty str (a URL the viewer can fetch), got {model!r}")
+    return model
+
+
 @dataclass
 class Frame:
     """A GMAT coordinate system: origin body + axes type, e.g. Earth / MJ2000Eq."""
@@ -126,7 +146,14 @@ class Trajectory:
     vel: List[List[float]] = field(default_factory=list)  # km/s
     color: Optional[str] = None
     label: Optional[str] = None
-    model: Optional[str] = None                            # reserved for 3D model refs
+    # URL of a glTF/GLB model the viewer draws for this spacecraft (resolved by the browser
+    # against the page origin, e.g. "/js/fixtures/entity_model_fixture.gltf"); its attitude
+    # comes from the spacecraft's `<name>_body` frame node. Authored through
+    # `Scenario.spacecraft(..., model=)` / `adopt(..., model=)` / `run_script(models=)`.
+    # `to_dict()` emits it only when set (the key is absent, not null, otherwise), so a
+    # scenario that declares no model serialises byte-identically to before this field
+    # had a producer. Validated by `check_model_ref` on construction and again on emit.
+    model: Optional[str] = None
     # Additive, M5.2 (docs/open-questions.md question 10's sensor-footprint
     # groundwork): a real attitude quaternion stream, [[x, y, z, w], ...], one per
     # sample, parallel to `t` -- scalar-last, matching
@@ -159,6 +186,9 @@ class Trajectory:
     # re-derive it.
     cov_dim: int = 0
 
+    def __post_init__(self) -> None:
+        check_model_ref(self.model, f"Trajectory {self.name!r} model")
+
     def append(self, t: float, state) -> None:
         s = [float(state[i]) for i in range(6)]
         self.t.append(float(t))
@@ -174,7 +204,7 @@ class Trajectory:
         return self.t[-1] if self.t else None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "label": self.label or self.name,
             "color": self.color,
@@ -199,6 +229,13 @@ class Trajectory:
             "stateSpaceId": (STATE_SPACE_ID_CARTESIAN_POS_VEL_6_ATTITUDE_QUAT_4 if self.attitude
                              else STATE_SPACE_ID_CARTESIAN_POS_VEL_6),
         }
+        # Additive, heavy cleanup round (questions 235/237): the 3D model reference, only when one is
+        # declared -- omitted (not null) otherwise so every model-less scenario's JSON is
+        # byte-identical to what it was before. Re-validated here because the attribute can
+        # be assigned after construction, which __post_init__ cannot see.
+        if self.model is not None:
+            d["model"] = check_model_ref(self.model, f"Trajectory {self.name!r} model")
+        return d
 
 
 @dataclass

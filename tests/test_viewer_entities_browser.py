@@ -16,15 +16,16 @@ Two scenarios are published:
     the live RIC-frame jitter bound (question 46) -- exactly the "drawn from a run"
     proof question 233 asks for.
   - "RPO demo + entities fixture": the SAME real GMAT-propagated scenario, fetched back
-    and given two additive fields no producer populates yet for a real run (confirmed
-    directly against `altavista/scenario.py` -- it never sets `Trajectory.cov`/
-    `cov_dim`, and `Trajectory.model` is never emitted by `to_dict()` at all, see this
-    task's own report): `Target` gets a real, closed-form-known diagonal covariance
-    (`cov`/`covDim`) at every native sample, and `Chaser` gets `model` pointing at the
-    already-committed `web/js/fixtures/entity_model_fixture.gltf` (served statically at
-    `/js/fixtures/entity_model_fixture.gltf`). This is the "fixture scenario you
-    publish yourself" this task's own brief calls for -- real orbital motion (so a VVLH
-    fallback attitude genuinely varies over time), not a toy straight line.
+    and given one additive field this test still patches in: `Target` gets a real,
+    closed-form-known diagonal covariance (`cov`/`covDim`) at every native sample (the
+    producer for a real run's covariance is the CDM route, `altavista/cdm.py`, out of
+    scope here). `Chaser`'s glTF model is NOT patched: the scenario is built with
+    `Scenario.spacecraft(..., model=MODEL_FIXTURE_URL)` -- the producer added in the heavy
+    cleanup round (question 237) -- so `Trajectory.to_dict()` emits `model` and the published
+    JSON the viewer GETs already carries it, pointing at the already-committed
+    `web/js/fixtures/entity_model_fixture.gltf` (served statically at
+    `/js/fixtures/entity_model_fixture.gltf`). Real orbital motion (so a VVLH fallback
+    attitude genuinely varies over time), not a toy straight line.
 """
 from __future__ import annotations
 
@@ -115,10 +116,10 @@ def _http_post_json(url: str, payload: dict) -> None:
 
 def _build_and_publish_fixture_scenario(base_url: str) -> None:
     """Real GMAT run (examples/05_rpo_ric.py's own recipe, built in-process so it can
-    target this fixture's own port) -> "RPO demo", then a second scenario derived from
-    the SAME real trajectories with `cov`/`model` added -> "RPO demo + entities
-    fixture" (see this file's own module docstring for why -- no real producer
-    populates either field for a Python-scenario run today)."""
+    target this fixture's own port, Chaser authored with `model=`) -> "RPO demo", then a
+    second scenario derived from the SAME real trajectories with `cov` added -> "RPO
+    demo + entities fixture" (see this file's own module docstring: `model` comes from
+    the producer, only `cov` is patched)."""
     import altavista as gv
 
     sc = gv.Scenario("RPO demo", frame="EarthMJ2000Eq")
@@ -133,7 +134,7 @@ def _build_and_publish_fixture_scenario(base_url: str) -> None:
     chaser = sc.spacecraft(
         "Chaser", epoch="01 Jan 2026 00:00:00.000",
         cartesian=[tx + 0.030 * ux, ty + 0.030 * uy, tz + 0.030 * uz, tvx, tvy, tvz],
-        DryMass=450.0, color="#ff6b6b",
+        DryMass=450.0, color="#ff6b6b", model=MODEL_FIXTURE_URL,
     )
     sc.propagate([target, chaser], hours=2.33, step=15)
     sc.frame_ric(target)
@@ -144,6 +145,13 @@ def _build_and_publish_fixture_scenario(base_url: str) -> None:
     published = _http_get_json(
         base_url.rstrip("/") + f"/api/scenario/{urllib.parse.quote(RPO_SCENARIO_NAME)}"
     )
+    # The model rides through publish -> server -> GET untouched, authored by the
+    # producer and not patched on here: Chaser declares it, Target (which never did) has
+    # no `model` key at all (omitted, not null).
+    by_name = {s["name"]: s for s in published["spacecraft"]}
+    assert by_name["Chaser"].get("model") == MODEL_FIXTURE_URL, by_name["Chaser"].keys()
+    assert "model" not in by_name["Target"], by_name["Target"].get("model")
+
     fixture = copy.deepcopy(published)
     fixture["name"] = FIXTURE_SCENARIO_NAME
 
@@ -157,8 +165,6 @@ def _build_and_publish_fixture_scenario(base_url: str) -> None:
             ]
             spacecraft["cov"] = block * n_samples
             spacecraft["covDim"] = 3
-        elif spacecraft["name"] == "Chaser":
-            spacecraft["model"] = MODEL_FIXTURE_URL
 
     _http_post_json(base_url.rstrip("/") + "/api/scenario", fixture)
 
@@ -390,13 +396,22 @@ _PROBE_JS = r"""
     viewer.setEntityClassEnabled('models', true);
     const t2 = fixSc.t0;
     let modelLoaded = false;
-    for (let i = 0; i < 200 && !modelLoaded; i++) {
+    // Bounded on wall-clock time (not a frame count): a scenario that declares no model
+    // never loads one, and that must surface as a clear assertion below within seconds,
+    // not as the probe overrunning the driver's own deadline.
+    const modelDeadline = performance.now() + 20000;
+    while (performance.now() < modelDeadline && !modelLoaded) {
       viewer.update(t2);
       await new Promise((r) => requestAnimationFrame(r));
       const entity = viewer._entityModelEntities.get('Chaser');
       modelLoaded = !!(entity && entity.modelLoaded);
     }
-    out.fixture = { modelLoaded };
+    const chaserJson = fixSc.spacecraft.find((s) => s.name === 'Chaser');
+    out.fixture = {
+      modelLoaded,
+      declaredModel: chaserJson && chaserJson.model !== undefined ? chaserJson.model : null,
+      modelGroupChildCount: viewer._entityGroups.models.children.length,
+    };
 
     // ellipsoid + keepout: found, tagged, world semi-axes
     let ellMesh = null, koMesh = null;
@@ -540,6 +555,9 @@ def test_entities_drawn_from_a_real_run(live_server):
             f"{KEEPOUT_MARGIN_KM} km margin: got={got_ko} expected={expected_ko_scene_units}"
         )
 
+    assert fx["declaredModel"] == MODEL_FIXTURE_URL, (
+        f"the scenario the viewer GETs does not carry the producer-authored model URL: {fx!r}"
+    )
     assert fx["modelLoaded"] is True, "the glTF model entity never finished loading within the probe's own timeout"
     assert fx["model"]["attached"] is True, f"model entity did not report modelLoaded: {fx!r}"
     assert fx["model"]["sourceLayerId"] == "entity-models"
@@ -548,6 +566,9 @@ def test_entities_drawn_from_a_real_run(live_server):
     assert fx["model"]["quaternionChanged"] is True, (
         "the model entity's quaternion did not change between two real orbital epochs -- attitude is not tracking "
         f"the body-frame node: {fx['model']!r}"
+    )
+    assert fx["model"]["bodyNodeQuaternionChanged"] is True and fx["model"]["entityMatchesBodyNode"] is True, (
+        f"the model's attitude does not track the Chaser_body frame node's own varying orientation: {fx['model']!r}"
     )
 
     # ------------------------------------------------------------------------- console-clean
