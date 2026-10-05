@@ -552,25 +552,47 @@ test completing, `ticker` completing at nominal t≈120s, virtual time exact to 
 1000 steps (M24.1) — and now, newly, STEP 1's own real lockstep port traffic delivered byte-exact
 through Renode.
 
-## The reproducer for question 171
+## Question 171 closed (2026-10-05): the defect was ours, in the bridge's host-to-guest injection
+
+Superseding "M24 close" above on the STEP 2 boundary; full account and decisions in
+`docs/sil-plan.md`, "Status (native manager, 2026-10-05)".
+
+- **Where the guest was.** Attached during a stalled STEP 2 with the RTEMS toolchain's own
+  `arm-rtems6-gdb` (run in a container, reaching Renode's stub at `host.docker.internal`;
+  `third_party/renode/q171_gdb/`). `IO_LOCKSTEP` was blocked in `read_all` → termios
+  `fillBufferQueue`, holding 250 of STEP 2's 300 payload bytes; the ttyS1 termios state showed
+  `rawInBufDropped = 50`; UART FIFOs and GIC empty; PC in the idle thread.
+- **Why.** The bridge injected each frame with `WriteChar` as one burst while emulated time was
+  frozen. Renode's Cadence RX FIFO is unbounded unless `EnableRxOverflow` is set, so the RTEMS
+  interrupt moved the whole frame into termios' 256-byte raw ring before the reader ran, and termios
+  dropped the overflow. STEP 2 is the first STEP carrying sensor inputs (305 bytes); HELLO, BIND and
+  STEP 1 fit. Boundary experiment through the real bridge and ELF: burst and 256-byte chunks stall,
+  255-byte and 64-byte chunks deliver.
+- **Fix.** `RenodeBridge.inject_frame`: at most 64 bytes (the FIFO depth) per burst, the guest run
+  for the chunk's wire time at 115200 baud between bursts. No guest, platform or Renode change.
+- **Corrections to the M24.4e–g record above.** The STEP 2 failure was host-to-guest, so "the same
+  boundary across three guest-to-host transports" never pointed at the transports. The uart0
+  "…warm-up co" truncation is OSAL's 172-byte printf buffer, not a blocked write. lldb's
+  `gdb-remote` *does* connect to this stub with this Renode build (memory reads and DWARF
+  expressions work; `register read pc` and `bt` do not), contrary to M24.4e. A bare
+  `machine StartGdbServer <port>` is refused on this mixed-architecture platform; the working form
+  is `machine StartGdbServer <port> false "cluster1"`.
+
+## The identical-traffic test (formerly the question 171 reproducer)
 
 `crates/av-kernel/tests/drm_attitude_control_renode.rs::byte_identical_port_traffic_between_posix_container_and_renode`
-is the reproducer. It is marked:
-
-```rust
-#[ignore = "question 171: Renode port traffic beyond STEP 1 does not deliver; verified posix-container-only until resolved"]
-```
-
-so a recorded no-go is a **visible ignore, not a red suite**. It still compiles and is still run on
-demand:
+is no longer `#[ignore]`d. Over 10 s (100 steps) all 998 port-traffic records are identical between
+the posix container and Renode, and so are the records-only hash, the events (provenance fields
+named and excluded), the samples and the native dynamics hashes. The identical-traffic criterion
+(question 145) is verified **container against Renode**. It skips visibly unless the cFS image, the
+Renode files and `AV_RENODE_TESTS=1` are all present; run it with
 
 ```
-cargo test -p av-kernel --test drm_attitude_control_renode -- --ignored --nocapture
+AV_RENODE_TESTS=1 \
+AV_RENODE_BIN=<.../Renode.app/Contents/MacOS/renode> \
+AV_RENODE_CORE_CPU1_EXE=<cross-built core-cpu1.exe> \
+scripts/dev/cargo-slot test -p av-kernel --test drm_attitude_control_renode -- --nocapture
 ```
 
-**Do not delete it.** It carries the bridge, the shim wiring, the Renode platform and the
-posix-container comparison side, and it is the fastest way back into question 171 for whoever
-resumes. The named next diagnostic step is a GDB-remote attach during a stalled STEP 2, reusing
-M24.4e's proven tooling — the transport is already excluded as the cause, since the identical
-"STEP 1 delivers, STEP 2+ does not" boundary reproduces across `CreateServerSocketTerminal`, a
-`CreateFileBackend`, and the `CharReceived` Python hook.
+(5–7 minutes; the two path variables are needed only when the files are not at their default
+paths under `third_party/`.)
