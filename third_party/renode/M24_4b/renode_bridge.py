@@ -61,6 +61,8 @@ frame -- see `RenodeBridge.inject_frame`) added, all optional environment variab
                              `third_party/renode/q171_gdb/` for the gdb attach tooling
   AV_BRIDGE_GDB_HOLD_S       hold duration limit (default 900); AV_BRIDGE_GDB_CLUSTER (default
                              cluster1); AV_BRIDGE_STEP_REPLY_PROBE_S (default 5)
+q171-d added AV_BRIDGE_STEP_EARLY_STOP (default 0): 1 stops granting a STEP its virtual time as
+soon as the whole reply frame is buffered on the hook socket (`hook_reply_available`).
 and an always-on frame log, `<scratch>/frames.jsonl` (one JSON line per frame in either direction,
 with its bytes in hex).
 """
@@ -68,6 +70,7 @@ import argparse
 import json
 import os
 import re
+import select
 import socket
 import struct
 import subprocess
@@ -655,6 +658,22 @@ runMacro $reset
         self.log_frame("guest->shim", frame_type, raw)
         return frame_type, payload, raw
 
+    def hook_reply_available(self):
+        """True iff one whole lockstep-local frame is already buffered on the hook socket. Peeks
+        (never consumes) and never blocks: `select` with a zero timeout first, because a socket
+        with a timeout set would otherwise wait for data inside `recv`."""
+        def readable():
+            r, _w, _x = select.select([self.hook_conn], [], [], 0)
+            return bool(r)
+        if not readable():
+            return False
+        head = self.hook_conn.recv(4, socket.MSG_PEEK)
+        if len(head) < 4:
+            return False
+        (length,) = struct.unpack("<I", head)
+        have = self.hook_conn.recv(4 + length, socket.MSG_PEEK)
+        return len(have) >= 4 + length
+
     def verify_against_file_backend(self):
         """M24.4f 'prove it' step: compares everything the hook has delivered so far
         (`self._hook_captured_bytes`) against the independent `CreateFileBackend` capture attached
@@ -788,6 +807,13 @@ runMacro $reset
                 chunk_s = 0.5
                 elapsed_s = 0.0
                 pc_trace = []
+                # q171-d: AV_BRIDGE_STEP_EARLY_STOP=1 stops granting virtual time as soon as the
+                # whole reply frame is already buffered on the hook socket (checked between
+                # chunks, without consuming it); unset/0 (the default) grants the full
+                # `granted_s` as before. The guest is tick-driven, so the time after its reply
+                # is idle; the port-traffic A/B in `drm_attitude_control_renode.rs`'s doc
+                # comment shows whether the choice changes what crosses the port boundary.
+                early_stop = os.environ.get("AV_BRIDGE_STEP_EARLY_STOP", "0") == "1"
                 while elapsed_s < granted_s - 1e-9:
                     this_chunk = min(chunk_s, granted_s - elapsed_s)
                     self.mon.run_for(this_chunk, timeout=15.0)
@@ -800,6 +826,9 @@ runMacro $reset
                     except Exception:
                         pass
                     pc_trace.append((round(elapsed_s, 2), pc_match[-1] if pc_match else None, sts))
+                    if early_stop and self.hook_reply_available():
+                        break
+                print(f"bridge: STEP sequence={req.sequence} granted {elapsed_s:.2f} s of {granted_s:.2f} s virtual time (early stop {'on' if early_stop else 'off'})", flush=True)
                 last_tai_ns = req.until_tai_ns
                 distinct_pcs = sorted({pc for _, pc, _sts in pc_trace if pc is not None})
                 if len(distinct_pcs) <= 1:
