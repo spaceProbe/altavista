@@ -78,14 +78,18 @@ one is unlikely to be masked by the same bug in the other):
   on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
   network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-09-22, native5-cfs-image-provenance round 5, question 232's
-commit-provenance record -- see "Re-pinned 2026-09-22 (round 5, native5-cfs-image-provenance:
-question 232 commit-provenance record; first build on this worktree)" below -- `third_party/cfs`
-still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
+Recorded digest (re-pinned 2026-10-05, question 236's reproducible shim cross-build -- see
+"Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)" below --
+`third_party/cfs` still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see
+`third_party/fetch-cfs.sh`):
 
 ```
-sha256:3bef12a6f2d63ddc561383e0e40d1be04e7f5426fea61ad7272787b7c36953fd
+sha256:847c9a0816d2f66e5f3b78318c80513fa704829c7aa71103b09db65713dc3015
 ```
+
+Re-pinned 2026-10-05: the shim binary changed (new builder, `--locked`, path remap), cFS half
+cached; the runtime-content hash below moved with it. The previous recorded ID was
+`sha256:3bef12a6f2d63ddc561383e0e40d1be04e7f5426fea61ad7272787b7c36953fd`.
 
 Re-pinned 2026-09-21 after the ninth eviction, rebuilt from an empty cache with the same
 Dockerfile; the runtime-content hash below is unchanged (question 190). The previous recorded
@@ -97,17 +101,63 @@ the same Dockerfile, so the ID moved and the runtime-content hash below did not.
 previous recorded ID was `sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d`.
 
 Recorded runtime-content hash for this pin (question 185, see the definition above; MOVED by the
-2026-09-22 re-pin -- see that section below for the measured cause: the whole move is
-`/cfs/av-lockstep-shim`, and the isolated reason is the cross-build ENVIRONMENT, not a source
-change, which is a finding about question 185's invariant rather than a routine re-pin):
+2026-10-05 re-pin -- see that section below: the whole move is `/cfs/av-lockstep-shim`, the new
+reproducible build (question 236), and every other runtime file is byte-identical to the previous
+pin. It also moved on 2026-09-22 for the opposite reason, an unpinned build environment; from
+this pin on, a rebuild of the same commit must not move it, and two builds below show it did not):
 ```
-sha256:cc83bb68e53151baa86a1bb6dd16580108e4cbe565d133fa09bef307c4ae9031
+sha256:fa059749467ada4a789e158b92b36f44830b3f6e95d837bb7bfc5f23bc13a479
 ```
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-4f6ce1bed33af1ae8b5dda1d2b9ed346fc540a03
+50eb5f9000d04e1d5db29682119333cd565871de
 ```
+
+## Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)
+
+**What changed.** The shim binary is no longer built by a hand-run recipe in the Dockerfile's
+comment: `services/cfs/build-shim.sh` does it with a digest-pinned builder
+(`rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f`,
+the multi-arch index digest, rustc 1.90.0), `cargo build --release --locked`, pinned protobuf
+packages (`3.21.12-3+deb12u1`) and binutils (`2.38-4ubuntu2.12`), and `--remap-path-prefix` for the
+repo mount, the spoore mount, cargo's target dir, `CARGO_HOME` and `RUSTUP_HOME`. This is the
+reproducibility fix the 2026-09-22 section below left to the lead. The Dockerfile, the copied-paths
+list (now also `Cargo.toml`, `Cargo.lock` and `build-shim.sh`) and the build commit moved with it.
+
+**Shim proof (before the image was rebuilt).** Two clean builds, each in a fresh container, the
+second from a different repo mount path and a different in-container target dir: unstripped
+`708d23c7dbb666608632d82d9cdb658f888ee13b0e1df91a5c622ef2826d5705` and stripped
+`8d61137c2820f6e05e2c6637a6ed1ee2f482cd338a0356dc39ae1e9285b16c5e`, `cmp`-identical both times
+(the manager's own independent pair, from two further mount paths, gave the same hashes). `strings`
+on the unstripped binary finds 0 occurrences of `/Users/probe`, `/usr/local/cargo` or `/root`; a
+control build without the remap flags finds 4, 1771 and 0, and differs from the remapped build
+from byte 41. The previous shim, `49739c93…`, embedded 236 such path matches (stripped).
+**Build input, not a reproducibility variable:** the spoore checkout at
+`34442f9dc464ede46d62e732f17fc947bd81aa50` (clean). A different spoore commit is a different input.
+
+**The image.** `services/cfs/build-image.sh` at `50eb5f9000d04e1d5db29682119333cd565871de`, clean
+tree under the copied paths (0 dirty), 17 seconds, every cFS step from the layer cache. The
+recorded values are above: image `sha256:847c9a0816d2…`, runtime-content hash
+`sha256:fa059749467a…`, and the "Built from commit" record, which the script wrote.
+
+**Did the runtime-content hash move, and why.** It moved from `sha256:cc83bb68…` to
+`sha256:fa059749…`. Compared file by file (12 files in the runtime-content set, listing taken from
+the previous image still on this host and from the new one, the algorithm of `build-image.sh`
+step 2b), exactly one line differs: `/cfs/av-lockstep-shim`, `49739c93…` to `8d61137c…`. Every
+`/cfs/cpu1` file and `/cfs/container-entrypoint.sh` is identical. The shim bytes changed because
+the builder, the flags and the path remap are new, as intended; no cFS source moved.
+
+**Stability proof.** A second build with no cache at all:
+`docker build --no-cache -f services/cfs/Dockerfile -t altavista-cfs-lockstep:q171-repro .`
+(2 min 51 s; it re-ran the cFS clone and compile and re-installed the shim layer). Its image id
+was `sha256:db0ffb2b51e6…`, which is not the recorded `847c9a08…`, as question 190 predicts
+without BuildKit. Its runtime-content hash, computed with `build-image.sh`'s own command, was
+**`sha256:fa059749467ada4a789e158b92b36f44830b3f6e95d837bb7bfc5f23bc13a479`, equal to the first
+build's**, with all 12 per-file lines identical, and `/cfs/av-lockstep-shim` in both images hashes
+to `8d61137c…`. That tag was removed afterwards (`docker rmi altavista-cfs-lockstep:q171-repro`
+only). So the runtime-content hash is now reproducible for both halves of the image, which
+question 185's invariant required and the 2026-09-22 section found missing.
 
 ## Re-recorded 2026-09-30 (round 5, closing gate): same image, the build commit moved
 
