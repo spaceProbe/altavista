@@ -57,6 +57,8 @@ CHROME_CANDIDATES = [
 RPO_SCENARIO_NAME = "RPO demo"
 FIXTURE_SCENARIO_NAME = "RPO demo + entities fixture"
 MODEL_FIXTURE_URL = "/js/fixtures/entity_model_fixture.gltf"
+# The fixture's own bounds, `[0,0,0]`-`[1,1,1.5]` m (web/js/fixtures/entity_model_fixture.gltf).
+MODEL_FIXTURE_SIZE_M = [1.0, 1.0, 1.5]
 ELLIPSOID_SIGMA = 3
 KEEPOUT_MARGIN_KM = 0.050
 # Same closed-form diagonal covariance web/js/entities_scene_check.mjs uses -- semi-axes
@@ -469,6 +471,31 @@ _PROBE_JS = r"""
         entityMatchesBodyNode: q2.angleTo(bodyNodeQ2) < 1e-9,
         meshChildCount: modelEntity.group.children.length,
       };
+      // Size: the model group's WORLD bounding box, converted back to metres (one metre
+      // is 1e-3 km * SCALE scene units), against the fixture's own metre bounds
+      // (a 1 x 1 x 1.5 m tetrahedron). Measured with the attitude temporarily set to
+      // identity, because an axis-aligned box of a ROTATED tetrahedron is not its metre
+      // size; the quaternion is restored in the same synchronous block (no await, for the
+      // same reason as the attitude reads above), and the group's world scale is read
+      // back to show no ancestor rescales it.
+      const g = modelEntity.group;
+      const savedQ = g.quaternion.clone();
+      g.quaternion.identity();
+      g.updateWorldMatrix(true, true);
+      const worldBox = new THREE.Box3().setFromObject(g);
+      const worldSize = worldBox.getSize(new THREE.Vector3());
+      const wp = new THREE.Vector3(), wq = new THREE.Quaternion(), ws = new THREE.Vector3();
+      g.matrixWorld.decompose(wp, wq, ws);
+      g.quaternion.copy(savedQ);
+      g.updateWorldMatrix(true, true);
+      const metresPerSceneUnit = 1 / (1e-3 * SCALE);
+      out.fixture.model.worldSizeMetres = [
+        worldSize.x * metresPerSceneUnit, worldSize.y * metresPerSceneUnit, worldSize.z * metresPerSceneUnit,
+      ];
+      out.fixture.model.worldSizeSceneUnits = [worldSize.x, worldSize.y, worldSize.z];
+      out.fixture.model.groupWorldScale = [ws.x, ws.y, ws.z];
+      out.fixture.model.groupChildNames = g.children.map((c) => c.name);
+      out.fixture.entityExtent = viewer.entityExtent('Chaser');
     } else {
       out.fixture.model = { attached: false };
     }
@@ -570,6 +597,19 @@ def test_entities_drawn_from_a_real_run(live_server):
     assert fx["model"]["bodyNodeQuaternionChanged"] is True and fx["model"]["entityMatchesBodyNode"] is True, (
         f"the model's attitude does not track the Chaser_body frame node's own varying orientation: {fx['model']!r}"
     )
+
+    # ---------------------------------------------------------------- model size (metres)
+    # glTF 2.0 lengths are metres; the fixture's tetrahedron is 1 x 1 x 1.5 m, so the
+    # drawn model, converted back from scene units to metres, must be spacecraft-sized.
+    # Before the metres-to-scene-units scale existed this read 1000 x 1000 x 1500 km.
+    assert fx["model"]["groupWorldScale"] == pytest.approx([1.0, 1.0, 1.0], rel=1e-9), (
+        f"the model group (or an ancestor) is rescaled; the metre scale belongs on an inner node: {fx['model']!r}"
+    )
+    for axis, got, expected in zip("xyz", fx["model"]["worldSizeMetres"], MODEL_FIXTURE_SIZE_M):
+        assert math.isclose(got, expected, rel_tol=0.01), (
+            f"the drawn model's world {axis} extent is {got} m, the fixture's own bound is {expected} m "
+            f"(scene units {fx['model']['worldSizeSceneUnits']!r}): {fx['model']!r}"
+        )
 
     # ------------------------------------------------------------------------- console-clean
     assert errors == [], (

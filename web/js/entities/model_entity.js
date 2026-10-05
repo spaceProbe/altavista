@@ -49,15 +49,30 @@ export function wrapAttitudeAt(quaternionTrackInterp) {
  * source -- never a second, independent quaternion-interpolation implementation. */
 export class ModelEntity {
   /**
-   * @param {{id:string, group?:THREE.Object3D, attitudeSource?:{orientation:Function}|null}} opts
+   * @param {{id:string, sceneUnitsPerMetre:number, group?:THREE.Object3D, attitudeSource?:{orientation:Function}|null}} opts
+   *   `sceneUnitsPerMetre` is REQUIRED (a finite number > 0): glTF 2.0 measures every
+   *   linear distance in metres ("the units for all linear distances are meters"), and
+   *   the scene's own unit is whatever the caller's scene says it is (the viewer's is
+   *   1000 km, `web/js/scene.js`'s `SCALE`, so `1e-3 * SCALE` = 1e-6 per metre). This
+   *   module cannot know that, and a default of 1 would be exactly the defect this
+   *   argument exists to prevent (a 1.5 m model drawn 1,500 km across), so there is no
+   *   default: a caller that omits it gets a `TypeError` at construction, not a
+   *   wrong-sized model on screen. See `attachModel()` for where it is applied.
    *   `group` defaults to a fresh empty `THREE.Group` (a caller building a
    *   `ModelEntity` before a glTF asset resolves, e.g. while budgeted/deferred by
    *   `LayerManager`, can still register position/frame-graph parenting immediately
    *   and swap `group`'s children in once `attachModel()` resolves -- see that
    *   method's own comment).
    */
-  constructor({ id, group = new THREE.Group(), attitudeSource = null } = {}) {
+  constructor({ id, sceneUnitsPerMetre, group = new THREE.Group(), attitudeSource = null } = {}) {
+    if (!(Number.isFinite(sceneUnitsPerMetre) && sceneUnitsPerMetre > 0)) {
+      throw new TypeError(
+        `ModelEntity '${id}': sceneUnitsPerMetre is required and must be a finite number > 0 `
+        + `(glTF lengths are metres; the scene's own unit is the caller's to state), got ${sceneUnitsPerMetre}`,
+      );
+    }
     this.id = id;
+    this.sceneUnitsPerMetre = sceneUnitsPerMetre;
     this.group = group;
     this._attitudeSource = attitudeSource;
     this.gltf = null;
@@ -79,12 +94,23 @@ export class ModelEntity {
    * unaffected by a model attaching later -- the same "switching is re-parenting, not
    * re-loading" identity-preservation discipline `docs/architecture.md` sec 4 already
    * requires for frames, applied here to an entity's own render group.
+   *
+   * The glTF content is metres, so it goes under ONE inner node named
+   * `entity-model-metres` whose uniform scale is `sceneUnitsPerMetre`, applied here once
+   * and nowhere else; `this.group` itself keeps unit scale (it carries the attitude
+   * quaternion, and it is what a caller positions and parents to, so a scale on it would
+   * leak into every child and every position copied onto it). After this call the
+   * group's world bounding box is the glTF's metre bounds times `sceneUnitsPerMetre`.
    * @param {{scene: THREE.Object3D}} gltf a GLTFLoader onLoad result
    */
   attachModel(gltf) {
     this.gltf = gltf;
     while (this.group.children.length) this.group.remove(this.group.children[0]);
-    for (const child of gltf.scene.children.slice()) this.group.add(child);
+    const metres = new THREE.Group();
+    metres.name = 'entity-model-metres';
+    metres.scale.setScalar(this.sceneUnitsPerMetre);
+    for (const child of gltf.scene.children.slice()) metres.add(child);
+    this.group.add(metres);
     this.modelLoaded = true;
     return this.group;
   }
@@ -125,13 +151,14 @@ export function parseGLTFAsset(loader, data, path = '') {
 }
 
 /** Convenience: parse a glTF asset and build a `ModelEntity` from it in one call.
- * @param {{id:string, data:ArrayBuffer|string|object, path?:string, loader?:GLTFLoader, attitudeSource?:{orientation:Function}|null}} opts
+ * `sceneUnitsPerMetre` is required, exactly as for `ModelEntity`'s constructor.
+ * @param {{id:string, sceneUnitsPerMetre:number, data:ArrayBuffer|string|object, path?:string, loader?:GLTFLoader, attitudeSource?:{orientation:Function}|null}} opts
  * @returns {Promise<ModelEntity>}
  */
 export async function createModelEntityFromGLTF({
-  id, data, path = '', loader = new GLTFLoader(), attitudeSource = null,
+  id, sceneUnitsPerMetre, data, path = '', loader = new GLTFLoader(), attitudeSource = null,
 }) {
-  const entity = new ModelEntity({ id, attitudeSource });
+  const entity = new ModelEntity({ id, sceneUnitsPerMetre, attitudeSource });
   const gltf = await parseGLTFAsset(loader, data, path);
   entity.attachModel(gltf);
   return entity;

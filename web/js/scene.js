@@ -2018,6 +2018,8 @@ export class Viewer {
       if (!s.t || !s.t.length) continue;
       const entity = new ModelEntity({
         id: s.name,
+        // glTF is metres; one metre is 1e-3 km, and SCALE is scene units per km.
+        sceneUnitsPerMetre: 1e-3 * SCALE,
         attitudeSource: this._entityAttitudeSourceFor(s.name),
       });
       entity.group.userData.sourceLayerId = ENTITY_MODEL_LAYER_ID;
