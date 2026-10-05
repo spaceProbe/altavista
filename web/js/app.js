@@ -659,6 +659,12 @@ function buildLists(sc) {
     const sw = document.createElement('span'); sw.className = 'swatch'; sw.style.background = color;
     const nm = document.createElement('span'); nm.className = 'name'; nm.textContent = label;
     const go = document.createElement('span'); go.className = 'go'; go.textContent = 'focus';
+    // A spacecraft's Focus frames it (scene.js `setFocus`/`_frameEntity`: camera distance
+    // from the entity's own drawn extent). Clicking again re-frames, which is how a user
+    // who has zoomed away, or whose entity's extent has changed since, asks for it -- the
+    // Focus dropdown only fires on a change, so this link is the repeat-Focus control and
+    // no separate "Frame" button is needed.
+    if (kind === 'sc') go.title = 'Focus and frame: the camera moves to fit the spacecraft\'s drawn extent (click again to re-frame)';
     go.addEventListener('click', () => { els.focusSelect.value = obj.name; applyView(); });
     li.append(cb, sw, nm, go);
     return li;

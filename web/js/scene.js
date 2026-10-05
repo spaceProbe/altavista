@@ -84,6 +84,12 @@ export const SCALE = 1e-3;          // scene units per km (1 unit = 1000 km)
 // against this exact, real constant rather than a value re-typed independently in
 // Python (which could silently drift from scene.js's own number).
 export const FIT_DISTANCE_FACTOR = 2.4;
+// Focusing a spacecraft frames it: the camera distance is set so the entity's bounding
+// sphere subtends this fraction of the camera's narrower field of view (see
+// `entityFramingDistance`). 0.6 leaves a fifth of the view free on each side for the
+// orbit controls to swing the object without it leaving the frame, and is large enough
+// that a ~3 km covariance ellipsoid reads as an ellipsoid, not a dot.
+export const ENTITY_FRAMING_FRACTION = 0.6;
 const MARKER_PX = 7;                // spacecraft marker diameter on screen
 const EVENT_PX = 9;
 // Auto-rebase policy (origin.js leaves this to the caller): rebase the floating
@@ -294,9 +300,13 @@ export class Viewer {
     this._focusPrev = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
     this._tmpAbs = new THREE.Vector3();  // scratch: absolute (origin-independent) position
+    this._tmpAim = new THREE.Vector3();  // scratch: the orbit target in world space (_updateEntitiesCamera)
     this._tmpQ = new THREE.Quaternion();
     this._sunDir = new THREE.Vector3(1, 0.3, 0.2);
     this.fitRadius = 30;
+    // True while an entity is framed (`_frameEntity`): near/far/minDistance are then the
+    // framing range, not the whole-scenario one `_restoreFitDepthRange` puts back.
+    this._entityFramed = false;
     this.resize();
   }
 
@@ -1314,7 +1324,17 @@ export class Viewer {
         if (vp.controls) vp.controls.target.set(local.x, local.y, local.z);
         vp.focusPrev.copy(fp);
       }
-      if (vp.controls) vp.controls.update();
+      if (vp.controls) {
+        vp.controls.update();
+        // Same defect and correction as the primary camera's `_updateEntitiesCamera`:
+        // `controls.target` is in `vp.renderGroup`'s local space (offset from world by this
+        // viewport's own origin shift), but OrbitControls' `lookAt` takes a world point --
+        // measured, the camera faced the Earth's centre 7.7 degrees off a LEO focus.
+        // Runs every tick, so it also covers `_setViewportFocus` and `_fitViewportOrigin`'s
+        // next frame. `vp._tmpAbs` is free here (only the other branch uses it).
+        cam.updateWorldMatrix(true, false);
+        cam.lookAt(vp.renderGroup.localToWorld(vp._tmpAbs.copy(vp.controls.target)));
+      }
     } else {
       vp.focusPrev.copy(fp);
       const frameObj = this.frameGraph.frame(vp.cameraFrameId).object3D;
@@ -1656,15 +1676,71 @@ export class Viewer {
     this._rebaseOriginTo(0, 0, 0, true);
     this.controls.target.set(0, 0, 0);
     this.camera.position.copy(dir.multiplyScalar(r * FIT_DISTANCE_FACTOR));
-    this.camera.near = Math.max(r * 1e-6, 1e-4);
-    this.camera.far = Math.max(r * 1e4, 1e6);
-    this.camera.updateProjectionMatrix();
-    this.controls.update();
+    this._restoreFitDepthRange();
+    this._updateEntitiesCamera();
     this._focusPrev.set(0, 0, 0);
   }
 
+  /**
+   * `controls.update()` for a camera parented in the entities frame, plus the aim
+   * correction `OrbitControls` cannot make for it. `controls.target` and `camera.position`
+   * are in `_entitiesGroup`'s LOCAL space (the floating origin's render space), but
+   * `OrbitControls.update()` finishes with `object.lookAt(this.target)`, and `lookAt`
+   * takes a WORLD-space point (and reads the camera's world position from its last
+   * `matrixWorld`, which is stale right after `camera.position` was set). The two spaces
+   * differ by `_entitiesGroup.position`, the origin shift: with the origin on a LEO
+   * spacecraft that is ~7 scene units, so the camera was aimed at the world origin (the
+   * Earth's centre) instead of the focused entity -- measured live, 62 degrees off a
+   * target 0.0015 units away, with the forward axis exactly on the Earth's centre. At
+   * the whole-scenario scale (origin at 0, or a camera tens of units out) the error is
+   * invisible, which is why it went unnoticed; at the scale of a framed 3 km object the
+   * entity is simply out of view. So after `controls.update()` the camera is re-aimed at
+   * the target's world position, from fresh matrices -- the same correction the
+   * non-entities-frame branch of `update()` already applies, for the same reason.
+   */
+  _updateEntitiesCamera() {
+    this.controls.update();
+    if (this._cameraFrameId !== this._originFrameId) return;
+    this.camera.updateWorldMatrix(true, false);
+    this.camera.lookAt(this._entitiesGroup.localToWorld(this._tmpAim.copy(this.controls.target)));
+  }
+
+  /** The whole-scenario near/far (sized off `fitRadius`, exactly `_fitOrigin()`'s own
+   * formula, which calls this) and the whole-scenario zoom floor: what the camera runs
+   * with unless an entity is framed (`_frameEntity`), and what Reset view and a focus on
+   * anything that is not a spacecraft put back. */
+  _restoreFitDepthRange() {
+    const r = this.fitRadius;
+    this.camera.near = Math.max(r * 1e-6, 1e-4);
+    this.camera.far = Math.max(r * 1e4, 1e6);
+    this.camera.updateProjectionMatrix();
+    this.controls.minDistance = ENTITIES_MIN_DISTANCE;
+    this._entityFramed = false;
+  }
+
+  /**
+   * Aim the camera at `name` (a body, a spacecraft, or null for the frame origin).
+   *
+   * A body keeps its pre-cleanup behaviour (target moves; the camera is only pulled in
+   * when it is more than 20 x, or less than 0.1 x, four body radii away). A SPACECRAFT is
+   * framed (`_frameEntity`): the camera target goes to it and the camera distance is set
+   * by its own extent, not by the central body -- the cleanup round's answer to "a 3 km
+   * ellipsoid at the Earth-framed camera is a dot, and neither Focus nor Reset view brings
+   * the camera to a scale where it can be seen" (questions 235/237). Framing happens here
+   * and only here, i.e. on an explicit Focus: the per-tick follow in `update()` carries
+   * the camera with a moving focus at a constant offset and never changes the distance,
+   * so an entity whose extent later changes (a class toggled on, the ellipsoid growing
+   * along the orbit) is not re-framed until the next Focus. Focusing anything that is not
+   * a spacecraft puts back the whole-scenario near/far and zoom floor a framed entity had
+   * replaced.
+   */
   setFocus(name) {
     this.focus = name || null;
+    if (name && this.spacecraft.has(name) && this._cameraFrameId === this._originFrameId) {
+      this._frameEntity(name);
+      return;
+    }
+    if (this._entityFramed) this._restoreFitDepthRange();
     const p = this._focusPosition(this._lastT ?? 0, this._tmp); // absolute
     const local = this.floatingOrigin.toRenderSpace(this._originFrameId, p);
     this.controls.target.set(local.x, local.y, local.z);
@@ -1675,17 +1751,89 @@ export class Viewer {
       const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
       if (off.length() > d * 20 || off.length() < d * 0.1) off.setLength(d);
       this.camera.position.set(local.x, local.y, local.z).add(off);
-    } else if (name && this.spacecraft.has(name)) {
-      const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
-      const central = [...this.bodies.values()].find(b => b.data.central);
-      const d = central ? central.data.radius * SCALE * 1.5 : this.fitRadius * 0.3;
-      if (off.length() > d * 20) off.setLength(d);
-      this.camera.position.set(local.x, local.y, local.z).add(off);
     }
-    this.controls.update();
+    this._updateEntitiesCamera();
     // The camera/target above used whatever origin was current; a drift-triggered
     // rebase happens on the very next update(t) tick (1/60s later) if the new focus
     // is far from it -- see _maybeRebaseOrigin.
+  }
+
+  /**
+   * The extent of what is drawn for spacecraft `name`, as a bounding sphere about its
+   * marker position, in scene units: the largest of (a) the covariance ellipsoid's
+   * longest semi-axis when that class is on and the spacecraft has a shape at the current
+   * sample, (b) the same for the keep-out volume, (c) the loaded glTF model's bounding
+   * sphere about the marker position when the models class is on, and (d) the entity
+   * marker's own radius (`ENTITY_MARKER_RADIUS_SCENE_UNITS`), which is also the floor and
+   * the answer when nothing else is drawn. Reads the live scene objects, so it is the
+   * extent as of the last `update(t)` tick. `source` names which one decided it.
+   * @param {string} name
+   * @returns {{radius:number, source:'covariance'|'keepout'|'model'|'marker'}|null}
+   *   null for an unknown spacecraft.
+   */
+  entityExtent(name) {
+    if (!this.spacecraft.has(name)) return null;
+    let best = { radius: ENTITY_MARKER_RADIUS_SCENE_UNITS, source: 'marker' };
+    const consider = (radius, source) => { if (radius > best.radius) best = { radius, source }; };
+    const cov = this._entityCovarianceMeshes.get(name);
+    if (cov && this.entityOptions.covarianceEllipsoids && cov.hasShape) {
+      consider(Math.max(cov.mesh.scale.x, cov.mesh.scale.y, cov.mesh.scale.z), 'covariance');
+    }
+    const ko = this._entityKeepoutMeshes.get(name);
+    if (ko && this.entityOptions.keepOutVolumes && ko.hasShape) {
+      consider(Math.max(ko.mesh.scale.x, ko.mesh.scale.y, ko.mesh.scale.z), 'keepout');
+    }
+    const model = this._entityModelEntities.get(name);
+    if (model && this.entityOptions.models && model.modelLoaded) {
+      const box = new THREE.Box3().setFromObject(model.group);
+      if (!box.isEmpty()) {
+        const centre = box.getCenter(new THREE.Vector3());
+        const half = box.getSize(new THREE.Vector3()).length() / 2;
+        consider(centre.distanceTo(model.group.position) + half, 'model');
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Frame spacecraft `name` (entities frame only; `setFocus` guards that): target on the
+   * entity, distance from `entityFramingDistance(entityExtent, camera.fov, camera.aspect)`,
+   * along the camera's current direction from the entity (a default direction when the
+   * camera sits on it). Steps, in this order, because the floating origin decides the
+   * precision of everything after it:
+   *   1. rebase the floating origin onto the entity NOW (`_rebaseOriginTo`, which carries
+   *      the camera and target with it), instead of waiting for `update()`'s drift test on
+   *      the next tick -- a 3 km object ~7,000 km from the Earth's centre is 7 scene units
+   *      from the origin until then, where one float32 step is ~0.8 m (question 46's bound
+   *      is sub-metre in the general scene, centimetre in RIC);
+   *   2. place target and camera in the rebased, now-small local space;
+   *   3. depth range (`entityFramingDepthRange`): near follows the framing distance so the
+   *      object is not clipped, far keeps the whole-scenario floor so the Earth behind it
+   *      still draws, and the zoom floor drops to a tenth of the distance. Restored by
+   *      Reset view (`_fitOrigin`) or a focus on a non-spacecraft (`setFocus`).
+   * Never called from the per-tick path.
+   */
+  _frameEntity(name) {
+    const p = this._focusPosition(this._lastT ?? 0, this._tmp); // absolute
+    this._rebaseOriginTo(p.x, p.y, p.z);
+    const local = this.floatingOrigin.toRenderSpace(this._originFrameId, p);
+    this.controls.target.set(local.x, local.y, local.z);
+    this._focusPrev.copy(p);
+    const extent = this.entityExtent(name);
+    const distance = entityFramingDistance(extent.radius, this.camera.fov, this.camera.aspect);
+    const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+    if (off.lengthSq() < 1e-30) off.set(1, -1.2, 0.7);
+    off.setLength(distance);
+    this.camera.position.set(local.x, local.y, local.z).add(off);
+    const range = entityFramingDepthRange(
+      distance, extent.radius, Math.max(this.fitRadius * 1e4, 1e6), ENTITIES_MIN_DISTANCE,
+    );
+    this.camera.near = range.near;
+    this.camera.far = range.far;
+    this.camera.updateProjectionMatrix();
+    this.controls.minDistance = range.minDistance;
+    this._entityFramed = true;
+    this._updateEntitiesCamera();
   }
 
   setVisible(kind, name, visible) {
@@ -2119,7 +2267,7 @@ export class Viewer {
         this.controls.target.set(local.x, local.y, local.z);
         this._focusPrev.copy(fp);
       }
-      this.controls.update();
+      this._updateEntitiesCamera();
     } else {
       // Camera parented to a different frame (e.g. RIC, via setViewFrame): that
       // frame's own Group already tracks its origin entity's absolute motion each
@@ -2326,6 +2474,84 @@ export function computeFitRadius(bodies, spacecraft) {
  */
 export function defaultFrameViewRadius(bodyRadiusKm) {
   return typeof bodyRadiusKm === 'number' ? bodyRadiusKm * SCALE * 3 : 1e-4;
+}
+
+/**
+ * Entity-framing distance (cleanup round, questions 235/237): how far from an entity's
+ * centre the camera sits so the entity's own BOUNDING SPHERE (radius `extentRadius`, the
+ * extent of what is drawn for it -- see `Viewer.entityExtent`) fills `fraction` of the
+ * view. "Fills" is stated angularly: the sphere's angular DIAMETER, as seen from the
+ * camera, equals `fraction` times the camera's NARROWER field of view -- the vertical FOV
+ * `fovDeg`, or the horizontal FOV it implies at `aspect` (width/height) when the view is
+ * portrait (aspect < 1), so the object fits whichever way the canvas is shaped. A sphere
+ * of radius R seen from distance d subtends an angular diameter of `2*asin(R/d)`, so
+ * `d = R / sin(fraction * fovEff / 2)`.
+ *
+ * Replaces the pre-cleanup constant (1.5 x the central body's radius, applied only when
+ * the camera was more than 20x that far out): a 3 km covariance ellipsoid framed from
+ * ~9,500 km is a dot. The result depends only on the extent and the real camera
+ * parameters -- never on the central body.
+ *
+ * Pure (no THREE, no DOM): exported so `web/js/entity_framing_check.mjs` runs it headless.
+ * The units of the result are the units of `extentRadius` (scene units in the viewer).
+ * @param {number} extentRadius bounding-sphere radius, > 0.
+ * @param {number} fovDeg the camera's vertical field of view in degrees, in (0, 180).
+ * @param {number} aspect canvas width / height, > 0.
+ * @param {number} [fraction] in (0, 1); default `ENTITY_FRAMING_FRACTION`.
+ * @returns {number} distance from the sphere's centre to the camera.
+ */
+export function entityFramingDistance(extentRadius, fovDeg, aspect, fraction = ENTITY_FRAMING_FRACTION) {
+  if (!(extentRadius > 0) || !Number.isFinite(extentRadius)) throw new Error(`entityFramingDistance: extentRadius must be > 0, got ${extentRadius}`);
+  if (!(fovDeg > 0 && fovDeg < 180)) throw new Error(`entityFramingDistance: fovDeg must be in (0, 180), got ${fovDeg}`);
+  if (!(aspect > 0) || !Number.isFinite(aspect)) throw new Error(`entityFramingDistance: aspect must be > 0, got ${aspect}`);
+  if (!(fraction > 0 && fraction < 1)) throw new Error(`entityFramingDistance: fraction must be in (0, 1), got ${fraction}`);
+  const effFovRad = narrowerFovRad(fovDeg, aspect);
+  return extentRadius / Math.sin((fraction * effFovRad) / 2);
+}
+
+/** The narrower of the vertical FOV and the horizontal FOV implied by `aspect`, radians. */
+function narrowerFovRad(fovDeg, aspect) {
+  const vRad = (fovDeg * Math.PI) / 180;
+  const hRad = 2 * Math.atan(Math.tan(vRad / 2) * aspect);
+  return Math.min(vRad, hRad);
+}
+
+/**
+ * The inverse of `entityFramingDistance`'s geometry, as a screen measurement: the
+ * fraction of the viewport HEIGHT that a sphere of radius `extentRadius`, centred on the
+ * view axis at `distance`, occupies in the perspective projection (its silhouette is the
+ * tangent cone of half-angle `asin(R/d)`, which lands at NDC `tan(asin(R/d)) /
+ * tan(fov/2)`). For the 0.6 angular fraction at a 50 degree FOV this is ~0.574, not 0.6
+ * -- perspective makes the projected extent a little smaller than the angular one.
+ * @returns {number} projected diameter / viewport height (> 1 means it overflows).
+ */
+export function projectedSphereHeightFraction(extentRadius, distance, fovDeg) {
+  if (!(distance > extentRadius)) return Infinity; // camera inside the sphere
+  const tanHalfAngle = extentRadius / Math.sqrt(distance * distance - extentRadius * extentRadius);
+  return tanHalfAngle / Math.tan((fovDeg * Math.PI) / 360);
+}
+
+/**
+ * Depth range and zoom clamp for a framed entity at `distance` with bounding radius
+ * `extentRadius`. `near` is 1 % of the distance, but never more than half the gap to
+ * the sphere's nearest surface (so the framed object cannot be clipped however wide
+ * the FOV); `far` is at least `farFloor` (the whole-scenario far plane, so the central
+ * body and the star field behind a framed entity are still drawn) and at least 1e4 x the
+ * distance. The renderer runs a logarithmic depth buffer (the `Viewer` constructor), so
+ * the resulting near/far ratio does not cost depth precision. `minDistance` lets the
+ * user zoom in to a tenth of the framing distance: `minDistanceCap` (the usual
+ * whole-scenario clamp, `ENTITIES_MIN_DISTANCE` = 1 km) is the ceiling, so a small framed
+ * object (a 300 m marker frames at ~1.2 km) is not stuck against a clamp that would stop
+ * the user zooming in on it, and a large one is not clamped tighter than before.
+ * @returns {{near:number, far:number, minDistance:number}}
+ */
+export function entityFramingDepthRange(distance, extentRadius, farFloor, minDistanceCap) {
+  const gap = Math.max(distance - extentRadius, distance * 1e-3);
+  return {
+    near: Math.min(distance * 0.01, gap * 0.5),
+    far: Math.max(farFloor, distance * 1e4),
+    minDistance: Math.min(minDistanceCap, distance * 0.1),
+  };
 }
 
 /**
