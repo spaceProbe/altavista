@@ -12,5 +12,5 @@ export {
 } from './model_entity.js';
 export {
   MarkerLayerAdapter, TrailLayerAdapter, MARKER_INSTANCE_BYTES, TRAIL_POINT_BYTES,
-  TRAIL_FIXED_OVERHEAD_BYTES, buildMarkerInstancedMesh, buildTrailGroup,
+  TRAIL_FIXED_OVERHEAD_BYTES, buildMarkerInstancedMesh, buildTrailGroup, ResidentEntityScene,
 } from './entities_instanced_layer.js';

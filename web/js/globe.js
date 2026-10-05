@@ -207,6 +207,7 @@ export class GlobeLayer {
     /** @type {Map<string, THREE.Mesh>} */
     this._meshes = new Map();
     this._lastSelectedKeys = new Set();
+    this._plannedTiles = null; // planView() -> commitPlannedView() hand-off, see those methods
 
     // Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe
     // through the LayerManager"): OPTIONAL -- `opts.layerManager`, a
@@ -290,35 +291,28 @@ export class GlobeLayer {
    * `selectTiles()` (web/js/globe_lod.js) -- the real screen-space-error LOD
    * computation, not reimplemented here.
    *
-   * Round 5 (question 228/decision 9) note, not a signature change: when a
-   * `web/js/tiles_layer.js` `TilesOverlayLayer` is ALSO registered on this SAME
-   * `layerManager` (`web/js/scene.js`'s `loadTilesOverlay()`), the `layerManager.
-   * update()` call below already carries everything `Tiles3DLayerAdapter.plan()`
-   * needs (`cameraEcef`/`screenHeightPx`/`fovYRad`, the same field names and the same
-   * body-centred-ECEF-metres convention that adapter uses -- see tiles_layer.js's own
-   * module docstring, "both ECEF-metre consumers in this codebase agree on scale") --
-   * so `scene.js` deliberately does NOT also drive a second, independent
-   * `layerManager.update()` call for the overlay that tick (`TilesOverlayLayer`'s own
-   * `selfDriveManager: false` mode, used exactly when a globe is active). Two
-   * independent per-tick calls on ONE shared manager would each see the OTHER
-   * layer's content as "not wanted" (`LayerManager.update(view)` treats every
-   * registered layer's `plan(view)` output as THIS tick's entire wanted set, layer.js's
-   * own module docstring) -- cancelling in-flight loads and evicting resident entries
-   * that are still genuinely wanted, every single frame. See `web/js/tiles_layer.js`'s
-   * own "Round 5" module docstring and `tests/test_viewer_tiles3d_manager.py` for the
-   * live proof this does not happen. This method itself needs no change for any of
-   * that: it already builds and sends exactly the view a co-registered `Tiles3D
-   * LayerAdapter` needs, it simply did not have one registered before this task.
+   * This is the STANDALONE driver: a `GlobeLayer` driven on its own (every headless
+   * check in this repo, and any caller with no other participant on the manager) calls
+   * `layerManager.update()` itself, here, with the globe's own view. When the globe
+   * shares its manager with other participants (`web/js/scene.js`'s `Viewer`: the
+   * entity markers/trails and the 3D-Tiles overlay), the manager must be updated ONCE
+   * per tick with everyone's keys in one view (`LayerManager.update(view)` treats every
+   * registered layer's `plan(view)` output as THAT call's entire wanted set, layer.js's
+   * own module docstring -- two partial calls per tick each see the other's content as
+   * "not wanted", cancelling in-flight loads and making resident entries evictable
+   * every frame, measured in round 7). That composer drives this class through the two
+   * additive halves below instead of through `update()`: `planView()` (this tick's LOD
+   * selection, returned as the globe's fragment of the composed view -- the same
+   * `{tiles, cameraEcef, screenHeightPx, fovYRad}` this method sends, so a co-registered
+   * `Tiles3DLayerAdapter`, which reads the same camera fields in the same
+   * body-centred-ECEF-metres convention, still finds them) and `commitPlannedView()`
+   * (mesh reconcile and texture binding, once the composed update has run). `update()`
+   * is exactly `planView()` + the manager's own update + `commitPlannedView()`'s
+   * reconcile, in the original order; its behaviour is unchanged.
    */
   update(cameraLocalPos, screenHeightPx, fovYRad) {
-    const cameraEcef = {
-      x: cameraLocalPos.x / SCENE_UNITS_PER_METRE,
-      y: cameraLocalPos.y / SCENE_UNITS_PER_METRE,
-      z: cameraLocalPos.z / SCENE_UNITS_PER_METRE,
-    };
-    const tiles = selectTiles(cameraEcef, {
-      screenHeightPx, fovYRad, sseThreshold: this.sseThreshold, maxLevel: this.maxLevel, maxTiles: this.maxTiles,
-    });
+    const view = this._selectView(cameraLocalPos, screenHeightPx, fovYRad);
+    const { tiles } = view;
 
     // Round 4: which tiles keep a mesh this tick is ALWAYS exactly this tick's own
     // LOD selection (`tiles`) -- true before this task too (`TileLoadScheduler.
@@ -341,14 +335,64 @@ export class GlobeLayer {
       // `AbortSignal`) synchronously, at `abort()` time -- genuinely real
       // cancellation on camera motion, a property `this.scheduler`'s own
       // (nothing-ever-listens-to-it) `AbortController` never had.
-      this.layerManager.update({
-        tiles, cameraEcef, screenHeightPx, fovYRad,
-      });
+      this.layerManager.update(view);
       selectedKeys = new Set(tiles.map(tileKey));
     } else {
       selectedKeys = this.scheduler.update(tiles);
     }
+    return this._reconcile(tiles, selectedKeys);
+  }
 
+  /**
+   * Additive, composer-facing first half of a manager-driven tick (see `update()`'s
+   * docstring): compute this tick's LOD selection and return it as the globe's
+   * fragment of the composed view, WITHOUT calling `layerManager.update()`. The caller
+   * merges this with every other participant's fragment, makes the one update call,
+   * then calls `commitPlannedView()`. Requires a `layerManager` (a standalone globe
+   * has no shared manager to compose into -- it uses `update()`).
+   * @returns {{tiles: object[], cameraEcef: {x:number,y:number,z:number}, screenHeightPx: number, fovYRad: number}}
+   */
+  planView(cameraLocalPos, screenHeightPx, fovYRad) {
+    if (!this.layerManager) throw new Error('GlobeLayer.planView(): requires a layerManager (a standalone globe drives itself via update())');
+    this._plannedTiles = null;
+    const view = this._selectView(cameraLocalPos, screenHeightPx, fovYRad);
+    this._plannedTiles = view.tiles;
+    return view;
+  }
+
+  /**
+   * Additive, composer-facing second half: after the composed `layerManager.update()`
+   * that carried `planView()`'s fragment has run, build/dispose meshes for the planned
+   * selection and bind every mesh's texture from whichever registered imagery layer is
+   * topmost for it -- exactly the part of `update()` that follows its own manager call.
+   * Returns the planned tile selection, like `update()`.
+   */
+  commitPlannedView() {
+    const tiles = this._plannedTiles;
+    if (!tiles) throw new Error('GlobeLayer.commitPlannedView(): no planned view (call planView() first)');
+    this._plannedTiles = null;
+    return this._reconcile(tiles, new Set(tiles.map(tileKey)));
+  }
+
+  /** The LOD selection plus the camera fields the manager's adapters plan against --
+   * the globe's view fragment, shared by `update()` and `planView()` so the two cannot
+   * drift. */
+  _selectView(cameraLocalPos, screenHeightPx, fovYRad) {
+    const cameraEcef = {
+      x: cameraLocalPos.x / SCENE_UNITS_PER_METRE,
+      y: cameraLocalPos.y / SCENE_UNITS_PER_METRE,
+      z: cameraLocalPos.z / SCENE_UNITS_PER_METRE,
+    };
+    const tiles = selectTiles(cameraEcef, {
+      screenHeightPx, fovYRad, sseThreshold: this.sseThreshold, maxLevel: this.maxLevel, maxTiles: this.maxTiles,
+    });
+    return { tiles, cameraEcef, screenHeightPx, fovYRad };
+  }
+
+  /** Everything `update()` does AFTER the manager (or scheduler) has decided: mesh
+   * build for newly selected tiles, per-mesh texture binding (manager mode), mesh
+   * disposal for tiles no longer selected, scheduler bookkeeping (standalone mode). */
+  _reconcile(tiles, selectedKeys) {
     for (const tile of tiles) {
       const k = tileKey(tile);
       if (!this._meshes.has(k)) {

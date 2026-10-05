@@ -1115,11 +1115,7 @@ print(lock + ".holder")
     /// module code, just reached a different way.
     ///
     /// The other direction (a Python holder, a Rust waiter reading a Python-written sidecar) is
-    /// NOT covered by a dedicated test here -- see this test's own module-level "What to prove"
-    /// section in the task brief for why one direction, done for real against production code
-    /// on both ends, was judged sufficient together with the by-construction path-agreement
-    /// proof above (which already covers both directions of "do the two languages compute the
-    /// identical path").
+    /// proved by `a_rust_waiter_reads_and_reports_a_real_python_holders_sidecar` below.
     #[test]
     fn a_python_waiter_using_the_real_lock_docker_tests_reads_and_reports_this_rust_holders_sidecar() {
         use std::io::{BufRead, BufReader, Write};
@@ -1229,6 +1225,217 @@ with docker_test_lock.lock_docker_tests():
         assert!(
             !waiting_line.to_lowercase().contains("stale"),
             "the Rust holder was alive and well when this WAITING line was printed -- it must not be reported as stale, got {waiting_line:?}"
+        );
+        assert!(
+            acquired_line.starts_with("ACQUIRED the docker-test lock") && acquired_line.contains("after waiting"),
+            "expected an ACQUIRED-after-waiting line reporting the real elapsed wait, got {acquired_line:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The reverse direction (round-5 "What remains"; questions 207, 212(b), 234, 236, 237): a
+    // PYTHON holder, a RUST waiter. Helpers first, then the test.
+    // -------------------------------------------------------------------------------------
+
+    /// Wall-clock bound on every single wait in the Python-holder/Rust-waiter proof below. Each
+    /// wait blocks on a real event (a child's own output line); this only bounds how long a
+    /// regression may hang the test before it fails with the lines seen so far.
+    const CHILD_EVENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Kills and reaps its child on every exit path, including a panic unwinding through the
+    /// test -- a leaked Python holder would keep the private lock (and a leaked waiter a blocked
+    /// `flock`) alive past the test.
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Forwards `reader`'s lines over a channel from a helper thread, so a test can wait on the
+    /// next line with a wall-clock deadline ([`recv_line_containing`]) instead of an unbounded
+    /// blocking `read_line`. The channel disconnects when the stream reaches EOF.
+    fn spawn_line_pump<R: std::io::Read + Send + 'static>(reader: R) -> std::sync::mpsc::Receiver<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(reader).lines() {
+                match line {
+                    Ok(line) => {
+                        if tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        rx
+    }
+
+    /// The next line from `rx` containing `needle` (other lines are skipped: filtered on content,
+    /// never on position), or a panic naming `what` and every line seen if `wait` of wall-clock
+    /// time passes or the stream ends first.
+    fn recv_line_containing(rx: &std::sync::mpsc::Receiver<String>, needle: &str, wait: std::time::Duration, what: &str) -> String {
+        use std::sync::mpsc::RecvTimeoutError;
+        let deadline = std::time::Instant::now() + wait;
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(line) if line.contains(needle) => return line.trim().to_string(),
+                Ok(line) => seen.push(line),
+                Err(RecvTimeoutError::Timeout) => panic!("timed out after {wait:?} waiting for {what} (a line containing {needle:?}); lines seen: {seen:?}"),
+                Err(RecvTimeoutError::Disconnected) => panic!("the stream ended before {what} (a line containing {needle:?}); lines seen: {seen:?}"),
+            }
+        }
+    }
+
+    /// The reverse of `a_python_waiter_using_the_real_lock_docker_tests_reads_and_reports_this_
+    /// rust_holders_sidecar` above: a Python process holds a PRIVATE lock (question 212(b)) via
+    /// this repository's own production `altavista.docker_test_lock.lock_docker_tests()` -- which
+    /// is what writes the sidecar, so there is no hand-written `flock` or record anywhere -- and
+    /// a Rust process running the production `lock_docker_tests_at` wait path (the existing
+    /// [`probe_process_that_blocks_acquiring_the_docker_test_lock`] probe, pointed at the private
+    /// lock through `AV_LOCKSTEP_PROBE_LOCK_PATH`) must print the Python holder's sidecar fields
+    /// in its WAITING line, then acquire once the Python holder releases.
+    ///
+    /// The Rust waiter is this very test binary (`std::env::current_exe`) re-run with `--exact`
+    /// on the probe, not the nested `cargo test` the announce test uses: same probe, same
+    /// production code, but no build-lock or cargo-slot contention and no compile inside the
+    /// window the private lock is held.
+    ///
+    /// Pins the exact fields rather than "contains HELD": `pid` is the Python child's real pid
+    /// (`Child::id()` from the spawn, cross-checked against the pid the child itself printed),
+    /// `tree` is the child's cwd as `os.getcwd()` reports it (the canonicalised repo root it is
+    /// spawned in), and `command` is `sys.executable -c <repo root>` -- the Python side's
+    /// `_current_command_line` over `sys.argv == ["-c", repo_root]`, with the executable path
+    /// reported by the child itself. The record's `time` is the one field not pinned beyond being
+    /// present. Neither the "unknown" nor the "stale" variant may appear.
+    ///
+    /// Same loading trick as the Rust-holder test above (`importlib.util.spec_from_file_location`,
+    /// because `altavista/__init__.py` imports `numpy`, which a bare `python3` does not have).
+    #[test]
+    fn a_rust_waiter_reads_and_reports_a_real_python_holders_sidecar() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        if let Some(line) = python3_skip_line("a_rust_waiter_reads_and_reports_a_real_python_holders_sidecar") {
+            assert!(line.starts_with("SKIPPED "), "the gate helper must announce a visible skip line: {line:?}");
+            return;
+        }
+
+        // `scratch` is the Python child's private `$HOME`; the lock it takes is
+        // `$HOME/.altavista/locks/docker-tests.lock`, and the Rust waiter is handed that same
+        // path through the probe's environment variable -- so the two sides meet at one file
+        // without either importing the other's path logic.
+        let scratch = repo_scratch_dir("py-holder-rust-waiter");
+        let private_lock_path = scratch.join(".altavista").join("locks").join("docker-tests.lock");
+        let sidecar_path = holder_sidecar_path(&private_lock_path);
+
+        // Canonical, so the child's `os.getcwd()` (the physical path) and the `argv` it receives
+        // are byte-identical to what this test expects, not merely equivalent through `..`.
+        let repo_root = fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")).expect("the repository root exists");
+        let repo_root_str = repo_root.to_string_lossy().into_owned();
+
+        const PYTHON_REAL_HOLDER: &str = r#"
+import importlib.util
+import os
+import sys
+
+repo_root = sys.argv[1]
+module_path = os.path.join(repo_root, "altavista", "docker_test_lock.py")
+spec = importlib.util.spec_from_file_location("docker_test_lock", module_path)
+docker_test_lock = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(docker_test_lock)
+
+with docker_test_lock.lock_docker_tests():
+    print(f"HOLDER_READY {os.getpid()} {sys.executable}", flush=True)
+    # Hold until the test closes our stdin (or kills us): a real event, never a sleep.
+    sys.stdin.readline()
+"#;
+
+        let mut holder = KillOnDrop(
+            Command::new("python3")
+                .args(["-c", PYTHON_REAL_HOLDER, &repo_root_str])
+                .current_dir(&repo_root)
+                .env("HOME", &scratch)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("could not spawn the python3 holder child: {e}")),
+        );
+        let holder_pid = holder.0.id();
+        let holder_stdin = holder.0.stdin.take().expect("piped stdin");
+        let holder_stdout = spawn_line_pump(holder.0.stdout.take().expect("piped stdout"));
+        let holder_stderr = spawn_line_pump(holder.0.stderr.take().expect("piped stderr"));
+
+        // The holder prints this only from inside `lock_docker_tests()`, i.e. after it has taken
+        // the real `flock` and written its sidecar.
+        let ready_line = recv_line_containing(&holder_stdout, "HOLDER_READY", CHILD_EVENT_TIMEOUT, "the python3 holder to take the lock");
+        let (printed_pid, python_executable) = ready_line
+            .strip_prefix("HOLDER_READY ")
+            .and_then(|rest| rest.split_once(' '))
+            .unwrap_or_else(|| panic!("unparsable HOLDER_READY line {ready_line:?}"));
+        assert_eq!(printed_pid, holder_pid.to_string(), "the pid the child printed must be the pid of the process this test spawned");
+        let raw_sidecar = fs::read_to_string(&sidecar_path).unwrap_or_else(|e| panic!("the python3 holder must have written its sidecar {sidecar_path:?} before reporting ready: {e}"));
+
+        // The Rust waiter: this test binary re-run on the probe, against the same private lock.
+        let mut waiter = KillOnDrop(
+            Command::new(std::env::current_exe().expect("the path of this test binary"))
+                .args(["--exact", "docker_test_lock::tests::probe_process_that_blocks_acquiring_the_docker_test_lock", "--nocapture"])
+                .env("AV_LOCKSTEP_PROBE_LOCK_PATH", &private_lock_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("could not spawn the Rust waiter child: {e}")),
+        );
+        let waiter_stdout = spawn_line_pump(waiter.0.stdout.take().expect("piped stdout"));
+        let waiter_stderr = spawn_line_pump(waiter.0.stderr.take().expect("piped stderr"));
+
+        let waiting_line = recv_line_containing(&waiter_stderr, "WAITING", CHILD_EVENT_TIMEOUT, "the Rust waiter's WAITING line");
+
+        // Release: closing the holder's stdin ends its `readline()`, so its `with` block exits
+        // (removing the sidecar, then unlocking) -- the waiter's blocked `flock` can now proceed.
+        drop(holder_stdin);
+
+        let acquired_line = recv_line_containing(&waiter_stderr, "ACQUIRED the docker-test lock", CHILD_EVENT_TIMEOUT, "the Rust waiter to acquire after the python3 holder released");
+        recv_line_containing(&waiter_stdout, "PROBE_ACQUIRED", CHILD_EVENT_TIMEOUT, "the Rust waiter's own acquisition confirmation");
+        let waiter_status = waiter.0.wait().expect("the Rust waiter child must exit");
+        let holder_status = holder.0.wait().expect("the python3 holder child must exit");
+
+        // Question 148: print what was actually observed, not a paraphrase.
+        std::io::stdout()
+            .write_all(
+                format!(
+                    "cross-language sidecar proof (Python holder, Rust waiter): holder pid = {holder_pid}; sidecar path = {sidecar_path:?}; sidecar contents = {raw_sidecar:?}; WAITING line = {waiting_line:?}; ACQUIRED line = {acquired_line:?}\n"
+                )
+                .as_bytes(),
+            )
+            .ok();
+
+        // Both children have exited, so nothing still uses the directory.
+        fs::remove_dir_all(&scratch).ok();
+
+        assert!(holder_status.success(), "the python3 holder must exit successfully, got {holder_status:?}; its stderr lines: {:?}", holder_stderr.try_iter().collect::<Vec<_>>());
+        assert!(waiter_status.success(), "the Rust waiter must exit successfully, got {waiter_status:?}");
+
+        let expected_command = format!("{python_executable} -c {repo_root_str}");
+        let expected_holder_clause = format!("holder: pid={holder_pid} tree={repo_root_str} command={expected_command:?} time=");
+        assert!(
+            waiting_line.contains("docker-test lock") && waiting_line.contains("question 207") && waiting_line.contains(&private_lock_path.display().to_string()),
+            "expected a WAITING line naming the docker-test lock, its private path and question 207, got {waiting_line:?}"
+        );
+        assert!(
+            waiting_line.contains(&expected_holder_clause),
+            "expected the Rust waiter's WAITING line to carry the Python holder's own sidecar fields {expected_holder_clause:?} (pid = the spawned child's real pid, tree = its cwd, command = its own command line), got {waiting_line:?}"
+        );
+        assert!(
+            !waiting_line.contains("holder: unknown") && !waiting_line.to_lowercase().contains("stale"),
+            "the Python holder was alive and its sidecar readable -- the line must be neither the unknown nor the stale variant, got {waiting_line:?}"
         );
         assert!(
             acquired_line.starts_with("ACQUIRED the docker-test lock") && acquired_line.contains("after waiting"),

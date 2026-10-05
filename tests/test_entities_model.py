@@ -86,6 +86,20 @@ def test_missing_attitude_degrades_to_identity_and_model_does_not_disappear(data
     assert checks_by_name["missingQuatDegradesToIdentity_modelStillInSceneGraph"]["pass"] is True
 
 
+def test_gltf_metres_are_scaled_to_scene_units_on_an_inner_node(data):
+    """glTF lengths are metres and the scene unit is 1000 km: after attach with the
+    scene's own factor (1e-3 * SCALE = 1e-6) the fixture's world box is its metre bounds
+    (1 x 1 x 1.5 m) times 1e-6 and its bounding sphere is sqrt(4.25)/2 = 1.031 m, the
+    scale sits on the inner `entity-model-metres` node (the entity's group keeps unit
+    scale), attitude still rotates the scaled content, and an omitted factor is refused.
+    """
+    checks_by_name = {c["name"]: c for c in data["checks"]}
+    scale_checks = [n for n in checks_by_name if n.startswith("scale_")]
+    assert len(scale_checks) >= 10, f"the metres-to-scene-units checks are missing: {scale_checks}"
+    failed = [n for n in scale_checks if not checks_by_name[n]["pass"]]
+    assert not failed, f"metres-to-scene-units checks failed: {[(n, checks_by_name[n]['detail']) for n in failed]}"
+
+
 def test_model_entity_report(data, capsys):
     with capsys.disabled():
         print("\nentity model checks (web/js/entities_model_check.mjs):")

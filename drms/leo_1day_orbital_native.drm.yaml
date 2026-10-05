@@ -1,0 +1,24 @@
+# DesignReferenceMission: the golden's own one-day window (2026-01-01T00:00:00Z, see
+# leo_1day_golden.drm.yaml's header for the TAI derivation) over the native-model bundle
+# leo_1day_orbital_native.{system,sos}.yaml. Samples every 300 s: 289 samples (the first and
+# last boundary samples included), as crates/av-kernel/tests/orbital_no_gmat_demo.rs's own
+# in-Rust twin of this bundle produces.
+id: drm_leo_1day_orbital_native
+version: "1"
+name: LEO one day, JGM2 8x8 + Sun/Moon (native orbital model)
+sos_configuration_id: leo_orbital_native_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767312037000000000
+options:
+  covariance: false
+  default_step_rate_hz: 0.0033333333333333335
+  sample_interval_s: 300.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "hand-authored from leo_1day_golden.drm.yaml (N6 native model)"
+# `cargo run -p av-kernel --example drm_hash -- drm drms/leo_1day_orbital_native.drm.yaml`.
+hash: "fe27db743c73fb74099b221da7d1d9ed09368d7e0b69ea053af1fe384bd80d90"

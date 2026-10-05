@@ -397,6 +397,165 @@ def test_the_globe_streams_through_the_layer_manager_and_binds_a_texture(live_se
     )
 
 
+# Heavy cleanup round 1 (questions 235/237): the merged-view per-tick update. The viewer
+# makes exactly ONE `LayerManager.update(view)` call per render tick, with a view composed
+# from the globe's and the entities' wanted sets, so (a) the imagery tiles stream and are
+# bound while entities are present -- the round-7 failure mode was that two partial views
+# per tick cancelled each other's loads and no imagery tile ever finished -- and (b) the
+# markers and trails stay resident, are re-planned every frame, and are drawn. The page
+# builds its own scenario (an Earth in correct kilometres plus two spacecraft in LEO, so
+# there are real entities to plan) and drives `viewer.update(t)` for real; every answer is
+# read off the scene graph and the manager's own maps.
+_MERGED_VIEW_PROBE_JS = r"""
+(async () => {
+  const out = {step: 'start'};
+  try {
+    const viewer = window.altavistaViewer;
+    if (!viewer) { out.error = 'no viewer on window (window.altavistaViewer unset)'; return out; }
+    const A = 6378.137;
+    const sc = {
+      name: 'merged-view-proof',
+      frame: { name: 'EarthMJ2000Eq' },
+      bodies: [{ name: 'Earth', central: true, radius: A, t: [0.0], pos: [0, 0, 0], quat: [0, 0, 0, 1] }],
+      spacecraft: [
+        { name: 'Alpha', color: '#54a0ff', t: [0.0, 0.01, 0.02], pos: [A + 500, 0, 0, A + 500, 60, 0, A + 500, 120, 0], vel: [0, 7.6, 0, 0, 7.6, 0, 0, 7.6, 0] },
+        { name: 'Bravo', color: '#ff6b6b', t: [0.0, 0.01, 0.02], pos: [A + 520, 0, 30, A + 520, 60, 30, A + 520, 120, 30], vel: [0, 7.6, 0, 0, 7.6, 0, 0, 7.6, 0] },
+      ],
+    };
+    viewer.setScenario(sc);
+    // Park the camera at LEO altitude so the globe's LOD selects a real, multi-tile set
+    // (the default whole-scenario framing would sit tens of thousands of km out and
+    // select only the two roots).
+    viewer.camera.position.set(7.4, 0.6, 0.9);
+    viewer.controls.target.set(0, 0, 0);
+    viewer.camera.lookAt(0, 0, 0);
+    const ok = viewer.enableGlobe('Earth', {});
+    out.enableGlobeReturned = ok;
+    if (!ok) { out.error = "enableGlobe('Earth') returned false"; return out; }
+
+    // Count the manager's update calls against the viewer's own ticks: exactly one each.
+    const lm = viewer.layerManager;
+    // (web/js/app.js's own requestAnimationFrame loop also ticks the viewer while this
+    // probe runs, so the viewer's ticks are counted too, not assumed to be this loop's.)
+    let updateCalls = 0;
+    let ticks = 0;
+    const viewKeys = new Set();
+    const origUpdate = lm.update.bind(lm);
+    lm.update = (view) => {
+      updateCalls += 1;
+      Object.keys(view).forEach((k) => viewKeys.add(k));
+      return origUpdate(view);
+    };
+    const origViewerUpdate = viewer.update.bind(viewer);
+    viewer.update = (t) => { ticks += 1; return origViewerUpdate(t); };
+
+    const FRAMES = 120;
+    for (let i = 0; i < FRAMES; i++) {
+      viewer.update(0.01);
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    out.frames = FRAMES;
+    out.updateCalls = updateCalls;
+    out.viewerTicks = ticks;
+    out.viewKeys = [...viewKeys].sort();
+
+    // ---- imagery: bound textures on the globe's tile meshes (scene graph)
+    let meshes = 0, withTexture = 0;
+    viewer.globeLayer.group.traverse((o) => {
+      if (!o.isMesh) return;
+      meshes += 1;
+      const map = o.material && o.material.map;
+      const img = map && map.image;
+      if (map && img && (img.width || img.naturalWidth)) withTexture += 1;
+    });
+    out.meshCount = meshes;
+    out.meshesWithBoundTexture = withTexture;
+    const counts = lm.countsByLayer();
+    out.countsByLayer = counts;
+    out.imageryResident = counts.imagery ? counts.imagery.resident : null;
+    out.cancelledCount = lm.cancelledCount;
+    out.byteCostRevisionCount = lm.byteCostRevisionCount;
+    out.softViolationCount = lm.softViolationCount;
+    out.residentBytes = lm.residentBytes;
+    out.budget = lm.memoryBudgetBytes;
+
+    // ---- entities: resident in the manager AND drawn in the scene graph
+    out.entityResident = {
+      markers: ['Alpha', 'Bravo'].filter((n) => lm.resident.has('entity-markers\u0000' + n)),
+      trails: ['Alpha', 'Bravo'].filter((n) => lm.resident.has('entity-trails\u0000' + n)),
+    };
+    let markerCount = 0, markerKeys = [], markerMeshVisible = null;
+    viewer._entityGroups.markers.traverse((o) => {
+      if (o.isInstancedMesh) { markerCount = o.count; markerKeys = o.userData.residentKeys.slice(); markerMeshVisible = o.visible; }
+    });
+    const trailNames = [];
+    viewer._entityGroups.trails.traverse((o) => { if (o.isLine) trailNames.push(o.userData.spacecraft); });
+    out.markerCount = markerCount;
+    out.markerKeys = markerKeys;
+    out.markerMeshVisible = markerMeshVisible;
+    out.markerGroupVisible = viewer._entityGroups.markers.visible;
+    out.trailNames = trailNames.sort();
+    out.trailGroupVisible = viewer._entityGroups.trails.visible;
+
+    out.step = 'done';
+  } catch (e) {
+    out.error = String((e && e.stack) || e);
+  }
+  return out;
+})()
+"""
+
+
+def test_the_globe_streams_and_the_entities_are_resident_and_drawn_through_one_merged_update(live_server):
+    """Heavy cleanup round 1, proof D, in a real browser against the real `Viewer`.
+
+    With a globe active AND entities loaded, the viewer's one shared manager must (a) get
+    exactly one `update()` per `viewer.update()` tick carrying BOTH halves' keys, (b) finish
+    streaming imagery -- tiles bound to the globe's meshes, none cancelled by the entity
+    half (`cancelledCount` stays 0: in this scene nothing else ever drops a wanted tile
+    while the camera is parked) -- and (c) keep the markers and trails resident and drawn.
+    """
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        pytest.skip("no Chrome/Chromium binary found on this host; cannot drive a headless browser")
+    errors, value = asyncio.run(_drive(live_server.url, chrome_path, _MERGED_VIEW_PROBE_JS, wait_s=6.0))
+
+    print("\nmerged-view probe:", json.dumps(value, indent=2, sort_keys=True))
+
+    assert value is not None, f"the page probe returned nothing; console errors were: {errors}"
+    assert not value.get("error"), f"probe reported an error: {value.get('error')}\nconsole: {errors}"
+
+    # (a) one merged update per tick, carrying the globe's AND the entities' keys.
+    assert value["viewerTicks"] >= value["frames"], value
+    assert value["updateCalls"] == value["viewerTicks"], (
+        f"expected exactly one LayerManager.update per viewer.update tick: {value!r}"
+    )
+    for key in ("tiles", "cameraEcef", "markers", "trails"):
+        assert key in value["viewKeys"], f"the composed view never carried '{key}': {value['viewKeys']!r}"
+
+    # (b) imagery streamed through the same manager and was drawn.
+    assert value["meshCount"] > 2, f"the camera should select a multi-tile globe: {value!r}"
+    assert value["meshesWithBoundTexture"] > 0, (
+        f"no globe tile mesh has a texture bound while entities are present: {value!r}"
+    )
+    assert value["imageryResident"] and value["imageryResident"] > 0, f"no imagery tile became resident: {value!r}"
+    assert value["cancelledCount"] == 0, f"a wanted load was cancelled while the camera was parked: {value!r}"
+
+    # (c) the entities are resident AND drawn.
+    assert value["entityResident"] == {"markers": ["Alpha", "Bravo"], "trails": ["Alpha", "Bravo"]}, value
+    assert value["markerCount"] == 2 and value["markerKeys"] == ["Alpha", "Bravo"], value
+    assert value["markerMeshVisible"] is True and value["markerGroupVisible"] is True, value
+    assert value["trailNames"] == ["Alpha", "Bravo"] and value["trailGroupVisible"] is True, value
+
+    # The shared budget held, and nothing was re-costed (stable per-tick entity requests).
+    assert value["residentBytes"] <= value["budget"], value
+    assert value["softViolationCount"] == 0, value
+    assert value["byteCostRevisionCount"] == 0, value
+    assert errors == [], (
+        f"expected zero page exceptions/console errors, got {len(errors)}:\n" + "\n".join(errors)
+    )
+
+
 _DECODE_PROBE_JS = r"""
 (async () => {
   const out = {step: 'start'};

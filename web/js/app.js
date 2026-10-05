@@ -659,6 +659,12 @@ function buildLists(sc) {
     const sw = document.createElement('span'); sw.className = 'swatch'; sw.style.background = color;
     const nm = document.createElement('span'); nm.className = 'name'; nm.textContent = label;
     const go = document.createElement('span'); go.className = 'go'; go.textContent = 'focus';
+    // A spacecraft's Focus frames it (scene.js `setFocus`/`_frameEntity`: camera distance
+    // from the entity's own drawn extent). Clicking again re-frames, which is how a user
+    // who has zoomed away, or whose entity's extent has changed since, asks for it -- the
+    // Focus dropdown only fires on a change, so this link is the repeat-Focus control and
+    // no separate "Frame" button is needed.
+    if (kind === 'sc') go.title = 'Focus and frame: the camera moves to fit the spacecraft\'s drawn extent (click again to re-frame)';
     go.addEventListener('click', () => { els.focusSelect.value = obj.name; applyView(); });
     li.append(cb, sw, nm, go);
     return li;
@@ -992,8 +998,9 @@ function frame(now) {
   // Round 5: refresh the Layers panel's "resident bytes against the budget" /
   // deferred / failed counters at ~2 Hz, the same throttle the 2D map panel's own
   // current-position redraw uses above and for the identical reason -- these numbers
-  // change every tick `viewer.layerManager.update()` actually runs (driven by the
-  // globe or the 3D Tiles overlay, see web/js/scene.js's own update()), so redrawing
+  // change every tick `viewer.layerManager.update()` actually runs (once per tick, with the
+  // globe's, the 3D Tiles overlay's and the entities' views merged -- see web/js/scene.js's
+  // `_updateLayerManager()`), so redrawing
   // on every requestAnimationFrame tick would be pure waste with no visible benefit.
   // Runs regardless of whether a scenario is loaded -- `viewer.layerManager` exists
   // for the whole lifetime of `viewer` (web/js/scene.js's constructor), not only once

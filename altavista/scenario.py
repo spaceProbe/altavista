@@ -32,7 +32,7 @@ from . import client
 from .bodies import (ALL_BODIES, BodySampler, _mat_to_quat, coordinate_system,
                      reset_cache as reset_cs_cache, sample_times)
 from .gmat_env import load_gmat
-from .model import DEFAULT_COLORS, Event, Footprint, Frame, ScenarioData, Trajectory
+from .model import DEFAULT_COLORS, Event, Footprint, Frame, ScenarioData, Trajectory, check_model_ref
 from .timeutil import a1_to_iso, tai_to_a1_mjd
 
 SEC_PER_DAY = 86400.0
@@ -304,11 +304,11 @@ class PropagatorSpec:
 class Spacecraft:
     """Wraps a GMAT Spacecraft plus the trajectory recorded for it."""
 
-    def __init__(self, scenario: "Scenario", obj, color: Optional[str] = None):
+    def __init__(self, scenario: "Scenario", obj, color: Optional[str] = None, model: Optional[str] = None):
         self.scenario = scenario
         self.obj = obj
         self.name = obj.GetName()
-        self.trajectory = Trajectory(self.name, color=color)
+        self.trajectory = Trajectory(self.name, color=color, model=model)
         # last known state, in <central_body>MJ2000Eq
         self.epoch: Optional[float] = None
         self.state: Optional[List[float]] = None
@@ -402,12 +402,17 @@ class Scenario:
 
     def spacecraft(self, name: str, epoch: Optional[str] = None, keplerian: Optional[Dict[str, float]] = None,
                    cartesian: Optional[Sequence[float]] = None, coordinate_system: str = "EarthMJ2000Eq",
-                   date_format: str = "UTCGregorian", color: Optional[str] = None, **fields) -> Spacecraft:
+                   date_format: str = "UTCGregorian", color: Optional[str] = None,
+                   model: Optional[str] = None, **fields) -> Spacecraft:
         """Create (or adopt) a GMAT Spacecraft.
 
         ``keplerian`` keys: SMA, ECC, INC, RAAN, AOP, TA (km / deg). ``cartesian``: [x,y,z,vx,vy,vz].
         Extra ``fields`` are passed to ``SetField`` (DryMass, Cd, DragArea, ...).
+        ``model`` is a URL string (e.g. ``"/js/fixtures/entity_model_fixture.gltf"``) of a glTF/GLB
+        the viewer draws for this spacecraft, oriented by its body frame; it is stored on
+        :attr:`Trajectory.model` and never fetched or checked from Python.
         """
+        check_model_ref(model, f"spacecraft {name!r} model")  # before any GMAT object is touched
         g = self.gmat
         obj = g.GetObject(name) if g.Exists(name) else g.Construct("Spacecraft", name)
         if epoch:
@@ -425,17 +430,26 @@ class Scenario:
                 obj.SetField(k, float(v))
         for k, v in fields.items():
             obj.SetField(k, v)
-        sc = self.adopt(obj, color=color)
+        sc = self.adopt(obj, color=color, model=model)
         if "Attitude" in fields:
             sc._attitude_explicit = True  # see Spacecraft.set_field's docstring comment
         return sc
 
-    def adopt(self, obj, color: Optional[str] = None) -> Spacecraft:
-        """Adopt an existing GMAT Spacecraft object built with the raw API."""
+    def adopt(self, obj, color: Optional[str] = None, model: Optional[str] = None) -> Spacecraft:
+        """Adopt an existing GMAT Spacecraft object built with the raw API.
+
+        ``model`` is the glTF/GLB URL string described on :meth:`spacecraft`. Adopting an
+        already-adopted spacecraft returns it as-is (``color`` is ignored then, as it always
+        was), except that a ``model`` passed here is still recorded on it rather than
+        silently dropped.
+        """
+        check_model_ref(model, f"spacecraft {obj.GetName()!r} model")
         for s in self.spacecraft_list:
             if s.obj.GetName() == obj.GetName():
+                if model is not None:
+                    s.trajectory.model = model
                 return s
-        sc = Spacecraft(self, obj, color=color or self._next_color())
+        sc = Spacecraft(self, obj, color=color or self._next_color(), model=model)
         self.spacecraft_list.append(sc)
         return sc
 
@@ -969,8 +983,20 @@ class Scenario:
 
     def run_script(self, text_or_path: Union[str, os.PathLike], spacecraft: Optional[Sequence[str]] = None,
                    max_points: Optional[int] = None, keep_gui: bool = False,
-                   colors: Optional[Dict[str, str]] = None, workdir: Optional[str] = None) -> None:
-        """Execute a GMAT script (text or path) and add its spacecraft/events to this scenario."""
+                   colors: Optional[Dict[str, str]] = None, workdir: Optional[str] = None,
+                   models: Optional[Dict[str, str]] = None) -> None:
+        """Execute a GMAT script (text or path) and add its spacecraft/events to this scenario.
+
+        ``colors`` / ``models`` map a spacecraft name to its colour / glTF-GLB model URL
+        (the latter as :meth:`spacecraft`'s ``model=``). Every ``models`` value is validated
+        before the script runs, and a name that is not one of the script's reported
+        spacecraft is a ``ValueError`` (a silently dropped model declaration is worse than a
+        loud typo).
+        """
+        for _sat, _model in (models or {}).items():
+            check_model_ref(_model, f"models[{_sat!r}]")
+            if _model is None:
+                raise ValueError(f"models[{_sat!r}] is None; omit the spacecraft to declare no model")
         g = self.gmat
         p = Path(str(text_or_path))
         if "\n" not in str(text_or_path) and p.exists():
@@ -983,6 +1009,10 @@ class Scenario:
         base = gmat_root() / "bin"
         workdir = workdir or tempfile.mkdtemp(prefix="altavista_")
         script, files = prepare_script(text, self.frame, workdir, spacecraft, keep_gui=keep_gui)
+        unknown = sorted(set(models or {}) - set(files))
+        if unknown:
+            raise ValueError(f"models names spacecraft the script does not report: {unknown}; "
+                             f"reported: {sorted(files)}")
         script_path = os.path.join(workdir, "altavista_run.script")
         with open(script_path, "w") as fh:
             fh.write(script)
@@ -1004,6 +1034,7 @@ class Scenario:
                 raise RuntimeError(f"no report written for {sat}; is it propagated in the script?")
             tr = parse_report(path)
             tr.name = sat
+            tr.model = (models or {}).get(sat)
             tr.color = (colors or {}).get(sat) or DEFAULT_COLORS[len(self.spacecraft_list) % len(DEFAULT_COLORS)]
             if max_points:
                 decimate(tr, max_points)

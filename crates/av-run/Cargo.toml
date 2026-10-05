@@ -72,3 +72,14 @@ av-command = { path = "../av-command", features = ["test-support"] }
 # `tonic::transport::Server::serve_with_incoming_shutdown` needs -- mirrors `crates/av-command/
 # tests/grpc_service.rs`'s identical dev-dependency exactly.
 tokio-stream = { version = "0.1", features = ["net"] }
+
+# `docs/open-questions.md` question 234's mechanism, applied here (heavy cleanup round,
+# question 237): `tests/command_dispatch_e2e.rs` builds a `RunConfig` with a live `Gmat` and
+# names `gmat_sys` directly, so it cannot compile under `--no-default-features`. Declared
+# `required-features = ["gmat"]` rather than given an inner `#![cfg]`, for the same reason
+# `av-kernel`'s 35 GMAT-needing targets are: cargo then does not build the target at all in the
+# GMAT-free state, instead of linking an empty binary that costs a `syspolicyd` scan (question
+# 226). `scripts/lint/required_features_clippy.sh` discovers and lints it with the feature on.
+[[test]]
+name = "command_dispatch_e2e"
+required-features = ["gmat"]

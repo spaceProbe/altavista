@@ -55,11 +55,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use av_cdm::pb::SystemDefinition;
-use av_kernel::drm::{schema, ExecutionErrorMode};
-// `docs/open-questions.md` question 230: named only by `run_drm`'s gated half (see that
+use av_kernel::drm::{execute, schema, DrmError, ExecutionErrorMode, RunConfig};
+// `docs/open-questions.md` question 230: named only by `run_drm`'s gated lines (see that
 // function's own doc comment).
-#[cfg(feature = "gmat")]
-use av_kernel::drm::{execute, DrmError, RunConfig};
 #[cfg(feature = "gmat")]
 use gmat_sys::Gmat;
 use prost::Message;
@@ -189,9 +187,9 @@ fn load_systems(paths: &[PathBuf]) -> Result<BTreeMap<String, SystemDefinition>,
 }
 
 /// `docs/open-questions.md` question 230: the one place this binary needs a live GMAT engine.
-/// Gated behind the `gmat` feature (default-on) -- `av-kernel`'s own `execute`/`RunConfig` do
-/// not exist at all without it (see `av_kernel::drm::executor`'s own `use gmat_sys::Gmat` doc
-/// comment: `RunConfig.gmat: &Gmat` makes the whole entry point GMAT-bound). Byte-identical to
+/// Gated behind the `gmat` feature (default-on) -- `RunConfig.gmat: &Gmat` (the one cfg-gated
+/// field of `av_kernel::drm::RunConfig`) is built here from a live handle; the
+/// `--no-default-features` twin below builds the same config without it. Byte-identical to
 /// what `run` used to do inline in the default build.
 #[cfg(feature = "gmat")]
 fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb::SosConfiguration, systems: &BTreeMap<String, SystemDefinition>) -> Result<av_kernel::drm::RunProducts, String> {
@@ -210,18 +208,23 @@ fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb
     execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
 }
 
-/// `docs/open-questions.md` question 230: the `--no-default-features` counterpart of
-/// [`run_drm`] -- a clear, typed (here, a plain `String` message, this binary's own error type)
-/// refusal naming the missing feature, never a panic and never built at all against a `Gmat`
-/// this binary cannot construct (`gmat-sys` is not even a dependency in this feature state).
+/// `docs/open-questions.md` questions 230/234: the `--no-default-features` counterpart of
+/// [`run_drm`]. It builds the same `RunConfig` minus the (cfg-gated) `gmat` field, exactly as
+/// `crates/av-kernel/tests/orbital_no_gmat_demo.rs` does, and calls the same `execute` -- a
+/// GMAT-free binary that refused every DRM would prove amputation, not portability. A DRM naming
+/// only native models (`"orbital."`, ...) therefore runs; one that names a `"gmat."` model is
+/// refused by the kernel's own typed `DrmError::GmatFeatureDisabled` (instance, model id and the
+/// missing feature in its message), surfaced through the same `DRM execution failed` path as any
+/// other `DrmError` -- never a panic. `gmat-sys` is not even a dependency in this feature state,
+/// so `--gmat-startup` (a GMAT startup file) has nothing to be given to and is refused, not
+/// silently ignored.
 #[cfg(not(feature = "gmat"))]
-fn run_drm(_cli: &Cli, _drm: &av_cdm::pb::DesignReferenceMission, _sos: &av_cdm::pb::SosConfiguration, _systems: &BTreeMap<String, SystemDefinition>) -> Result<av_kernel::drm::RunProducts, String> {
-    // `Cli::gmat_startup`/`.error_mode` and `products_dir_for_out` are read only by the gated
-    // half of `run_drm` above; referenced here so they stay reachable (not dead code) in a
-    // build that never runs a DRM at all -- `Cli`'s own shape (and `parse_cli`/`products_dir_
-    // for_out`'s own tests) are unchanged in either feature state.
-    let _ = (&_cli.gmat_startup, &_cli.error_mode, &products_dir_for_out as &dyn Fn(Option<&PathBuf>) -> Option<PathBuf>);
-    Err("av-run was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked); rebuild with the default features to run a DRM".to_string())
+fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb::SosConfiguration, systems: &BTreeMap<String, SystemDefinition>) -> Result<av_kernel::drm::RunProducts, String> {
+    if cli.gmat_startup.is_some() {
+        return Err("--gmat-startup was given, but av-run was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked)".to_string());
+    }
+    let cfg = RunConfig { drm, sos, systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
+    execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
 }
 
 fn run(args: &[String]) -> Result<(), String> {

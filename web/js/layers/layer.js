@@ -128,6 +128,61 @@ export function globalKeyFor(layerId, localKey) {
 }
 
 /**
+ * Merge several participants' view fragments into the ONE `view` object a single
+ * `LayerManager.update(view)` call takes (heavy cleanup round 1, question 235/237: the
+ * merged-view per-tick update). `LayerManager.update()`'s contract is unchanged -- one
+ * call's `plan(view)` outputs are that call's ENTIRE wanted set -- so a viewer with
+ * several participants driving one shared manager (the globe's `tiles`/`cameraEcef`/
+ * `screenHeightPx`/`fovYRad`, the entities' `markers`/`trails`, the 3D-Tiles overlay's
+ * camera fields) must make exactly one call per tick carrying every participant's
+ * keys; two partial calls make each see the other's content as "not wanted" and
+ * cancel its in-flight loads (measured in round 7, see `updateComposed`).
+ *
+ * `null`/`undefined` fragments (a participant that is inactive this tick) are skipped.
+ * A key present in more than one fragment keeps the value from the EARLIEST fragment:
+ * order is precedence, so a caller lists the participant whose value must win first
+ * (the viewer lists the globe before the overlay, whose camera fields are the same
+ * quantities -- see `web/js/scene.js`). Returns a fresh object; no input is mutated.
+ * @param {...(object|null|undefined)} fragments
+ */
+export function composeView(...fragments) {
+  const view = {};
+  for (const fragment of fragments) {
+    if (!fragment) continue;
+    for (const key of Object.keys(fragment)) {
+      if (!(key in view)) view[key] = fragment[key];
+    }
+  }
+  return view;
+}
+
+/**
+ * The one per-tick driver of a shared `LayerManager`: asks every participant for its
+ * view fragment, makes exactly ONE `manager.update(composeView(...))` call, then lets
+ * each participant that contributed a fragment apply its own consequence of that
+ * update. A participant is any object with
+ *   - `planView(): object|null` -- its fragment of the view this tick (`null` = not
+ *     participating; its `commit` is then not called), and
+ *   - `commit?(): void` -- called AFTER the manager's update, in participant order,
+ *     only when `planView()` returned a fragment (the globe binds the textures that are
+ *     now resident, the entity scene reads residency into the scene graph).
+ * Nothing else may call `manager.update()` for a manager this drives:
+ * `web/js/merged_view_check.mjs` shows what a second, partial call does (it cancels
+ * the other participants' in-flight loads every tick). Returns whatever
+ * `manager.update()` returned (the plan, sorted by `comparePriority`), or `null` when
+ * no participant had a fragment and so no call was made.
+ * @param {LayerManager} manager
+ * @param {Array<{planView: () => (object|null), commit?: () => void}>} participants
+ */
+export function updateComposed(manager, participants) {
+  const fragments = participants.map((p) => p.planView());
+  if (!fragments.some((f) => f)) return null;
+  const plan = manager.update(composeView(...fragments));
+  participants.forEach((p, i) => { if (fragments[i] && p.commit) p.commit(); });
+  return plan;
+}
+
+/**
  * The priority-queue rule (design constraint d, binding): descending screen-space
  * error (the content that looks worst on screen is loaded first), ties broken by
  * ascending view distance (nearer first), ties broken by ascending global key (the
@@ -422,7 +477,7 @@ export class LayerManager {
     for (const [globalKey, entry] of this.resident) {
       if (entry.layerId === id) this._evictEntry(globalKey, entry);
     }
-    const prefix = `${id} `; // globalKeyFor's own join -- see that function's doc comment
+    const prefix = `${id}\u0000`; // globalKeyFor's own join -- see that function's doc comment
     for (const globalKey of this._failed.keys()) {
       if (globalKey.startsWith(prefix)) this._failed.delete(globalKey);
     }

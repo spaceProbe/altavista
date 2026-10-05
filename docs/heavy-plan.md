@@ -2641,3 +2641,223 @@ reference; store, catalog and gateway as tiers with their digests, matrices and 
    justification already written down.
 2. A producer for `Trajectory.model`, so the glTF entity class has live input — the same
    shape the covariance gap had before this round, and closed the same way.
+
+## Status (heavy manager, 2026-10-05) — post-delivery cleanup round
+
+This round does not reopen the plan. It closes the items question 237 chartered from what both
+plans handed on, and one defect the round itself found. `## Delivered` above stands; where this
+round changes what it says, that is stated here.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `c519e27` | Task 5: the `drag_srp` golden through the fixed generator, no recorded number moved; the generator stops writing the plain arc's STM tolerances into it |
+| `0682f75` | Task 6: the docker-test lock's Python-holder/Rust-waiter test; `av-run` built without GMAT runs a native DRM, with a test |
+| `422e922` | Task 2: a producer for `Trajectory.model`; `examples/05_rpo_ric.py`'s Chaser declares the fixture glTF |
+| `bcfed29` | Task 1: one merged `LayerManager.update` per tick; entity markers and trails re-planned and re-admitted |
+| `2e43a09` | Task 3: a lint refusing raw control bytes in `web/js/`, and the seven existing ones escaped |
+| `a2f05a3` | Task 4: Focus frames a spacecraft by its own extent; the camera-aim defect fixed for the primary and the per-viewport cameras |
+| `7e924b4` | Task 7 (added this round on the lead's ruling): glTF models drawn at their metre size |
+| this commit | this status section, and the README's gate recipe |
+
+### Task 1: the merged-view update
+
+`web/js/layers/layer.js` gains `composeView` and `updateComposed`. `Viewer._updateLayerManager`
+asks three participants for their fragment of the view each tick — the globe
+(`GlobeLayer.planView()`/`commitPlannedView()`, additive; a standalone `GlobeLayer.update()` is
+unchanged), the 3D-Tiles overlay (`getManagedView()`), and the new `ResidentEntityScene` — and
+makes exactly one `layerManager.update()` call. `ResidentEntityScene` builds its marker and trail
+requests once per scenario with stable keys and costs, so re-planning a resident payload is a
+no-op, and after the update reads the manager's own `resident` map into the scene graph (the
+marker `InstancedMesh`'s count and order, one trail line per resident trail). The once-only
+admission and its deferred `_finishEntityMarkerTrailBuild` are gone.
+
+Proved: the eight existing globe/imagery/layers/entities/3D-Tiles node checks unchanged; the
+Docker-gated `tests/test_viewer_layers_stream.py` 14 of 14 with the round-7 globeLayerProbe
+numbers (step B `residentBytes` 9,724, textureless regressions 0, one default tile evicted from
+under a live mesh); `web/js/merged_view_check.mjs` (B: twenty imagery loads survive entity-only
+view changes with zero cancellations, while the old two-call pattern kept as a control cancels
+them; C: wanted entity payloads are never evicted under pressure, unwanted ones are evicted by the
+manager's own eviction and leave the scene graph, stay out while wanted but not fitting, and are
+re-admitted and drawn once pressure lifts); and real Chrome with a globe and entities (one update
+per tick for 240 ticks, every globe mesh textured, entities resident and drawn, console clean).
+Splitting the update per participant fails five B checks; making entities unwanted after their
+first plan fails the C re-admission checks.
+
+The limit of proofs B and C, stated: they drive the real `GlobeLayer`, `ResidentEntityScene` and
+`updateComposed` through a rig that restates `scene.js`'s five-line `_updateLayerManager`; the real
+`Viewer` is covered by the browser proof.
+
+### Task 2: a producer for `Trajectory.model`
+
+`to_dict()` emits `model` only when one is declared (the key is absent otherwise, so every
+model-less scenario's JSON is byte-identical, pinned against a literal captured from the previous
+code). Authored beside `color=`: `Scenario.spacecraft(..., model=)`, `adopt(..., model=)`, and
+`run_script(models=)` beside `colors`. A non-empty `str` is required, checked before any GMAT
+object is created; Python never fetches the URL. The publish path carries it unchanged (the hub
+stores the posted dict verbatim). `tests/test_viewer_entities_browser.py` now builds its scenario
+through the producer rather than patching the fetched dict.
+
+### Task 3: the control-byte lint
+
+**The inventory was seven raw bytes, not three** — the second correction of rounds 5 and 6's
+record (question 235 made the first): one NUL in `web/js/layers/layer.js:480`, two SOH in
+`web/js/panels/layers_panel.js:311`, three NULs in `web/js/layers_budget_check.mjs` (137, 345,
+397) and one NUL inside a comment in `web/js/layers_check.mjs:574`. Each is now its escape in the
+same literal, and the runtime strings are proved identical against the previous modules.
+`web/js/control_bytes_check.mjs` refuses 0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F and 0x7F, runs in the
+gate's node phase and through `tests/test_web_js_control_bytes.py` in its pytest phase, and is in
+the README's gate recipe.
+
+### Task 4: entity framing, and a camera-aim defect
+
+Focus on a spacecraft frames it: `Viewer.entityExtent(name)` is the bounding radius of what is
+drawn for it (ellipsoid or keep-out volume when their class is on, the model when loaded, else the
+marker), and the camera goes to `R / sin(0.6 · fov / 2)` with the narrower of the two fields of
+view, near/far and the zoom floor sized from that distance. Reset view and a body focus restore the
+whole-scenario values. In real Chrome the closed-form ellipsoid measured 0.10 px on the
+Earth-framed camera (the lead's observation, made a number) and 58 % of the canvas height after
+Focus.
+
+### Task 5: the `drag_srp` golden
+
+All 155 numeric leaves are bit-identical (parsed and as text) and no key was removed; only
+`golden_regeneration_reason` (added), `generated` and `sha256` differ. The sha256
+`208cf4b7…e226` was re-derived independently from the file's own bytes. The plain golden was
+regenerated to a scratch path to prove the generator fix leaves it unchanged (161 of 161 numeric
+leaves identical). Consumers green: `drag_srp_m5` 2, `srp_goldens` 3, `stm_goldens` 1,
+`gmat-sys` `drag_srp_stm` 4.
+
+### Task 6: two missing tests
+
+- `a_rust_waiter_reads_and_reports_a_real_python_holders_sidecar` (`av-lockstep`): a python3 child
+  takes a private lock through the production `lock_docker_tests()`; the test binary re-runs itself
+  on the existing blocking probe; the Rust WAITING line must carry the Python record's exact pid,
+  tree and command and must not be the unknown or stale variant.
+- `tests/test_av_run_no_gmat.py`: `av-run` built with `--no-default-features` into `target/no-gmat`
+  (so `target/debug/av-run` is never overwritten), `otool -L` showing no GMAT library against the
+  default binary as a positive control, the native bundle `drms/leo_1day_orbital_native.*` run and
+  checked against the kernel test's bounds, the default build bit-identical on the same DRM, and
+  the golden DRM refused with the kernel's typed `GmatFeatureDisabled`.
+
+### Task 7: glTF models at their metre size
+
+glTF's unit is the metre and the scene's is 1000 km, but `ModelEntity.attachModel` added the
+glTF's nodes unscaled: the 1 × 1 × 1.5 m fixture on the Chaser measured 1000 × 1000 × 1500 km in
+real Chrome. The content now sits under an inner node `entity-model-metres` scaled by a required
+`sceneUnitsPerMetre`, `1e-3 · SCALE` from `scene.js`; the Chaser's model measures 1.000 × 1.000 ×
+1.500 m.
+
+### Defects found in review, and their root causes
+
+1. **The `drag_srp` generator wrote another golden's tolerances.** `gen_leo_1day.py` put the six
+   `stm.golden_comparison_tolerance` bounds, which are `stm_goldens.rs`'s and sourced to residuals on
+   the plain arc, into every golden it wrote, including `--drag-srp`. Written for the plain golden
+   only now. **Definitively root-caused.**
+2. **`goldens/README.md` said the native model is never asserted against the `drag_srp` golden.**
+   `drag_srp_m5.rs` asserts its final state at a measured-plus-margin 110 m / 0.13 m/s; only the
+   golden's own 0.05 m is never applied to the native path. Corrected in task 5's commit.
+3. **`av-run` without GMAT refused every DRM**, though the kernel's `execute` runs native models
+   without GMAT (question 234's "amputation, not portability"). Fixed; decision 1.
+4. **`av-run`'s GMAT-free clippy could not pass**: `tests/command_dispatch_e2e.rs` names `gmat_sys`
+   and `RunConfig.gmat` ungated. Declared `required-features = ["gmat"]`; decision 3.
+5. **The control-byte inventory was incomplete twice** (task 3): four raw NULs in two check files
+   had never been counted.
+6. **OrbitControls aimed both camera kinds at a world point given in local coordinates.**
+   `controls.target` and `camera.position` live in the entities group's (or a viewport's render
+   group's) local, floating-origin space; `OrbitControls.update()` ends with `lookAt(target)`, which
+   takes a world point. With the origin rebased onto a LEO spacecraft the primary camera faced the
+   Earth's centre, 62° off its target, and a second viewport was 7.7° off. Invisible at
+   whole-scenario scale, fatal at the scale of a framed 3 km object. Both re-aimed after every
+   update; a 7-unit origin shift is asserted so the viewport check cannot pass vacuously.
+   **Definitively root-caused.**
+7. **glTF models drawn a million times too large** (task 7). **Definitively root-caused.**
+8. **The browser test's model wait was bounded by frame count**: with no model declared it overran
+   the driver's 60 s deadline under swiftshader and the probe returned nothing. Bounded on wall-clock
+   time (20 s) now.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. `av-run` built without GMAT calls the kernel's `execute` and lets the kernel refuse a GMAT DRM
+   with its typed error; `--gmat-startup` is refused in that build. The default build is unchanged.
+2. The `drag_srp` generator change is accepted as a genuine defect fix, with the plain golden's
+   output proved unchanged before committing.
+3. `command_dispatch_e2e` declares `required-features = ["gmat"]` (the lead's ruling), question 234's
+   mechanism; the av-run and av-kernel GMAT-free clippy runs are in the gate and the README recipe.
+   **This changes `crates/av-run/Cargo.toml`, so the SBOM epoch moves: regeneration is the lead's at
+   the merge (question 227).**
+4. `run_script(models=)` refuses a spacecraft name the script does not report, rather than dropping
+   the declaration.
+5. A switched-off entity class stops being wanted by the manager, so it stops holding budget and is
+   re-admitted when switched on and it fits (the lead's ruling). The scene graph follows residency
+   one tick later, because residency settles on microtasks after the update; accepted.
+6. The control-byte lint classifies files by extension and fails on an unclassified one, rather
+   than sniffing content.
+7. Focus is the framing action: the Focus link re-frames on each click, so no separate control was
+   added. Fraction 0.6 of the narrower field of view. Nothing re-frames by itself.
+8. The aim fix applies to both camera kinds; extent-based framing to the primary camera only. The
+   per-viewport Focus keeps the central-body distance rule.
+9. `ModelEntity`'s `sceneUnitsPerMetre` is required, with no default: 1 is the defect and 1e-6
+   would bake `scene.js`'s `SCALE` into the entity module.
+10. One worker per task, with tasks 3 and 4 held until task 1 landed (`layer.js` and `scene.js`
+    shared), and task 6 split across two workers into one commit.
+
+### Gates
+
+Run at `7e924b4` (the last code commit; this commit is documentation only), phases in sequence
+by `scratchpad/gate-cleanup/run_gate.sh`, each phase's whole output captured before reading.
+`target/debug/deps` held 54,562 entries at the start, under `cargo-slot`'s threshold, so it was not
+moved (question 236), and no phase printed the warning.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against` the main tree's proto | **clean, exit 0** |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **151 binaries, 1502 passed, 0 failed, 4 ignored, exit 0**, 671 s (round 7: 1491) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-run --all-targets --no-default-features -- -D warnings` | **clean, exit 0** (new this round, decision 3) |
+| required-features lint (the script's steps inline, every cargo call through `cargo-slot`, because the script calls bare `cargo`) | **clean, exit 0**: `linted 3 (package, feature set) group(s)` (`av-kernel`/`gmat`, `av-run`/`gmat` new, `av-jobs`/`store-fixture`) |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0, with the accepted spoore wildcard warnings and seven duplicate-crate warnings |
+| `cargo test -p av-kernel --no-fail-fast` | **46 binaries, 887 passed, 0 failed, 2 ignored, exit 0**; 3,253 s, of which 2,671 s were three announced waits for the host-wide docker-test lock held by the native team's Renode run |
+| every `web/js/**/*_check.mjs` | **24 of 28 exit 0**. The other four (`command_panel_check`, `panels_check`, `timeline_check` exit 2; `layers_stream_check` exit 1) printed their usage line: each needs arguments its pytest driver supplies, and all four drivers passed in the phase below |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1013 passed, 8 failed, 17 skipped**, 897 s; every skip a visible opt-in gate with its reason; the eight failures attributed below |
+
+**The eight Python failures, each attributed; none is this round's code.**
+
+- **Seven are the SBOM epoch** (`tests/test_sbom.py`: `test_the_epoch_is_never_wall_clock` for the
+  six Rust components, plus `test_all_six_rust_components_share_exactly_one_epoch_from_git`). The
+  committed epoch is `2026-09-22T16:52:59Z`; git's committer date for the epoch paths is now
+  `2026-10-05T11:43:28Z`, which is `0682f75`'s, the commit that changed `crates/av-run/Cargo.toml`
+  (decision 3). Question 220's rule: a manifest change moves the epoch, and question 227's:
+  regeneration is the lead's at the merge with `scripts/kit/regenerate_compliance.py`.
+- **One is the cFS image** (`services/cfs/tests/test_image_digest.py::
+  test_image_digest_matches_recorded_value`): the host's `altavista-cfs-lockstep:local` is
+  `sha256:847c9a08…`, created 2026-10-05 07:13 CDT, during this round, while this branch records
+  `sha256:3bef12a6…`. That is the native team's reproducible-shim rebuild (question 237): the
+  `AltaVista-edge` worktree's own `services/cfs/IMAGE_DIGEST.md` records `847c9a08…`. Not this
+  track's; it lands with that team's merge.
+
+### What `## Delivered` now says differently
+
+- Markers and trails are no longer admitted once: the seam named in `## Delivered` and question 235
+  is removed (task 1).
+- glTF models draw from a real scenario (task 2), at their true size (task 7).
+
+### What remains, each with its reason
+
+- **A 1.5 m model is not visible when its spacecraft is framed.** At true size it is smaller than
+  the marker (radius 0.0003 scene units, 300 km), so `entityExtent()` frames at marker scale. Showing
+  a model needs a screen-space marker, or framing that prefers the model when its class is on. Next
+  heavy work.
+- **The per-viewport Focus** still uses the central-body distance; only its aim is fixed.
+- **The CDM route has no `model=`**: a run published through `av-run` carries no model.
+- **`clippy -p av-run --bins` without `--no-deps`** warns on `av-command`'s
+  `AuditWriter::from_line_sink`, used only under `test-support`. Recorded for a later round.
+- **The `drag_srp` golden's `reason`** still describes a regeneration (question 81's ballistics),
+  not the golden's purpose, as `native-dynamics-plan.md` round 5 noted for both frozen reasons; a
+  deliberate rewrite moves the sha and is its own task.
+- **`scripts/lint/required_features_clippy.sh` calls bare `cargo`**, so the gate ran its steps inline
+  through `cargo-slot`; the script itself should take the slot.
+- Compliance regeneration is the lead's at the merge (decision 3).

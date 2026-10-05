@@ -607,8 +607,9 @@ _PROBE_JS = r"""
     out.registeredLayers = viewer.layerManager ? [...viewer.layerManager._layers.keys()] : [];
 
     // Pump real frames -- exactly web/js/app.js's own requestAnimationFrame loop
-    // calls (Viewer.update(t) -> _syncGlobeLayer + tilesOverlay.update(!globeLayer),
-    // this task's own round-5 orchestration). 240 frames (double the globe-only
+    // calls (Viewer.update(t) -> _updateLayerManager: one merged layerManager.update()
+    // for the globe, the overlay and the entities, then tilesOverlay.update(false);
+    // the heavy cleanup round's merged view, round 5's orchestration before it). 240 frames (double the globe-only
     // proof's own 120): the vendored TilesRenderer needs real network fetch + real
     // GLTFLoader parse time on top of what the globe alone needs.
     for (let i = 0; i < 240; i++) {

@@ -47,7 +47,7 @@ import { TilesOverlayLayer, placeOverlayInBodyFixedFrame } from './tiles_layer.j
 // Round 4 (docs/open-questions.md question 228 finding 2, "wire the globe through
 // the LayerManager"): imported from the barrel (`./layers/index.js`), per that
 // module's own convention -- see `Viewer`'s constructor and `enableGlobe()`, below.
-import { LayerManager } from './layers/index.js';
+import { LayerManager, updateComposed } from './layers/index.js';
 // M26.3 (docs/ui-rework-plan.md): the multiple-3D-viewports data model. See viewport.js's
 // own module docstring for the full design (per-viewport camera/frame/focus/floating
 // origin/line-clones, THREE.Layers instead of a second THREE.Scene) -- this file is the
@@ -66,7 +66,7 @@ import { Viewport, PRIMARY_LAYER, pickAlongCamera } from './viewport.js';
 // rendering here does NOT reuse the module's own `buildEllipsoidMesh`/`buildTrailGroup`
 // position data verbatim (floating-origin safety, question 46).
 import {
-  MarkerLayerAdapter, TrailLayerAdapter,
+  MarkerLayerAdapter, TrailLayerAdapter, ResidentEntityScene,
   covarianceEllipsoid, keepOutVolumeFromCovariance, buildEllipsoidMesh,
   ModelEntity, parseGLTFAsset,
 } from './entities/index.js';
@@ -84,6 +84,12 @@ export const SCALE = 1e-3;          // scene units per km (1 unit = 1000 km)
 // against this exact, real constant rather than a value re-typed independently in
 // Python (which could silently drift from scene.js's own number).
 export const FIT_DISTANCE_FACTOR = 2.4;
+// Focusing a spacecraft frames it: the camera distance is set so the entity's bounding
+// sphere subtends this fraction of the camera's narrower field of view (see
+// `entityFramingDistance`). 0.6 leaves a fifth of the view free on each side for the
+// orbit controls to swing the object without it leaving the frame, and is large enough
+// that a ~3 km covariance ellipsoid reads as an ellipsoid, not a dot.
+export const ENTITY_FRAMING_FRACTION = 0.6;
 const MARKER_PX = 7;                // spacecraft marker diameter on screen
 const EVENT_PX = 9;
 // Auto-rebase policy (origin.js leaves this to the caller): rebase the floating
@@ -149,7 +155,7 @@ const ENTITY_MODEL_LAYER_ID = 'entity-models';           // same
 // "Trails ... every spacecraft's recent track" (this task's brief) -- a visibility
 // default (how much history to show), not a mission parameter, same discipline as the
 // sigma/margin constants above. Admission byteCost is declared honestly against this
-// same cap (see setScenario()'s entity-trail view building) so the LayerManager's own
+// same cap (see _buildEntities()'s entity list) so the LayerManager's own
 // budget reflects what is actually drawn, never an undeclared amount.
 const ENTITY_TRAIL_RECENT_SAMPLES = 50;
 // Constant per-instance marker size (scene units) -- entity markers are a SEPARATE,
@@ -158,6 +164,10 @@ const ENTITY_TRAIL_RECENT_SAMPLES = 50;
 // fixed on-screen footprint rather than reusing MARKER_PX's pixel-constant formula,
 // keeping the two visually distinguishable rather than exact duplicates.
 const ENTITY_MARKER_RADIUS_SCENE_UNITS = 3e-4;
+
+// A shared-manager participant that never contributes a fragment (`updateComposed`, layers/layer.js) --
+// stands in for the entity scene before the first scenario has loaded.
+const NO_PARTICIPANT = { planView: () => null };
 
 export class Viewer {
   constructor(canvas, labelLayer) {
@@ -276,9 +286,11 @@ export class Viewer {
     // -- see both methods' own "heavy round 7" comments. Null/empty until the first
     // setScenario() call.
     this._entityGroups = null;           // {markers, trails, covarianceEllipsoids, keepOutVolumes, models}: THREE.Group
-    this._entityMarkerMesh = null;       // one THREE.InstancedMesh, rebuilt per scenario
-    this._entityMarkerResidentNames = [];// spacecraft names, in the SAME order as _entityMarkerMesh's instances
-    this._entityTrailLines = new Map();  // spacecraft name -> {line, positions:Float32Array, maxPoints}
+    // The marker InstancedMesh, the names its instances stand for and the trail lines are
+    // owned by this ResidentEntityScene (entities_instanced_layer.js), which mirrors the
+    // shared manager's residency into the scene graph every tick; `_entityMarkerMesh`/
+    // `_entityMarkerResidentNames`/`_entityTrailLines` (accessors, below) read through it.
+    this._entityResidency = null;
     this._entityCovarianceMeshes = new Map();  // spacecraft name -> {mesh, lastIndex}
     this._entityKeepoutMeshes = new Map();     // spacecraft name -> {mesh, lastIndex}
     this._entityModelEntities = new Map();     // spacecraft name -> ModelEntity
@@ -288,9 +300,13 @@ export class Viewer {
     this._focusPrev = new THREE.Vector3();
     this._tmp = new THREE.Vector3();
     this._tmpAbs = new THREE.Vector3();  // scratch: absolute (origin-independent) position
+    this._tmpAim = new THREE.Vector3();  // scratch: the orbit target in world space (_updateEntitiesCamera)
     this._tmpQ = new THREE.Quaternion();
     this._sunDir = new THREE.Vector3(1, 0.3, 0.2);
     this.fitRadius = 30;
+    // True while an entity is framed (`_frameEntity`): near/far/minDistance are then the
+    // framing range, not the whole-scenario one `_restoreFitDepthRange` puts back.
+    this._entityFramed = false;
     this.resize();
   }
 
@@ -379,6 +395,13 @@ export class Viewer {
     return 600;
   }
 
+  /** The marker `THREE.InstancedMesh` (null before a scenario with entities loads). */
+  get _entityMarkerMesh() { return this._entityResidency ? this._entityResidency.markerMesh : null; }
+  /** Spacecraft names whose marker payload is resident, in the order of the mesh's instances. */
+  get _entityMarkerResidentNames() { return this._entityResidency ? this._entityResidency.markerNames : []; }
+  /** spacecraft name -> {line, positions:Float32Array, maxPoints}, resident trails only. */
+  get _entityTrailLines() { return this._entityResidency ? this._entityResidency.trailLines : new Map(); }
+
   clear() {
     for (const b of this.bodies.values()) { disposeMesh(b.mesh); disposeMesh(b.dot); b.label.remove(); }
     for (const s of this.spacecraft.values()) { s.line.geometry.dispose(); s.line.material.dispose(); s.label.remove(); }
@@ -428,6 +451,9 @@ export class Viewer {
     // never a stale registration or a stale blacklist surviving into the next scenario.
     this.layerManager.removeLayer(ENTITY_MARKER_LAYER_ID);
     this.layerManager.removeLayer(ENTITY_TRAIL_LAYER_ID);
+    // The marker mesh and the resident trail lines belong to the residency scene: it removes
+    // and disposes them (the shared marker geometry is left alone) before the group sweep below.
+    if (this._entityResidency) { this._entityResidency.dispose(); this._entityResidency = null; }
     if (this._entityGroups) {
       // `disposeGeometry: false` for markers/ellipsoids/keep-out -- their geometry is
       // SHARED (this._entityMarkerGeometry, constructed once in the constructor; and
@@ -442,13 +468,6 @@ export class Viewer {
       disposeEntityGroup(this._entityGroups.models, true);
       this._entityGroups = null;
     }
-    // Entity marker/trail meshes' own GPU resources: the marker mesh's material is
-    // this scenario's own (disposeEntityGroup, just above, already removed+disposed it
-    // from the group -- the geometry is the SHARED this._entityMarkerGeometry, deliberately
-    // never disposed here). Trail lines are disposed the same way through their group.
-    this._entityMarkerMesh = null;
-    this._entityMarkerResidentNames = [];
-    this._entityTrailLines.clear();
     this._entityCovarianceMeshes.clear();
     this._entityKeepoutMeshes.clear();
     this._entityModelEntities.clear();
@@ -1305,7 +1324,17 @@ export class Viewer {
         if (vp.controls) vp.controls.target.set(local.x, local.y, local.z);
         vp.focusPrev.copy(fp);
       }
-      if (vp.controls) vp.controls.update();
+      if (vp.controls) {
+        vp.controls.update();
+        // Same defect and correction as the primary camera's `_updateEntitiesCamera`:
+        // `controls.target` is in `vp.renderGroup`'s local space (offset from world by this
+        // viewport's own origin shift), but OrbitControls' `lookAt` takes a world point --
+        // measured, the camera faced the Earth's centre 7.7 degrees off a LEO focus.
+        // Runs every tick, so it also covers `_setViewportFocus` and `_fitViewportOrigin`'s
+        // next frame. `vp._tmpAbs` is free here (only the other branch uses it).
+        cam.updateWorldMatrix(true, false);
+        cam.lookAt(vp.renderGroup.localToWorld(vp._tmpAbs.copy(vp.controls.target)));
+      }
     } else {
       vp.focusPrev.copy(fp);
       const frameObj = this.frameGraph.frame(vp.cameraFrameId).object3D;
@@ -1441,24 +1470,60 @@ export class Viewer {
   }
 
   /**
-   * Per-tick globe upkeep, called from update() below once the current body
-   * positions/quaternions are known. Tracks `body.mesh`'s already origin-relative
-   * transform exactly (plain position/quaternion copy -- see globe.js's module
-   * docstring for why the globe never needs its own floating-origin treatment), then
-   * computes the camera's position **in that body's local frame** (scene units) via
-   * `worldToLocal` and hands it to `GlobeLayer.update()`, which does the real
-   * screen-space-error tile selection (web/js/globe_lod.js).
+   * Per-tick globe upkeep, first half: called from `_updateLayerManager()` below once
+   * the current body positions/quaternions are known. Tracks `body.mesh`'s already
+   * origin-relative transform exactly (plain position/quaternion copy -- see globe.js's
+   * module docstring for why the globe never needs its own floating-origin treatment),
+   * then computes the camera's position **in that body's local frame** (scene units) via
+   * `worldToLocal` and asks `GlobeLayer.planView()` for the globe's fragment of this
+   * tick's view (the real screen-space-error tile selection, web/js/globe_lod.js). It
+   * does NOT call `layerManager.update()`: the globe's fragment is merged with the
+   * entities' and the overlay's into the tick's one update call, and the globe's
+   * meshes/textures are then reconciled by `GlobeLayer.commitPlannedView()`.
+   * Returns `null` (not participating) with no globe or no body to attach it to.
    */
   _syncGlobeLayer(cam) {
     const layer = this.globeLayer;
     const b = this.bodies.get(this.globeBodyName);
-    if (!layer || !b) return;
+    if (!layer || !b) return null;
     layer.group.position.copy(b.mesh.position);
     layer.group.quaternion.copy(b.mesh.quaternion);
     layer.group.updateMatrixWorld(true);
     const camLocal = layer.group.worldToLocal(cam.getWorldPosition(this._tmpAbs));
     const h = this._referenceCanvasHeight();
-    layer.update(camLocal, h, THREE.MathUtils.degToRad(cam.fov));
+    return layer.planView(camLocal, h, THREE.MathUtils.degToRad(cam.fov));
+  }
+
+  /**
+   * The ONE `layerManager.update()` call of this render tick (heavy cleanup round 1,
+   * questions 235/237). `LayerManager.update(view)` treats every registered layer's
+   * `plan(view)` output as that call's ENTIRE wanted set, so every participant on this
+   * viewer's shared manager contributes a fragment to a single merged view instead of
+   * calling the manager itself (two partial calls per tick each see the other's content
+   * as "not wanted" and cancel its in-flight loads -- measured in round 7: with a globe
+   * active no imagery tile ever finished). The participants, in precedence order (the
+   * earliest fragment wins a shared key, `composeView`):
+   *   - the globe: `tiles`, `cameraEcef`, `screenHeightPx`, `fovYRad` (`_syncGlobeLayer`);
+   *   - the 3D-Tiles overlay: `cameraEcef`/`screenHeightPx`/`fovYRad` from its own
+   *     `getManagedView()` -- the globe's values win when both are present, exactly the
+   *     camera the overlay's adapter read from the globe's view before this merge;
+   *   - the entities: `markers`, `trails` (`this._entityResidency`), re-planned every
+   *     tick with stable keys and costs, so an entity payload that was evicted is
+   *     re-admitted once it is wanted and fits again.
+   * After the update, each participant applies its own consequence (`GlobeLayer.
+   * commitPlannedView()` binds the textures that are now resident; the entity scene reads
+   * residency into the scene graph). `tilesOverlay.update(false)` always runs, because
+   * the vendored renderer's own fetch/parse pipeline and its `errorTarget` nudge need a
+   * tick whether or not the overlay is a manager participant this frame; `false` because
+   * the manager is driven here, never by the overlay itself.
+   */
+  _updateLayerManager(cam) {
+    updateComposed(this.layerManager, [
+      { planView: () => this._syncGlobeLayer(cam), commit: () => this.globeLayer.commitPlannedView() },
+      { planView: () => (this.tilesOverlay ? this.tilesOverlay.getManagedView() : null) },
+      this._entityResidency || NO_PARTICIPANT,
+    ]);
+    if (this.tilesOverlay) this.tilesOverlay.update(false);
   }
 
   // ------------------------------------------------------------- M15.4/M16.4: 3D Tiles overlay
@@ -1532,10 +1597,11 @@ export class Viewer {
    * `layerManager: this.layerManager` -- THIS viewer's one shared manager, same
    * invariant `enableGlobe()` already documents above -- routes the overlay's real
    * content fetch through it (`web/js/tiles_layer.js`'s own "Round 5" module
-   * docstring has the full mechanism). Per-tick driving of that shared manager stays
-   * coordinated with the globe (`update()`, below): `TilesOverlayLayer`'s own
-   * `selfDriveManager` is decided fresh every tick from whether `this.globeLayer` is
-   * currently set, never fixed here at construction time.
+   * docstring has the full mechanism). Per-tick driving of that shared manager is the
+   * viewer's, never the overlay's: the overlay contributes its camera fragment to the
+   * tick's ONE merged `layerManager.update()` (`_updateLayerManager`, above) and is
+   * itself ticked with `update(false)`, whether or not a globe or entities are also
+   * participants.
    * @param {string} url
    * @param {string} [bodyName] which body's body-fixed frame to geo-reference
    *   against -- defaults to 'Earth', matching every example scenario that loads a
@@ -1610,15 +1676,71 @@ export class Viewer {
     this._rebaseOriginTo(0, 0, 0, true);
     this.controls.target.set(0, 0, 0);
     this.camera.position.copy(dir.multiplyScalar(r * FIT_DISTANCE_FACTOR));
-    this.camera.near = Math.max(r * 1e-6, 1e-4);
-    this.camera.far = Math.max(r * 1e4, 1e6);
-    this.camera.updateProjectionMatrix();
-    this.controls.update();
+    this._restoreFitDepthRange();
+    this._updateEntitiesCamera();
     this._focusPrev.set(0, 0, 0);
   }
 
+  /**
+   * `controls.update()` for a camera parented in the entities frame, plus the aim
+   * correction `OrbitControls` cannot make for it. `controls.target` and `camera.position`
+   * are in `_entitiesGroup`'s LOCAL space (the floating origin's render space), but
+   * `OrbitControls.update()` finishes with `object.lookAt(this.target)`, and `lookAt`
+   * takes a WORLD-space point (and reads the camera's world position from its last
+   * `matrixWorld`, which is stale right after `camera.position` was set). The two spaces
+   * differ by `_entitiesGroup.position`, the origin shift: with the origin on a LEO
+   * spacecraft that is ~7 scene units, so the camera was aimed at the world origin (the
+   * Earth's centre) instead of the focused entity -- measured live, 62 degrees off a
+   * target 0.0015 units away, with the forward axis exactly on the Earth's centre. At
+   * the whole-scenario scale (origin at 0, or a camera tens of units out) the error is
+   * invisible, which is why it went unnoticed; at the scale of a framed 3 km object the
+   * entity is simply out of view. So after `controls.update()` the camera is re-aimed at
+   * the target's world position, from fresh matrices -- the same correction the
+   * non-entities-frame branch of `update()` already applies, for the same reason.
+   */
+  _updateEntitiesCamera() {
+    this.controls.update();
+    if (this._cameraFrameId !== this._originFrameId) return;
+    this.camera.updateWorldMatrix(true, false);
+    this.camera.lookAt(this._entitiesGroup.localToWorld(this._tmpAim.copy(this.controls.target)));
+  }
+
+  /** The whole-scenario near/far (sized off `fitRadius`, exactly `_fitOrigin()`'s own
+   * formula, which calls this) and the whole-scenario zoom floor: what the camera runs
+   * with unless an entity is framed (`_frameEntity`), and what Reset view and a focus on
+   * anything that is not a spacecraft put back. */
+  _restoreFitDepthRange() {
+    const r = this.fitRadius;
+    this.camera.near = Math.max(r * 1e-6, 1e-4);
+    this.camera.far = Math.max(r * 1e4, 1e6);
+    this.camera.updateProjectionMatrix();
+    this.controls.minDistance = ENTITIES_MIN_DISTANCE;
+    this._entityFramed = false;
+  }
+
+  /**
+   * Aim the camera at `name` (a body, a spacecraft, or null for the frame origin).
+   *
+   * A body keeps its pre-cleanup behaviour (target moves; the camera is only pulled in
+   * when it is more than 20 x, or less than 0.1 x, four body radii away). A SPACECRAFT is
+   * framed (`_frameEntity`): the camera target goes to it and the camera distance is set
+   * by its own extent, not by the central body -- the cleanup round's answer to "a 3 km
+   * ellipsoid at the Earth-framed camera is a dot, and neither Focus nor Reset view brings
+   * the camera to a scale where it can be seen" (questions 235/237). Framing happens here
+   * and only here, i.e. on an explicit Focus: the per-tick follow in `update()` carries
+   * the camera with a moving focus at a constant offset and never changes the distance,
+   * so an entity whose extent later changes (a class toggled on, the ellipsoid growing
+   * along the orbit) is not re-framed until the next Focus. Focusing anything that is not
+   * a spacecraft puts back the whole-scenario near/far and zoom floor a framed entity had
+   * replaced.
+   */
   setFocus(name) {
     this.focus = name || null;
+    if (name && this.spacecraft.has(name) && this._cameraFrameId === this._originFrameId) {
+      this._frameEntity(name);
+      return;
+    }
+    if (this._entityFramed) this._restoreFitDepthRange();
     const p = this._focusPosition(this._lastT ?? 0, this._tmp); // absolute
     const local = this.floatingOrigin.toRenderSpace(this._originFrameId, p);
     this.controls.target.set(local.x, local.y, local.z);
@@ -1629,17 +1751,89 @@ export class Viewer {
       const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
       if (off.length() > d * 20 || off.length() < d * 0.1) off.setLength(d);
       this.camera.position.set(local.x, local.y, local.z).add(off);
-    } else if (name && this.spacecraft.has(name)) {
-      const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
-      const central = [...this.bodies.values()].find(b => b.data.central);
-      const d = central ? central.data.radius * SCALE * 1.5 : this.fitRadius * 0.3;
-      if (off.length() > d * 20) off.setLength(d);
-      this.camera.position.set(local.x, local.y, local.z).add(off);
     }
-    this.controls.update();
+    this._updateEntitiesCamera();
     // The camera/target above used whatever origin was current; a drift-triggered
     // rebase happens on the very next update(t) tick (1/60s later) if the new focus
     // is far from it -- see _maybeRebaseOrigin.
+  }
+
+  /**
+   * The extent of what is drawn for spacecraft `name`, as a bounding sphere about its
+   * marker position, in scene units: the largest of (a) the covariance ellipsoid's
+   * longest semi-axis when that class is on and the spacecraft has a shape at the current
+   * sample, (b) the same for the keep-out volume, (c) the loaded glTF model's bounding
+   * sphere about the marker position when the models class is on, and (d) the entity
+   * marker's own radius (`ENTITY_MARKER_RADIUS_SCENE_UNITS`), which is also the floor and
+   * the answer when nothing else is drawn. Reads the live scene objects, so it is the
+   * extent as of the last `update(t)` tick. `source` names which one decided it.
+   * @param {string} name
+   * @returns {{radius:number, source:'covariance'|'keepout'|'model'|'marker'}|null}
+   *   null for an unknown spacecraft.
+   */
+  entityExtent(name) {
+    if (!this.spacecraft.has(name)) return null;
+    let best = { radius: ENTITY_MARKER_RADIUS_SCENE_UNITS, source: 'marker' };
+    const consider = (radius, source) => { if (radius > best.radius) best = { radius, source }; };
+    const cov = this._entityCovarianceMeshes.get(name);
+    if (cov && this.entityOptions.covarianceEllipsoids && cov.hasShape) {
+      consider(Math.max(cov.mesh.scale.x, cov.mesh.scale.y, cov.mesh.scale.z), 'covariance');
+    }
+    const ko = this._entityKeepoutMeshes.get(name);
+    if (ko && this.entityOptions.keepOutVolumes && ko.hasShape) {
+      consider(Math.max(ko.mesh.scale.x, ko.mesh.scale.y, ko.mesh.scale.z), 'keepout');
+    }
+    const model = this._entityModelEntities.get(name);
+    if (model && this.entityOptions.models && model.modelLoaded) {
+      const box = new THREE.Box3().setFromObject(model.group);
+      if (!box.isEmpty()) {
+        const centre = box.getCenter(new THREE.Vector3());
+        const half = box.getSize(new THREE.Vector3()).length() / 2;
+        consider(centre.distanceTo(model.group.position) + half, 'model');
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Frame spacecraft `name` (entities frame only; `setFocus` guards that): target on the
+   * entity, distance from `entityFramingDistance(entityExtent, camera.fov, camera.aspect)`,
+   * along the camera's current direction from the entity (a default direction when the
+   * camera sits on it). Steps, in this order, because the floating origin decides the
+   * precision of everything after it:
+   *   1. rebase the floating origin onto the entity NOW (`_rebaseOriginTo`, which carries
+   *      the camera and target with it), instead of waiting for `update()`'s drift test on
+   *      the next tick -- a 3 km object ~7,000 km from the Earth's centre is 7 scene units
+   *      from the origin until then, where one float32 step is ~0.8 m (question 46's bound
+   *      is sub-metre in the general scene, centimetre in RIC);
+   *   2. place target and camera in the rebased, now-small local space;
+   *   3. depth range (`entityFramingDepthRange`): near follows the framing distance so the
+   *      object is not clipped, far keeps the whole-scenario floor so the Earth behind it
+   *      still draws, and the zoom floor drops to a tenth of the distance. Restored by
+   *      Reset view (`_fitOrigin`) or a focus on a non-spacecraft (`setFocus`).
+   * Never called from the per-tick path.
+   */
+  _frameEntity(name) {
+    const p = this._focusPosition(this._lastT ?? 0, this._tmp); // absolute
+    this._rebaseOriginTo(p.x, p.y, p.z);
+    const local = this.floatingOrigin.toRenderSpace(this._originFrameId, p);
+    this.controls.target.set(local.x, local.y, local.z);
+    this._focusPrev.copy(p);
+    const extent = this.entityExtent(name);
+    const distance = entityFramingDistance(extent.radius, this.camera.fov, this.camera.aspect);
+    const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+    if (off.lengthSq() < 1e-30) off.set(1, -1.2, 0.7);
+    off.setLength(distance);
+    this.camera.position.set(local.x, local.y, local.z).add(off);
+    const range = entityFramingDepthRange(
+      distance, extent.radius, Math.max(this.fitRadius * 1e4, 1e6), ENTITIES_MIN_DISTANCE,
+    );
+    this.camera.near = range.near;
+    this.camera.far = range.far;
+    this.camera.updateProjectionMatrix();
+    this.controls.minDistance = range.minDistance;
+    this._entityFramed = true;
+    this._updateEntitiesCamera();
   }
 
   setVisible(kind, name, visible) {
@@ -1713,24 +1907,21 @@ export class Viewer {
    * `this.entityOptions` (never rebuilt on a checkbox toggle -- `setEntityClassEnabled`
    * below only flips `group.visible`).
    *
-   * Markers/trails go through `this.layerManager` (`addLayer`, a single admission call
-   * below): "the entity adapters' declared byte costs go on the SAME 64 MiB budget as
-   * the globe's imagery/terrain... never a second LayerManager" (this task's own
-   * brief). Deliberately admitted ONCE here, not re-`update()`-d every render tick --
-   * see the doc comment on `this.layerManager.update(...)`, below, for why: `GlobeLayer`
-   * (web/js/globe.js, a file this task may not edit) drives this SAME shared manager
-   * with its OWN `{tiles, cameraEcef, screenHeightPx, fovYRad}` view every tick it is
-   * active, and `LayerManager.update(view)`'s own contract (web/js/layers/layer.js) is
-   * that EVERY registered layer's `plan(view)` output is that call's entire wanted set
-   * -- two independently-built partial views driving one manager, once each per tick,
-   * would each treat the OTHER call's layers as "not wanted", cancelling
-   * still-in-flight pending loads before they can ever resolve (measured: with a globe
-   * active, alternating globe-view/entity-view calls at 60 Hz never let a single
-   * imagery tile finish loading -- see this task's own report). A one-time admission at
-   * scenario load avoids that entirely: entity markers/trails become resident before
-   * any globe tile is even pending, and (at this codebase's 64 MiB budget against a
-   * demo/RPO scene's few-hundred-byte entity cost) are never evicted afterward, since
-   * eviction only fires under real budget pressure this scene never creates.
+   * Markers/trails go through `this.layerManager` (`addLayer` once per scenario):
+   * "the entity adapters' declared byte costs go on the SAME 64 MiB budget as the
+   * globe's imagery/terrain... never a second LayerManager" (this task's own brief).
+   * They are NOT admitted once: a `ResidentEntityScene` (web/js/entities/
+   * entities_instanced_layer.js) is the entities' participant in the render tick's ONE
+   * merged `layerManager.update()` (`_updateLayerManager`, this class), so markers and
+   * trails are re-planned every frame next to the globe's tiles. Their requests are
+   * stable (same keys, same declared costs), so a resident payload's re-plan is a
+   * no-op; a payload the manager evicted under budget pressure is wanted again on the
+   * next tick and re-admitted as soon as it fits; and the scene graph follows the
+   * manager's residency (`ResidentEntityScene.sync()`), so an evicted marker/trail
+   * stops being drawn and is drawn again when re-admitted. `clear()` disposes the
+   * scene and unregisters the adapters; the adapters' loads are microtask-deferred and
+   * the manager ignores a load that settles after its layer was removed, so no stale
+   * callback can reach a disposed group.
    *
    * Covariance ellipsoids/keep-out volumes and glTF models are NOT run through
    * `this.layerManager` -- H6's own module never declared a byte cost for them (only
@@ -1756,42 +1947,29 @@ export class Viewer {
 
     const spacecraftList = sc.spacecraft || [];
 
-    // ---- markers + trails: register fresh adapters, admit once (see this method's own
-    // doc comment for why once, not per-tick).
+    // ---- markers + trails: register fresh adapters; the ResidentEntityScene plans their
+    // requests into every tick's merged update (see this method's own doc comment) and
+    // mirrors their residency into the two groups created above.
     this.layerManager.addLayer(new MarkerLayerAdapter({ id: ENTITY_MARKER_LAYER_ID }));
     this.layerManager.addLayer(new TrailLayerAdapter({ id: ENTITY_TRAIL_LAYER_ID }));
-    const markerView = spacecraftList
-      .filter((s) => s.t && s.t.length)
-      .map((s) => ({
-        id: s.name,
-        positionKm: [s.pos[0] || 0, s.pos[1] || 0, s.pos[2] || 0],
-        color: s.color || '#ffffff',
-        sseError: 1,
-        viewDistanceM: 1,
-      }));
-    const trailView = spacecraftList
-      .filter((s) => s.t && s.t.length)
-      .map((s) => ({
-        id: s.name,
-        pointsKm: recentTrailPointsKm(s, ENTITY_TRAIL_RECENT_SAMPLES),
-        color: s.color || '#ffffff',
-        sseError: 1,
-        viewDistanceM: 1,
-      }));
-    this.layerManager.update({ markers: markerView, trails: trailView });
-    // `_entitySceneGen`: bumped once per `setScenario()` call (see the top of this
-    // method... actually incremented just below) -- both adapters' own `load()`
-    // (entities_instanced_layer.js's `microtaskLoad`) resolve ONE MICROTASK after
-    // `update()` returns, and `LayerManager._onLoaded` (the admission's own `.then()`)
-    // runs a SECOND microtask after that -- so nothing is actually resident yet at
-    // this exact line, only pending. `_finishEntityMarkerTrailBuild`, below, is
-    // deliberately deferred a few microtask ticks so it reads the manager's REAL,
-    // settled resident set, not an empty one -- and re-checks this generation token
-    // before touching anything, in case a second `setScenario()` call (or clear())
-    // ran before this settles.
-    this._entitySceneGen = (this._entitySceneGen || 0) + 1;
-    const gen = this._entitySceneGen;
-    this._finishEntityMarkerTrailBuild(spacecraftList, gen);
+    this._entityResidency = new ResidentEntityScene({
+      manager: this.layerManager,
+      markerLayerId: ENTITY_MARKER_LAYER_ID,
+      trailLayerId: ENTITY_TRAIL_LAYER_ID,
+      markerGroup: this._entityGroups.markers,
+      trailGroup: this._entityGroups.trails,
+      markerGeometry: this._entityMarkerGeometry,
+      trailMaxPoints: ENTITY_TRAIL_RECENT_SAMPLES,
+      isEnabled: (cls) => !!this.entityOptions[cls],
+      entities: spacecraftList
+        .filter((s) => s.t && s.t.length)
+        .map((s) => ({
+          name: s.name,
+          positionKm: [s.pos[0] || 0, s.pos[1] || 0, s.pos[2] || 0],
+          color: s.color || '#ffffff',
+          trailPointsKm: recentTrailPointsKm(s, ENTITY_TRAIL_RECENT_SAMPLES),
+        })),
+    });
 
     // ---- covariance ellipsoids + keep-out volumes: built only for a spacecraft whose
     // trajectory carries real `cov`/`covDim` (question 233's own wire contract, see
@@ -1840,6 +2018,8 @@ export class Viewer {
       if (!s.t || !s.t.length) continue;
       const entity = new ModelEntity({
         id: s.name,
+        // glTF is metres; one metre is 1e-3 km, and SCALE is scene units per km.
+        sceneUnitsPerMetre: 1e-3 * SCALE,
         attitudeSource: this._entityAttitudeSourceFor(s.name),
       });
       entity.group.userData.sourceLayerId = ENTITY_MODEL_LAYER_ID;
@@ -1848,76 +2028,6 @@ export class Viewer {
       this._entityGroups.models.add(entity.group);
       this._entityModelEntities.set(s.name, entity);
       this._loadEntityModel(s.name, s.model, loadToken);
-    }
-  }
-
-  /** The deferred second half of `_buildEntities`'s marker/trail admission -- see that
-   * method's own comment on `_entitySceneGen` for why this must wait a few microtask
-   * ticks before reading `this.layerManager.resident` (the entity adapters' own
-   * `load()` is deliberately microtask-deferred, `entities_instanced_layer.js`'s own
-   * module docstring: "so a request that gets cancelled between admission and
-   * settlement is genuinely observable"). Awaits enough real microtask turns for BOTH
-   * `microtaskLoad`'s own internal `.then()` AND `LayerManager`'s outer
-   * `.then(_onLoaded)` (chained onto `load()`'s own promise) to have run -- `await
-   * Promise.resolve()` twice, not once, is what makes that reliable regardless of
-   * engine microtask-queue implementation details (never a fixed-duration
-   * `setTimeout`, per design constraint g -- "no clocks slept, ever").
-   *
-   * Builds the marker `THREE.InstancedMesh` and one `THREE.Line` per resident trail
-   * from whatever admission actually produced (at this codebase's 64 MiB budget, that
-   * is "every spacecraft" for any real scenario this round exercises, but this reads
-   * the manager's own truth rather than assuming it) -- capacity fixed at
-   * construction; `_updateEntityMarkers`/`_updateEntityTrails` (per-tick, below) only
-   * ever overwrite an existing instance's matrix/buffer contents, never reallocate.
-   *
-   * Bails silently (no console noise -- a genuine, ordinary "the scenario changed
-   * again before this settled" race, not an error) if `gen` no longer matches
-   * `this._entitySceneGen` -- bumped by every `_buildEntities()` call -- meaning this
-   * viewer has already moved on to a different (or no) scenario by the time this
-   * would have touched the scene graph.
-   */
-  async _finishEntityMarkerTrailBuild(spacecraftList, gen) {
-    await Promise.resolve();
-    await Promise.resolve();
-    if (this._entitySceneGen !== gen || !this._entityGroups) return;
-
-    const residentMarkerNames = [];
-    for (const entry of this.layerManager.resident.values()) {
-      if (entry.layerId === ENTITY_MARKER_LAYER_ID) residentMarkerNames.push(entry.localKey);
-    }
-    this._entityMarkerResidentNames = residentMarkerNames;
-    if (residentMarkerNames.length) {
-      const material = new THREE.MeshBasicMaterial({ vertexColors: true });
-      const mesh = new THREE.InstancedMesh(this._entityMarkerGeometry, material, residentMarkerNames.length);
-      mesh.count = residentMarkerNames.length;
-      mesh.userData.sourceLayerId = ENTITY_MARKER_LAYER_ID;
-      mesh.userData.residentKeys = residentMarkerNames;
-      residentMarkerNames.forEach((name, i) => {
-        const s = spacecraftList.find((sc0) => sc0.name === name);
-        mesh.setColorAt(i, new THREE.Color((s && s.color) || '#ffffff'));
-      });
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      this._entityGroups.markers.add(mesh);
-      this._entityMarkerMesh = mesh;
-    } else {
-      this._entityMarkerMesh = null;
-    }
-
-    for (const entry of this.layerManager.resident.values()) {
-      if (entry.layerId !== ENTITY_TRAIL_LAYER_ID) continue;
-      const name = entry.localKey;
-      const s = spacecraftList.find((sc0) => sc0.name === name);
-      const positions = new Float32Array(ENTITY_TRAIL_RECENT_SAMPLES * 3);
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setDrawRange(0, 0);
-      const material = new THREE.LineBasicMaterial({ color: new THREE.Color((s && s.color) || '#ffffff') });
-      const line = new THREE.Line(geometry, material);
-      line.userData.sourceLayerId = ENTITY_TRAIL_LAYER_ID;
-      line.userData.spacecraft = name;
-      line.frustumCulled = false;
-      this._entityGroups.trails.add(line);
-      this._entityTrailLines.set(name, { line, positions, maxPoints: ENTITY_TRAIL_RECENT_SAMPLES });
     }
   }
 
@@ -1977,8 +2087,11 @@ export class Viewer {
   /** The Layers panel's per-entity-class checkbox handler (web/js/app.js). Flips
    * `this.entityOptions[cls]` and the corresponding group's own `.visible` -- never
    * rebuilds anything (mirrors `setOptions()`'s own "flip a flag, don't rebuild"
-   * discipline for trail/label/axes/grid/stars toggles, just below). A no-op before
-   * the first scenario has ever loaded (`this._entityGroups` is null).
+   * discipline for trail/label/axes/grid/stars toggles, just below). For `markers`/
+   * `trails` it also changes what the next tick's merged update WANTS (a switched-off
+   * class plans nothing and stops spending the shared byte budget, `ResidentEntityScene.
+   * planView()` reads `entityOptions` every tick). A no-op before the first scenario
+   * has ever loaded (`this._entityGroups` is null).
    * @param {'markers'|'trails'|'covarianceEllipsoids'|'keepOutVolumes'|'models'} cls
    * @param {boolean} enabled
    */
@@ -1997,8 +2110,9 @@ export class Viewer {
    * directly here would reintroduce exactly the float32-precision jitter question 46's
    * bound exists to catch). `this.layerManager`'s own resident/admission bookkeeping
    * is untouched by this method -- it is read-only here (which spacecraft are
-   * currently admitted), never re-driven per tick (see `_buildEntities`'s own doc
-   * comment for why). */
+   * currently resident, via `this._entityMarkerResidentNames`, which
+   * `ResidentEntityScene.sync()` refreshed from the manager earlier this tick in
+   * `_updateLayerManager`). */
   _updateEntityMarkers() {
     const mesh = this._entityMarkerMesh;
     if (!mesh) return;
@@ -2155,7 +2269,7 @@ export class Viewer {
         this.controls.target.set(local.x, local.y, local.z);
         this._focusPrev.copy(fp);
       }
-      this.controls.update();
+      this._updateEntitiesCamera();
     } else {
       // Camera parented to a different frame (e.g. RIC, via setViewFrame): that
       // frame's own Group already tracks its origin entity's absolute motion each
@@ -2198,23 +2312,13 @@ export class Viewer {
         b.dot.scale.setScalar(Math.max(1.5 / pxPerUnitAt(d), 1e-6));
       }
     }
-    // M15.4/M16.4: globe tiles + 3D Tiles overlay, both no-ops when neither is
-    // enabled. The body-fixed frame sync must run after the bodies loop above (it
-    // copies b.mesh's just-updated local transform) and before the overlay's own
-    // update() (which reads camera position through that same frame's world matrix).
+    // M15.4/M16.4 + heavy cleanup round 1: globe tiles, 3D Tiles overlay and entity
+    // markers/trails all plan into the ONE `layerManager.update()` this tick makes
+    // (`_updateLayerManager`, see its doc comment). The body-fixed frame sync must run
+    // after the bodies loop above (it copies b.mesh's just-updated local transform) and
+    // before the overlay's own camera read (through that same frame's world matrix).
     if (this._tilesOverlayBodyName) this._syncBodyFixedFrame(this._tilesOverlayBodyName);
-    if (this.globeLayer) this._syncGlobeLayer(cam);
-    // Round 5 (question 228/decision 9): `selfDriveManager = !this.globeLayer` --
-    // when a globe is ALSO active on this viewer's one shared `layerManager`,
-    // `_syncGlobeLayer` above has ALREADY called `layerManager.update()` this tick
-    // with a view that already carries everything a co-registered `Tiles3DLayerAdapter`
-    // needs (see `globe.js`'s own `update()` docstring), so `tilesOverlay.update()`
-    // here must NOT drive the manager a second, independent time -- see
-    // `web/js/tiles_layer.js`'s "Round 5" module docstring for why a second call
-    // would wrongly cancel/evict the other layer's own still-wanted content every
-    // frame. When no globe is active, the overlay is the sole registrant and safely
-    // self-drives.
-    if (this.tilesOverlay) this.tilesOverlay.update(!this.globeLayer);
+    this._updateLayerManager(cam);
     // lighting from the Sun (direction only; the small origin shift folded into
     // b.mesh.position above is negligible next to interplanetary distance, so the
     // normalized direction is unaffected)
@@ -2372,6 +2476,84 @@ export function computeFitRadius(bodies, spacecraft) {
  */
 export function defaultFrameViewRadius(bodyRadiusKm) {
   return typeof bodyRadiusKm === 'number' ? bodyRadiusKm * SCALE * 3 : 1e-4;
+}
+
+/**
+ * Entity-framing distance (cleanup round, questions 235/237): how far from an entity's
+ * centre the camera sits so the entity's own BOUNDING SPHERE (radius `extentRadius`, the
+ * extent of what is drawn for it -- see `Viewer.entityExtent`) fills `fraction` of the
+ * view. "Fills" is stated angularly: the sphere's angular DIAMETER, as seen from the
+ * camera, equals `fraction` times the camera's NARROWER field of view -- the vertical FOV
+ * `fovDeg`, or the horizontal FOV it implies at `aspect` (width/height) when the view is
+ * portrait (aspect < 1), so the object fits whichever way the canvas is shaped. A sphere
+ * of radius R seen from distance d subtends an angular diameter of `2*asin(R/d)`, so
+ * `d = R / sin(fraction * fovEff / 2)`.
+ *
+ * Replaces the pre-cleanup constant (1.5 x the central body's radius, applied only when
+ * the camera was more than 20x that far out): a 3 km covariance ellipsoid framed from
+ * ~9,500 km is a dot. The result depends only on the extent and the real camera
+ * parameters -- never on the central body.
+ *
+ * Pure (no THREE, no DOM): exported so `web/js/entity_framing_check.mjs` runs it headless.
+ * The units of the result are the units of `extentRadius` (scene units in the viewer).
+ * @param {number} extentRadius bounding-sphere radius, > 0.
+ * @param {number} fovDeg the camera's vertical field of view in degrees, in (0, 180).
+ * @param {number} aspect canvas width / height, > 0.
+ * @param {number} [fraction] in (0, 1); default `ENTITY_FRAMING_FRACTION`.
+ * @returns {number} distance from the sphere's centre to the camera.
+ */
+export function entityFramingDistance(extentRadius, fovDeg, aspect, fraction = ENTITY_FRAMING_FRACTION) {
+  if (!(extentRadius > 0) || !Number.isFinite(extentRadius)) throw new Error(`entityFramingDistance: extentRadius must be > 0, got ${extentRadius}`);
+  if (!(fovDeg > 0 && fovDeg < 180)) throw new Error(`entityFramingDistance: fovDeg must be in (0, 180), got ${fovDeg}`);
+  if (!(aspect > 0) || !Number.isFinite(aspect)) throw new Error(`entityFramingDistance: aspect must be > 0, got ${aspect}`);
+  if (!(fraction > 0 && fraction < 1)) throw new Error(`entityFramingDistance: fraction must be in (0, 1), got ${fraction}`);
+  const effFovRad = narrowerFovRad(fovDeg, aspect);
+  return extentRadius / Math.sin((fraction * effFovRad) / 2);
+}
+
+/** The narrower of the vertical FOV and the horizontal FOV implied by `aspect`, radians. */
+function narrowerFovRad(fovDeg, aspect) {
+  const vRad = (fovDeg * Math.PI) / 180;
+  const hRad = 2 * Math.atan(Math.tan(vRad / 2) * aspect);
+  return Math.min(vRad, hRad);
+}
+
+/**
+ * The inverse of `entityFramingDistance`'s geometry, as a screen measurement: the
+ * fraction of the viewport HEIGHT that a sphere of radius `extentRadius`, centred on the
+ * view axis at `distance`, occupies in the perspective projection (its silhouette is the
+ * tangent cone of half-angle `asin(R/d)`, which lands at NDC `tan(asin(R/d)) /
+ * tan(fov/2)`). For the 0.6 angular fraction at a 50 degree FOV this is ~0.574, not 0.6
+ * -- perspective makes the projected extent a little smaller than the angular one.
+ * @returns {number} projected diameter / viewport height (> 1 means it overflows).
+ */
+export function projectedSphereHeightFraction(extentRadius, distance, fovDeg) {
+  if (!(distance > extentRadius)) return Infinity; // camera inside the sphere
+  const tanHalfAngle = extentRadius / Math.sqrt(distance * distance - extentRadius * extentRadius);
+  return tanHalfAngle / Math.tan((fovDeg * Math.PI) / 360);
+}
+
+/**
+ * Depth range and zoom clamp for a framed entity at `distance` with bounding radius
+ * `extentRadius`. `near` is 1 % of the distance, but never more than half the gap to
+ * the sphere's nearest surface (so the framed object cannot be clipped however wide
+ * the FOV); `far` is at least `farFloor` (the whole-scenario far plane, so the central
+ * body and the star field behind a framed entity are still drawn) and at least 1e4 x the
+ * distance. The renderer runs a logarithmic depth buffer (the `Viewer` constructor), so
+ * the resulting near/far ratio does not cost depth precision. `minDistance` lets the
+ * user zoom in to a tenth of the framing distance: `minDistanceCap` (the usual
+ * whole-scenario clamp, `ENTITIES_MIN_DISTANCE` = 1 km) is the ceiling, so a small framed
+ * object (a 300 m marker frames at ~1.2 km) is not stuck against a clamp that would stop
+ * the user zooming in on it, and a large one is not clamped tighter than before.
+ * @returns {{near:number, far:number, minDistance:number}}
+ */
+export function entityFramingDepthRange(distance, extentRadius, farFloor, minDistanceCap) {
+  const gap = Math.max(distance - extentRadius, distance * 1e-3);
+  return {
+    near: Math.min(distance * 0.01, gap * 0.5),
+    far: Math.max(farFloor, distance * 1e4),
+    minDistance: Math.min(minDistanceCap, distance * 0.1),
+  };
 }
 
 /**

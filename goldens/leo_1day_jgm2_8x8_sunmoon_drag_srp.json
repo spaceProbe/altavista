@@ -25,8 +25,9 @@
     "srp": true
   },
   "frame": "EarthMJ2000Eq",
-  "generated": "2026-09-03T01:07:58+00:00",
+  "generated": "2026-10-05T11:35:42+00:00",
   "gmat_version": "R2026a",
+  "golden_regeneration_reason": "regenerated through the fixed generator's shape (questions 234/236/237): reason fixed in the generator with golden_regeneration_reason beside it; no recorded number moved",
   "initial_state": [
     5734.276359906977,
     3310.6859999999997,
@@ -44,7 +45,7 @@
     "min_step_s": 0.0
   },
   "reason": "question 81: STM spacecraft flew with GMAT default ballistics (850 kg, 15 m2, 1 m2); now identical to the 6-state vehicle",
-  "sha256": "19cc6139d4ee99c9b65bd925eba37fadedf44e81bf05f365cc82640f9b6a3330",
+  "sha256": "208cf4b7b76f24b197a1a1d5e87c46ed93fc0eba513ad17beb8a7c318131e226",
   "spacecraft": {
     "AOP": 0.0,
     "Cd": 2.2,

@@ -28,6 +28,16 @@
 //   - noAttitudeSourceDegradesToIdentity: a `ModelEntity` with NO attitude source
 //     configured at all (one level up from BodyInterp's own guard) also lands on the
 //     identity quaternion, never a stale/uninitialized value.
+//   - modelScaledFromMetresToSceneUnits (the `scale_*` checks): glTF is metres, the scene
+//     unit is 1000 km, so `attachModel()` puts the glTF content under ONE inner node named
+//     `entity-model-metres` whose scale is the caller's `sceneUnitsPerMetre`, and
+//     `entity.group` keeps unit scale. The fixture's WORLD bounding box (read from the
+//     scene graph after attach) is its own metre bounds [0,0,0]-[1,1,1.5] times 1e-6
+//     (1 m x 1 m x 1.5 m), its bounding-sphere radius comes back to
+//     sqrt(1+1+2.25)/2 = 1.031 m, the glTF's own vertices (PRE-scale, the geometry
+//     attribute) are unchanged because the scale lives on the node, attitude still
+//     drives `group`'s quaternion and rotates the scaled content, a second attach does
+//     not compound the scale, and a missing/invalid `sceneUnitsPerMetre` throws.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,9 +45,15 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { BodyInterp } from './interp.js';
 import { ModelEntity, createModelEntityFromGLTF, parseGLTFAsset } from './entities/model_entity.js';
+import { SCALE } from './scene.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'entity_model_fixture.gltf');
+
+// glTF lengths are metres; the viewer's scene unit is 1000 km (`SCALE` is scene units per
+// km), so one metre is 1e-3 km * SCALE scene units -- the very expression
+// `web/js/scene.js` passes to `ModelEntity` where it builds one.
+const SCENE_UNITS_PER_METRE = 1e-3 * SCALE;
 
 // Node-only shim, torn down immediately after use -- same pattern
 // web/js/command_panel_check.mjs/web/js/layers_panel_check.mjs already use for
@@ -131,7 +147,7 @@ async function runChecks() {
   }
 
   // --------------------------------------------------------- ModelEntity.attachModel
-  const entity = new ModelEntity({ id: 'fixture-entity' });
+  const entity = new ModelEntity({ id: 'fixture-entity', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE });
   const groupBeforeAttach = entity.group;
   const gltf2 = await parseGLTFAsset(loader, fixtureText, __dirname);
   entity.attachModel(gltf2);
@@ -141,7 +157,7 @@ async function runChecks() {
   check('modelEntityAttachModel_meshPresentInEntityGroup', attachedMesh !== null, {});
 
   // --------------------------------------------------------- convenience factory
-  const entity2 = await createModelEntityFromGLTF({ id: 'fixture-entity-2', data: fixtureText, path: __dirname, loader: new GLTFLoader() });
+  const entity2 = await createModelEntityFromGLTF({ id: 'fixture-entity-2', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE, data: fixtureText, path: __dirname, loader: new GLTFLoader() });
   check('createModelEntityFromGLTF_meshPresent', findFirstMesh(entity2.group) !== null, {});
 
   // --------------------------------------------------------- attitude: real BodyInterp WITH quat
@@ -157,7 +173,7 @@ async function runChecks() {
     ],
   };
   const bi = new BodyInterp(bodyWithQuat);
-  const entity3 = new ModelEntity({ id: 'attitude-entity', attitudeSource: bi });
+  const entity3 = new ModelEntity({ id: 'attitude-entity', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE, attitudeSource: bi });
   entity3.attachModel(await parseGLTFAsset(new GLTFLoader(), fixtureText, __dirname));
   const tSample = 0.5;
   entity3.update(tSample);
@@ -175,7 +191,7 @@ async function runChecks() {
   // --------------------------------------------------------- attitude: real BodyInterp, body has NO quat
   const bodyNoQuat = { t: [0, 1], pos: [[0, 0, 0], [1, 1, 1]] }; // no `quat` key at all
   const biNoQuat = new BodyInterp(bodyNoQuat);
-  const entity4 = new ModelEntity({ id: 'no-attitude-body-entity', attitudeSource: biNoQuat });
+  const entity4 = new ModelEntity({ id: 'no-attitude-body-entity', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE, attitudeSource: biNoQuat });
   entity4.attachModel(await parseGLTFAsset(new GLTFLoader(), fixtureText, __dirname));
   entity4.update(0.5); // must not throw
   const identityQ = new THREE.Quaternion();
@@ -187,12 +203,82 @@ async function runChecks() {
   });
 
   // --------------------------------------------------------- attitude: no source at all
-  const entity5 = new ModelEntity({ id: 'no-source-entity' });
+  const entity5 = new ModelEntity({ id: 'no-source-entity', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE });
   entity5.attachModel(await parseGLTFAsset(new GLTFLoader(), fixtureText, __dirname));
   entity5.update(123.456); // must not throw despite no attitude source ever set
   check('noAttitudeSourceDegradesToIdentity_quaternionIsIdentity', quatApproxEqual(entity5.group.quaternion, identityQ, 1e-12), {
     got: entity5.group.quaternion.toArray(),
   });
+
+  // --------------------------------------------------------- metres -> scene units
+  // Existing checks above read the glTF's OWN vertices (`gltf.scene`'s mesh geometry,
+  // pre-scale, which attach never edits); the checks below read the SCALED world box.
+  check('scale_sceneFactorIsOneMicroUnitPerMetre', approxEqual(SCENE_UNITS_PER_METRE, 1e-6, 1e-18), { SCENE_UNITS_PER_METRE });
+  const entity6 = await createModelEntityFromGLTF({
+    id: 'scaled-entity', sceneUnitsPerMetre: SCENE_UNITS_PER_METRE, data: fixtureText, path: __dirname, loader: new GLTFLoader(),
+  });
+  const inner = entity6.group.children.length === 1 ? entity6.group.children[0] : null;
+  check('scale_innerNodeNamedAndScaled', inner !== null && inner.name === 'entity-model-metres'
+    && [inner.scale.x, inner.scale.y, inner.scale.z].every((c) => approxEqual(c, SCENE_UNITS_PER_METRE, 1e-18)), {
+    childCount: entity6.group.children.length, name: inner && inner.name, scale: inner && inner.scale.toArray(),
+  });
+  check('scale_groupKeepsUnitScale', entity6.group.scale.x === 1 && entity6.group.scale.y === 1 && entity6.group.scale.z === 1, {
+    scale: entity6.group.scale.toArray(),
+  });
+  entity6.group.updateMatrixWorld(true);
+  const box6 = new THREE.Box3().setFromObject(entity6.group);
+  const size6 = box6.getSize(new THREE.Vector3());
+  const expectedSizeSceneUnits = [1e-6, 1e-6, 1.5e-6];
+  check('scale_worldBoxSizeIsMetreBoundsTimesOneMicro',
+    [size6.x, size6.y, size6.z].every((c, k) => approxEqual(c, expectedSizeSceneUnits[k], 1e-15))
+    && approxEqual(box6.min.length(), 0, 1e-15) && approxEqual(box6.max.x, 1e-6, 1e-15) && approxEqual(box6.max.z, 1.5e-6, 1e-15),
+    { min: box6.min.toArray(), max: box6.max.toArray(), size: size6.toArray(), expectedSizeSceneUnits });
+  const sphere6 = box6.getBoundingSphere(new THREE.Sphere());
+  const radiusMetres = sphere6.radius / SCENE_UNITS_PER_METRE;
+  check('scale_boundingSphereRadiusIsAboutOnePointZeroThreeOneMetres', approxEqual(radiusMetres, Math.sqrt(1 + 1 + 2.25) / 2, 1e-3), {
+    radiusMetres, expected: Math.sqrt(1 + 1 + 2.25) / 2,
+  });
+  const mesh6 = findFirstMesh(entity6.group);
+  const pos6 = mesh6.geometry.getAttribute('position');
+  let preScaleVertsOk = true, worldVertsOk = true;
+  const wv = new THREE.Vector3();
+  for (let i = 0; i < EXPECTED_VERTS.length; i++) {
+    const exp = EXPECTED_VERTS[i];
+    if (![pos6.getX(i), pos6.getY(i), pos6.getZ(i)].every((c, k) => approxEqual(c, exp[k], 1e-6))) preScaleVertsOk = false;
+    wv.set(pos6.getX(i), pos6.getY(i), pos6.getZ(i)); mesh6.localToWorld(wv);
+    if (!wv.toArray().every((c, k) => approxEqual(c, exp[k] * SCENE_UNITS_PER_METRE, 1e-15))) worldVertsOk = false;
+  }
+  check('scale_geometryAttributeStillInMetres', preScaleVertsOk, {});
+  check('scale_worldVerticesAreMetresTimesOneMicro', worldVertsOk, {});
+
+  // Attitude still drives `group`'s quaternion, and rotates the scaled content: the
+  // track above is 90 degrees about +Z at t=2, which maps the box's +X extent onto +Y.
+  entity6.setAttitudeSource(bi);
+  entity6.update(2);
+  entity6.group.updateMatrixWorld(true);
+  const q6 = new THREE.Quaternion(); bi.orientation(2, q6);
+  check('scale_attitudeStillDrivesGroupQuaternion', quatApproxEqual(entity6.group.quaternion, q6, 1e-12)
+    && !quatApproxEqual(entity6.group.quaternion, new THREE.Quaternion(), 1e-3), { got: entity6.group.quaternion.toArray() });
+  const boxRot = new THREE.Box3().setFromObject(entity6.group);
+  check('scale_attitudeRotatesTheScaledContent',
+    approxEqual(boxRot.min.x, -1e-6, 1e-12) && approxEqual(boxRot.max.x, 0, 1e-12)
+    && approxEqual(boxRot.min.y, 0, 1e-12) && approxEqual(boxRot.max.y, 1e-6, 1e-12)
+    && approxEqual(boxRot.max.z, 1.5e-6, 1e-12),
+    { min: boxRot.min.toArray(), max: boxRot.max.toArray() });
+
+  // Re-attaching replaces the content and does not compound the scale.
+  entity6.update(0);
+  entity6.attachModel(await parseGLTFAsset(new GLTFLoader(), fixtureText, __dirname));
+  entity6.group.updateMatrixWorld(true);
+  const boxAgain = new THREE.Box3().setFromObject(entity6.group).getSize(new THREE.Vector3());
+  check('scale_reattachDoesNotCompound', entity6.group.children.length === 1
+    && approxEqual(boxAgain.z, 1.5e-6, 1e-15), { size: boxAgain.toArray(), childCount: entity6.group.children.length });
+
+  // No silent default: an omitted or invalid factor is refused at construction.
+  const refused = (opts) => { try { new ModelEntity(opts); return false; } catch (e) { return e instanceof TypeError; } };
+  check('scale_missingOrInvalidFactorThrows',
+    refused({ id: 'x' }) && refused({ id: 'x', sceneUnitsPerMetre: 0 }) && refused({ id: 'x', sceneUnitsPerMetre: NaN })
+    && refused({ id: 'x', sceneUnitsPerMetre: -1e-6 }) && refused({ id: 'x', sceneUnitsPerMetre: '1e-6' }), {});
 }
 
 main().catch((err) => {

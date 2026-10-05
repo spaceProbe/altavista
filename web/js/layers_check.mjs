@@ -571,7 +571,7 @@ class ProbeGatewayFailureError extends Error {
  * second running total (not actually keyed by layer) would pass `totalsMatch` but
  * fail `noCrossContamination` the instant both layers' names landed in the same
  * bucket; an implementation that recovered the layer id with a naive `split(' ')` or
- * `split(':')` instead of `globalKeyFor`'s own ` ` join character would either
+ * `split(':')` instead of `globalKeyFor`'s own `\u0000` join character would either
  * throw or silently misattribute the moment a real `gateway-tileset:<sha>` layer id
  * (which contains ':') was involved -- this probe's own ids are deliberately plain
  * here, so the perturbation this task's report records against a wrong `split` is run
