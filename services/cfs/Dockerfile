@@ -26,55 +26,21 @@
 #
 # The shim binary itself (`services/cfs/bin/av-lockstep-shim`, a stripped linux/aarch64 ELF) is
 # PREBUILT, not compiled by this Dockerfile -- `crates/av-lockstep-shim` depends on `av-cdm`,
-# which depends on `spoore-cdm` via the workspace `Cargo.toml`'s own host path dependency -- a
-# RELATIVE sibling path since question 219(c) (`spoore-cdm = { path =
-# "../spoore/crates/spoore-cdm" }`, resolved against wherever the workspace root is mounted; an
-# absolute `/Users/probe/code/spoore/...` path before that, this task's own file ownership
-# excludes `~/code/spoore` and the root `Cargo.toml` either way) -- a plain `docker build` has no
-# access to that host path, and vendoring/rewriting the dependency is out of this task's scope.
-# Rebuild it with (from the repository root, on this same host; `SPOORE_ROOT` defaults to the
-# sibling checkout `../spoore` next to this repository's own root, question 219(b)):
+# which depends on `spoore-cdm` via the workspace `Cargo.toml`'s own host path dependency (a
+# RELATIVE sibling path since question 219(c), `../spoore/crates/spoore-cdm`), and a plain
+# `docker build` has no access to that host path; vendoring/rewriting the dependency is out of
+# this image's scope. Build it, from the repository root on this same host, with
 #
-#   docker run --rm \
-#     -v "$(pwd)":/Users/probe/code/AltaVista-edge \
-#     -v "${SPOORE_ROOT:-$(pwd)/../spoore}":/Users/probe/code/spoore:ro \
-#     -w /Users/probe/code/AltaVista-edge rust:1.90-bookworm \
-#     sh -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends protobuf-compiler libprotobuf-dev \
-#       && cargo build --release -p av-lockstep-shim --target-dir /Users/probe/code/AltaVista-edge/target-docker-linux"
+#   services/cfs/build-shim.sh
 #
-# (Round 5, native5-cfs-image-provenance: this recipe used to omit the `apt-get install
-# protobuf-compiler` step, and following it verbatim failed with "Could not find `protoc`" --
-# `spoore-cdm`'s own build.rs and av-cdm's own build.rs both compile their protos with
-# prost-build, which shells out to the `protoc` binary; the plain `rust:1.90-bookworm` image
-# does not ship it. Every OTHER cross-build script in this repository that builds an
-# av-cdm-dependent crate already installs this package for the identical reason --
-# services/tiles/build-image.sh's own prebuild step installs `protobuf-compiler
-# libprotobuf-dev libssl-dev pkg-config` before its own `cargo build`. `av-lockstep-shim`
-# itself needs neither `libssl-dev` nor `pkg-config`: it depends on no OpenSSL-backed TLS
-# stack at all -- see crates/av-lockstep-shim/Cargo.toml's own comment on its `tonic`
-# dependency ("does NOT pull tokio-rustls/`ring`") -- so only `protobuf-compiler` and
-# `libprotobuf-dev` are added here, not tiles' full four-package set.)
-#
-# (the repository is mounted at a container path whose PARENT is literally `/Users/probe/code`,
-# not `/workspace` -- round 4's own worker report, `scripts/kit/build_kit.py`'s own
-# `CONTAINER_WORKSPACE` comment: a workspace mounted at `/workspace` needs spoore's relative
-# sibling mount at `/spoore`, which satisfies THIS crate's own `spoore-cdm` dependency but NOT
-# `crates/av-proposer/Cargo.toml`'s still-absolute `spoore-models`/`spoore-ml` dependencies --
-# cargo has to load av-proposer's manifest too to resolve the workspace at all, whichever `-p`
-# target is actually being built, and a SECOND mount or an in-container symlink at the fixed
-# absolute path does not work either, measured directly: cargo then sees `spoore-cdm` as two
-# different packages and refuses to write the lockfile. Mounting the repo itself under
-# `/Users/probe/code` makes spoore's own relative-sibling destination equal that fixed absolute
-# path by construction, so one mount satisfies both.)
-#   docker run --rm -v "$(pwd)"/target-docker-linux/release:/b ubuntu:22.04 \
-#     sh -c "apt-get update -qq && apt-get install -y -qq binutils && strip -o /b/av-lockstep-shim-stripped /b/av-lockstep-shim"
-#   cp target-docker-linux/release/av-lockstep-shim-stripped services/cfs/bin/av-lockstep-shim
-#
-# (R5.3, question 208(a): this recipe said `rust:1.85-bookworm` until the workspace's declared
-# `rust-version` was measured and corrected from a false "1.85" to "1.87". Cargo enforces that
-# floor workspace-wide, so a 1.85 container now refuses to build this crate at all; 1.90 is the
-# toolchain `services/proposer/build-image.sh` and `tests/test_edge_plugin_container.py`
-# already cross-build with, so it is the one this recipe names.)
+# (question 236). That script is the recipe: a digest-pinned `rust:1.90-bookworm` builder, pinned
+# protobuf-compiler/libprotobuf apt versions (spoore-cdm's and av-cdm's build.rs shell out to
+# `protoc`, which the rust image does not ship), `cargo build --release --locked`,
+# `--remap-path-prefix` for every build path rustc would embed, and a strip on this Dockerfile's own
+# digest-pinned ubuntu base. Two builds of the same commit, from different repo mount paths, give
+# the same bytes (measured, question 236; the script header records the pins). It also explains
+# why the repo is mounted under `/Users/probe/code` rather than `/workspace`, and why rust 1.90
+# (question 208(a): the workspace's measured floor is 1.87, so the old 1.85 recipe no longer builds).
 #
 # (`target-docker-linux/` is `.dockerignore`d -- only the copied-out, stripped binary under
 # `services/cfs/bin/` is ever part of this Dockerfile's build context.) This binary links only

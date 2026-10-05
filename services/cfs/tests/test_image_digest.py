@@ -371,8 +371,8 @@ def test_manifest_paths_exist_and_hash_match() -> None:
                 f"  - {p}: absent. This is a compiled, git-ignored build artifact "
                 f"(`git check-ignore {p}` succeeds), not tracked in git -- see "
                 "services/cfs/Dockerfile's own header comment (the paragraph starting "
-                "\"The shim binary itself ... is PREBUILT, not compiled by this Dockerfile\") "
-                "for the exact three-command cross-build recipe that produces it, then re-run "
+                "\"The shim binary itself ... is PREBUILT, not compiled by this Dockerfile\"): "
+                "run services/cfs/build-shim.sh to produce it, then re-run "
                 f"`{BUILD_SCRIPT}` to regenerate this manifest with it present."
             )
         pytest.skip("\n".join(lines))

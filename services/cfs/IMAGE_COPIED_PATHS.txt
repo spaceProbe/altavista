@@ -63,17 +63,25 @@
 #         the tiles header's own warning about exactly this trap), used by that crate's own
 #         tests and never reaching the shipped binary.
 #
-#     What this still does not catch, stated plainly: the shim binary in services/cfs/bin/ is
-#     produced by a recipe this repository does not pin (a moving `rust:1.90-bookworm` tag, no
-#     `--locked`, and the absolute build path embedded in the output), so two builds of the
-#     SAME commit do not produce the same bytes -- measured in round 5, see
-#     services/cfs/IMAGE_DIGEST.md's own 2026-09-22 section. The source paths above catch a
-#     source change; they cannot catch a toolchain change, and nothing here claims to.
-#   - The root Cargo.lock/Cargo.toml (question 233's ratified exclusion; same reasoning as the
-#     other three IMAGE_COPIED_PATHS.txt files' own headers). Moot for this image specifically --
-#     this Dockerfile has no Rust build step of its own at all; the one Rust binary it ships
-#     (av-lockstep-shim) is prebuilt outside this Dockerfile and is excluded above already.
-#     Recorded here anyway, for the same consistency those three files' headers state.
+#     The shim binary is produced by services/cfs/build-shim.sh (question 236: digest-pinned
+#     builder, pinned protoc and binutils, `--locked`, `--remap-path-prefix`), which makes two
+#     builds of the SAME commit byte-identical regardless of the path they were built at. So the
+#     binary's inputs are its sources above PLUS three more, all listed below (q171 round, the
+#     lead's ruling):
+#       * services/cfs/build-shim.sh -- it carries the pins (compiler, protoc, strip); a change to
+#         a pin changes the bytes, so the script is an input here, unlike build-image.sh below,
+#         which only orchestrates.
+#       * the root Cargo.lock and Cargo.toml -- with `--locked` the lock file decides every
+#         registry crate compiled into the binary, and the root manifest carries the workspace
+#         profile (`[profile.release]`) and the path dependencies. This REVERSES question 233's
+#         Cargo.lock/Cargo.toml exclusion for this image only (the other three
+#         IMAGE_COPIED_PATHS.txt files keep it). The cost is stated plainly: an unrelated
+#         dependency bump elsewhere in the workspace makes this image's provenance check refuse
+#         until the image is rebuilt; now that the build is reproducible, that rebuild proves the
+#         bytes unchanged (the runtime-content hash in IMAGE_DIGEST.md does not move), which is
+#         the honest answer rather than an assumed one.
+#     Still not caught here: the spoore checkout (`../spoore`, outside this repository; its
+#     commit is printed by build-shim.sh as a build input).
 #   - services/cfs/build-image.sh itself: it orchestrates the build; it is not a source the
 #     image's bytes are compiled from.
 #   - services/cfs/IMAGE_DIGEST.md, services/cfs/IMAGE_CONTEXT_MANIFEST.txt, and the rest of
@@ -94,3 +102,6 @@ services/cfs/container-entrypoint.sh
 services/cfs/psp-lockstep
 services/cfs/Dockerfile
 third_party/fetch-cfs.sh
+Cargo.lock
+Cargo.toml
+services/cfs/build-shim.sh

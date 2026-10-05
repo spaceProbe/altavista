@@ -17,6 +17,45 @@
 //! M24_4c_REPORT.md` for the full design rationale, wall-clock budget reasoning (stated before
 //! measuring), and the measured result.
 //!
+//! **The identical-traffic criterion, as asserted (question 145; q171-d).** Both halves run with
+//! `RunConfig.products_dir` set, so the executor writes each run's `port_traffic.pb`
+//! (`PortTrafficLog`, every FRAMED/BYTE_STREAM frame carried: instance, port, direction, epoch,
+//! payload bytes, step sequence) and reports its SHA-256 as `RunProducts.port_traffic_hash`. The
+//! two whole-file hashes are not equal and cannot be: besides the records the sidecar carries the
+//! run's own `run_id` (twice), `provenance.config_hash` (the DRM hash) and
+//! `provenance.attributes["sos_configuration_hash"]` (a `SosConfiguration` whose `"controller"`
+//! is bound to a Docker image in one run and to a `container.address` in the other). So the test
+//! asserts, in this order: both hashes non-empty and equal to the SHA-256 of the file written;
+//! every decoded record equal, in order (998 records over the 100 steps: 6 ports); the same
+//! records re-encoded alone hash identically; and the rest of the sidecar equal after
+//! blanking exactly those named fields ([`SIDECAR_PROVENANCE_EXCLUSIONS`]). `products.events` is
+//! compared field by field with exactly [`EVENT_PROVENANCE_EXCLUSIONS`] excluded.
+//!
+//! **Wall time, measured** (Apple silicon, `core-cpu1.exe` from the 2026-10-05 rebuild; the
+//! bridge grants every STEP `STEP_MIN_VIRTUAL_S = 10 s` of virtual time in 0.5 s chunks, which
+//! dominates):
+//!
+//! - full grants (`AV_BRIDGE_STEP_EARLY_STOP=0`): 100 STEPs in 2153 s of Renode run, 2187 s (36.4
+//!   min) for the whole test (posix half 14.6 s, bridge ready 18.1 s);
+//! - early stop (the test's default: the bridge stops granting a STEP's virtual time as soon as
+//!   the whole reply is buffered on the hook socket, between 0.5 s chunks; `AV_BRIDGE_STEP_EARLY_STOP`
+//!   in the environment overrides it): 280 s of Renode run, 305 s (5.1 min) for the whole test.
+//!
+//! **The A/B that justifies the early stop** (same 10 s arc, same ELF, same run ids, 2026-10-05):
+//! the Renode sidecar `port_traffic.pb` is byte-identical between the two runs (SHA-256
+//! `8a16007f...7fff` both, 83694 bytes, 998 records), the records-only hash is
+//! `8e518964...8fd2` in all four sidecars, and the truth pointing error at t = 10 s is
+//! 1.823926917407e-1 rad in all four. (The *posix* whole-file hash differs between those two
+//! runs, `a514ea92...` against `36329922...`, and that is the sidecar's own
+//! `sos_configuration_hash`: the posix `SosConfiguration` embeds the throwaway registry's
+//! ephemeral port in `ContainerBinding.image`; nothing about the traffic.) The guest is
+//! tick-driven (the cFE clock follows the lockstep tick, not Renode's virtual time), so the
+//! virtual time granted after the reply is idle: the PC trace of the full-grant run shows one
+//! distinct PC (`0x4004bb32`, the idle loop) for 99 of its 100 STEPs (all but STEP 1) -- and the
+//! same 99 in the early-stop run.
+//!
+//! The run holds the host-wide docker-test lock for its whole body (it did before this change).
+//!
 //! **What is compared, and what is deliberately excluded.** Mirrors
 //! `drm_attitude_control_cfs.rs::byte_identical_run_products_across_two_separately_spawned_cfs_containers`:
 //! every trajectory's `samples`/`event_ids`/`state_space_id`/segment
@@ -46,9 +85,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, Fault, Parameter, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, Event, Fault, Parameter, PortTrafficLog, SosConfiguration, SystemDefinition};
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
-use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id};
+use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id, DockerGateReason};
+use prost::Message;
 use gmat_sys::Gmat;
 
 /// Not a real item -- just an anchor for the module doc comment's own cross-reference above.
@@ -126,8 +166,8 @@ fn container_drm(id: &str, sos_id: &str, duration_s: i64, faults: Vec<Fault>) ->
     drm
 }
 
-fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str) -> RunConfig<'a> {
-    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default() , products_dir: None, replay: None, command_source: None }
+fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str, products_dir: PathBuf) -> RunConfig<'a> {
+    RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir: Some(products_dir), replay: None, command_source: None }
 }
 
 fn systems_map(sysvec: &[&SystemDefinition]) -> BTreeMap<String, SystemDefinition> {
@@ -206,13 +246,23 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
 // comparison).
 // ------------------------------------------------------------------------------------------
 
+/// `AV_RENODE_BIN` (optional) overrides the Renode binary, so a worktree that does not carry the
+/// gitignored portable build can still run this test; unset, the path is unchanged.
 fn renode_bin() -> PathBuf {
+    if let Some(p) = std::env::var_os("AV_RENODE_BIN") {
+        return PathBuf::from(p);
+    }
     repo_root().join("third_party/renode/renode-1.16.1-osx-arm64/Renode.app/Contents/MacOS/renode")
 }
 fn renode_platform() -> PathBuf {
     repo_root().join("third_party/renode/platforms/cpus/zynqmp.repl")
 }
+/// `AV_RENODE_CORE_CPU1_EXE` (optional) overrides the cross-built RTEMS ELF, so a rebuilt ELF kept
+/// outside the main tree can be run without being copied into it; unset, the path is unchanged.
 fn renode_elf() -> PathBuf {
+    if let Some(p) = std::env::var_os("AV_RENODE_CORE_CPU1_EXE") {
+        return PathBuf::from(p);
+    }
     repo_root().join("third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe")
 }
 fn renode_bridge_script() -> PathBuf {
@@ -230,9 +280,9 @@ fn venv_python() -> PathBuf {
 /// 194: typed (`DockerGateReason::RequiredFileMissing`), not a bare `String`.
 fn renode_unavailable_reason() -> Option<av_lockstep::docker::DockerGateReason> {
     for (path, what) in [
-        (renode_bin(), "the Renode binary (fetch-renode.sh)"),
+        (renode_bin(), "the Renode binary (fetch-renode.sh, or set AV_RENODE_BIN to another path)"),
         (renode_platform(), "this repository's own zynqmp.repl platform file"),
-        (renode_elf(), "the cross-built RTEMS core-cpu1.exe (third_party/rtems-container/build-cfs-cross.sh)"),
+        (renode_elf(), "the cross-built RTEMS core-cpu1.exe (third_party/rtems-container/build-cfs-cross.sh, or set AV_RENODE_CORE_CPU1_EXE to another path)"),
         (renode_bridge_script(), "third_party/renode/M24_4b/renode_bridge.py"),
         (venv_python(), "the repo-local .venv python3 (needed for renode_bridge.py's altavista.pb protobuf stubs)"),
     ] {
@@ -393,6 +443,10 @@ fn spawn_renode_bridge(scratch_dir: &std::path::Path) -> RenodeHandles {
         .arg(&uart1_raw_log)
         .arg("--renode-log")
         .arg(&renode_log)
+        // q171-d: stop granting a STEP virtual time once its reply is buffered (see the doc
+        // comment at the top of this file for the A/B that shows the port traffic is unchanged);
+        // `AV_BRIDGE_STEP_EARLY_STOP=0` in the environment restores the full 10 s grant.
+        .env("AV_BRIDGE_STEP_EARLY_STOP", std::env::var("AV_BRIDGE_STEP_EARLY_STOP").unwrap_or_else(|_| "1".to_string()))
         .stdout(Stdio::from(std::fs::File::create(scratch_dir.join("bridge_stdout.log")).expect("create bridge_stdout.log")))
         .stderr(Stdio::from(std::fs::File::create(scratch_dir.join("bridge_stderr.log")).expect("create bridge_stderr.log")))
         .process_group(0); // its own group -- ProcessGroupGuard signals the group, Renode included
@@ -461,21 +515,178 @@ fn truth_pointing_error_rad_at_end(products: &RunProducts) -> f64 {
 }
 
 // ------------------------------------------------------------------------------------------
+// Port-traffic sidecar and event comparison.
+// ------------------------------------------------------------------------------------------
+
+/// Lowercase-hex SHA-256 (`openssl`, already a dependency of this crate; `sha2` is banned
+/// workspace-wide), the same function the executor hashes the sidecar with.
+fn sha256_hex(bytes: &[u8]) -> String {
+    openssl::sha::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn read_sidecar(dir: &std::path::Path) -> (Vec<u8>, PortTrafficLog) {
+    let path = dir.join("port_traffic.pb");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let log = PortTrafficLog::decode(bytes.as_slice()).unwrap_or_else(|e| panic!("{} did not decode as a PortTrafficLog: {e}", path.display()));
+    (bytes, log)
+}
+
+/// What differs between the two sidecars for reasons that are not port traffic. The whole-file
+/// hashes cannot be equal across the two bindings: besides the records, the sidecar carries the
+/// run's own `run_id` (and the same inside `provenance`), `provenance.config_hash` (the DRM hash;
+/// the two DRMs differ in id and `sos_configuration_id`) and
+/// `provenance.attributes["sos_configuration_hash"]` (the hash of a `SosConfiguration` whose
+/// `"controller"` instance is bound to a Docker image in one run and to a `container.address` in
+/// the other, so it differs by construction). Nothing else may differ.
+const SIDECAR_PROVENANCE_EXCLUSIONS: &str = "PortTrafficLog.run_id, provenance.run_id, provenance.config_hash, provenance.attributes[\"sos_configuration_hash\"]";
+
+fn assert_port_traffic_identical(posix: &RunProducts, posix_dir: &std::path::Path, renode: &RunProducts, renode_dir: &std::path::Path) {
+    let (posix_bytes, posix_log) = read_sidecar(posix_dir);
+    let (renode_bytes, renode_log) = read_sidecar(renode_dir);
+    println!("port_traffic_hash: posix={} renode={}", posix.port_traffic_hash, renode.port_traffic_hash);
+    println!("port_traffic.pb: posix {} bytes / {} records, renode {} bytes / {} records", posix_bytes.len(), posix_log.records.len(), renode_bytes.len(), renode_log.records.len());
+    assert!(!posix.port_traffic_hash.is_empty() && !renode.port_traffic_hash.is_empty(), "both runs were given a products_dir, so both must report a non-empty port_traffic_hash");
+    assert_eq!(posix.port_traffic_hash, sha256_hex(&posix_bytes), "the posix run's port_traffic_hash must be the SHA-256 of the port_traffic.pb it wrote");
+    assert_eq!(renode.port_traffic_hash, sha256_hex(&renode_bytes), "the Renode run's port_traffic_hash must be the SHA-256 of the port_traffic.pb it wrote");
+    assert!(!posix_log.records.is_empty(), "the posix run must have recorded port traffic");
+    let mut per_port: BTreeMap<(String, String, i32), (usize, usize)> = BTreeMap::new();
+    for rec in &posix_log.records {
+        let e = per_port.entry((rec.instance.clone(), rec.port.clone(), rec.direction)).or_default();
+        e.0 += 1;
+        e.1 += rec.payload.len();
+    }
+    for ((instance, port, direction), (n, bytes)) in &per_port {
+        println!("  port traffic {instance}.{port} dir={direction}: {n} records, {bytes} payload bytes");
+    }
+
+    // The traffic itself: every record (instance, port, direction, tai_ns, payload bytes, step
+    // sequence), in order, byte for byte.
+    assert_eq!(posix_log.records.len(), renode_log.records.len(), "port traffic record count");
+    for (i, (p, r)) in posix_log.records.iter().zip(renode_log.records.iter()).enumerate() {
+        assert_eq!(p, r, "port traffic record {i} differs (instance/port/direction/tai_ns/payload/sequence): posix {p:?} vs renode {r:?}");
+    }
+    // The same traffic as one hash: the sidecar re-encoded with only its records.
+    let records_only = |log: &PortTrafficLog| sha256_hex(&PortTrafficLog { records: log.records.clone(), ..Default::default() }.encode_to_vec());
+    let (posix_records_hash, renode_records_hash) = (records_only(&posix_log), records_only(&renode_log));
+    println!("port traffic records-only hash: posix={posix_records_hash} renode={renode_records_hash}");
+    assert_eq!(posix_records_hash, renode_records_hash, "the records-only hash of the port traffic must be identical");
+
+    // The sidecar's remaining fields, with each excluded field named (see the constant).
+    let strip = |log: &PortTrafficLog| {
+        let mut log = log.clone();
+        log.run_id.clear();
+        let prov = log.provenance.as_mut().expect("the sidecar carries the run's provenance");
+        prov.run_id.clear();
+        prov.config_hash.clear();
+        prov.attributes.remove("sos_configuration_hash");
+        log
+    };
+    assert_eq!(strip(&posix_log), strip(&renode_log), "the sidecars must be identical except {SIDECAR_PROVENANCE_EXCLUSIONS}");
+    if posix.port_traffic_hash == renode.port_traffic_hash {
+        println!("port_traffic_hash is equal as it stands");
+    } else {
+        println!("port_traffic_hash differs only through {SIDECAR_PROVENANCE_EXCLUSIONS}; the records are byte-identical");
+    }
+}
+
+/// The `products.events` fields that are provenance of the run, not part of what happened, found
+/// by decoding both runs' events (q171-d): every event's `provenance.config_hash` (the DRM hash;
+/// the two DRMs differ in id and `sos_configuration_id`) and `provenance.run_id`; and, on the
+/// `"controller"` instance's own `run_start`/`run_end` events only, `provenance.attributes[
+/// "system_definition_hash"]` and `["system_definition_id"]` (the controller is a different
+/// `SystemDefinition` per binding: `..._controller_cfs` against `..._controller_renode`). Every
+/// other field of every event is compared exactly (the `run_start` `detail` is identical: it does
+/// not carry the container address).
+const EVENT_PROVENANCE_EXCLUSIONS: &str = "provenance.config_hash, provenance.run_id, and the controller instance's provenance.attributes[\"system_definition_hash\"/\"system_definition_id\"]";
+
+/// Field-by-field differences between two event lists, outside [`EVENT_PROVENANCE_EXCLUSIONS`];
+/// empty means identical. Names the event, the field and both values, so a failure is a diagnosis.
+fn event_differences(posix: &[Event], renode: &[Event]) -> Vec<String> {
+    let mut out = Vec::new();
+    if posix.len() != renode.len() {
+        out.push(format!("event count: posix {} vs renode {}", posix.len(), renode.len()));
+    }
+    for (i, (p, r)) in posix.iter().zip(renode.iter()).enumerate() {
+        let mut field = |name: &str, a: String, b: String| {
+            if a != b {
+                out.push(format!("event[{i}] {:?}: {name}: posix={a} renode={b}", p.id));
+            }
+        };
+        field("id", format!("{:?}", p.id), format!("{:?}", r.id));
+        field("entity_id", format!("{:?}", p.entity_id), format!("{:?}", r.entity_id));
+        field("tai_ns", p.tai_ns.to_string(), r.tai_ns.to_string());
+        field("kind", format!("{:?}", p.kind), format!("{:?}", r.kind));
+        field("name", format!("{:?}", p.name), format!("{:?}", r.name));
+        field("detail", format!("{:?}", p.detail), format!("{:?}", r.detail));
+        field("values", format!("{:?}", p.values), format!("{:?}", r.values));
+        field("frame_id", format!("{:?}", p.frame_id), format!("{:?}", r.frame_id));
+        field("reference_id", format!("{:?}", p.reference_id), format!("{:?}", r.reference_id));
+        field("label", format!("{:?}", p.label), format!("{:?}", r.label));
+        match (&p.provenance, &r.provenance) {
+            (Some(pp), Some(rp)) => {
+                field("provenance.author_kind", format!("{:?}", pp.author_kind), format!("{:?}", rp.author_kind));
+                field("provenance.principal", format!("{:?}", pp.principal), format!("{:?}", rp.principal));
+                field("provenance.tool", format!("{:?}", pp.tool), format!("{:?}", rp.tool));
+                field("provenance.data_pack_hash", format!("{:?}", pp.data_pack_hash), format!("{:?}", rp.data_pack_hash));
+                field("provenance.dataset_hash", format!("{:?}", pp.dataset_hash), format!("{:?}", rp.dataset_hash));
+                field("provenance.created_tai_ns", pp.created_tai_ns.to_string(), rp.created_tai_ns.to_string());
+                let attrs = |a: &std::collections::BTreeMap<String, String>| {
+                    let mut a = a.clone();
+                    if p.entity_id == "controller" {
+                        a.remove("system_definition_hash");
+                        a.remove("system_definition_id");
+                    }
+                    format!("{a:?}")
+                };
+                let (pa, ra) = (attrs(&pp.attributes), attrs(&rp.attributes));
+                field("provenance.attributes", pa, ra);
+            }
+            (a, b) => field("provenance presence", format!("{}", a.is_some()), format!("{}", b.is_some())),
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------------------------------
 // The comparison itself.
 // ------------------------------------------------------------------------------------------
 
-/// Short (a handful of 10 Hz steps): see `third_party/renode/M24_4c_REPORT.md`'s own "wall-clock
-/// budget" section for the reasoning behind this figure, stated before running.
-const COMPARISON_DURATION_S: i64 = 1;
+/// 100 steps at the fixture's 10 Hz: the same arc as the container determinism test
+/// (`drm_attitude_control_cfs.rs`'s `DETERMINISM_DURATION_S`), which is the arc question 145's
+/// identical-traffic criterion is stated over.
+const COMPARISON_DURATION_S: i64 = 10;
+
+/// The opt-in variable: a run takes tens of minutes of wall time (see the test's doc comment).
+const RENODE_OPT_IN_ENV: &str = "AV_RENODE_TESTS";
+/// Measured wall time of the whole test (see the test's doc comment).
+const RENODE_WALL_TIME_HINT: &str = "5 to 7 minutes (measured 305 s and 409 s; 36 minutes with AV_BRIDGE_STEP_EARLY_STOP=0)";
+/// Set to `1` to leave the scratch directory (sidecars, bridge frame log, monitor log) on disk after
+/// a passing run, so its evidence can be inspected or copied.
+const RENODE_KEEP_SCRATCH_ENV: &str = "AV_RENODE_KEEP_SCRATCH";
+
+/// `None` iff the long Renode run was explicitly asked for. Typed
+/// (`DockerGateReason::PrerequisiteUnavailable`, the variant for "a non-Docker prerequisite is
+/// unavailable"), so the skip is announced the same way as the image and file reasons.
+fn renode_opt_in_unavailable_reason() -> Option<DockerGateReason> {
+    if std::env::var(RENODE_OPT_IN_ENV).as_deref() == Ok("1") {
+        return None;
+    }
+    Some(DockerGateReason::PrerequisiteUnavailable {
+        what: format!("the opt-in {RENODE_OPT_IN_ENV}=1 (not set)"),
+        hint: format!("set {RENODE_OPT_IN_ENV}=1 to run it; a {COMPARISON_DURATION_S} s arc ({} steps) takes {RENODE_WALL_TIME_HINT} of wall time", COMPARISON_DURATION_S * 10),
+    })
+}
 
 #[test]
-#[ignore = "question 171: Renode port traffic beyond STEP 1 does not deliver; verified posix-container-only until resolved"]
 fn byte_identical_port_traffic_between_posix_container_and_renode() {
     let mut reasons = Vec::new();
     if let Some(r) = cfs_image_unavailable_reason() {
         reasons.push(r);
     }
     if let Some(r) = renode_unavailable_reason() {
+        reasons.push(r);
+    }
+    if let Some(r) = renode_opt_in_unavailable_reason() {
         reasons.push(r);
     }
     if !reasons.is_empty() {
@@ -511,6 +722,9 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let run_id = test_run_id();
 
     // --- Posix-container half (ContainerBinding.image path, digest-pulled). ---
+    let scratch_dir = PathBuf::from(format!("/tmp/av-renode-m24c-{}", std::process::id()));
+    let posix_products_dir = scratch_dir.join("products_posix");
+    let renode_products_dir = scratch_dir.join("products_renode");
     let t0 = Instant::now();
     let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
     let controller_cfs = load_system("demo_attitude_control_controller_cfs");
@@ -518,12 +732,11 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let posix_sos = container_sos("attitude_control_m24c_posix_sos", &base_sos, &controller_cfs.id, ContainerBinding { image: image.clone(), image_digest: digest.clone(), ..Default::default() });
     let posix_drm = container_drm("attitude_control_m24c_posix_drm", &posix_sos.id, COMPARISON_DURATION_S, vec![]);
     let gmat_posix = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let products_posix = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix")).expect("the posix-container run must execute end to end");
+    let products_posix = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix", posix_products_dir.clone())).expect("the posix-container run must execute end to end");
     let posix_elapsed = t0.elapsed();
     println!("posix-container run: {COMPARISON_DURATION_S}s @ 10Hz in {posix_elapsed:.2?} wall time");
 
     // --- Renode half (container.address-only, already-running-process path). ---
-    let scratch_dir = PathBuf::from(format!("/tmp/av-renode-m24c-{}", std::process::id()));
     let t1 = Instant::now();
     let renode = spawn_renode_bridge(&scratch_dir);
     let renode_ready_elapsed = t1.elapsed();
@@ -535,7 +748,7 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let renode_drm = container_drm("attitude_control_m24c_renode_drm", &renode_sos.id, COMPARISON_DURATION_S, vec![]);
     let gmat_renode = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
     let t2 = Instant::now();
-    let products_renode = execute(run_config(&gmat_renode, &renode_drm, &renode_sos, &renode_systems, "test-run-m24c-renode")).expect("the Renode-bound run must execute end to end through the real RTEMS/cFE/IO_LOCKSTEP guest");
+    let products_renode = execute(run_config(&gmat_renode, &renode_drm, &renode_sos, &renode_systems, "test-run-m24c-renode", renode_products_dir.clone())).expect("the Renode-bound run must execute end to end through the real RTEMS/cFE/IO_LOCKSTEP guest");
     let renode_run_elapsed = t2.elapsed();
     println!("Renode-bound run: {COMPARISON_DURATION_S}s @ 10Hz in {renode_run_elapsed:.2?} wall time ({} steps)", COMPARISON_DURATION_S * 10);
 
@@ -545,6 +758,12 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
         "truth-based pointing error at t={COMPARISON_DURATION_S}s: posix={posix_theta:.12e} rad, renode={renode_theta:.12e} rad, |diff|={:.3e} rad",
         (posix_theta - renode_theta).abs()
     );
+
+    // ---------------------------------------------------------------------------------------
+    // The identical-traffic criterion (question 145), first and strictest: the executor's own
+    // port-traffic sidecar of each run (`port_traffic.pb`, hashed into `port_traffic_hash`).
+    // ---------------------------------------------------------------------------------------
+    assert_port_traffic_identical(&products_posix, &posix_products_dir, &products_renode, &renode_products_dir);
 
     // ---------------------------------------------------------------------------------------
     // The exit criterion: per-step byte comparison of port traffic. Recorded (never asserted):
@@ -577,7 +796,31 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
             // module doc comment (folds in container.address, inherently different).
         }
     }
-    assert_eq!(products_posix.events, products_renode.events, "products.events (lifecycle + fault events) must be byte-identical");
+    let event_diffs = event_differences(&products_posix.events, &products_renode.events);
+    println!("products.events: {} posix, {} renode; differences outside {EVENT_PROVENANCE_EXCLUSIONS}: {}", products_posix.events.len(), products_renode.events.len(), event_diffs.len());
+    assert!(event_diffs.is_empty(), "products.events must be byte-identical except {EVENT_PROVENANCE_EXCLUSIONS}; first differences:\n{}", event_diffs.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+    // `event_differences` names fields for the diagnosis; this is the completeness check, over
+    // whole `Event` values with only the named fields blanked, so a field added to `Event` later
+    // is compared without anyone having to list it.
+    let strip_events = |events: &[Event]| -> Vec<Event> {
+        events
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                let controller = e.entity_id == "controller";
+                if let Some(p) = e.provenance.as_mut() {
+                    p.config_hash.clear();
+                    p.run_id.clear();
+                    if controller {
+                        p.attributes.remove("system_definition_hash");
+                        p.attributes.remove("system_definition_id");
+                    }
+                }
+                e
+            })
+            .collect()
+    };
+    assert_eq!(strip_events(&products_posix.events), strip_events(&products_renode.events), "products.events must be identical as whole values except {EVENT_PROVENANCE_EXCLUSIONS}");
     assert_eq!(products_posix.scores, products_renode.scores, "products.scores must be byte-identical (both empty -- no measures declared)");
     assert_eq!(products_posix.dropped_in_flight_messages, products_renode.dropped_in_flight_messages, "dropped_in_flight_messages must match (both runs end cleanly at the same scenario length)");
     assert_eq!(products_posix.frames, products_renode.frames, "frames (registry defaults + declared Scenario.frames) must be byte-identical -- neither depends on the controller's own binding kind");
@@ -593,5 +836,9 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     // leftover scratch dirs `M24_4d_REPORT.md` found and removed by hand, rather than merely
     // disclosing the leak once more. Best-effort: a removal failure here must never turn an
     // otherwise-passing test red.
-    let _ = std::fs::remove_dir_all(&scratch_dir);
+    if std::env::var(RENODE_KEEP_SCRATCH_ENV).as_deref() == Ok("1") {
+        println!("{RENODE_KEEP_SCRATCH_ENV}=1: scratch dir kept at {}", scratch_dir.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&scratch_dir);
+    }
 }
