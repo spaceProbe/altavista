@@ -206,13 +206,23 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
 // comparison).
 // ------------------------------------------------------------------------------------------
 
+/// `AV_RENODE_BIN` (optional) overrides the Renode binary, so a worktree that does not carry the
+/// gitignored portable build can still run this test; unset, the path is unchanged.
 fn renode_bin() -> PathBuf {
+    if let Some(p) = std::env::var_os("AV_RENODE_BIN") {
+        return PathBuf::from(p);
+    }
     repo_root().join("third_party/renode/renode-1.16.1-osx-arm64/Renode.app/Contents/MacOS/renode")
 }
 fn renode_platform() -> PathBuf {
     repo_root().join("third_party/renode/platforms/cpus/zynqmp.repl")
 }
+/// `AV_RENODE_CORE_CPU1_EXE` (optional) overrides the cross-built RTEMS ELF, so a rebuilt ELF kept
+/// outside the main tree can be run without being copied into it; unset, the path is unchanged.
 fn renode_elf() -> PathBuf {
+    if let Some(p) = std::env::var_os("AV_RENODE_CORE_CPU1_EXE") {
+        return PathBuf::from(p);
+    }
     repo_root().join("third_party/cfs/build-rtems_zynqmp/exe/cpu1/core-cpu1.exe")
 }
 fn renode_bridge_script() -> PathBuf {
@@ -230,9 +240,9 @@ fn venv_python() -> PathBuf {
 /// 194: typed (`DockerGateReason::RequiredFileMissing`), not a bare `String`.
 fn renode_unavailable_reason() -> Option<av_lockstep::docker::DockerGateReason> {
     for (path, what) in [
-        (renode_bin(), "the Renode binary (fetch-renode.sh)"),
+        (renode_bin(), "the Renode binary (fetch-renode.sh, or set AV_RENODE_BIN to another path)"),
         (renode_platform(), "this repository's own zynqmp.repl platform file"),
-        (renode_elf(), "the cross-built RTEMS core-cpu1.exe (third_party/rtems-container/build-cfs-cross.sh)"),
+        (renode_elf(), "the cross-built RTEMS core-cpu1.exe (third_party/rtems-container/build-cfs-cross.sh, or set AV_RENODE_CORE_CPU1_EXE to another path)"),
         (renode_bridge_script(), "third_party/renode/M24_4b/renode_bridge.py"),
         (venv_python(), "the repo-local .venv python3 (needed for renode_bridge.py's altavista.pb protobuf stubs)"),
     ] {

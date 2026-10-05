@@ -51,8 +51,21 @@ remembers nothing and must redo both from scratch) to re-establish the connectio
 and only then synthesizes and sends the shim a `RESET_ACK` carrying the original request's
 `sequence` -- the shim/kernel never sees any of this reboot-and-rehandshake machinery, exactly the
 way `services/cfs/README.md`'s protocol contract expects `Reset` to look from the caller's side.
+
+Question 171 (q171-c; STEP 2 stalled because the guest's termios dropped the tail of the 305-byte
+frame -- see `RenodeBridge.inject_frame`) added, all optional environment variables:
+  AV_BRIDGE_RX_CHUNK_BYTES   max bytes injected before the guest runs (default 64; 0 = the old
+                             single burst, which reproduces the stall)
+  AV_BRIDGE_GDB_PORT         if set, a STEP whose reply is missing 5 s after its grant starts
+                             Renode's GDB stub on that port and holds (`hold_for_debugger`); see
+                             `third_party/renode/q171_gdb/` for the gdb attach tooling
+  AV_BRIDGE_GDB_HOLD_S       hold duration limit (default 900); AV_BRIDGE_GDB_CLUSTER (default
+                             cluster1); AV_BRIDGE_STEP_REPLY_PROBE_S (default 5)
+and an always-on frame log, `<scratch>/frames.jsonl` (one JSON line per frame in either direction,
+with its bytes in hex).
 """
 import argparse
+import json
 import os
 import re
 import socket
@@ -453,8 +466,69 @@ class RenodeBridge:
         self._hook_captured_bytes = bytearray()
         self.cached_hello = None
         self.cached_bind = None
+        self.scratch_dir = None
+        self.frame_log_path = None
+
+    def log_frame(self, direction, frame_type, raw):
+        """Appends one JSON line per relayed frame to `<scratch>/frames.jsonl` (question 171,
+        q171-c): `direction` is "shim->guest" (frame as received from the shim, before it is
+        injected) or "guest->shim" (frame as received from the guest's uart1), `raw` is the whole
+        frame including its 4-byte length field. Always on: a frame log is a few hundred bytes per
+        STEP and is the only record of exactly what was injected when a stall is being debugged."""
+        if not self.frame_log_path:
+            return
+        with open(self.frame_log_path, "a") as f:
+            f.write(json.dumps({"t": round(time.time(), 3), "dir": direction, "type": frame_type, "len": len(raw), "hex": raw.hex()}) + "\n")
+
+    def hold_for_debugger(self, reason):
+        """Env-gated (inert unless `AV_BRIDGE_GDB_PORT` is set; question 171, q171-c; a
+        re-introduction of the temporary AV_M24_4E_GDB_PORT hold M24.4e removed). Called when a
+        STEP's reply has not arrived after its virtual-time grant: starts Renode's GDB stub
+        (`machine StartGdbServer <port> false "cluster1"`) and holds this bridge -- and therefore the emulation,
+        which only advances inside `emulation RunFor` -- paused, so an external gdb/lldb/script can
+        inspect the stalled guest. Writes `<scratch>/gdb_hold_ready.txt` (port + monitor port),
+        then polls (every 0.5 s) for:
+          - `<scratch>/hold_cmd`: monitor commands, one per line, run through this bridge's own
+            `MonitorClient` (the only monitor connection that is safe to use); each command and its
+            reply are appended to `<scratch>/hold_cmd.out`, and the file is deleted when done;
+          - `<scratch>/gdb_hold_release`: ends the hold (also ends after `AV_BRIDGE_GDB_HOLD_S`,
+            default 900 s). The caller then carries on exactly as it would have without the hold."""
+        port = os.environ.get("AV_BRIDGE_GDB_PORT")
+        if not port or not self.scratch_dir:
+            return
+        hold_s = float(os.environ.get("AV_BRIDGE_GDB_HOLD_S", "900"))
+        # This platform has CPUs of two architectures (cluster0 = ARMv8-A APUs, cluster1 = the
+        # ARMv7-R RPUs the guest runs on), so a bare `StartGdbServer <port>` is refused; name the
+        # cluster, and `false` keeps the emulation paused (it is advanced only by `RunFor`).
+        cluster = os.environ.get("AV_BRIDGE_GDB_CLUSTER", "cluster1")
+        reply = clean(self.mon.cmd(f'machine StartGdbServer {int(port)} false "{cluster}"', timeout=20.0))
+        print(f"bridge: GDB HOLD ({reason}); StartGdbServer reply: {reply[:300]!r}", flush=True)
+        ready = os.path.join(self.scratch_dir, "gdb_hold_ready.txt")
+        with open(ready, "w") as f:
+            f.write(f"gdb_port={int(port)}\nmonitor_port={self.monitor_port}\nreason={reason}\n")
+        cmd_path = os.path.join(self.scratch_dir, "hold_cmd")
+        out_path = os.path.join(self.scratch_dir, "hold_cmd.out")
+        release = os.path.join(self.scratch_dir, "gdb_hold_release")
+        deadline = time.monotonic() + hold_s
+        while time.monotonic() < deadline and not os.path.exists(release):
+            if os.path.exists(cmd_path):
+                with open(cmd_path) as f:
+                    lines = [ln.strip() for ln in f if ln.strip()]
+                os.remove(cmd_path)
+                with open(out_path, "a") as out:
+                    for ln in lines:
+                        try:
+                            out.write(f"> {ln}\n{clean(self.mon.cmd(ln, timeout=120.0))}\n")
+                        except Exception as e:  # keep the hold alive for the debugger
+                            out.write(f"> {ln}\nERROR {e!r}\n")
+                        out.flush()
+                    out.write("--- done ---\n")
+            time.sleep(0.5)
+        print("bridge: GDB HOLD ended", flush=True)
 
     def start(self, log_path):
+        self.scratch_dir = os.path.dirname(os.path.abspath(log_path)) or "."
+        self.frame_log_path = os.path.join(self.scratch_dir, "frames.jsonl")
         logf = open(log_path, "wb")
         self.proc = subprocess.Popen(
             [self.renode_bin, "--disable-gui", "--hide-log", "-P", str(self.monitor_port)],
@@ -578,6 +652,7 @@ runMacro $reset
         # `verify_against_file_backend()`'s own post-run cross-check.
         frame_type, payload, raw = read_frame(self.hook_conn, timeout=timeout)
         self._hook_captured_bytes.extend(raw)
+        self.log_frame("guest->shim", frame_type, raw)
         return frame_type, payload, raw
 
     def verify_against_file_backend(self):
@@ -604,8 +679,39 @@ runMacro $reset
             return False, len(hook_bytes), len(file_bytes), common
         return True, len(hook_bytes), len(file_bytes), None
 
+    def inject_frame(self, raw_bytes):
+        """Host -> guest delivery of one whole frame at UART line rate, not as one instantaneous
+        burst. Question 171 ROOT CAUSE (q171-c; evidence in docs/sil-plan.md's q171 status
+        and third_party/renode/REPORT.md): `WriteChar`
+        puts a byte in the Cadence UART's RX FIFO while emulated time is frozen, and Renode's model
+        of that FIFO is unbounded (`Cadence_UART.WriteChar`: `Count < fifoCapacity ||
+        !EnableRxOverflow`). Injecting a whole frame before the guest executes one instruction
+        therefore hands the RTEMS driver (`zynq_uart_interrupt`: at most 32 bytes per interrupt,
+        and the level-triggered interrupt re-fires until the FIFO is empty) the entire frame in one
+        interrupt storm during which the reader task is never dispatched, and termios'
+        `rtems_termios_enqueue_raw_characters` drops every byte that does not fit its 256-byte raw
+        input ring (255 usable; `rawInBufDropped`; cpukit/libcsupport/src/termios.c, `newTail !=
+        head`). STEP 1 (17 bytes), HELLO (11) and BIND (154) fit; STEP 2 -- the first STEP carrying
+        sensor inputs -- is 305 bytes: the guest kept the first 255, dropped the last 50, and
+        `read_all` waited forever for them. A real UART delivers a byte every 10/115200 s and holds
+        at most 64, so: inject at most `AV_BRIDGE_RX_CHUNK_BYTES` (default 64, the FIFO depth) at a
+        time and let the guest run for that chunk's time on the wire before the next. `0` restores
+        the old single burst (reproduces the stall; for A/B measurement only). Virtual time spent
+        here is harmless to determinism: the cFE clock is driven by the lockstep tick, not by
+        Renode's virtual time."""
+        chunk = int(os.environ.get("AV_BRIDGE_RX_CHUNK_BYTES", "64"))
+        if chunk <= 0:
+            chunk = max(1, len(raw_bytes))
+        prev = 0
+        for start in range(0, len(raw_bytes), chunk):
+            if prev:
+                self.mon.run_for(max(0.001, prev * 10 / 115200.0))
+            piece = raw_bytes[start:start + chunk]
+            self.mon.write_chars(piece)
+            prev = len(piece)
+
     def deliver_to_guest(self, raw_bytes, run_seconds):
-        self.mon.write_chars(raw_bytes)
+        self.inject_frame(raw_bytes)
         self.mon.run_for(run_seconds)
 
     def do_machine_reset_and_rehandshake(self):
@@ -624,6 +730,7 @@ runMacro $reset
         last_tai_ns = None
         while True:
             frame_type, payload, raw = read_frame(shim_sock, timeout=300.0)
+            self.log_frame("shim->guest", frame_type, raw)
             if frame_type == FRAME_HELLO:
                 self.cached_hello = raw
                 self.wait_for_rxen()
@@ -642,7 +749,7 @@ runMacro $reset
             elif frame_type == FRAME_STEP:
                 req = lockstep_pb2.LockstepStepRequest.FromString(payload)
                 delta_s = max(0.0, (req.until_tai_ns - (last_tai_ns or req.until_tai_ns)) / 1e9)
-                self.mon.write_chars(raw)
+                self.inject_frame(raw)
                 # M24.4c found that `delta_s` alone (the DRM's own nominal step period) was not
                 # enough virtual time for a real first STEP and introduced a floor
                 # (`STEP_MIN_VIRTUAL_S`, raised 3.0 -> 10.0 across that task).
@@ -697,7 +804,16 @@ runMacro $reset
                 distinct_pcs = sorted({pc for _, pc, _sts in pc_trace if pc is not None})
                 if len(distinct_pcs) <= 1:
                     print(f"bridge: STEP idle-CPU trace (informational, not a stall -- guest_read_frame reads from the M24.4f CharReceived hook socket): distinct PC values: {distinct_pcs}")
-                _ft, _pl, guest_raw = self.guest_read_frame(timeout=60.0)
+                if os.environ.get("AV_BRIDGE_GDB_PORT"):
+                    # q171-c: probe briefly for the reply, and if it is not there hold for a
+                    # debugger (see `hold_for_debugger`), then wait the usual way.
+                    try:
+                        _ft, _pl, guest_raw = self.guest_read_frame(timeout=float(os.environ.get("AV_BRIDGE_STEP_REPLY_PROBE_S", "5")))
+                    except TimeoutError:
+                        self.hold_for_debugger(f"STEP sequence={req.sequence} reply not received after a {granted_s} s grant")
+                        _ft, _pl, guest_raw = self.guest_read_frame(timeout=60.0)
+                else:
+                    _ft, _pl, guest_raw = self.guest_read_frame(timeout=60.0)
                 shim_sock.sendall(guest_raw)
             elif frame_type == FRAME_RESET:
                 req = lockstep_pb2.LockstepResetRequest.FromString(payload)
