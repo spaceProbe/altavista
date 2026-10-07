@@ -261,7 +261,8 @@ impl Drop for DockerImageGuard {
 }
 
 /// Tags and pushes the already-built `altavista-cfs-lockstep:local` to a throwaway local
-/// registry (loopback-only -- `docker run -p 127.0.0.1::5000 registry:2`), labeled per question
+/// registry (loopback-only -- `docker run -p 127.0.0.1:<FIXED_REGISTRY_PORT>:5000 registry:2`,
+/// a FIXED port so the image reference is the same in every run, question 239), labeled per question
 /// 156 (`test_label_args`) so a killed test's own registry container is swept by
 /// [`prune_stale_test_resources`] on the *next* run even if this run's own `Drop` guards never
 /// get to fire -- ported from `drm_attitude_control_renode.rs`'s own
@@ -294,14 +295,26 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
     let labels = test_label_args(run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    // Question 239 / sil-plan "Found, not fixed" 1: the registry is published on the FIXED
+    // loopback port `FIXED_REGISTRY_PORT`, never an ephemeral one, so the `ContainerBinding.image`
+    // string -- hashed with the whole `SosConfiguration` into the run's provenance and the
+    // `port_traffic.pb` sidecar (ADR-005 section 7: the canonical hash covers every field but
+    // `hash`) -- is the same string in every run, whichever throwaway registry container serves
+    // it. The docker-test lock (held by every caller) serialises the registries, so at most one
+    // test-owned registry holds the port at a time; whatever else holds it is reported, never
+    // worked around.
+    wait_for_fixed_registry_port_free().unwrap_or_else(|e| panic!("{e}"));
+    let port_mapping = format!("127.0.0.1:{FIXED_REGISTRY_PORT}:5000");
+    let mut registry_args = vec!["run", "-d", "-p", port_mapping.as_str()];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
-    let registry_id = docker_cmd(&registry_args);
-    let registry_guard = DockerContainerGuard(registry_id.clone());
-    let port_line = docker_cmd(&["port", &registry_id, "5000"]);
-    let port: u16 = port_line.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("a numeric host port from `docker port`, got {port_line:?}"));
-    let image_ref = format!("127.0.0.1:{port}/altavista-cfs-lockstep");
+    let output = Command::new("docker").args(&registry_args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {registry_args:?}`: {e}"));
+    if !output.status.success() {
+        panic!("{}", FixedRegistryError::StartFailed { port: FIXED_REGISTRY_PORT, detail: String::from_utf8_lossy(&output.stderr).trim().to_string() });
+    }
+    let registry_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let registry_guard = DockerContainerGuard(registry_id);
+    let image_ref = format!("127.0.0.1:{FIXED_REGISTRY_PORT}/altavista-cfs-lockstep");
     let tagged = format!("{image_ref}:test");
     // `docker tag` has no `--label` flag (it creates an alias to an existing image object, not a
     // new one) -- see this function's own doc comment above for the proof that this tag and
@@ -309,10 +322,65 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
     // than merely impossible.
     docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
     let image_guard = DockerImageGuard(tagged.clone());
-    docker_cmd(&["push", &tagged]);
-    let repo_digests = docker_cmd(&["inspect", "--format={{index .RepoDigests 0}}", &tagged]);
-    let digest = repo_digests.rsplit('@').next().filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a @sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
+    // The registry container has only just been started: retry the push briefly until the
+    // registry process inside it accepts connections.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let out = Command::new("docker").args(["push", &tagged]).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker push {tagged}`: {e}"));
+        if out.status.success() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("`docker push {tagged}` did not succeed within 30 s: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let repo_digests = docker_cmd(&["inspect", "--format={{range .RepoDigests}}{{println .}}{{end}}", &tagged]);
+    let prefix = format!("{image_ref}@");
+    let digest = repo_digests.lines().find_map(|l| l.strip_prefix(prefix.as_str())).filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a {prefix}sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
     (image_ref, digest, (registry_guard, image_guard))
+}
+
+/// The loopback port this file's throwaway registries are published on. Fixed (not an ephemeral
+/// `-p 127.0.0.1::5000`) so `ContainerBinding.image` is a stable string -- see
+/// [`push_cfs_image_to_local_registry`]. Chosen below every OS ephemeral range (macOS 49152+,
+/// Linux 32768+) and away from 5000 (macOS AirPlay Receiver holds it).
+const FIXED_REGISTRY_PORT: u16 = 19031;
+
+/// Why a test-owned registry could not be started on [`FIXED_REGISTRY_PORT`]. Never recovered by
+/// choosing another port: a different port would change `ContainerBinding.image` and, with it,
+/// the run's `sos_configuration_hash`.
+#[derive(Debug)]
+enum FixedRegistryError {
+    /// Something is still listening on the port after the grace period (a registry this test
+    /// owns is removed by its guard and by the labeled-container prune; this is something else).
+    PortOccupied { port: u16 },
+    /// `docker run` refused to start the registry on the port.
+    StartFailed { port: u16, detail: String },
+}
+impl std::fmt::Display for FixedRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixedRegistryError::PortOccupied { port } => write!(f, "FixedRegistryError::PortOccupied: 127.0.0.1:{port} is in use by something that is not this test's registry; free it (this test never falls back to another port, which would change ContainerBinding.image and the sos_configuration_hash)"),
+            FixedRegistryError::StartFailed { port, detail } => write!(f, "FixedRegistryError::StartFailed: `docker run` could not publish the registry on 127.0.0.1:{port}: {detail}"),
+        }
+    }
+}
+
+/// Waits (up to 15 s) for nothing to accept connections on `127.0.0.1:FIXED_REGISTRY_PORT`: a
+/// previous test-owned registry that was just removed releases the port a moment later.
+fn wait_for_fixed_registry_port_free() -> Result<(), FixedRegistryError> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], FIXED_REGISTRY_PORT));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_err() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(FixedRegistryError::PortOccupied { port: FIXED_REGISTRY_PORT });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -745,4 +813,84 @@ fn run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepte
     // scenario, not just the pre-fault span.
     let traj = products.trajectories.get("attitude").expect("the \"attitude\" instance produced a trajectory");
     assert_eq!(traj.samples.len(), (RESET_DURATION_S + 1) as usize, "expected samples covering the full {RESET_DURATION_S}s scenario (1 Hz output grid), got tai_ns values {:?}", traj.samples.iter().map(|s| s.tai_ns).collect::<Vec<_>>());
+}
+
+// ------------------------------------------------------------------------------------------
+// Question 239 / sil-plan "Found, not fixed" 1: a posix run's provenance does not depend on
+// which throwaway registry served the image.
+// ------------------------------------------------------------------------------------------
+
+const REGISTRY_INDEPENDENCE_DURATION_S: i64 = DETERMINISM_DURATION_S;
+
+#[test]
+fn the_port_traffic_hash_is_the_same_across_two_separately_started_registries() {
+    if skip_if_cfs_image_unavailable("the_port_traffic_hash_is_the_same_across_two_separately_started_registries") {
+        return;
+    }
+    run_the_port_traffic_hash_is_the_same_across_two_separately_started_registries();
+}
+
+/// Lowercase-hex SHA-256 (`openssl`, a dependency of this crate; `sha2` is banned workspace-wide).
+fn sha256_hex(bytes: &[u8]) -> String {
+    openssl::sha::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether `docker inspect <id>` still finds a container with this id.
+fn docker_container_exists(id: &str) -> bool {
+    Command::new("docker").args(["inspect", "--type=container", id]).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// **The defect this fails against.** The posix half of the cFS tests binds
+/// `ContainerBinding.image = <registry>/altavista-cfs-lockstep`, and the whole `SosConfiguration`
+/// is hashed (ADR-005 section 7) into `Provenance.attributes["sos_configuration_hash"]`, which
+/// the `port_traffic.pb` sidecar embeds -- so when the registry's address was an ephemeral
+/// `127.0.0.1:<port>`, two runs of identical code against two throwaway registries got different
+/// whole-file `port_traffic_hash` values (`a514ea92...` against `36329922...`) with every record
+/// identical. [`push_cfs_image_to_local_registry`] now publishes each registry on the fixed
+/// [`FIXED_REGISTRY_PORT`]; this test starts TWO registries one after the other (distinct
+/// containers: different ids, the first removed before the second starts), runs the same DRM and
+/// the same run id once against each, and requires the same whole-file `port_traffic_hash`
+/// (each the SHA-256 of the file written) and the same `sos_configuration_hash`.
+fn run_the_port_traffic_hash_is_the_same_across_two_separately_started_registries() {
+    let _engine = gmat_sys::engine_lock();
+    let (_lock, run_id) = lock_and_prune_docker_tests();
+    let (systems, base_sos) = load_systems_and_base_sos();
+    const SHARED_RUN_ID: &str = "test-run-cfs-registry-independence";
+
+    // One full cycle: start a registry, push the image to it, run the DRM against it, write the
+    // sidecar, then tear the registry down (the guards drop at the end of this closure).
+    let run_against_fresh_registry = |label: &str| -> (String, String, String, RunProducts, Vec<u8>) {
+        let (image, digest, registry_guards) = push_cfs_image_to_local_registry(&run_id);
+        let registry_id = registry_guards.0 .0.clone();
+        let sos = container_sos("attitude_control_cfs_registry_sos", &base_sos, &image, &digest);
+        let drm = container_drm("attitude_control_cfs_registry_drm", &sos.id, REGISTRY_INDEPENDENCE_DURATION_S, vec![]);
+        let dir = replay_scratch_dir(label);
+        let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        let cfg = RunConfig { gmat: &gmat, drm: &drm, sos: &sos, systems: &systems, run_id: SHARED_RUN_ID.to_string(), error_mode: Default::default(), products_dir: Some(dir.clone()), replay: None, command_source: None };
+        let products = execute(cfg).unwrap_or_else(|e| panic!("run {label} must execute end to end against its own registry: {e:?}"));
+        let sidecar = std::fs::read(dir.join("port_traffic.pb")).unwrap_or_else(|e| panic!("reading run {label}'s port_traffic.pb: {e}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        (image, digest, registry_id, products, sidecar)
+    };
+
+    let (image_a, digest_a, registry_a, products_a, sidecar_a) = run_against_fresh_registry("registry-a");
+    assert!(!docker_container_exists(&registry_a), "registry A ({registry_a}) must be gone before registry B starts: the two runs must be served by distinct registry containers");
+    let (image_b, digest_b, registry_b, products_b, sidecar_b) = run_against_fresh_registry("registry-b");
+
+    assert_ne!(registry_a, registry_b, "the two runs must be served by two distinct registry containers");
+    println!("registry A {registry_a}: image {image_a}@{digest_a}");
+    println!("registry B {registry_b}: image {image_b}@{digest_b}");
+    assert_eq!(image_a, image_b, "ContainerBinding.image must not depend on which registry container serves it");
+    assert_eq!(digest_a, digest_b, "the same local image pushed to two fresh registries must have the same digest (image_digest is part of the hashed binding)");
+
+    let sos_hash_a = products_a.provenance.attributes.get("sos_configuration_hash").expect("run A records sos_configuration_hash");
+    let sos_hash_b = products_b.provenance.attributes.get("sos_configuration_hash").expect("run B records sos_configuration_hash");
+    println!("sos_configuration_hash: A={sos_hash_a} B={sos_hash_b}");
+    println!("port_traffic_hash: A={} B={}", products_a.port_traffic_hash, products_b.port_traffic_hash);
+    assert!(!products_a.port_traffic_hash.is_empty() && !products_b.port_traffic_hash.is_empty(), "both runs were given a products_dir, so both report a non-empty port_traffic_hash");
+    assert_eq!(products_a.port_traffic_hash, sha256_hex(&sidecar_a), "run A's port_traffic_hash must be the SHA-256 of the port_traffic.pb it wrote");
+    assert_eq!(products_b.port_traffic_hash, sha256_hex(&sidecar_b), "run B's port_traffic_hash must be the SHA-256 of the port_traffic.pb it wrote");
+    assert_eq!(sos_hash_a, sos_hash_b, "sos_configuration_hash must be the same across the two registries");
+    assert_eq!(products_a.port_traffic_hash, products_b.port_traffic_hash, "the whole-file port_traffic_hash must be the same across the two registries");
+    assert_eq!(sidecar_a, sidecar_b, "the two port_traffic.pb files must be byte-identical");
 }

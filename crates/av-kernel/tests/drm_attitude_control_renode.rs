@@ -47,8 +47,11 @@
 //! `8e518964...8fd2` in all four sidecars, and the truth pointing error at t = 10 s is
 //! 1.823926917407e-1 rad in all four. (The *posix* whole-file hash differs between those two
 //! runs, `a514ea92...` against `36329922...`, and that is the sidecar's own
-//! `sos_configuration_hash`: the posix `SosConfiguration` embeds the throwaway registry's
-//! ephemeral port in `ContainerBinding.image`; nothing about the traffic.) The guest is
+//! `sos_configuration_hash`: the posix `SosConfiguration` embedded the throwaway registry's
+//! ephemeral port in `ContainerBinding.image`; nothing about the traffic. Since question 239 the
+//! registry is published on a fixed port, so the reference and the posix whole-file hash are
+//! the same in every run: `drm_attitude_control_cfs.rs`'s
+//! `the_port_traffic_hash_is_the_same_across_two_separately_started_registries` proves it.) The guest is
 //! tick-driven (the cFE clock follows the lockstep tick, not Renode's virtual time), so the
 //! virtual time granted after the reply is idle: the PC trace of the full-grant run shows one
 //! distinct PC (`0x4004bb32`, the idle loop) for 99 of its 100 STEPs (all but STEP 1) -- and the
@@ -221,18 +224,29 @@ impl Drop for DockerImageGuard {
 /// local registry, labeled per question 156 (`test_label_args`) so a killed test's own registry
 /// container is swept by [`prune_stale_test_resources`] on the *next* run even if this run's own
 /// `Drop` guards never get to fire. Returns `(image_ref, real_digest, guards)`.
+///
+/// Question 239: the registry is published on the FIXED loopback port [`FIXED_REGISTRY_PORT`]
+/// (the same port and the same rules as `drm_attitude_control_cfs.rs`'s helper of the same name),
+/// so `ContainerBinding.image` -- hashed with the whole `SosConfiguration` into
+/// `sos_configuration_hash` (ADR-005 section 7) -- is the same string in every run. The
+/// docker-test lock, held by the caller, serialises the test-owned registries on that port;
+/// anything else holding it is reported, never worked around with another port.
 fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerContainerGuard, DockerImageGuard)) {
     let labels = test_label_args(run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    wait_for_fixed_registry_port_free().unwrap_or_else(|e| panic!("{e}"));
+    let port_mapping = format!("127.0.0.1:{FIXED_REGISTRY_PORT}:5000");
+    let mut registry_args = vec!["run", "-d", "-p", port_mapping.as_str()];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
-    let registry_id = docker_cmd(&registry_args);
-    let registry_guard = DockerContainerGuard(registry_id.clone());
-    let port_line = docker_cmd(&["port", &registry_id, "5000"]);
-    let port: u16 = port_line.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("a numeric host port from `docker port`, got {port_line:?}"));
-    let image_ref = format!("127.0.0.1:{port}/altavista-cfs-lockstep");
+    let output = Command::new("docker").args(&registry_args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {registry_args:?}`: {e}"));
+    if !output.status.success() {
+        panic!("{}", FixedRegistryError::StartFailed { port: FIXED_REGISTRY_PORT, detail: String::from_utf8_lossy(&output.stderr).trim().to_string() });
+    }
+    let registry_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let registry_guard = DockerContainerGuard(registry_id);
+    let image_ref = format!("127.0.0.1:{FIXED_REGISTRY_PORT}/altavista-cfs-lockstep");
     let tagged = format!("{image_ref}:test");
     // `docker tag` has no `--label` flag (it creates an alias to an existing image object, not a
     // new one) -- the throwaway *registry container* above is this helper's own expensive/
@@ -240,10 +254,65 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
     // container, not a dangling tag), and that one is labeled.
     docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
     let image_guard = DockerImageGuard(tagged.clone());
-    docker_cmd(&["push", &tagged]);
-    let repo_digests = docker_cmd(&["inspect", "--format={{index .RepoDigests 0}}", &tagged]);
-    let digest = repo_digests.rsplit('@').next().filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a @sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
+    // The registry container has only just been started: retry the push briefly until the
+    // registry process inside it accepts connections.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let out = Command::new("docker").args(["push", &tagged]).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker push {tagged}`: {e}"));
+        if out.status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("`docker push {tagged}` did not succeed within 30 s: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The digest from the RepoDigests entry for THIS reference, not index 0 (the image may carry
+    // RepoDigests from other registries).
+    let repo_digests = docker_cmd(&["inspect", "--format={{range .RepoDigests}}{{println .}}{{end}}", &tagged]);
+    let prefix = format!("{image_ref}@");
+    let digest = repo_digests.lines().find_map(|l| l.strip_prefix(prefix.as_str())).filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a {prefix}sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
     (image_ref, digest, (registry_guard, image_guard))
+}
+
+/// The loopback port the throwaway registry is published on: the same value as
+/// `drm_attitude_control_cfs.rs`'s `FIXED_REGISTRY_PORT` (the two files serialise on the
+/// docker-test lock). Below every OS ephemeral range and away from 5000 (macOS AirPlay Receiver).
+const FIXED_REGISTRY_PORT: u16 = 19031;
+
+/// Why a test-owned registry could not be started on [`FIXED_REGISTRY_PORT`]. Never recovered by
+/// choosing another port, which would change `ContainerBinding.image` and the
+/// `sos_configuration_hash`.
+#[derive(Debug)]
+enum FixedRegistryError {
+    /// Something still accepts connections on the port after the grace period.
+    PortOccupied { port: u16 },
+    /// `docker run` refused to start the registry on the port.
+    StartFailed { port: u16, detail: String },
+}
+impl std::fmt::Display for FixedRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixedRegistryError::PortOccupied { port } => write!(f, "FixedRegistryError::PortOccupied: 127.0.0.1:{port} is in use by something that is not this test's registry; free it (this test never falls back to another port, which would change ContainerBinding.image and the sos_configuration_hash)"),
+            FixedRegistryError::StartFailed { port, detail } => write!(f, "FixedRegistryError::StartFailed: `docker run` could not publish the registry on 127.0.0.1:{port}: {detail}"),
+        }
+    }
+}
+
+/// Waits (up to 15 s) for nothing to accept connections on `127.0.0.1:FIXED_REGISTRY_PORT`: a
+/// test-owned registry removed a moment ago releases the port shortly after.
+fn wait_for_fixed_registry_port_free() -> Result<(), FixedRegistryError> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], FIXED_REGISTRY_PORT));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(FixedRegistryError::PortOccupied { port: FIXED_REGISTRY_PORT });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 // ------------------------------------------------------------------------------------------
