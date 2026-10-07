@@ -171,7 +171,7 @@ root-caused incident: this test's `docker load` moved `av-edge-plugin:local`/
 `altavista-cfs-lockstep:local` onto stale images from an earlier build, silently defeating another
 track's `IMAGE_DIGEST.md` provenance gate, question 212(a), until the lead restored the tags by
 hand -- a test mutating host state outside itself, question 199). `_load_and_verify_images` now
-brackets every load with a `docker image ls`-based tag snapshot (`_docker_tag_snapshot`, never
+brackets every load with a `docker image ls`-based tag snapshot (`docker_tag_snapshot`, never
 free-text `docker images` parsing) and, immediately after each load, undoes exactly the
 `repository:tag -> id` binding(s) that load created or changed: `docker rmi <repository:tag>`
 (untag only -- never a bare id, never `-f`; see `_load_and_verify_images`'s own doc comment on the
@@ -179,15 +179,22 @@ measured `docker rmi -f <ID>` behaviour that rules that out) when the binding di
 before, or `docker tag <previous_id> <repository:tag>` to restore it when the load moved an
 existing one. The one component this file still references by tag afterward (`edge-plugin-image`,
 used by both `_run_ingest_from_installed_kit` and `_run_edge_plugin_from_kit_image`) is re-tagged
-under a test-only name (`_test_only_tag`) BEFORE that undo step runs, so undoing the host tag
+under a test-only name (`ImageTagGuard.test_only_tag`) BEFORE that undo step runs, so undoing the host tag
 never risks deleting the only reference to the image this test still needs -- that test-only tag
 is what `av-edge-plugin:local` used to be handed to those two functions as, literally on the host,
 and it is removed in `ResourceGuard.cleanup()` like any other resource this run created.
-`_assert_host_tags_unchanged`, the test's own closing proof, runs inside the outer `finally` (so
+`ImageTagGuard.assert_host_tags_unchanged`, the test's own closing proof, runs inside the outer `finally` (so
 it runs on the failure path too, not only on success -- exactly the case the lead hit: a test that
 moves tags and then fails for an unrelated reason) and asserts every tag present before this run's
 first `docker load` still points at the same id, and that no test-only tag this run created
 survives.
+
+Question 239: the snapshot, load-and-verify-by-id, restore and closing assertion are one
+implementation, `scripts/kit/docker_image_tags.py::ImageTagGuard`, shared with
+`scripts/kit/live_evidence.py` (which `docker load`s the same tarballs and had none of this); this
+file keeps only the kit-specific parts (which components, the test-only tag prefix, `KIT_MANIFEST`).
+The restore now also runs on the failure paths of a single load (load failed, tag missing, digest
+mismatch), not only after a verified one.
 """
 from __future__ import annotations
 
@@ -208,6 +215,7 @@ sys.path.insert(0, str(KIT_DIR))
 import build_kit  # noqa: E402  (path insert must precede this import)
 import manifest as kit_manifest  # noqa: E402
 import sbom  # noqa: E402
+from docker_image_tags import ImageTagGuard  # noqa: E402  (question 239: shared with live_evidence.py)
 
 from altavista.container_hardening import (  # noqa: E402
     TEST_LABEL_KEY,
@@ -390,28 +398,6 @@ def _docker(*args: str, timeout: float = 60.0, check: bool = True) -> subprocess
     return result
 
 
-def _docker_tag_snapshot() -> dict[str, str]:
-    """`repository:tag -> full image id` (`sha256:...`) for every REAL tag on this host right
-    now (round 5, question 234) -- one `docker image ls --format` call, never free-text `docker
-    images` parsing. `<none>:<none>` entries (untagged/dangling images) are excluded: they carry
-    no `repository:tag` binding a `docker load` could clobber, so they are not this function's
-    concern. `docker image ls --format '{{.ID}}'` prints a bare hex id with no `sha256:` prefix
-    even with `--no-trunc`; every id here is normalized to the same `sha256:...` form `docker
-    image inspect --format '{{.Id}}'` returns, so callers can compare the two directly."""
-    result = _docker("image", "ls", "--no-trunc", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}")
-    snapshot: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            continue
-        repo_tag, image_id = line.split("\t")
-        if repo_tag.startswith("<none>:"):
-            continue
-        if not image_id.startswith("sha256:"):
-            image_id = f"sha256:{image_id}"
-        snapshot[repo_tag] = image_id
-    return snapshot
-
-
 def _labelled_id(run_id: str, kind: str) -> str:
     return f"av-kit-install-test-{kind}-{run_id}"
 
@@ -426,7 +412,7 @@ class ResourceGuard:
         self.containers: list[str] = []
         self.networks: list[str] = []
         self.volumes: list[str] = []
-        #: Round 5 (question 234): test-only image TAGS this run created (`_test_only_tag`,
+        #: Round 5 (question 234): test-only image TAGS this run created (`ImageTagGuard.test_only_tag`,
         #: `_load_and_verify_images`) -- always a `repository:tag` NAME, never a bare id, so
         #: cleanup below can only ever untag, never trigger the `docker rmi -f <ID>` behaviour
         #: `_load_and_verify_images`'s own doc comment records (strips every tag on that id).
@@ -585,72 +571,23 @@ _COMPONENTS_REFERENCED_AFTER_LOAD = frozenset({"edge-plugin-image"})
 _TEST_TAG_PREFIX = "av-kit-zero-egress-test"
 
 
-def _test_only_tag(component: str, run_id: str) -> str:
-    return f"{_TEST_TAG_PREFIX}/{component}:{run_id}"
-
-
-def _assert_host_tags_unchanged(initial_snapshot: dict[str, str], test_only_tags: list[str]) -> None:
-    """The test's own closing proof of question 199/234 compliance, checked directly against the
-    host's real state -- never assumed from having "undone" each load along the way. Called from
-    the outer `finally`, below, so it runs on the failure path too: a test that moves tags and
-    then fails for an unrelated reason is exactly the case the lead hit and this function exists
-    to catch. `initial_snapshot` is `_docker_tag_snapshot()` taken before this run's first
-    `docker load`, anywhere; `test_only_tags` is every test-only tag `_load_and_verify_images`
-    created (`ResourceGuard.cleanup`, called just before this function, is what should have
-    already removed them -- this is the proof that it actually did, not a description of intent)."""
-    final_snapshot = _docker_tag_snapshot()
-    problems = []
-    for repo_tag, before_id in initial_snapshot.items():
-        after_id = final_snapshot.get(repo_tag)
-        if after_id != before_id:
-            problems.append(f"{repo_tag}: was {before_id} before this run, is {after_id!r} now")
-    for test_tag in test_only_tags:
-        if test_tag in final_snapshot:
-            problems.append(f"{test_tag}: this run's own test-only tag still exists -- cleanup did not remove it")
-    # Manager review, round 5: the two loops above catch a tag that MOVED and a test-only tag
-    # that survived cleanup, but not the third shape -- a `repository:tag` that did not exist at
-    # all before this run and does now, which is precisely what an undo step that silently failed
-    # to untag a binding `docker load` created would leave behind. That one would sit in neither
-    # `initial_snapshot` nor `test_only_tags` and pass unnoticed, so it is checked directly.
-    # This whole test body runs inside `lock_docker_tests()` (question 207), so no other
-    # docker-gated test on this host can have created a tag inside this window; a new tag here is
-    # either this run's own leak or a process that took no lock, and both are worth seeing.
-    for repo_tag in sorted(set(final_snapshot) - set(initial_snapshot) - set(test_only_tags)):
-        problems.append(
-            f"{repo_tag}: did not exist before this run and points at {final_snapshot[repo_tag]} now "
-            f"-- a repository tag this run created and did not remove"
-        )
-    assert not problems, (
-        "docker tag hygiene violation (question 199/234: a test that loads an image must never "
-        "leave a repository tag behind that it did not own) --\n" + "\n".join(problems)
-    )
-
-
-def _load_and_verify_images(guard: ResourceGuard, run_id: str, test_only_tags: list[str]) -> tuple[dict, dict[str, str]]:
+def _load_and_verify_images(image_tags: ImageTagGuard) -> tuple[dict, dict[str, str]]:
     """B.1: `docker load -i` each image tarball the kit carries, on the host, and compare the
     loaded image id to the digest `KIT_MANIFEST` records for that component -- an image is
     trusted only after this comparison (question 212). Runs BEFORE any network/volume/container
     of this test's own is created; needs no label of its own (it never creates a container).
 
-    Round 5 (question 234): `docker load` restores the tarball's OWN repository tag on the host,
-    unconditionally -- if that tag already named a different image (this worktree's own proof kit
-    can predate whatever the host's tags currently point at; that mismatch is exactly what moved
-    `av-edge-plugin:local`/`altavista-cfs-lockstep:local` out from under another track's
-    `IMAGE_DIGEST.md` gate, question 212(a), until the lead restored them by hand), loading it
-    here would silently move that alias -- a test mutating host state outside itself (question
-    199). Every load below is now bracketed by a `_docker_tag_snapshot()` immediately before and
-    after it; whatever `repository:tag -> id` binding(s) the load created or changed, relative to
-    that BEFORE snapshot (never the very first one -- an earlier component's own test-only tag in
-    this same loop must never be mistaken for damage a later load did), is undone right after:
-    `docker rmi <repository:tag>` (untag only) if the load created the binding, or
-    `docker tag <previous_id> <repository:tag>` to restore it if the load moved one. Never `docker
-    rmi` a bare id, and never `-f`: `crates/av-kernel/tests/drm_attitude_control_cfs.rs`'s own doc
-    comment on `push_cfs_image_to_local_registry` records, from a direct measurement on this host,
-    that `docker rmi -f <IMAGE ID>` strips EVERY repository tag pointing at that id in one call --
-    exactly the blast radius this function exists to rule out. The one component this file still
-    references by tag afterward (`_COMPONENTS_REFERENCED_AFTER_LOAD`) is re-tagged under a
-    test-only name (`_test_only_tag`) BEFORE the undo step runs, so undoing the host tag can never
-    risk deleting the only reference to the image this test still needs.
+    Round 5 (question 234), moved by question 239 into `scripts/kit/docker_image_tags.py`
+    (`ImageTagGuard`) so `scripts/kit/live_evidence.py`, which `docker load`s the same tarballs,
+    shares one implementation instead of a copy: `docker load` restores the tarball's OWN
+    repository tag on the host, unconditionally, so every load there is bracketed by a `docker
+    image ls` snapshot, verified BY ID, and whatever `repository:tag -> id` binding it created
+    (`docker rmi <repository:tag>`, untag only) or moved (`docker tag <previous_id>
+    <repository:tag>`) is undone before the next component loads, on the failure paths too. The
+    one component this file still references by tag afterward (`_COMPONENTS_REFERENCED_AFTER_LOAD`)
+    is re-tagged under a test-only name BEFORE that undo step runs, so undoing the host tag can
+    never risk deleting the only reference to the image this test still needs; `ResourceGuard`
+    removes that test-only tag (registered through `ImageTagGuard`'s `on_test_tag`).
 
     Returns `(evidence, test_tag_by_component)` -- `test_tag_by_component` names the test-only tag
     created for each component in `_COMPONENTS_REFERENCED_AFTER_LOAD`, for the caller to hand to
@@ -665,76 +602,18 @@ def _load_and_verify_images(guard: ResourceGuard, run_id: str, test_only_tags: l
         tarball = _PROOF_KIT_DIR / "images" / f"{component}.tar"
         assert tarball.is_file(), f"{component}: kit claims images.{component}.collected but {tarball} is missing"
 
-        before_load = _docker_tag_snapshot()
-        load = subprocess.run(["docker", "load", "-i", str(tarball)], capture_output=True, text=True, timeout=120)
-        assert load.returncode == 0, f"docker load -i {tarball} failed (rc={load.returncode}): {load.stderr}"
-        after_load = _docker_tag_snapshot()
-
-        loaded_id = after_load.get(entry["tag"])
-        assert loaded_id is not None, (
-            f"{component}: docker load -i {tarball} succeeded but {entry['tag']!r} is not bound "
-            f"to any image afterward (tags currently on the host: {sorted(after_load)!r})"
+        loaded = image_tags.load_verified(
+            component=component, tarball=tarball, tag=entry["tag"], recorded_digest=entry["recorded_digest"],
+            keep_as_test_tag=component in _COMPONENTS_REFERENCED_AFTER_LOAD,
         )
-        # Verify by id, never by re-querying the tag a second time (question 234: the tag is
-        # exactly the thing this function stops trusting) -- a self-inspect by id both confirms
-        # the id genuinely exists and gives the value compared to KIT_MANIFEST below.
-        verify = subprocess.run(
-            ["docker", "image", "inspect", loaded_id, "--format", "{{.Id}}"],
-            capture_output=True, text=True, timeout=30,
-        )
-        assert verify.returncode == 0, f"{component}: docker image inspect {loaded_id} failed right after loading: {verify.stderr}"
-        actual_digest = verify.stdout.strip()
-        evidence[component] = {
-            "tag": entry["tag"],
-            "recorded_digest": entry["recorded_digest"],
-            "loaded_digest": actual_digest,
-            "docker_load_stdout": load.stdout.strip(),
-        }
-        assert actual_digest == entry["recorded_digest"], (
-            f"{component}: KIT_MANIFEST records {entry['recorded_digest']}, but the image loaded "
-            f"from {tarball} has id {actual_digest} -- refusing to trust it (question 212)"
-        )
-
-        changed = {
-            repo_tag: (before_load.get(repo_tag), new_id)
-            for repo_tag, new_id in after_load.items()
-            if before_load.get(repo_tag) != new_id
-        }
-        if changed:
+        evidence[component] = loaded.evidence
+        if loaded.changed:
             print(
-                f"\n--- {component}: tag binding(s) this load created/changed, undone below "
-                f"(question 199/234) ---\n"
-                + json.dumps({rt: {"before": old, "after": new} for rt, (old, new) in changed.items()}, indent=2)
+                f"\n--- {component}: tag binding(s) this load created/changed, undone (question 199/234) ---\n"
+                + json.dumps({rt: {"before": old, "after": new} for rt, (old, new) in loaded.changed.items()}, indent=2)
             )
-
-        if component in _COMPONENTS_REFERENCED_AFTER_LOAD:
-            # Re-tag FIRST -- before any untag/restore below runs -- so the image this file still
-            # needs is never left with only the about-to-be-undone host tag as its sole reference.
-            test_tag = _test_only_tag(component, run_id)
-            _docker("tag", loaded_id, test_tag)
-            guard.track_image(test_tag)
-            test_only_tags.append(test_tag)
-            test_tag_by_component[component] = test_tag
-
-        for repo_tag, (old_id, new_id) in changed.items():
-            if old_id is None:
-                # The load created this binding from nothing -- untag only. Safe even when
-                # `repo_tag` is the loaded image's only OTHER reference, because the test-only
-                # re-tag above (when this component needs one) already added a second one first.
-                _docker("rmi", repo_tag)
-                still_present = subprocess.run(
-                    ["docker", "image", "inspect", new_id, "--format", "{{.Id}}"],
-                    capture_output=True, text=True, timeout=30,
-                )
-                assert still_present.returncode == 0, (
-                    f"{component}: untagging {repo_tag!r} (a binding this load created) left "
-                    f"image {new_id} with no reference at all -- it should still exist, either "
-                    f"under this run's own test-only tag or another host tag that already "
-                    f"pointed at it before this load"
-                )
-            else:
-                # The load MOVED an existing tag off `old_id` -- point it back.
-                _docker("tag", old_id, repo_tag)
+        if loaded.test_tag is not None:
+            test_tag_by_component[component] = loaded.test_tag
 
     return evidence, test_tag_by_component
 
@@ -752,18 +631,18 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
 
     reached: dict[str, bool] = {"4a_viewer": False, "4b_ingest": False, "4c_plugin": False, "4d_runs": False}
 
-    # Round 5 (question 234): the tag snapshot taken before this run's first `docker load`,
-    # anywhere -- `_assert_host_tags_unchanged` (the outer `finally`, below) compares against it.
-    # Captured here, outside the `try`, so it is never undefined even if `_load_and_verify_images`
-    # itself raises partway through its own loop.
-    initial_tag_snapshot = _docker_tag_snapshot()
-    test_only_tags: list[str] = []
+    # Round 5 (question 234): `ImageTagGuard` takes the tag snapshot before this run's first
+    # `docker load`, anywhere -- its `assert_host_tags_unchanged` (the outer `finally`, below)
+    # compares against it. Constructed here, outside the `try`, so it is never undefined even if
+    # `_load_and_verify_images` itself raises partway through its own loop. Question 239: the
+    # implementation moved to `scripts/kit/docker_image_tags.py`, shared with `live_evidence.py`.
+    image_tags = ImageTagGuard(run_id, _TEST_TAG_PREFIX, on_test_tag=guard.track_image)
 
     try:
         # ---------------------------------------------------------------------------------
         # B.1 -- image provenance, on the host, before anything else.
         # ---------------------------------------------------------------------------------
-        image_evidence, test_tag_by_component = _load_and_verify_images(guard, run_id, test_only_tags)
+        image_evidence, test_tag_by_component = _load_and_verify_images(image_tags)
         print(f"\n--- image provenance (question 212) ---\n{json.dumps(image_evidence, indent=2)}")
         edge_plugin_image_ref = test_tag_by_component["edge-plugin-image"]
 
@@ -932,7 +811,7 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         # raised, a violation found here chains onto it (both are visible in the traceback) rather
         # than being silently skipped, which is exactly the gap the lead's own incident exposed (a
         # test that moved tags and then failed for an unrelated reason).
-        _assert_host_tags_unchanged(initial_tag_snapshot, test_only_tags)
+        image_tags.assert_host_tags_unchanged()
 
     guard.assert_nothing_left()
 
@@ -1057,7 +936,7 @@ def _run_ingest_from_installed_kit(guard: ResourceGuard, run_id: str, network_na
         "-v", f"{install_volume}:/target:ro",
         "-v", f"{VERIFY_PUB_PEM}:/keys/verify.pub.pem:ro",
         "--entrypoint", "/target/kit/binaries/av-ingest-server",
-        # Round 5 (question 234): this test's own test-only tag (`_test_only_tag`), not
+        # Round 5 (question 234): this test's own test-only tag (`ImageTagGuard.test_only_tag`), not
         # `av-edge-plugin:local` -- that host tag is exactly what `_load_and_verify_images` no
         # longer trusts (it could be a different image by the time this container starts, on a
         # host running other tracks concurrently). Still the SAME image this test loaded from the

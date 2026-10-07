@@ -23,6 +23,14 @@ What this file proves:
 6. Determinism (D4b(e)): two `assemble_bundle` calls fed the SAME saved live-input dict produce
    byte-identical bytes, exactly `tests/test_evidence_bundle.py::
    test_two_runs_over_the_same_state_are_byte_identical`'s own proof, extended to live inputs.
+7. Question 239: `live_evidence.py` never leaves a docker tag it did not own. `docker load -i`
+   restores the tarball's own repository tag on the host, and the kit's tarball moved
+   `av-edge-plugin:local` onto its 2026-09-15 image three times. The shared helper,
+   `scripts/kit/docker_image_tags.py::ImageTagGuard`, is proved on scratch images under a
+   test-only repository (a moved tag, a created tag, a digest mismatch, a leaked tag the closing
+   assertion must refuse), and `bring_up_av_ingest_server`'s failure path is proved through a
+   scratch kit -- none of these touches a `:local` tag. The real-kit test below also compares the
+   host's whole tag table before and after.
 
 No test mutates `os.environ` (question 199). No test writes anywhere but `tmp_path`/its own
 labelled docker resources (cleaned up and asserted gone, same discipline as
@@ -33,10 +41,13 @@ already-running, already-local processes over loopback.
 """
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
 import sys
+import tarfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -47,6 +58,7 @@ if str(KIT_DIR) not in sys.path:
     sys.path.insert(0, str(KIT_DIR))
 import evidence  # noqa: E402
 import live_evidence  # noqa: E402
+from docker_image_tags import ImageHygieneError, ImageTagGuard, docker_tag_snapshot  # noqa: E402
 
 SECDEPLOY_DIR = Path("/Users/probe/code/secdeploy")
 BASE_MANIFEST = SECDEPLOY_DIR / "suite.toml"
@@ -123,6 +135,9 @@ _DOCKER_INGEST_SKIP_REASON = _docker_ingest_skip_reason()
 requires_docker_ingest = pytest.mark.skipif(
     _DOCKER_INGEST_SKIP_REASON is not None, reason=_DOCKER_INGEST_SKIP_REASON or ""
 )
+
+_DOCKER_SKIP_REASON = _docker_unavailable_reason()
+requires_docker = pytest.mark.skipif(_DOCKER_SKIP_REASON is not None, reason=_DOCKER_SKIP_REASON or "")
 
 
 # =================================================================================================
@@ -252,7 +267,18 @@ def test_av_ingest_server_returns_a_real_verify_result_from_the_kit():
     from altavista.docker_test_lock import lock_docker_tests
 
     with lock_docker_tests():
+        tags_before = docker_tag_snapshot()
         result = live_evidence.bring_up_av_ingest_server(live_evidence.DEFAULT_KIT_DIR, run_id)
+        tags_after = docker_tag_snapshot()
+    # Question 239: the load restores the kit tarball's own repository tags on the host (the kit
+    # can predate what the host's `:local` tags point at); this run must leave every tag as found.
+    # `bring_up_av_ingest_server` asserts the same itself, from its own `finally`; this is the
+    # independent check, over the whole table.
+    assert tags_after == tags_before, (
+        "docker tags changed across bring_up_av_ingest_server: "
+        + repr({t: (tags_before.get(t), tags_after.get(t)) for t in set(tags_before) | set(tags_after)
+                if tags_before.get(t) != tags_after.get(t)})
+    )
     entry = result["entry"]
     assert entry["status"] == "collected", entry
     assert entry["url"].endswith("/admin/api/evidence/verify")
@@ -267,6 +293,189 @@ def test_av_ingest_server_returns_a_real_verify_result_from_the_kit():
         capture_output=True, text=True, timeout=30,
     ).stdout.strip()
     assert remaining == "", f"container(s) from run {run_id} still exist: {remaining!r}"
+
+
+# =================================================================================================
+# 2b. Question 239: a docker load never leaves a repository tag this run did not own
+# =================================================================================================
+
+class _ScratchImages:
+    """Tiny images this test creates itself (`docker import` of a one-file tar), all under a
+    run-scoped, test-only repository, so the load/restore logic is exercised on real tags without
+    ever touching a `:local` tag another track pins. `cleanup` removes every image it made by
+    NAME (untag only; an image left untagged by the helper under test is re-tagged under a
+    cleanup name first), never `-f` and never an image it did not create."""
+
+    def __init__(self) -> None:
+        self.run_id = uuid.uuid4().hex[:12]
+        self.repo = f"av-hygiene-test-{self.run_id}"
+        self._cleanup_names: list[str] = []
+        self._ids: list[str] = []
+
+    def make(self, name: str) -> str:
+        """Imports a fresh, unique image, tagged `<repo>/<name>:1`; returns its full id."""
+        ref = f"{self.repo}/{name}:1"
+        data = f"{self.run_id}:{name}".encode()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            info = tarfile.TarInfo(name="marker")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+        done = subprocess.run(["docker", "import", "-", ref], input=buf.getvalue(), capture_output=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        image_id = self.id_of(ref)
+        self._ids.append(image_id)
+        self._cleanup_names.append(ref)
+        return image_id
+
+    @staticmethod
+    def id_of(ref: str) -> str:
+        done = subprocess.run(["docker", "image", "inspect", ref, "--format", "{{.Id}}"], capture_output=True, text=True, timeout=30)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    @staticmethod
+    def exists(ref: str) -> bool:
+        return subprocess.run(["docker", "image", "inspect", ref], capture_output=True, timeout=30).returncode == 0
+
+    def tarball_carrying(self, ref: str, path: Path) -> None:
+        done = subprocess.run(["docker", "save", "-o", str(path), ref], capture_output=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+
+    def drop_tag(self, ref: str) -> None:
+        """Untags `ref` (the scratch image keeps living if another tag or its id is still named)."""
+        subprocess.run(["docker", "rmi", ref], capture_output=True, timeout=30)
+
+    def cleanup(self) -> None:
+        for i, image_id in enumerate(self._ids):
+            name = f"{self.repo}/cleanup-{i}:1"
+            if subprocess.run(["docker", "tag", image_id, name], capture_output=True, timeout=30).returncode == 0:
+                self._cleanup_names.append(name)
+        for ref in self._cleanup_names:
+            subprocess.run(["docker", "rmi", ref], capture_output=True, timeout=30)
+
+
+@pytest.fixture
+def scratch_images(tmp_path):
+    from altavista.docker_test_lock import lock_docker_tests
+
+    scratch = _ScratchImages()
+    with lock_docker_tests():
+        try:
+            yield scratch
+        finally:
+            scratch.cleanup()
+            leftover = [t for t in docker_tag_snapshot() if t.startswith(scratch.repo)]
+            assert leftover == [], f"the scratch images' tags were not all removed: {leftover}"
+
+
+@requires_docker
+def test_load_verified_puts_a_moved_tag_back_and_keeps_the_image_under_a_test_only_tag(scratch_images, tmp_path):
+    """The reported defect, on scratch images: the host's `X:1` names image A, the tarball carries
+    image B under the same `X:1`. A bare `docker load` moves `X:1` onto B; the helper must verify B
+    by id, hand back a run-scoped test-only tag that names B, and leave `X:1` on A."""
+    tarball = tmp_path / "b.tar"
+    b_id = scratch_images.make("x")
+    ref = f"{scratch_images.repo}/x:1"
+    scratch_images.tarball_carrying(ref, tarball)
+    scratch_images.drop_tag(ref)                       # B is gone from the host
+    a_id = scratch_images.make("x")                    # A now holds the host's `x:1`
+    assert a_id != b_id and scratch_images.id_of(ref) == a_id
+
+    guard = ImageTagGuard(scratch_images.run_id, f"{scratch_images.repo}/test-only")
+    loaded = guard.load_verified(component="x", tarball=tarball, tag=ref, recorded_digest=b_id, keep_as_test_tag=True)
+    assert loaded.evidence["loaded_digest"] == b_id and loaded.evidence["recorded_digest"] == b_id
+    assert loaded.changed == {ref: (a_id, b_id)}, "the load moved `x:1` from A to B -- the helper saw it"
+    assert scratch_images.id_of(ref) == a_id, "the moved tag was not put back"
+    assert scratch_images.id_of(loaded.test_tag) == b_id, "the test-only tag must name the verified image"
+    guard.remove_test_only_tags()
+    guard.assert_host_tags_unchanged()
+    assert scratch_images.id_of(ref) == a_id
+
+
+@requires_docker
+def test_load_verified_untags_a_binding_the_load_created_and_drops_an_unwanted_image(scratch_images, tmp_path):
+    tarball = tmp_path / "b.tar"
+    b_id = scratch_images.make("y")
+    ref = f"{scratch_images.repo}/y:1"
+    scratch_images.tarball_carrying(ref, tarball)
+    scratch_images.drop_tag(ref)
+    assert not scratch_images.exists(ref)
+
+    guard = ImageTagGuard(scratch_images.run_id, f"{scratch_images.repo}/test-only")
+    loaded = guard.load_verified(component="y", tarball=tarball, tag=ref, recorded_digest=b_id, keep_as_test_tag=False)
+    assert loaded.test_tag is None and loaded.changed == {ref: (None, b_id)}
+    assert not scratch_images.exists(ref), "the binding the load created was not removed"
+    guard.assert_host_tags_unchanged()
+
+
+@requires_docker
+def test_load_verified_restores_the_host_tags_when_the_digest_does_not_match(scratch_images, tmp_path):
+    """The failure path: a recorded digest the loaded image does not have. The helper must refuse
+    the image AND still put the moved tag back (the pre-239 kit test restored only after a pass)."""
+    tarball = tmp_path / "b.tar"
+    b_id = scratch_images.make("z")
+    ref = f"{scratch_images.repo}/z:1"
+    scratch_images.tarball_carrying(ref, tarball)
+    scratch_images.drop_tag(ref)
+    a_id = scratch_images.make("z")
+
+    guard = ImageTagGuard(scratch_images.run_id, f"{scratch_images.repo}/test-only")
+    with pytest.raises(ImageHygieneError, match="refusing to trust it"):
+        guard.load_verified(component="z", tarball=tarball, tag=ref, recorded_digest="sha256:" + "0" * 64, keep_as_test_tag=True)
+    assert scratch_images.id_of(ref) == a_id, "a refused image must not leave the moved tag where the load put it"
+    assert guard.test_only_tags == [], "no test-only tag is made for an image that was refused"
+    guard.assert_host_tags_unchanged()
+    assert b_id != a_id
+
+
+@requires_docker
+def test_the_closing_assertion_refuses_a_moved_a_surviving_and_a_new_tag(scratch_images):
+    a_id = scratch_images.make("m")
+    b_id = scratch_images.make("n")
+    moved = f"{scratch_images.repo}/m:1"
+    guard = ImageTagGuard(scratch_images.run_id, f"{scratch_images.repo}/test-only")
+    guard.assert_host_tags_unchanged()                      # nothing happened yet: clean
+
+    subprocess.run(["docker", "tag", b_id, moved], check=True, capture_output=True, timeout=30)
+    with pytest.raises(ImageHygieneError, match=r"m:1: was .* before this run, is .* now"):
+        guard.assert_host_tags_unchanged()
+    subprocess.run(["docker", "tag", a_id, moved], check=True, capture_output=True, timeout=30)
+    guard.assert_host_tags_unchanged()                      # restored: clean again
+
+    leaked = f"{scratch_images.repo}/leak:1"
+    subprocess.run(["docker", "tag", a_id, leaked], check=True, capture_output=True, timeout=30)
+    scratch_images._cleanup_names.append(leaked)
+    with pytest.raises(ImageHygieneError, match="did not exist before this run"):
+        guard.assert_host_tags_unchanged()
+    guard.test_only_tags.append(leaked)
+    with pytest.raises(ImageHygieneError, match="test-only tag still exists"):
+        guard.assert_host_tags_unchanged()
+
+
+@requires_docker
+def test_bring_up_av_ingest_server_restores_tags_when_the_loaded_image_is_refused(scratch_images, tmp_path):
+    """`bring_up_av_ingest_server`'s own failure path, through a scratch kit whose KIT_MANIFEST
+    records a digest the tarball's image does not have: the call raises, and the whole host tag
+    table is as it was (the scratch tag moved by the load is back on its previous image)."""
+    kit = tmp_path / "kit"
+    (kit / "images").mkdir(parents=True)
+    (kit / "binaries").mkdir()
+    (kit / "binaries" / "av-ingest-server").write_bytes(b"not run: the load is refused first")
+    b_id = scratch_images.make("kit")
+    ref = f"{scratch_images.repo}/kit:1"
+    scratch_images.tarball_carrying(ref, kit / "images" / "edge-plugin-image.tar")
+    scratch_images.drop_tag(ref)
+    a_id = scratch_images.make("kit")
+    (kit / "KIT_MANIFEST").write_text(json.dumps({
+        "images": {"edge-plugin-image": {"tag": ref, "recorded_digest": "sha256:" + "1" * 64}},
+    }), encoding="utf-8")
+
+    before = docker_tag_snapshot()
+    with pytest.raises(ImageHygieneError, match="refusing to trust it"):
+        live_evidence.bring_up_av_ingest_server(kit, scratch_images.run_id)
+    assert docker_tag_snapshot() == before
+    assert scratch_images.id_of(ref) == a_id and a_id != b_id
 
 
 # =================================================================================================
