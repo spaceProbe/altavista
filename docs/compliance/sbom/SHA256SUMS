@@ -5,6 +5,6 @@ abf23386cdee809533b73f7b25f46a000c399187084b50b774c44d16190c6086  docs/complianc
 dc56c4fe77cea2d7e0e87f6c9cb8bdfcef67b3c07b6455466fc0c02d7e0240f7  docs/compliance/sbom/av-ingest.cdx.json
 5c0b04cbc555cf6686e6eee53c63fed049ff1effcc093716f95b6d18b7dfc140  docs/compliance/sbom/av-proposer.cdx.json
 5dfff84ebf2abb8bb394d446ecf3975ebf2f53e2aa2cd36ff32244beda42ba6e  docs/compliance/sbom/av-viewer.cdx.json
-346bbc3af70d8269a115e6dd39e897ca2450d497a109faa3d90ed200abd960f7  docs/compliance/sbom/cfs-image.cdx.json
-ff7a52a4852efd05492d7dda0d9110207a20919fe1cfc5f9bd7816fcd07740a8  docs/compliance/sbom/edge-plugin-image.cdx.json
+a3eb33e641522ccc57fe35a2ebf4de35f82be4997b2dd3f6205533029941c33a  docs/compliance/sbom/cfs-image.cdx.json
+3ad22fb93f326086e361799bc0e0db0f84b2de14effe509e8e6a358f446e786b  docs/compliance/sbom/edge-plugin-image.cdx.json
 4a52d6c5f3a743eb9be44a69a3568b0c4630f0a7fe2e6d76c8b70f867c3d5b75  docs/compliance/sbom/gmat-service.cdx.json
