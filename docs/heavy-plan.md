@@ -2848,7 +2848,8 @@ moved (question 236), and no phase printed the warning.
 ### What remains, each with its reason
 
 - **A 1.5 m model is not visible when its spacecraft is framed.** At true size it is smaller than
-  the marker (radius 0.0003 scene units, 300 km), so `entityExtent()` frames at marker scale. Showing
+  the marker (radius 0.0003 scene units, 300 m; written "300 km" here until the carry-over round
+  below corrected it, since a scene unit is 1000 km), so `entityExtent()` frames at marker scale. Showing
   a model needs a screen-space marker, or framing that prefers the model when its class is on. Next
   heavy work.
 - **The per-viewport Focus** still uses the central-body distance; only its aim is fixed.
@@ -2861,3 +2862,169 @@ moved (question 236), and no phase printed the warning.
 - **`scripts/lint/required_features_clippy.sh` calls bare `cargo`**, so the gate ran its steps inline
   through `cargo-slot`; the script itself should take the slot.
 - Compliance regeneration is the lead's at the merge (decision 3).
+
+## Status (heavy manager, 2026-10-07) — post-delivery carry-over round (question 239)
+
+This round does not reopen the plan. It closes the three heavy items question 238 carried and
+question 239 chartered. `## Delivered` stands.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `8ae5155` | Task 1: a screen-space entity marker; `entityExtent` prefers the model; a model-only spacecraft is visible at Focus |
+| `64f2d65` | Task 3: `visual_model_uri` on the run's wire; a run published by `av-run` can carry a model |
+| `dacdecc` | Task 2: per-viewport Focus frames a spacecraft by its extent |
+| `ecebac0` | The tiles, proposer and edge-plugin images re-pinned at `dacdecc` (task 3's proto change staled them, question 232) |
+| this commit | this status section, and the "300 km" correction in the previous round's "What remains" |
+
+### Task 1: a model-only spacecraft is visible at Focus
+
+The entity marker is a fixed 10 px disc at any camera distance, in every viewport at once. It is
+still the residency scene's `InstancedMesh`; its material (`createScreenSpaceMarkerMaterial`,
+`web/js/entities/entities_instanced_layer.js`) rewrites `MeshBasicMaterial`'s `project_vertex`
+chunk to project only the instance centre and add the disc in clip space against the drawing
+renderer's viewport, bound per draw in `onBeforeRender`. `frustumCulled` is off because an
+`InstancedMesh` caches one bounding sphere at its first frustum test, which a floating-origin
+rebase makes stale (reproduced on three's own `Frustum` in `entities_marker_material_check.mjs`).
+`Viewer.entityExtent` takes the largest of covariance, keep-out and the loaded model (farthest
+vertex from the marker position, `modelBoundingRadius`); the marker no longer floors it, and with
+nothing else drawn the answer is the old 3e-4 scene-unit (300 m) radius, source `marker`, so a
+marker-only Focus does not move.
+
+Proved in real headless Chrome (`tests/test_viewer_entity_framing_browser.py`): with only markers
+and models on, Focus on the RPO Chaser gives source `model`, the model's bounding sphere at 0.5796
+of the canvas height against the closed form, and the model drawn (10,811 pixels change when the
+class is switched on, none outside its box); the marker's width is constant across a 1000x
+distance change in the primary and a second viewport, where a size-attenuated control grows more
+than fivefold. Re-run by the manager: 24 passed; restoring the marker floor fails the fill
+assertion at 0.0028 of the canvas height.
+
+### Task 2: per-viewport Focus frames by extent
+
+`_setViewportFocus` frames a spacecraft through `_frameViewportEntity` when the viewport's camera is
+in the entities frame (the primary's own guard): that viewport's floating origin is rebased onto the
+entity, the placement is the primary's, extracted as `_placeCameraForEntity` (distance from
+`entityFramingDistance` with the viewport's own fov and aspect, near/far and zoom floor from
+`entityFramingDepthRange`), and the world-point aim is `_aimViewportCamera`, which the per-tick path
+now shares. A body or null focus, `fitViewport` and a frame change restore the whole-scenario range
+(`_restoreViewportFitDepthRange`). Outside the entities frame the central-body rule is unchanged.
+Proved by sixteen new `viewport_check.mjs` checks and a real-Chrome test: a portrait second viewport
+frames the 1.5 m model at 10.3 m against the closed form, aim error under 0.001° with a 7-unit
+origin shift asserted, the model drawn in that viewport's renderer, the primary and a bystander
+viewport untouched. Disabling the guard fails eleven node checks (manager's perturbation).
+
+### Task 3: a model reference on the run's wire
+
+`SystemInstance.visual_model_uri = 9` is the DRM's per-instance declaration and
+`Trajectory.visual_model_uri = 12` carries it (additions under `buf breaking`; "model" already means
+the dynamics model on this wire). The YAML loader accepts the key; the executor copies it onto the
+instance's trajectory on both `execute` paths; `cdm_trajectory_to_viewer_json` emits the viewer's
+`model` only when non-empty (a whitespace-only value is a `CdmAdapterError`, a 400 on both routes),
+so model-less viewer JSON is byte-identical to a capture from `develop`. Unset, proto3 omits the
+field and every existing canonical DRM/SoS/system hash is unchanged (asserted as literals); set, it
+enters `sos_configuration_hash`. New bundle `drms/leo_1day_orbital_native_model.{drm,sos}.yaml`
+reusing the native system file and the fixture glTF. Proved by `crates/av-kernel/tests/
+drm_visual_model.rs` (3) and `tests/test_cdm_visual_model.py`, which runs `av-run`, publishes to a
+live server's `POST /api/cdm/run` and draws the model in headless Chrome at 1.000 x 1.000 x 1.500 m.
+Re-run by the manager: kernel 3 passed, Python 72 passed with `test_cdm_adapter.py`; the adapter
+ignoring the field fails two tests.
+
+### Defects found, and their root causes
+
+1. **The fixture glTF is wound inside out**, so drawn single-sided none of its ~10,800 projected
+   pixels showed. `ModelEntity.attachModel` now draws materials two-sided by default, with an
+   opt-out: the fixture's winding is the root cause; two-sided drawing is a viewer policy that also
+   protects future open or mis-wound models. **Definitively root-caused.**
+2. **The per-spacecraft marker's scale floor of 1e-6 scene units (1 m)** put an opaque 1 m sphere
+   over a framed 1.5 m model (about 240 px of it showed). Floor now 1e-10. **Definitively
+   root-caused.**
+3. **Open, the round's main defect: shared entity objects are placed against the primary's render
+   origin.** `s.marker` and the model group that copies it are written once per tick through
+   `_toLocal` (`toRenderSpace` against the primary's floating origin, quantized with
+   `Math.fround`), contrary to `viewport.js`'s docstring. In a second viewport framed 10 m from the
+   Chaser while the primary's origin is elsewhere, the model sits 0.04–0.25 m off its true position
+   and hops up to about 0.48 m between ticks, which breaks question 46's centimetre bound in
+   secondary viewports. Not fixed this round. Proposed fix: draw shared entity objects relative to
+   each viewport's own origin at render time (an `onBeforeRender` offset), or per-viewport entity
+   objects.
+4. **`av-edge-plugin:local` moved a third time.** The gate found the tag on the kit's 2026-09-15
+   image `38062a48…`, so the plugin container test skipped. The persistent image-event log
+   (question 236) shows, at 2026-10-05 09:02:28 and 2026-10-07 16:51:04 CDT, a `load` of that image
+   with no tag repair after it, 28 s and 2 min 19 s after `tests/test_kit_zero_egress_install.py`'s
+   own load-and-restore. `scripts/kit/live_evidence.py::_load_and_verify_image` runs `docker load -i`
+   on the kit's plugin tarball and never restores the tag: question 234's rule was applied to the kit
+   test, not to this script, which `tests/test_live_evidence.py` drives right after it in a worktree
+   that has a built proof kit (`AltaVista-edge`; this worktree has none, so both skip here). Root
+   cause by code and log correlation, not by a re-run, because a re-run moves a shared host's tag.
+   The fix belongs to the kit's owner. The manager re-tagged the recorded image, and the re-pin
+   below supersedes it.
+5. **The previous round's "151 binaries"** for the workspace test phase is 150: its own log has 150
+   `test result` lines, and the binary lists of that log and this round's are identical.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. `target/debug/deps` (92,805 entries, under `cargo-slot`'s 100,000) was moved aside at the start
+   anyway, because the proto change rebuilds everything downstream of `av-cdm`; question 236's rule
+   is "at the start, not the end". It is at `target/deps-aside-2026-10-07` (11 GB), kept for the
+   lead to delete; the gate ended at 49,588 entries.
+2. Task 3's wire shape was fixed by the manager before the worker started: `visual_model_uri` on
+   `SystemInstance` (declaration) and `Trajectory` (wire), configuration in the SoS hash only when
+   set.
+3. The marker-only Focus keeps its old 300 m framing radius as a fallback.
+4. The screen-space marker is a vertex-shader rewrite on the existing `InstancedMesh`, not
+   `THREE.Points`: the residency model and its per-instance colour and `count` stay, and there is no
+   GL point-size cap.
+5. The two-sided default and the 1e-10 floor are accepted (the lead's ruling).
+6. Per-viewport framing applies in the entities frame only, mirroring the primary's guard.
+7. Tasks 1 and 3 ran in parallel (disjoint files); task 2 waited for task 1 (`scene.js`).
+8. The tiles, proposer and edge-plugin images are this team's (questions 232, 233) and were rebuilt
+   at `dacdecc` because the proto change made them stale; their three container tests pass against
+   the new records. The cFS image is the native team's and is left to its merge.
+9. `scenario_to_cdm` does not write `visual_model_uri`, so a Python-authored model does not survive
+   scenario → CDM → scenario; accepted and documented in `altavista/CDM.md`.
+
+### Observed, not fixed
+
+- The logarithmic depth buffer resolves about 0.1 m at a 6.4 m framing distance (three's per-fragment
+  `1 + w` term in float32); a model's surfaces closer than about 10 cm in depth would z-fight.
+- The glTF's default material renders dark and metallic.
+- `tests/test_cdm_run.py` still builds with bare `cargo`.
+
+### Gates
+
+Run at `dacdecc` (the last code commit) by `scratchpad/gate-heavy-co/run_gate.sh`, phases in
+sequence, each phase's whole output captured before reading. The container tests were re-run after
+`ecebac0`.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against` the main tree's proto | **clean, exit 0** |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **150 binaries, 1502 passed, 0 failed, 4 ignored, exit 0**, 445 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-run --all-targets --no-default-features -- -D warnings` | **clean, exit 0** |
+| required-features lint (steps inline through `cargo-slot`) | **clean, exit 0**: `linted 3 (package, feature set) group(s)` |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0; warnings: 7 duplicate, 6 wildcard (spoore), 5 license-not-encountered |
+| `cargo test -p av-kernel --no-fail-fast` | **47 binaries, 891 passed, 0 failed, 1 ignored, exit 0**, 566 s with two announced docker-lock waits (24 s, 1 s). One binary more than round 7's (`drm_visual_model`, 3 tests); the Renode test is no longer `#[ignore]` since question 238's fix |
+| every `web/js/**/*_check.mjs` | **25 of 29 exit 0**; the same four as last round print their usage line (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` exit 1) and their pytest drivers pass |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1044 passed, 3 failed, 18 skipped**, 574 s; every skip a visible opt-in gate or the plugin tag (defect 4) |
+| after `ecebac0`: `tests/test_proposer_container.py`, `test_tiles_container.py`, `test_edge_plugin_container.py` | **3 passed**, 206 s |
+
+**The three Python failures, each attributed.** All three are question 232's provenance check
+refusing an image as stale because `64f2d65` touched `proto/altavista/v1`, one of its copied paths:
+the proposer and tiles images (this team's, rebuilt in `ecebac0`, now green) and the cFS image
+(`services/cfs/tests/test_image_digest.py`, the native team's; it needs a rebuild at the merge).
+No SBOM test failed: no manifest moved this round. Whether the proto change moves the compliance
+bundle is for the lead's regeneration at the merge (`AV_SBOM_REBUILD` was not set).
+
+### What remains, each with its reason
+
+- **Defect 3**: shared entity objects quantized against the primary's origin; the first heavy task of
+  any further round.
+- **Defect 4**: `scripts/kit/live_evidence.py` leaves the plugin tag on the kit's image; the kit
+  owner's fix.
+- **The cFS image** is stale by provenance after the proto change; native team or the lead at the
+  merge.
+- `scenario_to_cdm` does not write `visual_model_uri` (decision 9).
