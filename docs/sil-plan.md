@@ -316,3 +316,214 @@ reproducible, which question 185 required. Recorded in `services/cfs/IMAGE_DIGES
    `rtems-syms` generates.
 3. **The test holds the docker-test lock for its whole body**, including the Renode half, which
    uses no Docker. Narrowing it to the posix half is a follow-up.
+
+## Status (native manager, 2026-10-07) — question 239's carry-over round
+
+The round question 239 chartered from question 238's carried items: a run's provenance independent
+of the test registry's port, the Renode test's docker lock narrowed to the container half, and a
+byte-reproducible RTEMS ELF. **All three are delivered**, with two more: a Renode bridge defect the
+round's own gate found (root-caused and fixed), and the kit's `live_evidence.py` tag restore the
+lead added mid-round. Six commits on `edge`, none pushed, none merged.
+
+| Commit | What |
+|---|---|
+| `4ae2b08` | the Renode test takes the docker-test lock for its posix half only |
+| `4839f3d` | the cFS test registries on a fixed loopback port; two posix runs, one `port_traffic_hash` |
+| `cf4d695` | `third_party/rtems-container/build-elf.sh`, the reproducible ELF recipe, and its pytest |
+| `2f2f52c` | the Renode bridge ends monitor commands in LF: one command, one prompt |
+| `a873ce8` | `scripts/kit/docker_image_tags.py`; `live_evidence.py` never leaves a tag it did not own |
+| this commit | this status section |
+
+### A run's provenance and the registry's port (sil-plan's "Found, not fixed" 1)
+
+- **The lead's ruling, mid-round:** the hashing rule is not changed. ADR-005 section 7 defines the
+  canonical hash as SHA-256 over the deterministic encoding with only the message's own `hash`
+  cleared; dropping `ContainerBinding.image` from it would be an ADR amendment, and where an image
+  is fetched from is configuration, stable in a real deployment. The instability was the
+  fixture's: a throwaway registry on an ephemeral port. The manager's first decision (clear
+  `image` when a digest is set, in `canonical_sos_hash`) was withdrawn before any code was written.
+- **Fix.** `push_cfs_image_to_local_registry` in `drm_attitude_control_cfs.rs` and
+  `drm_attitude_control_renode.rs` publishes the registry on the fixed loopback port 19031
+  (below every OS ephemeral range, away from macOS AirPlay's 5000), with typed `PortOccupied` /
+  `StartFailed` errors and never an ephemeral fallback; the docker-test lock, held by every
+  caller, serialises the test-owned registries on it. The push is retried while the registry
+  starts, and the digest comes from the `RepoDigests` entry matching the reference, not index 0.
+- **Proof** (`the_port_traffic_hash_is_the_same_across_two_separately_started_registries`): two
+  runs of the same DRM, same run id, against two separately started registries (the first
+  asserted removed before the second starts): `sos_configuration_hash` `9e2fb427…` and whole-file
+  `port_traffic_hash` `b66a00fb…` equal, each the SHA-256 of its file, the two files
+  byte-identical. The manager's re-run in a separate process gave the same two values.
+  **Perturbation:** run B bound to `localhost:19031/…` (the same registry and digest under
+  another reference) fails on `port_traffic_hash`, `b66a00fb…` against `a52c3d1f…`; the
+  worker's perturbation (run B on an ephemeral port) fails on the reference and on
+  `sos_configuration_hash`. The whole `drm_attitude_control_cfs` target: 5 passed, 0 skipped.
+
+### The Renode test's docker lock (sil-plan's "Found, not fixed" 3)
+
+The lock, the stale-resource prune, the registry with its image tag and the posix run's managed
+container now live in the posix half's own block and are dropped (registry guards, then the lock)
+before `spawn_renode_bridge`; only the posix `RunProducts` leaves it. The GMAT engine lock is
+still held for the whole body. **Proof**, observed from outside the process by a non-blocking
+`flock` probe every 0.5 s: held by the test's pid for 5.5 s of posix half, then free for 509
+consecutive polls through the bridge boot and the Renode run; the test passed (998 records,
+439 s). **Perturbation:** with the whole-body lock restored, the probe saw the test's pid holding
+the lock after the Renode bridge was ready. The manager's probe through the first gate saw the
+same shape (the test's pid for 6 s, then other tracks' docker tests taking the lock twice during
+its Renode half).
+
+### The RTEMS ELF, byte-reproducible (sil-plan's "Found, not fixed" 2)
+
+`third_party/rtems-container/build-elf.sh`, in the manner of `services/cfs/build-shim.sh`:
+
+- cFS from the seven pinned commits through the local mirrors (`fetch-cfs.sh`'s own
+  `CFS_FETCH_DEST` into a fresh stage under `$HOME`, `GIT_ALLOW_PROTOCOL=file` so a missing commit
+  fails rather than fetching), never the mutable `third_party/cfs`;
+- `debian:bookworm-slim@sha256:88200866…` with the 93-package apt closure pinned by version and the
+  container's whole `dpkg-query -W` set checked against `19ed31e5…`;
+- the toolchain mounted read-only and checked against a manifest hash (`b56b32d8…`, sorted path,
+  file SHA-256 or symlink target), refusing on mismatch;
+- cFE's `BUILDDATE=202610050000`, `HOSTNAME=altavista-elf-build`, `USER=altavista` (the variables
+  `generate_build_env.cmake` reads);
+- **the last three bytes, root-caused:** the C file `rtems-syms` generates is named `cc` plus its
+  own pid in base 62 (pid 8 → `cciaaaaa`, 133 → `ccjcaaaa`; the question 171 ELF carries
+  `cc2gbaaa.c`, pid 4270), recorded as an `STT_FILE` symbol, so the bytes followed the
+  container's process history. `rtems-syms -S <file>` names it; the recipe applies
+  `-S <TARGET>-dl-sym.c` by an asserted, idempotent edit of the staged `RTEMS.cmake`. No ELF bytes
+  are post-processed.
+
+**Byte for byte:** four builds from four host staging paths (three by the worker, one by the
+manager) give `core-cpu1.exe` SHA-256 `a5a5fe7b…2eb5`, 7,551,228 bytes, no host path in it. The
+control without `-S` differs (symbol `ccS8aaaa.c`); `BUILDDATE` (worker) and `BUILDHOST`
+(manager) perturbations differ. **It boots** under Renode to cFE OPERATIONAL with `IO_LOCKSTEP`,
+`SCH_LOCKSTEP` and `ADCS` (uart0 identical to the question 171 ELF's but for the Build line), and
+**it passes the Renode test** in the gate below. Against the question 171 ELF (`b5b2eac3…`) every
+text symbol is at the same address; 452 data symbols moved by exactly +8 bytes from
+`CFE_BUILD_ENV_TABLE` on, the pinned build-environment strings being longer.
+`services/cfs/tests/test_build_elf_script.py` (14 tests) pins the invariants.
+
+### A defect the gate found: the bridge's monitor commands drew two prompts each
+
+The first gate (at `cf4d695`) failed the Renode test at STEP 87 of 100: `MonitorDesyncError`,
+30 bytes (`1m(<machine>) \x1b[0`) queued before `cmd#1098`, then the shim saw the peer close and
+the kernel aborted the STEP RPC. **Root cause, measured** against Renode 1.16.1's monitor with a
+raw byte trace: CR and LF each end a line, so the bridge's `<cmd>\r\n` was a command plus an
+empty line, and the empty line drew a second prompt (`emulation\r\n` 2 prompts, `emulation\n` 1;
+five CRLF commands in one send, 10). `_read_reply_for` returned at the first prompt and left the
+second to the 150 ms grace drain, which a loaded host outruns (the stray was exactly that prompt,
+its leading `\x1b[33;` already read); `_read_n_replies` counted N prompts for N `WriteChar`
+commands while 2N arrived, declaring a batch drained about halfway. M24_4g's "trailing ANSI
+fragment after `RunFor`", attributed then to Renode-side buffering, was this second prompt.
+**Fix** (`2f2f52c`): `MonitorClient.TERMINATOR` is a lone LF for `send` and `write_chars`; every
+command form the bridge sends was probed with LF against the real Renode (one prompt each,
+nothing late). The grace drain stays as a backstop and now reports what it finds, separating the
+expected tail of the same prompt (` \x1b[0m`, written in small segments) from anything else.
+**Proof:** a fake monitor in `tests/test_renode_monitor_client.py` that draws one prompt per line
+terminator, the empty-line one delayed past the grace window (12 passed; with CRLF restored, 3
+fail on `MonitorDesyncError`, the worker's and the manager's perturbation alike); the Renode test
+with the reproducible ELF passed three times with zero unexpected grace-drain bytes, and in the
+final gate below. Why it first appeared now: narrowing the lock (`4ae2b08`) lets other tracks'
+docker work run during the Renode half (the first gate's probe saw two other holders in it), so
+the host was busier there than in any earlier run; the defect was older than that.
+
+### The kit's `live_evidence.py` and the plugin tag (the lead's addition)
+
+`av-edge-plugin:local` moved to the proof kit's 2026-09-15 image a third time; the heavy manager
+root-caused it to `scripts/kit/live_evidence.py::_load_and_verify_image`, whose `docker load -i`
+restores the tarball's own tag host-wide and was never undone (question 234's rule reached the kit
+test in `69de194`, not this script). The snapshot / load / verify-by-id / undo / closing-assertion
+logic is now one helper, `scripts/kit/docker_image_tags.py` (`ImageTagGuard`), imported by both;
+the undo runs in a `finally`; `live_evidence.py` runs its container from a run-scoped test-only
+tag and asserts the host's tags unchanged from its outermost `finally`. **Proof:** the host's 26
+tags byte-identical after both test files in both orders and after the manager's re-run, the
+image-event log showing `load` then this code's own `tag`/`untag`; the undo disabled reproduces
+the incident and the closing assertion catches it; the closing assertion disabled fails its own
+test. The worker's perturbation left the plugin tag on the kit image and the worker put it back
+by hand to the id it held before (`9d366f65…`), recorded in its evidence.
+
+### Gate
+
+Final gate at `a873ce8` (the code head), every phase in sequence, whole output under the
+manager's scratchpad `gate-native-co/`, 2026-10-07 17:50 to 18:26:
+
+| Phase | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto`; `buf lint proto` | clean, clean |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 150 binaries, 1,502 passed, 0 failed, 4 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| the same for `av-kernel` and `av-run` with `--no-default-features` | clean, clean |
+| the required-features lint's steps through `cargo-slot` | 3 groups linted, clean |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed |
+| `cargo test -p av-kernel --no-default-features` | 653 passed |
+| `cargo test -p av-kernel` | 889 passed, 1 ignored (the Renode test skips visibly here: no Renode binary in this worktree) |
+| the Renode test, `AV_RENODE_TESTS=1`, ELF `a5a5fe7b…` | passed, 998 records both sides, records-only hash `8e518964…8fd2` both, 542 s; lock released after 15.5 s |
+| `pytest -q -rs` under `cargo-slot --hold` | 1,057 passed, 17 skipped, 0 failed |
+
+The 17 skips: 13 opt-in gates (`AV_KIT_WITH_*`, `AV_SBOM_REBUILD`, `AV_CFS_RUN_REPRO_BUILD`), and
+three image-digest refusals, all heavy-track images rebuilt on this host between 17:09 and 17:13
+today, outside this round: `av-edge-plugin:local` (`9d366f65…` against the recorded `4a43e35b…`),
+`av-proposer:local` (`11813019…` against `93da1979…`), and `av-tiles:local` (`a83606dc…` against
+`58e013a7…`). They are the lead's to reconcile at the merge. No compliance test failed.
+The first gate, at `cf4d695`, had every phase green except the Renode test, which found the
+bridge defect above (pytest there: 1,049 passed, 15 skipped).
+
+### Decisions (numbered, for the lead to ratify)
+
+1. Question 239's provenance item is fixed in the fixture under the lead's ruling, not in
+   `canonical_sos_hash`; ADR-005 is unchanged and no recorded hash moved (no committed SOS carries
+   a `ContainerBinding.image`).
+2. The fixed registry port is 19031, the same in both cFS test files, with no fallback; the
+   helper stays duplicated in the two files (the pattern they already had) rather than becoming a
+   shared test module this round.
+3. The manager's perturbation of the provenance proof used a second reference to the same registry
+   (`localhost:19031`), so it isolates the reference string as the cause.
+4. In the Renode test, registry guards drop before the lock, so no Docker resource of the test
+   outlives the lock that protects it from other trees' prunes.
+5. The three tasks ran in parallel in this worktree on disjoint paths; the Renode test file
+   carried both task 2's and task 1's changes, so task 2 was committed from its worker's exact
+   file version (`git update-index --cacheinfo`) and the port change went into task 1's commit.
+6. The `rtems-syms` fix uses the tool's own `-S` option on the staged `RTEMS.cmake`, applied by
+   `build-elf.sh`, not `build-cfs-cross.sh`, so the direct invocation stays as it was and the
+   control switch (`ELF_NO_SYMS_FIX`) is one place.
+7. The apt pin is the whole 93-package closure plus the dpkg-set hash, because cmake's and the
+   host compiler's behaviour depend on the transitive set; apt still uses the network once per
+   build (question 154's window).
+8. The pinned cFE metadata values are labels, not the building machine: `202610050000`,
+   `altavista-elf-build`, `altavista`.
+9. The container-side paths `/workspace` and `/output/toolchain` are fixed by the recipe (the
+   toolchain cmake already hardcodes the second); host staging paths are proven not to matter,
+   container paths were not varied.
+10. `target/debug/deps` held 44,634 entries at the start, under `cargo-slot`'s threshold, so it was
+    not moved (question 236's rule).
+11. The final gate ran at `a873ce8`, the code head; this commit changes only this file.
+12. `docs/roadmap-status.md`'s native line is left to the lead, because the heavy track edits the
+    adjacent line in the same round.
+13. The bridge defect the gate found was fixed this round rather than recorded, because it stood
+    between the reproducible ELF and its required Renode proof and its root cause was measured.
+14. The bridge's readers still complete on the prompt's text, not on its colour-reset tail; waiting
+    for the tail would hang on an uncoloured monitor. The tail is counted, never trusted.
+15. The shared tag helper lives in `scripts/kit/`, not `tests/` (production tooling must not import
+    a test module) and not `altavista/` (it would change the pinned wheel's contents and hash).
+16. A failed load, a missing tag and a digest mismatch now restore tags too (the undo moved into a
+    `finally`); the kit test's "image still exists after untag" check applies only when a test-only
+    tag was kept, which on this host changes nothing.
+
+### Found, not fixed this round
+
+1. **The container instance's `dynamics_hash` still varies per run.** `ModelInfo::settings_hash`
+   (`binding.rs`, around line 1589) folds in the binding's image, digest and the ephemeral
+   `container.address`, so the container segment's `dynamics_hash` differs between two runs; it
+   never reaches `port_traffic.pb`, and the tests already exclude it, but it is the same class
+   of defect as the registry port.
+2. **The apt pin depends on the live Debian mirror carrying those versions;** a point release that
+   drops one fails the build loudly. `snapshot.debian.org` would make it permanent.
+3. **`av-edge-plugin:local` no longer matches `services/edge-plugin/IMAGE_DIGEST.md`.** The
+   image-event log shows `delete sha256:4a43e35b…` (the recorded image) and a rebuild tagged
+   `sha256:9d366f65…` at 2026-10-07 17:13:00 CDT, not by this round's work; the plugin container
+   test skips on the mismatch until the record or the tag is reconciled (question 236's rule:
+   the lead's).
+4. **The cFS test helper is duplicated** in `drm_attitude_control_cfs.rs` and
+   `drm_attitude_control_renode.rs`, now including the fixed port; a shared test module would
+   stop the two drifting.
+5. **`alpine:latest` is not the image the container executor test recorded** (`294b683c…`
+   against `28bd5fe8…`), so that heavy-track test skips; it skipped the same way last round.
