@@ -32,7 +32,8 @@ button) and reading every answer off the live scene graph, never off a counter:
 
 The second half of the file (question 239, task 1) covers a spacecraft whose only drawn thing is
 its glTF model, and the entity marker's screen-space size; see the comment block above
-`RPO_SCENARIO_NAME`.
+`RPO_SCENARIO_NAME`. The last test (task 2) proves a second viewport's Focus frames a spacecraft
+exactly as the primary's does, in its own fov/aspect and origin, without touching any other camera.
 
 The harness helpers (`_find_chrome`/`_free_port`/`_LiveServer`/`_drive`) are
 tests/test_viewer_entities_browser.py's own, duplicated per this repo's convention.
@@ -484,9 +485,9 @@ _PROBE_JS = r"""
     await frames(3);
     out.afterReset = { near: cam.near, far: cam.far, minDistance: viewer.controls.minDistance, framed: viewer._entityFramed };
 
-    // ---- a second (per-viewport) camera focused on the spacecraft faces it too. Its focus
-    // still uses the old central-body distance (extent framing is the primary camera's),
-    // so this asserts only the aim: forward axis vs the direction to the entity.
+    // ---- a second (per-viewport) camera focused on the spacecraft faces it too, and sits at
+    // the framing distance of ITS OWN fov/aspect (question 239, task 2; the full proof is
+    // test_viewport_focus_frames_the_spacecraft_like_the_primary below).
     {
       const vpCanvas = document.createElement('canvas');
       vpCanvas.style.cssText = 'position:fixed;left:0;top:0;width:400px;height:300px;z-index:-1';
@@ -497,11 +498,18 @@ _PROBE_JS = r"""
       vp.camera.updateMatrixWorld(true);
       const camPos = vp.camera.getWorldPosition(new THREE.Vector3());
       const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(vp.camera.getWorldQuaternion(new THREE.Quaternion()));
-      const tgt = viewer.spacecraft.get(NAME).marker.getWorldPosition(new THREE.Vector3());
+      // the entity's TRUE position (f64 interpolator): the marker's world position is rounded
+      // to float32 in the primary's render space, whose origin is at 0 after Reset view, so it
+      // is up to ~0.25 m off the true position (see the viewport-focus probe below)
+      const tgt = new THREE.Vector3();
+      viewer.spacecraft.get(NAME).interp.at(viewer._lastT, tgt);
+      tgt.multiplyScalar(scene.SCALE);
       const toT = tgt.clone().sub(camPos).normalize();
       out.viewport = {
         renderGroupShiftLen: vp.renderGroup.position.length(),
         distance: camPos.distanceTo(tgt),
+        expectedDistance: scene.entityFramingDistance(viewer.entityExtent(NAME).radius, vp.camera.fov, vp.camera.aspect),
+        extentSource: viewer.entityExtent(NAME).source,
         offAxisDeg: (Math.acos(Math.min(1, Math.max(-1, fwd.dot(toT)))) * 180) / Math.PI,
       };
     }
@@ -617,6 +625,10 @@ def test_focus_frames_the_spacecraft_by_its_own_extent(live_server):
     assert vpm["renderGroupShiftLen"] > 1.0, f"the viewport's origin was not rebased onto the spacecraft, so this proved nothing: {vpm}"
     assert vpm["offAxisDeg"] < 1e-3, (
         f"the per-viewport camera is not facing its focused spacecraft: {vpm['offAxisDeg']:.4f} degrees off ({vpm})"
+    )
+    assert vpm["extentSource"] == "covariance", vpm
+    assert math.isclose(vpm["distance"], vpm["expectedDistance"], rel_tol=1e-6), (
+        f"the per-viewport camera is not at the entity's framing distance: {vpm}"
     )
 
     assert errors == [], (
@@ -1133,6 +1145,384 @@ def test_entity_marker_is_a_constant_number_of_pixels_at_any_distance_in_every_v
     )
     assert not math.isclose(a_near["widthCss"], a_far["widthCss"], rel_tol=MARKER_RATIO_TOL)
     assert v["viewport"]["attenuatedNear"]["widthCss"] >= 3 * MARKER_DIAMETER_PX, v["viewport"]["attenuatedNear"]
+
+    assert errors == [], (
+        f"expected zero console warnings/errors/page exceptions, got {len(errors)}:\n" + "\n".join(errors)
+    )
+
+
+# =====================================================================================
+# A second viewport's Focus on a spacecraft frames it as the primary's does (heavy
+# carry-over round, question 239, task 2).
+#
+# Before: `Viewer._setViewportFocus` put a viewport's camera at 1.5 central-body radii for a
+# spacecraft focus (9,500 km from a 1.5 m model, a dot), with the Earth-framed near/far.
+# Now, in the entities frame, it does what `setFocus` does: the viewport's OWN floating origin is
+# rebased onto the entity, the camera goes to `entityFramingDistance(entityExtent, <the
+# viewport's> fov, <the viewport's> aspect)`, near/far come from `entityFramingDepthRange`, the
+# zoom floor drops, and the camera is aimed at the world point. A body focus, a null focus,
+# `fitViewport` and a frame change put the whole-scenario near/far and zoom floor back.
+#
+# The probe uses a PORTRAIT viewport (300 x 500 CSS px, aspect 0.6), so its narrower field of
+# view is the horizontal one and its framing distance differs from the (landscape) primary's by
+# a factor the assertions state; a second, landscape viewport is the bystander whose camera,
+# origin and depth range must not move.
+# =====================================================================================
+# Distances are compared to the closed form at 1e-6 relative (the primary's own tolerance): the
+# camera sits ~5e-6 scene units from its target and both are f64 numbers a few units from the
+# world origin before the rebase, so the rounding error is ~1e-15 / 5e-6 = 2e-10; 1e-6 is three
+# orders looser than that and orders tighter than the factor-of-1.8 error of the wrong aspect
+# (primary landscape vs. portrait viewport).
+VIEWPORT_DISTANCE_REL_TOL = 1e-6
+VIEWPORT_AIM_TOL_DEG = 1e-3
+
+_VIEWPORT_PROBE_JS = r"""
+(async () => {
+  const out = { step: 'start' };
+  try {
+""" + _RPO_PROBE_PRELUDE + r"""
+    // ---- ONLY the markers and models classes on
+    await setClass('Trails', false);
+    await setClass('glTF models', true);
+    await until(() => viewer.entityOptions.models && !viewer.entityOptions.trails, 'the class options');
+    out.options = { ...viewer.entityOptions };
+
+    const mk = (id, w, h) => {
+      const c = document.createElement('canvas');
+      c.style.cssText = `position:fixed;left:0;top:0;width:${w}px;height:${h}px;z-index:-1`;
+      document.body.appendChild(c);
+      return { id, canvas: c, vp: viewer.addViewport(id, c) };
+    };
+    const A = mk('frame-a', 300, 500);   // portrait: the viewport under test
+    const B = mk('frame-b', 400, 300);   // landscape: the bystander
+    await frames(3);
+    A.vp.controls.enableDamping = false; B.vp.controls.enableDamping = false;
+    const FO = viewer._originFrameId;
+    const originOf = (fo) => { const o = fo.getOrigin(FO); return [o.x, o.y, o.z]; };
+    const snapPrimary = () => ({
+      pos: viewer.camera.position.toArray(), quat: viewer.camera.quaternion.toArray(),
+      near: viewer.camera.near, far: viewer.camera.far, target: viewer.controls.target.toArray(),
+      minDistance: viewer.controls.minDistance, origin: originOf(viewer.floatingOrigin),
+      groupShift: viewer._entitiesGroup.position.toArray(), framed: viewer._entityFramed, focus: viewer.focus,
+    });
+    const snapVp = (e) => ({
+      pos: e.vp.camera.position.toArray(), quat: e.vp.camera.quaternion.toArray(),
+      near: e.vp.camera.near, far: e.vp.camera.far, target: e.vp.controls.target.toArray(),
+      minDistance: e.vp.controls.minDistance, origin: originOf(e.vp.floatingOrigin),
+      groupShift: e.vp.renderGroup.position.toArray(), framed: e.vp.entityFramed, focus: e.vp.focus,
+    });
+    const fit = { near: Math.max(viewer.fitRadius * 1e-6, 1e-4), far: Math.max(viewer.fitRadius * 1e4, 1e6) };
+    out.fit = { ...fit, fitRadius: viewer.fitRadius };
+    out.cameras = {
+      primary: { fov: viewer.camera.fov, aspect: viewer.camera.aspect },
+      a: { fov: A.vp.camera.fov, aspect: A.vp.camera.aspect, css: [A.canvas.clientWidth, A.canvas.clientHeight] },
+      b: { fov: B.vp.camera.fov, aspect: B.vp.camera.aspect },
+    };
+    const before = { primary: snapPrimary(), b: snapVp(B), a: snapVp(A) };
+
+    // ---- Focus the Chaser on viewport A (the API app.js's viewport panes call)
+    viewer.setViewportFocus(A.id, NAME);
+    // measured right away, before any tick: the framing is done by the focus call itself
+    out.immediate = { distance: A.vp.camera.position.distanceTo(A.vp.controls.target), near: A.vp.camera.near };
+    await frames(6);
+    const cam = A.vp.camera;
+    const entity = viewer._entityModelEntities.get(NAME);
+    out.extent = viewer.entityExtent(NAME);
+    out.focus = A.vp.focus;
+    out.framed = A.vp.entityFramed;
+    out.distance = cam.position.distanceTo(A.vp.controls.target);          // render space
+    out.expectedDistance = scene.entityFramingDistance(out.extent.radius, cam.fov, cam.aspect);
+    out.primaryRuleDistance = scene.entityFramingDistance(out.extent.radius, viewer.camera.fov, viewer.camera.aspect);
+    out.depth = { near: cam.near, far: cam.far, minDistance: A.vp.controls.minDistance };
+    out.originShift = { renderGroup: A.vp.renderGroup.position.length(), vpOrigin: originOf(A.vp.floatingOrigin), cameraLocalLen: cam.position.length() };
+    {
+      const abs = new THREE.Vector3();
+      viewer.spacecraft.get(NAME).interp.at(viewer._lastT, abs);
+      out.originShift.entityAbsScene = [abs.x * scene.SCALE, abs.y * scene.SCALE, abs.z * scene.SCALE];
+    }
+
+    // ---- aim: forward axis vs the direction to the Chaser's TRUE position (the f64 interpolator's,
+    // in world space). Not the marker's or the model's world position: those are rounded to
+    // float32 in the PRIMARY's render space (`_toLocal`), which here has its origin at 0, so
+    // at LEO they sit up to ~0.25 m (half a float32 step of 0.48 m) off the true position and
+    // hop between ticks (a defect found by this task, in the report; not fixed here).
+    const trueWorld = () => {
+      const a = new THREE.Vector3();
+      viewer.spacecraft.get(NAME).interp.at(viewer._lastT, a);
+      return a.multiplyScalar(scene.SCALE);
+    };
+    const faceAngle = (c) => {
+      c.updateMatrixWorld(true);
+      const camPos = c.getWorldPosition(new THREE.Vector3());
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(c.getWorldQuaternion(new THREE.Quaternion()));
+      const tgt = trueWorld();
+      const to = tgt.sub(camPos);
+      return { deg: (Math.acos(Math.min(1, Math.max(-1, fwd.dot(to.clone().normalize())))) * 180) / Math.PI, worldDistance: to.length() };
+    };
+    out.aim = faceAngle(cam);
+
+    // ---- the model as the viewport's camera sees it
+    const measureModel = (c, cv) => {
+      c.updateMatrixWorld(true); c.updateProjectionMatrix();
+      entity.group.updateWorldMatrix(true, true);
+      const origin = entity.group.getWorldPosition(new THREE.Vector3());
+      const camPos = c.getWorldPosition(new THREE.Vector3());
+      let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity, behind = 0, n = 0, maxDist = 0, zmin = Infinity, zmax = -Infinity;
+      entity.group.traverse((o) => {
+        if (!o.isMesh) return;
+        const pos = o.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const w = new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
+          maxDist = Math.max(maxDist, w.distanceTo(origin));
+          const vz = w.clone().applyMatrix4(c.matrixWorldInverse).z;
+          if (vz >= 0) behind += 1;
+          zmin = Math.min(zmin, -vz); zmax = Math.max(zmax, -vz);
+          const p = w.project(c);
+          xmin = Math.min(xmin, p.x); xmax = Math.max(xmax, p.x); ymin = Math.min(ymin, p.y); ymax = Math.max(ymax, p.y);
+          n += 1;
+        }
+      });
+      // the bounding sphere about the marker position (radius = farthest vertex), projected
+      const R = maxDist, D = origin.distanceTo(camPos);
+      const dirv = origin.clone().sub(camPos).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld, 1).normalize();
+      const right = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld, 0).normalize();
+      const shift = (R * R) / D, lift = R * Math.sqrt(1 - (R * R) / (D * D));
+      const tp = (axis, s) => origin.clone().addScaledVector(dirv, -shift).addScaledVector(axis, s * lift).project(c);
+      const W = cv.width, H = cv.height;
+      const px = (nx) => (nx * 0.5 + 0.5) * W, py = (ny) => (1 - (ny * 0.5 + 0.5)) * H;
+      return {
+        vertices: n, verticesBehindCamera: behind, R, D, viewDepthMin: zmin, viewDepthMax: zmax,
+        sphereWidthFraction: Math.abs(tp(right, 1).x - tp(right, -1).x) / 2,
+        sphereHeightFraction: Math.abs(tp(up, 1).y - tp(up, -1).y) / 2,
+        box: { x0: Math.floor(px(xmin)), x1: Math.ceil(px(xmax)), y0: Math.floor(py(ymax)), y1: Math.ceil(py(ymin)) },
+      };
+    };
+    out.model = measureModel(cam, A.canvas);
+
+    // ---- is it DRAWN in viewport A's own renderer? render with the models class on and off
+    {
+      const rg = 3, b = out.model.box;
+      const box = { x0: b.x0 - rg, x1: b.x1 + rg, y0: b.y0 - rg, y1: b.y1 + rg };
+      const renderNow = () => { A.vp.renderer.render(viewer.scene, cam); return grab(A.vp.renderer, A.canvas); };
+      const on = renderNow();
+      viewer._entityGroups.models.visible = false;
+      const off = renderNow();
+      viewer._entityGroups.models.visible = true;
+      const d = diffIn(on, off, box);
+      const whole = diffIn(on, off, { x0: 0, x1: A.canvas.width - 1, y0: 0, y1: A.canvas.height - 1 });
+      out.drawn = { box, boxArea: (box.x1 - box.x0 + 1) * (box.y1 - box.y0 + 1), diffInBox: d, diffWholeFrame: whole.count };
+    }
+
+    // ---- nothing re-frames per tick: the clock runs, the extent changes under the camera
+    // (models off: the extent falls back to the 300 m marker, whose framing distance is 1000x
+    // larger), and the viewport's distance does not move until the next explicit Focus.
+    const d0 = A.vp.camera.position.distanceTo(A.vp.controls.target);
+    const t0 = viewer._lastT;
+    document.getElementById('btn-play').click();
+    await until(() => viewer._lastT - t0 > 5 / 86400, 'the clock to advance by at least 5 s');
+    await frames(10);
+    await setClass('glTF models', false);
+    await frames(5);
+    out.noReframe = {
+      d0, dAfter: A.vp.camera.position.distanceTo(A.vp.controls.target), clockAdvancedDays: viewer._lastT - t0,
+      extentNow: viewer.entityExtent(NAME), aim: faceAngle(A.vp.camera),
+    };
+    // (aim measured at once: with the clock running, the per-tick follow of the orbit target is
+    // float32 in the viewport's render space, ~0.5 mm at 10 m, i.e. ~0.003 degrees)
+    viewer.setViewportFocus(A.id, NAME);
+    out.reframed = {
+      extent: viewer.entityExtent(NAME), distance: A.vp.camera.position.distanceTo(A.vp.controls.target),
+      expected: scene.entityFramingDistance(viewer.entityExtent(NAME).radius, A.vp.camera.fov, A.vp.camera.aspect),
+      aim: faceAngle(A.vp.camera),
+    };
+    await frames(3);
+    out.reframed.distanceAfterFrames = A.vp.camera.position.distanceTo(A.vp.controls.target);
+    await setClass('glTF models', true);
+    document.getElementById('btn-play').click();   // pause again
+    await frames(3);
+
+    // ---- restores: a body focus, a null focus, fitViewport and a frame change, each starting
+    // from a framed state
+    const refocus = async () => {
+      viewer.setViewportFocus(A.id, NAME);
+      await frames(3);
+      return { framed: A.vp.entityFramed, near: A.vp.camera.near, minDistance: A.vp.controls.minDistance,
+               distance: A.vp.camera.position.distanceTo(A.vp.controls.target) };
+    };
+    const restored = (label, extra = {}) => ({ label, framed: A.vp.entityFramed, near: A.vp.camera.near, far: A.vp.camera.far,
+                                              minDistance: A.vp.controls.minDistance, focus: A.vp.focus, ...extra });
+    out.restores = [];
+    const run = async (label, act, extra = () => ({})) => {
+      const from = await refocus();
+      act();
+      const to = restored(label, extra());
+      await frames(3);
+      out.restores.push({ from, to, toAfterFrames: restored(label, extra()) });
+    };
+    await run('body', () => viewer.setViewportFocus(A.id, 'Earth'));
+    await run('null', () => viewer.setViewportFocus(A.id, null));
+    await run('fitViewport', () => viewer.fitViewport(A.id));
+    // a frame change: a plain static frame added to the live frame graph, then the viewport
+    // moves into it and back
+    viewer.frameGraph.addFrame({ id: 'probe-frame', parentId: FO, description: 'probe', axesKind: null, fixedRotationQ: null, body: null });
+    await run('frame change', () => viewer.setViewportFrame(A.id, 'probe-frame', NAME), () => ({ cameraFrameId: A.vp.cameraFrameId }));
+    viewer.setViewportFrame(A.id, FO, NAME);   // back into the entities frame, focus on the Chaser: framed again
+    await frames(4);
+    out.backInEntitiesFrame = {
+      framed: A.vp.entityFramed, distance: A.vp.camera.position.distanceTo(A.vp.controls.target),
+      expected: scene.entityFramingDistance(viewer.entityExtent(NAME).radius, A.vp.camera.fov, A.vp.camera.aspect),
+      aim: faceAngle(A.vp.camera), cameraFrameId: A.vp.cameraFrameId,
+    };
+
+    // ---- the primary and the bystander viewport were never touched
+    out.before = before;
+    out.after = { primary: snapPrimary(), b: snapVp(B) };
+    out.step = 'done';
+  } catch (e) {
+    out.error = String((e && e.stack) || e);
+  }
+  return out;
+})()
+"""
+
+
+def test_viewport_focus_frames_the_spacecraft_like_the_primary(rpo_server):
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        pytest.skip("no Chrome/Chromium binary found on this host; cannot drive a headless browser")
+    errors, v = asyncio.run(_drive(rpo_server.url, chrome_path, _VIEWPORT_PROBE_JS, wait_s=4.0))
+
+    print("\nviewport-focus probe:", json.dumps(v, indent=2, sort_keys=True))
+    print("console/exception messages:", errors)
+    assert v is not None, f"the page probe returned nothing; console errors were: {errors}"
+    assert not v.get("error"), f"probe reported an error: {v.get('error')}\nconsole: {errors}"
+    assert v["step"] == "done", v
+
+    # Only the markers and models classes are on; the Chaser's extent is its 1.5 m model.
+    assert v["options"] == {"markers": True, "trails": False, "covarianceEllipsoids": False,
+                            "keepOutVolumes": False, "models": True}, v["options"]
+    assert v["focus"] == "Chaser" and v["framed"] is True
+    assert v["extent"]["source"] == "model", v["extent"]
+    assert 1e-6 <= v["extent"]["radius"] <= 2.5e-6, v["extent"]  # a 1 x 1 x 1.5 m shell, 1 m = 1e-6 scene units
+
+    # The viewport is portrait (its narrower FOV is the horizontal one), the primary is landscape.
+    cams = v["cameras"]
+    assert cams["a"]["aspect"] < 1 < cams["primary"]["aspect"], cams
+    assert cams["a"]["css"] == [300, 500], cams
+
+    # ------------------------------------------------ distance: the closed form of ITS OWN fov/aspect
+    fov, aspect = cams["a"]["fov"], cams["a"]["aspect"]
+    v_rad = math.radians(fov)
+    eff_rad = min(v_rad, 2 * math.atan(math.tan(v_rad / 2) * aspect))
+    closed_form = v["extent"]["radius"] / math.sin(0.6 * eff_rad / 2)   # independent of the helper
+    assert math.isclose(v["expectedDistance"], closed_form, rel_tol=1e-12), (v["expectedDistance"], closed_form)
+    assert math.isclose(v["distance"], closed_form, rel_tol=VIEWPORT_DISTANCE_REL_TOL), (
+        f"the viewport camera is {v['distance']:.6e} scene units from the Chaser; its own fov/aspect frame the "
+        f"{v['extent']['radius']:.3e} model at {closed_form:.6e} (the old rule put it at 1.5 Earth radii, 9.567e+00)"
+    )
+    assert math.isclose(v["immediate"]["distance"], closed_form, rel_tol=VIEWPORT_DISTANCE_REL_TOL), v["immediate"]
+    # the portrait viewport's distance is NOT the landscape primary's: the viewport's own aspect is used
+    assert v["distance"] > 1.5 * v["primaryRuleDistance"], (v["distance"], v["primaryRuleDistance"])
+    # and the world-space distance to the TRUE position (f64 interpolator) is the same number
+    assert math.isclose(v["aim"]["worldDistance"], v["distance"], rel_tol=VIEWPORT_DISTANCE_REL_TOL), v["aim"]
+
+    # ------------------------------------------------ the model fills the framing fraction of the NARROWER dimension
+    m = v["model"]
+    assert m["verticesBehindCamera"] == 0 and m["vertices"] > 0, m
+    assert math.isclose(m["R"], v["extent"]["radius"], rel_tol=1e-6), m
+    assert 0.50 <= m["sphereWidthFraction"] <= 0.65, f"framing sphere is {m['sphereWidthFraction']:.3f} of the portrait canvas width: {m}"
+    assert m["sphereHeightFraction"] < m["sphereWidthFraction"], m
+    # the closed form of the projection: tan(asin(R/d)) / tan(hfov / 2), hfov/2 from the aspect
+    tan_half_h = math.tan(v_rad / 2) * aspect
+    want = (m["R"] / math.sqrt(m["D"] ** 2 - m["R"] ** 2)) / tan_half_h
+    assert math.isclose(m["sphereWidthFraction"], want, rel_tol=1e-6), (m["sphereWidthFraction"], want)
+
+    # ------------------------------------------------ depth range and zoom floor (independent closed form)
+    d = v["distance"]
+    gap = max(d - v["extent"]["radius"], d * 1e-3)
+    want_near = min(0.01 * d, 0.5 * gap)
+    want_far = max(v["fit"]["far"], 1e4 * d)
+    assert math.isclose(v["depth"]["near"], want_near, rel_tol=1e-9), (v["depth"], want_near)
+    assert math.isclose(v["depth"]["far"], want_far, rel_tol=1e-9), (v["depth"], want_far)
+    assert math.isclose(v["depth"]["minDistance"], min(1e-3, 0.1 * d), rel_tol=1e-9), v["depth"]
+    assert v["depth"]["near"] < m["D"] - m["R"] and m["D"] + m["R"] < v["depth"]["far"], (v["depth"], m)
+    assert m["viewDepthMin"] > v["depth"]["near"] and m["viewDepthMax"] < v["depth"]["far"], (m, v["depth"])
+    assert v["depth"]["far"] > 7.0 + 6.4, v["depth"]   # the Earth, ~7 scene units behind, still draws
+
+    # ------------------------------------------------ the viewport's own origin moved onto the entity, and the aim
+    o = v["originShift"]
+    assert o["renderGroup"] > 1.0, f"the viewport's origin was not rebased onto the spacecraft, so the aim proved nothing: {o}"
+    assert math.dist(o["vpOrigin"], o["entityAbsScene"]) < 1e-4, o   # origin within 100 m of the entity (the clock is paused)
+    assert o["cameraLocalLen"] < 1e-4, f"the camera is not near its render origin (float32 bound): {o}"
+    assert v["aim"]["deg"] < VIEWPORT_AIM_TOL_DEG, (
+        f"the viewport camera is {v['aim']['deg']:.5f} degrees off the framed Chaser (origin shift {o['renderGroup']:.3f})"
+    )
+
+    # ------------------------------------------------ drawn in the viewport's own renderer
+    dr = v["drawn"]
+    assert dr["diffInBox"]["count"] > 0.15 * dr["boxArea"], (
+        f"the model is placed but not drawn in the viewport: {dr['diffInBox']['count']} of {dr['boxArea']} pixels differ ({dr})"
+    )
+    assert dr["diffWholeFrame"] == dr["diffInBox"]["count"], dr
+
+    # ------------------------------------------------ nothing re-frames per tick
+    nr = v["noReframe"]
+    assert nr["clockAdvancedDays"] > 0, f"the clock did not advance, so 'no re-framing' proved nothing: {nr}"
+    assert nr["extentNow"]["source"] == "marker", nr["extentNow"]
+    # While the clock runs the per-tick follow sets the orbit target through float32 in the
+    # viewport's render space (about 0.1 mm per step here, measured up to 0.3 mm in a 10.3 m
+    # distance, i.e. 3e-5 relative); 1e-3 is far above that and far below the factor ~200 a
+    # re-frame to the 300 m marker extent would change the distance by.
+    assert math.isclose(nr["dAfter"], nr["d0"], rel_tol=1e-3), f"the viewport camera re-framed by itself: {nr}"
+    assert nr["aim"]["deg"] < 0.02, nr  # the follow kept the entity in the middle of the view while the clock ran
+    rf = v["reframed"]
+    assert rf["extent"]["source"] == "marker", rf
+    assert math.isclose(rf["distance"], rf["expected"], rel_tol=VIEWPORT_DISTANCE_REL_TOL), rf
+    assert rf["distance"] > 100 * nr["d0"], f"an explicit Focus did not re-frame to the larger (marker) extent: {rf} vs {nr['d0']}"
+    assert rf["aim"]["deg"] < VIEWPORT_AIM_TOL_DEG, rf
+
+    # ------------------------------------------------ restores
+    fit = v["fit"]
+    assert [r["to"]["label"] for r in v["restores"]] == ["body", "null", "fitViewport", "frame change"]
+    for r in v["restores"]:
+        assert r["from"]["framed"] is True and r["from"]["near"] < 1e-3 and r["from"]["minDistance"] < 1e-3, (
+            f"the restore test did not start from a framed state: {r}"
+        )
+        for key in ("to", "toAfterFrames"):
+            t = r[key]
+            assert t["framed"] is False, r
+            if t["label"] != "frame change":
+                assert math.isclose(t["near"], fit["near"], rel_tol=1e-12) and math.isclose(t["far"], fit["far"], rel_tol=1e-12), (
+                    f"{t['label']}: whole-scenario near/far were not put back: {t} vs {fit}"
+                )
+                assert t["minDistance"] == 1e-3, t
+            else:
+                assert t["cameraFrameId"] == "probe-frame", t
+                # `_frameCameraInto` sized the range for the new frame; it is not the framing range
+                assert t["near"] > r["from"]["near"] and t["minDistance"] != r["from"]["minDistance"], (t, r["from"])
+    assert v["restores"][0]["to"]["focus"] == "Earth" and v["restores"][1]["to"]["focus"] is None
+    back = v["backInEntitiesFrame"]
+    assert back["cameraFrameId"] == "EarthMJ2000Eq" and back["framed"] is True, back
+    assert math.isclose(back["distance"], back["expected"], rel_tol=VIEWPORT_DISTANCE_REL_TOL), back
+    assert back["aim"]["deg"] < VIEWPORT_AIM_TOL_DEG, back
+
+    # ------------------------------------------------ independence: the primary and the other viewport are untouched
+    assert v["after"]["primary"] == v["before"]["primary"], (
+        f"viewport A's focus changed the primary camera: {v['before']['primary']} -> {v['after']['primary']}"
+    )
+    # Viewport B: depth range, zoom floor, origin, render-group shift, framed flag and focus are
+    # exactly equal. Its camera pose is equal to 1e-9 scene units (a micrometre): the viewport's own
+    # per-tick `controls.update()` rebuilds the pose from spherical coordinates every frame and
+    # leaves ~1e-15 of rounding noise whether or not anything else happened, while a pose change
+    # caused by A's focus would be of the order of the scene (tens of units).
+    b0, b1 = v["before"]["b"], v["after"]["b"]
+    for key in ("near", "far", "minDistance", "origin", "groupShift", "framed", "focus"):
+        assert b1[key] == b0[key], f"viewport A's focus changed viewport B's {key}: {b0[key]} -> {b1[key]}"
+    for key in ("pos", "quat", "target"):
+        assert math.dist(b0[key], b1[key]) < 1e-9, f"viewport A's focus moved viewport B's {key}: {b0[key]} -> {b1[key]}"
+    assert v["before"]["a"]["framed"] is False and v["after"]["primary"]["framed"] is False
+    assert v["after"]["primary"]["near"] == fit["near"] and v["after"]["primary"]["far"] == fit["far"]
 
     assert errors == [], (
         f"expected zero console warnings/errors/page exceptions, got {len(errors)}:\n" + "\n".join(errors)

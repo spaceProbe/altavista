@@ -113,6 +113,10 @@ export class Viewport {
     // camera. `null` until a Viewer actually attaches this viewport to its frame graph.
     this.cameraFrameId = null;
     this.focus = null; // spacecraft/body name, or null (= this viewport's frame's own origin)
+    // True while a spacecraft is framed on this viewport (Viewer._frameViewportEntity): its
+    // near/far/zoom floor are then the framing range, not the whole-scenario one. The
+    // per-viewport twin of Viewer._entityFramed.
+    this.entityFramed = false;
     // One FloatingOrigin PER VIEWPORT (see module docstring) -- never shared with another
     // Viewport instance, and never the same object as web/js/scene.js's own
     // `Viewer.floatingOrigin` (the legacy primary viewport's origin).

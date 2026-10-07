@@ -1154,6 +1154,9 @@ export class Viewer {
       this._setViewportFocus(vp, vp.focus);
       return;
     }
+    // A frame change puts back the whole-scenario depth range: `_frameCameraInto` sets the
+    // frame's own near/far/zoom range, replacing any framed entity's.
+    vp.entityFramed = false;
     this._frameCameraInto(vp.camera, vp.controls, frameId, vp.focus);
   }
 
@@ -1197,9 +1200,7 @@ export class Viewer {
     this._rebaseViewportOriginTo(vp, 0, 0, 0, true);
     if (vp.controls) vp.controls.target.set(0, 0, 0);
     vp.camera.position.copy(dir.multiplyScalar(r * FIT_DISTANCE_FACTOR));
-    vp.camera.near = Math.max(r * 1e-6, 1e-4);
-    vp.camera.far = Math.max(r * 1e4, 1e6);
-    vp.camera.updateProjectionMatrix();
+    this._restoreViewportFitDepthRange(vp);
     if (vp.controls) vp.controls.update();
     vp.focusPrev.set(0, 0, 0);
   }
@@ -1218,8 +1219,21 @@ export class Viewer {
     this.setViewportFrame(id, targetFrameId, null);
   }
 
+  /**
+   * Per-viewport equivalent of `setFocus`. A SPACECRAFT focus on a viewport whose camera is
+   * parented in the entities frame is framed exactly as the primary's is
+   * (`_frameViewportEntity`: same extent, distance and depth-range helpers, against this
+   * viewport's own camera, origin and controls). Anything else (a body, null) puts back the
+   * viewport's whole-scenario near/far and zoom floor if a framed entity had replaced them.
+   * Framing happens here and never per tick.
+   */
   _setViewportFocus(vp, name) {
     vp.focus = name || null;
+    if (vp.focus && this.spacecraft.has(vp.focus) && vp.cameraFrameId === this._originFrameId) {
+      this._frameViewportEntity(vp, vp.focus);
+      return;
+    }
+    if (vp.entityFramed) this._restoreViewportFitDepthRange(vp);
     const p = this._focusPositionFor(vp.focus, this._lastT ?? 0, vp._tmp);
     const local = vp.floatingOrigin.toRenderSpace(this._originFrameId, p);
     if (vp.controls) vp.controls.target.set(local.x, local.y, local.z);
@@ -1231,6 +1245,8 @@ export class Viewer {
       if (off.length() > d * 20 || off.length() < d * 0.1) off.setLength(d);
       vp.camera.position.set(local.x, local.y, local.z).add(off);
     } else if (name && this.spacecraft.has(name)) {
+      // A spacecraft focus on a viewport that is NOT in the entities frame: unchanged (the
+      // central-body distance rule); entity framing is an entities-frame behaviour.
       const off = new THREE.Vector3().subVectors(vp.camera.position, vp.controls ? vp.controls.target : new THREE.Vector3(local.x, local.y, local.z));
       const central = [...this.bodies.values()].find(b => b.data.central);
       const d = central ? central.data.radius * SCALE * 1.5 : this.fitRadius * 0.3;
@@ -1238,6 +1254,44 @@ export class Viewer {
       vp.camera.position.set(local.x, local.y, local.z).add(off);
     }
     if (vp.controls) vp.controls.update();
+  }
+
+  /** Per-viewport `_frameEntity` (entities frame only; `_setViewportFocus` guards that):
+   * rebase `vp`'s OWN floating origin onto the entity first (`_rebaseViewportOriginTo`, which
+   * carries `vp`'s camera and target), then the shared placement (`_placeCameraForEntity`,
+   * with `vp`'s own fov/aspect) and the world-space aim. Reads and writes only `vp`: no other
+   * viewport's, and not the primary's, camera, origin or depth range. Restored by
+   * `_restoreViewportFitDepthRange`. */
+  _frameViewportEntity(vp, name) {
+    const p = this._focusPositionFor(name, this._lastT ?? 0, vp._tmp); // absolute
+    this._rebaseViewportOriginTo(vp, p.x, p.y, p.z);
+    const local = vp.floatingOrigin.toRenderSpace(this._originFrameId, p);
+    if (vp.controls) vp.controls.target.set(local.x, local.y, local.z);
+    vp.focusPrev.copy(p);
+    this._placeCameraForEntity(name, vp.camera, vp.controls, local);
+    vp.entityFramed = true;
+    this._aimViewportCamera(vp, local);
+  }
+
+  /** `controls.update()` plus the world-space re-aim for a viewport camera parented in the
+   * entities frame -- `_updateEntitiesCamera`'s per-viewport twin, shared by the per-tick
+   * path (`_updateViewport`) and `_frameViewportEntity`. `local` is the orbit target in
+   * `vp.renderGroup`'s space when there are no controls to hold it. */
+  _aimViewportCamera(vp, local) {
+    if (vp.controls) vp.controls.update();
+    vp.camera.updateWorldMatrix(true, false);
+    vp.camera.lookAt(vp.renderGroup.localToWorld(vp._tmpAbs.copy(vp.controls ? vp.controls.target : local)));
+  }
+
+  /** Per-viewport `_restoreFitDepthRange`: the whole-scenario near/far (`_fitViewportOrigin`'s
+   * own formula, which calls this) and zoom floor, replacing a framed entity's. */
+  _restoreViewportFitDepthRange(vp) {
+    const r = this.fitRadius;
+    vp.camera.near = Math.max(r * 1e-6, 1e-4);
+    vp.camera.far = Math.max(r * 1e4, 1e6);
+    vp.camera.updateProjectionMatrix();
+    if (vp.controls) vp.controls.minDistance = ENTITIES_MIN_DISTANCE;
+    vp.entityFramed = false;
   }
 
   /** Set which body/spacecraft viewport `id` is focused on, within whatever frame it is
@@ -1337,17 +1391,14 @@ export class Viewer {
         if (vp.controls) vp.controls.target.set(local.x, local.y, local.z);
         vp.focusPrev.copy(fp);
       }
-      if (vp.controls) {
-        vp.controls.update();
-        // Same defect and correction as the primary camera's `_updateEntitiesCamera`:
-        // `controls.target` is in `vp.renderGroup`'s local space (offset from world by this
-        // viewport's own origin shift), but OrbitControls' `lookAt` takes a world point --
-        // measured, the camera faced the Earth's centre 7.7 degrees off a LEO focus.
-        // Runs every tick, so it also covers `_setViewportFocus` and `_fitViewportOrigin`'s
-        // next frame. `vp._tmpAbs` is free here (only the other branch uses it).
-        cam.updateWorldMatrix(true, false);
-        cam.lookAt(vp.renderGroup.localToWorld(vp._tmpAbs.copy(vp.controls.target)));
-      }
+      // Same defect and correction as the primary camera's `_updateEntitiesCamera`:
+      // `controls.target` is in `vp.renderGroup`'s local space (offset from world by this
+      // viewport's own origin shift), but OrbitControls' `lookAt` takes a world point --
+      // measured, the camera faced the Earth's centre 7.7 degrees off a LEO focus.
+      // Runs every tick, so it also covers `_fitViewportOrigin`'s next frame
+      // (`_frameViewportEntity` aims at once). `vp._tmpAbs` is free here (only the other
+      // branch uses it).
+      if (vp.controls) this._aimViewportCamera(vp, null);
     } else {
       vp.focusPrev.copy(fp);
       const frameObj = this.frameGraph.frame(vp.cameraFrameId).object3D;
@@ -1834,21 +1885,38 @@ export class Viewer {
     const local = this.floatingOrigin.toRenderSpace(this._originFrameId, p);
     this.controls.target.set(local.x, local.y, local.z);
     this._focusPrev.copy(p);
+    this._placeCameraForEntity(name, this.camera, this.controls, local);
+    this._entityFramed = true;
+    this._updateEntitiesCamera();
+  }
+
+  /**
+   * The part of entity framing that is the same for the primary camera (`_frameEntity`) and
+   * a viewport's camera (`_frameViewportEntity`): with the camera's floating origin already
+   * rebased onto the entity and `local` (the entity's origin-relative render-space position)
+   * already the orbit target, put `camera` at `entityFramingDistance(entityExtent, camera.fov,
+   * camera.aspect)` from `local` along its current direction from it (a default direction
+   * when it sits on it), set its near/far from `entityFramingDepthRange`, and (when it has
+   * controls) the zoom floor. The caller sets the "framed" flag and aims the camera.
+   * @param {string} name spacecraft
+   * @param {THREE.PerspectiveCamera} camera
+   * @param {{minDistance:number}|null} controls null for a headless viewport
+   * @param {{x:number,y:number,z:number}} local
+   */
+  _placeCameraForEntity(name, camera, controls, local) {
     const extent = this.entityExtent(name);
-    const distance = entityFramingDistance(extent.radius, this.camera.fov, this.camera.aspect);
-    const off = new THREE.Vector3().subVectors(this.camera.position, this.controls.target);
+    const distance = entityFramingDistance(extent.radius, camera.fov, camera.aspect);
+    const off = new THREE.Vector3().subVectors(camera.position, local);
     if (off.lengthSq() < 1e-30) off.set(1, -1.2, 0.7);
     off.setLength(distance);
-    this.camera.position.set(local.x, local.y, local.z).add(off);
+    camera.position.set(local.x, local.y, local.z).add(off);
     const range = entityFramingDepthRange(
       distance, extent.radius, Math.max(this.fitRadius * 1e4, 1e6), ENTITIES_MIN_DISTANCE,
     );
-    this.camera.near = range.near;
-    this.camera.far = range.far;
-    this.camera.updateProjectionMatrix();
-    this.controls.minDistance = range.minDistance;
-    this._entityFramed = true;
-    this._updateEntitiesCamera();
+    camera.near = range.near;
+    camera.far = range.far;
+    camera.updateProjectionMatrix();
+    if (controls) controls.minDistance = range.minDistance;
   }
 
   setVisible(kind, name, visible) {

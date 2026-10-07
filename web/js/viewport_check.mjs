@@ -35,7 +35,7 @@
 import * as THREE from 'three';
 import { FrameGraph } from './frames.js';
 import { FloatingOrigin } from './origin.js';
-import { SCALE, computeOriginShift } from './scene.js';
+import { SCALE, computeOriginShift, Viewer, entityFramingDistance, entityFramingDepthRange } from './scene.js';
 import { Viewport, SHARED_LAYER, PRIMARY_LAYER, pickAlongCamera, resetViewportLayerCounterForTests } from './viewport.js';
 import { measureRpo, buildTrack, SCENES } from './scene_jitter_harness.mjs';
 import {
@@ -386,6 +386,116 @@ resetViewportLayerCounterForTests();
     !displacedChoices.some((c) => c.panelId === 'sidebar'));
   check('the displaced pane is still offered "3D Viewport" (always available)',
     displacedChoices.some((c) => c.panelId === 'viewport' && c.factory === true));
+}
+
+// ===================== 8. a viewport's Focus on a spacecraft frames it by its own extent
+// (question 239, task 2). `Viewer` itself needs WebGL (see this file's docstring), but its
+// per-viewport framing methods only touch the viewer's plain fields, so the REAL prototype
+// methods are bound onto a minimal stand-in that supplies those fields (a spacecraft
+// interpolator, an extent, the frame id, the fit radius): the code under test is Viewer's, the
+// stand-in is only its data. The Viewports are real and headless (no canvas, no controls), which
+// exercises the no-controls path; the browser proof (tests/test_viewer_entity_framing_browser.py)
+// covers the controls path, the primary camera and a real renderer.
+{
+  const FRAME = 'EarthMJ2000Eq';
+  const EXTENT = 1.5e-6;                    // a 1.5 m model, scene units
+  const ENTITY_KM = [7000, 1.0, 2.0];       // the spacecraft's absolute position
+  const EARTH_KM = 6378.137;
+  const fake = {
+    _originFrameId: FRAME, fitRadius: 30, _lastT: 0, options: { trail: 'full' },
+    spacecraft: new Map([['Chaser', { interp: { at: (t, out) => out.set(...ENTITY_KM) } }]]),
+    bodies: new Map([['Earth', { data: { radius: EARTH_KM, central: true }, interp: { position: (t, out) => out.set(0, 0, 0) } }]]),
+    footprints: new Map(), viewports: new Map(),
+    entityExtent: () => ({ radius: EXTENT, source: 'model' }),
+  };
+  for (const m of ['_setViewportFocus', '_frameViewportEntity', '_placeCameraForEntity', '_aimViewportCamera',
+    '_restoreViewportFitDepthRange', '_rebaseViewportOriginTo', '_refreshViewportGeometry', '_fitViewportOrigin',
+    '_focusPositionFor', 'fitViewport', 'setViewportFocus']) {
+    fake[m] = Viewer.prototype[m];
+  }
+  const makeVp = (id, aspect) => {
+    const vp = new Viewport(id);
+    vp.cameraFrameId = FRAME;
+    vp.camera.aspect = aspect;
+    vp.camera.updateProjectionMatrix();
+    new THREE.Group().add(vp.renderGroup);
+    vp.renderGroup.add(vp.camera);
+    fake.viewports.set(id, vp);
+    fake._fitViewportOrigin(vp);
+    return vp;
+  };
+  const vpA = makeVp('vp-framing-a', 0.6);   // portrait
+  const vpB = makeVp('vp-framing-b', 1.6);   // the bystander
+  const fitNear = Math.max(30 * 1e-6, 1e-4), fitFar = Math.max(30 * 1e4, 1e6);
+  const snap = (vp) => JSON.stringify({
+    p: vp.camera.position.toArray(), q: vp.camera.quaternion.toArray(), near: vp.camera.near, far: vp.camera.far,
+    o: vp.floatingOrigin.getOrigin(FRAME), g: vp.renderGroup.position.toArray(), f: vp.entityFramed, focus: vp.focus,
+  });
+  const bBefore = snap(vpB);
+  check('viewport framing: a fresh viewport starts with the whole-scenario near/far and unframed',
+    vpA.camera.near === fitNear && vpA.camera.far === fitFar && vpA.entityFramed === false);
+
+  fake.setViewportFocus('vp-framing-a', 'Chaser');
+  const absScene = new THREE.Vector3(...ENTITY_KM).multiplyScalar(SCALE);
+  const local = vpA.floatingOrigin.toRenderSpace(FRAME, absScene);
+  const dist = vpA.camera.position.distanceTo(new THREE.Vector3(local.x, local.y, local.z));
+  const want = entityFramingDistance(EXTENT, vpA.camera.fov, vpA.camera.aspect);
+  const centralRuleDistance = EARTH_KM * SCALE * 1.5;
+  check('viewport framing: the camera is at entityFramingDistance(extent, the viewport\'s own fov/aspect)',
+    Math.abs(dist - want) <= 1e-9 * want);
+  check('viewport framing: a portrait viewport sits farther than a landscape one would (its aspect is used)',
+    dist > 1.5 * entityFramingDistance(EXTENT, vpA.camera.fov, 1.6));
+  check('BREAKS: the old central-body rule (1.5 Earth radii) is ~1e6 times too far for a 1.5 m model',
+    centralRuleDistance > 1e5 * dist);
+  const range = entityFramingDepthRange(want, EXTENT, fitFar, 1e-3);
+  check('viewport framing: near/far come from entityFramingDepthRange',
+    vpA.camera.near === range.near && vpA.camera.far === range.far && vpA.entityFramed === true);
+  check('viewport framing: the viewport\'s own floating origin is on the entity and its render group carries the shift',
+    Math.hypot(...['x', 'y', 'z'].map((k) => vpA.floatingOrigin.getOrigin(FRAME)[k] - absScene[k])) < 1e-12
+      && vpA.renderGroup.position.length() > 1);
+  check('viewport framing: the camera is within float32-safe range of its render origin', vpA.camera.position.length() < 1e-4);
+  {
+    vpA.camera.updateWorldMatrix(true, false);
+    const camWorld = vpA.camera.getWorldPosition(new THREE.Vector3());
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(vpA.camera.getWorldQuaternion(new THREE.Quaternion()));
+    const toEntity = absScene.clone().sub(camWorld).normalize();
+    const errDeg = (Math.acos(Math.min(1, fwd.dot(toEntity))) * 180) / Math.PI;
+    check('viewport framing: the camera faces the entity in world space (< 0.001 degrees) with a non-trivial origin shift',
+      errDeg < 1e-3 && vpA.renderGroup.position.length() > 1);
+    check('viewport framing: the world distance to the entity equals the framing distance',
+      Math.abs(camWorld.distanceTo(absScene) - want) <= 1e-9 * want);
+  }
+  check('viewport framing: another viewport\'s camera, origin, render group and depth range are untouched',
+    snap(vpB) === bBefore);
+
+  // restores
+  for (const [label, act] of [
+    ['a body focus', () => fake.setViewportFocus('vp-framing-a', 'Earth')],
+    ['a null focus', () => fake.setViewportFocus('vp-framing-a', null)],
+    ['fitViewport', () => fake.fitViewport('vp-framing-a')],
+  ]) {
+    fake.setViewportFocus('vp-framing-a', 'Chaser');
+    const framed = vpA.entityFramed && vpA.camera.near < 1e-6;
+    act();
+    check(`viewport framing: ${label} puts back the whole-scenario near/far and clears the framed flag`,
+      framed && vpA.camera.near === fitNear && vpA.camera.far === fitFar && vpA.entityFramed === false);
+  }
+  check('viewport framing: nothing above touched the other viewport', snap(vpB) === bBefore);
+  // a second focus on the same spacecraft re-frames to the CURRENT extent; per-tick state is not involved
+  fake.entityExtent = () => ({ radius: 3e-4, source: 'marker' });
+  fake.setViewportFocus('vp-framing-a', 'Chaser');
+  const dist2 = vpA.camera.position.distanceTo(vpA.floatingOrigin.toRenderSpace(FRAME, absScene));
+  check('viewport framing: an explicit re-Focus re-frames to the new extent',
+    Math.abs(dist2 - entityFramingDistance(3e-4, vpA.camera.fov, vpA.camera.aspect)) <= 1e-9 * dist2);
+  // a viewport that is NOT in the entities frame keeps the old behaviour and is not marked framed
+  {
+    const vpC = makeVp('vp-framing-c', 1.0);
+    vpC.cameraFrameId = 'RIC';
+    fake.setViewportFocus('vp-framing-c', 'Chaser');
+    const o = vpC.floatingOrigin.getOrigin(FRAME);
+    check('viewport framing: outside the entities frame a spacecraft focus is not entity-framed (origin kept, flag off)',
+      vpC.entityFramed === false && o.x === 0 && o.y === 0 && o.z === 0 && vpC.camera.near === fitNear);
+  }
 }
 
 const allPass = checks.every((c) => c.pass);

@@ -251,6 +251,25 @@ def test_pane_header_menu_can_swap_a_panel_without_duplicating_it(viewport_data)
         assert not failed, f"{substring!r} checks failed: {failed}"
 
 
+# ----------------------------------------------------- Focus frames a spacecraft per viewport
+def test_viewport_focus_frames_a_spacecraft_by_its_own_extent(viewport_data):
+    """Question 239, task 2: the real `Viewer._setViewportFocus` path (its prototype methods
+    bound onto a data-only stand-in; the Viewports are real) puts a viewport's camera at
+    `entityFramingDistance(extent, the viewport's own fov/aspect)`, sets near/far from
+    `entityFramingDepthRange`, rebases the viewport's OWN floating origin onto the entity and
+    aims at the world point; a body focus, a null focus and `fitViewport` restore the
+    whole-scenario near/far; another viewport is untouched. Fails against the pre-task
+    `_setViewportFocus` (1.5 central radii, Earth-framed near/far); the BREAKS check records
+    how far off that was. The real-renderer proof is
+    tests/test_viewer_entity_framing_browser.py."""
+    names = [c["name"] for c in viewport_data["checks"] if c["name"].startswith("viewport framing:")]
+    assert len(names) >= 14, f"the viewport-framing checks vanished from viewport_check.mjs: {names}"
+    failed = _failed(viewport_data, "viewport framing:")
+    assert not failed, f"viewport framing checks failed: {failed}"
+    breaks = _matched(viewport_data, "BREAKS: the old central-body rule")
+    assert breaks[0]["pass"] is True
+
+
 # ------------------------------------------------------------------------------ overall
 def test_viewport_check_report(viewport_data, capsys):
     """Not a correctness assertion on its own -- prints the full named-check table so
