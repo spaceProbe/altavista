@@ -242,6 +242,7 @@ impl DynamicsService for DynamicsServiceImpl {
             label: None,
             provenance: None,
             config_hash: settings_hash.clone(),
+            visual_model_uri: String::new(),
         };
         for s in &samples {
             trajectory.samples.push(TrajectorySample {

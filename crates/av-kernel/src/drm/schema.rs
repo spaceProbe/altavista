@@ -481,6 +481,9 @@ pub struct RawSystemInstance {
     /// (`executor::load_initial_covariance`) and SPD-checks it at load; the former
     /// `covariance.p0_row_major` parameter-string convention has been removed entirely.
     pub initial_covariance: Vec<f64>,
+    /// Question 239: URL of the glTF/GLB model the viewer draws for the entity this instance
+    /// embodies (`SystemInstance.visual_model_uri`). Empty = none; enters the SoS hash when set.
+    pub visual_model_uri: String,
 }
 impl RawSystemInstance {
     fn into_pb(self) -> Result<pb::SystemInstance, DrmError> {
@@ -493,6 +496,7 @@ impl RawSystemInstance {
             entity_id: self.entity_id,
             parameter_overrides: parameters(self.parameter_overrides)?,
             initial_covariance: self.initial_covariance,
+            visual_model_uri: self.visual_model_uri,
         })
     }
 }

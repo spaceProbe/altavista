@@ -38,6 +38,7 @@ pub fn build_trajectory(system_id: &str, model_info: &ModelInfo, samples: Vec<Tr
         label: None,
         provenance: None,
         config_hash: String::new(),
+        visual_model_uri: String::new(),
     }
 }
 

@@ -3015,8 +3015,11 @@ fn run_covariance_instance(
     Ok((traj, emitted, all_outputs))
 }
 
-fn finish_trajectory(mut traj: Trajectory, drm_hash: &str, sos_hash: &str, scenario: &Scenario, run_id: &str, sys: &SystemDefinition, sys_hash: &str) -> Trajectory {
+#[allow(clippy::too_many_arguments)]
+fn finish_trajectory(mut traj: Trajectory, drm_hash: &str, sos_hash: &str, scenario: &Scenario, run_id: &str, sys: &SystemDefinition, sys_hash: &str, visual_model_uri: &str) -> Trajectory {
     traj.config_hash = drm_hash.to_string();
+    // Question 239: the producing instance's declared viewer model, copied unchanged (empty = none).
+    traj.visual_model_uri = visual_model_uri.to_string();
     traj.provenance = Some(Provenance {
         author_kind: AuthorKind::Service as i32,
         principal: String::new(),
@@ -3945,7 +3948,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             all_events.extend(events);
             outputs_by_instance.insert(instance.name.clone(), outputs);
             let traj = convert_gmat_trajectory_to_declared_frame(gmat, plan, &gmat_ns, &instance.name, traj)?;
-            let finished = finish_trajectory(traj, &computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, sys, &sys_hash);
+            let finished = finish_trajectory(traj, &computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, sys, &sys_hash, &instance.visual_model_uri);
             trajectories.insert(instance.name.clone(), finished);
         }
     } else {
@@ -4024,7 +4027,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
                 None => false,
             };
             if !emits_no_trajectory {
-                let mut finished = finish_trajectory(traj, &computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, sys, &sys_hash);
+                let mut finished = finish_trajectory(traj, &computed_drm_hash, &computed_sos_hash, &scenario, &cfg.run_id, sys, &sys_hash, &instance.visual_model_uri);
                 // Question 107's "binding_hash into provenance": LockstepBindResponse.binding_hash,
                 // recorded on this instance's own Trajectory.provenance.attributes -- the same place
                 // finish_trajectory already records system_definition_hash/id -- rather than a new

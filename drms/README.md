@@ -207,6 +207,22 @@ carries the same orbit as a Cartesian state converted offline at JGM2's mu, as
 `av-run` built with `--no-default-features` and checks that the default build gives a
 bit-identical result on it.
 
+## `leo_1day_orbital_native_model` (heavy carry-over round, question 239)
+
+`leo_1day_orbital_native` with one addition: its SoS instance declares
+`visual_model_uri: /js/fixtures/entity_model_fixture.gltf` (`SystemInstance.visual_model_uri`,
+`proto/altavista/v1/system.proto` field 9), the URL of the glTF the viewer draws for the entity the
+instance embodies, resolved by the browser against the page origin. The fixture is the repo's own
+1.000 x 1.000 x 1.500 m model, so nothing is fetched from a network. Only the `.drm` and `.sos`
+files are copied (new ids, new hashes); the bundle is run with `leo_1day_orbital_native.system.yaml`
+unchanged, so the two can never drift apart on the vehicle. The declaration is configuration and
+enters `sos_configuration_hash` when set; unset, proto3 omits it, and `leo_1day_orbital_native`'s
+three declared hashes are unchanged (pinned in `crates/av-kernel/tests/drm_visual_model.rs`). The
+executor copies the value onto `Trajectory.visual_model_uri` (field 12) for the instance's
+trajectory; `altavista.cdm.cdm_trajectory_to_viewer_json` turns a non-empty one into the viewer
+`model`. `tests/test_cdm_visual_model.py` runs it through `av-run`, `POST /api/cdm/run` and
+headless Chrome.
+
 ## `leo_1day_maneuver_vnb` (M10.1, question 97)
 
 The impulsive-maneuver golden: the *same* vehicle and force model as `leo_1day_golden`

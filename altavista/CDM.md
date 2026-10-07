@@ -118,6 +118,16 @@ conversion, so neither the hash nor the bundle's trajectory/event order depends 
 `ScenarioData.spacecraft` / `.events` list order — building the same `ScenarioData` twice
 independently yields the same `config_hash` (`tests/test_cdm_adapter.py::test_config_hash_is_stable_across_independent_builds`).
 
+## `visual_model_uri` (question 239)
+
+`Trajectory.visual_model_uri` (`trajectory.proto` field 12; the executor copies it from the
+producing `SystemInstance.visual_model_uri`) is a URL of a glTF/GLB model the viewer draws for the
+entity. `cdm_trajectory_to_viewer_json` turns a non-empty one into the viewer trajectory's `model`
+(validated by `altavista.model.check_model_ref`; a whitespace-only value raises `CdmAdapterError`,
+a 400 on both publishing routes) and leaves `model` unset when it is empty, so a model-less run's
+viewer JSON has no `model` key. The reverse direction (`scenario_to_cdm`) does not write the field
+yet.
+
 ## `POST /api/cdm/trajectory`
 
 Accepts one `altavista.v1.Trajectory`:

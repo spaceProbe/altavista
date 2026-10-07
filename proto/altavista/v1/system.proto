@@ -186,6 +186,15 @@ message SystemInstance {
   // empty means "no covariance for this instance". Symmetric positive definite; the
   // executor rejects anything else with a typed error (question 83 governs projection).
   repeated double initial_covariance = 8 [packed = true];
+  // Question 239: the DRM's declaration, per instance, of the model the viewer draws for the
+  // entity this instance embodies: a URL of a glTF/GLB model, resolved by the browser against
+  // the page origin (e.g. "/js/fixtures/entity_model_fixture.gltf"). Empty means none. It is
+  // configuration, so it enters `sos_configuration_hash` when set; unset, proto3 omits it and
+  // every existing canonical hash is unchanged. Named `visual_model_uri`, not `model`, because
+  // "model" already means the dynamics model on this wire (`ModelBinding.model_id`,
+  // `TrajectorySegment.dynamics_model`). The executor copies it unchanged onto the
+  // `Trajectory.visual_model_uri` it emits for this instance.
+  string visual_model_uri = 9;
 }
 
 message Connection {

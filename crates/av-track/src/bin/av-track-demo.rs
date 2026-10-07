@@ -170,6 +170,7 @@ fn main() {
             ..Default::default()
         }),
         config_hash: av_edge::hash::hex_encode(&track_cfg.config_hash()),
+        visual_model_uri: String::new(),
     };
     run_products.trajectories.insert("flight_track".to_string(), track_trajectory);
 

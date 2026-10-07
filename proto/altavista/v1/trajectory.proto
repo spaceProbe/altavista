@@ -77,6 +77,11 @@ message Trajectory {
   Provenance provenance = 10;
   // SHA-256 of the DRM configuration this trajectory was produced from.
   string config_hash = 11;
+  // Question 239: a URL of a glTF/GLB model the viewer draws for this trajectory's entity,
+  // resolved by the browser against the page origin. Copied unchanged by the executor from the
+  // producing instance's `SystemInstance.visual_model_uri`. Empty means none. Not "model": that
+  // word already means the dynamics model on this wire.
+  string visual_model_uri = 12;
 }
 
 enum EventKind {

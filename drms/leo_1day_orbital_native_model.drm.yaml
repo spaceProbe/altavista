@@ -1,0 +1,22 @@
+# DesignReferenceMission: leo_1day_orbital_native.drm.yaml over the SoS that declares a viewer
+# model (leo_1day_orbital_native_model.sos.yaml, question 239). Same window, options and
+# 289 samples; only the ids differ. Run it with the unchanged leo_1day_orbital_native.system.yaml.
+id: drm_leo_1day_orbital_native_model
+version: "1"
+name: LEO one day, native orbital model, declaring a viewer model
+sos_configuration_id: leo_orbital_native_model_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767312037000000000
+options:
+  covariance: false
+  default_step_rate_hz: 0.0033333333333333335
+  sample_interval_s: 300.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "hand-authored from leo_1day_orbital_native.drm.yaml (question 239)"
+# `cargo run -p av-kernel --example drm_hash -- drm drms/leo_1day_orbital_native_model.drm.yaml`.
+hash: "56e37dd753d3ff5571bf23941372c6c2d953a0b6764405b9c5d75c52b573ad42"

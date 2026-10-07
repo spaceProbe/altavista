@@ -1,0 +1,25 @@
+# SosConfiguration: leo_1day_orbital_native.sos.yaml with one addition, question 239's
+# `visual_model_uri` on the instance: the URL of the glTF the viewer draws for the entity
+# this instance embodies (resolved by the browser against the page origin). The repo's own
+# fixture model, a 1.000 x 1.000 x 1.500 m box (web/js/fixtures/entity_model_fixture.gltf),
+# so no network fetch is involved. It is configuration, so it enters this file's hash: the
+# hash below differs from leo_1day_orbital_native.sos.yaml's only because of that line (and the
+# id). Binds to leo_1day_orbital_native.system.yaml's `leo_orbital_native_sys` directly, so the
+# two bundles can never drift apart on the vehicle.
+id: leo_orbital_native_model_sos
+version: "1"
+name: LEO golden physics, single native orbital instance, declaring a viewer model
+instances:
+  - name: leo
+    system_id: leo_orbital_native_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_orbital_native_sys
+    step_rate_hz: 0.0033333333333333335
+    visual_model_uri: /js/fixtures/entity_model_fixture.gltf
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "hand-authored from leo_1day_orbital_native.sos.yaml (question 239)"
+# `cargo run -p av-kernel --example drm_hash -- sos drms/leo_1day_orbital_native_model.sos.yaml`.
+hash: "467a3ce99bb1079702cc617681eaa4aa9f008f6bf47ca236a35e2e59fca1775c"

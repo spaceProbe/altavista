@@ -116,7 +116,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .model import (STATE_SPACE_ID_CARTESIAN_POS_VEL_6, STATE_SPACE_ID_CARTESIAN_POS_VEL_6_ATTITUDE_QUAT_4,
-                   BodyTrack, Event, Frame, ScenarioData, Trajectory)
+                   BodyTrack, Event, Frame, ScenarioData, Trajectory, check_model_ref)
 from .pb import core_pb2, entity_pb2, trajectory_pb2
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -781,6 +781,15 @@ def cdm_trajectory_to_viewer_json(cdm: trajectory_pb2.Trajectory, *, name: Optio
     ``attitude``, ``cov`` is all-or-nothing: present (non-empty) on every sample or none;
     a partially-covarianced CDM trajectory raises :class:`CdmAdapterError` naming the
     counts.
+
+    **Visual model (heavy carry-over round, question 239).** A non-empty
+    ``cdm.visual_model_uri`` (``proto/altavista/v1/trajectory.proto``: the executor copies it
+    from the producing ``SystemInstance.visual_model_uri``) becomes the returned
+    :class:`~altavista.model.Trajectory`'s ``model``, validated by
+    :func:`~altavista.model.check_model_ref` (a whitespace-only value raises
+    :class:`CdmAdapterError` naming the trajectory); the URL is never fetched here. An empty
+    one leaves ``model`` as ``None``, so a model-less run's viewer JSON has no ``model`` key
+    and is byte-identical to what it was before the field existed.
     """
     if cdm.interpolation not in (trajectory_pb2.INTERPOLATION_UNSPECIFIED, trajectory_pb2.INTERPOLATION_HERMITE_VELOCITY):
         raise CdmAdapterError(
@@ -794,7 +803,13 @@ def cdm_trajectory_to_viewer_json(cdm: trajectory_pb2.Trajectory, *, name: Optio
         resolved_space = None
     if resolved_space is not None and not has_position_class(resolved_space):
         return None
-    tr = Trajectory(name=name or cdm.entity_id or cdm.id or "cdm_trajectory", color=color, label=label)
+    tr_name = name or cdm.entity_id or cdm.id or "cdm_trajectory"
+    model = cdm.visual_model_uri or None
+    try:
+        check_model_ref(model, f"Trajectory {cdm.id!r} visual_model_uri")
+    except (TypeError, ValueError) as exc:
+        raise CdmAdapterError(str(exc)) from exc
+    tr = Trajectory(name=tr_name, color=color, label=label, model=model)
     samples = sorted(cdm.samples, key=lambda sample: sample.tai_ns)
     n_with_attitude = 0
     n_with_cov = 0
