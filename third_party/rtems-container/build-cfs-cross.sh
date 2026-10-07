@@ -5,7 +5,18 @@
 # container ENTRYPOINT override -- it does not build any Docker image itself and creates no new
 # tags (question 156); it runs the cFS cross-build against the bind-mounted repo and toolchain.
 #
-# Expected invocation (from the repository root, on the host):
+# Expected invocation: third_party/rtems-container/build-elf.sh (question 239, task native-co-3).
+# It is the byte-reproducible, digest-pinned recipe: it stages the cFS sources from the pinned
+# commits (never the mutable third_party/cfs), runs THIS script as the entrypoint of a
+# digest-pinned debian image with pinned apt packages and a hash-pinned read-only toolchain, pins
+# cFE's BUILDDATE/HOSTNAME/USER, and fixes the rtems-syms temporary C file name (a one-line edit of
+# the staged RTEMS.cmake). Two clean builds from different staging paths give the identical
+# core-cpu1.exe. This script no longer needs to be run by hand.
+#
+# Historical only (still true, but NOT reproducible: it builds into the mutable third_party/cfs,
+# floats the image tag, installs unpinned cmake and lets cFE stamp the date/host/user and
+# rtems-syms a pid-derived file name into the ELF), the original M24.3 invocation, from the
+# repository root, on the host:
 #
 #   docker run --rm \
 #     -v "$(pwd)":/workspace \

@@ -168,7 +168,9 @@ class MonitorClient:
        socket for bytes that this call did not itself request -- if any are found, that is direct
        proof a previous command's reply was not fully drained, and this raises
        `MonitorDesyncError` rather than silently letting the next parse find them.
-    3. A reply is accepted only once (a) the accumulated bytes contain this command's own echoed
+    3. One command is terminated by a lone `\\n` (`TERMINATOR`), never `\\r\\n`: Renode's monitor
+       takes CR and LF each as a line end, so CRLF drew two prompts per command (question 239).
+       A reply is accepted only once (a) the accumulated bytes contain this command's own echoed
        text and (b) the known prompt string reappears *after* that echo -- never on a fixed idle
        gap. This is what actually prevents the desync (item 2's stray-byte check is a loud
        backstop, not the primary fix): `run_for()` no longer returns until Renode's own reply is
@@ -186,12 +188,29 @@ class MonitorClient:
         # substring, not a shaped regex, so a parenthesised token inside some command's own output
         # can never be mistaken for the monitor's own prompt.
         self.prompt = prompt
+        # Bytes the post-reply `_grace_drain` found (question 239): the backstop's own tally.
+        self.grace_drain_bytes = 0
+        self.grace_drain_unexpected_bytes = 0
+        self.grace_drain_events = []
 
     def set_prompt(self, machine_name: str):
         self.prompt = f"({machine_name})"
 
+    # The monitor command terminator: LF only, never CRLF. Renode 1.16.1's monitor treats CR and
+    # LF each as a line terminator, so `<cmd>\r\n` is the command line followed by an EMPTY line,
+    # and the empty line draws a second prompt (question 239, measured against the real Renode
+    # with `monitor_probe.py`: `emulation\r\n` -> 2 prompts, `emulation\n` -> 1, a bare `\r\n` -> 2,
+    # five CRLF commands in one send -> 10 prompts, five LF commands -> 5). Under CRLF every reply
+    # was followed by a surplus prompt that this client could only sweep up with a timed grace
+    # drain, and a surplus prompt arriving after that window was read as a stray by the next
+    # command (`MonitorDesyncError`, drm_attitude_control_renode STEP 87 of 100, cmd#1098).
+    TERMINATOR = "\n"
+    # What follows the `(<name>)` text of one prompt on the wire (the colour reset of its
+    # `\x1b[33;1m(<name>) \x1b[0m`); see `_grace_drain`.
+    PROMPT_TAIL = b" \x1b[0m"
+
     def send(self, line: str):
-        self.sock.sendall((line + "\r\n").encode())
+        self.sock.sendall((line + self.TERMINATOR).encode())
 
     def _peek_stray_bytes(self) -> bytes:
         """Non-blocking check for bytes already queued on the socket, without consuming them.
@@ -216,19 +235,27 @@ class MonitorClient:
                 f"and would have been misattributed to whatever command asked next: {clean(stray)!r}"
             )
 
-    def _grace_drain(self, idle_gap=0.15, overall_timeout=0.5) -> bytes:
-        """M24_4g finding, live (not anticipated): a command's echo-plus-trailing-prompt is not
-        always the literal last thing Renode sends for it. Two real examples hit while proving
-        this fix against the real bridge: (1) `include` (which invokes a Python-hook-defined
-        macro, `setup_uart_tx_bridge`) prints that macro's own return-value dispatch
-        (`Command setup_uart_tx_bridge failed, returning "0".`) as a separate line *after* its own
-        completion prompt; (2) a plain `RunFor` left a few trailing bytes of what looks like an
-        ANSI color code (a truncated `\\x1b[33;...m`) arriving a beat after its own prompt. Both
-        are Renode-side buffering artifacts (a second `send()`/flush a few ms behind the first),
-        not a second logical reply -- and both would otherwise sit as genuine stray bytes for
-        `_check_no_stray_bytes` to (correctly, but unhelpfully) trip the very next command on.
+    def _grace_drain(self, idle_gap=0.15, overall_timeout=0.5, what="") -> bytes:
+        """The settle read after a reply is complete: a backstop, not the mechanism.
 
-        Fix: once a command's PRIMARY completion signal (echo + trailing prompt) is confirmed, do
+        M24_4g found, live, that a command's echo-plus-prompt is not always the literal last
+        thing Renode sends for it, and attributed the trailing bytes (a truncated
+        `\\x1b[33;...m` after a `RunFor`'s prompt; the `Command setup_uart_tx_bridge failed,
+        returning "0".` line after `include`) to Renode-side buffering. Question 239 re-measured
+        that against the real Renode 1.16.1 (`monitor_probe.py`): the monitor treats CR and LF
+        each as a line terminator, so the `\\r\\n` this client used to send was a command line plus
+        an EMPTY line, and the empty line drew a SECOND PROMPT -- the "trailing ANSI fragment"
+        was that second prompt (the stray in the STEP 87 failure, cmd#1098, was exactly its
+        remainder, `1m(<name>) \\x1b[0`), arriving later than this drain's window under load. Now
+        that commands end in a lone `\\n` (see `TERMINATOR`) one command draws one prompt, and
+        what this drain can still legitimately find is only the tail of that same prompt: Renode
+        writes `\\x1b[33;1m(<name>) \\x1b[0m` in many tiny segments, so the `(<name>)` text can be
+        in hand before its last few bytes (` \\x1b[0m`). `grace_drain_summary()` separates that
+        expected tail from anything else; "anything else" must be zero over a run. (The `include`
+        line's origin was not re-derived; with LF-only commands `include`'s reply carried it
+        and the drain found nothing, in the question 239 probe.)
+
+        Fix (M24_4g, kept): once a command's PRIMARY completion signal (echo + trailing prompt) is confirmed, do
         one short, bounded settle read for anything that follows immediately -- the same shape of
         fix M24.1's own virtual-time spike already used for an analogous problem ("a short (30ms)
         grace timeout only after the marker is seen", `third_party/renode/REPORT.md`). This is
@@ -255,7 +282,26 @@ class MonitorClient:
             if not data:
                 break
             chunks.append(data)
-        return b"".join(chunks)
+        drained = b"".join(chunks)
+        if drained:
+            # Counted, not just swallowed (question 239). Renode writes its prompt in many tiny
+            # TCP segments (`\x1b[33;1m(<name>) \x1b[0m`), so a reader that has just seen the
+            # `(<name>)` text may not yet have the prompt's own trailing ` \x1b[0m`: those bytes
+            # are the rest of the SAME prompt, expected, and counted as `grace_drain_bytes` only.
+            # Anything else the drain finds (a second prompt, other text) is `unexpected` and
+            # must be zero over a run now that one command draws exactly one prompt.
+            self.grace_drain_bytes += len(drained)
+            unexpected = 0 if self.PROMPT_TAIL.endswith(drained) else len(drained)
+            self.grace_drain_unexpected_bytes += unexpected
+            self.grace_drain_events.append((what, len(drained), unexpected, clean(drained)[:80]))
+        return drained
+
+    def grace_drain_summary(self) -> str:
+        unexpected = [e for e in self.grace_drain_events if e[2]]
+        return (f"monitor grace-drain bytes: total={self.grace_drain_bytes} (rest of the same "
+                f"prompt's colour reset) unexpected={self.grace_drain_unexpected_bytes} "
+                f"in {len(self.grace_drain_events)} drain(s)"
+                f"{'' if not unexpected else ': ' + repr(unexpected[:5])}")
 
     def _read_reply_for(self, line: str, tag: int, timeout: float) -> bytes:
         assert self.prompt, "MonitorClient.set_prompt() must be called before any cmd()"
@@ -266,7 +312,7 @@ class MonitorClient:
             if line in text:
                 after_echo = text[text.index(line) + len(line):]
                 if self.prompt in after_echo:
-                    return buf + self._grace_drain()
+                    return buf + self._grace_drain(what=f"cmd#{tag} {line[:40]}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -318,7 +364,9 @@ class MonitorClient:
         many completion prompts have been observed as commands were sent, counted by literal
         occurrences of the known prompt string, which cannot be fooled by a byte value that
         happens to repeat within the chunk (a substring match on the last line's own echo could
-        be). The whole chunk is sent and drained while still holding `self.lock`, so from any
+        be). The count is exact only because each command line ends in a lone `\\n` (question 239:
+        with `\\r\\n` every command drew two prompts, 2N arrived for N sent, and the batch was
+        declared drained about halfway through, the rest being left to the grace drain). The whole chunk is sent and drained while still holding `self.lock`, so from any
         other caller's perspective there is still only ever one outstanding request *unit* at a
         time -- this batch never leaves any of its own N replies undrained for an unrelated later
         command to misattribute, the same invariant `cmd()` enforces for a single command."""
@@ -328,7 +376,7 @@ class MonitorClient:
                 self._seq += 1
                 tag = self._seq
                 self._check_no_stray_bytes(tag)
-                lines = "".join(f"sysbus.uart1 WriteChar {b}\r\n" for b in chunk)
+                lines = "".join(f"sysbus.uart1 WriteChar {b}{self.TERMINATOR}" for b in chunk)
                 self.sock.sendall(lines.encode())
                 self._read_n_replies(len(chunk), tag, timeout=max(8.0, 0.2 * len(chunk)))
 
@@ -339,7 +387,7 @@ class MonitorClient:
         while True:
             text = clean(buf)
             if text.count(self.prompt) >= expected_count:
-                return buf + self._grace_drain()
+                return buf + self._grace_drain(what=f"cmd#{tag} WriteChar x{expected_count}")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -828,7 +876,7 @@ runMacro $reset
                     pc_trace.append((round(elapsed_s, 2), pc_match[-1] if pc_match else None, sts))
                     if early_stop and self.hook_reply_available():
                         break
-                print(f"bridge: STEP sequence={req.sequence} granted {elapsed_s:.2f} s of {granted_s:.2f} s virtual time (early stop {'on' if early_stop else 'off'})", flush=True)
+                print(f"bridge: STEP sequence={req.sequence} granted {elapsed_s:.2f} s of {granted_s:.2f} s virtual time (early stop {'on' if early_stop else 'off'}); {self.mon.grace_drain_summary()}", flush=True)
                 last_tai_ns = req.until_tai_ns
                 distinct_pcs = sorted({pc for _, pc, _sts in pc_trace if pc is not None})
                 if len(distinct_pcs) <= 1:
@@ -862,6 +910,7 @@ runMacro $reset
 
     def stop(self):
         if self.mon is not None:
+            print(f"bridge: {self.mon.grace_drain_summary()}", flush=True)
             try:
                 self.mon.send("quit")
             except OSError:

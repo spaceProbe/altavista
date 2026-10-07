@@ -47,14 +47,23 @@
 //! `8e518964...8fd2` in all four sidecars, and the truth pointing error at t = 10 s is
 //! 1.823926917407e-1 rad in all four. (The *posix* whole-file hash differs between those two
 //! runs, `a514ea92...` against `36329922...`, and that is the sidecar's own
-//! `sos_configuration_hash`: the posix `SosConfiguration` embeds the throwaway registry's
-//! ephemeral port in `ContainerBinding.image`; nothing about the traffic.) The guest is
+//! `sos_configuration_hash`: the posix `SosConfiguration` embedded the throwaway registry's
+//! ephemeral port in `ContainerBinding.image`; nothing about the traffic. Since question 239 the
+//! registry is published on a fixed port, so the reference and the posix whole-file hash are
+//! the same in every run: `drm_attitude_control_cfs.rs`'s
+//! `the_port_traffic_hash_is_the_same_across_two_separately_started_registries` proves it.) The guest is
 //! tick-driven (the cFE clock follows the lockstep tick, not Renode's virtual time), so the
 //! virtual time granted after the reply is idle: the PC trace of the full-grant run shows one
 //! distinct PC (`0x4004bb32`, the idle loop) for 99 of its 100 STEPs (all but STEP 1) -- and the
 //! same 99 in the early-stop run.
 //!
-//! The run holds the host-wide docker-test lock for its whole body (it did before this change).
+//! The run holds the host-wide docker-test lock (question 207) for the posix half only: the
+//! lock, the stale-resource prune, the throwaway registry with its image tag and the posix run's
+//! managed container all live in that half's own scope, and are dropped (registry guards first,
+//! then the lock) before `spawn_renode_bridge` is called. The Renode half uses no Docker at all
+//! and runs without the lock, so other tracks' Docker-gated work is not blocked for its 5-7
+//! minutes. The test prints a "docker-test lock released" line and a "Renode half starting" line
+//! so the order is visible in its own output. The GMAT engine lock is held for the whole body.
 //!
 //! **What is compared, and what is deliberately excluded.** Mirrors
 //! `drm_attitude_control_cfs.rs::byte_identical_run_products_across_two_separately_spawned_cfs_containers`:
@@ -215,18 +224,29 @@ impl Drop for DockerImageGuard {
 /// local registry, labeled per question 156 (`test_label_args`) so a killed test's own registry
 /// container is swept by [`prune_stale_test_resources`] on the *next* run even if this run's own
 /// `Drop` guards never get to fire. Returns `(image_ref, real_digest, guards)`.
+///
+/// Question 239: the registry is published on the FIXED loopback port [`FIXED_REGISTRY_PORT`]
+/// (the same port and the same rules as `drm_attitude_control_cfs.rs`'s helper of the same name),
+/// so `ContainerBinding.image` -- hashed with the whole `SosConfiguration` into
+/// `sos_configuration_hash` (ADR-005 section 7) -- is the same string in every run. The
+/// docker-test lock, held by the caller, serialises the test-owned registries on that port;
+/// anything else holding it is reported, never worked around with another port.
 fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerContainerGuard, DockerImageGuard)) {
     let labels = test_label_args(run_id);
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
+    wait_for_fixed_registry_port_free().unwrap_or_else(|e| panic!("{e}"));
+    let port_mapping = format!("127.0.0.1:{FIXED_REGISTRY_PORT}:5000");
+    let mut registry_args = vec!["run", "-d", "-p", port_mapping.as_str()];
     registry_args.extend(label_refs.iter().copied());
     registry_args.push("registry:2");
-    let registry_id = docker_cmd(&registry_args);
-    let registry_guard = DockerContainerGuard(registry_id.clone());
-    let port_line = docker_cmd(&["port", &registry_id, "5000"]);
-    let port: u16 = port_line.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).unwrap_or_else(|| panic!("a numeric host port from `docker port`, got {port_line:?}"));
-    let image_ref = format!("127.0.0.1:{port}/altavista-cfs-lockstep");
+    let output = Command::new("docker").args(&registry_args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {registry_args:?}`: {e}"));
+    if !output.status.success() {
+        panic!("{}", FixedRegistryError::StartFailed { port: FIXED_REGISTRY_PORT, detail: String::from_utf8_lossy(&output.stderr).trim().to_string() });
+    }
+    let registry_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let registry_guard = DockerContainerGuard(registry_id);
+    let image_ref = format!("127.0.0.1:{FIXED_REGISTRY_PORT}/altavista-cfs-lockstep");
     let tagged = format!("{image_ref}:test");
     // `docker tag` has no `--label` flag (it creates an alias to an existing image object, not a
     // new one) -- the throwaway *registry container* above is this helper's own expensive/
@@ -234,10 +254,65 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
     // container, not a dangling tag), and that one is labeled.
     docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
     let image_guard = DockerImageGuard(tagged.clone());
-    docker_cmd(&["push", &tagged]);
-    let repo_digests = docker_cmd(&["inspect", "--format={{index .RepoDigests 0}}", &tagged]);
-    let digest = repo_digests.rsplit('@').next().filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a @sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
+    // The registry container has only just been started: retry the push briefly until the
+    // registry process inside it accepts connections.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let out = Command::new("docker").args(["push", &tagged]).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker push {tagged}`: {e}"));
+        if out.status.success() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("`docker push {tagged}` did not succeed within 30 s: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The digest from the RepoDigests entry for THIS reference, not index 0 (the image may carry
+    // RepoDigests from other registries).
+    let repo_digests = docker_cmd(&["inspect", "--format={{range .RepoDigests}}{{println .}}{{end}}", &tagged]);
+    let prefix = format!("{image_ref}@");
+    let digest = repo_digests.lines().find_map(|l| l.strip_prefix(prefix.as_str())).filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a {prefix}sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
     (image_ref, digest, (registry_guard, image_guard))
+}
+
+/// The loopback port the throwaway registry is published on: the same value as
+/// `drm_attitude_control_cfs.rs`'s `FIXED_REGISTRY_PORT` (the two files serialise on the
+/// docker-test lock). Below every OS ephemeral range and away from 5000 (macOS AirPlay Receiver).
+const FIXED_REGISTRY_PORT: u16 = 19031;
+
+/// Why a test-owned registry could not be started on [`FIXED_REGISTRY_PORT`]. Never recovered by
+/// choosing another port, which would change `ContainerBinding.image` and the
+/// `sos_configuration_hash`.
+#[derive(Debug)]
+enum FixedRegistryError {
+    /// Something still accepts connections on the port after the grace period.
+    PortOccupied { port: u16 },
+    /// `docker run` refused to start the registry on the port.
+    StartFailed { port: u16, detail: String },
+}
+impl std::fmt::Display for FixedRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixedRegistryError::PortOccupied { port } => write!(f, "FixedRegistryError::PortOccupied: 127.0.0.1:{port} is in use by something that is not this test's registry; free it (this test never falls back to another port, which would change ContainerBinding.image and the sos_configuration_hash)"),
+            FixedRegistryError::StartFailed { port, detail } => write!(f, "FixedRegistryError::StartFailed: `docker run` could not publish the registry on 127.0.0.1:{port}: {detail}"),
+        }
+    }
+}
+
+/// Waits (up to 15 s) for nothing to accept connections on `127.0.0.1:FIXED_REGISTRY_PORT`: a
+/// test-owned registry removed a moment ago releases the port shortly after.
+fn wait_for_fixed_registry_port_free() -> Result<(), FixedRegistryError> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], FIXED_REGISTRY_PORT));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(FixedRegistryError::PortOccupied { port: FIXED_REGISTRY_PORT });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -708,35 +783,56 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let _engine = gmat_sys::engine_lock();
     let (truth, star, imu, base_sos) = load_native_fixtures_and_base_sos();
 
-    // Question 207: held for this whole (`#[ignore]`d, but still real when run explicitly)
-    // test body -- a different worktree's own docker-gated `cargo test`/`pytest` process racing
-    // this daemon-wide prune sweep is exactly what round 3's own gate measured failing
-    // elsewhere in this workspace (crates/av-lockstep/tests/docker_lifecycle.rs's own doc
-    // comment has the full account). `prune_stale_test_resources` now requires proof (a `&
-    // DockerTestLock` parameter) that the caller already holds this lock.
-    let _lock = lock_docker_tests();
-
-    // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its own
-    // `Drop` guards never ran if that run was killed) before this test creates anything.
-    prune_stale_test_resources(&_lock);
-    let run_id = test_run_id();
-
     // --- Posix-container half (ContainerBinding.image path, digest-pulled). ---
     let scratch_dir = PathBuf::from(format!("/tmp/av-renode-m24c-{}", std::process::id()));
     let posix_products_dir = scratch_dir.join("products_posix");
     let renode_products_dir = scratch_dir.join("products_renode");
-    let t0 = Instant::now();
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
-    let controller_cfs = load_system("demo_attitude_control_controller_cfs");
-    let posix_systems = systems_map(&[&truth, &star, &imu, &controller_cfs]);
-    let posix_sos = container_sos("attitude_control_m24c_posix_sos", &base_sos, &controller_cfs.id, ContainerBinding { image: image.clone(), image_digest: digest.clone(), ..Default::default() });
-    let posix_drm = container_drm("attitude_control_m24c_posix_drm", &posix_sos.id, COMPARISON_DURATION_S, vec![]);
-    let gmat_posix = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let products_posix = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix", posix_products_dir.clone())).expect("the posix-container run must execute end to end");
-    let posix_elapsed = t0.elapsed();
-    println!("posix-container run: {COMPARISON_DURATION_S}s @ 10Hz in {posix_elapsed:.2?} wall time");
+
+    // Question 207: the host-wide docker-test lock guards this half, and only this half. A
+    // different worktree's own docker-gated `cargo test`/`pytest` process racing this daemon-wide
+    // prune sweep is exactly what round 3's own gate measured failing elsewhere in this workspace
+    // (crates/av-lockstep/tests/docker_lifecycle.rs's own doc comment has the full account).
+    // `prune_stale_test_resources` requires proof (a `&DockerTestLock` parameter) that the caller
+    // already holds this lock. The Renode half below uses no Docker at all (the shim and
+    // `renode_bridge.py` are plain child processes), so everything Docker -- the lock, the
+    // prune, the throwaway registry and its image tag, the posix run's managed container -- is
+    // created and dropped inside this block, and nothing but plain value (the posix
+    // `RunProducts`, an owned struct) leaves it. The lock is therefore free for the 5-7 minutes
+    // of the Renode half (it used to be held across them).
+    let products_posix = {
+        let lock = lock_docker_tests();
+        let lock_taken = Instant::now();
+
+        // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its
+        // own `Drop` guards never ran if that run was killed) before this test creates anything.
+        prune_stale_test_resources(&lock);
+        let run_id = test_run_id();
+
+        let t0 = Instant::now();
+        let (image, digest, registry_guards) = push_cfs_image_to_local_registry(&run_id);
+        let controller_cfs = load_system("demo_attitude_control_controller_cfs");
+        let posix_systems = systems_map(&[&truth, &star, &imu, &controller_cfs]);
+        let posix_sos = container_sos("attitude_control_m24c_posix_sos", &base_sos, &controller_cfs.id, ContainerBinding { image: image.clone(), image_digest: digest.clone(), ..Default::default() });
+        let posix_drm = container_drm("attitude_control_m24c_posix_drm", &posix_sos.id, COMPARISON_DURATION_S, vec![]);
+        let gmat_posix = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        // The posix run's managed container is stopped when the run's models drop, i.e. by the
+        // time this call returns -- still inside the lock.
+        let products = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix", posix_products_dir.clone())).expect("the posix-container run must execute end to end");
+        let elapsed = t0.elapsed();
+        println!("posix-container run: {COMPARISON_DURATION_S}s @ 10Hz in {elapsed:.2?} wall time");
+
+        // Explicit drop order: the throwaway registry container and its image tag first (their
+        // `Drop`s run `docker rm -f` / `docker rmi -f`), THEN the lock, so no Docker resource of
+        // this test outlives the lock that protects it from other trees' daemon-wide prunes.
+        drop(registry_guards);
+        drop(lock);
+        println!("docker-test lock released after {:.2?} (registry guards dropped first); no Docker resource of this test remains", lock_taken.elapsed());
+        products
+    };
 
     // --- Renode half (container.address-only, already-running-process path). ---
+    // No Docker, and no docker-test lock: both were released at the end of the block above.
+    println!("Renode half starting (docker-test lock not held)");
     let t1 = Instant::now();
     let renode = spawn_renode_bridge(&scratch_dir);
     let renode_ready_elapsed = t1.elapsed();
