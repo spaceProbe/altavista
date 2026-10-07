@@ -54,7 +54,13 @@
 //! distinct PC (`0x4004bb32`, the idle loop) for 99 of its 100 STEPs (all but STEP 1) -- and the
 //! same 99 in the early-stop run.
 //!
-//! The run holds the host-wide docker-test lock for its whole body (it did before this change).
+//! The run holds the host-wide docker-test lock (question 207) for the posix half only: the
+//! lock, the stale-resource prune, the throwaway registry with its image tag and the posix run's
+//! managed container all live in that half's own scope, and are dropped (registry guards first,
+//! then the lock) before `spawn_renode_bridge` is called. The Renode half uses no Docker at all
+//! and runs without the lock, so other tracks' Docker-gated work is not blocked for its 5-7
+//! minutes. The test prints a "docker-test lock released" line and a "Renode half starting" line
+//! so the order is visible in its own output. The GMAT engine lock is held for the whole body.
 //!
 //! **What is compared, and what is deliberately excluded.** Mirrors
 //! `drm_attitude_control_cfs.rs::byte_identical_run_products_across_two_separately_spawned_cfs_containers`:
@@ -708,35 +714,56 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let _engine = gmat_sys::engine_lock();
     let (truth, star, imu, base_sos) = load_native_fixtures_and_base_sos();
 
-    // Question 207: held for this whole (`#[ignore]`d, but still real when run explicitly)
-    // test body -- a different worktree's own docker-gated `cargo test`/`pytest` process racing
-    // this daemon-wide prune sweep is exactly what round 3's own gate measured failing
-    // elsewhere in this workspace (crates/av-lockstep/tests/docker_lifecycle.rs's own doc
-    // comment has the full account). `prune_stale_test_resources` now requires proof (a `&
-    // DockerTestLock` parameter) that the caller already holds this lock.
-    let _lock = lock_docker_tests();
-
-    // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its own
-    // `Drop` guards never ran if that run was killed) before this test creates anything.
-    prune_stale_test_resources(&_lock);
-    let run_id = test_run_id();
-
     // --- Posix-container half (ContainerBinding.image path, digest-pulled). ---
     let scratch_dir = PathBuf::from(format!("/tmp/av-renode-m24c-{}", std::process::id()));
     let posix_products_dir = scratch_dir.join("products_posix");
     let renode_products_dir = scratch_dir.join("products_renode");
-    let t0 = Instant::now();
-    let (image, digest, _registry_guards) = push_cfs_image_to_local_registry(&run_id);
-    let controller_cfs = load_system("demo_attitude_control_controller_cfs");
-    let posix_systems = systems_map(&[&truth, &star, &imu, &controller_cfs]);
-    let posix_sos = container_sos("attitude_control_m24c_posix_sos", &base_sos, &controller_cfs.id, ContainerBinding { image: image.clone(), image_digest: digest.clone(), ..Default::default() });
-    let posix_drm = container_drm("attitude_control_m24c_posix_drm", &posix_sos.id, COMPARISON_DURATION_S, vec![]);
-    let gmat_posix = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let products_posix = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix", posix_products_dir.clone())).expect("the posix-container run must execute end to end");
-    let posix_elapsed = t0.elapsed();
-    println!("posix-container run: {COMPARISON_DURATION_S}s @ 10Hz in {posix_elapsed:.2?} wall time");
+
+    // Question 207: the host-wide docker-test lock guards this half, and only this half. A
+    // different worktree's own docker-gated `cargo test`/`pytest` process racing this daemon-wide
+    // prune sweep is exactly what round 3's own gate measured failing elsewhere in this workspace
+    // (crates/av-lockstep/tests/docker_lifecycle.rs's own doc comment has the full account).
+    // `prune_stale_test_resources` requires proof (a `&DockerTestLock` parameter) that the caller
+    // already holds this lock. The Renode half below uses no Docker at all (the shim and
+    // `renode_bridge.py` are plain child processes), so everything Docker -- the lock, the
+    // prune, the throwaway registry and its image tag, the posix run's managed container -- is
+    // created and dropped inside this block, and nothing but plain value (the posix
+    // `RunProducts`, an owned struct) leaves it. The lock is therefore free for the 5-7 minutes
+    // of the Renode half (it used to be held across them).
+    let products_posix = {
+        let lock = lock_docker_tests();
+        let lock_taken = Instant::now();
+
+        // Question 156's amendment: sweep whatever a previous, interrupted run left behind (its
+        // own `Drop` guards never ran if that run was killed) before this test creates anything.
+        prune_stale_test_resources(&lock);
+        let run_id = test_run_id();
+
+        let t0 = Instant::now();
+        let (image, digest, registry_guards) = push_cfs_image_to_local_registry(&run_id);
+        let controller_cfs = load_system("demo_attitude_control_controller_cfs");
+        let posix_systems = systems_map(&[&truth, &star, &imu, &controller_cfs]);
+        let posix_sos = container_sos("attitude_control_m24c_posix_sos", &base_sos, &controller_cfs.id, ContainerBinding { image: image.clone(), image_digest: digest.clone(), ..Default::default() });
+        let posix_drm = container_drm("attitude_control_m24c_posix_drm", &posix_sos.id, COMPARISON_DURATION_S, vec![]);
+        let gmat_posix = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        // The posix run's managed container is stopped when the run's models drop, i.e. by the
+        // time this call returns -- still inside the lock.
+        let products = execute(run_config(&gmat_posix, &posix_drm, &posix_sos, &posix_systems, "test-run-m24c-posix", posix_products_dir.clone())).expect("the posix-container run must execute end to end");
+        let elapsed = t0.elapsed();
+        println!("posix-container run: {COMPARISON_DURATION_S}s @ 10Hz in {elapsed:.2?} wall time");
+
+        // Explicit drop order: the throwaway registry container and its image tag first (their
+        // `Drop`s run `docker rm -f` / `docker rmi -f`), THEN the lock, so no Docker resource of
+        // this test outlives the lock that protects it from other trees' daemon-wide prunes.
+        drop(registry_guards);
+        drop(lock);
+        println!("docker-test lock released after {:.2?} (registry guards dropped first); no Docker resource of this test remains", lock_taken.elapsed());
+        products
+    };
 
     // --- Renode half (container.address-only, already-running-process path). ---
+    // No Docker, and no docker-test lock: both were released at the end of the block above.
+    println!("Renode half starting (docker-test lock not held)");
     let t1 = Instant::now();
     let renode = spawn_renode_bridge(&scratch_dir);
     let renode_ready_elapsed = t1.elapsed();
