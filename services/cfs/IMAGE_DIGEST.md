@@ -78,14 +78,19 @@ one is unlikely to be masked by the same bug in the other):
   on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
   network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-10-05, question 236's reproducible shim cross-build -- see
-"Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)" below --
-`third_party/cfs` still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see
-`third_party/fetch-cfs.sh`):
+Recorded digest (re-pinned 2026-10-07 at the merge of question 239's rounds -- see
+"Re-pinned 2026-10-07" below -- `third_party/cfs` still pinned at
+`088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
 
 ```
-sha256:847c9a0816d2f66e5f3b78318c80513fa704829c7aa71103b09db65713dc3015
+sha256:4a9a6aee3a3723b909485206a2e7bc94470ae211c8010fb26f6cad23214fef3b
 ```
+
+Re-pinned 2026-10-07: the heavy round added `SystemInstance.visual_model_uri` and
+`Trajectory.visual_model_uri` to `proto/altavista/v1`, which the shim compiles through `av-cdm`, so
+`services/cfs/build-shim.sh` (unchanged) produced a new shim, `a044c0d2…` stripped, and the
+image moved with it. The previous recorded ID was
+`sha256:847c9a0816d2f66e5f3b78318c80513fa704829c7aa71103b09db65713dc3015`.
 
 Re-pinned 2026-10-05: the shim binary changed (new builder, `--locked`, path remap), cFS half
 cached; the runtime-content hash below moved with it. The previous recorded ID was
@@ -101,17 +106,19 @@ the same Dockerfile, so the ID moved and the runtime-content hash below did not.
 previous recorded ID was `sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d`.
 
 Recorded runtime-content hash for this pin (question 185, see the definition above; MOVED by the
-2026-10-05 re-pin -- see that section below: the whole move is `/cfs/av-lockstep-shim`, the new
+2026-10-07 re-pin on exactly one file, `/cfs/av-lockstep-shim` `8d61137c…` → `a044c0d2…`, a source
+change through the proto, every other runtime file byte-identical; previously `sha256:fa059749…`.
+MOVED by the 2026-10-05 re-pin -- see that section below: the whole move is `/cfs/av-lockstep-shim`, the new
 reproducible build (question 236), and every other runtime file is byte-identical to the previous
 pin. It also moved on 2026-09-22 for the opposite reason, an unpinned build environment; from
 this pin on, a rebuild of the same commit must not move it, and two builds below show it did not):
 ```
-sha256:fa059749467ada4a789e158b92b36f44830b3f6e95d837bb7bfc5f23bc13a479
+sha256:c72ad6c5cc1a12cc3dfced266474a09010179252916e41586da49c2a608adbc8
 ```
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-50eb5f9000d04e1d5db29682119333cd565871de
+2917e5159a015232d870cfa030f3b1d588c25009
 ```
 
 ## Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)

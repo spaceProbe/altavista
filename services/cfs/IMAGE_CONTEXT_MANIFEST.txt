@@ -6,8 +6,8 @@
 # Dockerfile's own header comment for the rebuild recipe). test_manifest_paths_exist_and_
 # hash_match verifies a BUILD_ARTIFACT entry only when the file is present on disk and
 # skips it visibly, by name, when absent; every other entry is verified strictly.
-# Built image ID for this manifest: sha256:847c9a0816d2f66e5f3b78318c80513fa704829c7aa71103b09db65713dc3015
-# Runtime-content hash for this build (question 185, see IMAGE_DIGEST.md): sha256:fa059749467ada4a789e158b92b36f44830b3f6e95d837bb7bfc5f23bc13a479
+# Built image ID for this manifest: sha256:4a9a6aee3a3723b909485206a2e7bc94470ae211c8010fb26f6cad23214fef3b
+# Runtime-content hash for this build (question 185, see IMAGE_DIGEST.md): sha256:c72ad6c5cc1a12cc3dfced266474a09010179252916e41586da49c2a608adbc8
 # Regenerate with: services/cfs/build-image.sh -- do not hand-edit.
 cc102cc6939fe35d5e16fbaa3d1f262f24e5f423a46ca067339e3cb0a4af2ee1  services/cfs/apps/adcs/CMakeLists.txt
 7473fd5909bc48b2cfdb771507d804ece78b49ae85d03dc1bcc5cc463bba8e84  services/cfs/apps/adcs/fsw/inc/adcs_app.h
@@ -39,7 +39,7 @@ d1b82283a9cdac70adccdf7415a9e96cccf611273f8ae62589a10e4721641075  services/cfs/a
 ef2486ccc2d107bf5c350e64502988c4b29f8ea49aa96df3bbc3e4f399bfb2c1  services/cfs/apps/shared/ccsds/inc/ccsds_codec.h
 e45c48f58b286eedb0f62c7f52ca2c2f851f32d32df75a99dbdbf38d77973710  services/cfs/apps/shared/ccsds/src/ccsds_codec.c
 dbb3c84ad56c53cfe56e78774cffe0ba20e70c8dca42351cb7554bab88dca826  services/cfs/apps/shared/mission/lockstep_wakeup_mid.h
-8d61137c2820f6e05e2c6637a6ed1ee2f482cd338a0356dc39ae1e9285b16c5e  services/cfs/bin/av-lockstep-shim  BUILD_ARTIFACT
+a044c0d24a047d32adf8b1efd9f56068ed77d44c9c187fd40d34d3b241ab75dc  services/cfs/bin/av-lockstep-shim  BUILD_ARTIFACT
 54a66ddb1b1a85eb3f78afa43c111684ad63203030fa40dc1be8613deb95f82e  services/cfs/build/cpu1_install_custom.cmake
 ba6255d3811229dcbdc6b631c7334868d5120a1d35a740a221f4b79a5495de2b  services/cfs/build/generate_startup.cmake
 144e90c95da85aa8653bc8d029b60c543caa9a5ec890a5bdd94e15c44ee561ee  services/cfs/build/targets.cmake
