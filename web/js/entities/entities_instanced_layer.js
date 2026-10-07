@@ -230,6 +230,87 @@ export function buildTrailGroup(manager, layerId) {
 
 const NO_ENTITY_REQUESTS = Object.freeze([]);
 
+/** Default entity-marker radius on screen, in CSS pixels (a 10 px disc). The viewer's
+ * per-spacecraft `s.marker` sphere is 7 px across (`MARKER_PX` in `web/js/scene.js`), so
+ * the two stay distinguishable where they coincide: the entity marker reads as a ring
+ * round the sphere. */
+export const ENTITY_MARKER_RADIUS_PX = 5;
+
+/**
+ * The material of the entity markers: a `MeshBasicMaterial` (per-instance colour, the
+ * log-depth and fog chunks) whose vertex stage is replaced so that every instance is a
+ * flat disc of a FIXED SIZE IN SCREEN PIXELS, at any camera distance.
+ *
+ * Why it is done in the vertex shader of the instanced mesh: the mesh is ONE object that
+ * every viewport's camera renders (`web/js/scene.js`: the primary renderer and one per
+ * extra viewport, each with its own camera, distance and canvas size). Scaling the
+ * instances from the CPU once per tick can only use one camera's distance, so the other
+ * viewports would see a marker that is sub-pixel or huge (the defect
+ * `Viewer._markerReferenceDistance` documents for the per-spacecraft markers). Here the
+ * size is resolved per draw call, from the camera and the drawing canvas that draw it:
+ *
+ *   - the instance CENTRE is projected as usual (`projectionMatrix * modelViewMatrix *
+ *     instanceMatrix * (0,0,0,1)`), so the floating-origin positions the viewer writes
+ *     into the instance matrices are used exactly as before and the instance's scale is
+ *     ignored;
+ *   - the geometry's x/y are then added in clip space as `xy * radiusPx * 2 / viewportPx *
+ *     w`, i.e. `radiusPx` pixels after the perspective divide, whatever the depth or FOV.
+ *     z and w are the centre's, so the disc sits at the centre's depth (and the
+ *     logarithmic depth buffer, which reads `gl_Position.w`, is unaffected).
+ *
+ * `uViewportPx` is one uniform object shared by every renderer's compiled program, set in
+ * `mesh.onBeforeRender` (`bindMarkerViewport`) from the renderer about to draw the mesh;
+ * renders are synchronous, so the value is the drawing renderer's at upload time.
+ *
+ * Why not `THREE.Points` with `sizeAttenuation: false`: the markers are an
+ * `InstancedMesh` of a shared geometry on purpose (the residency model above, the
+ * per-instance colour and the `count` the proofs read back are that class's), and a
+ * point's size is capped by the GL implementation's point-size range.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.radiusPx] marker radius in CSS pixels (default `ENTITY_MARKER_RADIUS_PX`)
+ * @returns {THREE.MeshBasicMaterial} with `userData.markerUniforms` = `{uMarkerRadiusPx, uViewportPx}`
+ */
+export function createScreenSpaceMarkerMaterial({ radiusPx = ENTITY_MARKER_RADIUS_PX } = {}) {
+  if (!(Number.isFinite(radiusPx) && radiusPx > 0)) {
+    throw new TypeError(`createScreenSpaceMarkerMaterial: radiusPx must be a finite number > 0, got ${radiusPx}`);
+  }
+  const uniforms = {
+    uMarkerRadiusPx: { value: radiusPx },
+    uViewportPx: { value: new THREE.Vector2(1, 1) },
+  };
+  const material = new THREE.MeshBasicMaterial({ vertexColors: true });
+  material.userData.markerUniforms = uniforms;
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uMarkerRadiusPx = uniforms.uMarkerRadiusPx;
+    shader.uniforms.uViewportPx = uniforms.uViewportPx;
+    const marker = [
+      'vec4 mvPosition = vec4( 0.0, 0.0, 0.0, 1.0 );',
+      '#ifdef USE_INSTANCING',
+      '\tmvPosition = instanceMatrix * mvPosition;',
+      '#endif',
+      'mvPosition = modelViewMatrix * mvPosition;',
+      'gl_Position = projectionMatrix * mvPosition;',
+      'gl_Position.xy += transformed.xy * ( uMarkerRadiusPx * 2.0 / uViewportPx ) * gl_Position.w;',
+    ].join('\n');
+    if (!shader.vertexShader.includes('#include <project_vertex>')) {
+      throw new Error('createScreenSpaceMarkerMaterial: the vertex shader has no project_vertex chunk to replace');
+    }
+    shader.vertexShader = 'uniform float uMarkerRadiusPx;\nuniform vec2 uViewportPx;\n'
+      + shader.vertexShader.replace('#include <project_vertex>', marker);
+  };
+  // Distinct program-cache key: never share a compiled program with an ordinary MeshBasicMaterial.
+  material.customProgramCacheKey = () => 'entity-marker-screen-space';
+  return material;
+}
+
+/** Point `material`'s `uViewportPx` at the drawing area of `renderer` (CSS pixels): the
+ * size the screen-space marker is measured against. Called from `mesh.onBeforeRender`. */
+export function bindMarkerViewport(material, renderer, target = new THREE.Vector4()) {
+  renderer.getViewport(target);
+  material.userData.markerUniforms.uViewportPx.value.set(Math.max(target.z, 1), Math.max(target.w, 1));
+}
+
 /**
  * The entity markers' and trails' participant in the merged per-tick view, and the
  * scene-graph side of their residency (heavy cleanup round 1, questions 235/237). One
@@ -280,11 +361,14 @@ const NO_ENTITY_REQUESTS = Object.freeze([]);
  * @param {Array<{name:string, positionKm:number[], color?:string, trailPointsKm:number[][]}>} opts.entities
  * @param {number} opts.trailMaxPoints capacity of each trail line's position buffer
  * @param {(cls: 'markers'|'trails') => boolean} [opts.isEnabled] read fresh every tick (default: both on)
+ * @param {number} [opts.markerRadiusPx] on-screen marker radius in CSS pixels, constant at
+ *   any camera distance in every viewport (`createScreenSpaceMarkerMaterial`); the markers
+ *   have no size in scene units, and `markerGeometry` only needs its x/y in [-1, 1]
  */
 export class ResidentEntityScene {
   constructor({
     manager, markerLayerId, trailLayerId, markerGroup, trailGroup, markerGeometry, entities, trailMaxPoints,
-    isEnabled = () => true,
+    isEnabled = () => true, markerRadiusPx = ENTITY_MARKER_RADIUS_PX,
   }) {
     this.manager = manager;
     this.markerLayerId = markerLayerId;
@@ -308,8 +392,20 @@ export class ResidentEntityScene {
     /** @type {THREE.InstancedMesh|null} null only when the scenario has no entities */
     this.markerMesh = null;
     if (entities.length) {
-      const mesh = new THREE.InstancedMesh(markerGeometry, new THREE.MeshBasicMaterial({ vertexColors: true }), entities.length);
+      const material = createScreenSpaceMarkerMaterial({ radiusPx: markerRadiusPx });
+      const mesh = new THREE.InstancedMesh(markerGeometry, material, entities.length);
       mesh.count = 0;
+      // A fixed on-screen size, resolved per draw call from the drawing renderer (see
+      // `createScreenSpaceMarkerMaterial`): the mesh is rendered by several cameras/canvases.
+      const viewport = new THREE.Vector4();
+      mesh.onBeforeRender = (renderer) => bindMarkerViewport(material, renderer, viewport);
+      // Never frustum-culled: `InstancedMesh` caches ONE bounding sphere the first time it is
+      // frustum-tested and never recomputes it, while the instances move every tick (a
+      // floating-origin rebase shifts every render-space coordinate, by up to ~7 scene
+      // units at LEO), so a sphere cached for an earlier position culls the mesh while its
+      // instances are in view (reproduced in web/js/entities_marker_material_check.mjs). The
+      // draw is a handful of discs, so the cull saved nothing anyway.
+      mesh.frustumCulled = false;
       entities.forEach((e, i) => mesh.setColorAt(i, this._colorByName.get(e.name)));
       mesh.userData.sourceLayerId = markerLayerId;
       mesh.userData.residentKeys = this.markerNames;

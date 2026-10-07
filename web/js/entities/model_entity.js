@@ -101,15 +101,37 @@ export class ModelEntity {
    * quaternion, and it is what a caller positions and parents to, so a scale on it would
    * leak into every child and every position copied onto it). After this call the
    * group's world bounding box is the glTF's metre bounds times `sceneUnitsPerMetre`.
+   *
+   * Materials are drawn two-sided (`doubleSided`, default true), whatever the glTF says.
+   * A glTF material is single-sided unless it declares `doubleSided`, and a single-sided
+   * mesh is back-face culled: an asset that is open (a shell, a thin plate, a panel) or
+   * wound inside out is then invisible from half the directions the camera can take, and
+   * which half follows the spacecraft's attitude. Measured on the committed fixture
+   * (`web/js/fixtures/entity_model_fixture.gltf`: three triangles at a corner, wound so
+   * their normals point into the corner): framed from the usual side, zero of its roughly
+   * 10,800 projected pixels were drawn single-sided. The cost of two-sided drawing for a
+   * single spacecraft model is negligible, so a viewer that has to show whatever model a
+   * run declares draws it from every side; pass `doubleSided: false` to keep each
+   * material's own `side`.
    * @param {{scene: THREE.Object3D}} gltf a GLTFLoader onLoad result
+   * @param {{doubleSided?: boolean}} [opts]
    */
-  attachModel(gltf) {
+  attachModel(gltf, { doubleSided = true } = {}) {
     this.gltf = gltf;
     while (this.group.children.length) this.group.remove(this.group.children[0]);
     const metres = new THREE.Group();
     metres.name = 'entity-model-metres';
     metres.scale.setScalar(this.sceneUnitsPerMetre);
     for (const child of gltf.scene.children.slice()) metres.add(child);
+    if (doubleSided) {
+      metres.traverse((obj) => {
+        if (!obj.isMesh || !obj.material) return;
+        for (const material of Array.isArray(obj.material) ? obj.material : [obj.material]) {
+          material.side = THREE.DoubleSide;
+          material.needsUpdate = true;
+        }
+      });
+    }
     this.group.add(metres);
     this.modelLoaded = true;
     return this.group;

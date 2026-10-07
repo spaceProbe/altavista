@@ -92,6 +92,12 @@ export const FIT_DISTANCE_FACTOR = 2.4;
 export const ENTITY_FRAMING_FRACTION = 0.6;
 const MARKER_PX = 7;                // spacecraft marker diameter on screen
 const EVENT_PX = 9;
+// Floor of the pixel-constant spacecraft/event marker scale, scene units (1e-10 = 0.1 mm).
+// It only keeps the scale from reaching zero. It used to be 1e-6 = 1 m, which is a lower
+// bound far above what a 7 px marker needs once the camera is a few metres away (a framed
+// 1.5 m glTF model): the Chaser's marker was then an opaque sphere of 1 m radius centred on
+// the model's origin, hiding all but the ~240 px of the model that poked out of it.
+const MARKER_MIN_SCALE_SCENE_UNITS = 1e-10;
 // Auto-rebase policy (origin.js leaves this to the caller): rebase the floating
 // origin whenever the focus target drifts more than this many scene units from the
 // current origin. At float32's ~7.2 decimal digits, a coordinate of magnitude V
@@ -158,12 +164,18 @@ const ENTITY_MODEL_LAYER_ID = 'entity-models';           // same
 // same cap (see _buildEntities()'s entity list) so the LayerManager's own
 // budget reflects what is actually drawn, never an undeclared amount.
 const ENTITY_TRAIL_RECENT_SAMPLES = 50;
-// Constant per-instance marker size (scene units) -- entity markers are a SEPARATE,
-// budgeted representation from the existing per-spacecraft `s.marker` mesh (unbudgeted,
-// always drawn); both may legitimately be visible at once, so this uses its own small,
-// fixed on-screen footprint rather than reusing MARKER_PX's pixel-constant formula,
-// keeping the two visually distinguishable rather than exact duplicates.
-const ENTITY_MARKER_RADIUS_SCENE_UNITS = 3e-4;
+// Entity markers are a SEPARATE, budgeted representation from the existing per-spacecraft
+// `s.marker` mesh (unbudgeted, always drawn); both may legitimately be visible at once.
+// They have NO size in scene units: each instance is a disc of a fixed number of screen
+// pixels (`ENTITY_MARKER_RADIUS_PX`, web/js/entities/entities_instanced_layer.js), resolved
+// per draw call by the instanced mesh's own vertex shader, so every viewport sees the same
+// pixel size at its own camera distance and nothing a marker does can set a framing extent.
+//
+// The only scene-unit number left is the Focus FALLBACK radius: when a spacecraft has
+// nothing else drawn (no covariance ellipsoid, keep-out volume or loaded model with its
+// class on), `Viewer.entityExtent` still has to give Focus something to frame. It is the
+// radius the marker used to have (300 m: scene unit = 1000 km), kept so that marker-only Focus does not move.
+const ENTITY_MARKER_FALLBACK_EXTENT_SCENE_UNITS = 3e-4;
 
 // A shared-manager participant that never contributes a fragment (`updateComposed`, layers/layer.js) --
 // stands in for the entity scene before the first scenario has loaded.
@@ -279,8 +291,9 @@ export class Viewer {
     // keep-out meshes reuse web/js/entities/ellipsoid_mesh.js's own module-level shared
     // unit sphere instead (buildEllipsoidMesh); this one is entity MARKERS' own, since
     // markers are built directly here, not through that module's mesh helper (see
-    // _buildEntityGroups()'s own comment for why).
-    this._entityMarkerGeometry = new THREE.SphereGeometry(1, 10, 8);
+    // _buildEntityGroups()'s own comment for why). A unit disc: the marker material's
+    // vertex shader reads only its x/y, as a fraction of the marker's pixel radius.
+    this._entityMarkerGeometry = new THREE.CircleGeometry(1, 24);
     // Everything else entity-related is rebuilt fresh per scenario in setScenario()
     // (mirroring this.bodies/this.spacecraft/this.footprints) and torn down in clear()
     // -- see both methods' own "heavy round 7" comments. Null/empty until the first
@@ -1760,21 +1773,28 @@ export class Viewer {
 
   /**
    * The extent of what is drawn for spacecraft `name`, as a bounding sphere about its
-   * marker position, in scene units: the largest of (a) the covariance ellipsoid's
-   * longest semi-axis when that class is on and the spacecraft has a shape at the current
-   * sample, (b) the same for the keep-out volume, (c) the loaded glTF model's bounding
-   * sphere about the marker position when the models class is on, and (d) the entity
-   * marker's own radius (`ENTITY_MARKER_RADIUS_SCENE_UNITS`), which is also the floor and
-   * the answer when nothing else is drawn. Reads the live scene objects, so it is the
-   * extent as of the last `update(t)` tick. `source` names which one decided it.
+   * marker position, in scene units: the largest of
+   *   (a) the covariance ellipsoid's longest semi-axis, when that class is on and the
+   *       spacecraft has a shape at the current sample,
+   *   (b) the same for the keep-out volume,
+   *   (c) the loaded glTF model's bounding sphere about the marker position (the farthest
+   *       vertex from it, `modelBoundingRadius`), when the models class is on and the
+   *       model has loaded.
+   * The entity MARKER is not part of it: it has no size in scene units (it is a fixed
+   * number of screen pixels at any distance), so it neither sets nor floors the extent.
+   * When none of (a)-(c) is drawn, the answer is the fallback radius
+   * `ENTITY_MARKER_FALLBACK_EXTENT_SCENE_UNITS` (3e-4 scene units, 300 m: what the marker
+   * used to be, so a marker-only Focus frames where it always did) with `source:
+   * 'marker'`. Reads the live scene objects, so it is the extent as of the last
+   * `update(t)` tick. `source` names which one decided it.
    * @param {string} name
    * @returns {{radius:number, source:'covariance'|'keepout'|'model'|'marker'}|null}
    *   null for an unknown spacecraft.
    */
   entityExtent(name) {
     if (!this.spacecraft.has(name)) return null;
-    let best = { radius: ENTITY_MARKER_RADIUS_SCENE_UNITS, source: 'marker' };
-    const consider = (radius, source) => { if (radius > best.radius) best = { radius, source }; };
+    let best = null;
+    const consider = (radius, source) => { if (radius > 0 && (!best || radius > best.radius)) best = { radius, source }; };
     const cov = this._entityCovarianceMeshes.get(name);
     if (cov && this.entityOptions.covarianceEllipsoids && cov.hasShape) {
       consider(Math.max(cov.mesh.scale.x, cov.mesh.scale.y, cov.mesh.scale.z), 'covariance');
@@ -1785,14 +1805,9 @@ export class Viewer {
     }
     const model = this._entityModelEntities.get(name);
     if (model && this.entityOptions.models && model.modelLoaded) {
-      const box = new THREE.Box3().setFromObject(model.group);
-      if (!box.isEmpty()) {
-        const centre = box.getCenter(new THREE.Vector3());
-        const half = box.getSize(new THREE.Vector3()).length() / 2;
-        consider(centre.distanceTo(model.group.position) + half, 'model');
-      }
+      consider(modelBoundingRadius(model.group), 'model');
     }
-    return best;
+    return best || { radius: ENTITY_MARKER_FALLBACK_EXTENT_SCENE_UNITS, source: 'marker' };
   }
 
   /**
@@ -2124,7 +2139,9 @@ export class Viewer {
       const s = this.spacecraft.get(name);
       if (!s) return;
       any = true;
-      scaleVec.setScalar(ENTITY_MARKER_RADIUS_SCENE_UNITS);
+      // Unit scale: the marker's size is in screen pixels (the material's vertex shader),
+      // the instance matrix carries the position only.
+      scaleVec.setScalar(1);
       m4.compose(s.marker.position, q.identity(), scaleVec);
       mesh.setMatrixAt(i, m4);
     });
@@ -2333,7 +2350,7 @@ export class Viewer {
       s.interp.at(t, this._tmpAbs).multiplyScalar(SCALE);
       this._toLocal(this._tmpAbs, s.marker.position);
       const d = this._markerReferenceDistance(s.marker.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      s.marker.scale.setScalar(Math.max(d * pxScale * MARKER_PX * 0.5, 1e-6));
+      s.marker.scale.setScalar(Math.max(d * pxScale * MARKER_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
       if (this.options.trail === 'past' && s.poly.times.length > 1) {
         const k = findSegment(t, s.poly.times);
         s.line.geometry.instanceCount = t >= s.poly.times[s.poly.times.length - 1] ? s.segCount : Math.max(0, k);
@@ -2349,7 +2366,7 @@ export class Viewer {
     }
     for (const e of this.events) {
       const d = this._markerReferenceDistance(e.mesh.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, 1e-6));
+      e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
     }
     // Heavy round 7 (H6 wiring): entity per-tick update, AFTER the spacecraft loop
     // above (every _updateEntity*() method below reads `s.marker.position`, which that
@@ -2479,6 +2496,31 @@ export function defaultFrameViewRadius(bodyRadiusKm) {
 }
 
 /**
+ * Radius, in scene units, of the smallest sphere centred on `group`'s own origin (where the
+ * viewer puts the spacecraft's marker position) that contains every vertex of every mesh
+ * under it, as the meshes are right now (attitude and the metre-to-scene-units node
+ * included). 0 for a group with no mesh geometry. Walks every vertex: called on an explicit
+ * Focus (`Viewer.entityExtent`), never per tick.
+ * @param {THREE.Object3D} group
+ * @returns {number}
+ */
+export function modelBoundingRadius(group) {
+  group.updateWorldMatrix(true, true);
+  const origin = group.getWorldPosition(new THREE.Vector3());
+  const v = new THREE.Vector3();
+  let maxSq = 0;
+  group.traverse((obj) => {
+    const position = obj.isMesh && obj.geometry && obj.geometry.attributes.position;
+    if (!position) return;
+    for (let i = 0; i < position.count; i++) {
+      v.fromBufferAttribute(position, i).applyMatrix4(obj.matrixWorld);
+      maxSq = Math.max(maxSq, v.distanceToSquared(origin));
+    }
+  });
+  return Math.sqrt(maxSq);
+}
+
+/**
  * Entity-framing distance (cleanup round, questions 235/237): how far from an entity's
  * centre the camera sits so the entity's own BOUNDING SPHERE (radius `extentRadius`, the
  * extent of what is drawn for it -- see `Viewer.entityExtent`) fills `fraction` of the
@@ -2540,7 +2582,11 @@ export function projectedSphereHeightFraction(extentRadius, distance, fovDeg) {
  * the FOV); `far` is at least `farFloor` (the whole-scenario far plane, so the central
  * body and the star field behind a framed entity are still drawn) and at least 1e4 x the
  * distance. The renderer runs a logarithmic depth buffer (the `Viewer` constructor), so
- * the resulting near/far ratio does not cost depth precision. `minDistance` lets the
+ * the resulting near/far ratio does not cost depth precision. (What limits depth
+ * resolution at a framed distance is three's per-fragment `1 + w` term in float32, not
+ * near/far: about 0.1 m at the 6.4 m framing distance of a 1.5 m model. Surfaces closer
+ * together than that in depth cannot be ordered; measured by
+ * tests/test_viewer_entity_framing_browser.py.) `minDistance` lets the
  * user zoom in to a tenth of the framing distance: `minDistanceCap` (the usual
  * whole-scenario clamp, `ENTITIES_MIN_DISTANCE` = 1 km) is the ceiling, so a small framed
  * object (a 300 m marker frames at ~1.2 km) is not stuck against a clamp that would stop
