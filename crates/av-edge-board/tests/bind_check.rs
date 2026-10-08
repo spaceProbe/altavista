@@ -1,7 +1,8 @@
 //! The Bind-time board check, through the real binary and the kernel's gRPC client, against
 //! a fake guest on loopback UDP (no board): matching parameters are forwarded stripped (the
 //! guest's BIND bytes equal the container path's encoding without them); a mismatched device
-//! or edge node is refused with `lockstep_capable = false` and nothing reaches the guest.
+//! or edge node, or a Bind lacking the board parameters (one or both), is refused with
+//! `lockstep_capable = false` and nothing reaches the guest.
 mod common;
 
 use std::collections::BTreeMap;
@@ -27,19 +28,6 @@ fn start(tag: &str, guest: &UdpGuest) -> (Service, String) {
 fn matching_parameters_are_forwarded_stripped_and_equal_the_container_paths_bytes() {
     let instance_params = params(&[("gain", "2.5"), ("mode", "safe")]);
 
-    // The reference: the container path today. No board parameters at all; the service
-    // forwards unchecked and warns.
-    let guest_a = UdpGuest::spawn(Brain::default());
-    let (mut service_a, _) = start("bind-ref", &guest_a);
-    let mut client = BlockingLockstepClient::connect_plaintext(&service_a.grpc_addr).unwrap();
-    assert!(client.bind(client_bind_request(&instance_params)).unwrap().lockstep_capable);
-    client.shutdown(LockstepShutdownRequest { run_id: RUN_ID.into() }).unwrap();
-    service_a.wait_exit(Duration::from_secs(15));
-    assert!(service_a.stderr().contains("WARNING: Bind carries no board.edge_node_id/board.port_device; forwarding unchecked"), "{}", service_a.stderr());
-    let reference = guest_a.brain.lock().unwrap().binds.clone();
-    guest_a.finish();
-    assert_eq!(reference.len(), 1);
-
     // The board path: the same request plus the two board parameters.
     let guest_b = UdpGuest::spawn(Brain::default());
     let (mut service_b, device) = start("bind-match", &guest_b);
@@ -61,11 +49,11 @@ fn matching_parameters_are_forwarded_stripped_and_equal_the_container_paths_byte
 
     // The guest's BIND bytes: identical to the container path's, and to an independent
     // encoding of the request without the board parameters.
-    assert_eq!(forwarded[0], reference[0], "the BIND bytes with the board parameters stripped must equal the container path's");
-    assert_eq!(forwarded[0], container_path_bind(&instance_params).encode_to_vec());
+    // The container path's encoding of the same request (no board parameters), built independently.
+    assert_eq!(forwarded[0], container_path_bind(&instance_params).encode_to_vec(), "the BIND bytes with the board parameters stripped must equal the container path's");
     let decoded = av_cdm::pb::LockstepBindRequest::decode(forwarded[0].as_slice()).unwrap();
     assert_eq!(decoded.parameters, instance_params, "only the instance's own parameters reach the guest");
-    println!("BIND-BYTES forwarded={} bytes, equal to the container path's ({} bytes) and to the independent encoding", forwarded[0].len(), reference[0].len());
+    println!("BIND-BYTES forwarded={} bytes, equal to the container path's independent encoding", forwarded[0].len());
 }
 
 #[test]
@@ -81,6 +69,11 @@ fn a_mismatched_device_or_edge_node_is_refused_and_nothing_is_forwarded() {
         ("serial instead of udp", params(&[(BIND_PARAM_EDGE_NODE_ID, "edge-udp"), (BIND_PARAM_PORT_DEVICE, "/dev/ttyUSB0@115200")]), vec!["/dev/ttyUSB0@115200", &device]),
         ("edge node", params(&[(BIND_PARAM_EDGE_NODE_ID, "edge-other"), (BIND_PARAM_PORT_DEVICE, &device)]), vec!["edge-other", "edge-udp", "edge node id differs"]),
         ("only one parameter", params(&[(BIND_PARAM_EDGE_NODE_ID, "edge-udp")]), vec!["only one of the two board parameters"]),
+        ("only the other parameter", params(&[(BIND_PARAM_PORT_DEVICE, &device)]), vec!["only one of the two board parameters", &device]),
+        // The lead's ruling (question 242, hilprep-4): a board link is always checked, so a Bind
+        // with neither parameter is refused too, not forwarded unchecked.
+        ("neither parameter", params(&[("gain", "2.5")]), vec!["neither board parameter is present", BIND_PARAM_EDGE_NODE_ID, BIND_PARAM_PORT_DEVICE, &device, "edge-udp"]),
+        ("no parameters at all", params(&[]), vec!["neither board parameter is present"]),
     ];
     for (name, p, must_name) in cases {
         let resp = client.bind(client_bind_request(&p)).unwrap_or_else(|e| panic!("{name}: a refusal is a response, not an RPC error: {e}"));

@@ -180,9 +180,11 @@ dependencies = [
  "libc",
  "openssl",
  "prost",
+ "serde_json",
  "thiserror",
  "tokio",
  "tonic",
+ "tonic-build",
 ]
 
 [[package]]

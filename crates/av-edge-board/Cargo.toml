@@ -22,7 +22,11 @@ libc.workspace = true
 
 # Server side only, like the shim: this crate hosts `LockstepService`, it never dials.
 tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
+
+[build-dependencies]
+# `build.rs` generates the `BoardEdgeService` server (question 242 (c)); both are already in the workspace lock.
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
 
 [dev-dependencies]
 # The kernel's own gRPC client for `LockstepService` (unmodified), as the shim's end-to-end
@@ -31,6 +35,8 @@ av-lockstep = { path = "../av-lockstep" }
 prost.workspace = true
 # Tests generate a throwaway P-384 key and self-signed certificate for the I/O log.
 openssl = "0.10"
+# The recording power-control fake writes JSON lines the tests parse.
+serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
 
 [[bin]]

@@ -2171,6 +2171,7 @@ the reason).
 | `board.tls`, `board.ca_file`, `board.client_cert`, `board.client_key` | as the `container.*` mTLS set |
 | `board.step_timeout_ms` | `Step`/`Reset`/`Shutdown` with no reply in this long is `ContainerError::StepTimeout` (as `DrmError::ContainerProtocol`) / `ResetRpc` / `ShutdownRpc`. Default 5000, bounds 10..=600000 |
 | `board.bind_timeout_ms` | the connect and `Bind` (the edge service waits for the flight software's HELLO inside it). Default 30000, same bounds. Expiry is `DrmError::BoardBind` / `BoardConnect` |
+| `board.power_control_timeout_ms` | how long to wait for the edge service's `PowerCycle` reply (see "Power control" below). Default 60000, same bounds. Expiry is a `PowerControlError::TimedOut` |
 
 `av-lockstep`'s blocking client has no deadline, so each board call runs on a worker thread
 (`TimedLockstep`) and the caller waits with `recv_timeout`; after a timeout the link is not used
@@ -2189,21 +2190,44 @@ The instance's `Trajectory.provenance.attributes` are `binding_kind = BINDING_KI
 edge service) and `board_link_hash` (SHA-256 of the kernel-side `BoardLink`: edge node, canonical
 device, sorted ports) in place of a container's `container_binding_hash`.
 
-**Power control is not acted on.** `BoardBinding.power_control` is read and kept, but power
-control is an edge-service operation a later task adds (hilprep-4): until then every
-`FAULT_TARGET_KIND_HARDWARE` fault naming a board instance, a `power_cycle` included, is
-`DrmError::HardwareFaultNotSupportedOnInstance` at load. Replaying a board instance's port log
-is not exercised here.
+**Power control (question 242 (c), hilprep-4).** `BoardBinding.power_control` is the **edge
+node's** power control channel (`av_edge::board::parse_power_control`: `cmd:<absolute path>`;
+empty is none; `gpio://...` is reserved and refused), and the board may hang off this host or a
+separate Linux edge node, so **the kernel never runs it**: `src/drm/power.rs`'s `PowerControl`
+trait has one production implementation, `EdgePowerControl`, a client of
+`altavista.v1.BoardEdgeService` (`proto/altavista/v1/board.proto`; the client is
+`av_lockstep::board_edge`) at the same `board.edge_address` with the same TLS and loopback rules as
+the board's lockstep link. The edge service runs its own configured channel locally and returns a
+typed result (`av-edge-board`'s README, "Power control"). A `FAULT_TARGET_KIND_HARDWARE` /
+`power_cycle` fault on a board instance is a boundary like a container's; at the fault's epoch the
+executor calls `PowerControl::power_cycle`, **then** sends the same lockstep `RESET`
+(`reason = "fault:<id>"`) a container gets (`power::perform` fixes the order), and records the
+container-style `fault:<id>` event plus one `marker:power_cycle:<id>` event (`values.duration_ns`;
+wall-clock dependent, so `pacing::WALL_CLOCK_DEPENDENT` names it and `is_wall_clock_event`
+recognises it, for a replay to exclude). A refused or failed power cycle (no channel, a different
+channel or edge node, non-zero exit, a signal, a timeout, a failed RPC) ends the run with
+`DrmError::BoardPowerCycle` carrying the edge service's reason, and no `RESET` is sent. The
+stall of a real channel shows in the pacing report as an overrun of the tick after the fault.
+Load-time: a malformed `power_control` is `DrmError::BoardPowerControl` even with no fault; a
+power-cycle fault on a board with an empty `power_control` is `BoardPowerCycleNeedsChannel`; any
+other HARDWARE kind on a board is `HardwareFaultKindNotSupported`, as for a container. A recording
+fake (`RecordingPowerControl`) implements the same trait for the kernel's own unit tests; the
+end-to-end fake sits behind the same RPC (an `av-edge-board` with `--power-control cmd:<a tiny
+executable>`). **Not done (HIL-day item):** a board that really reboots needs the edge service to
+re-handshake (HELLO once) and the kernel to re-`Bind` before the `RESET`; the stand-in's guest stays
+up through the "power cycle", so that path is unwritten and unexercised (`power.rs` module doc).
+Replaying a board instance's port log is not exercised here.
 
-**Proven against stand-ins only**: `tests/drm_board_pacing.rs` and `tests/drm_board_refusals.rs`
-run the real `av-edge-board` binary in front of a fake lockstep-local guest on a loopback UDP
+**Proven against stand-ins only**: `tests/drm_board_pacing.rs`, `tests/drm_board_refusals.rs` and
+`tests/drm_board_power.rs` run the real `av-edge-board` binary in front of a fake lockstep-local guest on a loopback UDP
 socket (the fake answers each STEP with an empty STEP_DONE, so the board-bound controller is
 silent). No ZCU104, no Renode, no Docker.
 
 **HIL-day run.** Start the guest's link, then `av-edge-board --port-device <spec> --edge-node-id
 <id> --io-log <new file> --signing-key <pem> --signing-cert <pem>` (see its README); give the
 SoS instance the matching `BoardBinding`; set `board.edge_address` (and `board.seed_key`, with
-that key in `Scenario.seeds`) on the controller's system, recomputing its hash
+that key in `Scenario.seeds`; add `--power-control cmd:<path>` to the service and the same
+`power_control` to the `BoardBinding` if a power-cycle fault is used) on the controller's system, recomputing its hash
 (`cargo run -p av-kernel --example drm_hash -- system <file>`); run `av-run` as for any DRM. No
 CLI flag is needed: a board instance forces pacing.
 
@@ -2214,8 +2238,9 @@ CLI flag is needed: a board instance forces pacing.
   `kernel::Kernel`) -- never `HashMap`.
 - No RNG anywhere in this crate.
 - No wall-clock read that affects a result: the clock only advances by an explicit `tick()`.
-  The one exception is real-time pacing (a board-bound run): only `RunProducts.pacing` and the
-  `pacing_overrun` events depend on the wall clock (`pacing::WALL_CLOCK_DEPENDENT`); a lockstep
+  The one exception is real-time pacing (a board-bound run): only `RunProducts.pacing`, the
+  `pacing_overrun` events and a board power cycle's outcome event depend on the wall clock
+  (`pacing::WALL_CLOCK_DEPENDENT`); a lockstep
   run reads no clock and its products are byte-for-byte unchanged by the pacing code.
 
 ## Known limitations / approximations, stated plainly

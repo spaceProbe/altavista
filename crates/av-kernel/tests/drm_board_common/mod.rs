@@ -173,15 +173,75 @@ impl Drop for FakeGuest {
 // The edge service binary
 // ------------------------------------------------------------------------------------------
 
-/// `av-edge-board` sits next to `deps/` in the target directory this test was built into; the
-/// path dev-dependency in `Cargo.toml` makes Cargo build it (as for `av-lockstep-shim`).
+/// The command that rebuilds the binary these tests spawn.
+pub const REBUILD_EDGE_BOARD: &str = "scripts/dev/cargo-slot build -p av-edge-board --bins";
+
+/// The local crates the `av-edge-board` binary is compiled from: itself and its whole path-dependency
+/// closure (`av-edge`, the pure half; `av-cdm`, the generated proto types; `av-codec` and
+/// `av-dynamics`, which `av-edge` links; `av-lockstep-shim`, `PeerLink` and `ShimService`).
+pub const EDGE_BOARD_SOURCE_CRATES: [&str; 6] = ["crates/av-edge-board", "crates/av-edge", "crates/av-cdm", "crates/av-codec", "crates/av-dynamics", "crates/av-lockstep-shim"];
+
+/// The proto directory every one of those crates' `build.rs` compiles (`board.proto`, `edge.proto`,
+/// `lockstep.proto`, ...): a proto change rebuilds the binary too.
+pub const EDGE_BOARD_SOURCE_PROTO_DIR: &str = "proto/altavista/v1";
+
+/// Every file whose change makes the `av-edge-board` binary out of date, for [`edge_board_bin`]'s
+/// staleness check: for each crate in [`EDGE_BOARD_SOURCE_CRATES`], its `Cargo.toml`, its
+/// `build.rs` if it has one, and every file under its `src/` (recursively); and every file under
+/// [`EDGE_BOARD_SOURCE_PROTO_DIR`].
+fn edge_board_source_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display())) {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for krate in EDGE_BOARD_SOURCE_CRATES {
+        let root = repo_root().join(krate);
+        for name in ["Cargo.toml", "build.rs"] {
+            if root.join(name).is_file() {
+                files.push(root.join(name));
+            }
+        }
+        walk(&root.join("src"), &mut files);
+    }
+    walk(&repo_root().join(EDGE_BOARD_SOURCE_PROTO_DIR), &mut files);
+    files
+}
+
+/// Panics, naming the fix, unless `binary` exists and is at least as new (mtime) as the newest of
+/// `sources`. Takes the paths as arguments so the check itself is testable.
+pub fn assert_binary_is_fresh(binary: &Path, sources: &[PathBuf]) {
+    assert!(binary.is_file(), "the av-edge-board binary {} does not exist: build it with `{REBUILD_EDGE_BOARD}` (`cargo test -p av-kernel` does not build another package's binary)", binary.display());
+    let built = std::fs::metadata(binary).and_then(|m| m.modified()).unwrap_or_else(|e| panic!("mtime of {}: {e}", binary.display()));
+    let newest = sources.iter().map(|p| (std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or_else(|e| panic!("mtime of {}: {e}", p.display())), p)).max_by_key(|(t, _)| *t);
+    if let Some((changed, path)) = newest {
+        assert!(
+            built >= changed,
+            "the av-edge-board binary {} is older than {} (a source it is built from): the board tests would spawn a STALE service. Rebuild it with `{REBUILD_EDGE_BOARD}` and rerun. (Scanned: Cargo.toml, build.rs and src/** of {} and every file under {EDGE_BOARD_SOURCE_PROTO_DIR}.)",
+            binary.display(),
+            path.display(),
+            EDGE_BOARD_SOURCE_CRATES.join(", ")
+        );
+    }
+}
+
+/// `av-edge-board` sits next to `deps/` in the target directory this test was built into. Cargo
+/// does NOT build it for `cargo test -p av-kernel` (a dev-dependency's binary is not built for
+/// another package's tests), so a stale or missing one is a visible panic, not a silent run
+/// against old code: see [`assert_binary_is_fresh`] and [`REBUILD_EDGE_BOARD`].
 pub fn edge_board_bin() -> PathBuf {
     let mut dir = std::env::current_exe().expect("this test's executable path").parent().expect("a parent directory").to_path_buf();
     if dir.ends_with("deps") {
         dir.pop();
     }
     let candidate = dir.join("av-edge-board");
-    assert!(candidate.is_file(), "expected the av-edge-board binary at {} (built via this crate's dev-dependency)", candidate.display());
+    assert_binary_is_fresh(&candidate, &edge_board_source_files());
     candidate
 }
 
@@ -220,10 +280,11 @@ fn write_identity(dir: &Path) -> (PathBuf, PathBuf) {
 
 /// The command line of the edge service. Every flag the service requires is added here and
 /// nowhere else, so a flag a later task makes mandatory is a change to this function only.
-fn service_argv(device: &str, edge_node_id: &str, grpc_addr: &str, dir: &Path) -> Vec<String> {
+fn service_argv(device: &str, edge_node_id: &str, grpc_addr: &str, dir: &Path, extra: &[String]) -> Vec<String> {
     let (key, cert) = write_identity(dir);
     let mut argv: Vec<String> = ["--port-device", device, "--edge-node-id", edge_node_id, "--grpc-addr", grpc_addr].iter().map(|s| s.to_string()).collect();
     argv.extend(["--io-log".to_string(), dir.join("io.log").display().to_string(), "--signing-key".to_string(), key.display().to_string(), "--signing-cert".to_string(), cert.display().to_string()]);
+    argv.extend(extra.iter().cloned());
     argv
 }
 
@@ -238,13 +299,18 @@ impl Service {
     /// Start `av-edge-board` for `device` (it handshakes with the guest at `device` first, so
     /// the guest must already be running) and wait until it serves.
     pub fn start(tag: &str, device: &str, edge_node_id: &str) -> Self {
+        Self::start_with(tag, device, edge_node_id, &[])
+    }
+
+    /// As [`Service::start`], with `extra` more `av-edge-board` arguments (`--power-control ...`).
+    pub fn start_with(tag: &str, device: &str, edge_node_id: &str, extra: &[String]) -> Self {
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("drm-board-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let grpc_addr = format!("127.0.0.1:{}", free_tcp_port());
         let stderr_path = dir.join("service.stderr");
         let stderr = std::fs::File::create(&stderr_path).unwrap();
-        let child = Command::new(edge_board_bin()).args(service_argv(device, edge_node_id, &grpc_addr, &dir)).stdout(Stdio::null()).stderr(Stdio::from(stderr)).spawn().expect("spawn av-edge-board");
+        let child = Command::new(edge_board_bin()).args(service_argv(device, edge_node_id, &grpc_addr, &dir, extra)).stdout(Stdio::null()).stderr(Stdio::from(stderr)).spawn().expect("spawn av-edge-board");
         let mut svc = Self { child, grpc_addr, dir, stderr_path };
         svc.wait_ready(Duration::from_secs(30));
         svc
@@ -262,6 +328,17 @@ impl Service {
             assert!(Instant::now() < deadline, "av-edge-board not ready after {timeout:?}; stderr:\n{}", self.stderr());
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The edge service's process id (the parent of anything it runs).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Read and verify the edge service's board I/O log now, as an independent reader would.
+    pub fn read_io_log(&self) -> av_edge::board_log::VerifiedLog {
+        let verifier = av_edge::board_log::LogVerifier::from_pem(&std::fs::read(self.dir.join("edge.cert.pem")).unwrap()).unwrap();
+        av_edge::board_log::read_log(&self.dir.join("io.log"), &verifier).unwrap_or_else(|e| panic!("the I/O log must verify: {e}"))
     }
 
     pub fn stderr(&self) -> String {
@@ -349,6 +426,17 @@ impl Scene {
         Self { drm, sos, systems }
     }
 
+    /// Declare `BoardBinding.power_control` on the controller (re-hashing the configuration).
+    pub fn with_power_control(mut self, power_control: &str) -> Self {
+        for inst in self.sos.instances.iter_mut().filter(|i| i.name == CONTROLLER) {
+            if let Some(Binding { config: Some(av_cdm::pb::binding::Config::Board(b)), .. }) = inst.binding.as_mut() {
+                b.power_control = power_control.to_string();
+            }
+        }
+        self.sos.hash = hash::canonical_sos_hash(&self.sos);
+        self
+    }
+
     pub fn start_tai_ns(&self) -> i64 {
         self.drm.scenario.as_ref().unwrap().start_tai_ns
     }
@@ -370,5 +458,78 @@ impl Scene {
             replay: None,
             command_source: None,
         })
+    }
+}
+
+// ------------------------------------------------------------------------------------------
+// The recording power-control fake (question 242 (c), hilprep-4)
+// ------------------------------------------------------------------------------------------
+
+/// A tiny executable the test writes into its own scratch directory, for `av-edge-board
+/// --power-control cmd:<path>`. Every call appends one JSON line (argv, its own pid, its parent
+/// pid, the Unix time in seconds, its working directory) to `calls.jsonl` beside itself, then
+/// does what `mode` says: `ok` (the default; exit 0), `fail` (stderr "relay stuck", exit 3), or
+/// `sleep` (writes its pid to `sleep.pid`, sleeps 30 s). `/bin/sh` is the interpreter: the shell
+/// allowlist on this host governs commands typed into a shell, not processes a binary spawns.
+/// hilprep-6 reuses it.
+pub struct FakeChannel {
+    pub dir: PathBuf,
+    pub path: PathBuf,
+}
+
+impl FakeChannel {
+    pub fn create(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("drm-board-channel-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("power-cycle");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n\
+             d=$(dirname \"$0\")\n\
+             args=\"\"\n\
+             for a in \"$@\"; do args=\"$args\\\"$a\\\",\"; done\n\
+             args=${args%,}\n\
+             printf '{\"argv\":[%s],\"pid\":%s,\"ppid\":%s,\"time_unix\":%s,\"cwd\":\"%s\"}\\n' \"$args\" \"$$\" \"$PPID\" \"$(date +%s)\" \"$(pwd)\" >> \"$d/calls.jsonl\"\n\
+             mode=ok\n\
+             [ -f \"$d/mode\" ] && mode=$(cat \"$d/mode\")\n\
+             case \"$mode\" in\n\
+               fail) echo 'relay stuck' >&2; exit 3;;\n\
+               sleep) echo $$ > \"$d/sleep.pid\"; sleep 30;;\n\
+             esac\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir, path }
+    }
+
+    /// `cmd:<path>`, the `--power-control` / `BoardBinding.power_control` spelling.
+    pub fn uri(&self) -> String {
+        format!("cmd:{}", self.path.display())
+    }
+
+    pub fn set_mode(&self, mode: &str) {
+        std::fs::write(self.dir.join("mode"), mode).unwrap();
+    }
+
+    /// Every call recorded so far, parsed.
+    pub fn calls(&self) -> Vec<serde_json::Value> {
+        match std::fs::read_to_string(self.dir.join("calls.jsonl")) {
+            Ok(text) => text.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("calls.jsonl line {l:?}: {e}"))).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The argv strings of a recorded call.
+    pub fn argv(call: &serde_json::Value) -> Vec<String> {
+        call["argv"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+    }
+}
+
+impl Drop for FakeChannel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+// The board's edge node: operations on the host the hardware-in-the-loop board hangs off
+// that are not lockstep traffic (question 242 (c)).
+//
+// A `BINDING_KIND_BOARD` instance is reached through its edge service (`av-edge-board`),
+// which serves `LockstepService` (lockstep.proto) on one gRPC address. This service is
+// served on that same address by the same process. It is a separate service, not further
+// RPCs on `LockstepService`, so that nothing that implements `LockstepService` (the cFS
+// shim, `services/lockstep-ref`) has anything new to implement.
+//
+// Power control is an edge-service operation (the lead's ruling, question 242 (c)):
+// `BoardBinding.power_control` (system.proto) is the **edge node's** power control channel
+// and the board may hang off this host or off a separate Linux edge node, so the kernel
+// never executes the channel itself. For a power-cycle fault it asks the edge service, which
+// runs its own configured channel locally on the edge node and answers with a typed result.
+// The kernel's behaviour is the same whichever host that is.
+//
+// Additive only: this file is new, and a later RPC on the edge node (the board I/O log's
+// chain head and record count) is a further additive RPC on `BoardEdgeService`.
+package altavista.v1;
+
+service BoardEdgeService {
+  // Run the edge node's configured power-control channel to power-cycle the board, once,
+  // and report what happened. The edge service refuses without running anything when it has
+  // no channel configured, when `power_control` differs from its own configured channel, or
+  // when `edge_node_id` differs from its own (a refusal is a normal response with outcome
+  // `BOARD_POWER_CYCLE_OUTCOME_REFUSED`, never a gRPC error). A gRPC error means the
+  // operation could not be carried out or recorded at all (for example the edge service's
+  // board I/O log has failed, so nothing may happen that the log cannot hold).
+  rpc PowerCycle(PowerCycleRequest) returns (PowerCycleResponse);
+}
+
+// What a power-cycle request asks for. The edge service compares `power_control` and
+// `edge_node_id` with its own configuration before it runs anything.
+message PowerCycleRequest {
+  // The run the power cycle belongs to (the kernel's `LockstepBindRequest.run_id`).
+  string run_id = 1;
+  // The board instance's name in the system-of-systems configuration.
+  string instance = 2;
+  // The DRM fault that causes the power cycle (`Fault.id`).
+  string fault_id = 3;
+  // The fault's epoch, TAI nanoseconds: the simulation time the power cycle happens at.
+  int64 tai_ns = 4;
+  // The edge node the kernel believes it is addressing (`BoardBinding.edge_node_id`).
+  string edge_node_id = 5;
+  // The channel the kernel's binding declares (`BoardBinding.power_control`), in the
+  // spelling the binding wrote it; the edge service compares canonical forms.
+  string power_control = 6;
+}
+
+// What came of a power-cycle request.
+enum BoardPowerCycleOutcome {
+  BOARD_POWER_CYCLE_OUTCOME_UNSPECIFIED = 0;
+  // The channel ran and reported success (for `cmd:`, the executable exited 0).
+  BOARD_POWER_CYCLE_OUTCOME_PERFORMED = 1;
+  // Nothing was run: see `PowerCycleResponse.refusal`.
+  BOARD_POWER_CYCLE_OUTCOME_REFUSED = 2;
+  // The channel was started and did not report success: see `PowerCycleResponse.failure`.
+  BOARD_POWER_CYCLE_OUTCOME_FAILED = 3;
+}
+
+// Why the edge service refused to run its channel.
+enum BoardPowerCycleRefusal {
+  BOARD_POWER_CYCLE_REFUSAL_UNSPECIFIED = 0;
+  // The edge service has no power-control channel configured.
+  BOARD_POWER_CYCLE_REFUSAL_NO_CHANNEL = 1;
+  // `PowerCycleRequest.power_control` is not the channel the edge service is configured
+  // with (compared in canonical form), or does not parse.
+  BOARD_POWER_CYCLE_REFUSAL_CHANNEL_MISMATCH = 2;
+  // `PowerCycleRequest.edge_node_id` is not the edge service's own edge node id.
+  BOARD_POWER_CYCLE_REFUSAL_EDGE_NODE_MISMATCH = 3;
+}
+
+// How a started channel failed.
+enum BoardPowerCycleFailure {
+  BOARD_POWER_CYCLE_FAILURE_UNSPECIFIED = 0;
+  // The executable could not be started (missing, not executable, ...): see `detail`.
+  BOARD_POWER_CYCLE_FAILURE_SPAWN = 1;
+  // The executable exited with a non-zero status: see `exit_status`.
+  BOARD_POWER_CYCLE_FAILURE_EXIT_STATUS = 2;
+  // The executable was ended by a signal it did not handle: see `signal`.
+  BOARD_POWER_CYCLE_FAILURE_SIGNALED = 3;
+  // The executable did not finish within the edge service's timeout and was killed.
+  BOARD_POWER_CYCLE_FAILURE_TIMEOUT = 4;
+}
+
+message PowerCycleResponse {
+  BoardPowerCycleOutcome outcome = 1;
+  // Set when `outcome` is REFUSED.
+  BoardPowerCycleRefusal refusal = 2;
+  // Set when `outcome` is FAILED.
+  BoardPowerCycleFailure failure = 3;
+  // The reason in words, for an operator: always set when `outcome` is not PERFORMED.
+  string detail = 4;
+  // FAILURE_EXIT_STATUS: the executable's exit status (non-zero).
+  int32 exit_status = 5;
+  // FAILURE_SIGNALED: the signal number that ended the executable.
+  int32 signal = 6;
+  // The tail of the executable's standard error, at most 4096 bytes (the end of what it
+  // wrote), decoded as UTF-8 with invalid sequences replaced. Empty when nothing was run.
+  string stderr_tail = 7;
+  // The channel the edge service ran or would have run, in canonical form (empty when it
+  // has none).
+  string power_control = 8;
+  // Wall-clock duration of the run on the edge node, nanoseconds (0 when nothing was
+  // started). Informational: it depends on the wall clock and on nothing the simulation
+  // computes, so a replay does not compare it.
+  int64 duration_ns = 9;
+  // The edge node's wall-clock instants (Unix epoch nanoseconds) at which the executable was
+  // started and finished (0 when nothing was started).
+  int64 started_unix_ns = 10;
+  int64 finished_unix_ns = 11;
+}

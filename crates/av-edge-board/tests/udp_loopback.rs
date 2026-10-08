@@ -21,7 +21,7 @@ fn start(tag: &str, guest: &UdpGuest) -> Service {
 fn a_full_run_over_udp_one_frame_per_datagram() {
     let guest = UdpGuest::spawn(Brain::default());
     let mut service = start("udp-full", &guest);
-    let bind = drive_full_run(&service.grpc_addr, &BTreeMap::new());
+    let bind = drive_full_run(&service.grpc_addr, &service.bind_params(&BTreeMap::new()));
     assert_eq!(bind.version, "fake-guest-1");
     let status = service.wait_exit(Duration::from_secs(15));
     assert!(status.success(), "{status}; stderr:\n{}", service.stderr());
@@ -44,7 +44,7 @@ fn a_foreign_datagram_is_dropped_and_counted_and_half_a_frame_is_a_typed_failure
     let guest = UdpGuest::spawn(Brain { half_reply_for_sequences: vec![3], ..Brain::default() });
     let mut service = start("udp-faults", &guest);
     let mut client = BlockingLockstepClient::connect_plaintext(&service.grpc_addr).unwrap();
-    assert!(client.bind(client_bind_request(&BTreeMap::new())).unwrap().lockstep_capable);
+    assert!(client.bind(client_bind_request(&service.bind_params(&BTreeMap::new()))).unwrap().lockstep_capable);
 
     // 1. A forged "reply" from an address that is not the configured peer, queued at the
     //    service's socket before the real STEP: it must be skipped, not taken as the answer.

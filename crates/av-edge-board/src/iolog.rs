@@ -72,9 +72,15 @@ impl BoardIoLog {
                 draft.instance = run.1.clone();
             }
         }
+        // The link's instants, unless the draft already carries its own (a power cycle's are the
+        // instants its channel was started and finished: it crosses no link).
         let (written, read) = self.times.snapshot();
-        draft.request_written_unix_ns = written;
-        draft.response_read_unix_ns = read;
+        if draft.request_written_unix_ns == 0 {
+            draft.request_written_unix_ns = written;
+        }
+        if draft.response_read_unix_ns == 0 {
+            draft.response_read_unix_ns = read;
+        }
         let writer = Arc::clone(&self.writer);
         let joined = tokio::task::spawn_blocking(move || writer.lock().unwrap_or_else(|e| e.into_inner()).append(draft)).await;
         match joined {

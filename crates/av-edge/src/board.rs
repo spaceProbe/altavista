@@ -51,7 +51,30 @@
 //! [`BoardLink::config_hash`] is the SHA-256 (via `openssl`, as
 //! [`crate::plugin::PluginConfig::config_hash`] does; never `sha2`) of the link's canonical
 //! JSON: edge node id, canonical device, sorted port names. `power_control` is not part of
-//! the link and is neither parsed nor hashed here.
+//! the link and is not hashed here; it has its own grammar, below.
+//!
+//! # Power control (question 242 (c))
+//!
+//! `BoardBinding.power_control` is the **edge node's** power control channel. It is run by the
+//! board's edge service (`av-edge-board`), never by the kernel: the kernel asks the service,
+//! at the address it already dials for the board, over `altavista.v1.BoardEdgeService`
+//! (`proto/altavista/v1/board.proto`). [`parse_power_control`] parses the string into a
+//! [`PowerControl`]:
+//!
+//! - **empty**: no channel ([`PowerControl::None`]).
+//! - **`cmd:<absolute path>`**: run that executable on the edge node ([`PowerControl::Cmd`]).
+//!   The path is absolute, normalised (no empty, `.` or `..` component, no trailing `/`),
+//!   without whitespace or control characters and at most 4096 bytes: it names one
+//!   executable and there is no shell and no argument syntax. The edge service runs it as
+//!   `<path> power-cycle --edge-node-id <id> --instance <name> --fault-id <id> --tai-ns <n>`
+//!   ([`power_cycle_argv`]); exit status 0 is success. The scheme is lower case.
+//! - **`gpio://...`** (any string starting `gpio:`): **reserved**, not implemented this round.
+//!   It is recognised so that it can be named in the refusal, [`PowerControlSpecError::Reserved`],
+//!   and is never silently accepted or ignored.
+//! - **anything else**: a typed [`PowerControlSpecError`].
+//!
+//! [`PowerControl::canonical`] is the one spelling (`""` or `cmd:<path>`); the kernel's binding
+//! and the edge service compare canonical forms.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -410,6 +433,119 @@ impl BoardLink {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Power control (question 242 (c))
+// ---------------------------------------------------------------------------------------
+
+const CMD_PREFIX: &str = "cmd:";
+const GPIO_PREFIX: &str = "gpio:";
+/// Longest `cmd:` path accepted (POSIX `PATH_MAX`).
+pub const MAX_POWER_CONTROL_PATH_LEN: usize = 4096;
+
+/// The edge node's power control channel, parsed from `BoardBinding.power_control`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PowerControl {
+    /// No channel: a power-cycle fault on the board is refused at load.
+    None,
+    /// Run this executable (absolute, normalised path) on the edge node.
+    Cmd { path: String },
+}
+
+impl PowerControl {
+    /// The one spelling of this channel: `""` for none, `cmd:<path>` otherwise.
+    pub fn canonical(&self) -> String {
+        match self {
+            PowerControl::None => String::new(),
+            PowerControl::Cmd { path } => format!("{CMD_PREFIX}{path}"),
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        matches!(self, PowerControl::None)
+    }
+}
+
+impl fmt::Display for PowerControl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.canonical())
+    }
+}
+
+impl FromStr for PowerControl {
+    type Err = PowerControlSpecError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_power_control(s)
+    }
+}
+
+/// Everything wrong a `power_control` string can be. `spec` is always the whole string as given.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PowerControlSpecError {
+    /// `gpio://...` is reserved for a later round: named, then refused.
+    #[error("power control channel {spec:?} uses the reserved `gpio:` scheme, which is not implemented yet: only `cmd:<absolute path>` is supported")]
+    Reserved { spec: String },
+    #[error("unknown scheme {scheme:?} in power control channel {spec:?}: only `cmd:<absolute path>` is supported (`gpio://...` is reserved; the scheme is lower case)")]
+    UnknownScheme { spec: String, scheme: String },
+    #[error("power control channel {spec:?} is not `cmd:<absolute path>` (nor empty for none)")]
+    NotAChannel { spec: String },
+    #[error("`cmd:` power control channel has no path")]
+    MissingPath,
+    #[error("`cmd:` path {path:?} is relative; an absolute path is required")]
+    RelativePath { path: String },
+    #[error("`cmd:` path {path:?} has an empty, `.` or `..` component, or a trailing `/`")]
+    PathNotNormalized { path: String },
+    #[error("`cmd:` path {path:?} contains the character {ch:?}, which is not allowed (no whitespace or control characters: the path is one executable, there is no shell and no arguments)")]
+    InvalidPathChar { path: String, ch: char },
+    #[error("`cmd:` path is {len} bytes, longer than the {MAX_POWER_CONTROL_PATH_LEN} allowed")]
+    PathTooLong { len: usize },
+}
+
+/// Parse a `BoardBinding.power_control` string. See the module doc, "Power control".
+pub fn parse_power_control(spec: &str) -> Result<PowerControl, PowerControlSpecError> {
+    if spec.is_empty() {
+        return Ok(PowerControl::None);
+    }
+    if let Some(path) = spec.strip_prefix(CMD_PREFIX) {
+        return parse_cmd_path(path);
+    }
+    if spec.starts_with(GPIO_PREFIX) {
+        return Err(PowerControlSpecError::Reserved { spec: spec.to_string() });
+    }
+    if let Some(i) = spec.find(':') {
+        let scheme = &spec[..i];
+        if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
+            return Err(PowerControlSpecError::UnknownScheme { spec: spec.to_string(), scheme: scheme.to_string() });
+        }
+    }
+    Err(PowerControlSpecError::NotAChannel { spec: spec.to_string() })
+}
+
+fn parse_cmd_path(path: &str) -> Result<PowerControl, PowerControlSpecError> {
+    if path.is_empty() {
+        return Err(PowerControlSpecError::MissingPath);
+    }
+    if path.len() > MAX_POWER_CONTROL_PATH_LEN {
+        return Err(PowerControlSpecError::PathTooLong { len: path.len() });
+    }
+    if let Some(ch) = path.chars().find(|c| c.is_control() || c.is_whitespace()) {
+        return Err(PowerControlSpecError::InvalidPathChar { path: path.to_string(), ch });
+    }
+    let Some(rest) = path.strip_prefix('/') else {
+        return Err(PowerControlSpecError::RelativePath { path: path.to_string() });
+    };
+    if rest.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+        return Err(PowerControlSpecError::PathNotNormalized { path: path.to_string() });
+    }
+    Ok(PowerControl::Cmd { path: path.to_string() })
+}
+
+/// The argument vector (after the program) the edge service passes a `cmd:` channel:
+/// `power-cycle --edge-node-id <id> --instance <name> --fault-id <id> --tai-ns <n>`. Pure, so
+/// the contract is tested without running anything.
+pub fn power_cycle_argv(edge_node_id: &str, instance: &str, fault_id: &str, tai_ns: i64) -> Vec<String> {
+    ["power-cycle", "--edge-node-id", edge_node_id, "--instance", instance, "--fault-id", fault_id, "--tai-ns", &tai_ns.to_string()].iter().map(|s| s.to_string()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,5 +732,72 @@ mod tests {
         let mut with_power = binding("e", &[("p", "/dev/ttyS1@115200")]);
         with_power.power_control = "gpio:3".into();
         assert_eq!(BoardLink::from_binding(&with_power).unwrap().config_hash(), pinned.config_hash());
+    }
+
+    #[test]
+    fn power_control_variants_parse() {
+        assert_eq!(parse_power_control(""), Ok(PowerControl::None));
+        assert!(PowerControl::None.is_none());
+        let cmd = parse_power_control("cmd:/opt/board/power-cycle.sh").unwrap();
+        assert_eq!(cmd, PowerControl::Cmd { path: "/opt/board/power-cycle.sh".into() });
+        assert!(!cmd.is_none());
+        assert_eq!(cmd.canonical(), "cmd:/opt/board/power-cycle.sh");
+        assert_eq!(cmd.to_string(), "cmd:/opt/board/power-cycle.sh");
+        assert_eq!("cmd:/a".parse::<PowerControl>(), Ok(PowerControl::Cmd { path: "/a".into() }));
+        assert_eq!(PowerControl::None.canonical(), "");
+        // Canonical strings parse back to themselves.
+        for spec in ["", "cmd:/x", "cmd:/usr/local/bin/ps-4", "cmd:/tmp/a.b/c-d_e"] {
+            assert_eq!(parse_power_control(spec).unwrap().canonical(), spec);
+        }
+    }
+
+    #[test]
+    fn every_malformed_power_control_is_a_typed_error() {
+        use PowerControlSpecError as E;
+        let spec = |s: &str| s.to_string();
+        let cases: Vec<(&str, PowerControlSpecError)> = vec![
+            ("gpio://17", E::Reserved { spec: spec("gpio://17") }),
+            ("gpio:3", E::Reserved { spec: spec("gpio:3") }),
+            ("gpio:", E::Reserved { spec: spec("gpio:") }),
+            ("cmd:", E::MissingPath),
+            ("cmd:relative/path", E::RelativePath { path: spec("relative/path") }),
+            ("cmd:./x", E::RelativePath { path: spec("./x") }),
+            ("cmd:/", E::PathNotNormalized { path: spec("/") }),
+            ("cmd:/a/", E::PathNotNormalized { path: spec("/a/") }),
+            ("cmd://a", E::PathNotNormalized { path: spec("//a") }),
+            ("cmd:/a//b", E::PathNotNormalized { path: spec("/a//b") }),
+            ("cmd:/a/./b", E::PathNotNormalized { path: spec("/a/./b") }),
+            ("cmd:/a/../b", E::PathNotNormalized { path: spec("/a/../b") }),
+            ("cmd:/a b", E::InvalidPathChar { path: spec("/a b"), ch: ' ' }),
+            ("cmd:/a\tb", E::InvalidPathChar { path: spec("/a\tb"), ch: '\t' }),
+            ("cmd:/a\nb", E::InvalidPathChar { path: spec("/a\nb"), ch: '\n' }),
+            ("cmd:/a\0b", E::InvalidPathChar { path: spec("/a\0b"), ch: '\0' }),
+            ("CMD:/a", E::UnknownScheme { spec: spec("CMD:/a"), scheme: spec("CMD") }),
+            ("GPIO://1", E::UnknownScheme { spec: spec("GPIO://1"), scheme: spec("GPIO") }),
+            ("http://host/x", E::UnknownScheme { spec: spec("http://host/x"), scheme: spec("http") }),
+            ("ssh:host", E::UnknownScheme { spec: spec("ssh:host"), scheme: spec("ssh") }),
+            ("/opt/board/power", E::NotAChannel { spec: spec("/opt/board/power") }),
+            ("power", E::NotAChannel { spec: spec("power") }),
+            (" cmd:/a", E::NotAChannel { spec: spec(" cmd:/a") }),
+            (":x", E::NotAChannel { spec: spec(":x") }),
+        ];
+        for (input, want) in cases {
+            assert_eq!(parse_power_control(input), Err(want), "spec {input:?}");
+        }
+        let long = format!("cmd:/{}", "a".repeat(MAX_POWER_CONTROL_PATH_LEN));
+        assert!(matches!(parse_power_control(&long), Err(E::PathTooLong { len }) if len == MAX_POWER_CONTROL_PATH_LEN + 1));
+        let ok = format!("cmd:/{}", "a".repeat(MAX_POWER_CONTROL_PATH_LEN - 1));
+        assert!(parse_power_control(&ok).is_ok());
+        // Every error names what it is about.
+        assert!(E::Reserved { spec: "gpio://17".into() }.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn the_power_cycle_argv_is_the_documented_one() {
+        assert_eq!(
+            power_cycle_argv("zcu104-a", "controller", "pc1", 1_767_225_638_000_000_000),
+            ["power-cycle", "--edge-node-id", "zcu104-a", "--instance", "controller", "--fault-id", "pc1", "--tai-ns", "1767225638000000000"]
+        );
+        assert_eq!(power_cycle_argv("e", "i", "f", -5).last().map(String::as_str), Some("-5"));
     }
 }

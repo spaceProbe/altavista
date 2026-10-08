@@ -59,6 +59,10 @@
 //! (`TimedLockstep`) so a silent board is a typed error. The instance reports
 //! `BINDING_KIND_BOARD` (`binding_kind` provenance attribute, `board.<instance>` model id) where
 //! a container reports none; `ContainerModel::provenance_attributes` lists exactly what it adds.
+//! `BoardBinding.power_control` (parsed at load by `av_edge::board::parse_power_control`) is the
+//! edge node's power control channel, run by the edge service, never by the kernel: a
+//! power-cycle fault asks it over `BoardEdgeService` (`drm::power`), then sends the lockstep
+//! `RESET`; `board.power_control_timeout_ms` bounds that call.
 //! `crates/av-kernel/README.md`, "Binding a board", has the parameter table and what is proven.
 //!
 //! ## Container (lockstep) binding (M13.2, question 107)
@@ -226,7 +230,8 @@ use std::fmt;
 // (lockstep) binding" section).
 use std::rc::Rc;
 
-use av_edge::board::BoardLink;
+use av_edge::board::{parse_power_control, BoardLink, PowerControl};
+use super::power::{self, EdgePowerControl, PowerControl as PowerControlSeam, PowerCycleCall, PowerCycleReport, PowerControlError};
 use av_cdm::pb::{Binding, BindingKind, BoardBinding, ContainerBinding, DrmOptions, ModelCapability, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
 // `docs/open-questions.md` question 230: `PacketField` is named only by `resolve_gmat_command_
 // port` and this module's own GMAT-only tests (both gated); `Tai` only by `materialize_gmat`
@@ -1389,6 +1394,19 @@ pub(crate) struct ContainerModel {
     /// kernel-side link (`av_edge::board::BoardLink::config_hash_hex`: edge node, canonical
     /// device, sorted ports), recorded as provenance next to the guest's own `binding_hash`.
     board_link_hash: Option<String>,
+    /// Question 242 (c): `Some` iff this is a board instance -- how its power cycle is asked of
+    /// the edge service ([`BoardPower`]).
+    board_power: Option<BoardPower>,
+}
+
+/// A board instance's power control seam and what a request to it must carry (question 242 (c)).
+pub(crate) struct BoardPower {
+    control: Box<dyn PowerControlSeam>,
+    edge_node_id: String,
+    /// `BoardBinding.power_control`, canonical.
+    power_control: String,
+    run_id: String,
+    instance: String,
 }
 
 impl DynamicsModel for ContainerModel {
@@ -1494,6 +1512,23 @@ impl ContainerModel {
                 ("board_link_hash".to_string(), link_hash.clone()),
             ],
         }
+    }
+
+    /// Whether this instance is a board (it has a power-control seam).
+    pub(crate) fn is_board(&self) -> bool {
+        self.board_power.is_some()
+    }
+
+    /// A board's power-cycle boundary: ask the edge service to power-cycle the board
+    /// ([`PowerControlSeam::power_cycle`]), then, only if it was performed, send the lockstep
+    /// `RESET` (`reason`) -- the order [`power::perform`] fixes. `tai_ns` is the fault's epoch.
+    /// Not callable on a container (`is_board` is false): a caller bug, reported as a typed error.
+    pub(crate) fn power_cycle_then_reset(&self, fault_id: &str, tai_ns: i64, reason: String) -> Result<PowerCycleReport, power::PerformError> {
+        let Some(bp) = &self.board_power else {
+            return Err(power::PerformError::PowerCycle(PowerControlError::BadResponse { detail: "power_cycle_then_reset called on an instance that is not a board".to_string() }));
+        };
+        let call = PowerCycleCall { run_id: bp.run_id.clone(), instance: bp.instance.clone(), fault_id: fault_id.to_string(), tai_ns, edge_node_id: bp.edge_node_id.clone(), power_control: bp.power_control.clone() };
+        power::perform(bp.control.as_ref(), &call, || self.reset(tai_ns, reason))
     }
 
     /// Send `Shutdown` and, for a Docker-run instance ([`ContainerModel::managed`] is `Some`),
@@ -1764,7 +1799,7 @@ pub(crate) fn materialize_container(
         settings_hash: av_dynamics::settings_hash(&settings),
         goldens: vec![],
     };
-    let model = ContainerModel { client: RefCell::new(LockstepIo::Direct(Box::new(client))), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed), board_link_hash: None };
+    let model = ContainerModel { client: RefCell::new(LockstepIo::Direct(Box::new(client))), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed), board_link_hash: None, board_power: None };
     Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
 }
 
@@ -1863,7 +1898,11 @@ pub(crate) fn materialize_board(
         goldens: vec![],
     };
     let io = LockstepIo::Timed { worker, step_timeout: std::time::Duration::from_millis(board.step_timeout_ms) };
-    let model = ContainerModel { client: RefCell::new(io), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(None), board_link_hash: Some(link_hash) };
+    // The power-control seam: a client of the same edge service, same address and TLS rules.
+    let tls = spec.tls_paths().map(|(ca, cert, key)| (ca.to_string(), cert.to_string(), key.to_string()));
+    let control = EdgePowerControl::new(spec.address.clone(), tls, std::time::Duration::from_millis(board.power_control_timeout_ms));
+    let board_power = BoardPower { control: Box::new(control), edge_node_id: board.link.edge_node_id().to_string(), power_control: board.power_control.canonical(), run_id: run_id.to_string(), instance: instance_name.to_string() };
+    let model = ContainerModel { client: RefCell::new(io), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(None), board_link_hash: Some(link_hash), board_power: Some(board_power) };
     Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
 }
 
@@ -2207,11 +2246,14 @@ pub struct BoardSpec {
     /// handshake inside it) with no reply within this is [`DrmError::BoardBind`]. Default
     /// [`BOARD_BIND_TIMEOUT_DEFAULT_MS`].
     pub bind_timeout_ms: u64,
-    /// `BoardBinding.power_control`, read and kept but **not acted on**: power control is an edge
-    /// service operation a later task adds (hilprep-4). So a non-empty value is not silently
-    /// ignored, `execute()` refuses every `FAULT_TARGET_KIND_HARDWARE` fault naming a board
-    /// instance (`DrmError::HardwareFaultNotSupportedOnInstance`) until then.
-    pub power_control: String,
+    /// `BoardBinding.power_control`, parsed (`av_edge::board::parse_power_control`): the edge
+    /// node's power control channel, which the **edge service** runs when asked
+    /// (`drm::power`). A malformed value is [`DrmError::BoardPowerControl`] at load; a
+    /// `HARDWARE`/`power_cycle` fault on this instance needs it non-empty.
+    pub power_control: PowerControl,
+    /// `board.power_control_timeout_ms`: how long the kernel waits for the edge service's
+    /// `PowerCycle` reply. Default [`power::POWER_CONTROL_TIMEOUT_DEFAULT_MS`].
+    pub power_control_timeout_ms: u64,
 }
 
 /// `board.step_timeout_ms` default: 5 s. A board's step is answered over a serial line or UDP by
@@ -3016,13 +3058,17 @@ fn parse_container_spec(context: &str, params: &BTreeMap<String, Parameter>, con
 ///   `board.tls` / `board.ca_file` / `board.client_cert` / `board.client_key` (as `container.*`,
 ///   with the same question 155 refusal of a non-loopback plaintext address,
 ///   [`DrmError::BoardPlaintextNonLoopback`]), `board.step_timeout_ms` and
-///   `board.bind_timeout_ms` (see [`BoardSpec`]). `output.*` is accepted as for a container. Any
-///   other name is [`DrmError::UnknownParameter`].
+///   `board.bind_timeout_ms` and `board.power_control_timeout_ms` (see [`BoardSpec`]). `output.*`
+///   is accepted as for a container. Any other name is [`DrmError::UnknownParameter`].
+/// - `BoardBinding.power_control` parsed by `av_edge::board::parse_power_control`
+///   ([`DrmError::BoardPowerControl`]), whether or not any fault uses it.
 fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, params: &BTreeMap<String, Parameter>, board_binding: &BoardBinding) -> Result<ContainerSpec, DrmError> {
     let link = BoardLink::from_binding_checked(board_binding, sys.ports.iter().map(|p| p.name.as_str())).map_err(|source| DrmError::BoardLink { instance: instance_name.to_string(), source })?;
     let mut spec = ContainerSpec::default();
     let mut step_timeout_ms = BOARD_STEP_TIMEOUT_DEFAULT_MS;
     let mut bind_timeout_ms = BOARD_BIND_TIMEOUT_DEFAULT_MS;
+    let mut power_control_timeout_ms = power::POWER_CONTROL_TIMEOUT_DEFAULT_MS;
+    let power_control = parse_power_control(&board_binding.power_control).map_err(|source| DrmError::BoardPowerControl { instance: instance_name.to_string(), source })?;
     let timeout_ms = |name: &str, p: &Parameter| -> Result<u64, DrmError> {
         let v = p.value;
         if !v.is_finite() || v.fract() != 0.0 || v < BOARD_TIMEOUT_MIN_MS as f64 || v > BOARD_TIMEOUT_MAX_MS as f64 {
@@ -3046,6 +3092,7 @@ fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, 
             "seed_key" => spec.seed_key = p.string_value.clone(),
             "step_timeout_ms" => step_timeout_ms = timeout_ms(name, p)?,
             "bind_timeout_ms" => bind_timeout_ms = timeout_ms(name, p)?,
+            "power_control_timeout_ms" => power_control_timeout_ms = timeout_ms(name, p)?,
             _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
         }
     }
@@ -3066,7 +3113,7 @@ fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, 
             }
         }
     }
-    spec.board = Some(BoardSpec { link, step_timeout_ms, bind_timeout_ms, power_control: board_binding.power_control.clone() });
+    spec.board = Some(BoardSpec { link, step_timeout_ms, bind_timeout_ms, power_control, power_control_timeout_ms });
     Ok(spec)
 }
 
@@ -4561,6 +4608,7 @@ mod tests {
             binding_hash: "bh".to_string(),
             managed: RefCell::new(None),
             board_link_hash: board_link_hash.map(str::to_string),
+            board_power: None,
         };
         assert_eq!(make(None).provenance_attributes(), vec![("container_binding_hash".to_string(), "bh".to_string())]);
         assert_eq!(

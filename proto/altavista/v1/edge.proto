@@ -392,9 +392,13 @@ enum BoardIoKind {
   BOARD_IO_KIND_RESET = 3;
   // The SHUTDOWN exchange.
   BOARD_IO_KIND_SHUTDOWN = 4;
-  // Reserved for the edge service's power-cycle operation (question 242 (c), a later
-  // task); nothing writes it yet. Only `error`, `request_written_unix_ns` and
-  // `response_read_unix_ns` would apply; no other exchange field does.
+  // The edge service ran its power control channel for a power-cycle fault
+  // (`BoardEdgeService.PowerCycle`, board.proto; question 242 (c)). Written only for a
+  // channel that was started (performed or failed), not for a refusal. The fields that
+  // apply: `run_id`, `instance`, `reset_tai_ns` (the fault's epoch), `reset_reason`
+  // ("fault:<fault id>"), `error` (set for a failure), and `request_written_unix_ns` /
+  // `response_read_unix_ns`, here the edge-node instants the channel was started and
+  // finished. No other exchange field applies.
   BOARD_IO_KIND_POWER_CYCLE = 5;
 }
 

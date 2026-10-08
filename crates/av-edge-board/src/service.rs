@@ -13,14 +13,18 @@
 //! - **Both present and equal:** both entries are removed, then the request is forwarded to
 //!   the board. The guest's BIND bytes are what the container path sends today (the
 //!   instance's other parameters, untouched); the board-specific entries never reach it.
-//! - **Present and different, or only one of the two present, or the device not parseable:**
+//! - **Present and different, or only one of the two present, or neither, or the device not
+//!   parseable:**
 //!   refused with a `LockstepBindResponse { lockstep_capable: false, refusal_reason }`
 //!   naming both the requested and the configured values, and **nothing is forwarded to the
 //!   board**. This is the refusal shape the kernel's container client already treats as a
 //!   typed `ContainerRefused` (`av-kernel`'s `materialize_container`), unlike a gRPC error,
 //!   which it reports as a failed Bind.
-//! - **Both absent:** forwarded unchanged with a warning line on stderr (the kernel side
-//!   that sets them is the next task).
+//! - **Both absent:** refused the same way (a board link is always checked): a Bind that
+//!   lacks the board parameters is refused with a reason naming what is missing, and nothing is
+//!   forwarded to the board. There is no opt-out. (Until question 242's power-control task the
+//!   service forwarded such a Bind unchecked with a warning, which protected only a kernel that
+//!   sent the parameters; the kernel's board path always sends them.)
 //!
 //! Step, Reset and Shutdown are forwarded as the shim does. A successful Shutdown also
 //! signals the process to exit (see [`BoardService::shutdown_signal`]): one link per
@@ -56,9 +60,7 @@ use tonic::{Request, Response, Status};
 pub enum BindCheck {
     /// Both parameters present and equal; they have been removed from the map.
     Matched,
-    /// Neither parameter present; the map is untouched.
-    Absent,
-    /// Refuse with this reason; the map is untouched.
+    /// Refuse with this reason (including: neither parameter present); the map is untouched.
     Refused(String),
 }
 
@@ -76,7 +78,7 @@ pub fn check_bind(own_edge_node_id: &str, own_device: &PortDevice, parameters: &
         ))
     };
     match (&want_node, &want_device) {
-        (None, None) => BindCheck::Absent,
+        (None, None) => refusal("neither board parameter is present: a board link is always checked, so the Bind must carry both".to_string()),
         (Some(_), None) | (None, Some(_)) => refusal("only one of the two board parameters is present".to_string()),
         (Some(node), Some(device)) => {
             let device_canonical = match parse_port_device(device) {
@@ -139,7 +141,6 @@ where
                 return Ok(Response::new(LockstepBindResponse { lockstep_capable: false, binding_hash: String::new(), version: String::new(), refusal_reason: reason }));
             }
             BindCheck::Matched => eprintln!("av-edge-board: Bind board parameters match this link; stripped them and forwarding the BIND to the board"),
-            BindCheck::Absent => eprintln!("av-edge-board: WARNING: Bind carries no {BIND_PARAM_EDGE_NODE_ID}/{BIND_PARAM_PORT_DEVICE}; forwarding unchecked"),
         }
         let exchange = self.log.begin().await?;
         self.log.set_run(&req.run_id, &req.instance);
@@ -223,10 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn absent_parameters_are_forwarded_untouched() {
-        let mut p = params(&[("gain", "2.5")]);
-        assert_eq!(check_bind("edge-7", &own(), &mut p), BindCheck::Absent);
-        assert_eq!(p, params(&[("gain", "2.5")]));
+    fn absent_parameters_are_refused_naming_the_missing_parameters_and_leave_the_map_alone() {
+        for original in [params(&[("gain", "2.5")]), params(&[])] {
+            let mut p = original.clone();
+            let BindCheck::Refused(reason) = check_bind("edge-7", &own(), &mut p) else { panic!("{original:?} must be refused") };
+            assert_eq!(p, original, "a refusal must not touch the parameters");
+            assert!(reason.contains("neither board parameter is present") && reason.contains(BIND_PARAM_EDGE_NODE_ID) && reason.contains(BIND_PARAM_PORT_DEVICE), "{reason}");
+            assert!(reason.contains("<absent>") && reason.contains("udp://board.lab:5000") && reason.contains("\"edge-7\""), "names both sides: {reason}");
+        }
     }
 
     #[test]

@@ -69,10 +69,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use av_cdm::pb;
 
 /// The run's wall-clock-dependent products, by name, for a replay to exclude (and only these):
-/// `RunProducts.pacing`, and every `RunProducts.events` entry for which [`is_overrun_event`] is
-/// true. Everything else in `RunProducts` and the port-traffic sidecar is independent of the
-/// wall clock.
-pub const WALL_CLOCK_DEPENDENT: [&str; 2] = ["RunProducts.pacing", "RunProducts.events[id starts with OVERRUN_EVENT_ID_PREFIX]"];
+/// `RunProducts.pacing`, every `RunProducts.events` entry for which [`is_overrun_event`] is true,
+/// and (question 242 (c)) every one for which `crate::drm::power::is_power_cycle_event` is true: a board power cycle's outcome event
+/// records the duration and the standard error of the channel the edge node ran. Everything else
+/// in `RunProducts` and the port-traffic sidecar is independent of the wall clock.
+pub const WALL_CLOCK_DEPENDENT: [&str; 3] = [
+    "RunProducts.pacing",
+    "RunProducts.events[id starts with OVERRUN_EVENT_ID_PREFIX]",
+    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX]",
+];
 
 /// The `Event.name` of a per-overrun event.
 pub const OVERRUN_EVENT_NAME: &str = "pacing_overrun";
@@ -436,6 +441,12 @@ impl Pacer {
 /// Whether `event` is a per-overrun event built by [`overrun_events`].
 pub fn is_overrun_event(event: &pb::Event) -> bool {
     event.id.starts_with(OVERRUN_EVENT_ID_PREFIX)
+}
+
+/// Whether `event` is one of the events [`WALL_CLOCK_DEPENDENT`] names: a pacing overrun or a
+/// board power-cycle outcome. A replay excludes exactly these from its comparison.
+pub fn is_wall_clock_event(event: &pb::Event) -> bool {
+    is_overrun_event(event) || crate::drm::power::is_power_cycle_event(event)
 }
 
 /// One event per overrun. `EVENT_KIND_MARKER`: an overrun is a point-in-time annotation of the

@@ -540,7 +540,8 @@ pub struct RunProducts {
     /// wall time ([`run_requires_real_time`]), `None` for a lockstep run -- whose encoded
     /// `RunProducts` therefore has no `pacing` field and is byte-for-byte what it was before
     /// this field existed. Wall-clock dependent, together with the `pacing_overrun` events in
-    /// `events`: [`crate::pacing::WALL_CLOCK_DEPENDENT`] names exactly these two.
+    /// `events`: [`crate::pacing::WALL_CLOCK_DEPENDENT`] names exactly these (and the board power-cycle
+    /// outcome event, `crate::drm::power`).
     pub pacing: Option<pb::PacingReport>,
 }
 
@@ -2526,8 +2527,21 @@ fn run_shared_group(
                     let instance = instances_by_name[&target];
                     let sys = systems.get(&instance.system_id).expect("validated in pass 1");
                     let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
-                    span.model.reset(boundary, format!("fault:{}", f.id)).map_err(|e| DrmError::ContainerProtocol { instance: target.clone(), source: e })?;
-                    all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    if span.model.is_board() {
+                        // Question 242 (c): a board's power cycle is an edge-service operation:
+                        // ask the edge service to run the edge node's channel first, then send
+                        // the same lockstep RESET a container gets, so the run continues. A
+                        // refused or failed power cycle ends the run (`drm::power`). HIL-day
+                        // item, not built: a board that really reboots needs the edge service to
+                        // re-handshake and the kernel to re-Bind before this RESET
+                        // (`drm::power`'s module doc, "Not in this round").
+                        let report = span.model.power_cycle_then_reset(&f.id, boundary, format!("fault:{}", f.id)).map_err(|e| e.into_drm_error(&target, &f.id))?;
+                        all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                        all_events.push(super::power::power_cycle_event(&f.id, &target, boundary, &report, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    } else {
+                        span.model.reset(boundary, format!("fault:{}", f.id)).map_err(|e| DrmError::ContainerProtocol { instance: target.clone(), source: e })?;
+                        all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    }
                 }
             }
         }
@@ -3876,11 +3890,17 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             return Err(DrmError::ContainerFaultsOrManeuversNotSupported { instance: f.instance.clone() });
         }
         if f.target_kind == FaultTargetKind::Hardware as i32 {
-            // Question 242: `BoardBinding.power_control` is not acted on yet (power control is an
-            // edge-service operation a later task adds), so every HARDWARE fault -- a power
-            // cycle included -- naming a board instance is refused at load rather than dropped.
-            if container_plans.get(&f.instance).is_some_and(|(spec, _)| spec.board.is_some()) {
-                return Err(DrmError::HardwareFaultNotSupportedOnInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
+            // Question 242 (c): a power cycle naming a board instance needs the binding's
+            // `power_control` channel (parsed and validated at classification, which already
+            // refused a malformed one); any other HARDWARE kind is refused by kind, as for a
+            // container. Both before any connection is made.
+            if let Some(board) = container_plans.get(&f.instance).and_then(|(spec, _)| spec.board.as_ref()) {
+                if f.kind != fault::POWER_CYCLE_KIND {
+                    return Err(DrmError::HardwareFaultKindNotSupported { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
+                }
+                if board.power_control.is_none() {
+                    return Err(DrmError::BoardPowerCycleNeedsChannel { fault_id: f.id.clone(), instance: f.instance.clone() });
+                }
             }
             if container_plans.contains_key(&f.instance) {
                 if f.kind != fault::POWER_CYCLE_KIND {

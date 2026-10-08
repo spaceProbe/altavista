@@ -66,13 +66,24 @@ struct Rig {
     log_bytes: Arc<Mutex<Vec<u8>>>,
     guest_steps: Arc<AtomicUsize>,
     verifier: LogVerifier,
-    _dir: std::path::PathBuf,
+    _dir: ScratchDir,
+}
+
+/// The rig's scratch directory (holding the throwaway identity), removed when dropped: on every
+/// exit path, a failing assertion's unwind included, and when `rig` itself fails part-way.
+struct ScratchDir(std::path::PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 async fn rig(tag: &str, sync_delay: Duration, fail_sync_at: Option<usize>) -> Rig {
     let dir = std::env::temp_dir().join(format!("av-edge-board-inproc-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let id = common::make_identity(&dir, "inproc");
+    let dir = ScratchDir(dir);
+    let id = common::make_identity(&dir.0, "inproc");
     let signer = LogSigner::from_pem(&std::fs::read(&id.key_pem).unwrap(), &std::fs::read(&id.cert_pem).unwrap()).unwrap();
     let verifier = LogVerifier::from_pem(&std::fs::read(&id.cert_pem).unwrap()).unwrap();
 
@@ -123,7 +134,13 @@ async fn rig(tag: &str, sync_delay: Duration, fail_sync_at: Option<usize>) -> Ri
 }
 
 fn bind_request() -> LockstepBindRequest {
-    LockstepBindRequest { run_id: "run-x".into(), instance: "obc".into(), ..Default::default() }
+    LockstepBindRequest {
+        run_id: "run-x".into(),
+        instance: "obc".into(),
+        // The board parameters a kernel sends; the service refuses a Bind without them.
+        parameters: [(av_edge::board::BIND_PARAM_EDGE_NODE_ID.to_string(), "edge-inproc".to_string()), (av_edge::board::BIND_PARAM_PORT_DEVICE.to_string(), "udp://127.0.0.1:9".to_string())].into(),
+        ..Default::default()
+    }
 }
 
 fn step(seq: u64) -> Request<ShimStepRequest> {

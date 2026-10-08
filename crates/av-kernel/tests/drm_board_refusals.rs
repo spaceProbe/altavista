@@ -2,8 +2,8 @@
 //! **against stand-ins only** (the real `av-edge-board` in front of a fake UDP guest, or a bare
 //! TCP listener): a Bind-time mismatch refused with the edge service's reason and nothing
 //! forwarded; a guest that stops answering and a service that never replies are typed timeouts,
-//! not hangs; an unreachable edge service, an unknown seed key and a HARDWARE fault are typed
-//! refusals. No board anywhere.
+//! not hangs; an unreachable edge service, an unknown seed key and a power-cycle fault with no
+//! channel are typed refusals. No board anywhere.
 mod drm_board_common;
 
 use std::net::TcpListener;
@@ -112,10 +112,12 @@ fn a_board_seed_key_missing_from_the_scenario_is_a_typed_error() {
     guest.finish();
 }
 
-/// `BoardBinding.power_control` is read but not acted on, so a HARDWARE fault (a power cycle
-/// included) naming a board instance is refused at load, before any connection is made.
+/// A HARDWARE power-cycle fault naming a board instance whose binding declares no
+/// `power_control` is refused at load, before any connection is made (question 242 (c), hilprep-4;
+/// until then every HARDWARE fault on a board was refused as `HardwareFaultNotSupportedOnInstance`).
+/// The supported shapes, with a channel, are `tests/drm_board_power.rs`.
 #[test]
-fn a_hardware_power_cycle_fault_on_a_board_instance_is_refused_at_load() {
+fn a_hardware_power_cycle_fault_on_a_board_instance_without_a_channel_is_refused_at_load() {
     let _serial = serial();
     let fault = Fault {
         id: "pc1".to_string(),
@@ -128,6 +130,6 @@ fn a_hardware_power_cycle_fault_on_a_board_instance_is_refused_at_load() {
     // Nothing listens at the edge address: reaching a connection attempt would be BoardConnect.
     let port = free_tcp_port();
     let scene = Scene::new("udp://127.0.0.1:9", "zcu104-test", &format!("127.0.0.1:{port}"), &[], 3, vec![fault]);
-    let err = scene.run().expect_err("a HARDWARE fault on a board is refused");
-    assert!(matches!(&err, DrmError::HardwareFaultNotSupportedOnInstance { fault_id, instance } if fault_id == "pc1" && instance == CONTROLLER), "{err:?}");
+    let err = scene.run().expect_err("a power cycle with no channel is refused");
+    assert!(matches!(&err, DrmError::BoardPowerCycleNeedsChannel { fault_id, instance } if fault_id == "pc1" && instance == CONTROLLER), "{err:?}");
 }

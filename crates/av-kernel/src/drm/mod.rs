@@ -75,6 +75,7 @@ pub mod gmat_command;
 pub mod ground;
 pub mod hash;
 pub mod maneuver;
+pub mod power;
 pub mod replay;
 pub mod schema;
 pub mod sensors;
@@ -365,6 +366,17 @@ pub enum DrmError {
     /// names more than one device, a declared port missing from the map or an undeclared one in
     /// it).
     BoardLink { instance: String, source: av_edge::board::BoardLinkError },
+    /// Question 242 (c): a `BoardBinding.power_control` that does not parse (`av_edge::board::
+    /// parse_power_control`): not `cmd:<absolute path>` and not empty, or the reserved
+    /// `gpio://...`. Refused at load whether or not any fault uses it.
+    BoardPowerControl { instance: String, source: av_edge::board::PowerControlSpecError },
+    /// Question 242 (c): a `FAULT_TARGET_KIND_HARDWARE` / `"power_cycle"` fault names a board
+    /// instance whose `BoardBinding.power_control` is empty, so there is no channel to run.
+    BoardPowerCycleNeedsChannel { fault_id: String, instance: String },
+    /// Question 242 (c): the board's edge service refused the power cycle or its channel failed
+    /// (or timed out, or the RPC failed): `source` carries the edge service's own reason. Ends the
+    /// run; no lockstep `RESET` was sent.
+    BoardPowerCycle { instance: String, fault_id: String, source: Box<power::PowerControlError> },
     /// Question 242: question 155's refusal, applied to a board's `board.edge_address`: plaintext
     /// (`board.tls` unset) to a non-loopback host.
     BoardPlaintextNonLoopback { context: String, address: String },
@@ -420,18 +432,16 @@ pub enum DrmError {
     /// fault. See `fault::is_legacy_dynamics_power_cycle`.
     PowerCycleFaultMustTargetHardware { fault_id: String, instance: String },
     /// Question 120, M16.2: a `FAULT_TARGET_KIND_HARDWARE` fault named a `BINDING_KIND_CONTAINER`
-    /// instance with a `kind` other than `"power_cycle"`. HARDWARE's own doc comment also names
+    /// (or, question 242, `BINDING_KIND_BOARD`) instance with a `kind` other than `"power_cycle"`. HARDWARE's own doc comment also names
     /// "Renode peripheral fault, board reset" -- neither has any meaning for a container instance
     /// today (a container has no Renode peripheral or board to act on, only its own process to
     /// power-cycle), so refused explicitly rather than silently dropped from the boundary set
     /// `executor::run_shared_group` builds.
     HardwareFaultKindNotSupported { fault_id: String, instance: String, kind: String },
     /// Question 120, M16.2: a `FAULT_TARGET_KIND_HARDWARE` fault named an instance that is not
-    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). Question 242:
-    /// also every HARDWARE fault (a power cycle included) naming a `BINDING_KIND_BOARD` instance
-    /// for now -- `BoardBinding.power_control` is read but not acted on, because power control
-    /// is an edge-service operation a later task adds (hilprep-4); until then a fault that asks
-    /// for it is refused at load rather than silently dropped. HARDWARE
+    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). (A HARDWARE
+    /// power cycle naming a `BINDING_KIND_BOARD` instance is supported as of question 242 (c):
+    /// `drm::power`.) HARDWARE
     /// covers a container's own power cycle today, and Renode peripheral faults/board resets
     /// later (both against binding kinds that do not exist yet) -- it has no meaning yet for a
     /// model instance, so this is refused explicitly, at load, rather than silently dropped
@@ -750,6 +760,12 @@ impl std::fmt::Display for DrmError {
             ),
             DrmError::BoardConfigMissing { instance } => write!(f, "instance {instance:?}: BINDING_KIND_BOARD requires Binding.config to be a BoardBinding"),
             DrmError::BoardLink { instance, source } => write!(f, "instance {instance:?}: invalid BoardBinding: {source}"),
+            DrmError::BoardPowerControl { instance, source } => write!(f, "instance {instance:?}: invalid BoardBinding.power_control: {source}"),
+            DrmError::BoardPowerCycleNeedsChannel { fault_id, instance } => write!(
+                f,
+                "fault {fault_id:?}: a FAULT_TARGET_KIND_HARDWARE power cycle names board instance {instance:?}, whose BoardBinding.power_control is empty: there is no power control channel to run (set it to cmd:<absolute path> of the edge node's executable)"
+            ),
+            DrmError::BoardPowerCycle { instance, fault_id, source } => write!(f, "instance {instance:?}: the power cycle for fault {fault_id:?} did not happen: {source}"),
             DrmError::BoardPlaintextNonLoopback { context, address } => write!(
                 f,
                 "{context}: board.edge_address {address:?} is plaintext (board.tls is not set) and is not a recognized loopback address (127.0.0.0/8, ::1, or \"localhost\") -- the kernel <-> edge service gRPC link is plaintext only on loopback within one host; set board.tls (with ca_file/client_cert/client_key) for any other host (question 155)"
@@ -769,10 +785,10 @@ impl std::fmt::Display for DrmError {
                 "fault {fault_id:?} on instance {instance:?}: a power-cycle fault must be FAULT_TARGET_KIND_HARDWARE, not FAULT_TARGET_KIND_DYNAMICS (question 120 moved it off DYNAMICS; the interim kind=\"power_cycle\" DYNAMICS shape is no longer accepted)"
             ),
             DrmError::HardwareFaultKindNotSupported { fault_id, instance, kind } => {
-                write!(f, "fault {fault_id:?} on container instance {instance:?}: FAULT_TARGET_KIND_HARDWARE kind {kind:?} is not supported (only \"power_cycle\" is, for a container instance)")
+                write!(f, "fault {fault_id:?} on container instance {instance:?}: FAULT_TARGET_KIND_HARDWARE kind {kind:?} is not supported (only \"power_cycle\" is, for a container or board instance)")
             }
             DrmError::HardwareFaultNotSupportedOnInstance { fault_id, instance } => {
-                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER instance -- HARDWARE has no runtime yet for a model instance, and none for a BINDING_KIND_BOARD instance either (its power control is an edge-service operation a later task adds)")
+                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER or BINDING_KIND_BOARD instance -- HARDWARE has no runtime yet for a model instance")
             }
             DrmError::ContainerDockerLifecycle { instance, detail } => write!(f, "instance {instance:?}: Docker image lifecycle failed: {detail}"),
             DrmError::InvalidFrameDefinition { id, reason } => write!(f, "frame {id:?}: {reason}"),
@@ -825,3 +841,14 @@ impl std::fmt::Display for DrmError {
     }
 }
 impl std::error::Error for DrmError {}
+
+impl DrmError {
+    /// The edge service's typed reason when this is a [`DrmError::BoardPowerCycle`] (the source
+    /// is boxed to keep `DrmError` small), else `None`.
+    pub fn power_control_error(&self) -> Option<&power::PowerControlError> {
+        match self {
+            DrmError::BoardPowerCycle { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}

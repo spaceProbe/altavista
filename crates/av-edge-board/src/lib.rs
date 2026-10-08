@@ -5,9 +5,10 @@
 //! the board's hardware link (a serial line, or a UDP endpoint; `BoardBinding.port_devices`)
 //! with the same `PeerLink`, the same framing, and the same `ShimService`. The additions are
 //! the two transports ([`serial`], [`udp`]), the [`link`] that picks one, and the Bind-time
-//! board check ([`service`]), and the board I/O log ([`iolog`], [`timed`]; the log itself is
-//! `av_edge::board_log`). The pure half (spec parsing, typed errors, the link's config
-//! hash) is `av_edge::board`. The binary is `av-edge-board`; the crate README gives the
+//! board check ([`service`]), the board I/O log ([`iolog`], [`timed`]; the log itself is
+//! `av_edge::board_log`), and the edge node's power control ([`power`]: `altavista.v1.BoardEdgeService`).
+//! The pure half (spec parsing, typed errors, the link's config hash, the power-control URI)
+//! is `av_edge::board`. The binary is `av-edge-board`; the crate README gives the
 //! command line.
 //!
 //! Everything here is proven against stand-ins only (a pseudo-terminal, loopback UDP, fake
@@ -16,6 +17,7 @@
 
 pub mod iolog;
 pub mod link;
+pub mod power;
 pub mod serial;
 pub mod service;
 pub mod timed;

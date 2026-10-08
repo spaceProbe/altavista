@@ -271,7 +271,7 @@ fn a_failed_exchange_is_logged_with_its_error_and_the_log_keeps_verifying() {
     let mut service = Service::spawn("iolog-fail", &["--port-device", &device, "--edge-node-id", "edge-udp"]);
     service.wait_ready(Duration::from_secs(20));
     let mut client = BlockingLockstepClient::connect_plaintext(&service.grpc_addr).unwrap();
-    assert!(client.bind(client_bind_request(&BTreeMap::new())).unwrap().lockstep_capable);
+    assert!(client.bind(client_bind_request(&service.bind_params(&BTreeMap::new()))).unwrap().lockstep_capable);
     check_step_reply(1, 300, &client.step(step_request(1, 300)).unwrap());
     let err = client.step(step_request(2, 300)).expect_err("a half-frame reply fails the step");
     let log = service.read_io_log();

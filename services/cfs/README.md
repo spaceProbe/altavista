@@ -259,9 +259,9 @@ HELLO-first handshake, the frame layout and every protocol check above hold as w
   where BIND is expected fails it), so the board's end must be open before the service starts, or
   the handshake times out with a typed error.
 - **Bind-time check:** the kernel sets `board.edge_node_id` and `board.port_device` in the Bind
-  parameters; the service refuses a mismatch without forwarding it and strips both before the BIND
-  reaches the guest, so the guest's BIND bytes (and its 512-byte BIND buffer) are what the
-  container path sends today.
+  parameters; the service refuses a mismatch, and a Bind that lacks them (a board link is always
+  checked), without forwarding it, and strips both before the BIND reaches the guest, so the
+  guest's BIND bytes (and its 512-byte BIND buffer) are what the container path sends today.
 
 The crate's README has the command line and the details. Proven so far against stand-ins only (a
 host pseudo-terminal, loopback UDP, fake guests); no board has been involved.

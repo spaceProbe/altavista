@@ -3,7 +3,8 @@
 The board's edge service (`docs/open-questions.md` question 242 (b)). It opens the board's link
 (`BoardBinding.port_devices`: a serial device or a UDP endpoint), speaks **lockstep-local v1**
 (`services/cfs/README.md`) over it to the flight software exactly as `av-lockstep-shim` does over a
-Unix socket, and serves `altavista.v1.LockstepService` to the kernel on loopback. It reuses
+Unix socket, and serves `altavista.v1.LockstepService` to the kernel on loopback, with
+`altavista.v1.BoardEdgeService` (the edge node's power control) on the same address. It reuses
 `av_lockstep_shim::{PeerLink, framing, service::ShimService}` unchanged; the shim is not modified.
 
 The pure half (spec parsing, typed errors, one-link-per-board validation, the canonical form and
@@ -19,6 +20,7 @@ guests that speak the frame protocol. No board has been involved.
 av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<port>]
               [--handshake-timeout-ms <n>] [--udp-local <addr:port>]
               --io-log <path> --signing-key <pem> --signing-cert <pem>
+              [--power-control cmd:/abs/path] [--power-timeout-ms <n>]
 ```
 
 - `--io-log`, `--signing-key`, `--signing-cert`: **required** (usage error, status 2, naming the
@@ -35,6 +37,10 @@ av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<p
   refused at start. Default `127.0.0.1:50081` (not yet in `docs/architecture.md`'s port map).
 - `--handshake-timeout-ms`: how long to wait for the guest's HELLO (default 60000). Expiry is a
   typed startup error and exit status 1.
+- `--power-control`: this edge node's power control channel (see "Power control" below):
+  `cmd:<absolute path>`, or absent for none. `gpio://...` is reserved and refused at start, as is
+  anything malformed. `--power-timeout-ms`: how long one run of the channel may take before it is
+  killed (default 30000, 10 to 600000).
 - `--udp-local`: UDP only; the local address to bind (default: an ephemeral port on the wildcard
   address). A board whose target is statically configured needs a fixed port here.
 
@@ -101,19 +107,54 @@ second trait in the shim, which is compiled into the cFS image, for no behaviour
 
 ## The Bind-time check (`src/service.rs`)
 
-When the kernel binds a `BINDING_KIND_BOARD` instance it will set `board.edge_node_id` and
+When the kernel binds a `BINDING_KIND_BOARD` instance it sets `board.edge_node_id` and
 `board.port_device` (`av_edge::board::BIND_PARAM_EDGE_NODE_ID` / `BIND_PARAM_PORT_DEVICE`) in
-`LockstepBindRequest.parameters`; the kernel side is the next task. The service compares them with
-its own configuration (the device in canonical form, so `udp://HOST:5000` equals `udp://host:5000`):
+`LockstepBindRequest.parameters`. The service compares them with its own configuration (the
+device in canonical form, so `udp://HOST:5000` equals `udp://host:5000`). **A board link is always
+checked**: a Bind that lacks the parameters is refused, so the check protects every client, not
+only a kernel that sends them.
 
 - **Both present and equal**: both are removed, then the BIND is forwarded. The guest's BIND bytes
   are what the container path sends today (and the guest's `payload[512]` BIND buffer sees nothing
   extra).
-- **Different, only one present, or the device unparseable**: refused with a
+- **Different, only one present, neither present, or the device unparseable**: refused with a
   `LockstepBindResponse { lockstep_capable: false, refusal_reason }` naming the requested and the
   configured values, and **nothing is forwarded to the board**. This is the refusal shape the
   kernel's container client already surfaces as a typed `ContainerRefused`.
-- **Both absent**: forwarded unchanged, with a `WARNING` line on stderr.
+  The refusal for a Bind with neither parameter says so and names both sides. There is no opt-out
+  flag (until the power-control task the service forwarded such a Bind unchecked with a warning;
+  that was the lead's ruling to close, question 242).
+
+## Power control (question 242 (c)): `altavista.v1.BoardEdgeService`
+
+`BoardBinding.power_control` is the **edge node's** power control channel, and the board may hang
+off this host or off a separate Linux edge node, so the kernel never runs it: a power-cycle fault
+asks this service, at the address the kernel already dials for the board, over
+`BoardEdgeService.PowerCycle` (`proto/altavista/v1/board.proto`, a separate service so nothing
+that implements `LockstepService` changes). `src/power.rs` has the full contract; in short:
+
+- **The channel** (`av_edge::board::parse_power_control`): `cmd:<absolute path>` runs that
+  executable here as `<path> power-cycle --edge-node-id <id> --instance <name> --fault-id <id>
+  --tai-ns <n>`: no shell, working directory `/`, stdin and stdout `/dev/null`, stderr captured
+  (the last 4096 bytes are returned), its own process group, killed (the whole group, `SIGKILL`) at
+  `--power-timeout-ms`. Exit 0 is success. `gpio://...` is reserved: not implemented this round.
+- **Refusals** (an ordinary response, outcome `REFUSED`, nothing run, nothing logged): the service
+  has no channel, the request's `power_control` differs from its own (canonical form), or its
+  `edge_node_id` differs. A malformed `instance` / `fault_id` is `INVALID_ARGUMENT`.
+- **Failures** (outcome `FAILED`, typed): the executable could not be started, exited non-zero,
+  was ended by a signal, or timed out, each with a detail and the captured stderr tail.
+- **The I/O log:** a channel that was started is one `BOARD_IO_KIND_POWER_CYCLE` record, durable
+  before the reply returns, between the STEP records either side of it: `run_id`, `instance`,
+  `reset_tai_ns` (the fault's epoch), `reset_reason` (`fault:<id>`), `error` for a failure, and
+  the instants the channel was started and finished. It shares the log's exchange gate, so no
+  STEP interleaves; a failed log refuses it before anything runs.
+- **Not done (HIL-day item):** this service performs the power cycle and nothing more. A board that
+  really reboots drops the lockstep-local link; the service must then re-handshake (HELLO once) and
+  the kernel must re-`Bind` before its `RESET`. Neither exists, and the stand-in cannot exercise
+  it: the fake guest and the Renode binding stay up through the "power cycle".
+- **The fake for tests** (also what the stand-in run uses): `--power-control cmd:<a tiny
+  executable>` that appends one JSON line per call beside itself and exits 0, or fails or sleeps on
+  demand; `tests/common/mod.rs` `FakeChannel` (and the kernel's `tests/drm_board_common`).
 
 ## The board I/O log (question 242 (a))
 
@@ -131,8 +172,8 @@ the run replays".
   record carries the run and instance of the kernel's Bind, the signer's certificate fingerprint,
   the link's config hash, and two wall-clock instants: when the last byte of the request had been
   handed to the link and when the last byte of the response had been read from it
-  (`timed::TimedStream`; informational, signed, not used by a replay). `BOARD_IO_KIND_POWER_CYCLE`
-  is reserved for the later power-control task; nothing writes it.
+  (`timed::TimedStream`; informational, signed, not used by a replay). A power cycle the service
+  ran is a `BOARD_IO_KIND_POWER_CYCLE` record (see "Power control").
 - **Chain and signature:** `record_hash = SHA-256(prev_hash || canonical body)`, the first
   `prev_hash` the ASCII `GENESIS`, `signature` = ECDSA P-384 over `record_hash` (the
   `MeasurementBatch` definition). File framing `[payload_len u32 LE][record_hash 32][payload]`, as
@@ -196,7 +237,15 @@ scripts/dev/cargo-slot test -p av-edge-board
 - `tests/udp_loopback.rs`: the same run over loopback UDP; a half-frame reply and a forged datagram
   from a foreign address; a lost HELLO.
 - `tests/bind_check.rs`: matching parameters forwarded stripped (the guest's BIND bytes equal the
-  container path's), mismatches refused with nothing forwarded.
+  container path's), mismatches and a Bind lacking the parameters refused with nothing forwarded.
+- `tests/power_cycle.rs`: `PowerCycle` through the real binary and the kernel's client
+  (`av_lockstep::board_edge`): the channel runs once, as the service's child, with the documented
+  argv, and the log holds `STEP, POWER_CYCLE, RESET, STEP` in order; every refusal runs nothing and
+  logs nothing; a non-zero exit, a spawn failure and a timeout (the child really dead) are typed
+  failures; reserved and malformed channels are startup errors.
+- `tests/power_inprocess.rs`: the `POWER_CYCLE` record is written and synced before the reply
+  returns; a failed sync is `DATA_LOSS`, and the failed log refuses the next power cycle before the
+  channel runs.
 
 The Linux build of hilprep-3b was checked (not built by the host's cargo) in the digest-pinned Rust
 builder image `services/cfs/build-shim.sh` uses; the I/O log additions have not been built on Linux.
@@ -205,7 +254,7 @@ builder image `services/cfs/build-shim.sh` uses; the I/O log additions have not 
 
 - No board has been involved; no real UART, USB-UART bridge or Ethernet MAC.
 - No TLS: the kernel-facing gRPC link is plaintext on loopback, as the shim's (question 155).
-- No `power_control` (`BoardBinding.power_control` is
-  not read), no reconnect: one link per process, HELLO once.
+- No reconnect: one link per process, HELLO once; so no re-handshake after a power cycle that
+  really reboots the board (see "Power control"). `gpio://` power control is reserved.
 - Only one link kind per board instance; a mixed `port_devices` map is refused by
   `av_edge::board::BoardLink` and this service takes a single device.

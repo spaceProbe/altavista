@@ -249,6 +249,9 @@ pub struct Service {
     pub identity: TestIdentity,
     /// Where `spawn` told the service to create its I/O log.
     pub io_log: PathBuf,
+    /// The two Bind parameters (`board.edge_node_id`, `board.port_device`) a kernel binding this
+    /// link sends; the service refuses a Bind without them.
+    pub board_params: BTreeMap<String, String>,
 }
 
 pub fn free_tcp_port() -> u16 {
@@ -317,7 +320,22 @@ impl Service {
             cmd.arg("--io-log").arg(&io_log).arg("--signing-key").arg(&identity.key_pem).arg("--signing-cert").arg(&identity.cert_pem);
         }
         let child = cmd.stdout(Stdio::null()).stderr(Stdio::from(stderr)).spawn().expect("spawn av-edge-board");
-        Self { child, grpc_addr, stderr_path, dir, identity, io_log }
+        let value_of = |flag: &str| args.iter().position(|a| *a == flag).and_then(|i| args.get(i + 1)).map(|s| s.to_string());
+        let mut board_params = BTreeMap::new();
+        if let (Some(node), Some(device)) = (value_of("--edge-node-id"), value_of("--port-device")) {
+            board_params.insert(av_edge::board::BIND_PARAM_EDGE_NODE_ID.to_string(), node);
+            // The canonical spelling when the spec parses; the raw string otherwise (those
+            // services never reach a Bind).
+            board_params.insert(av_edge::board::BIND_PARAM_PORT_DEVICE.to_string(), av_edge::board::parse_port_device(&device).map(|d| d.canonical()).unwrap_or(device));
+        }
+        Self { child, grpc_addr, stderr_path, dir, identity, io_log, board_params }
+    }
+
+    /// `extra` (the instance's own Bind parameters) plus this service's board parameters.
+    pub fn bind_params(&self, extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut p = extra.clone();
+        p.extend(self.board_params.clone());
+        p
     }
 
     /// Read and verify this service's I/O log right now against its certificate, as an
@@ -523,5 +541,77 @@ impl UdpGuest {
 impl Drop for UdpGuest {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// The recording power-control fake (question 242 (c))
+// ---------------------------------------------------------------------------------------
+
+/// A tiny `/bin/sh` executable for `av-edge-board --power-control cmd:<path>`: each call appends
+/// one JSON line (argv, its pid, its parent pid, Unix seconds, working directory) to
+/// `calls.jsonl` beside itself, then does what the `mode` file says: `ok` (default; exit 0),
+/// `fail` (stderr "relay stuck", exit 3) or `sleep` (writes its pid to `sleep.pid`, sleeps 30 s).
+/// The same script as `crates/av-kernel/tests/drm_board_common`'s `FakeChannel`.
+pub struct FakeChannel {
+    pub dir: PathBuf,
+    pub path: PathBuf,
+}
+
+impl FakeChannel {
+    pub fn create(tag: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("av-edge-board-channel-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("power-cycle");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n\
+             d=$(dirname \"$0\")\n\
+             args=\"\"\n\
+             for a in \"$@\"; do args=\"$args\\\"$a\\\",\"; done\n\
+             args=${args%,}\n\
+             printf '{\"argv\":[%s],\"pid\":%s,\"ppid\":%s,\"time_unix\":%s,\"cwd\":\"%s\"}\\n' \"$args\" \"$$\" \"$PPID\" \"$(date +%s)\" \"$(pwd)\" >> \"$d/calls.jsonl\"\n\
+             mode=ok\n\
+             [ -f \"$d/mode\" ] && mode=$(cat \"$d/mode\")\n\
+             case \"$mode\" in\n\
+               fail) echo 'relay stuck' >&2; exit 3;;\n\
+               sleep) echo $$ > \"$d/sleep.pid\"; sleep 30;;\n\
+             esac\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir, path }
+    }
+
+    pub fn uri(&self) -> String {
+        format!("cmd:{}", self.path.display())
+    }
+
+    pub fn set_mode(&self, mode: &str) {
+        std::fs::write(self.dir.join("mode"), mode).unwrap();
+    }
+
+    pub fn calls(&self) -> Vec<serde_json::Value> {
+        match std::fs::read_to_string(self.dir.join("calls.jsonl")) {
+            Ok(text) => text.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("calls.jsonl line {l:?}: {e}"))).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn argv(call: &serde_json::Value) -> Vec<String> {
+        call["argv"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+    }
+
+    pub fn is_alive(pid: i32) -> bool {
+        std::process::Command::new("/bin/kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
+    }
+}
+
+impl Drop for FakeChannel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }

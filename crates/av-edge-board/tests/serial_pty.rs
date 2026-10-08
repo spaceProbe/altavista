@@ -30,7 +30,7 @@ fn a_full_run_over_a_pty_with_paced_writes() {
     service.wait_ready(Duration::from_secs(20));
 
     let t0 = std::time::Instant::now();
-    let bind = drive_full_run(&service.grpc_addr, &Default::default());
+    let bind = drive_full_run(&service.grpc_addr, &service.bind_params(&Default::default()));
     let run_time = t0.elapsed();
     assert_eq!(bind.version, "fake-guest-1");
 

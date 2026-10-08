@@ -77,6 +77,10 @@ pub mod docker;
 /// full account of the defect, the lock path, and why it needed a new dependency.
 mod docker_test_lock;
 
+/// Question 242 (c): the client for `altavista.v1.BoardEdgeService` (the board's edge-node
+/// operations, power cycle today), dialled at the same address as the board's `LockstepService`.
+pub mod board_edge;
+
 pub use av_grpc::pb::{
     LockstepBindRequest, LockstepBindResponse, LockstepResetRequest, LockstepResetResponse, LockstepShutdownRequest, LockstepShutdownResponse, LockstepStepRequest, LockstepStepResponse,
 };
@@ -199,7 +203,7 @@ impl BlockingLockstepClient {
     }
 }
 
-fn new_runtime() -> Result<tokio::runtime::Runtime, ConnectError> {
+pub(crate) fn new_runtime() -> Result<tokio::runtime::Runtime, ConnectError> {
     tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(ConnectError::Runtime)
 }
 
