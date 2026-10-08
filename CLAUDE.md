@@ -34,7 +34,7 @@
 
 - **Mechanitis** (github.com/spaceProbe/Mechanitis) is the engineering data model that was first
   drafted here.
-  - `docs/mechanitis.md`, the relationship note, is on branch
-    `claude/engineering-data-model-22do9e` and not merged yet.
+  - `docs/mechanitis.md` is the relationship note (on `develop`); question 240 records the
+    read-only scoping of what an evidence interface would need.
   - AltaVista is a source of analysis evidence for Mechanitis (runs reproducible from their
     hashes) and shares its evidence-chain pattern.
