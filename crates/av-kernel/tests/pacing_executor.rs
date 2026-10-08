@@ -1,8 +1,9 @@
 //! The executor's side of real-time pacing (question 242, ADR-005 section 2), below what a
-//! `BINDING_KIND_BOARD` instance can do today: `classify_binding` still refuses a board until
-//! hilprep-3a, so no paced run can complete here. What is proven: the one predicate, the typed
-//! refusals around it, that the decision to pace is made before any binding is touched, and that
-//! a lockstep run carries no pacing product at all. The kernel half (`run_with_ports_paced`) is
+//! `BINDING_KIND_BOARD` instance needs no board for: the one predicate, the typed refusals around
+//! it, that the decision to pace is made before any binding is touched, and that a lockstep run
+//! carries no pacing product at all. (A board instance is classified since hilprep-3a; the paced
+//! run end to end, against a fake guest behind the real `av-edge-board`, is
+//! `tests/drm_board_pacing.rs`.) The kernel half (`run_with_ports_paced`) is
 //! `tests/pacing_kernel.rs`; the byte-for-byte lockstep proof is the baseline hash comparison
 //! recorded in the task report.
 //!
@@ -136,15 +137,24 @@ fn pacing_and_covariance_are_refused_together_before_any_binding_is_touched() {
     }
 }
 
-/// With a board bound the flag is irrelevant (forced), and the run proceeds to classification,
-/// which refuses `BINDING_KIND_BOARD` until hilprep-3a lands. When 3a replaces this refusal this
-/// assertion is the one to change: the run then paces.
+/// With a board bound the flag is irrelevant (forced), and the run proceeds to classification.
+/// Updated by hilprep-3a: classification used to refuse `BINDING_KIND_BOARD`
+/// (`UnsupportedBinding`); it now validates the `BoardBinding`, and this fixture's empty
+/// `BoardBinding` fails that validation with a typed `BoardLink` error naming the instance -- the
+/// proof that the gate was passed and a board instance reached `classify_binding` for both flag
+/// values (it would be `RealTimeNotSupported`/`UnsupportedBinding` otherwise).
 #[test]
 fn a_board_instance_passes_the_real_time_gate_whatever_the_flag_says_and_reaches_classification() {
     for flag in [false, true] {
         let (drm, sos, systems) = bundle(vec![board_instance("hw")], opts(flag, false));
-        let err = run(&drm, &sos, &systems).expect_err("classify_binding refuses a board until hilprep-3a");
-        assert!(matches!(err, DrmError::UnsupportedBinding { .. }), "real_time = {flag}: got {err:?}");
+        let err = run(&drm, &sos, &systems).expect_err("an empty BoardBinding fails validation");
+        match err {
+            DrmError::BoardLink { instance, source } => {
+                assert_eq!(instance, "hw", "real_time = {flag}");
+                assert_eq!(source, av_edge::board::BoardLinkError::EmptyEdgeNodeId, "real_time = {flag}");
+            }
+            other => panic!("real_time = {flag}: expected BoardLink, got {other:?}"),
+        }
     }
 }
 

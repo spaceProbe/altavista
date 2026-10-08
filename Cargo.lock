@@ -297,6 +297,7 @@ dependencies = [
  "av-codec",
  "av-dynamics",
  "av-edge",
+ "av-edge-board",
  "av-lockstep",
  "av-lockstep-shim",
  "av-orbital",

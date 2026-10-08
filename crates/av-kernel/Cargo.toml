@@ -65,6 +65,12 @@ av-orbital = { path = "../av-orbital", default-features = false }
 # see crates/av-lockstep/src/lib.rs's own module doc comment for why it, not av-grpc
 # directly, and for the OpenSSL-backed-mTLS-vs-plaintext-loopback split.
 av-lockstep = { path = "../av-lockstep" }
+# Question 242 (hilprep-3a): `BINDING_KIND_BOARD` -- `drm::binding` validates a `BoardBinding`
+# with `av_edge::board` (`parse_port_device`, `BoardLink`, the `board.*` Bind-parameter names),
+# the pure half of the board's link. Question 205: `av-edge` depends on neither `av-kernel` nor
+# `gmat-sys`, so this edge is one way, never a cycle (and `tests/edge_plugin_codec_crosscheck.rs`
+# keeps using it as before; it was a dev-dependency until this task).
+av-edge = { path = "../av-edge" }
 serde.workspace = true
 serde_json.workspace = true
 # DRM authoring format (question 87): YAML, field-for-field mirroring the proto messages --
@@ -98,14 +104,11 @@ prost-types.workspace = true
 # own library code never links against the shim binary, only this one test spawns it
 # out-of-process.
 av-lockstep-shim = { path = "../av-lockstep-shim" }
-# Question 205: `tests/edge_plugin_codec_crosscheck.rs` cross-checks
-# `av_edge::plugin::packet::decode_numeric_fields` against this crate's own `codec::
-# decode_packet` (moved from `crates/av-edge/tests/plugin_replay.rs` -- `av-edge` may not
-# build `gmat-sys`, so the one test in that file needing `av_kernel` had to move here
-# instead). Test-only, like `av-lockstep-shim` above: `av-edge` depends on neither
-# `av-kernel` nor `gmat-sys` (question 205's whole point), so this edge is dev-only and one
-# way, never a cycle.
-av-edge = { path = "../av-edge" }
+# Question 242 (hilprep-3a): `tests/drm_board_*.rs` start the real `av-edge-board` binary (the
+# board's edge service) as a child process against an in-test fake guest, the way
+# `drm_attitude_control_renode.rs` starts `av-lockstep-shim`; a path dev-dependency makes Cargo
+# build the binary before the tests run (the test locates it next to its own executable).
+av-edge-board = { path = "../av-edge-board" }
 
 # `docs/open-questions.md` question 230: every integration test/example below actually calls
 # into the GMAT-backed half of this crate (a live `Gmat` engine, `materialize_gmat`,

@@ -357,6 +357,28 @@ pub enum DrmError {
     /// `materialize_container` always connects to the `127.0.0.1:<host_port>` address Docker
     /// itself published, never a caller-supplied one.
     ContainerPlaintextNonLoopback { context: String, address: String },
+    /// Question 242 (hilprep-3a): a `BINDING_KIND_BOARD` instance's `Binding.config` was not a
+    /// `BoardBinding` (unset, or another variant of the oneof).
+    BoardConfigMissing { instance: String },
+    /// Question 242: the `BoardBinding` failed `av_edge::board` validation -- `source` is the
+    /// typed reason (empty `edge_node_id`, an unparsable `port_devices` spec, a mixed map that
+    /// names more than one device, a declared port missing from the map or an undeclared one in
+    /// it).
+    BoardLink { instance: String, source: av_edge::board::BoardLinkError },
+    /// Question 242: question 155's refusal, applied to a board's `board.edge_address`: plaintext
+    /// (`board.tls` unset) to a non-loopback host.
+    BoardPlaintextNonLoopback { context: String, address: String },
+    /// Question 242: a declared `board.seed_key` named no key in `Scenario.seeds`.
+    UnknownBoardSeed { instance: String, seed_key: String },
+    /// Question 242: connecting to a board instance's edge service (`board.edge_address`) failed.
+    BoardConnect { instance: String, address: String, detail: String },
+    /// Question 242: the `Bind` RPC to the edge service failed at the transport/gRPC level or got
+    /// no reply within `board.bind_timeout_ms`.
+    BoardBind { instance: String, detail: String },
+    /// Question 242: the edge service answered `Bind` with `lockstep_capable = false`; `reason`
+    /// is its own `refusal_reason` (a mismatched edge node or device, or the flight software
+    /// refusing the port set).
+    BoardRefused { instance: String, reason: String },
     /// Question 107: a declared `container.seed_key` did not name a key present in
     /// `Scenario.seeds` -- mirrors [`DrmError::UnknownManeuverSeed`] (ADR-004 "seeds are
     /// inputs" applied to a container binding's own seed).
@@ -405,7 +427,11 @@ pub enum DrmError {
     /// `executor::run_shared_group` builds.
     HardwareFaultKindNotSupported { fault_id: String, instance: String, kind: String },
     /// Question 120, M16.2: a `FAULT_TARGET_KIND_HARDWARE` fault named an instance that is not
-    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). HARDWARE
+    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). Question 242:
+    /// also every HARDWARE fault (a power cycle included) naming a `BINDING_KIND_BOARD` instance
+    /// for now -- `BoardBinding.power_control` is read but not acted on, because power control
+    /// is an edge-service operation a later task adds (hilprep-4); until then a fault that asks
+    /// for it is refused at load rather than silently dropped. HARDWARE
     /// covers a container's own power cycle today, and Renode peripheral faults/board resets
     /// later (both against binding kinds that do not exist yet) -- it has no meaning yet for a
     /// model instance, so this is refused explicitly, at load, rather than silently dropped
@@ -722,6 +748,16 @@ impl std::fmt::Display for DrmError {
                 f,
                 "{context}: container.address {address:?} is plaintext (container.tls is not set) and is not a recognized loopback address (127.0.0.0/8, ::1, or \"localhost\") -- the kernel <-> shim gRPC link is plaintext only on loopback within one host; set container.tls (with ca_file/client_cert/client_key) for any other host (question 155)"
             ),
+            DrmError::BoardConfigMissing { instance } => write!(f, "instance {instance:?}: BINDING_KIND_BOARD requires Binding.config to be a BoardBinding"),
+            DrmError::BoardLink { instance, source } => write!(f, "instance {instance:?}: invalid BoardBinding: {source}"),
+            DrmError::BoardPlaintextNonLoopback { context, address } => write!(
+                f,
+                "{context}: board.edge_address {address:?} is plaintext (board.tls is not set) and is not a recognized loopback address (127.0.0.0/8, ::1, or \"localhost\") -- the kernel <-> edge service gRPC link is plaintext only on loopback within one host; set board.tls (with ca_file/client_cert/client_key) for any other host (question 155)"
+            ),
+            DrmError::UnknownBoardSeed { instance, seed_key } => write!(f, "instance {instance:?}: board.seed_key {seed_key:?} names no entry in Scenario.seeds"),
+            DrmError::BoardConnect { instance, address, detail } => write!(f, "instance {instance:?}: connecting to the board's edge service at {address:?} failed: {detail}"),
+            DrmError::BoardBind { instance, detail } => write!(f, "instance {instance:?}: Bind RPC to the board's edge service failed: {detail}"),
+            DrmError::BoardRefused { instance, reason } => write!(f, "instance {instance:?}: the board's edge service refused Bind (lockstep_capable=false): {reason}"),
             DrmError::UnknownContainerSeed { instance, seed_key } => write!(f, "instance {instance:?}: container.seed_key {seed_key:?} names no entry in Scenario.seeds"),
             DrmError::ContainerProtocol { instance, source } => write!(f, "instance {instance:?}: {source}"),
             DrmError::ContainerPeriodNotOnGrid { instance, period_ns, duration_ns } => {
@@ -736,7 +772,7 @@ impl std::fmt::Display for DrmError {
                 write!(f, "fault {fault_id:?} on container instance {instance:?}: FAULT_TARGET_KIND_HARDWARE kind {kind:?} is not supported (only \"power_cycle\" is, for a container instance)")
             }
             DrmError::HardwareFaultNotSupportedOnInstance { fault_id, instance } => {
-                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER instance -- HARDWARE has no runtime yet for a model instance (Renode/board bindings are still Planned)")
+                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER instance -- HARDWARE has no runtime yet for a model instance, and none for a BINDING_KIND_BOARD instance either (its power control is an edge-service operation a later task adds)")
             }
             DrmError::ContainerDockerLifecycle { instance, detail } => write!(f, "instance {instance:?}: Docker image lifecycle failed: {detail}"),
             DrmError::InvalidFrameDefinition { id, reason } => write!(f, "frame {id:?}: {reason}"),

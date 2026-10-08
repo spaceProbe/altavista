@@ -5,6 +5,12 @@
 //! through [`crate::kernel::HeteroKernel`], and returns [`RunProducts`] (`docs/open-questions.md`
 //! question 93): trajectories, events, evaluated `scores`, and the run's own overall provenance.
 //!
+//! **A `BINDING_KIND_BOARD` instance (question 242) takes the container path** everywhere below
+//! (`binding::Classification::Container` with `ContainerSpec::board` set; bound by
+//! `binding::materialize_board`), differing in its `Bind` parameters, its per-call deadline, the
+//! provenance attributes it reports, a `HARDWARE` fault refused on it at load, and in forcing
+//! real-time pacing for the run.
+//!
 //! ## One shared kernel run per `SosConfiguration` (M14.1, question 109)
 //!
 //! **Decided by the lead:** every non-covariance instance of one `SosConfiguration` -- every
@@ -1788,7 +1794,7 @@ fn run_one_span(
 /// own "A3.3" comment further down), and `Router::take_port_traffic` is a genuine drain (a
 /// second call returns nothing) -- so the ONE drain happens here and is threaded back out
 /// through this tuple, rather than `execute()` draining it again itself and getting nothing.
-type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, String>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>);
+type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, Vec<(String, String)>>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>);
 
 /// Question 178 (R5.1a): drain `handle`'s own accumulated SENSOR fault effect (if any) and fold
 /// it into `sensor_fault_totals`, attributed to whichever fault id `active_sensor_fault` says is
@@ -2007,7 +2013,9 @@ fn run_shared_group(
     }
 
     let mut container_spans: BTreeMap<String, ContainerSpanState> = BTreeMap::new();
-    let mut container_binding_hashes: BTreeMap<String, String> = BTreeMap::new();
+    // Per container/board instance: the `Trajectory.provenance.attributes` it contributes
+    // (`ContainerModel::provenance_attributes`).
+    let mut container_binding_hashes: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (name, (spec, period_ns)) in container_plans {
         let instance = instances_by_name[name];
         let sys = systems.get(&instance.system_id).expect("validated in pass 1");
@@ -2058,20 +2066,33 @@ fn run_shared_group(
             continue;
         }
 
-        let seed = *scenario.seeds.get(&spec.seed_key).ok_or_else(|| DrmError::UnknownContainerSeed { instance: name.clone(), seed_key: spec.seed_key.clone() })?;
+        let seed = *scenario.seeds.get(&spec.seed_key).ok_or_else(|| {
+            if spec.board.is_some() {
+                DrmError::UnknownBoardSeed { instance: name.clone(), seed_key: spec.seed_key.clone() }
+            } else {
+                DrmError::UnknownContainerSeed { instance: name.clone(), seed_key: spec.seed_key.clone() }
+            }
+        })?;
+        // `board.*` is the kernel's own vocabulary for a board instance (question 242) and never
+        // reaches the peer; `materialize_board` adds the two `board.*` Bind parameters the edge
+        // service checks (`av_edge::board::BIND_PARAM_*`) on top.
         let bind_parameters: BTreeMap<String, String> = binding::effective_parameters(sys, instance)
             .into_iter()
-            .filter(|(pname, _)| !pname.starts_with("container.") && !pname.starts_with("output."))
+            .filter(|(pname, _)| !pname.starts_with("container.") && !pname.starts_with("board.") && !pname.starts_with("output."))
             .map(|(pname, p)| (pname, if p.string_value.is_empty() { p.value.to_string() } else { p.string_value.clone() }))
             .collect();
-        let materialized = binding::materialize_container(spec, sys, name, run_id, scenario.start_tai_ns, *period_ns, seed, &bind_parameters)?;
+        let materialized = if spec.board.is_some() {
+            binding::materialize_board(spec, sys, name, run_id, scenario.start_tai_ns, *period_ns, seed, &bind_parameters)?
+        } else {
+            binding::materialize_container(spec, sys, name, run_id, scenario.start_tai_ns, *period_ns, seed, &bind_parameters)?
+        };
         // A container's own epoch is simply the caller's own `epoch_tai_ns` argument, exactly
         // like a model instance's (`binding`'s module doc comment's "Epoch" section, question
         // 96) -- every span below registers containers at `seg_start`, never this recorded
         // value again, so this is only a sanity check that `materialize_container` never
         // silently returns a different epoch than the one it was asked for.
         debug_assert_eq!(materialized.t0_tai_ns, scenario.start_tai_ns);
-        container_binding_hashes.insert(name.clone(), materialized.model.binding_hash.clone());
+        container_binding_hashes.insert(name.clone(), materialized.model.provenance_attributes());
         container_spans.insert(
             name.clone(),
             ContainerSpanState {
@@ -3855,6 +3876,12 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             return Err(DrmError::ContainerFaultsOrManeuversNotSupported { instance: f.instance.clone() });
         }
         if f.target_kind == FaultTargetKind::Hardware as i32 {
+            // Question 242: `BoardBinding.power_control` is not acted on yet (power control is an
+            // edge-service operation a later task adds), so every HARDWARE fault -- a power
+            // cycle included -- naming a board instance is refused at load rather than dropped.
+            if container_plans.get(&f.instance).is_some_and(|(spec, _)| spec.board.is_some()) {
+                return Err(DrmError::HardwareFaultNotSupportedOnInstance { fault_id: f.id.clone(), instance: f.instance.clone() });
+            }
             if container_plans.contains_key(&f.instance) {
                 if f.kind != fault::POWER_CYCLE_KIND {
                     return Err(DrmError::HardwareFaultKindNotSupported { fault_id: f.id.clone(), instance: f.instance.clone(), kind: f.kind.clone() });
@@ -4080,9 +4107,13 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
                 // recorded on this instance's own Trajectory.provenance.attributes -- the same place
                 // finish_trajectory already records system_definition_hash/id -- rather than a new
                 // Trajectory field (proto/** is read-only to this task).
-                if let Some(hash) = container_binding_hashes.get(&instance.name) {
+                // Question 242: a board instance contributes `board_binding_hash`, `board_link_hash`
+                // and `binding_kind` instead (`ContainerModel::provenance_attributes`).
+                if let Some(attrs) = container_binding_hashes.get(&instance.name) {
                     if let Some(prov) = finished.provenance.as_mut() {
-                        prov.attributes.insert("container_binding_hash".to_string(), hash.clone());
+                        for (key, value) in attrs {
+                            prov.attributes.insert(key.clone(), value.clone());
+                        }
                     }
                 }
                 // M15.2 (question 116): the M14.4-era "held_sample_tai_ns" provenance attribute is

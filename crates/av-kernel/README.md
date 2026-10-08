@@ -2136,11 +2136,76 @@ iteration, no clock read, no allocation).
   evaluated before the overrun events are added, so no score depends on the wall clock.
   `pacing::WALL_CLOCK_DEPENDENT` names exactly these two products for a replay to exclude.
 - **Refusals.** `real_time = true` without a board stays `RealTimeNotSupported`; a board with
-  `covariance` is `InvalidDrmOptions`. Until the board binding is classified (hilprep-3a),
-  `classify_binding` still refuses `BINDING_KIND_BOARD`, so the executor path is exercised
-  below `execute` only (`tests/pacing_kernel.rs` with the real clock, the unit tests with a
-  fake one, `drm::executor::pacing_plumbing_tests` for `run_one_span`).
+  `covariance` is `InvalidDrmOptions`. Since hilprep-3a a board instance is classified and bound
+  (see ["Binding a board"](#binding-a-board-binding_kind_board-question-242-hilprep-3a)), so a
+  board-bound run is paced end to end: `tests/drm_board_pacing.rs`.
 - **No board result is claimed.** Nothing here has run against a ZCU104.
+
+## Binding a board (`BINDING_KIND_BOARD`, question 242, hilprep-3a)
+
+A `BINDING_KIND_BOARD` instance is bound by dialling the board's **edge service**
+(`crates/av-edge-board`, binary `av-edge-board`) over the same `altavista.v1.LockstepService`
+client a container uses; the edge service speaks lockstep-local to the flight software over the
+board's serial line or UDP. Steps, `Reset`, `Shutdown`, the typed protocol errors and the
+port-traffic sidecar are the container machinery unchanged: `classify_binding` returns
+`Classification::Container(spec)` with `spec.board = Some(BoardSpec)` (one marker instead of a
+parallel variant that would copy every container match arm). A board-bound run is paced
+(`run_requires_real_time`), so its `RunProducts.pacing` is set and overruns become events.
+
+**The SoS instance** carries `Binding { kind: BINDING_KIND_BOARD, board: BoardBinding {
+edge_node_id, port_devices, power_control } }` (YAML: `binding: { kind: BINDING_KIND_BOARD,
+board: { edge_node_id: ..., port_devices: { <port>: "udp://host:port" | "/dev/<name>@<baud>" } } }`).
+`port_devices` must name **every** declared port of the system, all mapped to the **same** device
+(one link per board instance; a mixed map, a missing or an undeclared port, an unparsable spec or
+an empty `edge_node_id` is `DrmError::BoardLink` naming the instance, `av_edge::board` giving
+the reason).
+
+**The system definition** carries the kernel-side `board.*` parameters (see
+`drms/demo_attitude_control_controller_board.system.yaml`); any other name is
+`DrmError::UnknownParameter`, and `board.*` never reaches the peer:
+
+| parameter | |
+|---|---|
+| `board.edge_address` | required: `host:port` of the running `av-edge-board` (its `--grpc-addr`, default `127.0.0.1:50081`). Plaintext only on loopback (question 155, `DrmError::BoardPlaintextNonLoopback`); otherwise `board.tls` = 1 |
+| `board.seed_key` | required: a key of `Scenario.seeds` (`UnknownBoardSeed` if absent) |
+| `board.tls`, `board.ca_file`, `board.client_cert`, `board.client_key` | as the `container.*` mTLS set |
+| `board.step_timeout_ms` | `Step`/`Reset`/`Shutdown` with no reply in this long is `ContainerError::StepTimeout` (as `DrmError::ContainerProtocol`) / `ResetRpc` / `ShutdownRpc`. Default 5000, bounds 10..=600000 |
+| `board.bind_timeout_ms` | the connect and `Bind` (the edge service waits for the flight software's HELLO inside it). Default 30000, same bounds. Expiry is `DrmError::BoardBind` / `BoardConnect` |
+
+`av-lockstep`'s blocking client has no deadline, so each board call runs on a worker thread
+(`TimedLockstep`) and the caller waits with `recv_timeout`; after a timeout the link is not used
+again and the worker exits when its stuck call returns. A late reply is an *overrun* (counted by
+the pacer); the timeout is only for silence. Containers keep the direct client.
+
+**Bind.** The request is the container's, plus `board.edge_node_id` and `board.port_device` (the
+canonical form of the one device) from `av_edge::board::BoardLink::bind_parameters`; the edge
+service refuses a mismatch with `lockstep_capable = false` and a reason
+(`DrmError::BoardRefused`, nothing forwarded to the flight software) and strips both parameters
+on a match, so the flight software's BIND is the container's.
+
+**Reported kind and hashes.** `ModelInfo.id` is `board.<instance>`, `depth` `board-lockstep`.
+The instance's `Trajectory.provenance.attributes` are `binding_kind = BINDING_KIND_BOARD`,
+`board_binding_hash` (the `binding_hash` of the flight software's `Bind` response, relayed by the
+edge service) and `board_link_hash` (SHA-256 of the kernel-side `BoardLink`: edge node, canonical
+device, sorted ports) in place of a container's `container_binding_hash`.
+
+**Power control is not acted on.** `BoardBinding.power_control` is read and kept, but power
+control is an edge-service operation a later task adds (hilprep-4): until then every
+`FAULT_TARGET_KIND_HARDWARE` fault naming a board instance, a `power_cycle` included, is
+`DrmError::HardwareFaultNotSupportedOnInstance` at load. Replaying a board instance's port log
+is not exercised here.
+
+**Proven against stand-ins only**: `tests/drm_board_pacing.rs` and `tests/drm_board_refusals.rs`
+run the real `av-edge-board` binary in front of a fake lockstep-local guest on a loopback UDP
+socket (the fake answers each STEP with an empty STEP_DONE, so the board-bound controller is
+silent). No ZCU104, no Renode, no Docker.
+
+**HIL-day run.** Start the guest's link, then `av-edge-board --port-device <spec> --edge-node-id
+<id> --io-log <new file> --signing-key <pem> --signing-cert <pem>` (see its README); give the
+SoS instance the matching `BoardBinding`; set `board.edge_address` (and `board.seed_key`, with
+that key in `Scenario.seeds`) on the controller's system, recomputing its hash
+(`cargo run -p av-kernel --example drm_hash -- system <file>`); run `av-run` as for any DRM. No
+CLI flag is needed: a board instance forces pacing.
 
 ## Determinism (ADR-002 / ADR-004)
 

@@ -31,8 +31,9 @@
 //! exposes without ever exposing `AnyModel`.
 //!
 //! **Non-model bindings are refused, never silently skipped, except `BINDING_KIND_CONTAINER`
-//! as of M13.2** (`docs/open-questions.md` question 107): `BINDING_KIND_RENODE` /
-//! `BINDING_KIND_BOARD` (and an unset/`_UNSPECIFIED` binding) still return
+//! as of M13.2** (`docs/open-questions.md` question 107) **and `BINDING_KIND_BOARD` as of question
+//! 242** (see "Board binding" below): `BINDING_KIND_RENODE` (and an unset/`_UNSPECIFIED` binding)
+//! still return
 //! [`DrmError::UnsupportedBinding`] from [`classify_binding`] -- ADR-005's Renode/board
 //! runtimes are still Planned, and this crate has no machinery for either. A
 //! `BINDING_KIND_CONTAINER` instance is now classified into [`BindingPlan::Container`] and,
@@ -42,6 +43,23 @@
 //! (lockstep) binding" section below and `crates/av-kernel/README.md`'s "Out of scope"
 //! section for exactly what M13.2 does and does not build (container image lifecycle --
 //! pulling by digest, starting the process -- is not this batch's job at all).
+//!
+//! ## Board binding (question 242, hilprep-3a)
+//!
+//! A `BINDING_KIND_BOARD` instance is dialled exactly like a `container.address` process, but the
+//! peer is the board's edge service (`av-edge-board`), which carries lockstep-local to the flight
+//! software over a serial line or UDP. [`classify_binding`] returns `Classification::Container`
+//! with [`ContainerSpec::board`] set ([`BoardSpec`]), built by `parse_board_spec` from the
+//! `BoardBinding` (validated by `av_edge::board::BoardLink`: edge node, every `port_devices` spec
+//! parsed, one link, complete against the system's declared ports) and the `board.*` vocabulary
+//! (`board.edge_address`, `board.seed_key`, `board.tls`/`ca_file`/`client_cert`/`client_key`,
+//! `board.step_timeout_ms`, `board.bind_timeout_ms`; anything else is `UnknownParameter`).
+//! [`materialize_board`] connects, adds `board.edge_node_id` and `board.port_device` to the `Bind`
+//! parameters for the edge service's check, and runs every later call through a deadline
+//! (`TimedLockstep`) so a silent board is a typed error. The instance reports
+//! `BINDING_KIND_BOARD` (`binding_kind` provenance attribute, `board.<instance>` model id) where
+//! a container reports none; `ContainerModel::provenance_attributes` lists exactly what it adds.
+//! `crates/av-kernel/README.md`, "Binding a board", has the parameter table and what is proven.
 //!
 //! ## Container (lockstep) binding (M13.2, question 107)
 //!
@@ -208,7 +226,8 @@ use std::fmt;
 // (lockstep) binding" section).
 use std::rc::Rc;
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DrmOptions, ModelCapability, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
+use av_edge::board::BoardLink;
+use av_cdm::pb::{Binding, BindingKind, BoardBinding, ContainerBinding, DrmOptions, ModelCapability, ModelInfo, PacketCodec, Parameter, Port, PortDirection, PortKind, StateSpace, SystemDefinition, SystemInstance};
 // `docs/open-questions.md` question 230: `PacketField` is named only by `resolve_gmat_command_
 // port` and this module's own GMAT-only tests (both gated); `Tai` only by `materialize_gmat`
 // (`Tai::from_nanos(epoch_tai_ns).to_a1_mjd()` at the `Gmat::convert`-adjacent A1MJD boundary).
@@ -1195,10 +1214,16 @@ pub enum ContainerError {
     /// `container.address`-only instance (M13.2's own subprocess path) -- that path never
     /// creates a [`ManagedContainer`] to tear down in the first place.
     DockerTeardown { detail: String },
+    /// Question 242 (hilprep-3a): a `BINDING_KIND_BOARD` instance's `Step` got no reply within
+    /// `board.step_timeout_ms` -- a silent board (or a silent edge service) is this typed error,
+    /// never a hang. Fatal like every variant here: the run stops. The late reply, if one ever
+    /// comes, is discarded and the instance's link is not used again.
+    StepTimeout { timeout_ms: u64 },
 }
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ContainerError::StepTimeout { timeout_ms } => write!(f, "Step got no reply within {timeout_ms} ms (board.step_timeout_ms): the board or its edge service is silent"),
             ContainerError::Connect { address, detail } => write!(f, "connecting to lockstep process at {address:?}: {detail}"),
             ContainerError::BindRpc { detail } => write!(f, "Bind RPC failed: {detail}"),
             ContainerError::Refused { reason } => write!(f, "lockstep process refused (lockstep_capable=false): {reason}"),
@@ -1213,6 +1238,117 @@ impl fmt::Display for ContainerError {
     }
 }
 impl std::error::Error for ContainerError {}
+
+/// Why one call on a [`LockstepIo`] did not return a response.
+#[derive(Debug)]
+enum IoError {
+    /// The RPC itself failed (the gRPC status or transport error, stringified).
+    Rpc(String),
+    /// A timed link got no reply within `timeout_ms`.
+    TimedOut { timeout_ms: u64 },
+    /// A timed link was used again after it timed out or its worker ended.
+    Unusable,
+}
+impl fmt::Display for IoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoError::Rpc(detail) => f.write_str(detail),
+            IoError::TimedOut { timeout_ms } => write!(f, "no reply within {timeout_ms} ms"),
+            IoError::Unusable => f.write_str("the link already timed out (or its worker ended) and is not used again"),
+        }
+    }
+}
+
+type LockstepJob = Box<dyn FnOnce(&mut BlockingLockstepClient) + Send>;
+
+/// A [`BlockingLockstepClient`] driven from a worker thread, so a call can be given up after a
+/// deadline. `av_lockstep`'s blocking client has no timeout (and is not this task's to change),
+/// and a silent board must be a typed error, never a hang (question 242): each call is a closure
+/// run by the worker, its result returned over a one-shot channel the caller waits on with
+/// `recv_timeout`. After a timeout the worker is still inside the abandoned call, so the link is
+/// marked unusable and every later call fails at once; dropping this value lets the worker exit
+/// when its current call returns (it is never joined). Used for `BINDING_KIND_BOARD` only: a
+/// container instance keeps the direct client and its behaviour.
+struct TimedLockstep {
+    jobs: std::sync::mpsc::Sender<LockstepJob>,
+    unusable: bool,
+}
+
+impl TimedLockstep {
+    fn new(mut client: BlockingLockstepClient) -> Self {
+        let (jobs, rx) = std::sync::mpsc::channel::<LockstepJob>();
+        std::thread::Builder::new()
+            .name("av-board-lockstep".to_string())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job(&mut client);
+                }
+            })
+            .expect("spawning the board lockstep worker thread");
+        Self { jobs, unusable: false }
+    }
+
+    /// A worker-less link (its job channel has no receiver), for tests of what does not touch the wire.
+    #[cfg(test)]
+    fn dead() -> Self {
+        let (jobs, _rx) = std::sync::mpsc::channel::<LockstepJob>();
+        Self { jobs, unusable: false }
+    }
+
+    fn call<R: Send + 'static>(&mut self, timeout: std::time::Duration, f: impl FnOnce(&mut BlockingLockstepClient) -> Result<R, String> + Send + 'static) -> Result<R, IoError> {
+        if self.unusable {
+            return Err(IoError::Unusable);
+        }
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let job: LockstepJob = Box::new(move |client| {
+            let _ = reply_tx.send(f(client));
+        });
+        if self.jobs.send(job).is_err() {
+            self.unusable = true;
+            return Err(IoError::Unusable);
+        }
+        match reply_rx.recv_timeout(timeout) {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(detail)) => Err(IoError::Rpc(detail)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.unusable = true;
+                Err(IoError::TimedOut { timeout_ms: timeout.as_millis() as u64 })
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.unusable = true;
+                Err(IoError::Unusable)
+            }
+        }
+    }
+}
+
+/// How a [`ContainerModel`] reaches its lockstep peer: directly (a container, unchanged) or
+/// through a [`TimedLockstep`] with a per-call deadline (a board).
+enum LockstepIo {
+    Direct(Box<BlockingLockstepClient>),
+    Timed { worker: TimedLockstep, step_timeout: std::time::Duration },
+}
+
+impl LockstepIo {
+    fn step(&mut self, request: LockstepStepRequest) -> Result<av_lockstep::LockstepStepResponse, IoError> {
+        match self {
+            LockstepIo::Direct(c) => c.step(request).map_err(|e| IoError::Rpc(e.to_string())),
+            LockstepIo::Timed { worker, step_timeout } => worker.call(*step_timeout, move |c| c.step(request).map_err(|e| e.to_string())),
+        }
+    }
+    fn reset(&mut self, request: av_lockstep::LockstepResetRequest) -> Result<av_lockstep::LockstepResetResponse, IoError> {
+        match self {
+            LockstepIo::Direct(c) => c.reset(request).map_err(|e| IoError::Rpc(e.to_string())),
+            LockstepIo::Timed { worker, step_timeout } => worker.call(*step_timeout, move |c| c.reset(request).map_err(|e| e.to_string())),
+        }
+    }
+    fn shutdown(&mut self, request: av_lockstep::LockstepShutdownRequest) -> Result<av_lockstep::LockstepShutdownResponse, IoError> {
+        match self {
+            LockstepIo::Direct(c) => c.shutdown(request).map_err(|e| IoError::Rpc(e.to_string())),
+            LockstepIo::Timed { worker, step_timeout } => worker.call(*step_timeout, move |c| c.shutdown(request).map_err(|e| e.to_string())),
+        }
+    }
+}
 
 /// A bound `BINDING_KIND_CONTAINER` instance: a live [`BlockingLockstepClient`] plus the
 /// bookkeeping (`next_sequence`) needed to speak `Step` correctly. `state_dim() == 0` --
@@ -1234,7 +1370,7 @@ impl std::error::Error for ContainerError {}
 /// LockstepService` over gRPC (`crate::drm::binding`'s own module doc comment, "Container
 /// (lockstep) binding"), never GMAT.
 pub(crate) struct ContainerModel {
-    client: RefCell<BlockingLockstepClient>,
+    client: RefCell<LockstepIo>,
     next_sequence: Cell<u64>,
     info: ModelInfo,
     /// `LockstepBindResponse.binding_hash`, recorded here so `crate::drm::executor` can
@@ -1249,6 +1385,10 @@ pub(crate) struct ContainerModel {
     /// every other field here needs interior mutability; `stop_and_remove` needs `&mut
     /// ManagedContainer`, so a bare field (not `Cell`) is required to borrow it mutably.
     managed: RefCell<Option<ManagedContainer>>,
+    /// Question 242: `Some` iff this is a `BINDING_KIND_BOARD` instance -- the SHA-256 hex of the
+    /// kernel-side link (`av_edge::board::BoardLink::config_hash_hex`: edge node, canonical
+    /// device, sorted ports), recorded as provenance next to the guest's own `binding_hash`.
+    board_link_hash: Option<String>,
 }
 
 impl DynamicsModel for ContainerModel {
@@ -1294,7 +1434,10 @@ impl DynamicsModel for ContainerModel {
         let until_tai_ns = t_tai_ns + dt_ns;
         let request = LockstepStepRequest { sequence, until_tai_ns, inputs: inbox.messages().to_vec() };
 
-        let response = self.client.borrow_mut().step(request).map_err(|e| ContainerError::StepRpc { detail: e.to_string() })?;
+        let response = self.client.borrow_mut().step(request).map_err(|e| match e {
+            IoError::TimedOut { timeout_ms } => ContainerError::StepTimeout { timeout_ms },
+            other => ContainerError::StepRpc { detail: other.to_string() },
+        })?;
         if response.sequence != sequence {
             return Err(ContainerError::SequenceMismatch { expected: sequence, got: response.sequence });
         }
@@ -1332,6 +1475,27 @@ impl DynamicsModel for ContainerModel {
 }
 
 impl ContainerModel {
+    /// The `Trajectory.provenance.attributes` this instance contributes, as `(key, value)`.
+    ///
+    /// - A container: `container_binding_hash` = `LockstepBindResponse.binding_hash` (unchanged).
+    /// - A board (question 242): `board_binding_hash` = the same field from the board's `Bind`
+    ///   response (the flight software's own binding hash, relayed by the edge service);
+    ///   `board_link_hash` = SHA-256 of the kernel-side `BoardLink` (edge node, canonical device,
+    ///   sorted ports), so a log shows both what the guest claimed and what the kernel
+    ///   configured; and `binding_kind` = `BINDING_KIND_BOARD`, the kind this instance reports
+    ///   (a container reports none, so this key exists only for a board and moves no container
+    ///   run's bytes).
+    pub(crate) fn provenance_attributes(&self) -> Vec<(String, String)> {
+        match &self.board_link_hash {
+            None => vec![("container_binding_hash".to_string(), self.binding_hash.clone())],
+            Some(link_hash) => vec![
+                ("binding_kind".to_string(), BindingKind::Board.as_str_name().to_string()),
+                ("board_binding_hash".to_string(), self.binding_hash.clone()),
+                ("board_link_hash".to_string(), link_hash.clone()),
+            ],
+        }
+    }
+
     /// Send `Shutdown` and, for a Docker-run instance ([`ContainerModel::managed`] is `Some`),
     /// stop and remove the container afterward -- question 118's "Shutdown then stop and remove
     /// on run end," in that order (the process gets a chance to exit cleanly on its own `Shutdown`
@@ -1600,7 +1764,106 @@ pub(crate) fn materialize_container(
         settings_hash: av_dynamics::settings_hash(&settings),
         goldens: vec![],
     };
-    let model = ContainerModel { client: RefCell::new(client), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed) };
+    let model = ContainerModel { client: RefCell::new(LockstepIo::Direct(Box::new(client))), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed), board_link_hash: None };
+    Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
+}
+
+/// Question 242 (hilprep-3a): bind one `BINDING_KIND_BOARD` instance. The board's edge service
+/// (`av-edge-board`) serves `altavista.v1.LockstepService` at `spec.address` exactly as a
+/// `container.address` process does, so this is [`materialize_container`]'s already-running path
+/// with three differences:
+///
+/// 1. `Bind`'s parameters carry the kernel's belief about the link
+///    (`av_edge::board::BIND_PARAM_EDGE_NODE_ID`, `BIND_PARAM_PORT_DEVICE` in the canonical form)
+///    for the edge service's check; a mismatch comes back as `lockstep_capable = false` with the
+///    service's reason, which is [`DrmError::BoardRefused`].
+/// 2. Every call goes through a [`TimedLockstep`]: `Bind` is bounded by `board.bind_timeout_ms`,
+///    each `Step`/`Reset`/`Shutdown` by `board.step_timeout_ms`, so a silent board or edge
+///    service is a typed error, never a hang.
+/// 3. No Docker, no retry: the edge service is already running (a refused connection is a real
+///    error).
+///
+/// The instance's `ModelInfo.id` is `board.<instance>` and its `depth` `board-lockstep`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn materialize_board(
+    spec: &ContainerSpec,
+    sys: &SystemDefinition,
+    instance_name: &str,
+    run_id: &str,
+    epoch_tai_ns: i64,
+    step_period_ns: i64,
+    seed: u64,
+    parameters: &BTreeMap<String, String>,
+) -> Result<MaterializedContainer, DrmError> {
+    let board = spec.board.as_ref().expect("materialize_board is called only for a ContainerSpec classify_binding built from a BoardBinding");
+    let address = spec.address.clone();
+    let connect_err = |detail: String| DrmError::BoardConnect { instance: instance_name.to_string(), address: address.clone(), detail };
+    // The connect (a TCP connect plus the HTTP/2 handshake) has no deadline of its own, and a peer
+    // that accepts and then says nothing would hang it: run it on a helper thread and give it
+    // `board.bind_timeout_ms`, like the Bind that follows.
+    let connect: Box<dyn FnOnce() -> Result<BlockingLockstepClient, String> + Send> = if spec.tls {
+        let (ca, cert, key) = spec.tls_paths().ok_or_else(|| connect_err("board.tls is set but board.ca_file/client_cert/client_key were not fully parsed -- this is a classify_binding bug, not a user error".to_string()))?;
+        let (ca, cert, key, endpoint) = (ca.to_string(), cert.to_string(), key.to_string(), format!("https://{address}"));
+        Box::new(move || BlockingLockstepClient::connect_mtls(&endpoint, std::path::Path::new(&ca), Some(std::path::Path::new(&cert)), Some(std::path::Path::new(&key))).map_err(|e| e.to_string()))
+    } else {
+        let address = address.clone();
+        Box::new(move || BlockingLockstepClient::connect_plaintext(&address).map_err(|e| e.to_string()))
+    };
+    let bind_timeout = std::time::Duration::from_millis(board.bind_timeout_ms);
+    let (connected_tx, connected_rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("av-board-connect".to_string())
+        .spawn(move || {
+            let _ = connected_tx.send(connect());
+        })
+        .expect("spawning the board connect thread");
+    let client = match connected_rx.recv_timeout(bind_timeout) {
+        Ok(Ok(client)) => client,
+        Ok(Err(detail)) => return Err(connect_err(detail)),
+        Err(_) => return Err(connect_err(IoError::TimedOut { timeout_ms: board.bind_timeout_ms }.to_string())),
+    };
+
+    let mut bind_parameters = parameters.clone();
+    bind_parameters.extend(board.link.bind_parameters());
+    let request = LockstepBindRequest {
+        run_id: run_id.to_string(),
+        instance: instance_name.to_string(),
+        ports: sys.ports.clone(),
+        start_tai_ns: epoch_tai_ns,
+        base_period_ns: step_period_ns,
+        step_period_ns,
+        seed,
+        parameters: bind_parameters,
+    };
+    let mut worker = TimedLockstep::new(client);
+    let response = worker
+        .call(bind_timeout, move |c| c.bind(request).map_err(|e| e.to_string()))
+        .map_err(|e| DrmError::BoardBind { instance: instance_name.to_string(), detail: e.to_string() })?;
+    if !response.lockstep_capable {
+        return Err(DrmError::BoardRefused { instance: instance_name.to_string(), reason: response.refusal_reason });
+    }
+
+    let link_hash = board.link.config_hash_hex();
+    let mut settings = BTreeMap::new();
+    settings.insert("address".to_string(), address);
+    settings.insert("tls".to_string(), spec.tls.to_string());
+    settings.insert("version".to_string(), response.version.clone());
+    settings.insert("edge_node_id".to_string(), board.link.edge_node_id().to_string());
+    settings.insert("port_device".to_string(), board.link.device().canonical());
+    settings.insert("board_link_hash".to_string(), link_hash.clone());
+    let info = ModelInfo {
+        id: format!("board.{instance_name}"),
+        version: response.version,
+        state_space_id: sys.state_space_id.clone(),
+        frame_id: String::new(),
+        controls: vec![],
+        capabilities: vec![ModelCapability::Step as i32, ModelCapability::Deterministic as i32],
+        depth: "board-lockstep".to_string(),
+        settings_hash: av_dynamics::settings_hash(&settings),
+        goldens: vec![],
+    };
+    let io = LockstepIo::Timed { worker, step_timeout: std::time::Duration::from_millis(board.step_timeout_ms) };
+    let model = ContainerModel { client: RefCell::new(io), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(None), board_link_hash: Some(link_hash) };
     Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
 }
 
@@ -1917,7 +2180,53 @@ pub struct ContainerSpec {
     /// `av_lockstep::docker::ManagedContainer::pull_and_run`'s own doc comment for the exact
     /// error). Threaded straight to that function's `extra_sysctls` parameter.
     pub docker_sysctls: BTreeMap<String, String>,
+    /// Question 242 (hilprep-3a): `Some` iff this is a `BINDING_KIND_BOARD` instance, built by
+    /// [`parse_board_spec`] from a `BoardBinding` and the `board.*` parameters. A board instance
+    /// is a container classification carrying this marker (not a second classification variant)
+    /// because everything downstream of classification is the container machinery unchanged --
+    /// the shared run loop, the replay substitution, `Reset`/`Shutdown`, the typed protocol
+    /// errors, the port-traffic sidecar -- and a parallel variant would copy every one of those
+    /// match arms; the differences (Bind parameters, the per-call deadline, what is reported)
+    /// branch on this field in three places. For a board, `address`/`tls`/`ca_file`/
+    /// `client_cert`/`client_key`/`seed_key` hold the `board.*` counterparts.
+    pub board: Option<BoardSpec>,
 }
+
+/// The board half of a [`ContainerSpec`] (question 242): what `BoardBinding` and the `board.*`
+/// parameters add to the container's address-only path. See the module doc's "Board binding".
+#[derive(Debug, Clone)]
+pub struct BoardSpec {
+    /// The validated one-link `BoardBinding` (`av_edge::board`): edge node, the single device
+    /// every port is multiplexed over, and the declared ports it carries.
+    pub link: BoardLink,
+    /// `board.step_timeout_ms`: a `Step`, `Reset` or `Shutdown` with no reply within this is
+    /// [`ContainerError::StepTimeout`] (or its `Reset`/`Shutdown` counterpart). Default
+    /// [`BOARD_STEP_TIMEOUT_DEFAULT_MS`].
+    pub step_timeout_ms: u64,
+    /// `board.bind_timeout_ms`: the `Bind` RPC (the edge service waits for the flight software's
+    /// handshake inside it) with no reply within this is [`DrmError::BoardBind`]. Default
+    /// [`BOARD_BIND_TIMEOUT_DEFAULT_MS`].
+    pub bind_timeout_ms: u64,
+    /// `BoardBinding.power_control`, read and kept but **not acted on**: power control is an edge
+    /// service operation a later task adds (hilprep-4). So a non-empty value is not silently
+    /// ignored, `execute()` refuses every `FAULT_TARGET_KIND_HARDWARE` fault naming a board
+    /// instance (`DrmError::HardwareFaultNotSupportedOnInstance`) until then.
+    pub power_control: String,
+}
+
+/// `board.step_timeout_ms` default: 5 s. A board's step is answered over a serial line or UDP by
+/// flight software on the order of milliseconds; five seconds is far above any step a healthy
+/// link takes and far below "the run hung". A late step is an *overrun* (the pacer counts it),
+/// not an error; this bound is only for silence.
+pub const BOARD_STEP_TIMEOUT_DEFAULT_MS: u64 = 5_000;
+/// `board.bind_timeout_ms` default: 30 s -- the edge service's own handshake timeout default is
+/// 60 s; an operator who raises that raises this with it.
+pub const BOARD_BIND_TIMEOUT_DEFAULT_MS: u64 = 30_000;
+/// Both timeouts must lie in `BOARD_TIMEOUT_MIN_MS..=BOARD_TIMEOUT_MAX_MS` (10 ms .. 10 min);
+/// outside is a typed refusal at load, never a clamp.
+pub const BOARD_TIMEOUT_MIN_MS: u64 = 10;
+pub const BOARD_TIMEOUT_MAX_MS: u64 = 600_000;
+
 impl Default for ContainerSpec {
     fn default() -> Self {
         ContainerSpec {
@@ -1933,6 +2242,7 @@ impl Default for ContainerSpec {
             port_endpoints: BTreeMap::new(),
             control_port: 50070,
             docker_sysctls: BTreeMap::new(),
+            board: None,
         }
     }
 }
@@ -2074,6 +2384,8 @@ pub struct OrbitalSystemSpec {
 #[derive(Debug, Clone)]
 pub enum Classification {
     Model(BindingPlan),
+    /// A `BINDING_KIND_CONTAINER` instance, or (question 242) a `BINDING_KIND_BOARD` instance:
+    /// the latter is a container classification whose [`ContainerSpec::board`] is `Some`.
     Container(ContainerSpec),
 }
 
@@ -2691,6 +3003,73 @@ fn parse_container_spec(context: &str, params: &BTreeMap<String, Parameter>, con
     Ok(spec)
 }
 
+/// Parse a `BINDING_KIND_BOARD` instance's `BoardBinding` plus its `"board."`-prefixed effective
+/// parameters into a [`ContainerSpec`] carrying a [`BoardSpec`] (question 242, hilprep-3a). No
+/// network is touched. Every failure is typed and names the instance, before any connection:
+///
+/// - `BoardBinding` validation by `av_edge::board::BoardLink::from_binding_checked`
+///   ([`DrmError::BoardLink`]): `edge_node_id` present and well-formed, every `port_devices`
+///   spec parses, one link (all ports one device), and the map complete against `sys.ports`
+///   (no declared port missing, none undeclared).
+/// - The `board.*` vocabulary, mirroring the container address-only path: `board.edge_address`
+///   (required, `host:port` of the edge service), `board.seed_key` (required),
+///   `board.tls` / `board.ca_file` / `board.client_cert` / `board.client_key` (as `container.*`,
+///   with the same question 155 refusal of a non-loopback plaintext address,
+///   [`DrmError::BoardPlaintextNonLoopback`]), `board.step_timeout_ms` and
+///   `board.bind_timeout_ms` (see [`BoardSpec`]). `output.*` is accepted as for a container. Any
+///   other name is [`DrmError::UnknownParameter`].
+fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, params: &BTreeMap<String, Parameter>, board_binding: &BoardBinding) -> Result<ContainerSpec, DrmError> {
+    let link = BoardLink::from_binding_checked(board_binding, sys.ports.iter().map(|p| p.name.as_str())).map_err(|source| DrmError::BoardLink { instance: instance_name.to_string(), source })?;
+    let mut spec = ContainerSpec::default();
+    let mut step_timeout_ms = BOARD_STEP_TIMEOUT_DEFAULT_MS;
+    let mut bind_timeout_ms = BOARD_BIND_TIMEOUT_DEFAULT_MS;
+    let timeout_ms = |name: &str, p: &Parameter| -> Result<u64, DrmError> {
+        let v = p.value;
+        if !v.is_finite() || v.fract() != 0.0 || v < BOARD_TIMEOUT_MIN_MS as f64 || v > BOARD_TIMEOUT_MAX_MS as f64 {
+            return Err(DrmError::InvalidBinding { reason: format!("{context}: {name}={v} must be a whole number of milliseconds in {BOARD_TIMEOUT_MIN_MS}..={BOARD_TIMEOUT_MAX_MS}") });
+        }
+        Ok(v as u64)
+    };
+    for (name, p) in params {
+        if name.starts_with("output.") {
+            continue;
+        }
+        let Some(field) = name.strip_prefix("board.") else {
+            return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() });
+        };
+        match field {
+            "edge_address" => spec.address = p.string_value.clone(),
+            "tls" => spec.tls = p.value != 0.0,
+            "ca_file" => spec.ca_file = Some(p.string_value.clone()),
+            "client_cert" => spec.client_cert = Some(p.string_value.clone()),
+            "client_key" => spec.client_key = Some(p.string_value.clone()),
+            "seed_key" => spec.seed_key = p.string_value.clone(),
+            "step_timeout_ms" => step_timeout_ms = timeout_ms(name, p)?,
+            "bind_timeout_ms" => bind_timeout_ms = timeout_ms(name, p)?,
+            _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
+        }
+    }
+    if spec.address.is_empty() {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "board.edge_address".to_string() });
+    }
+    // Question 155, applied to the board's edge service: plaintext only on loopback.
+    if !spec.tls && !is_loopback_address(&spec.address) {
+        return Err(DrmError::BoardPlaintextNonLoopback { context: context.to_string(), address: spec.address.clone() });
+    }
+    if spec.seed_key.is_empty() {
+        return Err(DrmError::MissingParameter { context: context.to_string(), name: "board.seed_key".to_string() });
+    }
+    if spec.tls && spec.tls_paths().is_none() {
+        for (present, name) in [(spec.ca_file.is_some(), "board.ca_file"), (spec.client_cert.is_some(), "board.client_cert"), (spec.client_key.is_some(), "board.client_key")] {
+            if !present {
+                return Err(DrmError::MissingParameter { context: context.to_string(), name: name.to_string() });
+            }
+        }
+    }
+    spec.board = Some(BoardSpec { link, step_timeout_ms, bind_timeout_ms, power_control: board_binding.power_control.clone() });
+    Ok(spec)
+}
+
 /// Human-readable name for a raw `Binding.kind` wire value, for error messages. `prost`'s
 /// `Enumeration` derive only gives `as_str_name` on an already-valid enum *value* (no
 /// `from_i32`/`TryFrom<i32>` in this prost version), so this matches the wire value directly
@@ -2725,7 +3104,8 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
 
     // M13.2, question 107: BINDING_KIND_CONTAINER is classified (not refused) as of this
     // task -- see the module doc comment's "Container (lockstep) binding" section.
-    // BINDING_KIND_RENODE/BOARD (and unset) still fall through to the blanket refusal below.
+    // BINDING_KIND_RENODE (and unset) still fall through to the blanket refusal below;
+    // BINDING_KIND_BOARD is classified as of question 242 (see below).
     if binding.kind == BindingKind::Container as i32 {
         // M15.3 (question 118): `Binding.config`'s own `ContainerBinding` (image/image_digest/
         // command/port_endpoints), when present -- `None` for a `Binding` whose `config` oneof
@@ -2737,6 +3117,16 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
             _ => None,
         };
         return Ok(Classification::Container(parse_container_spec(&context, &params, container_binding)?));
+    }
+
+    // Question 242 (hilprep-3a): BINDING_KIND_BOARD is classified too -- as a container
+    // classification carrying a `BoardSpec` (see `ContainerSpec::board`). Its `Binding.config`
+    // must be the `BoardBinding`; anything else is a typed error, not a guess.
+    if binding.kind == BindingKind::Board as i32 {
+        let Some(av_cdm::pb::binding::Config::Board(board_binding)) = &binding.config else {
+            return Err(DrmError::BoardConfigMissing { instance: instance.name.clone() });
+        };
+        return Ok(Classification::Container(parse_board_spec(&instance.name, &context, sys, &params, board_binding)?));
     }
 
     if binding.kind != BindingKind::Model as i32 {
@@ -3839,7 +4229,7 @@ mod tests {
     // tests below (`fault::rebind_gmat_spec_at_state`).
     #[cfg(feature = "gmat")]
     use super::super::fault;
-    use av_cdm::pb::{Binding, ContainerBinding, ModelBinding, RenodeBinding};
+    use av_cdm::pb::{Binding, BoardBinding, ContainerBinding, ModelBinding, RenodeBinding};
 
     fn param(name: &str, value: f64) -> Parameter {
         Parameter { name: name.to_string(), value, ..Default::default() }
@@ -3995,6 +4385,188 @@ mod tests {
             sparam("container.client_key", "/client.key"),
         ]);
         assert!(matches!(classify_binding(&instance, &sys, &DrmOptions::default()), Ok(Classification::Container(_))), "TLS is the question-155-sanctioned path for a non-loopback endpoint");
+    }
+
+    // ---- BINDING_KIND_BOARD classification (question 242, hilprep-3a). No network, no board. ----
+
+    fn board_port(name: &str, direction: PortDirection) -> Port {
+        Port { name: name.to_string(), direction: direction as i32, ..Default::default() }
+    }
+
+    fn board_binding(edge_node_id: &str, devices: &[(&str, &str)]) -> BoardBinding {
+        BoardBinding { edge_node_id: edge_node_id.to_string(), port_devices: devices.iter().map(|(p, d)| (p.to_string(), d.to_string())).collect(), power_control: String::new() }
+    }
+
+    fn board_params() -> Vec<Parameter> {
+        vec![sparam("board.edge_address", "127.0.0.1:50081"), sparam("board.seed_key", "ctl")]
+    }
+
+    fn board_instance_with(config: Option<BoardBinding>, params: Vec<Parameter>) -> (SystemInstance, SystemDefinition) {
+        let instance = SystemInstance {
+            name: "ctl".to_string(),
+            system_id: "ctl_sys".to_string(),
+            binding: Some(Binding { kind: BindingKind::Board as i32, config: config.map(av_cdm::pb::binding::Config::Board) }),
+            ..Default::default()
+        };
+        let sys = SystemDefinition {
+            id: "ctl_sys".to_string(),
+            dynamics_model: "native.ctl".to_string(),
+            ports: vec![board_port("tm", PortDirection::In), board_port("tc", PortDirection::Out)],
+            parameters: params,
+            ..Default::default()
+        };
+        (instance, sys)
+    }
+
+    fn good_board() -> BoardBinding {
+        board_binding("zcu104-a", &[("tm", "udp://127.0.0.1:5000"), ("tc", "udp://127.0.0.1:5000")])
+    }
+
+    fn classify_board(config: Option<BoardBinding>, params: Vec<Parameter>) -> Result<ContainerSpec, DrmError> {
+        let (instance, sys) = board_instance_with(config, params);
+        match classify_binding(&instance, &sys, &DrmOptions::default())? {
+            Classification::Container(spec) => Ok(spec),
+            other => panic!("a board classifies as a container classification carrying a BoardSpec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_binding_with_valid_parameters_classifies_with_a_board_spec_and_the_documented_defaults() {
+        let spec = classify_board(Some(good_board()), board_params()).expect("valid board classifies");
+        let board = spec.board.as_ref().expect("the board marker");
+        assert_eq!(spec.address, "127.0.0.1:50081");
+        assert_eq!(spec.seed_key, "ctl");
+        assert!(!spec.tls);
+        assert_eq!(board.link.edge_node_id(), "zcu104-a");
+        assert_eq!(board.link.device().canonical(), "udp://127.0.0.1:5000");
+        assert_eq!(board.link.ports(), ["tc".to_string(), "tm".to_string()]);
+        assert_eq!(board.step_timeout_ms, BOARD_STEP_TIMEOUT_DEFAULT_MS);
+        assert_eq!(board.bind_timeout_ms, BOARD_BIND_TIMEOUT_DEFAULT_MS);
+        assert!(spec.image.is_none() && spec.docker_sysctls.is_empty(), "no Docker path for a board");
+    }
+
+    #[test]
+    fn board_binding_timeouts_and_output_declarations_are_read() {
+        let mut params = board_params();
+        params.push(param("board.step_timeout_ms", 250.0));
+        params.push(param("board.bind_timeout_ms", 2000.0));
+        params.push(param("output.foo", 0.0));
+        let spec = classify_board(Some(good_board()), params).expect("classifies");
+        let board = spec.board.unwrap();
+        assert_eq!((board.step_timeout_ms, board.bind_timeout_ms), (250, 2000));
+    }
+
+    #[test]
+    fn board_binding_without_a_boardbinding_config_is_a_typed_error() {
+        let err = classify_board(None, board_params()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardConfigMissing { ref instance } if instance == "ctl"), "{err:?}");
+        // The wrong oneof variant is the same error, not a fallthrough to the container path.
+        let (mut instance, sys) = board_instance_with(None, board_params());
+        instance.binding = Some(Binding { kind: BindingKind::Board as i32, config: Some(av_cdm::pb::binding::Config::Container(ContainerBinding::default())) });
+        let err = classify_binding(&instance, &sys, &DrmOptions::default()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardConfigMissing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn board_binding_without_an_edge_node_id_is_a_typed_error_naming_the_instance() {
+        let err = classify_board(Some(board_binding("", &[("tm", "udp://127.0.0.1:5000"), ("tc", "udp://127.0.0.1:5000")])), board_params()).unwrap_err();
+        match err {
+            DrmError::BoardLink { instance, source } => {
+                assert_eq!(instance, "ctl");
+                assert_eq!(source, av_edge::board::BoardLinkError::EmptyEdgeNodeId);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_binding_with_an_unparsable_port_device_spec_is_a_typed_error() {
+        for bad in ["tcp://10.0.0.1:5", "/dev/ttyUSB0", "/dev/ttyUSB0@0", "udp://host", "udp://127.0.0.1:0", "ttyUSB0@9600", ""] {
+            let err = classify_board(Some(board_binding("n", &[("tm", bad), ("tc", bad)])), board_params()).unwrap_err();
+            assert!(matches!(err, DrmError::BoardLink { source: av_edge::board::BoardLinkError::PortDevice { .. }, .. }), "spec {bad:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn board_binding_with_a_mixed_port_map_is_a_typed_error() {
+        let err = classify_board(Some(board_binding("n", &[("tm", "/dev/ttyUSB0@115200"), ("tc", "udp://127.0.0.1:5000")])), board_params()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardLink { source: av_edge::board::BoardLinkError::MixedDevices { .. }, .. }), "{err:?}");
+        // Two spellings of one device are one link, not a mix.
+        classify_board(Some(board_binding("n", &[("tm", "udp://LOCALHOST:5000"), ("tc", "udp://localhost:5000")])), board_params()).expect("one device, two spellings");
+    }
+
+    #[test]
+    fn board_binding_incomplete_against_the_declared_ports_is_a_typed_error() {
+        let err = classify_board(Some(board_binding("n", &[("tm", "udp://127.0.0.1:5000")])), board_params()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardLink { source: av_edge::board::BoardLinkError::MissingPorts { ref ports }, .. } if ports == &["tc".to_string()]), "{err:?}");
+        let err = classify_board(Some(board_binding("n", &[("tm", "udp://127.0.0.1:5000"), ("tc", "udp://127.0.0.1:5000"), ("zz", "udp://127.0.0.1:5000")])), board_params()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardLink { source: av_edge::board::BoardLinkError::ExtraPorts { ref ports }, .. } if ports == &["zz".to_string()]), "{err:?}");
+    }
+
+    #[test]
+    fn board_binding_missing_edge_address_or_seed_key_is_a_typed_error() {
+        let err = classify_board(Some(good_board()), vec![sparam("board.seed_key", "ctl")]).unwrap_err();
+        assert!(matches!(err, DrmError::MissingParameter { ref name, .. } if name == "board.edge_address"), "{err:?}");
+        let err = classify_board(Some(good_board()), vec![sparam("board.edge_address", "127.0.0.1:50081")]).unwrap_err();
+        assert!(matches!(err, DrmError::MissingParameter { ref name, .. } if name == "board.seed_key"), "{err:?}");
+    }
+
+    #[test]
+    fn board_binding_with_a_non_loopback_plaintext_edge_address_is_refused_but_tls_is_allowed() {
+        let params = vec![sparam("board.edge_address", "10.0.0.7:50081"), sparam("board.seed_key", "ctl")];
+        let err = classify_board(Some(good_board()), params.clone()).unwrap_err();
+        assert!(matches!(err, DrmError::BoardPlaintextNonLoopback { ref address, .. } if address == "10.0.0.7:50081"), "{err:?}");
+        let mut tls = params;
+        tls.push(param("board.tls", 1.0));
+        let err = classify_board(Some(good_board()), tls.clone()).unwrap_err();
+        assert!(matches!(err, DrmError::MissingParameter { ref name, .. } if name == "board.ca_file"), "{err:?}");
+        tls.extend([sparam("board.ca_file", "/ca.pem"), sparam("board.client_cert", "/c.pem"), sparam("board.client_key", "/c.key")]);
+        let spec = classify_board(Some(good_board()), tls).expect("mTLS to a non-loopback edge service classifies");
+        assert!(spec.tls && spec.tls_paths().is_some());
+    }
+
+    #[test]
+    fn board_binding_unknown_board_parameters_and_container_parameters_are_typed_errors() {
+        for name in ["board.bogus", "board.step_timeout", "container.address", "force_model.central_body"] {
+            let mut params = board_params();
+            params.push(sparam(name, "x"));
+            let err = classify_board(Some(good_board()), params).unwrap_err();
+            assert!(matches!(err, DrmError::UnknownParameter { name: ref n, .. } if n == name), "{name}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn board_binding_timeouts_outside_the_documented_bounds_are_typed_errors() {
+        for (name, value) in [("board.step_timeout_ms", 0.0), ("board.step_timeout_ms", 9.0), ("board.step_timeout_ms", 600_001.0), ("board.step_timeout_ms", 12.5), ("board.step_timeout_ms", f64::NAN), ("board.bind_timeout_ms", -1.0), ("board.bind_timeout_ms", 1e12)] {
+            let mut params = board_params();
+            params.push(param(name, value));
+            let err = classify_board(Some(good_board()), params).unwrap_err();
+            assert!(matches!(err, DrmError::InvalidBinding { ref reason } if reason.contains(name)), "{name}={value}: {err:?}");
+        }
+        for value in [10.0, 600_000.0] {
+            let mut params = board_params();
+            params.push(param("board.step_timeout_ms", value));
+            classify_board(Some(good_board()), params).expect("the bounds are inclusive");
+        }
+    }
+
+    #[test]
+    fn a_board_instances_provenance_reports_the_board_kind_and_a_container_still_reports_its_own() {
+        // The attribute set is a pure function of the model's fields; build the two shapes by hand.
+        let info = ModelInfo::default();
+        let make = |board_link_hash: Option<&str>| ContainerModel {
+            client: RefCell::new(LockstepIo::Timed { worker: TimedLockstep::dead(), step_timeout: std::time::Duration::from_millis(1) }),
+            next_sequence: Cell::new(1),
+            info: info.clone(),
+            binding_hash: "bh".to_string(),
+            managed: RefCell::new(None),
+            board_link_hash: board_link_hash.map(str::to_string),
+        };
+        assert_eq!(make(None).provenance_attributes(), vec![("container_binding_hash".to_string(), "bh".to_string())]);
+        assert_eq!(
+            make(Some("lh")).provenance_attributes(),
+            vec![("binding_kind".to_string(), "BINDING_KIND_BOARD".to_string()), ("board_binding_hash".to_string(), "bh".to_string()), ("board_link_hash".to_string(), "lh".to_string())]
+        );
     }
 
     #[test]
