@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-05, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–238); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–240); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -23,8 +23,9 @@ recipe is in `README.md`.
 
 - **Hardware in the loop:** needs a ZCU102/104 board.
 - **ClickHouse store and multi-host jobs:** need a host that runs ClickHouse.
-- **Next heavy work (question 238):** a model-only spacecraft is framed at marker scale, so a 1.5 m model is invisible at Focus; per-viewport Focus still uses the central-body distance; the run route carries no `model`.
-- **Next native work (question 238):** a run's provenance depends on the test registry's port (`ContainerBinding.image` enters `sos_configuration_hash`); the Renode test holds the docker lock for its whole run; the RTEMS ELF build is not byte-reproducible (cFE's build date and host, and a temp name from `rtems-syms`).
+- **Next heavy work (question 240):** shared entity objects are float32-quantized against the primary camera's origin, so a model in a second viewport framed 10 m away sits 4–25 cm off its true position, breaking question 46's centimetre bound in secondary viewports; `scenario_to_cdm` does not write `visual_model_uri`. (Question 238's three heavy items are closed.)
+- **Next native work (question 240):** the container instance's `dynamics_hash` still folds in its ephemeral address; the RTEMS build's apt pins depend on the live Debian mirror. (Question 238's three native items are closed: stable provenance, a narrowed Renode lock, a byte-reproducible ELF.)
+- **Mechanitis (question 240):** scoped read-only; AltaVista changes nothing until Mechanitis settles encoding and shared types (its ADR-003). The open decisions are the user's.
 - **Jacchia-Roberts drag:** the source mirror is proven to be the R2026a tree; the shipped binary's half of the provenance question is the lead's before an instrumented build.
 - **With the user:** the spoore `publish = false` merge and upstream PRs (questions 75, 207), the GMAT covariance report (question 150), the secdeploy upstream proposals, the Redpanda licence review (question 6).
 - **Host:** the docker-test lock and two cargo slots serialise both teams (questions 207, 229, 235); a large `target/debug/deps` is moved aside at the start of a round (question 236); Colima mounts only `$HOME` into containers; the Colima VM's image GC deletes unused images above 85% disk, so dangling volumes are pruned when it climbs; the local shell policy blocks `bash <script>`.
