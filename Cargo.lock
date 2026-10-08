@@ -178,6 +178,7 @@ dependencies = [
  "av-lockstep",
  "av-lockstep-shim",
  "libc",
+ "openssl",
  "prost",
  "thiserror",
  "tokio",

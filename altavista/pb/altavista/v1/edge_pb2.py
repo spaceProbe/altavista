@@ -24,9 +24,10 @@ _sym_db = _symbol_database.Default()
 
 from . import core_pb2 as altavista_dot_v1_dot_core__pb2
 from . import envelope_pb2 as altavista_dot_v1_dot_envelope__pb2
+from . import lockstep_pb2 as altavista_dot_v1_dot_lockstep__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17\x61ltavista/v1/edge.proto\x12\x0c\x61ltavista.v1\x1a\x17\x61ltavista/v1/core.proto\x1a\x1b\x61ltavista/v1/envelope.proto\"\xbb\x02\n\x10MeasurementBatch\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x10\n\x08sequence\x18\x02 \x01(\x04\x12\x11\n\tprev_hash\x18\x03 \x01(\x0c\x12\x12\n\nbatch_hash\x18\x04 \x01(\x0c\x12\x11\n\tsignature\x18\x05 \x01(\x0c\x12\x1a\n\x12signer_cert_sha256\x18\x06 \x01(\t\x12\"\n\x05label\x18\x07 \x01(\x0b\x32\x13.altavista.v1.Label\x12/\n\x0cmeasurements\x18\x08 \x03(\x0b\x32\x19.altavista.v1.Measurement\x12,\n\nprovenance\x18\t \x01(\x0b\x32\x18.altavista.v1.Provenance\x12\x14\n\x0c\x62\x61tch_tai_ns\x18\n \x01(\x03\x12\x11\n\tshard_key\x18\x0b \x01(\t\"\x9c\x01\n\x0c\x42\x61tchVerdict\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12/\n\trejection\x18\x02 \x01(\x0e\x32\x1c.altavista.v1.BatchRejection\x12\x13\n\x0bproducer_id\x18\x03 \x01(\t\x12\x10\n\x08sequence\x18\x04 \x01(\x04\x12\x12\n\nbatch_hash\x18\x05 \x01(\x0c\x12\x0e\n\x06\x64\x65tail\x18\x06 \x01(\t\"\xbb\x02\n\x11RejectionCounters\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x04\x12\x16\n\x0eunsigned_count\x18\x03 \x01(\x04\x12\x1b\n\x13\x62\x61\x64_signature_count\x18\x04 \x01(\x04\x12\x17\n\x0f\x63hain_gap_count\x18\x05 \x01(\x04\x12\x19\n\x11\x63hain_break_count\x18\x06 \x01(\x04\x12\x18\n\x10mislabeled_count\x18\x07 \x01(\x04\x12\x1c\n\x14over_clearance_count\x18\x08 \x01(\x04\x12\x13\n\x0bstale_count\x18\t \x01(\x04\x12\x17\n\x0f\x64uplicate_count\x18\n \x01(\x04\x12\x12\n\nchain_head\x18\x0b \x01(\x0c\x12\x1c\n\x14shard_mismatch_count\x18\x0c \x01(\x04\"M\n\x11MeasurementSchema\x12\x16\n\x0emeasurement_id\x18\x01 \x01(\t\x12\x11\n\tsensor_id\x18\x02 \x01(\t\x12\r\n\x05z_len\x18\x03 \x01(\r\"\xf5\x01\n\x0ePluginManifest\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x16\n\x0eplugin_version\x18\x02 \x01(\t\x12\x37\n\x0eoutput_schemas\x18\x03 \x03(\x0b\x32\x1f.altavista.v1.MeasurementSchema\x12\x11\n\tframe_ids\x18\x04 \x03(\t\x12\"\n\x05label\x18\x05 \x01(\x0b\x32\x13.altavista.v1.Label\x12\x11\n\tclearance\x18\x06 \x01(\t\x12\x12\n\nshard_keys\x18\x07 \x03(\t\x12\x1f\n\x17leaf_fingerprint_sha256\x18\x08 \x01(\t\"s\n\x0bManifestAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12.\n\x07refusal\x18\x02 \x01(\x0e\x32\x1d.altavista.v1.ManifestRefusal\x12\x0e\n\x06\x64\x65tail\x18\x03 \x01(\t\x12\x12\n\nchain_head\x18\x04 \x01(\x0c\"\xa8\x01\n\x10IdentityCounters\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x04\x12\x15\n\rmalformed_pem\x18\x02 \x01(\x04\x12\x10\n\x08not_p384\x18\x03 \x01(\x04\x12\x1a\n\x12issuer_not_trusted\x18\x04 \x01(\x04\x12\x0f\n\x07\x65xpired\x18\x05 \x01(\x04\x12\x15\n\rnot_yet_valid\x18\x06 \x01(\x04\x12\x15\n\ropenssl_error\x18\x07 \x01(\x04\"=\n\x11PartitionEvidence\x12\x12\n\nchain_head\x18\x01 \x01(\x0c\x12\x14\n\x0crecord_count\x18\x02 \x01(\x04\"\x11\n\x0f\x45videnceRequest\"\xa1\x03\n\x10\x45videnceResponse\x12\x16\n\x0e\x61\x63\x63\x65pted_total\x18\x01 \x01(\x04\x12\x16\n\x0erejected_total\x18\x02 \x01(\x04\x12\x30\n\x08identity\x18\x03 \x01(\x0b\x32\x1e.altavista.v1.IdentityCounters\x12@\n\tproducers\x18\x04 \x03(\x0b\x32-.altavista.v1.EvidenceResponse.ProducersEntry\x12\x42\n\npartitions\x18\x05 \x03(\x0b\x32..altavista.v1.EvidenceResponse.PartitionsEntry\x1aQ\n\x0eProducersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.RejectionCounters:\x02\x38\x01\x1aR\n\x0fPartitionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.PartitionEvidence:\x02\x38\x01\"\x0f\n\rVerifyRequest\"\xa6\x01\n\x0eVerifyResponse\x12@\n\npartitions\x18\x01 \x03(\x0b\x32,.altavista.v1.VerifyResponse.PartitionsEntry\x1aR\n\x0fPartitionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.ChainVerification:\x02\x38\x01*\xd4\x02\n\x0e\x42\x61tchRejection\x12\x1f\n\x1b\x42\x41TCH_REJECTION_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x42\x41TCH_REJECTION_UNSIGNED\x10\x01\x12!\n\x1d\x42\x41TCH_REJECTION_BAD_SIGNATURE\x10\x02\x12\x1d\n\x19\x42\x41TCH_REJECTION_CHAIN_GAP\x10\x03\x12\x1f\n\x1b\x42\x41TCH_REJECTION_CHAIN_BREAK\x10\x04\x12\x1e\n\x1a\x42\x41TCH_REJECTION_MISLABELED\x10\x05\x12\"\n\x1e\x42\x41TCH_REJECTION_OVER_CLEARANCE\x10\x06\x12\x19\n\x15\x42\x41TCH_REJECTION_STALE\x10\x07\x12\x1d\n\x19\x42\x41TCH_REJECTION_DUPLICATE\x10\x08\x12\"\n\x1e\x42\x41TCH_REJECTION_SHARD_MISMATCH\x10\t*\xfe\x01\n\x0fManifestRefusal\x12 \n\x1cMANIFEST_REFUSAL_UNSPECIFIED\x10\x00\x12#\n\x1fMANIFEST_REFUSAL_UNKNOWN_PLUGIN\x10\x01\x12(\n$MANIFEST_REFUSAL_LABEL_NOT_PERMITTED\x10\x02\x12+\n\'MANIFEST_REFUSAL_CLEARANCE_ABOVE_LADDER\x10\x03\x12&\n\"MANIFEST_REFUSAL_MANIFEST_MISMATCH\x10\x04\x12%\n!MANIFEST_REFUSAL_IDENTITY_REFUSED\x10\x05\x32\xb4\x02\n\nEdgeIngest\x12\x43\n\x08\x41nnounce\x12\x1c.altavista.v1.PluginManifest\x1a\x19.altavista.v1.ManifestAck\x12H\n\x06Submit\x12\x1e.altavista.v1.MeasurementBatch\x1a\x1a.altavista.v1.BatchVerdict(\x01\x30\x01\x12L\n\x0bGetEvidence\x12\x1d.altavista.v1.EvidenceRequest\x1a\x1e.altavista.v1.EvidenceResponse\x12I\n\x0cVerifyLedger\x12\x1b.altavista.v1.VerifyRequest\x1a\x1c.altavista.v1.VerifyResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17\x61ltavista/v1/edge.proto\x12\x0c\x61ltavista.v1\x1a\x17\x61ltavista/v1/core.proto\x1a\x1b\x61ltavista/v1/envelope.proto\x1a\x1b\x61ltavista/v1/lockstep.proto\"\xbb\x02\n\x10MeasurementBatch\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x10\n\x08sequence\x18\x02 \x01(\x04\x12\x11\n\tprev_hash\x18\x03 \x01(\x0c\x12\x12\n\nbatch_hash\x18\x04 \x01(\x0c\x12\x11\n\tsignature\x18\x05 \x01(\x0c\x12\x1a\n\x12signer_cert_sha256\x18\x06 \x01(\t\x12\"\n\x05label\x18\x07 \x01(\x0b\x32\x13.altavista.v1.Label\x12/\n\x0cmeasurements\x18\x08 \x03(\x0b\x32\x19.altavista.v1.Measurement\x12,\n\nprovenance\x18\t \x01(\x0b\x32\x18.altavista.v1.Provenance\x12\x14\n\x0c\x62\x61tch_tai_ns\x18\n \x01(\x03\x12\x11\n\tshard_key\x18\x0b \x01(\t\"\x9c\x01\n\x0c\x42\x61tchVerdict\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12/\n\trejection\x18\x02 \x01(\x0e\x32\x1c.altavista.v1.BatchRejection\x12\x13\n\x0bproducer_id\x18\x03 \x01(\t\x12\x10\n\x08sequence\x18\x04 \x01(\x04\x12\x12\n\nbatch_hash\x18\x05 \x01(\x0c\x12\x0e\n\x06\x64\x65tail\x18\x06 \x01(\t\"\xbb\x02\n\x11RejectionCounters\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x02 \x01(\x04\x12\x16\n\x0eunsigned_count\x18\x03 \x01(\x04\x12\x1b\n\x13\x62\x61\x64_signature_count\x18\x04 \x01(\x04\x12\x17\n\x0f\x63hain_gap_count\x18\x05 \x01(\x04\x12\x19\n\x11\x63hain_break_count\x18\x06 \x01(\x04\x12\x18\n\x10mislabeled_count\x18\x07 \x01(\x04\x12\x1c\n\x14over_clearance_count\x18\x08 \x01(\x04\x12\x13\n\x0bstale_count\x18\t \x01(\x04\x12\x17\n\x0f\x64uplicate_count\x18\n \x01(\x04\x12\x12\n\nchain_head\x18\x0b \x01(\x0c\x12\x1c\n\x14shard_mismatch_count\x18\x0c \x01(\x04\"M\n\x11MeasurementSchema\x12\x16\n\x0emeasurement_id\x18\x01 \x01(\t\x12\x11\n\tsensor_id\x18\x02 \x01(\t\x12\r\n\x05z_len\x18\x03 \x01(\r\"\xf5\x01\n\x0ePluginManifest\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x16\n\x0eplugin_version\x18\x02 \x01(\t\x12\x37\n\x0eoutput_schemas\x18\x03 \x03(\x0b\x32\x1f.altavista.v1.MeasurementSchema\x12\x11\n\tframe_ids\x18\x04 \x03(\t\x12\"\n\x05label\x18\x05 \x01(\x0b\x32\x13.altavista.v1.Label\x12\x11\n\tclearance\x18\x06 \x01(\t\x12\x12\n\nshard_keys\x18\x07 \x03(\t\x12\x1f\n\x17leaf_fingerprint_sha256\x18\x08 \x01(\t\"s\n\x0bManifestAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12.\n\x07refusal\x18\x02 \x01(\x0e\x32\x1d.altavista.v1.ManifestRefusal\x12\x0e\n\x06\x64\x65tail\x18\x03 \x01(\t\x12\x12\n\nchain_head\x18\x04 \x01(\x0c\"\xa8\x01\n\x10IdentityCounters\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x04\x12\x15\n\rmalformed_pem\x18\x02 \x01(\x04\x12\x10\n\x08not_p384\x18\x03 \x01(\x04\x12\x1a\n\x12issuer_not_trusted\x18\x04 \x01(\x04\x12\x0f\n\x07\x65xpired\x18\x05 \x01(\x04\x12\x15\n\rnot_yet_valid\x18\x06 \x01(\x04\x12\x15\n\ropenssl_error\x18\x07 \x01(\x04\"=\n\x11PartitionEvidence\x12\x12\n\nchain_head\x18\x01 \x01(\x0c\x12\x14\n\x0crecord_count\x18\x02 \x01(\x04\"\x11\n\x0f\x45videnceRequest\"\xa1\x03\n\x10\x45videnceResponse\x12\x16\n\x0e\x61\x63\x63\x65pted_total\x18\x01 \x01(\x04\x12\x16\n\x0erejected_total\x18\x02 \x01(\x04\x12\x30\n\x08identity\x18\x03 \x01(\x0b\x32\x1e.altavista.v1.IdentityCounters\x12@\n\tproducers\x18\x04 \x03(\x0b\x32-.altavista.v1.EvidenceResponse.ProducersEntry\x12\x42\n\npartitions\x18\x05 \x03(\x0b\x32..altavista.v1.EvidenceResponse.PartitionsEntry\x1aQ\n\x0eProducersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.RejectionCounters:\x02\x38\x01\x1aR\n\x0fPartitionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.PartitionEvidence:\x02\x38\x01\"\x0f\n\rVerifyRequest\"\xa6\x01\n\x0eVerifyResponse\x12@\n\npartitions\x18\x01 \x03(\x0b\x32,.altavista.v1.VerifyResponse.PartitionsEntry\x1aR\n\x0fPartitionsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12.\n\x05value\x18\x02 \x01(\x0b\x32\x1f.altavista.v1.ChainVerification:\x02\x38\x01\"\xe6\x05\n\rBoardIoRecord\x12\x13\n\x0bproducer_id\x18\x01 \x01(\t\x12\x10\n\x08sequence\x18\x02 \x01(\x04\x12\x11\n\tprev_hash\x18\x03 \x01(\x0c\x12\x13\n\x0brecord_hash\x18\x04 \x01(\x0c\x12\x11\n\tsignature\x18\x05 \x01(\x0c\x12\x1a\n\x12signer_cert_sha256\x18\x06 \x01(\t\x12\x0e\n\x06run_id\x18\x07 \x01(\t\x12\x10\n\x08instance\x18\x08 \x01(\t\x12\'\n\x04kind\x18\t \x01(\x0e\x32\x19.altavista.v1.BoardIoKind\x12\x19\n\x11lockstep_sequence\x18\n \x01(\x04\x12\x14\n\x0cuntil_tai_ns\x18\x0b \x01(\x03\x12)\n\x06inputs\x18\x0c \x03(\x0b\x32\x19.altavista.v1.PortMessage\x12*\n\x07outputs\x18\r \x03(\x0b\x32\x19.altavista.v1.PortMessage\x12\x44\n\rnamed_outputs\x18\x0e \x03(\x0b\x32-.altavista.v1.BoardIoRecord.NamedOutputsEntry\x12\x37\n\x0c\x62ind_request\x18\x0f \x01(\x0b\x32!.altavista.v1.LockstepBindRequest\x12\x39\n\rbind_response\x18\x10 \x01(\x0b\x32\".altavista.v1.LockstepBindResponse\x12\x14\n\x0creset_tai_ns\x18\x11 \x01(\x03\x12\x14\n\x0creset_reason\x18\x12 \x01(\t\x12\r\n\x05\x65rror\x18\x13 \x01(\t\x12\x1f\n\x17request_written_unix_ns\x18\x14 \x01(\x03\x12\x1d\n\x15response_read_unix_ns\x18\x15 \x01(\x03\x12\x1a\n\x12link_config_sha256\x18\x16 \x01(\t\x1a\x33\n\x11NamedOutputsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x01:\x02\x38\x01*\xd4\x02\n\x0e\x42\x61tchRejection\x12\x1f\n\x1b\x42\x41TCH_REJECTION_UNSPECIFIED\x10\x00\x12\x1c\n\x18\x42\x41TCH_REJECTION_UNSIGNED\x10\x01\x12!\n\x1d\x42\x41TCH_REJECTION_BAD_SIGNATURE\x10\x02\x12\x1d\n\x19\x42\x41TCH_REJECTION_CHAIN_GAP\x10\x03\x12\x1f\n\x1b\x42\x41TCH_REJECTION_CHAIN_BREAK\x10\x04\x12\x1e\n\x1a\x42\x41TCH_REJECTION_MISLABELED\x10\x05\x12\"\n\x1e\x42\x41TCH_REJECTION_OVER_CLEARANCE\x10\x06\x12\x19\n\x15\x42\x41TCH_REJECTION_STALE\x10\x07\x12\x1d\n\x19\x42\x41TCH_REJECTION_DUPLICATE\x10\x08\x12\"\n\x1e\x42\x41TCH_REJECTION_SHARD_MISMATCH\x10\t*\xfe\x01\n\x0fManifestRefusal\x12 \n\x1cMANIFEST_REFUSAL_UNSPECIFIED\x10\x00\x12#\n\x1fMANIFEST_REFUSAL_UNKNOWN_PLUGIN\x10\x01\x12(\n$MANIFEST_REFUSAL_LABEL_NOT_PERMITTED\x10\x02\x12+\n\'MANIFEST_REFUSAL_CLEARANCE_ABOVE_LADDER\x10\x03\x12&\n\"MANIFEST_REFUSAL_MANIFEST_MISMATCH\x10\x04\x12%\n!MANIFEST_REFUSAL_IDENTITY_REFUSED\x10\x05*\xb0\x01\n\x0b\x42oardIoKind\x12\x1d\n\x19\x42OARD_IO_KIND_UNSPECIFIED\x10\x00\x12\x16\n\x12\x42OARD_IO_KIND_BIND\x10\x01\x12\x16\n\x12\x42OARD_IO_KIND_STEP\x10\x02\x12\x17\n\x13\x42OARD_IO_KIND_RESET\x10\x03\x12\x1a\n\x16\x42OARD_IO_KIND_SHUTDOWN\x10\x04\x12\x1d\n\x19\x42OARD_IO_KIND_POWER_CYCLE\x10\x05\x32\xb4\x02\n\nEdgeIngest\x12\x43\n\x08\x41nnounce\x12\x1c.altavista.v1.PluginManifest\x1a\x19.altavista.v1.ManifestAck\x12H\n\x06Submit\x12\x1e.altavista.v1.MeasurementBatch\x1a\x1a.altavista.v1.BatchVerdict(\x01\x30\x01\x12L\n\x0bGetEvidence\x12\x1d.altavista.v1.EvidenceRequest\x1a\x1e.altavista.v1.EvidenceResponse\x12I\n\x0cVerifyLedger\x12\x1b.altavista.v1.VerifyRequest\x1a\x1c.altavista.v1.VerifyResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -39,40 +40,48 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_EVIDENCERESPONSE_PARTITIONSENTRY']._serialized_options = b'8\001'
   _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._loaded_options = None
   _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._serialized_options = b'8\001'
-  _globals['_BATCHREJECTION']._serialized_start=2194
-  _globals['_BATCHREJECTION']._serialized_end=2534
-  _globals['_MANIFESTREFUSAL']._serialized_start=2537
-  _globals['_MANIFESTREFUSAL']._serialized_end=2791
-  _globals['_MEASUREMENTBATCH']._serialized_start=96
-  _globals['_MEASUREMENTBATCH']._serialized_end=411
-  _globals['_BATCHVERDICT']._serialized_start=414
-  _globals['_BATCHVERDICT']._serialized_end=570
-  _globals['_REJECTIONCOUNTERS']._serialized_start=573
-  _globals['_REJECTIONCOUNTERS']._serialized_end=888
-  _globals['_MEASUREMENTSCHEMA']._serialized_start=890
-  _globals['_MEASUREMENTSCHEMA']._serialized_end=967
-  _globals['_PLUGINMANIFEST']._serialized_start=970
-  _globals['_PLUGINMANIFEST']._serialized_end=1215
-  _globals['_MANIFESTACK']._serialized_start=1217
-  _globals['_MANIFESTACK']._serialized_end=1332
-  _globals['_IDENTITYCOUNTERS']._serialized_start=1335
-  _globals['_IDENTITYCOUNTERS']._serialized_end=1503
-  _globals['_PARTITIONEVIDENCE']._serialized_start=1505
-  _globals['_PARTITIONEVIDENCE']._serialized_end=1566
-  _globals['_EVIDENCEREQUEST']._serialized_start=1568
-  _globals['_EVIDENCEREQUEST']._serialized_end=1585
-  _globals['_EVIDENCERESPONSE']._serialized_start=1588
-  _globals['_EVIDENCERESPONSE']._serialized_end=2005
-  _globals['_EVIDENCERESPONSE_PRODUCERSENTRY']._serialized_start=1840
-  _globals['_EVIDENCERESPONSE_PRODUCERSENTRY']._serialized_end=1921
-  _globals['_EVIDENCERESPONSE_PARTITIONSENTRY']._serialized_start=1923
-  _globals['_EVIDENCERESPONSE_PARTITIONSENTRY']._serialized_end=2005
-  _globals['_VERIFYREQUEST']._serialized_start=2007
-  _globals['_VERIFYREQUEST']._serialized_end=2022
-  _globals['_VERIFYRESPONSE']._serialized_start=2025
-  _globals['_VERIFYRESPONSE']._serialized_end=2191
-  _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._serialized_start=2109
-  _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._serialized_end=2191
-  _globals['_EDGEINGEST']._serialized_start=2794
-  _globals['_EDGEINGEST']._serialized_end=3102
+  _globals['_BOARDIORECORD_NAMEDOUTPUTSENTRY']._loaded_options = None
+  _globals['_BOARDIORECORD_NAMEDOUTPUTSENTRY']._serialized_options = b'8\001'
+  _globals['_BATCHREJECTION']._serialized_start=2968
+  _globals['_BATCHREJECTION']._serialized_end=3308
+  _globals['_MANIFESTREFUSAL']._serialized_start=3311
+  _globals['_MANIFESTREFUSAL']._serialized_end=3565
+  _globals['_BOARDIOKIND']._serialized_start=3568
+  _globals['_BOARDIOKIND']._serialized_end=3744
+  _globals['_MEASUREMENTBATCH']._serialized_start=125
+  _globals['_MEASUREMENTBATCH']._serialized_end=440
+  _globals['_BATCHVERDICT']._serialized_start=443
+  _globals['_BATCHVERDICT']._serialized_end=599
+  _globals['_REJECTIONCOUNTERS']._serialized_start=602
+  _globals['_REJECTIONCOUNTERS']._serialized_end=917
+  _globals['_MEASUREMENTSCHEMA']._serialized_start=919
+  _globals['_MEASUREMENTSCHEMA']._serialized_end=996
+  _globals['_PLUGINMANIFEST']._serialized_start=999
+  _globals['_PLUGINMANIFEST']._serialized_end=1244
+  _globals['_MANIFESTACK']._serialized_start=1246
+  _globals['_MANIFESTACK']._serialized_end=1361
+  _globals['_IDENTITYCOUNTERS']._serialized_start=1364
+  _globals['_IDENTITYCOUNTERS']._serialized_end=1532
+  _globals['_PARTITIONEVIDENCE']._serialized_start=1534
+  _globals['_PARTITIONEVIDENCE']._serialized_end=1595
+  _globals['_EVIDENCEREQUEST']._serialized_start=1597
+  _globals['_EVIDENCEREQUEST']._serialized_end=1614
+  _globals['_EVIDENCERESPONSE']._serialized_start=1617
+  _globals['_EVIDENCERESPONSE']._serialized_end=2034
+  _globals['_EVIDENCERESPONSE_PRODUCERSENTRY']._serialized_start=1869
+  _globals['_EVIDENCERESPONSE_PRODUCERSENTRY']._serialized_end=1950
+  _globals['_EVIDENCERESPONSE_PARTITIONSENTRY']._serialized_start=1952
+  _globals['_EVIDENCERESPONSE_PARTITIONSENTRY']._serialized_end=2034
+  _globals['_VERIFYREQUEST']._serialized_start=2036
+  _globals['_VERIFYREQUEST']._serialized_end=2051
+  _globals['_VERIFYRESPONSE']._serialized_start=2054
+  _globals['_VERIFYRESPONSE']._serialized_end=2220
+  _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._serialized_start=2138
+  _globals['_VERIFYRESPONSE_PARTITIONSENTRY']._serialized_end=2220
+  _globals['_BOARDIORECORD']._serialized_start=2223
+  _globals['_BOARDIORECORD']._serialized_end=2965
+  _globals['_BOARDIORECORD_NAMEDOUTPUTSENTRY']._serialized_start=2914
+  _globals['_BOARDIORECORD_NAMEDOUTPUTSENTRY']._serialized_end=2965
+  _globals['_EDGEINGEST']._serialized_start=3747
+  _globals['_EDGEINGEST']._serialized_end=4055
 # @@protoc_insertion_point(module_scope)

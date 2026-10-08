@@ -103,8 +103,13 @@
 //!   `udp://host:port` endpoints) into typed devices with typed errors, enforces one link
 //!   per board instance, and gives the link a canonical form and a SHA-256 config hash.
 //!   Its I/O half is `crates/av-edge-board`.
+//! - [`board_log`] -- question 242 (a): the board's I/O log. [`board_log::BoardIoRecord`]s
+//!   (one per BIND/STEP/RESET/SHUTDOWN exchange, port payloads exactly as they crossed the
+//!   link) signed and hash-chained like measurement batches, an `fsync`ing append-only
+//!   writer, and a verifier that reports the first defect or a torn tail as a typed outcome.
 
 pub mod board;
+pub mod board_log;
 pub mod buffer;
 pub mod chain;
 pub mod hash;

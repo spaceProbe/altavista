@@ -25,14 +25,28 @@
 //! Step, Reset and Shutdown are forwarded as the shim does. A successful Shutdown also
 //! signals the process to exit (see [`BoardService::shutdown_signal`]): one link per
 //! process, and the guest has left its loop.
+//!
+//! # The board I/O log (question 242 (a))
+//!
+//! Every exchange that crosses the link (Bind as forwarded, Step, Reset, Shutdown) is
+//! recorded as a signed, hash-chained `BoardIoRecord` by [`crate::iolog::BoardIoLog`], and
+//! the record is on disk (written and `fsync`ed) **before the reply is returned to the
+//! kernel**: the service performs the exchange, appends, and only then returns the board's
+//! response (or the error status of a failed exchange, which is logged too, with its
+//! `error`). If the append fails the kernel gets `DATA_LOSS` instead of the response and
+//! the log is poisoned, so no later exchange reaches the board. A Bind refused by the
+//! board-parameter check never crosses the link and is not logged. The initial HELLO
+//! handshake is link setup, not part of a run, and is not logged.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use av_edge::board::{parse_port_device, PortDevice, BIND_PARAM_EDGE_NODE_ID, BIND_PARAM_PORT_DEVICE};
+use av_edge::board_log::{BoardIoKind, BoardIoRecord};
 use av_lockstep_shim::pb::lockstep_service_server::LockstepService;
 use av_lockstep_shim::pb::{LockstepBindRequest, LockstepBindResponse, LockstepResetRequest, LockstepResetResponse, LockstepShutdownRequest, LockstepShutdownResponse, LockstepStepRequest, LockstepStepResponse};
 use av_lockstep_shim::service::ShimService;
 use av_lockstep_shim::PeerLink;
+use crate::iolog::BoardIoLog;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
@@ -92,17 +106,24 @@ pub struct BoardService<S> {
     edge_node_id: String,
     device: PortDevice,
     shutdown: Arc<Notify>,
+    log: Arc<BoardIoLog>,
 }
 
 impl<S> BoardService<S> {
-    pub fn new(peer: Arc<PeerLink<S>>, edge_node_id: String, device: PortDevice) -> Self {
-        Self { inner: ShimService::new(peer), edge_node_id, device, shutdown: Arc::new(Notify::new()) }
+    /// `log` is the board I/O log every exchange is recorded in before its reply returns.
+    pub fn new(peer: Arc<PeerLink<S>>, edge_node_id: String, device: PortDevice, log: Arc<BoardIoLog>) -> Self {
+        Self { inner: ShimService::new(peer), edge_node_id, device, shutdown: Arc::new(Notify::new()), log }
     }
 
     /// Notified (once, with a stored permit) after a Shutdown RPC succeeded.
     pub fn shutdown_signal(&self) -> Arc<Notify> {
         Arc::clone(&self.shutdown)
     }
+}
+
+/// The error text a failed exchange is logged with.
+fn error_text(status: &Status) -> String {
+    format!("{:?}: {}", status.code(), status.message())
 }
 
 #[tonic::async_trait]
@@ -120,24 +141,65 @@ where
             BindCheck::Matched => eprintln!("av-edge-board: Bind board parameters match this link; stripped them and forwarding the BIND to the board"),
             BindCheck::Absent => eprintln!("av-edge-board: WARNING: Bind carries no {BIND_PARAM_EDGE_NODE_ID}/{BIND_PARAM_PORT_DEVICE}; forwarding unchecked"),
         }
-        self.inner.bind(Request::new(req)).await
+        let exchange = self.log.begin().await?;
+        self.log.set_run(&req.run_id, &req.instance);
+        let mut draft = BoardIoRecord { kind: BoardIoKind::Bind as i32, run_id: req.run_id.clone(), instance: req.instance.clone(), bind_request: Some(req.clone()), ..Default::default() };
+        let result = self.inner.bind(Request::new(req)).await;
+        match &result {
+            Ok(r) => draft.bind_response = Some(r.get_ref().clone()),
+            Err(status) => draft.error = error_text(status),
+        }
+        // The record is durable before the reply is returned.
+        self.log.record(&exchange, draft).await?;
+        result
     }
 
     async fn step(&self, request: Request<LockstepStepRequest>) -> Result<Response<LockstepStepResponse>, Status> {
-        self.inner.step(request).await
+        let exchange = self.log.begin().await?;
+        let req = request.into_inner();
+        let mut draft = BoardIoRecord { kind: BoardIoKind::Step as i32, lockstep_sequence: req.sequence, until_tai_ns: req.until_tai_ns, inputs: req.inputs.clone(), ..Default::default() };
+        let result = self.inner.step(Request::new(req)).await;
+        match &result {
+            Ok(r) => {
+                draft.outputs = r.get_ref().outputs.clone();
+                draft.named_outputs = r.get_ref().named_outputs.clone();
+            }
+            Err(status) => draft.error = error_text(status),
+        }
+        // The record is durable before the reply is returned.
+        self.log.record(&exchange, draft).await?;
+        result
     }
 
     async fn reset(&self, request: Request<LockstepResetRequest>) -> Result<Response<LockstepResetResponse>, Status> {
-        self.inner.reset(request).await
+        let exchange = self.log.begin().await?;
+        let req = request.into_inner();
+        let mut draft = BoardIoRecord { kind: BoardIoKind::Reset as i32, lockstep_sequence: req.sequence, reset_tai_ns: req.tai_ns, reset_reason: req.reason.clone(), ..Default::default() };
+        let result = self.inner.reset(Request::new(req)).await;
+        if let Err(status) = &result {
+            draft.error = error_text(status);
+        }
+        self.log.record(&exchange, draft).await?;
+        result
     }
 
     async fn shutdown(&self, request: Request<LockstepShutdownRequest>) -> Result<Response<LockstepShutdownResponse>, Status> {
-        let response = self.inner.shutdown(request).await;
-        if response.is_ok() {
+        let exchange = self.log.begin().await?;
+        let req = request.into_inner();
+        let mut draft = BoardIoRecord { kind: BoardIoKind::Shutdown as i32, run_id: req.run_id.clone(), ..Default::default() };
+        let result = self.inner.shutdown(Request::new(req)).await;
+        if let Err(status) = &result {
+            draft.error = error_text(status);
+        }
+        let logged = self.log.record(&exchange, draft).await;
+        if result.is_ok() {
+            // The guest has left its loop whether or not the record could be written; the
+            // process exits once the reply (or the log failure) has been sent.
             eprintln!("av-edge-board: Shutdown acknowledged by the board; exiting once the reply is sent");
             self.shutdown.notify_one();
         }
-        response
+        logged?;
+        result
     }
 }
 

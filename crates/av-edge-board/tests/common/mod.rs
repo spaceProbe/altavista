@@ -244,27 +244,87 @@ pub struct Service {
     pub child: Child,
     pub grpc_addr: String,
     stderr_path: PathBuf,
+    /// A per-service scratch directory: the throwaway identity, the I/O log.
+    pub dir: PathBuf,
+    pub identity: TestIdentity,
+    /// Where `spawn` told the service to create its I/O log.
+    pub io_log: PathBuf,
 }
 
 pub fn free_tcp_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
+/// A throwaway P-384 key and a self-signed certificate for it, written as PEM files.
+pub struct TestIdentity {
+    pub key_pem: PathBuf,
+    pub cert_pem: PathBuf,
+    /// The bare public key (`-----BEGIN PUBLIC KEY-----`).
+    pub pub_pem: PathBuf,
+}
+
+pub fn make_identity(dir: &std::path::Path, cn: &str) -> TestIdentity {
+    use openssl::asn1::Asn1Time;
+    use openssl::bn::BigNum;
+    use openssl::ec::{EcGroup, EcKey};
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::PKey;
+    use openssl::x509::{X509Builder, X509NameBuilder};
+    let key = EcKey::generate(&EcGroup::from_curve_name(Nid::SECP384R1).unwrap()).unwrap();
+    let pkey = PKey::from_ec_key(key.clone()).unwrap();
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, cn).unwrap();
+    let name = name.build();
+    let mut b = X509Builder::new().unwrap();
+    b.set_version(2).unwrap();
+    b.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap()).unwrap();
+    b.set_subject_name(&name).unwrap();
+    b.set_issuer_name(&name).unwrap();
+    b.set_pubkey(&pkey).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(30).unwrap()).unwrap();
+    b.sign(&pkey, MessageDigest::sha384()).unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    let id = TestIdentity { key_pem: dir.join(format!("{cn}.key.pem")), cert_pem: dir.join(format!("{cn}.cert.pem")), pub_pem: dir.join(format!("{cn}.pub.pem")) };
+    std::fs::write(&id.key_pem, key.private_key_to_pem().unwrap()).unwrap();
+    std::fs::write(&id.cert_pem, b.build().to_pem().unwrap()).unwrap();
+    std::fs::write(&id.pub_pem, pkey.public_key_to_pem().unwrap()).unwrap();
+    id
+}
+
 impl Service {
-    /// Start `av-edge-board` with `args` plus a fresh loopback `--grpc-addr`. Its stderr goes
-    /// to a file the test inspects.
+    /// Start `av-edge-board` with `args` plus a fresh loopback `--grpc-addr`, a throwaway
+    /// identity and a not-yet-existing I/O log (`self.io_log`). Its stderr goes to a file the
+    /// test inspects.
     pub fn spawn(tag: &str, args: &[&str]) -> Self {
+        Self::spawn_with(tag, args, true)
+    }
+
+    /// As `spawn`, but with the three I/O-log flags only if `with_log_args`.
+    pub fn spawn_with(tag: &str, args: &[&str], with_log_args: bool) -> Self {
         let grpc_addr = format!("127.0.0.1:{}", free_tcp_port());
-        let stderr_path = std::env::temp_dir().join(format!("av-edge-board-{tag}-{}.stderr", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("av-edge-board-{tag}-{}.d", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let identity = make_identity(&dir, "edge-test");
+        let io_log = dir.join("io.log");
+        let stderr_path = dir.join("service.stderr");
         let stderr = std::fs::File::create(&stderr_path).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_av-edge-board"))
-            .args(args)
-            .args(["--grpc-addr", &grpc_addr])
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .expect("spawn av-edge-board");
-        Self { child, grpc_addr, stderr_path }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_av-edge-board"));
+        cmd.args(args).args(["--grpc-addr", &grpc_addr]);
+        if with_log_args {
+            cmd.arg("--io-log").arg(&io_log).arg("--signing-key").arg(&identity.key_pem).arg("--signing-cert").arg(&identity.cert_pem);
+        }
+        let child = cmd.stdout(Stdio::null()).stderr(Stdio::from(stderr)).spawn().expect("spawn av-edge-board");
+        Self { child, grpc_addr, stderr_path, dir, identity, io_log }
+    }
+
+    /// Read and verify this service's I/O log right now against its certificate, as an
+    /// independent reader would (a fresh read of the file).
+    pub fn read_io_log(&self) -> av_edge::board_log::VerifiedLog {
+        let verifier = av_edge::board_log::LogVerifier::from_pem(&std::fs::read(&self.identity.cert_pem).unwrap()).unwrap();
+        av_edge::board_log::read_log(&self.io_log, &verifier).unwrap_or_else(|e| panic!("the I/O log must verify: {e}"))
     }
 
     pub fn wait_ready(&mut self, timeout: Duration) {
@@ -305,7 +365,11 @@ impl Service {
     pub fn save_evidence(&self, name: &str) {
         if let Ok(dir) = std::env::var("AV_EDGE_BOARD_EVIDENCE_DIR") {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::copy(&self.stderr_path, PathBuf::from(dir).join(name));
+            let _ = std::fs::copy(&self.stderr_path, PathBuf::from(&dir).join(name));
+            if self.io_log.exists() {
+                let _ = std::fs::copy(&self.io_log, PathBuf::from(&dir).join(format!("{name}.io.log")));
+                let _ = std::fs::copy(&self.identity.cert_pem, PathBuf::from(&dir).join(format!("{name}.cert.pem")));
+            }
         }
     }
 }
@@ -314,7 +378,7 @@ impl Drop for Service {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_file(&self.stderr_path);
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

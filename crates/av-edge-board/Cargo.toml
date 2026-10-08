@@ -29,8 +29,15 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 # test uses it.
 av-lockstep = { path = "../av-lockstep" }
 prost.workspace = true
+# Tests generate a throwaway P-384 key and self-signed certificate for the I/O log.
+openssl = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
 
 [[bin]]
 name = "av-edge-board"
 path = "src/bin/av-edge-board.rs"
+
+# The reader tool (question 242 (a)): verifies a board I/O log and prints a summary.
+[[bin]]
+name = "av-edge-board-log"
+path = "src/bin/av-edge-board-log.rs"

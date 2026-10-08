@@ -18,7 +18,14 @@ guests that speak the frame protocol. No board has been involved.
 ```text
 av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<port>]
               [--handshake-timeout-ms <n>] [--udp-local <addr:port>]
+              --io-log <path> --signing-key <pem> --signing-cert <pem>
 ```
+
+- `--io-log`, `--signing-key`, `--signing-cert`: **required** (usage error, status 2, naming the
+  missing flag): a board run without a durable, signed I/O log is refused. The key is the edge
+  node's EC P-384 private key, the certificate the one carrying its public key (a key on another
+  curve, or not matching the certificate, is refused with status 1 before any file is created).
+  The log must not exist (see "The board I/O log" below).
 
 - `--port-device`: `/dev/<name>@<baud>` (serial, framing fixed at 8N1, no flow control) or
   `udp://<host>:<port>` (IPv4, bracketed IPv6, or hostname). Anything else is a typed error that
@@ -108,6 +115,60 @@ its own configuration (the device in canonical form, so `udp://HOST:5000` equals
   kernel's container client already surfaces as a typed `ContainerRefused`.
 - **Both absent**: forwarded unchanged, with a `WARNING` line on stderr.
 
+## The board I/O log (question 242 (a))
+
+Every exchange that crosses the link is recorded on the edge side as a signed, hash-chained
+`altavista.v1.BoardIoRecord` (`proto/altavista/v1/edge.proto`; the writer, reader and verifier
+are `av_edge::board_log` in `crates/av-edge/src/board_log.rs`, whose module doc has the byte-exact
+format). ADR-005 section 4: the board's I/O is logged "as a signed batch (ADR-004) so the rest of
+the run replays".
+
+- **What is logged:** BIND (the request as forwarded, board parameters stripped, and the board's
+  response), each STEP (`lockstep_sequence`, `until_tai_ns`, the `inputs` sent and the `outputs` and
+  `named_outputs` returned, the bytes as they crossed the link), RESET, SHUTDOWN. A failed exchange
+  is logged too, with its `error` (inputs recorded, outputs empty). Not logged: a Bind refused by
+  the board-parameter check (it never reaches the board) and the HELLO handshake (link setup). Each
+  record carries the run and instance of the kernel's Bind, the signer's certificate fingerprint,
+  the link's config hash, and two wall-clock instants: when the last byte of the request had been
+  handed to the link and when the last byte of the response had been read from it
+  (`timed::TimedStream`; informational, signed, not used by a replay). `BOARD_IO_KIND_POWER_CYCLE`
+  is reserved for the later power-control task; nothing writes it.
+- **Chain and signature:** `record_hash = SHA-256(prev_hash || canonical body)`, the first
+  `prev_hash` the ASCII `GENESIS`, `signature` = ECDSA P-384 over `record_hash` (the
+  `MeasurementBatch` definition). File framing `[payload_len u32 LE][record_hash 32][payload]`, as
+  `av-ingest`'s partition log, but with one chain, the signed one (no second unsigned hash).
+- **Durability:** the record is written with one `write` and `fsync`ed (`File::sync_all`) **before
+  the reply is returned to the kernel** (`BoardIoLog::record` is awaited between the exchange and the
+  return). On macOS `sync_all` is `F_FULLFSYNC`, a few milliseconds per exchange on this host; the
+  kernel's per-step budget must include it. One exchange at a time; records are in exchange order.
+- **When the log cannot be written:** the kernel gets `DATA_LOSS` instead of the response, the log
+  is poisoned, and every later exchange is refused with `FAILED_PRECONDITION` before anything is
+  sent to the board. A run does not continue unlogged.
+- **One log per service run:** the file is created exclusively; an existing path is refused
+  (appending would splice a second run into the first run's chain and put a crashed run's torn
+  tail mid-file). The file's directory entry is `fsync`ed on creation. A startup that fails after
+  the log was created (a handshake timeout, say) removes the still-empty file, so the next start is
+  not refused; a log holding any record is never removed.
+- **What the chain cannot show:** records removed from the *end* of a log. Pin the chain head and
+  record count (printed at exit and by the tool) in the run's manifest.
+
+### Reading a log: `av-edge-board-log`
+
+```text
+av-edge-board-log <log> --cert <pem> [--records]
+```
+
+`--cert` is the signer's certificate (every record must name its fingerprint and verify against its
+key) or a bare P-384 public key PEM (signatures only). It prints `key: value` lines (`verification:
+OK | OK, TORN TAIL | FAILED: <typed error with the record index>`, `records`, `binds`, `steps`,
+`resets`, `shutdowns`, `failed_exchanges`, `first_epoch_tai_ns` / `last_epoch_tai_ns` (STEP
+`until_tai_ns`), the wall-clock bounds, `producer`, `signer_cert_sha256`, `link_config_sha256`,
+`run_ids`, `chain_head`, `bytes_verified`, and `torn_tail:` if the last frame is physically
+incomplete); `--records` adds a line per record. Exit status 0 verified, 3 verified with a torn tail
+(the records before it are intact), 1 verification failed, 2 usage. The file is never modified. The
+library entry points a replay uses are `av_edge::board_log::{LogVerifier::from_pem, read_log,
+verify_bytes}`; a torn tail is `VerifiedLog::recovery`, a typed outcome, never an error.
+
 ## Tests
 
 ```text
@@ -115,6 +176,18 @@ scripts/dev/cargo-slot test -p av-edge --lib board
 scripts/dev/cargo-slot test -p av-edge-board
 ```
 
+- `tests/io_log.rs`: the I/O log through the real binary, the pty and UDP fake guests and the
+  kernel's gRPC client. Every exchange of a session is a record; the log verifies; STEP outputs equal
+  what the client received; the BIND record equals the BIND bytes the guest received; **immediately
+  after each Step returns, a fresh independent read of the file already holds that step's record**;
+  the startup refusals; a failed exchange; the tool's exit codes for tampering, a wrong certificate
+  and a torn tail.
+- `tests/io_log_inprocess.rs`: `BoardService` over an in-memory stream with a sink recording write
+  and sync events: the order guest-reply, write, sync-start, sync-end, response-returned with an
+  80 ms sync; and `DATA_LOSS` / `FAILED_PRECONDITION` after an injected sync failure with the
+  guest's STEP count unmoved. (The real binary's `fsync` syscall itself was not traced; the ordering
+  of write and sync before the reply is established here, in the sink, and in
+  `av_edge::board_log`'s unit tests.)
 - `tests/serial_pty.rs`: the real binary on the slave side of a pty, a fake guest on the master side,
   the kernel's `BlockingLockstepClient` driving Bind, STEPs with 300 to 1000 input bytes, Reset,
   Shutdown; measures at the master that no read exceeds 64 bytes and that each burst is followed no
@@ -125,14 +198,14 @@ scripts/dev/cargo-slot test -p av-edge-board
 - `tests/bind_check.rs`: matching parameters forwarded stripped (the guest's BIND bytes equal the
   container path's), mismatches refused with nothing forwarded.
 
-The Linux build is checked (not built by the host's cargo) in the digest-pinned Rust builder image
-`services/cfs/build-shim.sh` uses.
+The Linux build of hilprep-3b was checked (not built by the host's cargo) in the digest-pinned Rust
+builder image `services/cfs/build-shim.sh` uses; the I/O log additions have not been built on Linux.
 
 ## Not done
 
 - No board has been involved; no real UART, USB-UART bridge or Ethernet MAC.
 - No TLS: the kernel-facing gRPC link is plaintext on loopback, as the shim's (question 155).
-- No log of the board's I/O (the next tasks), no `power_control` (`BoardBinding.power_control` is
+- No `power_control` (`BoardBinding.power_control` is
   not read), no reconnect: one link per process, HELLO once.
 - Only one link kind per board instance; a mixed `port_devices` map is refused by
   `av_edge::board::BoardLink` and this service takes a single device.

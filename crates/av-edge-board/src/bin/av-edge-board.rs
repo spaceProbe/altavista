@@ -5,15 +5,20 @@
 //! ```text
 //! av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<port>]
 //!               [--handshake-timeout-ms <n>] [--udp-local <addr:port>]
+//!               --io-log <path> --signing-key <pem> --signing-cert <pem>
 //! ```
 //!
 //! Every stage is logged on stderr. One link per process; the process exits after a
 //! successful Shutdown RPC, or on SIGINT/SIGTERM.
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use av_edge::board::{parse_port_device, BoardLink, BoardLinkError, PortDeviceSpecError};
+use av_edge::board_log::{BoardIoLogWriter, BoardLogError, LogSigner};
+use av_edge_board::iolog::BoardIoLog;
+use av_edge_board::timed::{LinkTimes, TimedStream};
 use av_edge_board::link::{open_link, LinkError, LinkOptions};
 use av_edge_board::service::BoardService;
 use av_lockstep_shim::pb::lockstep_service_server::LockstepServiceServer;
@@ -48,6 +53,24 @@ enum StartupError {
     Handshake(#[from] ProtocolError),
     #[error("serving LockstepService: {0}")]
     Serve(String),
+    #[error("{flag} {path}: {source}")]
+    ReadIdentity { flag: &'static str, path: String, source: std::io::Error },
+    #[error("the board I/O log: {0}")]
+    IoLog(#[from] BoardLogError),
+}
+
+/// Removes the I/O log at drop if nothing was ever written to it, so a startup that fails
+/// after the file was created (a handshake timeout while the board is being brought up, say)
+/// does not leave an empty file that would make the next start refuse "log already exists".
+/// A log with any record in it is never touched.
+struct EmptyLogCleanup(PathBuf);
+
+impl Drop for EmptyLogCleanup {
+    fn drop(&mut self) {
+        if std::fs::metadata(&self.0).map(|m| m.len() == 0).unwrap_or(false) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 }
 
 struct Args {
@@ -56,9 +79,12 @@ struct Args {
     grpc_addr: String,
     handshake_timeout_ms: u64,
     udp_local: Option<SocketAddr>,
+    io_log: PathBuf,
+    signing_key: PathBuf,
+    signing_cert: PathBuf,
 }
 
-const USAGE: &str = "usage: av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:PORT] [--handshake-timeout-ms N] [--udp-local ADDR:PORT]\n  <spec> is /dev/<name>@<baud> (serial, 8N1) or udp://<host>:<port>";
+const USAGE: &str = "usage: av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:PORT] [--handshake-timeout-ms N] [--udp-local ADDR:PORT] --io-log PATH --signing-key PEM --signing-cert PEM\n  <spec> is /dev/<name>@<baud> (serial, 8N1) or udp://<host>:<port>\n  --io-log/--signing-key/--signing-cert are required: the board's I/O is logged durably as signed, hash-chained records, and a run without that log is refused (the log must not exist yet; the key and certificate are the edge node's P-384 identity)";
 
 fn parse_args() -> Result<Args, StartupError> {
     let mut port_device = None;
@@ -66,6 +92,9 @@ fn parse_args() -> Result<Args, StartupError> {
     let mut grpc_addr = DEFAULT_GRPC_ADDR.to_string();
     let mut handshake_timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS;
     let mut udp_local = None;
+    let mut io_log = None;
+    let mut signing_key = None;
+    let mut signing_cert = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or_else(|| StartupError::Usage(format!("{flag} needs a value\n{USAGE}")));
@@ -81,6 +110,9 @@ fn parse_args() -> Result<Args, StartupError> {
                 let v = val()?;
                 udp_local = Some(v.parse().map_err(|e| StartupError::Usage(format!("--udp-local {v:?} is not a valid ADDR:PORT: {e}")))?);
             }
+            "--io-log" => io_log = Some(PathBuf::from(val()?)),
+            "--signing-key" => signing_key = Some(PathBuf::from(val()?)),
+            "--signing-cert" => signing_cert = Some(PathBuf::from(val()?)),
             "--help" | "-h" => return Err(StartupError::Usage(USAGE.to_string())),
             other => return Err(StartupError::Usage(format!("unrecognized argument: {other}\n{USAGE}"))),
         }
@@ -91,6 +123,9 @@ fn parse_args() -> Result<Args, StartupError> {
         grpc_addr,
         handshake_timeout_ms,
         udp_local,
+        io_log: io_log.ok_or_else(|| StartupError::Usage(format!("--io-log is required: a board run without a durable, signed I/O log is refused\n{USAGE}")))?,
+        signing_key: signing_key.ok_or_else(|| StartupError::Usage(format!("--signing-key is required: the board's I/O log is signed\n{USAGE}")))?,
+        signing_cert: signing_cert.ok_or_else(|| StartupError::Usage(format!("--signing-cert is required: the board's I/O log names its signer by certificate\n{USAGE}")))?,
     })
 }
 
@@ -104,15 +139,27 @@ async fn run() -> Result<(), StartupError> {
     }
     eprintln!("av-edge-board: edge node {:?}, port device {} (link config hash {})", link.edge_node_id(), device, link.config_hash_hex());
 
+    // The board's I/O log (question 242 (a)): signer first, then the log file, both before the
+    // board is touched, so a missing key or an existing log refuses the run up front.
+    let read = |flag: &'static str, path: &PathBuf| std::fs::read(path).map_err(|source| StartupError::ReadIdentity { flag, path: path.display().to_string(), source });
+    let signer = LogSigner::from_pem(&read("--signing-key", &args.signing_key)?, &read("--signing-cert", &args.signing_cert)?)?;
+    eprintln!("av-edge-board: signing the I/O log as certificate {}", signer.cert_sha256());
+    let writer = BoardIoLogWriter::create(&args.io_log, link.edge_node_id(), &link.config_hash_hex(), signer)?;
+    let _empty_log_cleanup = EmptyLogCleanup(args.io_log.clone());
+    eprintln!("av-edge-board: board I/O log created at {}", args.io_log.display());
+    let times = Arc::new(LinkTimes::default());
+    let log = Arc::new(BoardIoLog::new(writer, Arc::clone(&times)));
+
     let stream = open_link(&device, &LinkOptions { udp_local: args.udp_local }).await?;
     let udp_stats = stream.udp_stats();
+    let stream = TimedStream::new(stream, times);
     eprintln!("av-edge-board: link open, performing the lockstep-local v1 handshake (timeout {} ms)", args.handshake_timeout_ms);
     let peer = tokio::time::timeout(Duration::from_millis(args.handshake_timeout_ms), PeerLink::handshake(stream))
         .await
         .map_err(|_| StartupError::HandshakeTimeout { after_ms: args.handshake_timeout_ms })??;
     eprintln!("av-edge-board: handshake complete");
 
-    let service = BoardService::new(Arc::new(peer), link.edge_node_id().to_string(), device);
+    let service = BoardService::new(Arc::new(peer), link.edge_node_id().to_string(), device, Arc::clone(&log));
     let shutdown_after_rpc = service.shutdown_signal();
     eprintln!("av-edge-board: LockstepService listening on {addr}");
 
@@ -141,6 +188,7 @@ async fn run() -> Result<(), StartupError> {
         let (accepted, foreign, malformed, sent) = stats.snapshot();
         eprintln!("av-edge-board: UDP datagrams: {accepted} accepted, {sent} sent, {foreign} dropped from foreign addresses, {malformed} malformed");
     }
+    eprintln!("av-edge-board: board I/O log {}: {} records, chain head {}", args.io_log.display(), log.records_written(), log.chain_head_hex());
     eprintln!("av-edge-board: stopped");
     Ok(())
 }
