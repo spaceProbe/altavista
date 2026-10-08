@@ -155,9 +155,10 @@ pub enum DrmError {
     /// Questions 82/83: a covariance request against a declared `RelativisticCorrection`
     /// force model was not accompanied by `DrmOptions.accept_missing_stm_terms`.
     MissingStmTermsNotAccepted { instance: String },
-    /// `DrmOptions.real_time` was `true`. ADR-005's real-time runtime is still Planned; this
-    /// crate only ever runs lockstep, so honouring the request would mean silently running
-    /// lockstep while claiming real-time was used -- refused instead.
+    /// `DrmOptions.real_time` was `true` but no instance is bound to a board. ADR-005 section 2
+    /// enters real-time pacing only when the configuration binds a board (then it is forced,
+    /// whatever the flag says); the flag alone would mean silently running lockstep while
+    /// claiming real-time was used -- refused instead.
     RealTimeNotSupported,
     /// `crate::registry::ModelRegistry::construct_gmat`/`construct_native` failed --
     /// `av_dynamics::ModelError`, the one error type every registry constructor and every
@@ -663,7 +664,7 @@ impl std::fmt::Display for DrmError {
             DrmError::MissingParameter { context, name } => write!(f, "{context}: missing required parameter {name:?}"),
             DrmError::UnknownParameter { context, name } => write!(f, "{context}: parameter {name:?} is not a recognized name for this binding kind"),
             DrmError::MissingStmTermsNotAccepted { instance } => write!(f, "instance {instance:?}: covariance requested against a force model declaring RelativisticCorrection, without DrmOptions.accept_missing_stm_terms"),
-            DrmError::RealTimeNotSupported => write!(f, "DrmOptions.real_time is true; this executor only ever runs lockstep (ADR-005's real-time runtime is still Planned)"),
+            DrmError::RealTimeNotSupported => write!(f, "DrmOptions.real_time is true but no instance is bound to a board; real-time pacing is entered only when the configuration binds a board (ADR-005 section 2)"),
             DrmError::Model(e) => write!(f, "{e}"),
             DrmError::InvalidDrmOptions { reason } => write!(f, "invalid DrmOptions/Scenario: {reason}"),
             DrmError::UnknownFaultInstance { fault_id, instance } => write!(f, "fault {fault_id:?} names instance {instance:?}, which is not in this SosConfiguration"),

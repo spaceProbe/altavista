@@ -550,11 +550,32 @@ impl HeteroScheduler {
     /// for a new one in the one place that never had it. So [`Self::catch_up_eligible`] branches
     /// on `state_dim()`, and only a genuinely physical system gets the new, broader test.
     pub fn advance_to_with_ports(&mut self, target_tai_ns: i64, router: &mut crate::router::Router) -> Result<(), HeteroScheduleError> {
+        self.advance_to_with_ports_paced(target_tai_ns, router, None)
+    }
+
+    /// [`HeteroScheduler::advance_to_with_ports`] with the kernel clock optionally slaved to wall
+    /// time (ADR-005 sec 2, `docs/open-questions.md` question 242; the schedule is documented in
+    /// [`crate::pacing`]). With `pacer == None` this **is** `advance_to_with_ports`: one
+    /// `Option` test per iteration, no clock read, no allocation.
+    ///
+    /// With a pacer, each iteration of the loop below -- one distinct step-end epoch `t`, every
+    /// system due at `t` stepped together -- is one pacing tick, released no earlier than
+    /// `wall(t - base_period)` and due at `wall(t)`. The tick's epoch is `min(t, target_tai_ns)`:
+    /// only a *physical* system can step to an epoch past the target (the M16.1 catch-up above;
+    /// a zero-dimensional system is eligible only while `next_due_ns <= target_tai_ns`), and that
+    /// step is work the output tick needs now, so it belongs to the tick at the target rather
+    /// than waiting for its own end epoch. Iterations clamped to the same epoch merge into one
+    /// tick ([`crate::pacing::Pacer::begin_tick`]). The pacer's clock never influences what is
+    /// stepped or in which order.
+    pub fn advance_to_with_ports_paced(&mut self, target_tai_ns: i64, router: &mut crate::router::Router, mut pacer: Option<&mut crate::pacing::Pacer>) -> Result<(), HeteroScheduleError> {
         loop {
             let next_time = self.systems.values().filter(|s| Self::catch_up_eligible(s, target_tai_ns)).map(|s| s.next_due_ns).min();
             let Some(t) = next_time else {
                 break;
             };
+            if let Some(p) = pacer.as_deref_mut() {
+                p.begin_tick(t.min(target_tai_ns));
+            }
             for (id, sys) in self.systems.iter_mut() {
                 if sys.next_due_ns != t || !Self::catch_up_eligible(sys, target_tai_ns) {
                     continue;
@@ -654,6 +675,9 @@ impl HeteroScheduler {
                 sys.history.curr = (result.t_tai_ns, result.state);
                 router.deliver(id, result.t_tai_ns, outbox);
                 sys.next_due_ns += sys.period_ns;
+            }
+            if let Some(p) = pacer.as_deref_mut() {
+                p.end_tick();
             }
         }
         Ok(())

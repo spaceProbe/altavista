@@ -39,6 +39,10 @@ binding"](#container-lockstep-binding-m132-question-107) below), honour `DrmOpti
   third-party parser crate), unit-checked before evaluation, evaluated against
   `ExprRunProducts` (trajectories, events, outputs). See ["Scoring"](#scoring-the-expression-
   language-and-runproducts-expr-adr-005-sec-6-m91) below.
+- **`pacing`** (question 242) -- `Pacer`: the kernel clock slaved to wall time at 1:1 when,
+  and only when, some instance is bound to a board, with every overrun measured, counted and
+  recorded. See ["Real-time pacing"](#real-time-pacing-pacing-adr-005-sec-2-question-242)
+  below.
 - **`drm`** (M6.1, driven by `HeteroKernel` as of M9.1) -- the DRM executor: `schema` (YAML
   authoring format), `hash` (canonical SHA-256), `binding` (bind a `SystemInstance` to a real
   `DynamicsModel`), `fault` (DYNAMICS fault injection), `maneuver` (M10.1, question 97 --
@@ -1435,7 +1439,7 @@ and throwaway registry they start (`Drop` guards around every `docker` resource,
 | `covariance` | Selects `HeteroKernel::run_with_covariance` instead of plain `HeteroKernel::run` (M9.1 -- see "`HeteroKernel` is the only kernel" below; before M9.1 this selected `Kernel<StmAugmented<AnyModel>>::run_with_covariance`/`Kernel<AnyModel>::run`). |
 | `nearest_spd_projection` | Passed straight through to `run_with_covariance`'s parameter of the same name (question 83, `crate::kernel`'s existing mechanism -- unchanged by this task). |
 | `accept_missing_stm_terms` | Passed to `GmatModel::new` (question 82) **and** checked a second time by `classify_binding`, before any GMAT call, so a covariance request against a declared `RelativisticCorrection` force model is refused early. |
-| `real_time` | `true` -> `DrmError::RealTimeNotSupported`. ADR-005's real-time runtime is still Planned and this crate only ever runs lockstep -- refused rather than silently honoured as lockstep anyway. |
+| `real_time` | `true` with no board-bound instance -> `DrmError::RealTimeNotSupported` (ADR-005 sec 2 enters real-time pacing only when the configuration binds a board; the flag alone is refused, never honoured as lockstep). With a `BINDING_KIND_BOARD` instance pacing is **forced** whatever the flag says -- see ["Real-time pacing"](#real-time-pacing-pacing-adr-005-sec-2-question-242). |
 
 Every one of these six fields is read and actually changes behaviour; none is parsed and
 dropped.
@@ -2102,6 +2106,42 @@ anything from it -- threading it into the viewer's own scene through
 a separate, later task. Nothing here silently drops the field; it simply is not this task's job
 to surface in the viewer yet.
 
+## Real-time pacing (`pacing`, ADR-005 sec 2, question 242)
+
+Lockstep is the default. When some instance is `BINDING_KIND_BOARD`
+(`drm::executor::run_requires_real_time`; `DrmOptions.real_time` does not enter it) the kernel
+clock is slaved to wall time at 1:1 and every deviation is counted. It is a mode of the same
+kernel: `HeteroKernel::run_with_ports_paced` and `HeteroScheduler::advance_to_with_ports_paced`
+take an `Option<&mut Pacer>`, and `None` is the lockstep path (one `Option` test per
+iteration, no clock read, no allocation).
+
+- **Anchor.** Once per run: wall `W0` = the instant the first tick is released, mapped to
+  sim `T0` = the scenario start; sim `t` is due at `W0 + (t - T0)`. The executor's
+  boundary-bounded spans share one `Pacer`, so later spans continue the schedule, and the time
+  spent re-binding models at a boundary shows up as lateness, not as a new anchor.
+- **Granularity.** One tick per iteration of `advance_to_with_ports` (one distinct step-end
+  epoch `t`; `next_due_ns` is a step's end). The work is released no earlier than
+  `wall(t - base_period)` and is due at `wall(t)`, so an output period coarser than a board's
+  step period still releases the board's steps one period apart. A physical system's catch-up
+  step past the output target is paced at `min(t, target)` (it belongs to the tick that needs
+  it); ticks are keyed by sim epoch, so a repeated epoch (a span boundary) is paced once.
+- **Overrun.** A tick finishing after its deadline is an overrun, `finish - deadline`. The next
+  tick is released at its own time or at once if that has passed: catch-up, no skipped step, no
+  re-anchor. `finish_run` records the run's final lateness and then holds to `wall(T_end)`.
+- **Products.** `RunProducts.pacing` (`PacingReport`: mode, base period, forcing instances,
+  ticks, overrun count / worst / total, a fixed-edge histogram, worst and mean work, final
+  lateness, wall-clock start in UNIX ns) is set only for a paced run; a lockstep run's encoding
+  has no such field. One `EVENT_KIND_MARKER` event per overrun (`name = "pacing_overrun"`,
+  `tai_ns` = the tick's epoch, `values = {overrun_ns, work_ns}`, no entity). Scores are
+  evaluated before the overrun events are added, so no score depends on the wall clock.
+  `pacing::WALL_CLOCK_DEPENDENT` names exactly these two products for a replay to exclude.
+- **Refusals.** `real_time = true` without a board stays `RealTimeNotSupported`; a board with
+  `covariance` is `InvalidDrmOptions`. Until the board binding is classified (hilprep-3a),
+  `classify_binding` still refuses `BINDING_KIND_BOARD`, so the executor path is exercised
+  below `execute` only (`tests/pacing_kernel.rs` with the real clock, the unit tests with a
+  fake one, `drm::executor::pacing_plumbing_tests` for `run_one_span`).
+- **No board result is claimed.** Nothing here has run against a ZCU104.
+
 ## Determinism (ADR-002 / ADR-004)
 
 - Simulated time is TAI nanoseconds, `i64` (`clock::Clock`) -- never a float.
@@ -2109,6 +2149,9 @@ to surface in the viewer yet.
   `kernel::Kernel`) -- never `HashMap`.
 - No RNG anywhere in this crate.
 - No wall-clock read that affects a result: the clock only advances by an explicit `tick()`.
+  The one exception is real-time pacing (a board-bound run): only `RunProducts.pacing` and the
+  `pacing_overrun` events depend on the wall clock (`pacing::WALL_CLOCK_DEPENDENT`); a lockstep
+  run reads no clock and its products are byte-for-byte unchanged by the pacing code.
 
 ## Known limitations / approximations, stated plainly
 

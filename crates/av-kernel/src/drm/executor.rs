@@ -133,10 +133,14 @@
 //!   instance (question 82), *and* checked a second time, before any GMAT call, by
 //!   `binding::classify_binding` (refuses a covariance request against a declared
 //!   `RelativisticCorrection` force model that has not accepted it).
-//! - **`real_time`** -> [`super::DrmError::RealTimeNotSupported`] when `true`: ADR-005's
-//!   real-time runtime is still Planned and this crate only ever runs lockstep, so this
-//!   option is refused rather than silently honoured as lockstep anyway (question 87's rule:
-//!   say so, never drop it quietly).
+//! - **`real_time`** -> [`super::DrmError::RealTimeNotSupported`] when `true` and no instance
+//!   is bound to a board: ADR-005 enters real-time pacing only when the configuration binds a
+//!   board, so the flag alone is refused rather than silently honoured as lockstep (question
+//!   87's rule: say so, never drop it quietly). With a board bound ([`run_requires_real_time`])
+//!   pacing is forced whatever the flag says: one [`crate::pacing::Pacer`] lives for the whole
+//!   run, is threaded through every span's `HeteroKernel::run_with_ports_paced`, and its report
+//!   and per-overrun events reach `RunProducts` (question 242; [`crate::pacing`]). A run without
+//!   a board takes none of these paths: no clock is read.
 //!
 //! ## Covariance
 //!
@@ -353,6 +357,7 @@ use super::maneuver::{self, ExecutionErrorMode, ParsedManeuver};
 use super::replay;
 use super::DrmError;
 use crate::kernel::{HeteroKernel, HeteroKernelError};
+use crate::pacing::Pacer;
 
 /// `docs/open-questions.md` question 230, N6 (this task): the handful of functions below that
 /// used to take a live `gmat: &Gmat` (`materialize_plan`, `materialize_plan_at_boundary`,
@@ -525,6 +530,24 @@ pub struct RunProducts {
     /// field doc comment). See this module's own "Port traffic sidecar" doc section for exactly
     /// how this is computed and written.
     pub port_traffic_hash: String,
+    /// The real-time pacing report (question 242): `Some` only when the run was paced against
+    /// wall time ([`run_requires_real_time`]), `None` for a lockstep run -- whose encoded
+    /// `RunProducts` therefore has no `pacing` field and is byte-for-byte what it was before
+    /// this field existed. Wall-clock dependent, together with the `pacing_overrun` events in
+    /// `events`: [`crate::pacing::WALL_CLOCK_DEPENDENT`] names exactly these two.
+    pub pacing: Option<pb::PacingReport>,
+}
+
+/// The names of the instances bound to a board (`BINDING_KIND_BOARD`), in `sos` order.
+pub fn board_instance_names(sos: &SosConfiguration) -> Vec<String> {
+    sos.instances.iter().filter(|i| i.binding.as_ref().is_some_and(|b| b.kind == pb::BindingKind::Board as i32)).map(|i| i.name.clone()).collect()
+}
+
+/// Whether the run must be paced against wall time: some instance is bound to a board (ADR-005
+/// section 2, "only when the configuration binds a board"). The one predicate the executor asks;
+/// `DrmOptions.real_time` does not enter it.
+pub fn run_requires_real_time(sos: &SosConfiguration) -> bool {
+    sos.instances.iter().any(|i| i.binding.as_ref().is_some_and(|b| b.kind == pb::BindingKind::Board as i32))
 }
 
 /// [`RunProducts::measurements`]'s own required order (question 173): `(epoch_ns,
@@ -579,6 +602,8 @@ impl RunProducts {
             // wrote (empty when RunConfig::products_dir was None) -- computed once, by
             // execute(), and carried on this struct rather than recomputed here.
             port_traffic_hash: self.port_traffic_hash.clone(),
+            // Question 242: unset (no bytes on the wire) for a lockstep run.
+            pacing: self.pacing.clone(),
         }
     }
 }
@@ -1244,6 +1269,7 @@ fn hetero_err_to_drm(e: HeteroKernelError) -> DrmError {
         HeteroKernelError::BasePeriod(be) => DrmError::Schedule(be.to_string()),
         HeteroKernelError::Schedule(se) => DrmError::Schedule(se.to_string()),
         HeteroKernelError::CovarianceHygiene(ce) => DrmError::CovarianceHygiene(ce.to_string()),
+        HeteroKernelError::Pacing(pe) => DrmError::Schedule(pe.to_string()),
     }
 }
 
@@ -1556,6 +1582,7 @@ fn run_one_span(
     router: &mut crate::router::Router,
     output_period_ns: i64,
     sensor_fault_drains: &mut BTreeMap<String, av_dynamics::SensorFaultEffectDrain>,
+    pacer: Option<&mut Pacer>,
 ) -> Result<(), DrmError> {
     sensor_fault_drains.clear();
     let mut kernel = HeteroKernel::new(output_period_ns);
@@ -1569,7 +1596,13 @@ fn run_one_span(
         kernel.register_system(name.clone(), span.period_ns, erase_container(name, span.model.clone(), span.error_slot.clone()), seg_start, vec![]);
     }
 
-    let mut result = kernel.run_with_ports(seg_start, seg_end, router).map_err(|e| hetero_err_to_drm_shared(e, &error_slots))?;
+    // Question 242: a paced run drives every span through the same pacer (one anchor for the
+    // whole run); an unpaced one takes the unchanged lockstep call.
+    let mut result = match pacer {
+        Some(p) => kernel.run_with_ports_paced(seg_start, seg_end, router, p),
+        None => kernel.run_with_ports(seg_start, seg_end, router),
+    }
+    .map_err(|e| hetero_err_to_drm_shared(e, &error_slots))?;
 
     for (name, span) in model_spans.iter_mut() {
         let sub = result.remove(name).expect("registered above");
@@ -1922,6 +1955,7 @@ fn run_shared_group(
     replay_targets: &std::collections::BTreeSet<String>,
     replay_log: Option<&pb::PortTrafficLog>,
     command_source: Option<&dyn super::command_source::ExternalCommandSource>,
+    mut pacer: Option<&mut Pacer>,
 ) -> Result<SharedGroupResult, DrmError> {
     // M25.4b: `replay_targets` non-empty implies `replay_log` is `Some` -- `execute()`'s own
     // resolution of `replay_targets` (Pass 1's own tail) only ever produces a non-empty set when
@@ -2319,7 +2353,7 @@ fn run_shared_group(
             // pre-M14.1 per-instance loop already applied.
             continue;
         }
-        run_one_span(seg_start, boundary, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains)?;
+        run_one_span(seg_start, boundary, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains, pacer.as_deref_mut())?;
         // Question 178 (R5.1a): fold whatever this just-finished span contributed, attributed
         // by `active_sensor_fault` as it stood BEFORE this boundary's own updates below (i.e.
         // "who was under fault during [seg_start, boundary)", the span that just ran).
@@ -2478,7 +2512,7 @@ fn run_shared_group(
         }
         seg_start = boundary;
     }
-    run_one_span(seg_start, run_end_tai_ns, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains)?;
+    run_one_span(seg_start, run_end_tai_ns, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains, pacer)?;
     for (name, drain) in std::mem::take(&mut sensor_fault_span_drains) {
         fold_sensor_fault_span_drain(&name, Some(drain), &active_sensor_fault, &mut sensor_fault_totals);
     }
@@ -3504,9 +3538,17 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     let mut router = crate::router::Router::build(cfg.sos, cfg.systems).map_err(DrmError::Router)?;
 
     let options = cfg.drm.options.ok_or_else(|| DrmError::InvalidDrmOptions { reason: "DesignReferenceMission.options is unset".to_string() })?;
-    if options.real_time {
+    // Question 242 (ADR-005 sec 2): real-time pacing is entered when, and only when, some
+    // instance is bound to a board. The flag alone keeps its typed refusal.
+    let board_instances = board_instance_names(cfg.sos);
+    if options.real_time && board_instances.is_empty() {
         return Err(DrmError::RealTimeNotSupported);
     }
+    if !board_instances.is_empty() && options.covariance {
+        return Err(DrmError::InvalidDrmOptions { reason: "real-time pacing (an instance bound to a board) and DrmOptions.covariance are not supported together".to_string() });
+    }
+    let mut pacer: Option<Pacer> = if board_instances.is_empty() { None } else { Some(Pacer::real_time(board_instances)) };
+    let mut pacing_stats: Option<crate::pacing::PacingStats> = None;
     if options.sample_interval_s <= 0.0 {
         return Err(DrmError::InvalidDrmOptions { reason: format!("sample_interval_s must be positive, got {}", options.sample_interval_s) });
     }
@@ -3973,7 +4015,13 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             &replay_targets,
             replay_log.as_ref(),
             cfg.command_source,
+            pacer.as_mut(),
         )?;
+        // Question 242: the run is over; commit the last tick, record the final lateness and hold
+        // to wall(T_end) so a paced run occupies its simulated duration.
+        if let Some(p) = pacer.as_mut() {
+            pacing_stats = Some(p.finish_run(scenario.end_tai_ns));
+        }
         all_events.extend(shared_events);
         all_measurements.extend(shared_measurements);
         shared_port_traffic = Some(shared_group_port_traffic);
@@ -4192,7 +4240,19 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         frames
     };
     sort_measurements(&mut all_measurements);
-    Ok(RunProducts { trajectories, events: all_events, scores, provenance, dropped_in_flight_messages: dropped_in_flight_messages as u64, frames, measurements: all_measurements, port_traffic_hash })
+    // Question 242: the pacing report and the per-overrun events are added only now, after the
+    // scores were evaluated, so no score can depend on the wall clock; the events join the
+    // others in the one `(epoch, id)` order (a stable re-sort of an already sorted list plus
+    // uniquely identified new events is the order a single sort would give).
+    let pacing = match (&pacer, &pacing_stats) {
+        (Some(p), Some(stats)) => {
+            all_events.extend(crate::pacing::overrun_events(p.overruns(), &computed_sos_hash, &scenario.data_pack_hash, &cfg.run_id));
+            all_events.sort_by_key(events::epoch_id_order);
+            Some(stats.to_proto())
+        }
+        _ => None,
+    };
+    Ok(RunProducts { trajectories, events: all_events, scores, provenance, dropped_in_flight_messages: dropped_in_flight_messages as u64, frames, measurements: all_measurements, port_traffic_hash, pacing })
 }
 
 /// M15.1 (`docs/open-questions.md` question 115): unit tests for [`merge_adjacent_segments`]
@@ -4492,6 +4552,7 @@ mod to_proto_tests {
                 pb::Measurement { measurement_id: "m2".to_string(), z: vec![3.0], epoch_ns: 200, sensor_id: "veh".to_string(), ..Default::default() },
             ],
             port_traffic_hash: "sample-port-traffic-hash".to_string(),
+            pacing: None,
         }
     }
 
@@ -4788,5 +4849,78 @@ mod fixed_rotation_measurement_interval_tests {
         let c0 = rotation_matrix(&gmat, a1mjd, "RepeatDbgParent", "RepeatDbgThis").unwrap();
         let c1 = rotation_matrix(&gmat, a1mjd, "RepeatDbgParent", "RepeatDbgThis").unwrap();
         assert_eq!(c0, c1, "identical epoch, two independent calls, must be bit-identical");
+    }
+}
+
+/// Real-time pacing's executor plumbing (question 242), below what a board instance can do today:
+/// the pacer given to [`run_one_span`] is the one every span's `run_with_ports_paced` paces
+/// against, and a span run without one is the unchanged lockstep call.
+#[cfg(test)]
+mod pacing_plumbing_tests {
+    use super::*;
+    use crate::pacing::testing::FakeClock;
+
+    const MS: i64 = 1_000_000;
+
+    fn span_state() -> BTreeMap<String, ModelSpanState> {
+        let spec = binding::ConstantAccelSpec { a: [1.0, 0.0, 0.0], frame_id: "test.frame".to_string(), x0_si: vec![0.0; 6], ..Default::default() };
+        let handle = ModelRegistry::construct_native(&spec, 0, "native.constant_accel", "gmat.orbital.cartesian6");
+        let state = ModelSpanState {
+            period_ns: 100 * MS,
+            cur_plan: BindingPlan::ConstantAccel(spec.clone()),
+            x0: spec.x0_si.clone(),
+            handle: Some(handle),
+            all_samples: Vec::new(),
+            all_segments: Vec::new(),
+            segment_preceded_by_own_maneuver: Vec::new(),
+            shell: None,
+            all_outputs: BTreeMap::new(),
+            applied_commands: Vec::new(),
+            measurements: Vec::new(),
+            decode_errors: Vec::new(),
+            decode_successes: Vec::new(),
+            seg_start_is_post_maneuver: false,
+        };
+        BTreeMap::from([("veh".to_string(), state)])
+    }
+
+    /// Run `[0, 1 s]` as two spans, as `run_shared_group` does at a boundary: the second span
+    /// re-registers a fresh model from the first span's last state, through the same `Router`.
+    fn two_spans(mut pacer: Option<&mut Pacer>) -> Vec<TrajectorySample> {
+        let mut spans = span_state();
+        let mut containers = BTreeMap::new();
+        let mut router = crate::router::Router::build(&SosConfiguration::default(), &BTreeMap::new()).unwrap();
+        let mut drains = BTreeMap::new();
+        run_one_span(0, 500 * MS, &mut spans, &mut containers, &mut router, 100 * MS, &mut drains, pacer.as_deref_mut()).unwrap();
+        // The boundary: a fresh handle from the continuous state, as `run_shared_group` rebuilds it.
+        let last = spans["veh"].all_samples.last().unwrap().mean.clone();
+        let spec = binding::ConstantAccelSpec { a: [1.0, 0.0, 0.0], frame_id: "test.frame".to_string(), x0_si: last.clone(), ..Default::default() };
+        let span = spans.get_mut("veh").unwrap();
+        span.handle = Some(ModelRegistry::construct_native(&spec, 500 * MS, "native.constant_accel", "gmat.orbital.cartesian6"));
+        span.x0 = last;
+        run_one_span(500 * MS, 1_000 * MS, &mut spans, &mut containers, &mut router, 100 * MS, &mut drains, pacer).unwrap();
+        spans["veh"].all_samples.clone()
+    }
+
+    #[test]
+    fn every_span_of_a_run_is_paced_against_the_one_pacer_and_the_samples_are_the_lockstep_samples() {
+        let clock = FakeClock::new(0);
+        let mut pacer = Pacer::new(Box::new(clock.clone()), vec!["hw".to_string()]);
+        let paced = two_spans(Some(&mut pacer));
+        let stats = pacer.finish_run(1_000 * MS);
+        assert_eq!(stats.ticks_paced, 10, "ten 100 ms ticks across two spans; the boundary epoch is paced once");
+        assert_eq!(stats.overrun_count, 0);
+        assert_eq!(stats.base_period_ns, 100 * MS);
+        assert_eq!(stats.sim_start_tai_ns, 0);
+        assert_eq!(clock.now(), 1_000 * MS, "the fake clock was slept to wall(T_end) by the pacer");
+        let lockstep = two_spans(None);
+        assert_eq!(paced, lockstep, "pacing changes no sample");
+    }
+
+    #[test]
+    fn a_span_run_without_a_pacer_is_the_unchanged_lockstep_call() {
+        // 0..=500 ms and 500..=1000 ms at 100 ms: 11 distinct samples (the shared boundary
+        // sample is kept once).
+        assert_eq!(two_spans(None).len(), 11);
     }
 }

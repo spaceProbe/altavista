@@ -368,6 +368,10 @@ pub enum HeteroKernelError {
     /// question 80) and the caller did not opt into the nearest-SPD projection -- mirrors
     /// [`ScheduleError::CovarianceHygiene`] exactly. Never raised by plain [`HeteroKernel::run`].
     CovarianceHygiene(CovarianceHygieneError),
+    /// [`HeteroKernel::run_with_ports_paced`]: the real-time [`crate::pacing::Pacer`] refused the
+    /// run (a non-positive base period, or a span whose base period differs from the one the
+    /// schedule was anchored with).
+    Pacing(crate::pacing::PacingError),
 }
 
 impl std::fmt::Display for HeteroKernelError {
@@ -376,10 +380,17 @@ impl std::fmt::Display for HeteroKernelError {
             HeteroKernelError::BasePeriod(e) => write!(f, "base-period check failed: {e}"),
             HeteroKernelError::Schedule(e) => write!(f, "{e}"),
             HeteroKernelError::CovarianceHygiene(e) => write!(f, "covariance hygiene check failed: {e}"),
+            HeteroKernelError::Pacing(e) => write!(f, "{e}"),
         }
     }
 }
 impl std::error::Error for HeteroKernelError {}
+
+impl From<crate::pacing::PacingError> for HeteroKernelError {
+    fn from(e: crate::pacing::PacingError) -> Self {
+        HeteroKernelError::Pacing(e)
+    }
+}
 
 impl From<HeteroScheduleError> for HeteroKernelError {
     fn from(e: HeteroScheduleError) -> Self {
@@ -726,6 +737,38 @@ impl HeteroKernel {
     ///
     /// Identical to [`HeteroKernel::run`].
     pub fn run_with_ports(&mut self, start_tai_ns: i64, end_tai_ns: i64, router: &mut crate::router::Router) -> Result<BTreeMap<String, Trajectory>, HeteroKernelError> {
+        self.run_with_ports_inner(start_tai_ns, end_tai_ns, router, None)
+    }
+
+    /// [`HeteroKernel::run_with_ports`] with the kernel clock slaved to wall time by `pacer`
+    /// (ADR-005 sec 2, question 242; see [`crate::pacing`] for the schedule and
+    /// [`HeteroScheduler::advance_to_with_ports_paced`] for what a tick is). The run's products
+    /// are exactly those of `run_with_ports`: the pacer only waits, measures and records. The
+    /// first span of a run anchors the pacer's schedule at `start_tai_ns`; every later span of
+    /// the same run (the executor calls this once per boundary-bounded span) passes the same
+    /// pacer and continues that schedule. The caller finishes the run with
+    /// [`crate::pacing::Pacer::finish_run`].
+    ///
+    /// # Errors
+    ///
+    /// As [`HeteroKernel::run`], plus [`HeteroKernelError::Pacing`].
+    pub fn run_with_ports_paced(
+        &mut self,
+        start_tai_ns: i64,
+        end_tai_ns: i64,
+        router: &mut crate::router::Router,
+        pacer: &mut crate::pacing::Pacer,
+    ) -> Result<BTreeMap<String, Trajectory>, HeteroKernelError> {
+        self.run_with_ports_inner(start_tai_ns, end_tai_ns, router, Some(pacer))
+    }
+
+    fn run_with_ports_inner(
+        &mut self,
+        start_tai_ns: i64,
+        end_tai_ns: i64,
+        router: &mut crate::router::Router,
+        mut pacer: Option<&mut crate::pacing::Pacer>,
+    ) -> Result<BTreeMap<String, Trajectory>, HeteroKernelError> {
         assert!(end_tai_ns > start_tai_ns, "end_tai_ns ({end_tai_ns}) must be after start_tai_ns ({start_tai_ns})");
         let horizon_ns = end_tai_ns - start_tai_ns;
         assert!(
@@ -734,7 +777,10 @@ impl HeteroKernel {
             self.output_period_ns
         );
 
-        self.scheduler.base_period_ns(self.output_period_ns).map_err(HeteroKernelError::BasePeriod)?;
+        let base_period_ns = self.scheduler.base_period_ns(self.output_period_ns).map_err(HeteroKernelError::BasePeriod)?;
+        if let Some(p) = pacer.as_deref_mut() {
+            p.begin_run(start_tai_ns, base_period_ns)?;
+        }
 
         let ids: Vec<String> = self.scheduler.system_ids().map(str::to_string).collect();
         let mut samples: BTreeMap<String, Vec<TrajectorySample>> = ids.iter().map(|id| (id.clone(), Vec::new())).collect();
@@ -748,7 +794,7 @@ impl HeteroKernel {
             // zero, one, or several times for this tick, once per system whose own native
             // cadence lands here -- every one of them shares this tick's own sequence number).
             router.begin_step();
-            self.scheduler.advance_to_with_ports(t, router)?;
+            self.scheduler.advance_to_with_ports_paced(t, router, pacer.as_deref_mut())?;
             for id in &ids {
                 let (mean, kind) = if self.scheduler.state_dim(id) == Some(0) {
                     let (hold_kind, s) = self.scheduler.sample_held(id, t)?;

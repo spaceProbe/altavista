@@ -49,6 +49,62 @@ message RunProducts {
   // recorded no port traffic. The sidecar's location is in provenance.attributes
   // ["port_traffic_uri"]; the hash is what a replay verifies against.
   string port_traffic_hash = 9;
+  // Question 242: the real-time pacing report. Present only for a run whose clock was slaved
+  // to wall time (some instance bound to a board, ADR-005 section 2); absent (unset, so no
+  // bytes on the wire) for a lockstep run, whose encoding is therefore exactly what it was
+  // before this field existed. One of the run's two wall-clock-dependent products: the other
+  // is the per-overrun Event (name "pacing_overrun", id prefix "marker:pacing:overrun:") in
+  // `events`; a replay excludes exactly those two (av-kernel `pacing::WALL_CLOCK_DEPENDENT`).
+  PacingReport pacing = 10;
+}
+
+enum PacingMode {
+  PACING_MODE_UNSPECIFIED = 0;
+  // The default: no wall-clock read, the run is a pure function of its ordered inputs.
+  PACING_MODE_LOCKSTEP = 1;
+  // The kernel clock is slaved to wall time at 1:1 and every deviation is counted.
+  PACING_MODE_REAL_TIME = 2;
+}
+
+// What real-time pacing measured over one run (question 242, ADR-005 sections 2 and 4). The
+// schedule is anchored once: wall time W0 is the instant the run's first tick was released,
+// mapped to the scenario start; sim time t is due at W0 + (t - start) at 1:1. A tick whose
+// work finishes after its deadline is an overrun (finish - deadline); the next tick is
+// released at its own scheduled time, or immediately if that has passed, so a late run
+// catches up without skipping a step and without re-anchoring.
+message PacingReport {
+  PacingMode mode = 1;
+  // The scheduler's base period the run was paced at (ADR-005 section 2), in nanoseconds.
+  int64 base_period_ns = 2;
+  // The instances that forced real-time pacing (those bound to a board), sorted.
+  repeated string forcing_instances = 3;
+  // The wall-clock instant (UNIX epoch nanoseconds) the schedule was anchored at, and the
+  // scenario start (TAI ns) it was mapped to. For forensics only: nothing derives from it.
+  int64 wall_start_unix_ns = 4;
+  int64 sim_start_tai_ns = 5;
+  // Ticks paced (a tick is one scheduler epoch; a span boundary or a catch-up step ahead of an
+  // output tick belongs to the tick it serves and is counted once).
+  uint64 ticks_paced = 6;
+  // Ticks whose work finished after their deadline.
+  uint64 overrun_count = 7;
+  // The largest overrun and the sim epoch (TAI ns) of the tick it happened at; both 0 with no
+  // overrun.
+  int64 worst_overrun_ns = 8;
+  int64 worst_overrun_tai_ns = 9;
+  // The sum of every overrun.
+  uint64 total_overrun_ns = 10;
+  // Overrun histogram. `overrun_histogram[i]` counts overruns in (edge[i-1], edge[i]] with
+  // edge[-1] = 0; the final element (one more than there are edges) counts overruns above
+  // the last edge. The edges are fixed by the kernel and sent so a reader needs none.
+  repeated int64 overrun_histogram_upper_edges_ns = 11;
+  repeated uint64 overrun_histogram = 12;
+  // Work time per tick (from release to finish, summed over the tick's segments).
+  int64 worst_work_ns = 13;
+  int64 mean_work_ns = 14;
+  uint64 total_work_ns = 15;
+  // The run's lateness at its end: the last tick's finish against W0 + (end - start), floored
+  // at 0. Zero means the run ended on or before its wall-clock schedule.
+  int64 final_lateness_ns = 16;
 }
 
 // One frame as it crossed a port during a run (question 175): the raw bytes the router

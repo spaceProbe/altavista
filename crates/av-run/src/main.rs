@@ -431,6 +431,7 @@ mod tests {
             frames: vec![],
             measurements: vec![],
             port_traffic_hash: String::new(),
+            pacing: None,
         }
     }
 
