@@ -1,8 +1,9 @@
 //! Question 242 (c): a `tonic` client for `altavista.v1.BoardEdgeService`
 //! (`proto/altavista/v1/board.proto`), the board's edge-node operations that are not lockstep
-//! traffic. Today that is `PowerCycle`: the kernel asks the board's edge service (`av-edge-board`),
-//! at the address it already dials for the board's `LockstepService`, to run the edge node's own
-//! power control channel.
+//! traffic. `PowerCycle`: the kernel asks the board's edge service (`av-edge-board`), at the
+//! address it already dials for the board's `LockstepService`, to run the edge node's own power
+//! control channel. `BoardIoLogHead` (hilprep-2b): where the edge service's signed I/O log ends,
+//! which the kernel pins in the run's products.
 //!
 //! Same shape and the same transport rules as [`crate::LockstepClient`] /
 //! [`crate::BlockingLockstepClient`] (this crate owns the kernel's gRPC clients): plaintext h2c is
@@ -12,7 +13,7 @@
 //! caller's to turn into a typed error.
 use std::path::Path;
 
-pub use av_grpc::pb::{BoardPowerCycleFailure, BoardPowerCycleOutcome, BoardPowerCycleRefusal, PowerCycleRequest, PowerCycleResponse};
+pub use av_grpc::pb::{BoardIoLogHeadRequest, BoardIoLogHeadResponse, BoardPowerCycleFailure, BoardPowerCycleOutcome, BoardPowerCycleRefusal, PowerCycleRequest, PowerCycleResponse};
 use av_grpc::pb::board_edge_service_client::BoardEdgeServiceClient as GeneratedClient;
 use av_grpc::tls::MtlsConfig;
 use tonic::transport::{Channel, Endpoint};
@@ -44,6 +45,11 @@ impl BoardEdgeClient {
     pub async fn power_cycle(&mut self, request: PowerCycleRequest) -> Result<PowerCycleResponse, Status> {
         self.inner.power_cycle(request).await.map(tonic::Response::into_inner)
     }
+
+    /// Where the edge service's board I/O log ends (hilprep-2b; `BoardEdgeService.BoardIoLogHead`).
+    pub async fn board_io_log_head(&mut self, request: BoardIoLogHeadRequest) -> Result<BoardIoLogHeadResponse, Status> {
+        self.inner.board_io_log_head(request).await.map(tonic::Response::into_inner)
+    }
 }
 
 /// A [`BoardEdgeClient`] plus the current-thread runtime it is driven through, for the kernel's
@@ -70,5 +76,10 @@ impl BlockingBoardEdgeClient {
     pub fn power_cycle(&mut self, request: PowerCycleRequest) -> Result<PowerCycleResponse, Status> {
         let client = &mut self.client;
         self.runtime.block_on(client.power_cycle(request))
+    }
+
+    pub fn board_io_log_head(&mut self, request: BoardIoLogHeadRequest) -> Result<BoardIoLogHeadResponse, Status> {
+        let client = &mut self.client;
+        self.runtime.block_on(client.board_io_log_head(request))
     }
 }

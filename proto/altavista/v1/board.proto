@@ -16,8 +16,13 @@ syntax = "proto3";
 // runs its own configured channel locally on the edge node and answers with a typed result.
 // The kernel's behaviour is the same whichever host that is.
 //
-// Additive only: this file is new, and a later RPC on the edge node (the board I/O log's
-// chain head and record count) is a further additive RPC on `BoardEdgeService`.
+// The board I/O log's end (question 242, hilprep-2b) is a further additive RPC on the same
+// service: `BoardIoLogHead` reports the chain head, record count and signer of the edge
+// service's signed board I/O log (`BoardIoRecord`, edge.proto), which the kernel pins in the
+// run's products so a replay can refuse a log truncated at its end.
+//
+// Additive only: this file is new, and `BoardIoLogHead` is a further additive RPC on
+// `BoardEdgeService`.
 package altavista.v1;
 
 service BoardEdgeService {
@@ -29,6 +34,16 @@ service BoardEdgeService {
   // operation could not be carried out or recorded at all (for example the edge service's
   // board I/O log has failed, so nothing may happen that the log cannot hold).
   rpc PowerCycle(PowerCycleRequest) returns (PowerCycleResponse);
+
+  // Report where the edge service's board I/O log ends right now: the number of records
+  // durably appended, the hash of the last one (the chain head) and who signs the log. The
+  // kernel asks once, after the last STEP of a board-bound run and before its SHUTDOWN, and
+  // pins the answer in the run's products; a hash chain cannot show that records were removed
+  // from its end, so a replay compares the log it is given with that pin. Read only: it
+  // writes no record. The edge service answers `FAILED_PRECONDITION` when its log has failed,
+  // when no BIND has named a run yet, or when `run_id` / `instance` differ from the run and
+  // instance the kernel's BIND named (the head of another run's log is not this run's).
+  rpc BoardIoLogHead(BoardIoLogHeadRequest) returns (BoardIoLogHeadResponse);
 }
 
 // What a power-cycle request asks for. The edge service compares `power_control` and
@@ -111,4 +126,31 @@ message PowerCycleResponse {
   // started and finished (0 when nothing was started).
   int64 started_unix_ns = 10;
   int64 finished_unix_ns = 11;
+}
+
+// Which run's log head is asked for. The edge service compares both with the run and instance
+// of the BIND it forwarded.
+message BoardIoLogHeadRequest {
+  // The run the log belongs to (the kernel's `LockstepBindRequest.run_id`).
+  string run_id = 1;
+  // The board instance's name in the system-of-systems configuration.
+  string instance = 2;
+}
+
+// The end of the board I/O log at the moment of the request.
+message BoardIoLogHeadResponse {
+  // Records durably appended so far: `BoardIoRecord.sequence` of the last one, 0 for an
+  // empty log.
+  uint64 records = 1;
+  // The last record's `record_hash`, 32 raw bytes (the chain head); the ASCII bytes of
+  // "GENESIS" while the log is empty (edge.proto's chain definition).
+  bytes chain_head = 2;
+  // Lowercase hex SHA-256 of the signing certificate's DER encoding
+  // (`BoardIoRecord.signer_cert_sha256`).
+  string signer_cert_sha256 = 3;
+  // Lowercase hex SHA-256 of the board link's canonical configuration
+  // (`BoardIoRecord.link_config_sha256`).
+  string link_config_sha256 = 4;
+  // The edge node that writes the log (`BoardIoRecord.producer_id`).
+  string producer_id = 5;
 }

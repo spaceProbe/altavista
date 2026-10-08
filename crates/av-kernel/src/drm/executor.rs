@@ -339,6 +339,7 @@ use gmat_sys::Gmat;
 use prost::Message as _;
 
 use super::binding::{self, BindingPlan, ContainerError, SharedContainerModel};
+use super::board_replay::{self, BoardLogReplay, BoardReplayRefusal};
 // Named only by `convert_gmat_trajectory_to_declared_frame_gmat`'s own signature (gated) --
 // the real GMAT-side frame conversion needs a `&GmatSystemSpec` (its own `central_body` names
 // the integration frame to convert away from), never reached without a live `Gmat` handle.
@@ -433,6 +434,8 @@ pub struct RunConfig<'a> {
     /// replayed, the missing-frame rule). `None` -- every test in this crate that does not care
     /// about replay, and `crates/av-run/src/main.rs` (no `--replay` CLI flag is added by this
     /// task; `av-run` always passes `None` here) -- runs exactly as before this field existed.
+    /// A board instance is replayed from its signed edge log instead, through
+    /// [`execute_with_board_replay`] (hilprep-2b); see [`super::replay::ReplayConfig::instances`].
     pub replay: Option<super::replay::ReplayConfig>,
     /// A3.1 (`docs/aiplane-plan.md`'s A3 milestone): `Some(source)` polls that source exactly
     /// once, at this run's own `scenario.start_tai_ns`, and dispatches whatever it returns
@@ -1903,6 +1906,19 @@ fn decode_error_episode_events(errors: &[crate::ports::DecodeErrorRecord], succe
     out
 }
 
+/// The `LockstepBindRequest.parameters` a container-classified instance (a container or a board)
+/// is bound with: its effective parameters, minus the kernel's own `container.*` / `board.*`
+/// vocabulary and the `output.*` declarations, each rendered as its string value or, for a
+/// numeric parameter, its number. One definition for the live bind and for the shape an edge log
+/// must have to be the log of this run (`board_replay::RunShape::bind_parameters`).
+fn container_bind_parameters(sys: &SystemDefinition, instance: &SystemInstance) -> BTreeMap<String, String> {
+    binding::effective_parameters(sys, instance)
+        .into_iter()
+        .filter(|(pname, _)| !pname.starts_with("container.") && !pname.starts_with("board.") && !pname.starts_with("output."))
+        .map(|(pname, p)| (pname, if p.string_value.is_empty() { p.value.to_string() } else { p.string_value.clone() }))
+        .collect()
+}
+
 /// A3.3 (M25.4b's own follow-on, `docs/open-questions.md` question 187): resolve `plan`'s own
 /// declared ack-telemetry FRAMED OUT port name and codec, generically over every
 /// `consume_framed`-capable [`BindingPlan`] variant -- the identical pairing `run_shared_group`'s
@@ -1961,6 +1977,7 @@ fn run_shared_group(
     router: &mut crate::router::Router,
     replay_targets: &std::collections::BTreeSet<String>,
     replay_log: Option<&pb::PortTrafficLog>,
+    board_scripts: &BTreeMap<String, std::sync::Arc<board_replay::BoardReplayScript>>,
     command_source: Option<&dyn super::command_source::ExternalCommandSource>,
     mut pacer: Option<&mut Pacer>,
 ) -> Result<SharedGroupResult, DrmError> {
@@ -1970,7 +1987,9 @@ fn run_shared_group(
     // verify_and_load` before this function was ever called. An empty `replay_targets` with
     // `replay_log` still `None` is exactly the "no replay requested" case every existing test in
     // this crate exercises.
-    debug_assert!(replay_targets.is_empty() || replay_log.is_some(), "run_shared_group: replay_targets is non-empty but replay_log is None -- execute() should never construct this combination");
+    // Hilprep-2b: except a board replayed from its edge log (`board_scripts`), which needs no
+    // port-traffic log.
+    debug_assert!(replay_targets.iter().all(|t| board_scripts.contains_key(t)) || replay_log.is_some(), "run_shared_group: a replay target without an edge log is present but replay_log is None -- execute() should never construct this combination");
 
     let mut model_spans: BTreeMap<String, ModelSpanState> = BTreeMap::new();
     for (name, (plan, period_ns)) in plans {
@@ -2017,6 +2036,19 @@ fn run_shared_group(
     // Per container/board instance: the `Trajectory.provenance.attributes` it contributes
     // (`ContainerModel::provenance_attributes`).
     let mut container_binding_hashes: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    // The handle a replayed container-classified instance runs on, built the same way at the
+    // start of the run and again at every boundary (a model span is re-materialized at each one):
+    // a board with an edge-log script plays that script under the `ModelInfo` the live board
+    // reported; anything else plays `port_traffic.pb` under the synthetic container-replay info.
+    let replay_container_handle = |name: &str| -> ModelHandle {
+        let (spec, _) = &container_plans[name];
+        let instance = instances_by_name[name];
+        let sys = systems.get(&instance.system_id).expect("validated in pass 1");
+        match (board_scripts.get(name), spec.board.as_ref()) {
+            (Some(script), Some(board)) => ModelRegistry::construct_replay_board(name, binding::board_model_info(spec, board, sys, name, &script.bind_version), scenario.start_tai_ns, script.clone()),
+            _ => ModelRegistry::construct_replay_container(name, &sys.dynamics_model, &sys.state_space_id, scenario.start_tai_ns, replay_log.expect("checked by the debug_assert! above")),
+        }
+    };
     for (name, (spec, period_ns)) in container_plans {
         let instance = instances_by_name[name];
         let sys = systems.get(&instance.system_id).expect("validated in pass 1");
@@ -2044,7 +2076,16 @@ fn run_shared_group(
             // check, before this function is ever reached) for why `cur_plan` below is never
             // actually read: a container instance -- replayed or not -- can never be a
             // fault/maneuver boundary's own target.
-            let handle = ModelRegistry::construct_replay_container(name, &sys.dynamics_model, &sys.state_space_id, scenario.start_tai_ns, replay_log.expect("checked by the debug_assert! above"));
+            let handle = replay_container_handle(name);
+            // Hilprep-2b: a board replayed from its edge log contributes the same provenance
+            // attributes a live board does (its binding hash from the log's BIND record, the link
+            // hash from the declared configuration) plus the verified pin, so those compare equal
+            // with the live run's instead of being excluded.
+            if let (Some(script), Some(board)) = (board_scripts.get(name), spec.board.as_ref()) {
+                let mut attrs = binding::board_provenance_attributes(&script.binding_hash, &board.link.config_hash_hex());
+                attrs.extend(script.pin.attributes());
+                container_binding_hashes.insert(name.clone(), attrs);
+            }
             model_spans.insert(
                 name.clone(),
                 ModelSpanState {
@@ -2077,11 +2118,7 @@ fn run_shared_group(
         // `board.*` is the kernel's own vocabulary for a board instance (question 242) and never
         // reaches the peer; `materialize_board` adds the two `board.*` Bind parameters the edge
         // service checks (`av_edge::board::BIND_PARAM_*`) on top.
-        let bind_parameters: BTreeMap<String, String> = binding::effective_parameters(sys, instance)
-            .into_iter()
-            .filter(|(pname, _)| !pname.starts_with("container.") && !pname.starts_with("board.") && !pname.starts_with("output."))
-            .map(|(pname, p)| (pname, if p.string_value.is_empty() { p.value.to_string() } else { p.string_value.clone() }))
-            .collect();
+        let bind_parameters = container_bind_parameters(sys, instance);
         let materialized = if spec.board.is_some() {
             binding::materialize_board(spec, sys, name, run_id, scenario.start_tai_ns, *period_ns, seed, &bind_parameters)?
         } else {
@@ -2367,6 +2404,9 @@ fn run_shared_group(
         }
     }
 
+    // Hilprep-2b: the (board instance, fault id) power cycles a replay has reproduced from the edge
+    // log; checked against the log's own POWER_CYCLE records after the last span.
+    let mut replayed_power_cycles: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
     for b in &boundaries {
         let boundary = b.tai_ns();
         if boundary <= seg_start || boundary >= run_end_tai_ns {
@@ -2394,6 +2434,19 @@ fn run_shared_group(
             // shape). No truncation/conversion here: only `Boundary::Maneuver`'s own dv-jump
             // arm below actually needs exactly 6 components, and it checks that explicitly.
             let last_state: Vec<f64> = span.all_samples.last().expect("run_one_span always appends >= 1 sample").mean.clone();
+
+            // Hilprep-2b: a replayed container-classified instance (a container, or a board) has
+            // no plan to change or re-materialize -- `cur_plan` is a placeholder -- and a power
+            // cycle naming it must not go through `apply_dynamics_fault`. Its handle is rebuilt the
+            // way it was first built, so its `ModelInfo` is the same in every span (and the
+            // adjacent segments merge, as a live board's do). Its fault events are produced
+            // after this loop.
+            if container_plans.contains_key(name) && replay_targets.contains(name) {
+                span.x0 = last_state;
+                span.seg_start_is_post_maneuver = false;
+                span.handle = Some(replay_container_handle(name));
+                continue;
+            }
 
             if *name == target {
                 match b {
@@ -2542,6 +2595,33 @@ fn run_shared_group(
                         span.model.reset(boundary, format!("fault:{}", f.id)).map_err(|e| DrmError::ContainerProtocol { instance: target.clone(), source: e })?;
                         all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
                     }
+                } else if replay_targets.contains(&target) && container_plans.contains_key(&target) {
+                    // Hilprep-2b: the power-cycling instance is replayed -- there is no board, no
+                    // edge service and no RESET to send, and **the power control is not called**.
+                    // The `fault:<id>` event is reproduced exactly as the live run built it (it
+                    // carries nothing wall-clock dependent). A board replayed from its edge log
+                    // also reproduces the live run's power-cycle outcome event from the log's
+                    // POWER_CYCLE record (same identity, epoch and `performed` flag; the
+                    // duration is computed from the record's two edge-node instants, the
+                    // wall-clock values `pacing::WALL_CLOCK_DEPENDENT` names). A replay from
+                    // `port_traffic.pb` has no record of the outcome and reproduces only the fault
+                    // event (the same port-traffic replay of a container used to drop even that).
+                    let instance = instances_by_name[&target];
+                    let sys = systems.get(&instance.system_id).expect("validated in pass 1");
+                    let sys_hash = system_hashes.get(&instance.system_id).expect("verified above");
+                    all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                    if let (Some(script), Some(board)) = (board_scripts.get(&target), container_plans[&target].0.board.as_ref()) {
+                        let logged = script.power_cycles.get(&f.id).ok_or_else(|| DrmError::BoardReplay { instance: target.clone(), refusal: Box::new(BoardReplayRefusal::PowerCycleNotInLog { fault_id: f.id.clone() }) })?;
+                        let report = super::power::PowerCycleReport {
+                            duration_ns: logged.finished_unix_ns - logged.started_unix_ns,
+                            started_unix_ns: logged.started_unix_ns,
+                            finished_unix_ns: logged.finished_unix_ns,
+                            stderr_tail: String::new(),
+                            power_control: board.power_control.canonical(),
+                        };
+                        all_events.push(super::power::power_cycle_event(&f.id, &target, boundary, &report, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
+                        replayed_power_cycles.insert((target.clone(), f.id.clone()));
+                    }
                 }
             }
         }
@@ -2550,6 +2630,18 @@ fn run_shared_group(
     run_one_span(seg_start, run_end_tai_ns, &mut model_spans, &mut container_spans, router, output_period_ns, &mut sensor_fault_span_drains, pacer)?;
     for (name, drain) in std::mem::take(&mut sensor_fault_span_drains) {
         fold_sensor_fault_span_drain(&name, Some(drain), &active_sensor_fault, &mut sensor_fault_totals);
+    }
+    // Hilprep-2b: a power cycle the edge log records that never fired in this replay is a log of a
+    // different run (the DRM's fault is off the executed span, say): refused, not ignored.
+    for (name, script) in board_scripts {
+        for fault_id in script.power_cycles.keys() {
+            if !replayed_power_cycles.contains(&(name.clone(), fault_id.clone())) {
+                return Err(DrmError::BoardReplay {
+                    instance: name.clone(),
+                    refusal: Box::new(BoardReplayRefusal::DoesNotMatchRun { detail: format!("the edge log records a power cycle for fault {fault_id:?}, which did not fire in this replay") }),
+                });
+            }
+        }
     }
 
     // Question 178 (R5.1a): a PERSISTENT SENSOR fault (`duration_ns == 0`) has no `Boundary::
@@ -2573,6 +2665,15 @@ fn run_shared_group(
     // instance's old identical call, now made once per instance after the shared run finishes
     // rather than at the end of that instance's own dedicated loop.
     for (name, span) in &container_spans {
+        // Hilprep-2b: a board's edge log is pinned in the run's products now -- after its last
+        // STEP (and any power cycle), before its SHUTDOWN, because the edge service records the
+        // SHUTDOWN and then exits (`board_replay`'s module doc, "the order at the end of a run").
+        if span.model.is_board() {
+            let (cspec, _) = &container_plans[name];
+            let board = cspec.board.as_ref().expect("a board span is built from a ContainerSpec carrying a BoardSpec");
+            let pin = board_replay::fetch_pin(cspec, run_id, name, std::time::Duration::from_millis(board.step_timeout_ms))?;
+            container_binding_hashes.get_mut(name).expect("inserted at bind").extend(pin.attributes());
+        }
         span.model
             .shutdown(av_lockstep::LockstepShutdownRequest { run_id: run_id.to_string() })
             .map_err(|e| DrmError::ContainerProtocol { instance: name.clone(), source: e })?;
@@ -3502,6 +3603,31 @@ fn validate_expression_at_load(name: &str, expression: &str, run: &crate::expr::
 /// doc comment for exactly how `DrmOptions` fields map to kernel behaviour and how scoring
 /// works.
 pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
+    execute_with_board_replay(cfg, &[])
+}
+
+/// [`execute`], with `board_logs`: each names a `BINDING_KIND_BOARD` instance to **replay from
+/// its signed edge I/O log** instead of dialling its edge service (hilprep-2b; the contract is
+/// `crate::drm::board_replay`'s module doc). Every log is verified -- chain, every signature
+/// against the certificate the caller supplies, no torn tail, the pinned head and record count the
+/// live run recorded in its products, the run and instance, the shape of the run -- **before any
+/// instance binds**, and a board in a replay is never bound, so the run is lockstep (no pacing, no
+/// `PacingReport`, no overrun events).
+///
+/// How a board instance is chosen for replay, with `RunConfig.replay` (`ReplayConfig`):
+/// - a log supplied for it: replayed from the log, whether or not it is named in
+///   `ReplayConfig.instances`;
+/// - no log, named in `ReplayConfig.instances`: replayed from the run's `port_traffic.pb`, as a
+///   container instance is (the explicit choice -- a port-traffic replay cannot reproduce the
+///   board's `ModelInfo`, named outputs or power-cycle outcome);
+/// - no log, `ReplayConfig.instances` empty (the default "every container-classified instance",
+///   which includes boards): refused, [`board_replay::BoardReplayRefusal::NeedsEdgeLog`] -- a
+///   board is never dialled in a replay and never silently replayed from the weaker source.
+///
+/// `execute(cfg)` is `execute_with_board_replay(cfg, &[])`. (A separate entry point rather than a
+/// field on `RunConfig`/`ReplayConfig`: both are built field by field at every existing call
+/// site.)
+pub fn execute_with_board_replay(cfg: RunConfig<'_>, board_logs: &[BoardLogReplay]) -> Result<RunProducts, DrmError> {
     // `docs/open-questions.md` question 230, N6: `RunConfig.gmat` is `#[cfg(feature = "gmat")]`
     // (its own doc comment) -- this is the one place that field is read, converted into the
     // [`GmatHandle`] every downstream helper below (`materialize_plan`, `run_shared_group`,
@@ -3523,7 +3649,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     // the "say so, never drop it quietly" failure mode this executor refuses everywhere else.
     // `cfg.drm.options` is read directly (not the `options` local a few lines below, parsed only
     // once Pass 0's other checks have run) since this is the very first thing this function does.
-    if cfg.replay.is_some() && cfg.drm.options.as_ref().is_some_and(|o| o.covariance) {
+    if (cfg.replay.is_some() || !board_logs.is_empty()) && cfg.drm.options.as_ref().is_some_and(|o| o.covariance) {
         return Err(DrmError::ReplayWithCovarianceNotSupported);
     }
 
@@ -3537,6 +3663,21 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
         Some(rc) => Some(replay::verify_and_load(rc)?),
         None => None,
     };
+
+    // Hilprep-2b: every board edge log is read, verified (chain, signatures against the supplied
+    // certificate, torn tail), compared with the pin the live run recorded and with this run's
+    // id and instance -- at this same early point, before anything binds. A refusal is a typed
+    // `DrmError::BoardReplay`. The run-shape comparison needs the classified instances and happens
+    // after Pass 1, still before any binding.
+    let mut loaded_board_logs: BTreeMap<String, board_replay::LoadedBoardLog> = BTreeMap::new();
+    for replay_of_board in board_logs {
+        let refuse = |refusal: BoardReplayRefusal| DrmError::BoardReplay { instance: replay_of_board.instance.clone(), refusal: Box::new(refusal) };
+        if loaded_board_logs.contains_key(&replay_of_board.instance) {
+            return Err(refuse(BoardReplayRefusal::DoesNotMatchRun { detail: "two edge I/O logs were supplied for this instance".to_string() }));
+        }
+        let loaded = board_replay::load(replay_of_board, &cfg.run_id).map_err(refuse)?;
+        loaded_board_logs.insert(replay_of_board.instance.clone(), loaded);
+    }
 
     // M18.4 (`docs/open-questions.md` question 127): namespace every GMAT object this call's own
     // model materializations construct, so this `execute()` invocation can never collide with a
@@ -3582,7 +3723,9 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     if !board_instances.is_empty() && options.covariance {
         return Err(DrmError::InvalidDrmOptions { reason: "real-time pacing (an instance bound to a board) and DrmOptions.covariance are not supported together".to_string() });
     }
-    let mut pacer: Option<Pacer> = if board_instances.is_empty() { None } else { Some(Pacer::real_time(board_instances)) };
+    // Hilprep-2b: the pacer is created below, after Pass 1 has resolved which instances a replay
+    // substitutes: a board that is replayed from its log is not bound, so it forces no pacing.
+    let mut pacer: Option<Pacer> = None;
     let mut pacing_stats: Option<crate::pacing::PacingStats> = None;
     if options.sample_interval_s <= 0.0 {
         return Err(DrmError::InvalidDrmOptions { reason: format!("sample_interval_s must be positive, got {}", options.sample_interval_s) });
@@ -3810,7 +3953,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
     // structurally impossible today since every instance classifies into exactly one, but this
     // keeps the check meaningful even if that ever changes) -- see `crate::drm::replay`'s own
     // module doc comment for the full "instances" contract.
-    let replay_targets: std::collections::BTreeSet<String> = match &cfg.replay {
+    let mut replay_targets: std::collections::BTreeSet<String> = match &cfg.replay {
         None => std::collections::BTreeSet::new(),
         Some(rc) if rc.instances.is_empty() => container_plans.keys().cloned().collect(),
         Some(rc) => {
@@ -3822,6 +3965,55 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             rc.instances.iter().cloned().collect()
         }
     };
+
+    // Hilprep-2b: board instances. A board classifies as a container carrying a `BoardSpec`, so the
+    // default above ("every container-classified instance") includes it; a board is never dialled
+    // in a replay, so it must be replayed from a signed edge log (supplied via `board_logs`) or,
+    // as the explicit choice, from `port_traffic.pb` by naming it in `ReplayConfig.instances`.
+    // A log supplied for an instance adds it to the targets. Refusals are typed and precede any
+    // binding.
+    let is_board = |name: &str| container_plans.get(name).is_some_and(|(spec, _)| spec.board.is_some());
+    let refuse_board = |instance: &str, refusal: BoardReplayRefusal| DrmError::BoardReplay { instance: instance.to_string(), refusal: Box::new(refusal) };
+    for name in loaded_board_logs.keys() {
+        if !cfg.sos.instances.iter().any(|i| &i.name == name) {
+            return Err(DrmError::UnknownReplayInstance { instance: name.clone() });
+        }
+        if !is_board(name) {
+            return Err(refuse_board(name, BoardReplayRefusal::NotABoardInstance));
+        }
+        replay_targets.insert(name.clone());
+    }
+    for name in &replay_targets {
+        let named = cfg.replay.as_ref().is_some_and(|rc| rc.instances.contains(name));
+        if is_board(name) && !loaded_board_logs.contains_key(name) && !named {
+            return Err(refuse_board(name, BoardReplayRefusal::NeedsEdgeLog));
+        }
+    }
+    // The logs against the run's shape (the BIND, the step grid, the power cycles): the last check
+    // before anything binds.
+    let mut board_scripts: BTreeMap<String, std::sync::Arc<board_replay::BoardReplayScript>> = BTreeMap::new();
+    for (name, loaded) in std::mem::take(&mut loaded_board_logs) {
+        let (spec, period_ns) = container_plans.get(&name).expect("is_board checked above");
+        let instance = cfg.sos.instances.iter().find(|i| i.name == name).expect("checked above");
+        let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
+        let shape = board_replay::RunShape {
+            start_tai_ns: scenario.start_tai_ns,
+            end_tai_ns: scenario.end_tai_ns,
+            period_ns: *period_ns,
+            seed: scenario.seeds.get(&spec.seed_key).copied(),
+            ports: sys.ports.clone(),
+            bind_parameters: container_bind_parameters(sys, instance),
+            power_cycles: scenario.faults.iter().filter(|f| f.instance == name && fault::is_container_power_cycle(f)).map(|f| (f.id.clone(), f.tai_ns)).collect(),
+        };
+        let script = loaded.into_script(&name, &shape).map_err(|r| refuse_board(&name, r))?;
+        board_scripts.insert(name, script);
+    }
+    // A replayed board is not bound, so it forces no pacing: only a board that is still bound does
+    // (ADR-005 section 2). A replay of every board is a lockstep run.
+    let live_boards: Vec<String> = board_instance_names(cfg.sos).into_iter().filter(|n| !replay_targets.contains(n)).collect();
+    if !live_boards.is_empty() {
+        pacer = Some(Pacer::real_time(live_boards));
+    }
 
     // R5.1b review (question 178's own "never a silent no-op" rule, applied to replay): replaying
     // an instance that a `FAULT_TARGET_KIND_SENSOR` fault targets is refused here, typed, rather
@@ -4061,6 +4253,7 @@ pub fn execute(cfg: RunConfig<'_>) -> Result<RunProducts, DrmError> {
             &mut router,
             &replay_targets,
             replay_log.as_ref(),
+            &board_scripts,
             cfg.command_source,
             pacer.as_mut(),
         )?;

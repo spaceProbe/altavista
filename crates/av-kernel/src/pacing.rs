@@ -53,9 +53,9 @@
 //! # Wall-clock-dependent products
 //!
 //! The pacing report and the overrun events depend on the wall clock and on nothing else; every
-//! other product of a run is unchanged by pacing. [`WALL_CLOCK_DEPENDENT`] names exactly them so
-//! a replay can exclude exactly them from its comparison, and [`is_overrun_event`] recognises
-//! the events.
+//! other product of a run is unchanged by pacing. [`WALL_CLOCK_DEPENDENT`] names them (and the
+//! few other fields a board replay cannot reproduce, with where each applies) so a replay can
+//! exclude exactly those from its comparison, and [`is_overrun_event`] recognises the events.
 //!
 //! # Clock
 //!
@@ -68,15 +68,33 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use av_cdm::pb;
 
-/// The run's wall-clock-dependent products, by name, for a replay to exclude (and only these):
-/// `RunProducts.pacing`, every `RunProducts.events` entry for which [`is_overrun_event`] is true,
-/// and (question 242 (c)) every one for which `crate::drm::power::is_power_cycle_event` is true: a board power cycle's outcome event
-/// records the duration and the standard error of the channel the edge node ran. Everything else
-/// in `RunProducts` and the port-traffic sidecar is independent of the wall clock.
-pub const WALL_CLOCK_DEPENDENT: [&str; 3] = [
+/// The one named set a replay of a board-bound run is compared with its live run under (and
+/// nothing else is excluded): [`crate::drm::board_replay::strip_replay_exclusions`] removes
+/// exactly these, so a test and a human apply the same contract.
+///
+/// **Excluded for every replay of a board** (the first four): the real-time pacing report
+/// (`RunProducts.pacing`; a replay runs lockstep, so it has none); every pacing-overrun event
+/// ([`is_overrun_event`]); and the wall-clock values of a board power cycle's outcome event
+/// (question 242 (c), `crate::drm::power::is_power_cycle_event`): its `detail` (which carries the
+/// channel's duration in ms and what it wrote to standard error) and `values["duration_ns"]` --
+/// the edge node measured them in wall time, and the replay computes the duration from the edge
+/// log's two instants. The event itself (its id, epoch, entity, name, reference and `performed`
+/// flag) is compared.
+///
+/// **Excluded only for a board replayed from `port_traffic.pb`** (the last four, marked), as a
+/// replayed container excludes them: such a replay has no record of the board's `Bind` response or
+/// of its power cycle's outcome. A board replayed from its **edge log** reproduces these exactly
+/// (the log's BIND record carries what they need), so they are *not* excluded for it. Everything
+/// else in `RunProducts` and the port-traffic sidecar is independent of the wall clock.
+pub const WALL_CLOCK_DEPENDENT: [&str; 8] = [
     "RunProducts.pacing",
     "RunProducts.events[id starts with OVERRUN_EVENT_ID_PREFIX]",
-    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX]",
+    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].detail",
+    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].values[duration_ns]",
+    "(port_traffic.pb replay of a board only) RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX]: the whole event",
+    "(port_traffic.pb replay of a board only) RunProducts.trajectories[<board>].segments[].dynamics_model / dynamics_hash / dynamics_depth",
+    "(port_traffic.pb replay of a board only) RunProducts.trajectories[<board>].provenance.attributes[binding_kind, board_binding_hash, board_link_hash]",
+    "(port_traffic.pb replay of a board only) RunProducts.trajectories[<board>].provenance.attributes[board_io_log_chain_head, board_io_log_records, board_io_log_signer_cert_sha256]",
 ];
 
 /// The `Event.name` of a per-overrun event.
@@ -443,8 +461,9 @@ pub fn is_overrun_event(event: &pb::Event) -> bool {
     event.id.starts_with(OVERRUN_EVENT_ID_PREFIX)
 }
 
-/// Whether `event` is one of the events [`WALL_CLOCK_DEPENDENT`] names: a pacing overrun or a
-/// board power-cycle outcome. A replay excludes exactly these from its comparison.
+/// Whether `event` is one of the events [`WALL_CLOCK_DEPENDENT`] names: a pacing overrun (excluded
+/// whole from a replay's comparison) or a board power-cycle outcome (its `detail` and
+/// `values["duration_ns"]` are excluded; the rest of the event is compared).
 pub fn is_wall_clock_event(event: &pb::Event) -> bool {
     is_overrun_event(event) || crate::drm::power::is_power_cycle_event(event)
 }

@@ -1399,6 +1399,20 @@ pub(crate) struct ContainerModel {
     board_power: Option<BoardPower>,
 }
 
+/// The kernel's one conversion from a lockstep `STEP` response's `outputs` to the `Outbox` the
+/// router delivers: each message keeps its port, its own `tai_ns` (`0` is `router::
+/// NO_MESSAGE_EPOCH`, "no epoch of its own": the router then stamps the step's end epoch) and its
+/// exact payload. A live [`ContainerModel`] applies it to the response; the replay of a board
+/// from its edge log (`drm::board_replay`) applies the same function to the logged response's
+/// outputs, so what the router records and delivers is the same by construction (hilprep-2b).
+pub(crate) fn outbox_from_lockstep_outputs(outputs: &[av_cdm::pb::PortMessage]) -> Outbox {
+    let mut outbox = Outbox::new();
+    for m in outputs {
+        outbox.push(m.port.clone(), m.tai_ns, m.payload.clone());
+    }
+    outbox
+}
+
 /// A board instance's power control seam and what a request to it must carry (question 242 (c)).
 pub(crate) struct BoardPower {
     control: Box<dyn PowerControlSeam>,
@@ -1464,10 +1478,7 @@ impl DynamicsModel for ContainerModel {
         }
         self.next_sequence.set(sequence + 1);
 
-        let mut outbox = Outbox::new();
-        for m in &response.outputs {
-            outbox.push(m.port.clone(), m.tai_ns, m.payload.clone());
-        }
+        let outbox = outbox_from_lockstep_outputs(&response.outputs);
         // `state` is always the caller's own 0-length slice (state_dim() == 0); `to_vec()` on
         // an empty slice is an empty Vec, exactly what this binding kind's "no physical
         // state" contract requires.
@@ -1506,11 +1517,7 @@ impl ContainerModel {
     pub(crate) fn provenance_attributes(&self) -> Vec<(String, String)> {
         match &self.board_link_hash {
             None => vec![("container_binding_hash".to_string(), self.binding_hash.clone())],
-            Some(link_hash) => vec![
-                ("binding_kind".to_string(), BindingKind::Board.as_str_name().to_string()),
-                ("board_binding_hash".to_string(), self.binding_hash.clone()),
-                ("board_link_hash".to_string(), link_hash.clone()),
-            ],
+            Some(link_hash) => board_provenance_attributes(&self.binding_hash, link_hash),
         }
     }
 
@@ -1803,6 +1810,47 @@ pub(crate) fn materialize_container(
     Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
 }
 
+/// The `ModelInfo` a bound `BINDING_KIND_BOARD` instance reports (`id` `board.<instance>`, `depth`
+/// `board-lockstep`; `TrajectorySegment.dynamics_model`/`.dynamics_hash`/`.dynamics_depth` are
+/// stamped from it). A pure function of the declared configuration (`spec`'s address and TLS
+/// flag, the validated link) and the one value only the flight software supplies,
+/// `LockstepBindResponse.version`. [`materialize_board`] builds it from the live Bind response;
+/// a replay of the board from its edge log (`drm::board_replay`) builds it from the same
+/// declared configuration and the version the log's BIND record carries, so the replayed
+/// instance's segment is byte-identical to the live run's (hilprep-2b).
+pub(crate) fn board_model_info(spec: &ContainerSpec, board: &BoardSpec, sys: &SystemDefinition, instance_name: &str, bind_version: &str) -> ModelInfo {
+    let mut settings = BTreeMap::new();
+    settings.insert("address".to_string(), spec.address.clone());
+    settings.insert("tls".to_string(), spec.tls.to_string());
+    settings.insert("version".to_string(), bind_version.to_string());
+    settings.insert("edge_node_id".to_string(), board.link.edge_node_id().to_string());
+    settings.insert("port_device".to_string(), board.link.device().canonical());
+    settings.insert("board_link_hash".to_string(), board.link.config_hash_hex());
+    ModelInfo {
+        id: format!("board.{instance_name}"),
+        version: bind_version.to_string(),
+        state_space_id: sys.state_space_id.clone(),
+        frame_id: String::new(),
+        controls: vec![],
+        capabilities: vec![ModelCapability::Step as i32, ModelCapability::Deterministic as i32],
+        depth: "board-lockstep".to_string(),
+        settings_hash: av_dynamics::settings_hash(&settings),
+        goldens: vec![],
+    }
+}
+
+/// The `Trajectory.provenance.attributes` a board instance contributes
+/// ([`ContainerModel::provenance_attributes`]), from the flight software's own binding hash and
+/// the kernel-side link hash; shared with the edge-log replay for the same reason as
+/// [`board_model_info`].
+pub(crate) fn board_provenance_attributes(binding_hash: &str, link_hash: &str) -> Vec<(String, String)> {
+    vec![
+        ("binding_kind".to_string(), BindingKind::Board.as_str_name().to_string()),
+        ("board_binding_hash".to_string(), binding_hash.to_string()),
+        ("board_link_hash".to_string(), link_hash.to_string()),
+    ]
+}
+
 /// Question 242 (hilprep-3a): bind one `BINDING_KIND_BOARD` instance. The board's edge service
 /// (`av-edge-board`) serves `altavista.v1.LockstepService` at `spec.address` exactly as a
 /// `container.address` process does, so this is [`materialize_container`]'s already-running path
@@ -1879,24 +1927,7 @@ pub(crate) fn materialize_board(
     }
 
     let link_hash = board.link.config_hash_hex();
-    let mut settings = BTreeMap::new();
-    settings.insert("address".to_string(), address);
-    settings.insert("tls".to_string(), spec.tls.to_string());
-    settings.insert("version".to_string(), response.version.clone());
-    settings.insert("edge_node_id".to_string(), board.link.edge_node_id().to_string());
-    settings.insert("port_device".to_string(), board.link.device().canonical());
-    settings.insert("board_link_hash".to_string(), link_hash.clone());
-    let info = ModelInfo {
-        id: format!("board.{instance_name}"),
-        version: response.version,
-        state_space_id: sys.state_space_id.clone(),
-        frame_id: String::new(),
-        controls: vec![],
-        capabilities: vec![ModelCapability::Step as i32, ModelCapability::Deterministic as i32],
-        depth: "board-lockstep".to_string(),
-        settings_hash: av_dynamics::settings_hash(&settings),
-        goldens: vec![],
-    };
+    let info = board_model_info(spec, board, sys, instance_name, &response.version);
     let io = LockstepIo::Timed { worker, step_timeout: std::time::Duration::from_millis(board.step_timeout_ms) };
     // The power-control seam: a client of the same edge service, same address and TLS rules.
     let tls = spec.tls_paths().map(|(ca, cert, key)| (ca.to_string(), cert.to_string(), key.to_string()));
@@ -2293,7 +2324,7 @@ impl ContainerSpec {
     /// already refuses a `container.tls = true` spec missing any of them, so a caller with a
     /// `ContainerSpec` in hand where `tls` is `true` can treat `None` here as an internal
     /// invariant violation, not a fresh user error (see [`materialize_container`]'s own use).
-    fn tls_paths(&self) -> Option<(&str, &str, &str)> {
+    pub(crate) fn tls_paths(&self) -> Option<(&str, &str, &str)> {
         match (&self.ca_file, &self.client_cert, &self.client_key) {
             (Some(ca), Some(cert), Some(key)) => Some((ca, cert, key)),
             _ => None,

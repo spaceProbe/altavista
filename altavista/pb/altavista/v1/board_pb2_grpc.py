@@ -39,6 +39,11 @@ class BoardEdgeServiceStub:
                 request_serializer=altavista_dot_v1_dot_board__pb2.PowerCycleRequest.SerializeToString,
                 response_deserializer=altavista_dot_v1_dot_board__pb2.PowerCycleResponse.FromString,
                 _registered_method=True)
+        self.BoardIoLogHead = channel.unary_unary(
+                '/altavista.v1.BoardEdgeService/BoardIoLogHead',
+                request_serializer=altavista_dot_v1_dot_board__pb2.BoardIoLogHeadRequest.SerializeToString,
+                response_deserializer=altavista_dot_v1_dot_board__pb2.BoardIoLogHeadResponse.FromString,
+                _registered_method=True)
 
 
 class BoardEdgeServiceServicer:
@@ -57,6 +62,20 @@ class BoardEdgeServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def BoardIoLogHead(self, request, context):
+        """Report where the edge service's board I/O log ends right now: the number of records
+        durably appended, the hash of the last one (the chain head) and who signs the log. The
+        kernel asks once, after the last STEP of a board-bound run and before its SHUTDOWN, and
+        pins the answer in the run's products; a hash chain cannot show that records were removed
+        from its end, so a replay compares the log it is given with that pin. Read only: it
+        writes no record. The edge service answers `FAILED_PRECONDITION` when its log has failed,
+        when no BIND has named a run yet, or when `run_id` / `instance` differ from the run and
+        instance the kernel's BIND named (the head of another run's log is not this run's).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_BoardEdgeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -64,6 +83,11 @@ def add_BoardEdgeServiceServicer_to_server(servicer, server):
                     servicer.PowerCycle,
                     request_deserializer=altavista_dot_v1_dot_board__pb2.PowerCycleRequest.FromString,
                     response_serializer=altavista_dot_v1_dot_board__pb2.PowerCycleResponse.SerializeToString,
+            ),
+            'BoardIoLogHead': grpc.unary_unary_rpc_method_handler(
+                    servicer.BoardIoLogHead,
+                    request_deserializer=altavista_dot_v1_dot_board__pb2.BoardIoLogHeadRequest.FromString,
+                    response_serializer=altavista_dot_v1_dot_board__pb2.BoardIoLogHeadResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -93,6 +117,33 @@ class BoardEdgeService:
             '/altavista.v1.BoardEdgeService/PowerCycle',
             altavista_dot_v1_dot_board__pb2.PowerCycleRequest.SerializeToString,
             altavista_dot_v1_dot_board__pb2.PowerCycleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BoardIoLogHead(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/altavista.v1.BoardEdgeService/BoardIoLogHead',
+            altavista_dot_v1_dot_board__pb2.BoardIoLogHeadRequest.SerializeToString,
+            altavista_dot_v1_dot_board__pb2.BoardIoLogHeadResponse.FromString,
             options,
             channel_credentials,
             insecure,

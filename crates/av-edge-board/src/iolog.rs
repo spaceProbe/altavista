@@ -21,7 +21,7 @@
 //! A run must not continue with an I/O the log does not hold.
 use std::sync::{Arc, Mutex};
 
-use av_edge::board_log::{AppendReceipt, BoardIoLogWriter, BoardIoRecord};
+use av_edge::board_log::{AppendReceipt, BoardIoLogWriter, BoardIoRecord, LogHead};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
 use tonic::Status;
 
@@ -91,6 +91,25 @@ impl BoardIoLog {
             }
             Err(e) => Err(Status::data_loss(format!("the board I/O log writer task failed: {e}"))),
         }
+    }
+
+    /// Where the log ends right now (`BoardEdgeService.BoardIoLogHead`), for the run and
+    /// instance the kernel's Bind named. Takes the exchange gate, so the answer is never taken
+    /// between a STEP's exchange and its record; writes nothing.
+    ///
+    /// `FAILED_PRECONDITION` when no Bind has named a run yet, when `run_id` / `instance` are not
+    /// the Bind's (the head of another run's log is not this run's), or when the log has failed
+    /// ([`BoardIoLog::begin`]).
+    pub async fn head(&self, run_id: &str, instance: &str) -> Result<LogHead, Status> {
+        let _exchange = self.begin().await?;
+        let (bound_run, bound_instance) = self.run.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if bound_run.is_empty() {
+            return Err(Status::failed_precondition("no Bind has named a run yet: this edge service's board I/O log has no run to report the head of"));
+        }
+        if bound_run != run_id || bound_instance != instance {
+            return Err(Status::failed_precondition(format!("the board I/O log belongs to run {bound_run:?} instance {bound_instance:?}, not run {run_id:?} instance {instance:?}")));
+        }
+        Ok(self.writer.lock().unwrap_or_else(|e| e.into_inner()).head())
     }
 
     /// Records durably written so far.

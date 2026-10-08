@@ -263,6 +263,19 @@ pub struct AppendReceipt {
     pub frame_bytes: usize,
 }
 
+/// Where a log ends: the record count, the chain head (the last record's hash, or [`GENESIS`]
+/// for an empty log) and who signs it. A hash chain cannot show that records were removed from
+/// its end, so a run's products pin these (the kernel asks the edge service for them,
+/// `BoardEdgeService.BoardIoLogHead`) and a replay compares the log it is given with them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogHead {
+    pub records: u64,
+    pub chain_head: Vec<u8>,
+    pub signer_cert_sha256: String,
+    pub link_config_sha256: String,
+    pub producer_id: String,
+}
+
 /// The append-only, signing, `fsync`ing writer of one board I/O log. Not `Clone`; one per
 /// service run.
 pub struct BoardIoLogWriter {
@@ -343,6 +356,11 @@ impl BoardIoLogWriter {
     /// Whether an earlier failure made the writer unusable.
     pub fn failure(&self) -> Option<&str> {
         self.failed.as_deref()
+    }
+
+    /// Where the log ends right now: what a run's products pin ([`LogHead`]).
+    pub fn head(&self) -> LogHead {
+        LogHead { records: self.records_written(), chain_head: self.tip.clone(), signer_cert_sha256: self.signer.cert_sha256.clone(), link_config_sha256: self.link_config_sha256.clone(), producer_id: self.producer_id.clone() }
     }
 
     pub fn path(&self) -> &Path {
@@ -876,6 +894,26 @@ mod tests {
         // What reached the sink verifies (the unsynced third frame was written whole here).
         let log = verify_bytes(&rec.bytes.lock().unwrap(), &verifier).unwrap();
         assert!(log.records.len() >= 2);
+    }
+
+    #[test]
+    fn the_writer_reports_where_the_log_ends() {
+        let (key, cert, _) = identity("edge-test");
+        let verifier = LogVerifier::from_pem(&cert).unwrap();
+        let rec = Recording::default();
+        let mut w = BoardIoLogWriter::with_sink(Path::new("mem"), Box::new(rec.clone()), "edge-1", "cd".repeat(32).as_str(), LogSigner::from_pem(&key, &cert).unwrap());
+        let empty = w.head();
+        assert_eq!((empty.records, empty.chain_head), (0, GENESIS.to_vec()), "an empty log ends at GENESIS");
+        for i in 1..=3 {
+            w.append(step_draft(i)).unwrap();
+        }
+        let head = w.head();
+        let log = verify_bytes(&rec.bytes.lock().unwrap(), &verifier).unwrap();
+        assert_eq!(head.records, 3);
+        assert_eq!(head.chain_head, log.records[2].record_hash, "the head is the last record's own hash");
+        assert_eq!(head.chain_head, log.chain_head);
+        assert_eq!((head.signer_cert_sha256.as_str(), head.producer_id.as_str()), (verifier.cert_sha256().unwrap(), "edge-1"));
+        assert_eq!(head.link_config_sha256, "cd".repeat(32));
     }
 
     #[test]

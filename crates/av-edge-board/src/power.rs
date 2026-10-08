@@ -1,6 +1,7 @@
 //! [`BoardEdge`]: `altavista.v1.BoardEdgeService`, the board's edge-node operations that are not
 //! lockstep traffic (question 242 (c); `proto/altavista/v1/board.proto`), served on the same gRPC
-//! address as `LockstepService`. Today there is one RPC, `PowerCycle`.
+//! address as `LockstepService`. Two RPCs: `PowerCycle`, and `BoardIoLogHead` (the log's chain
+//! head and record count, which the kernel pins in a run's products: hilprep-2b, `crate::iolog`).
 //!
 //! # Power control is run here, never by the kernel
 //!
@@ -61,7 +62,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use av_cdm::pb::{BoardPowerCycleFailure, BoardPowerCycleOutcome, BoardPowerCycleRefusal, PowerCycleRequest, PowerCycleResponse};
+use av_cdm::pb::{BoardIoLogHeadRequest, BoardIoLogHeadResponse, BoardPowerCycleFailure, BoardPowerCycleOutcome, BoardPowerCycleRefusal, PowerCycleRequest, PowerCycleResponse};
 use av_edge::board::{parse_power_control, power_cycle_argv, PowerControl};
 use av_edge::board_log::{BoardIoKind, BoardIoRecord};
 use tokio::io::AsyncReadExt;
@@ -295,6 +296,19 @@ impl BoardEdgeService for BoardEdge {
             duration_ns: run.duration_ns,
             started_unix_ns: run.started_unix_ns,
             finished_unix_ns: run.finished_unix_ns,
+        }))
+    }
+
+    async fn board_io_log_head(&self, request: Request<BoardIoLogHeadRequest>) -> Result<Response<BoardIoLogHeadResponse>, Status> {
+        let req = request.into_inner();
+        let head = self.log.head(&req.run_id, &req.instance).await?;
+        eprintln!("av-edge-board: BoardIoLogHead for run {:?} instance {:?}: {} records, chain head {}", req.run_id, req.instance, head.records, av_edge::hash::hex_encode(&head.chain_head));
+        Ok(Response::new(BoardIoLogHeadResponse {
+            records: head.records,
+            chain_head: head.chain_head,
+            signer_cert_sha256: head.signer_cert_sha256,
+            link_config_sha256: head.link_config_sha256,
+            producer_id: head.producer_id,
         }))
     }
 }

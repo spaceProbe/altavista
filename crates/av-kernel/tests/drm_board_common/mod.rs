@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use av_cdm::pb::{Binding, BindingKind, BoardBinding, DesignReferenceMission, Fault, LockstepBindRequest, LockstepBindResponse, LockstepResetRequest, LockstepResetResponse, LockstepShutdownResponse, LockstepStepRequest, LockstepStepResponse, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Binding, BindingKind, BoardBinding, DesignReferenceMission, Fault, LockstepBindRequest, LockstepBindResponse, LockstepResetRequest, LockstepResetResponse, LockstepShutdownResponse, LockstepStepRequest, LockstepStepResponse, PortMessage, SosConfiguration, SystemDefinition};
 use av_kernel::drm::{execute, hash, schema, DrmError, RunConfig, RunProducts};
 use av_lockstep_shim::framing::{encode_frame, encode_hello, FrameType, PROTOCOL_VERSION};
 use prost::Message;
@@ -64,6 +64,11 @@ fn take_frame(buf: &mut Vec<u8>) -> Option<(FrameType, Vec<u8>)> {
     Some((ty, payload))
 }
 
+/// How a fake guest answers a STEP: the response's `outputs` and `named_outputs` as a function of
+/// the request (hilprep-2b: non-empty, step-dependent answers, so a replay from the log is not
+/// vacuous).
+pub type StepAnswer = Arc<dyn Fn(&LockstepStepRequest) -> (Vec<PortMessage>, BTreeMap<String, f64>) + Send + Sync>;
+
 /// How the fake guest misbehaves. The default answers every STEP at once with an empty
 /// STEP_DONE (the controller is then silent and the truth drifts: the stand-in does not run the
 /// control law).
@@ -73,6 +78,8 @@ pub struct GuestPlan {
     pub delay_for_step: BTreeMap<u64, Duration>,
     /// Never answer a STEP whose sequence is at least this.
     pub silent_from_step: Option<u64>,
+    /// Answer every STEP with these outputs instead of empty ones (the default `None`).
+    pub answer: Option<StepAnswer>,
 }
 
 /// What the fake guest saw.
@@ -134,7 +141,8 @@ impl FakeGuest {
                             if let Some(d) = plan.delay_for_step.get(&req.sequence) {
                                 std::thread::sleep(*d);
                             }
-                            let resp = LockstepStepResponse { sequence: req.sequence, reached_tai_ns: req.until_tai_ns, outputs: vec![], named_outputs: BTreeMap::new() };
+                            let (outputs, named_outputs) = plan.answer.as_ref().map(|f| f(&req)).unwrap_or_default();
+                            let resp = LockstepStepResponse { sequence: req.sequence, reached_tai_ns: req.until_tai_ns, outputs, named_outputs };
                             Some(encode_frame(FrameType::StepDone, &resp.encode_to_vec()))
                         }
                     }

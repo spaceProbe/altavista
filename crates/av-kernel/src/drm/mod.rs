@@ -54,6 +54,9 @@
 //!   delta-v frame transform (`docs/open-questions.md` question 97).
 //! - [`events`] -- the CDM `Event`s [`executor::execute`] emits (`docs/open-questions.md`
 //!   question 95).
+//! - [`board_replay`] -- replaying a board-bound run from the board edge service's signed I/O log
+//!   (hilprep-2b): the pin of the log's chain head and record count in the run's products, the
+//!   verification, [`executor::execute_with_board_replay`], and the comparison contract.
 //! - [`executor`] -- [`executor::execute`], the end-to-end entry point. `executor::RunProducts::
 //!   to_proto` (question 121, M17.2) converts a run's products into the real
 //!   `altavista.v1.RunProducts` CDM message -- see that method's own doc comment and
@@ -61,6 +64,7 @@
 
 pub mod attitude;
 pub mod binding;
+pub mod board_replay;
 pub mod command;
 pub mod command_source;
 pub mod controller;
@@ -94,7 +98,8 @@ pub use command_source::{CommandOutcome, ExternalCommandSource};
 // branch of `convert_gmat_trajectory_to_declared_frame`) and which were restored GMAT-free
 // (everything else `execute` reaches, including the container-materialization cluster in
 // `binding.rs` and `replay::verify_and_load`).
-pub use executor::{execute, RunConfig, RunProducts, Score};
+pub use board_replay::{BoardLogPin, BoardLogReplay, BoardReplayRefusal};
+pub use executor::{execute, execute_with_board_replay, RunConfig, RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
 pub use replay::ReplayConfig;
 
@@ -391,6 +396,15 @@ pub enum DrmError {
     /// is its own `refusal_reason` (a mismatched edge node or device, or the flight software
     /// refusing the port set).
     BoardRefused { instance: String, reason: String },
+    /// Hilprep-2b: at the end of a board-bound run the kernel could not obtain the board edge
+    /// service's log head to pin in the run's products (`board_replay::fetch_pin`): the RPC failed,
+    /// timed out, or answered something that cannot be a pin. Ends the run: a run whose board log
+    /// cannot be pinned is not one a replay could trust.
+    BoardLogPin { instance: String, detail: String },
+    /// Hilprep-2b: a board instance could not be replayed from its signed edge I/O log; `refusal`
+    /// names exactly why (`board_replay::BoardReplayRefusal`). Raised before anything binds,
+    /// except `PowerCycleNotInLog`.
+    BoardReplay { instance: String, refusal: Box<board_replay::BoardReplayRefusal> },
     /// Question 107: a declared `container.seed_key` did not name a key present in
     /// `Scenario.seeds` -- mirrors [`DrmError::UnknownManeuverSeed`] (ADR-004 "seeds are
     /// inputs" applied to a container binding's own seed).
@@ -774,6 +788,8 @@ impl std::fmt::Display for DrmError {
             DrmError::BoardConnect { instance, address, detail } => write!(f, "instance {instance:?}: connecting to the board's edge service at {address:?} failed: {detail}"),
             DrmError::BoardBind { instance, detail } => write!(f, "instance {instance:?}: Bind RPC to the board's edge service failed: {detail}"),
             DrmError::BoardRefused { instance, reason } => write!(f, "instance {instance:?}: the board's edge service refused Bind (lockstep_capable=false): {reason}"),
+            DrmError::BoardLogPin { instance, detail } => write!(f, "instance {instance:?}: the board's edge I/O log head could not be pinned in the run's products: {detail}"),
+            DrmError::BoardReplay { instance, refusal } => write!(f, "instance {instance:?}: board replay refused: {refusal}"),
             DrmError::UnknownContainerSeed { instance, seed_key } => write!(f, "instance {instance:?}: container.seed_key {seed_key:?} names no entry in Scenario.seeds"),
             DrmError::ContainerProtocol { instance, source } => write!(f, "instance {instance:?}: {source}"),
             DrmError::ContainerPeriodNotOnGrid { instance, period_ns, duration_ns } => {

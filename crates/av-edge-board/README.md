@@ -190,8 +190,18 @@ the run replays".
   tail mid-file). The file's directory entry is `fsync`ed on creation. A startup that fails after
   the log was created (a handshake timeout, say) removes the still-empty file, so the next start is
   not refused; a log holding any record is never removed.
-- **What the chain cannot show:** records removed from the *end* of a log. Pin the chain head and
-  record count (printed at exit and by the tool) in the run's manifest.
+- **What the chain cannot show:** records removed from the *end* of a log. So the kernel pins the
+  chain head and record count in the run's products (hilprep-2b): `BoardEdgeService.BoardIoLogHead`
+  (`proto/altavista/v1/board.proto`, served on the same address as `LockstepService`) reports
+  `records`, `chain_head` (32 raw bytes), `signer_cert_sha256`, `link_config_sha256` and
+  `producer_id` of the log as it stands. It is **read only** (it appends nothing), takes the
+  exchange gate (never answered between a STEP's exchange and its record), and is
+  `FAILED_PRECONDITION` when the log has failed, when no Bind has named a run yet, or when its
+  `run_id` / `instance` are not the Bind's. The kernel asks once, after the last STEP and **before**
+  the SHUTDOWN (the service records the SHUTDOWN and exits, so it cannot answer after it); a replay
+  requires the pinned count and head and then exactly one SHUTDOWN record
+  (`crates/av-kernel/README.md`, "Replaying a board-bound run"). The count and head are also printed
+  at exit and by the tool.
 
 ### Reading a log: `av-edge-board-log`
 
@@ -246,6 +256,10 @@ scripts/dev/cargo-slot test -p av-edge-board
 - `tests/power_inprocess.rs`: the `POWER_CYCLE` record is written and synced before the reply
   returns; a failed sync is `DATA_LOSS`, and the failed log refuses the next power cycle before the
   channel runs.
+- `tests/log_head_inprocess.rs` (hilprep-2b): `BoardIoLogHead` equals the end of the verified log
+  (count, last record's hash, signer, link, producer), writes nothing, moves with the log, and is
+  refused before a Bind, for another run or instance, and from a failed log. The kernel's end-to-end
+  proof is `crates/av-kernel/tests/drm_board_replay.rs`.
 
 The Linux build of hilprep-3b was checked (not built by the host's cargo) in the digest-pinned Rust
 builder image `services/cfs/build-shim.sh` uses; the I/O log additions have not been built on Linux.
