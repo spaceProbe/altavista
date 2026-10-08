@@ -98,7 +98,13 @@
 //!   [`buffer::BatchSink`]/[`buffer::UplinkDriver`], the sink trait and pure state machine
 //!   that buffer while disconnected and replay in order on reconnect. No network code, no
 //!   clock reads, no sleeping here either.
+//! - [`board`] -- question 242 (b): the pure half of a board's link on the edge side. It
+//!   parses and validates `BoardBinding.port_devices` (`/dev/...@<baud>` serial lines,
+//!   `udp://host:port` endpoints) into typed devices with typed errors, enforces one link
+//!   per board instance, and gives the link a canonical form and a SHA-256 config hash.
+//!   Its I/O half is `crates/av-edge-board`.
 
+pub mod board;
 pub mod buffer;
 pub mod chain;
 pub mod hash;

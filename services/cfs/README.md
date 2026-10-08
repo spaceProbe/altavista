@@ -239,6 +239,33 @@ warm-up completed) -- every one found only by actually running the compiled apps
 kernel `Step`, not by static reading of any of them alone. `IMAGE_DIGEST.md`'s own "M23.4
 changes" section has the full account of each, with a pointer to its own fix site.
 
+## Lockstep-local over a serial line and over UDP (question 242 (b))
+
+The same frames, unchanged, also run to a board: `crates/av-edge-board` (`av-edge-board`) opens the
+board's link and serves `LockstepService` to the kernel exactly as the shim does for a container
+(`BoardBinding.port_devices`, `av_edge::board` for the pure half). Only the carrier differs; the
+HELLO-first handshake, the frame layout and every protocol check above hold as written.
+
+- **Serial** (`--port-device /dev/<name>@<baud>`): the byte stream is the frame stream, raw 8N1, no
+  flow control. The guest end is `io_lockstep_app.c` on `/dev/ttyS1` (Zynq UART1). Because RTEMS'
+  termios keeps a 256-byte raw input ring and the Cadence UART's receive FIFO is 64 bytes
+  (question 238), **host writes are chunked: at most 64 bytes per write, with each chunk's 8N1 wire
+  time (10 bits per byte at the baud rate) between chunks, always**.
+- **UDP** (`--port-device udp://host:port`): **one whole frame per datagram**, the 4-byte length
+  prefix kept, so the bytes are identical to the other carriers'. A received datagram that is not
+  exactly one complete frame is a typed error; datagrams from any address other than the configured
+  peer are dropped and counted.
+- **HELLO is sent once** on every carrier and never retried (the guest reads it once; a second HELLO
+  where BIND is expected fails it), so the board's end must be open before the service starts, or
+  the handshake times out with a typed error.
+- **Bind-time check:** the kernel sets `board.edge_node_id` and `board.port_device` in the Bind
+  parameters; the service refuses a mismatch without forwarding it and strips both before the BIND
+  reaches the guest, so the guest's BIND bytes (and its 512-byte BIND buffer) are what the
+  container path sends today.
+
+The crate's README has the command line and the details. Proven so far against stand-ins only (a
+host pseudo-terminal, loopback UDP, fake guests); no board has been involved.
+
 ## Example: hand-derived bytes for a `SHUTDOWN` frame
 
 As a worked example matching `crates/av-lockstep-shim/tests/frame_bytes.rs`'s pinned test: a

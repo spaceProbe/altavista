@@ -1,0 +1,36 @@
+[package]
+name = "av-edge-board"
+publish = false
+description = "Question 242 (b): the board's edge service. Opens the board's link (a serial device or a UDP endpoint, BoardBinding.port_devices), speaks lockstep-local v1 over it to the flight software exactly as av-lockstep-shim does over a Unix socket, and serves altavista.v1.LockstepService to the kernel. The pure half (spec parsing, typed errors, hashable config) is av-edge::board."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The pure half: `parse_port_device`, `BoardLink`, the Bind parameter names.
+av-edge = { path = "../av-edge" }
+# `LockstepBindRequest` etc. (the shim's `pb` re-exports these `av_cdm::pb` types) and the
+# `PeerLink`/`framing`/`ShimService` this service reuses unchanged.
+av-cdm = { path = "../av-cdm" }
+av-lockstep-shim = { path = "../av-lockstep-shim" }
+thiserror.workspace = true
+# Raw termios / open(2) / ioctl(2) for the serial device; no `serialport`, `nix` or
+# `tokio-serial` (the same reasoning as av-lockstep's `flock` use, see the root Cargo.toml).
+libc.workspace = true
+
+# Server side only, like the shim: this crate hosts `LockstepService`, it never dials.
+tonic = { version = "0.12", default-features = false, features = ["codegen", "prost", "server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+
+[dev-dependencies]
+# The kernel's own gRPC client for `LockstepService` (unmodified), as the shim's end-to-end
+# test uses it.
+av-lockstep = { path = "../av-lockstep" }
+prost.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal", "process"] }
+
+[[bin]]
+name = "av-edge-board"
+path = "src/bin/av-edge-board.rs"
