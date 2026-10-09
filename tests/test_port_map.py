@@ -142,6 +142,12 @@ def _real_constants() -> dict[str, dict[str, "str | None"]]:
         "admin": None,
     }
 
+    edge_board = _read("crates/av-edge-board/src/bin/av-edge-board.rs")
+    real["av-edge-board"] = {
+        "grpc": _extract(edge_board, r'const DEFAULT_GRPC_ADDR: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-edge-board/src/bin/av-edge-board.rs"),
+        "admin": None,
+    }
+
     proposer = _read("crates/av-proposer/src/bin/av-proposer.rs")
     real["av-proposer"] = {
         "grpc": _extract(proposer, r'const DEFAULT_MODEL_SERVICE_BIND: &str = "127\.0\.0\.1:(\d+)"', source="crates/av-proposer/src/bin/av-proposer.rs"),

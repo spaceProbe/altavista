@@ -17,7 +17,10 @@
 //! Simulated time is TAI nanoseconds, `i64`, never a float ([`clock::Clock`]). Iteration over
 //! systems is always by system id, `BTreeMap` ([`schedule::Scheduler`], [`kernel::Kernel`]) --
 //! never `HashMap`. No RNG. No wall-clock read that affects a result: the clock only ever
-//! advances by an explicit call, never by reading the system clock.
+//! advances by an explicit call, never by reading the system clock. The one exception is
+//! [`pacing`] (question 242): when some instance is bound to a board the run is paced against
+//! wall time, and then only the pacing report and the per-overrun events depend on the wall
+//! clock ([`pacing::WALL_CLOCK_DEPENDENT`]); a lockstep run reads no clock at all.
 //!
 //! ## GMAT dependency: everywhere except `clock`/`interpolate`/`schedule`/`kernel`/`trajectory`
 //!
@@ -87,6 +90,7 @@ pub mod drm;
 pub mod expr;
 pub mod interpolate;
 pub mod kernel;
+pub mod pacing;
 pub mod ports;
 pub mod registry;
 pub mod rng;
@@ -98,6 +102,7 @@ pub use clock::{base_period_ns, check_integer_multiples, BasePeriodError, Clock}
 pub use codec::{ApidMap, CodecError, DecodedPacket, FieldValue};
 pub use interpolate::{hermite_velocity, interpolate_by_state_space, InterpolationError};
 pub use kernel::{HeteroKernel, Kernel};
+pub use pacing::{Pacer, PacingClock, PacingStats, SystemClock};
 pub use ports::{Inbox, Outbox, PortMessage};
 pub use registry::{ModelHandle, ModelKind, ModelRegistry};
 pub use router::{Router, RouterError};

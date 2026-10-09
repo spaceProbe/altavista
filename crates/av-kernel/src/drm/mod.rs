@@ -54,6 +54,9 @@
 //!   delta-v frame transform (`docs/open-questions.md` question 97).
 //! - [`events`] -- the CDM `Event`s [`executor::execute`] emits (`docs/open-questions.md`
 //!   question 95).
+//! - [`board_replay`] -- replaying a board-bound run from the board edge service's signed I/O log
+//!   (hilprep-2b): the pin of the log's chain head and record count in the run's products, the
+//!   verification, [`executor::execute_with_board_replay`], and the comparison contract.
 //! - [`executor`] -- [`executor::execute`], the end-to-end entry point. `executor::RunProducts::
 //!   to_proto` (question 121, M17.2) converts a run's products into the real
 //!   `altavista.v1.RunProducts` CDM message -- see that method's own doc comment and
@@ -61,6 +64,7 @@
 
 pub mod attitude;
 pub mod binding;
+pub mod board_replay;
 pub mod command;
 pub mod command_source;
 pub mod controller;
@@ -75,6 +79,7 @@ pub mod gmat_command;
 pub mod ground;
 pub mod hash;
 pub mod maneuver;
+pub mod power;
 pub mod replay;
 pub mod schema;
 pub mod sensors;
@@ -93,7 +98,8 @@ pub use command_source::{CommandOutcome, ExternalCommandSource};
 // branch of `convert_gmat_trajectory_to_declared_frame`) and which were restored GMAT-free
 // (everything else `execute` reaches, including the container-materialization cluster in
 // `binding.rs` and `replay::verify_and_load`).
-pub use executor::{execute, RunConfig, RunProducts, Score};
+pub use board_replay::{BoardLogPin, BoardLogReplay, BoardReplayRefusal};
+pub use executor::{execute, execute_with_board_replay, RunConfig, RunProducts, Score};
 pub use maneuver::ExecutionErrorMode;
 pub use replay::ReplayConfig;
 
@@ -155,9 +161,10 @@ pub enum DrmError {
     /// Questions 82/83: a covariance request against a declared `RelativisticCorrection`
     /// force model was not accompanied by `DrmOptions.accept_missing_stm_terms`.
     MissingStmTermsNotAccepted { instance: String },
-    /// `DrmOptions.real_time` was `true`. ADR-005's real-time runtime is still Planned; this
-    /// crate only ever runs lockstep, so honouring the request would mean silently running
-    /// lockstep while claiming real-time was used -- refused instead.
+    /// `DrmOptions.real_time` was `true` but no instance is bound to a board. ADR-005 section 2
+    /// enters real-time pacing only when the configuration binds a board (then it is forced,
+    /// whatever the flag says); the flag alone would mean silently running lockstep while
+    /// claiming real-time was used -- refused instead.
     RealTimeNotSupported,
     /// `crate::registry::ModelRegistry::construct_gmat`/`construct_native` failed --
     /// `av_dynamics::ModelError`, the one error type every registry constructor and every
@@ -356,6 +363,48 @@ pub enum DrmError {
     /// `materialize_container` always connects to the `127.0.0.1:<host_port>` address Docker
     /// itself published, never a caller-supplied one.
     ContainerPlaintextNonLoopback { context: String, address: String },
+    /// Question 242 (hilprep-3a): a `BINDING_KIND_BOARD` instance's `Binding.config` was not a
+    /// `BoardBinding` (unset, or another variant of the oneof).
+    BoardConfigMissing { instance: String },
+    /// Question 242: the `BoardBinding` failed `av_edge::board` validation -- `source` is the
+    /// typed reason (empty `edge_node_id`, an unparsable `port_devices` spec, a mixed map that
+    /// names more than one device, a declared port missing from the map or an undeclared one in
+    /// it).
+    BoardLink { instance: String, source: av_edge::board::BoardLinkError },
+    /// Question 242 (c): a `BoardBinding.power_control` that does not parse (`av_edge::board::
+    /// parse_power_control`): not `cmd:<absolute path>` and not empty, or the reserved
+    /// `gpio://...`. Refused at load whether or not any fault uses it.
+    BoardPowerControl { instance: String, source: av_edge::board::PowerControlSpecError },
+    /// Question 242 (c): a `FAULT_TARGET_KIND_HARDWARE` / `"power_cycle"` fault names a board
+    /// instance whose `BoardBinding.power_control` is empty, so there is no channel to run.
+    BoardPowerCycleNeedsChannel { fault_id: String, instance: String },
+    /// Question 242 (c): the board's edge service refused the power cycle or its channel failed
+    /// (or timed out, or the RPC failed): `source` carries the edge service's own reason. Ends the
+    /// run; no lockstep `RESET` was sent.
+    BoardPowerCycle { instance: String, fault_id: String, source: Box<power::PowerControlError> },
+    /// Question 242: question 155's refusal, applied to a board's `board.edge_address`: plaintext
+    /// (`board.tls` unset) to a non-loopback host.
+    BoardPlaintextNonLoopback { context: String, address: String },
+    /// Question 242: a declared `board.seed_key` named no key in `Scenario.seeds`.
+    UnknownBoardSeed { instance: String, seed_key: String },
+    /// Question 242: connecting to a board instance's edge service (`board.edge_address`) failed.
+    BoardConnect { instance: String, address: String, detail: String },
+    /// Question 242: the `Bind` RPC to the edge service failed at the transport/gRPC level or got
+    /// no reply within `board.bind_timeout_ms`.
+    BoardBind { instance: String, detail: String },
+    /// Question 242: the edge service answered `Bind` with `lockstep_capable = false`; `reason`
+    /// is its own `refusal_reason` (a mismatched edge node or device, or the flight software
+    /// refusing the port set).
+    BoardRefused { instance: String, reason: String },
+    /// Hilprep-2b: at the end of a board-bound run the kernel could not obtain the board edge
+    /// service's log head to pin in the run's products (`board_replay::fetch_pin`): the RPC failed,
+    /// timed out, or answered something that cannot be a pin. Ends the run: a run whose board log
+    /// cannot be pinned is not one a replay could trust.
+    BoardLogPin { instance: String, detail: String },
+    /// Hilprep-2b: a board instance could not be replayed from its signed edge I/O log; `refusal`
+    /// names exactly why (`board_replay::BoardReplayRefusal`). Raised before anything binds,
+    /// except `PowerCycleNotInLog`.
+    BoardReplay { instance: String, refusal: Box<board_replay::BoardReplayRefusal> },
     /// Question 107: a declared `container.seed_key` did not name a key present in
     /// `Scenario.seeds` -- mirrors [`DrmError::UnknownManeuverSeed`] (ADR-004 "seeds are
     /// inputs" applied to a container binding's own seed).
@@ -397,14 +446,16 @@ pub enum DrmError {
     /// fault. See `fault::is_legacy_dynamics_power_cycle`.
     PowerCycleFaultMustTargetHardware { fault_id: String, instance: String },
     /// Question 120, M16.2: a `FAULT_TARGET_KIND_HARDWARE` fault named a `BINDING_KIND_CONTAINER`
-    /// instance with a `kind` other than `"power_cycle"`. HARDWARE's own doc comment also names
+    /// (or, question 242, `BINDING_KIND_BOARD`) instance with a `kind` other than `"power_cycle"`. HARDWARE's own doc comment also names
     /// "Renode peripheral fault, board reset" -- neither has any meaning for a container instance
     /// today (a container has no Renode peripheral or board to act on, only its own process to
     /// power-cycle), so refused explicitly rather than silently dropped from the boundary set
     /// `executor::run_shared_group` builds.
     HardwareFaultKindNotSupported { fault_id: String, instance: String, kind: String },
     /// Question 120, M16.2: a `FAULT_TARGET_KIND_HARDWARE` fault named an instance that is not
-    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). HARDWARE
+    /// `BINDING_KIND_CONTAINER` (a `BINDING_KIND_MODEL` instance, GMAT or native). (A HARDWARE
+    /// power cycle naming a `BINDING_KIND_BOARD` instance is supported as of question 242 (c):
+    /// `drm::power`.) HARDWARE
     /// covers a container's own power cycle today, and Renode peripheral faults/board resets
     /// later (both against binding kinds that do not exist yet) -- it has no meaning yet for a
     /// model instance, so this is refused explicitly, at load, rather than silently dropped
@@ -663,7 +714,7 @@ impl std::fmt::Display for DrmError {
             DrmError::MissingParameter { context, name } => write!(f, "{context}: missing required parameter {name:?}"),
             DrmError::UnknownParameter { context, name } => write!(f, "{context}: parameter {name:?} is not a recognized name for this binding kind"),
             DrmError::MissingStmTermsNotAccepted { instance } => write!(f, "instance {instance:?}: covariance requested against a force model declaring RelativisticCorrection, without DrmOptions.accept_missing_stm_terms"),
-            DrmError::RealTimeNotSupported => write!(f, "DrmOptions.real_time is true; this executor only ever runs lockstep (ADR-005's real-time runtime is still Planned)"),
+            DrmError::RealTimeNotSupported => write!(f, "DrmOptions.real_time is true but no instance is bound to a board; real-time pacing is entered only when the configuration binds a board (ADR-005 section 2)"),
             DrmError::Model(e) => write!(f, "{e}"),
             DrmError::InvalidDrmOptions { reason } => write!(f, "invalid DrmOptions/Scenario: {reason}"),
             DrmError::UnknownFaultInstance { fault_id, instance } => write!(f, "fault {fault_id:?} names instance {instance:?}, which is not in this SosConfiguration"),
@@ -721,6 +772,24 @@ impl std::fmt::Display for DrmError {
                 f,
                 "{context}: container.address {address:?} is plaintext (container.tls is not set) and is not a recognized loopback address (127.0.0.0/8, ::1, or \"localhost\") -- the kernel <-> shim gRPC link is plaintext only on loopback within one host; set container.tls (with ca_file/client_cert/client_key) for any other host (question 155)"
             ),
+            DrmError::BoardConfigMissing { instance } => write!(f, "instance {instance:?}: BINDING_KIND_BOARD requires Binding.config to be a BoardBinding"),
+            DrmError::BoardLink { instance, source } => write!(f, "instance {instance:?}: invalid BoardBinding: {source}"),
+            DrmError::BoardPowerControl { instance, source } => write!(f, "instance {instance:?}: invalid BoardBinding.power_control: {source}"),
+            DrmError::BoardPowerCycleNeedsChannel { fault_id, instance } => write!(
+                f,
+                "fault {fault_id:?}: a FAULT_TARGET_KIND_HARDWARE power cycle names board instance {instance:?}, whose BoardBinding.power_control is empty: there is no power control channel to run (set it to cmd:<absolute path> of the edge node's executable)"
+            ),
+            DrmError::BoardPowerCycle { instance, fault_id, source } => write!(f, "instance {instance:?}: the power cycle for fault {fault_id:?} did not happen: {source}"),
+            DrmError::BoardPlaintextNonLoopback { context, address } => write!(
+                f,
+                "{context}: board.edge_address {address:?} is plaintext (board.tls is not set) and is not a recognized loopback address (127.0.0.0/8, ::1, or \"localhost\") -- the kernel <-> edge service gRPC link is plaintext only on loopback within one host; set board.tls (with ca_file/client_cert/client_key) for any other host (question 155)"
+            ),
+            DrmError::UnknownBoardSeed { instance, seed_key } => write!(f, "instance {instance:?}: board.seed_key {seed_key:?} names no entry in Scenario.seeds"),
+            DrmError::BoardConnect { instance, address, detail } => write!(f, "instance {instance:?}: connecting to the board's edge service at {address:?} failed: {detail}"),
+            DrmError::BoardBind { instance, detail } => write!(f, "instance {instance:?}: Bind RPC to the board's edge service failed: {detail}"),
+            DrmError::BoardRefused { instance, reason } => write!(f, "instance {instance:?}: the board's edge service refused Bind (lockstep_capable=false): {reason}"),
+            DrmError::BoardLogPin { instance, detail } => write!(f, "instance {instance:?}: the board's edge I/O log head could not be pinned in the run's products: {detail}"),
+            DrmError::BoardReplay { instance, refusal } => write!(f, "instance {instance:?}: board replay refused: {refusal}"),
             DrmError::UnknownContainerSeed { instance, seed_key } => write!(f, "instance {instance:?}: container.seed_key {seed_key:?} names no entry in Scenario.seeds"),
             DrmError::ContainerProtocol { instance, source } => write!(f, "instance {instance:?}: {source}"),
             DrmError::ContainerPeriodNotOnGrid { instance, period_ns, duration_ns } => {
@@ -732,10 +801,10 @@ impl std::fmt::Display for DrmError {
                 "fault {fault_id:?} on instance {instance:?}: a power-cycle fault must be FAULT_TARGET_KIND_HARDWARE, not FAULT_TARGET_KIND_DYNAMICS (question 120 moved it off DYNAMICS; the interim kind=\"power_cycle\" DYNAMICS shape is no longer accepted)"
             ),
             DrmError::HardwareFaultKindNotSupported { fault_id, instance, kind } => {
-                write!(f, "fault {fault_id:?} on container instance {instance:?}: FAULT_TARGET_KIND_HARDWARE kind {kind:?} is not supported (only \"power_cycle\" is, for a container instance)")
+                write!(f, "fault {fault_id:?} on container instance {instance:?}: FAULT_TARGET_KIND_HARDWARE kind {kind:?} is not supported (only \"power_cycle\" is, for a container or board instance)")
             }
             DrmError::HardwareFaultNotSupportedOnInstance { fault_id, instance } => {
-                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER instance -- HARDWARE has no runtime yet for a model instance (Renode/board bindings are still Planned)")
+                write!(f, "fault {fault_id:?}: FAULT_TARGET_KIND_HARDWARE names instance {instance:?}, which is not a BINDING_KIND_CONTAINER or BINDING_KIND_BOARD instance -- HARDWARE has no runtime yet for a model instance")
             }
             DrmError::ContainerDockerLifecycle { instance, detail } => write!(f, "instance {instance:?}: Docker image lifecycle failed: {detail}"),
             DrmError::InvalidFrameDefinition { id, reason } => write!(f, "frame {id:?}: {reason}"),
@@ -788,3 +857,14 @@ impl std::fmt::Display for DrmError {
     }
 }
 impl std::error::Error for DrmError {}
+
+impl DrmError {
+    /// The edge service's typed reason when this is a [`DrmError::BoardPowerCycle`] (the source
+    /// is boxed to keep `DrmError` small), else `None`.
+    pub fn power_control_error(&self) -> Option<&power::PowerControlError> {
+        match self {
+            DrmError::BoardPowerCycle { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}

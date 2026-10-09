@@ -46,6 +46,7 @@ extern "C" {
  * comment): a real `docker run` of this build found that ordering race is not hypothetical --
  * `services/cfs/apps/sch_lockstep`'s timebase helper thread starts independently of
  * `services/cfs/apps/io_lockstep`'s own BIND handshake with the shim. */
+/* The tick count (`psp_lockstep_tick_count`) is not part of what starts over. */
 void psp_lockstep_init(int64_t start_tai_ns);
 
 /* Matches OSAL's `OS_TimerSync_t` (`osal/src/os/inc/osapi-timebase.h`): `timer_id` is unused
@@ -83,9 +84,11 @@ int psp_lockstep_release_tick(int64_t until_tai_ns);
  * on its own; see the module doc comment above. */
 int64_t psp_lockstep_current_tai_ns(void);
 
-/* Total number of ticks released so far (0 before the first `psp_lockstep_release_tick` call).
- * Exists so a test can observe "no advance happened" without racing
- * `psp_lockstep_external_sync`'s own blocking wait. */
+/* Total number of ticks consumed by `psp_lockstep_external_sync` since this process started
+ * (0 before the first). Monotonic: `psp_lockstep_init` (a RESET) does NOT reset it, because the
+ * scheduler (`services/cfs/apps/sch_lockstep`) compares it with the last count it has seen and a
+ * count that went backwards silences it until it climbs back (hilprep-6). Exists so a test can
+ * observe "no advance happened" without racing `psp_lockstep_external_sync`'s own blocking wait. */
 uint64_t psp_lockstep_tick_count(void);
 
 #ifdef __cplusplus

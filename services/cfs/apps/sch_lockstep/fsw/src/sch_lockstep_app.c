@@ -135,6 +135,18 @@ void SCH_LS_AppMain(void)
          * produce, but is not assumed away here -- still gets one wakeup per tick, not one
          * wakeup for the whole burst). */
         uint64_t current_tick_count = psp_lockstep_tick_count();
+        if (current_tick_count < last_seen_tick_count)
+        {
+            /* hilprep-6: the tick count went BACKWARDS, which psp_lockstep.c no longer lets happen
+             * (psp_lockstep_init used to zero it on every RESET, and this loop then dispatched
+             * nothing until the count had climbed back to last_seen_tick_count: a RESET after N
+             * steps silenced the whole mission for N steps). Kept as a guard rather than assumed
+             * away: if a counter is ever reset again, restart from zero so every tick consumed
+             * since is dispatched, never wait for it to catch up. (Equality is not a backwards
+             * step and cannot be told apart from "no new tick", which is why the fix is a
+             * monotonic counter in psp_lockstep.c and this is only the backstop.) */
+            last_seen_tick_count = 0;
+        }
         for (; last_seen_tick_count < current_tick_count; ++last_seen_tick_count)
         {
             g_tick_callback_count += 1;

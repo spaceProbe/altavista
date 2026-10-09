@@ -170,6 +170,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-edge-board"
+version = "0.1.0"
+dependencies = [
+ "av-cdm",
+ "av-edge",
+ "av-lockstep",
+ "av-lockstep-shim",
+ "libc",
+ "openssl",
+ "prost",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
 name = "av-gateway"
 version = "0.1.0"
 dependencies = [
@@ -281,6 +299,7 @@ dependencies = [
  "av-codec",
  "av-dynamics",
  "av-edge",
+ "av-edge-board",
  "av-lockstep",
  "av-lockstep-shim",
  "av-orbital",

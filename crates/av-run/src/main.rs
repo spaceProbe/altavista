@@ -37,6 +37,17 @@
 //! reader (`altavista.pb.altavista.v1.run_pb2.RunProducts` on the Python side, binary or JSON
 //! transcoded, exactly like `POST /api/cdm/trajectory` already accepted a bare `Trajectory`).
 //!
+//! ## Replaying a board-bound run (hilprep-2b)
+//!
+//! `--replay-board-log <instance>=<edge I/O log> --board-log-cert <PEM> --board-log-pins
+//! <live run's --out file>` replays a `BINDING_KIND_BOARD` instance from the board edge service's
+//! signed log (`av-edge-board --io-log`) instead of dialling it: no board and no edge service are
+//! needed, and the run is lockstep. The log is verified (chain, every signature against the
+//! certificate, no torn tail), compared with the chain head and record count the live run pinned
+//! in its products (read from `--board-log-pins`, the live run's `--out` file), and checked against
+//! this run's id and shape, all before anything binds. `av_kernel::drm::board_replay` has the
+//! contract.
+//!
 //! ## No new HTTP-client dependency
 //!
 //! Posting the bundle to a running `altavista` server needs an HTTP client. This workspace's
@@ -55,7 +66,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use av_cdm::pb::SystemDefinition;
-use av_kernel::drm::{execute, schema, DrmError, ExecutionErrorMode, RunConfig};
+use av_kernel::drm::{execute_with_board_replay, schema, BoardLogPin, BoardLogReplay, DrmError, ExecutionErrorMode, RunConfig};
 // `docs/open-questions.md` question 230: named only by `run_drm`'s gated lines (see that
 // function's own doc comment).
 #[cfg(feature = "gmat")]
@@ -83,17 +94,34 @@ struct Cli {
     out: Option<PathBuf>,
     gmat_startup: Option<String>,
     error_mode: ExecutionErrorMode,
+    /// `--replay-board-log <instance>=<path>`, repeatable: board instances to replay from their
+    /// edge I/O logs.
+    replay_board_logs: Vec<(String, PathBuf)>,
+    /// `--board-log-cert`: the PEM certificate the logs are signed by.
+    board_log_cert: Option<PathBuf>,
+    /// `--board-log-pins`: the live run's `--out` file, whose board trajectories pin each log's
+    /// chain head and record count.
+    board_log_pins: Option<PathBuf>,
 }
 
 fn usage(prog: &str) -> String {
     format!(
         "usage: {prog} --drm <path> --sos <path> --system <path> [--system <path> ...] --run-id <id> \
          (--server <http://host:port> | --out <path> | both) [--gmat-startup <path>] \
-         [--error-mode nominal|sampled]\n\n\
+         [--error-mode nominal|sampled] \
+         [--replay-board-log <instance>=<edge-log> ... --board-log-cert <pem> --board-log-pins <live-run-out>]\n\n\
          Loads one DesignReferenceMission + SosConfiguration + SystemDefinition(s) (drms/*.yaml \
          authoring format), runs it through av_kernel::drm::execute, and emits the resulting \
          RunProducts as an altavista.v1.RunProducts CDM v1 message on the wire (binary \
-         protobuf): to --out (raw bytes) and/or POSTed to --server's POST /api/cdm/run."
+         protobuf): to --out (raw bytes) and/or POSTed to --server's POST /api/cdm/run.\n\n\
+         Replaying a board-bound run (hilprep-2b): --replay-board-log <instance>=<path> (repeatable) \
+         replays that BINDING_KIND_BOARD instance from the signed I/O log the board's edge service \
+         (av-edge-board --io-log) wrote, instead of dialling it -- no board and no edge service are \
+         needed, and the run is lockstep (no pacing report). --board-log-cert is the PEM X.509 \
+         certificate the log is signed by (a bare public key is refused); --board-log-pins is the \
+         live run's --out file, which pins each board log's chain head and record count in its \
+         products, so a log cut short or rewritten is refused. --run-id must be the live run's. \
+         Every check happens before anything binds. All three flags go together."
     )
 }
 
@@ -107,6 +135,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut out = None;
     let mut gmat_startup = None;
     let mut error_mode = ExecutionErrorMode::Nominal;
+    let mut replay_board_logs: Vec<(String, PathBuf)> = Vec::new();
+    let mut board_log_cert = None;
+    let mut board_log_pins = None;
 
     let mut i = 1;
     let next = |i: &mut usize, flag: &str| -> Result<String, String> {
@@ -130,6 +161,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                     other => return Err(format!("--error-mode must be 'nominal' or 'sampled', got {other:?}\n\n{}", usage(prog))),
                 };
             }
+            "--replay-board-log" => {
+                let v = next(&mut i, "--replay-board-log")?;
+                match v.split_once('=') {
+                    Some((instance, path)) if !instance.is_empty() && !path.is_empty() => replay_board_logs.push((instance.to_string(), PathBuf::from(path))),
+                    _ => return Err(format!("--replay-board-log needs <instance>=<path>, got {v:?}\n\n{}", usage(prog))),
+                }
+            }
+            "--board-log-cert" => board_log_cert = Some(PathBuf::from(next(&mut i, "--board-log-cert")?)),
+            "--board-log-pins" => board_log_pins = Some(PathBuf::from(next(&mut i, "--board-log-pins")?)),
             "-h" | "--help" => return Err(usage(prog)),
             other => return Err(format!("unrecognized argument {other:?}\n\n{}", usage(prog))),
         }
@@ -145,7 +185,30 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     if server.is_none() && out.is_none() {
         return Err(format!("at least one of --server / --out is required\n\n{}", usage(prog)));
     }
-    Ok(Cli { drm, sos, systems, run_id, server, out, gmat_startup, error_mode })
+    if replay_board_logs.is_empty() != (board_log_cert.is_none() && board_log_pins.is_none()) {
+        return Err(format!("--replay-board-log, --board-log-cert and --board-log-pins go together (a replay needs the certificate the log is signed by and the live run's pinned log head)\n\n{}", usage(prog)));
+    }
+    if !replay_board_logs.is_empty() && (board_log_cert.is_none() || board_log_pins.is_none()) {
+        return Err(format!("--replay-board-log needs both --board-log-cert and --board-log-pins\n\n{}", usage(prog)));
+    }
+    Ok(Cli { drm, sos, systems, run_id, server, out, gmat_startup, error_mode, replay_board_logs, board_log_cert, board_log_pins })
+}
+
+/// The board replays `cli` asks for (none without `--replay-board-log`): each log with the
+/// certificate it is signed by and the pin the live run recorded for that instance in its
+/// products (`--board-log-pins`). Reads files only; the kernel verifies everything.
+fn board_replays(cli: &Cli) -> Result<Vec<BoardLogReplay>, String> {
+    let (Some(cert), Some(pins)) = (&cli.board_log_cert, &cli.board_log_pins) else { return Ok(Vec::new()) };
+    let certificate_pem = std::fs::read(cert).map_err(|e| format!("reading {}: {e}", cert.display()))?;
+    let live = std::fs::read(pins).map_err(|e| format!("reading {}: {e}", pins.display()))?;
+    let live = av_cdm::pb::RunProducts::decode(live.as_slice()).map_err(|e| format!("{} is not an altavista.v1.RunProducts message: {e}", pins.display()))?;
+    cli.replay_board_logs
+        .iter()
+        .map(|(instance, path)| {
+            let expected = BoardLogPin::from_trajectories(&live.trajectories, instance).map_err(|e| format!("{}: {e}", pins.display()))?;
+            Ok(BoardLogReplay { instance: instance.clone(), log_path: path.clone(), certificate_pem: certificate_pem.clone(), expected })
+        })
+        .collect()
 }
 
 fn read_to_string(path: &PathBuf) -> Result<String, String> {
@@ -200,12 +263,12 @@ fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb
     let startup = cli.gmat_startup.clone().unwrap_or_else(Gmat::default_startup_file);
     let gmat = Gmat::setup(&startup).map_err(|e| format!("GMAT setup ({startup}): {e}"))?;
 
-    // M25.4b (question 175's own successor task, replay): no `--replay` CLI flag is added by this
-    // task -- `av-run` always passes `None` here. Wiring a flag through to `ReplayConfig::{log_path,
-    // expected_hash, instances}` is deliberately left for a later task; this line only keeps
-    // `av-run` compiling against `RunConfig`'s new field.
+    // M25.4b (question 175's own successor task, replay): `RunConfig.replay` (the port-traffic
+    // replay) still has no CLI flag -- `av-run` passes `None` here. Hilprep-2b adds the one replay
+    // a HIL day needs: `--replay-board-log`, board instances from their edge I/O logs.
+    let boards = board_replays(cli)?;
     let cfg = RunConfig { gmat: &gmat, drm, sos, systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
-    execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
+    execute_with_board_replay(cfg, &boards).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
 }
 
 /// `docs/open-questions.md` questions 230/234: the `--no-default-features` counterpart of
@@ -223,8 +286,9 @@ fn run_drm(cli: &Cli, drm: &av_cdm::pb::DesignReferenceMission, sos: &av_cdm::pb
     if cli.gmat_startup.is_some() {
         return Err("--gmat-startup was given, but av-run was built with --no-default-features (the \"gmat\" cargo feature is off, gmat-sys is not linked)".to_string());
     }
+    let boards = board_replays(cli)?;
     let cfg = RunConfig { drm, sos, systems, run_id: cli.run_id.clone(), error_mode: cli.error_mode, products_dir: products_dir_for_out(cli.out.as_ref()), replay: None, command_source: None };
-    execute(cfg).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
+    execute_with_board_replay(cfg, &boards).map_err(|e: DrmError| format!("DRM execution failed: {e}"))
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -344,6 +408,36 @@ mod tests {
         assert_eq!(cli.error_mode, ExecutionErrorMode::Nominal);
     }
 
+    fn args(extra: &[&str]) -> Vec<String> {
+        ["av-run", "--drm", "d.yaml", "--sos", "s.yaml", "--system", "sys.yaml", "--run-id", "r1", "--out", "out.bin"].iter().chain(extra.iter()).map(|s| s.to_string()).collect()
+    }
+
+    /// Hilprep-2b: the three board-replay flags parse together, are documented in `--help`, and
+    /// are refused when given apart or malformed.
+    #[test]
+    fn the_board_replay_flags_parse_together_and_are_refused_apart() {
+        let cli = parse_cli(&args(&["--replay-board-log", "controller=io.log", "--replay-board-log", "other=b.log", "--board-log-cert", "edge.pem", "--board-log-pins", "live.pb"])).unwrap();
+        assert_eq!(cli.replay_board_logs, vec![("controller".to_string(), PathBuf::from("io.log")), ("other".to_string(), PathBuf::from("b.log"))]);
+        assert_eq!((cli.board_log_cert, cli.board_log_pins), (Some(PathBuf::from("edge.pem")), Some(PathBuf::from("live.pb"))));
+        assert!(parse_cli(&args(&[])).unwrap().replay_board_logs.is_empty());
+        for apart in [
+            vec!["--replay-board-log", "controller=io.log"],
+            vec!["--replay-board-log", "controller=io.log", "--board-log-cert", "edge.pem"],
+            vec!["--replay-board-log", "controller=io.log", "--board-log-pins", "live.pb"],
+            vec!["--board-log-cert", "edge.pem"],
+            vec!["--board-log-pins", "live.pb"],
+        ] {
+            let err = parse_cli(&args(&apart)).unwrap_err();
+            assert!(err.contains("--replay-board-log") && err.contains("--board-log-cert"), "{apart:?}: {err}");
+        }
+        for malformed in ["controller", "=io.log", "controller="] {
+            let err = parse_cli(&args(&["--replay-board-log", malformed, "--board-log-cert", "e", "--board-log-pins", "p"])).unwrap_err();
+            assert!(err.contains("<instance>=<path>"), "{malformed:?}: {err}");
+        }
+        let help = parse_cli(&args(&["--help"])).unwrap_err();
+        assert!(help.contains("--replay-board-log") && help.contains("--board-log-cert") && help.contains("--board-log-pins") && help.contains("signed I/O log"), "{help}");
+    }
+
     #[test]
     fn refuses_when_neither_server_nor_out_is_given() {
         let args: Vec<String> = ["av-run", "--drm", "d.yaml", "--sos", "s.yaml", "--system", "sys.yaml", "--run-id", "r1"].iter().map(|s| s.to_string()).collect();
@@ -431,6 +525,7 @@ mod tests {
             frames: vec![],
             measurements: vec![],
             port_traffic_hash: String::new(),
+            pacing: None,
         }
     }
 

@@ -77,6 +77,7 @@ Then, with the GMAT install beside the repository (or `GMAT_ROOT` set):
 ```bash
 cargo build --workspace
 cargo test --workspace --exclude av-kernel
+cargo build -p av-edge-board --bins   # the kernel's board tests spawn this binary; cargo does not rebuild it for them
 cargo test -p av-kernel
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings
@@ -119,9 +120,18 @@ Put it in front of every `cargo` command, in this section and elsewhere:
 ```bash
 scripts/dev/cargo-slot build --workspace
 scripts/dev/cargo-slot test --workspace --exclude av-kernel
+scripts/dev/cargo-slot build -p av-edge-board --bins
 scripts/dev/cargo-slot test -p av-kernel
 scripts/dev/cargo-slot clippy --workspace --all-targets -- -D warnings
 ```
+
+The `build -p av-edge-board --bins` line before the kernel tests is not optional: the kernel's
+`tests/drm_board_*.rs` spawn the `av-edge-board` binary found in `target/debug/`, and
+`cargo test -p av-kernel` does not build another package's binary. The harness
+(`tests/drm_board_common/mod.rs`) panics, naming this command, if the binary is missing or older
+than the newest of `Cargo.toml`, `build.rs` and `src/**` of the crates it is compiled from
+(`av-edge-board`, `av-edge`, `av-cdm`, `av-codec`, `av-dynamics`, `av-lockstep-shim`) or any file
+under `proto/altavista/v1/`.
 
 There are two slots, not one, because question 229's own measurement is that this host
 tolerates two concurrent cargo jobs, not three -- so a third caller waits for whichever of the

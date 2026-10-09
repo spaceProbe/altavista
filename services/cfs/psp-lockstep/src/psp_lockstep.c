@@ -37,7 +37,7 @@ static size_t g_pending_count = 0;
 
 static int64_t g_last_enqueued_tai_ns = 0; /* for the strictly-increasing check on release */
 static int64_t g_last_consumed_tai_ns = 0; /* "cFS's own clock" -- see psp_lockstep_current_tai_ns */
-static uint64_t g_tick_count = 0;          /* ticks actually consumed by external_sync */
+static uint64_t g_tick_count = 0;          /* ticks actually consumed by external_sync since process start; never reset (see psp_lockstep_init) */
 static int g_initialized = 0;
 
 void psp_lockstep_init(int64_t start_tai_ns)
@@ -52,7 +52,15 @@ void psp_lockstep_init(int64_t start_tai_ns)
     g_pending_count = 0;
     g_last_enqueued_tai_ns = start_tai_ns;
     g_last_consumed_tai_ns = start_tai_ns;
-    g_tick_count = 0;
+    /* g_tick_count is deliberately NOT reset here. It counts ticks consumed since this process
+     * started, and services/cfs/apps/sch_lockstep keeps its own copy of "the last count I
+     * dispatched a wakeup for" (psp_lockstep_tick_count() is its tick source). Zeroing the count
+     * on a RESET left that copy ahead of the counter, so the scheduler sent no wakeup again until
+     * the counter had climbed back to where it was: a RESET after N ticks silenced every app the
+     * scheduler wakes for the next N steps (hilprep-6; the symptom is a controller that answers
+     * its next N steps with no output, each after io_lockstep's full output wait). A clock that
+     * "starts over" at a new epoch (above) is not a counter that starts over: the epoch is
+     * g_last_consumed_tai_ns, the count only ever grows. */
     g_initialized = 1;
     pthread_cond_broadcast(&g_tick_cond); /* wakes any external_sync() call already blocked on
                                               "not yet initialized" -- see that function's own

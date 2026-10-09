@@ -58,6 +58,15 @@ One shim process serves exactly one peer connection for its lifetime — a fresh
 bound flight-software process) starts per container/run, matching `Bind`'s own one-shot-per-process
 contract; `Reset` exists precisely so a *bound* process can be power-cycled without a fresh `Bind`.
 
+A `Reset` restarts the lockstep **clock** at the request's `tai_ns` (`psp_lockstep_init`) but not the
+**tick count** (`psp_lockstep_tick_count`, ticks consumed since the process started, which only grows).
+`sch_lockstep` dispatches one wakeup per tick between its own last-seen count and the current one, so a
+count that started over would silence the scheduler, and every app it wakes, for as many steps as had
+passed before the `Reset` (found by the hilprep-6 stand-in run: a controller that answered 50 steps with
+no output after a `Reset` at step 50; `tests/test_psp_lockstep_clock.py` and the power-cycle test of
+`crates/av-kernel/tests/drm_attitude_control_cfs.rs` pin it). The apps themselves are not reset: `Reset`
+re-arms the clock bookkeeping only (`io_lockstep`'s `handle_reset`).
+
 ## Endianness: little-endian, deliberately, and why that differs from CCSDS elsewhere
 
 **Every multi-byte integer in this protocol is little-endian.** This is a deliberate choice, not
@@ -238,6 +247,33 @@ being the bare APID, and an unconditional blocking receive that deadlocked befor
 warm-up completed) -- every one found only by actually running the compiled apps against a real
 kernel `Step`, not by static reading of any of them alone. `IMAGE_DIGEST.md`'s own "M23.4
 changes" section has the full account of each, with a pointer to its own fix site.
+
+## Lockstep-local over a serial line and over UDP (question 242 (b))
+
+The same frames, unchanged, also run to a board: `crates/av-edge-board` (`av-edge-board`) opens the
+board's link and serves `LockstepService` to the kernel exactly as the shim does for a container
+(`BoardBinding.port_devices`, `av_edge::board` for the pure half). Only the carrier differs; the
+HELLO-first handshake, the frame layout and every protocol check above hold as written.
+
+- **Serial** (`--port-device /dev/<name>@<baud>`): the byte stream is the frame stream, raw 8N1, no
+  flow control. The guest end is `io_lockstep_app.c` on `/dev/ttyS1` (Zynq UART1). Because RTEMS'
+  termios keeps a 256-byte raw input ring and the Cadence UART's receive FIFO is 64 bytes
+  (question 238), **host writes are chunked: at most 64 bytes per write, with each chunk's 8N1 wire
+  time (10 bits per byte at the baud rate) between chunks, always**.
+- **UDP** (`--port-device udp://host:port`): **one whole frame per datagram**, the 4-byte length
+  prefix kept, so the bytes are identical to the other carriers'. A received datagram that is not
+  exactly one complete frame is a typed error; datagrams from any address other than the configured
+  peer are dropped and counted.
+- **HELLO is sent once** on every carrier and never retried (the guest reads it once; a second HELLO
+  where BIND is expected fails it), so the board's end must be open before the service starts, or
+  the handshake times out with a typed error.
+- **Bind-time check:** the kernel sets `board.edge_node_id` and `board.port_device` in the Bind
+  parameters; the service refuses a mismatch, and a Bind that lacks them (a board link is always
+  checked), without forwarding it, and strips both before the BIND reaches the guest, so the
+  guest's BIND bytes (and its 512-byte BIND buffer) are what the container path sends today.
+
+The crate's README has the command line and the details. Proven so far against stand-ins only (a
+host pseudo-terminal, loopback UDP, fake guests); no board has been involved.
 
 ## Example: hand-derived bytes for a `SHUTDOWN` frame
 

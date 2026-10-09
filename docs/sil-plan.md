@@ -527,3 +527,252 @@ bridge defect above (pytest there: 1,049 passed, 15 skipped).
    stop the two drifting.
 5. **`alpine:latest` is not the image the container executor test recorded** (`294b683c…`
    against `28bd5fe8…`), so that heavy-track test skips; it skipped the same way last round.
+
+## Status (native manager, 2026-10-09) — P3 HIL preparation (question 242)
+
+The round question 242 chartered before the ZCU104 arrives: real-time pacing, the board binding's
+transport and its durable, signed I/O log with replay, `power_control`, and a reproducible SD-card
+boot image recipe. **All five are delivered against stand-ins; the board is not on hand and nothing
+here is a board result.** Eleven commits on `edge`, none pushed, none merged.
+
+| Commit | What |
+|---|---|
+| `c675cf1` | `av_edge::board` (the pure half) and `crates/av-edge-board`: serial and UDP `port_devices`, the Bind-time check |
+| `4abaea6` | real-time pacing in the kernel when a board is bound; `RunProducts.pacing = 10` (`PacingReport`) |
+| `f59f485` | the board's I/O logged on the edge side as signed, hash-chained, fsynced `BoardIoRecord`s (`edge.proto`) |
+| `7072c57` | the kernel classifies and binds `BINDING_KIND_BOARD` through its edge service |
+| `a802cd0` | `power_control` as an edge-service operation (`board.proto`, `BoardEdgeService.PowerCycle`), the strict Bind check |
+| `aefacf5` | replay of a board from its signed edge log, with the log's end pinned in the run's products |
+| `738df1a` | `third_party/zcu104-boot/`: the pinned, byte-reproducible boot image recipe |
+| `0ccbffe` | the stand-in HIL run: the real ELF in Renode, in real time, behind a pty, bound as a board |
+| `6dc0ee7` | defect: a RESET silenced the cFS scheduler for as many steps as its epoch (fixed) |
+| `99e0bf3` | the boot recipe re-pinned to the fixed ELF |
+| `d50deed` | two defects the first gate found in this round's own tests |
+| this commit | this status section |
+
+### Real-time pacing (question 242 (a); ADR-005 section 2)
+
+`crates/av-kernel/src/pacing.rs`, with the clock injected. Entered when, and only when, an instance
+is `BINDING_KIND_BOARD`; forced then whatever `DrmOptions.real_time` says, and `real_time = true`
+without a board keeps its typed refusal. The schedule is anchored once (wall `W0` for the scenario
+start, 1:1); a tick is one scheduler step-end epoch, released no earlier than `wall(t − base)` and
+due at `wall(t)`, so an output period coarser than the board's step does not send the board's steps
+in a burst; a physical catch-up step belongs to the tick that needs it; a span boundary is paced
+once. A late tick is an overrun (`finish − deadline`); the run catches up without skipping a step or
+re-anchoring, and time between spans counts as lateness. `PacingReport` (ticks, overrun count, worst
+overrun and its epoch, total, a fixed-edge histogram, work times, final lateness, the wall anchor) is
+unset for a lockstep run, and one `EVENT_KIND_MARKER` event per overrun is added after scoring.
+`pacing::WALL_CLOCK_DEPENDENT` names every wall-clock product (the report, the overrun events, the
+power-cycle outcome marker). **Lockstep is unchanged byte for byte:** three lockstep DRMs (attitude
+control, ground segment, the two-instance GMAT run) give products and sidecars identical to `40f30c1`
+after every kernel commit of the round (`ed7d33d6…`, `ee684365…`, `2de7a1b4…`; sidecars `aabb2029…`,
+`e9cd0936…`, `d1bc27d1…`). A board with `DrmOptions.covariance` is refused.
+
+### The board binding and its transport (question 242 (b))
+
+- **Edge side.** `av-edge-board --port-device <spec> --edge-node-id <id> --io-log <path>
+  --signing-key <pem> --signing-cert <pem> [--power-control cmd:<path>] [--grpc-addr 127.0.0.1:50081]`.
+  `/dev/…@<baud>` is a raw 8N1 termios line through `libc` (`TIOCEXCL`; Linux refuses a non-standard
+  baud rather than rounding), written in chunks of at most 64 bytes with each chunk's wire time
+  between them, always (question 238's FIFO: the real Cadence FIFO depth, and the pty stand-in has no
+  pacing of its own); `udp://host:port` carries one whole lockstep-local frame per datagram, foreign
+  and partial datagrams refused. HELLO is sent once and never retried (the guest reads it once), so
+  the board's end must be up before the service starts. Proven on a host pty (max burst 64 B) and
+  loopback UDP, and compiled and tested on Linux in the digest-pinned builder.
+- **Kernel side.** `classify_binding` validates the `BoardBinding` (edge node id, every spec parsed,
+  one link, the map complete against the system's ports) and the `board.*` parameters
+  (`board.edge_address`, `board.seed_key`, `board.tls*` under question 155's rule,
+  `board.step_timeout_ms`, `board.bind_timeout_ms`), each failure a typed `DrmError` before any
+  connection; `materialize_board` dials the edge service with deadlines (a silent board is a typed
+  `StepTimeout`, never a hang). The instance reports `BINDING_KIND_BOARD` everywhere.
+- **The Bind check.** The kernel sends `board.edge_node_id` and `board.port_device`; the service
+  refuses a mismatch, **or their absence**, without forwarding, and strips them on a match, so the
+  guest's BIND bytes are the container path's.
+
+### The board's I/O, logged and replayed (question 242 (a))
+
+`BoardIoRecord` (`edge.proto`): one record per exchange crossing the link, the port payloads exactly
+as they crossed, signed (P-384) on one hash chain, written and fsynced **before** the reply returns
+to the kernel (a failed append returns `DATA_LOSS` and poisons the log); `av-edge-board-log` verifies
+a log. A chain cannot show a cut at its end, so the kernel pins the log's record count, chain head
+and signer on the board trajectory's provenance (taken after the last STEP, before SHUTDOWN; replay
+requires exactly one SHUTDOWN record after the pin). `execute_with_board_replay` replays a board from
+its log, refusing every tamper and truncation class with a typed error before anything binds
+(including history rewritten and re-signed with the genuine key); the default container replay
+includes board instances. A replay binds no board, so it runs lockstep: the named wall-clock fields
+are the only exclusions, and from the edge log even the board segment's `dynamics_*` and binding
+provenance reproduce. `av-run --replay-board-log/--board-log-cert/--board-log-pins` replays from the
+command line.
+
+### `power_control` (question 242 (c); the lead's ruling)
+
+An edge-service operation: `cmd:<absolute path>` runs on the edge node, never in the kernel, through
+`BoardEdgeService.PowerCycle` at the address the kernel already dials, with typed refusals (no
+channel, channel or edge-node mismatch) and failures (spawn, exit status, signal, timeout; the
+channel's process group is killed on timeout); `gpio://` is reserved. At a `HARDWARE`/`power_cycle`
+fault on a board the kernel power-cycles, then sends the container path's lockstep RESET; a refused
+or failed power cycle aborts the run. The test fake is a script behind the same RPC; its recorded
+parent pid is the edge service's.
+
+### The stand-in HIL run (`crates/av-kernel/tests/hil_standin_renode.rs`, `AV_HIL_STANDIN_TESTS=1`)
+
+**STAND-IN: Renode 1.16.1 emulating the ZynqMP RPU, not the ZCU104.** The real reproducible ELF runs
+free in Renode at real time with UART1 on a host pseudo-terminal
+(`third_party/renode/hil_standin/`); `av-edge-board` opens the pty at 115200 with its signed log and
+a recording power channel; the kernel paces `drms/demo_attitude_control` with `"controller"` bound as
+a board. Guest RX is fed in virtual time by a paced character hook (wall-clock RX stalled the guest at
+STEP 2, question 238's FIFO again). From the final gate:
+
+| | run (a), no fault | run (b), power cycle at 5 s |
+|---|---|---|
+| ticks / overruns | 100 / 94 | 100 / 100 |
+| worst overrun | 2,344 ms at t+0.3 s | 2,378 ms at t+0.3 s |
+| total overrun / final lateness | 135.3 s / 0 | 205.0 s / 1.71 s |
+| histogram (≤10 µs … >1 s) | 0, 0, 0, 0, 3, 26, 65 | 0, 0, 0, 0, 0, 0, 100 |
+| Renode virtual-to-wall ratio | 0.89 | 0.95 |
+| run wall time | 10.5 s | 11.8 s |
+
+The overruns are the emulator's on a loaded host (the guest's step work is ~100 ms mean in Renode),
+not a board's: they show the counting works, not what the ZCU104 will do. Run (a)'s 998 decoded
+port-traffic records are **identical to the lockstep reference** (records-only `8e518964…8fd2`, the
+posix-against-Renode figure), so real-time pacing over a serial line changed nothing at the port
+boundary. Run (b): the channel ran once, the log reads `[Step, PowerCycle, Reset, Step]`, and the
+controller published again one step after the RESET (50 of 50 steps). Both runs replay from their
+signed logs equal to the live run after the named exclusions; a forged log, a perturbed re-signed
+record, a Bind mismatch and a missing device each refuse or fail as they should.
+
+### A defect the stand-in found: a RESET silenced the scheduler (`6dc0ee7`)
+
+`psp_lockstep_init` zeroed the tick count on every RESET while `sch_lockstep` keeps its own last-seen
+count, so after a RESET at tick N the scheduler woke nothing for N steps, each answered empty after
+`io_lockstep`'s 2,000 ms output wait. Platform independent: the posix container had it too, and the
+container power-cycle test only asserted that the run continued. Fixed in the PSP (the count only
+grows; the clock restarts at the new epoch) with a backstop in `sch_lockstep`; a psp test fails on the
+old code, and both bindings now assert outputs resume within two steps and at least 48 of the next 50
+follow. Old ELF and recorded image: 0 outputs in 50; fixed ELF and a test-only image: 50 of 50. **The
+reproducible ELF moved** from `a5a5fe7b…` to `de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3`
+(the committed `build-elf.sh`, twice from different stages); run (a)'s traffic is unchanged.
+
+### The ZCU104 boot image recipe (question 242 (d))
+
+`third_party/zcu104-boot/build-boot-bin.sh`: a digest-pinned Debian container, apt pinned by
+version, every fetch pinned by commit and hash in one network window and then `--network none`;
+`bootgen` from source, the FSBL (A53-0) and PMU firmware from `embeddedsw` `xilinx_v2024.2` with no
+Vivado, Vitis or licence, and the RPU ELF (checked by hash) as `r5-lockstep` partitions. The recipe
+takes the docker-test lock itself (`scripts/dev/docker-lock-run.py`), for its whole run including a
+~25 min toolchain build. **One input is not open source:** the ZCU104's full `psu_init`
+(`embeddedsw` ships ZCU102 and Kria; U-Boot's ZCU104 `psu_init_gpl.c` has no DDR programming and
+lacks the protection, isolation-removal and TrustZone steps). The default output is therefore
+`BOOT.standin-zcu102-psuinit.bin`, deliberately not `BOOT.BIN`; with `BOOT_PSU_INIT_DIR` and
+`BOOT_PSU_INIT_MANIFEST_SHA256` it builds `BOOT.BIN` from a ZCU104 export, whose sourcing is the
+user's decision (the lead is taking it to the user). Byte for byte: three builds from different paths
+and toolchain caches agreed at the old ELF; at the fixed ELF two more agree (image `72fd2d6f…`, FSBL
+`61f8b945…`, PMU firmware `81701d2b…`). Structurally (`bootgen -read`, checked by the recipe): FSBL
+a53-0 aarch-64 el-3 at 0xFFFC0000, PMU firmware at PMU RAM 0xFFDC0000, two RPU partitions
+`r5-lockstep` aarch-32 at 0x0 (960 B, ATCM) and 0x40000000 (719,840 B, DDR), entry 0x40. **The ELF
+needs no change for the board:** the cFE console is PS UART0 (FT4232 channel B), `io_lockstep` PS
+UART1 (channel C), and the UART reference clock is 99.99 MHz against the BSP's 100 MHz. The MicroBlaze
+target libraries are not bit-reproducible (libnosys temp names in DWARF, `hash_func.o` local labels;
+no root cause), mitigated by pinning the PMU firmware by its output hash. **Process disclosure:** the
+worker first ran some docker commands the shell policy had refused through a scratch Python driver,
+before the lead's no-wrapper rule reached it; the driver is deleted, and every pinned output was
+reproduced afterwards by the committed recipe.
+
+### The cFS shim and image move on any proto edit
+
+A rebuild of the shim with the committed `build-shim.sh` at `aefacf5` gave `28dde7bf…`, not the
+recorded `a044c0d2…`. Bisected from `git archive` stages: `40f30c1` and `c675cf1` reproduce
+`a044c0d2…` (the environment is stable; the `Cargo.lock` block for the new crate does not move it),
+`4abaea6` moves it. **Cause:** any proto compiled into `av-cdm` (here `run.proto`, which the shim never
+uses) changes `av-cdm`'s crate hash, which reorders prost's field-name literals in `.rodata`, the
+`.text` immediates pointing at them, and the build-id: same size (2,306,360 bytes), no new string.
+So the shim, and the cFS image's runtime-content hash, move on any proto edit; acceptable now that
+the rebuild is reproducible and cheap. `altavista-cfs-lockstep:local` and `IMAGE_DIGEST.md` are
+untouched; the lead rebuilds and re-pins at the merge (the cFS apps changed too, `6dc0ee7`).
+
+### Gate
+
+Final gate at `d50deed` (the code head), every phase in sequence, whole output under the manager's
+scratchpad `gate-hilprep/`, 2026-10-09 15:07 to 15:50. `buf` is blocked by this host's shell policy
+and is not run by any route here: the lead ran `buf lint` and `buf breaking` against `develop` on
+every proto change of the round (`run.proto`, `edge.proto`, `board.proto`), rc 0 each.
+
+| Phase | Result |
+|---|---|
+| `cargo test --workspace --exclude av-kernel` | 162 binaries, 1,580 passed, 0 failed, 4 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings`; the same for `av-kernel`, `av-run` without default features | clean, clean, clean |
+| the required-features lint's steps through `cargo-slot`; `cargo deny check` | clean; ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed |
+| `cargo build -p av-edge-board --bins` (the board tests spawn it; the harness refuses a stale one) | ok |
+| `cargo test -p av-kernel --no-default-features` | 736 passed, 0 failed |
+| `cargo test -p av-kernel` | 971 passed, **1 failed**, 1 ignored: the container power-cycle assertion of `6dc0ee7` against the recorded image, which carries the pre-fix cFS apps (0 outputs in 50 post-RESET steps); it passes on an image built from the fixed tree and goes green at the lead's re-pin |
+| the Renode test, `AV_RENODE_TESTS=1`, ELF `de96907f…` | passed, records-only `8e518964…8fd2` both sides, 998 records, 552 s; docker lock released after 5.4 s |
+| the stand-in HIL test, `AV_HIL_STANDIN_TESTS=1`, ELF `de96907f…` | passed, 55 s (table above) |
+| `pytest -q -rs` under `cargo-slot --hold` | 1,082 passed, **12 failed**, 14 skipped |
+
+The twelve pytest failures are recorded artifacts this round's changes move, each the lead's at the
+merge: the six Rust SBOMs' epoch (7 tests: the round's `Cargo.toml`/`Cargo.lock` changes and the new
+workspace member move it from 2026-10-05T11:43:28Z to 2026-10-08T05:03:45Z); the cFS image (2 tests:
+its context manifest and its build-commit provenance, the shim and apps above); and three heavy-track
+images whose provenance check fires because their copied paths include `proto/altavista/v1` and
+`crates/av-cdm` (`av-edge-plugin`, `av-proposer`, `av-tiles`; recorded commit `dacdecc5`). The 14 skips
+are opt-in gates (`AV_KIT_WITH_*`, `AV_SBOM_REBUILD`, `AV_CFS_RUN_REPRO_BUILD`). The first gate, at
+`99e0bf3`, also failed `pacing_kernel`'s coarse-output test in both feature states (its consecutive-
+gap check tripped on ~10 ms sleep overshoot under load; now checked against each release's own
+schedule) and `test_suite_declarations`' port-map count (10 rows since `av-edge-board`); both fixed in
+`d50deed`.
+
+### Decisions (numbered, for the lead to ratify)
+
+1. `target/debug/deps` held 113,888 entries at the start (over `cargo-slot`'s 100,000) and was moved
+   aside at the start (question 236's rule).
+2. The lockstep baseline was recorded at `40f30c1` before any change and re-checked after every kernel
+   commit; the products embed the sidecar path, so the comparison runs at one output root.
+3. The board's edge service is a new crate, `av-edge-board`, with its pure half in `av_edge::board`
+   (the edge plugin pattern); `av-lockstep-shim` is unchanged, so the cFS image's shim never gains
+   `openssl`. The new workspace member moves the Rust SBOM epoch (the lead regenerates it).
+4. The kernel binds a board through the existing lockstep gRPC client, the board classified as a
+   container classification carrying a `BoardSpec`; it reports `BINDING_KIND_BOARD` everywhere.
+5. Real-time pacing only when a board is bound (ADR-005 section 2); a board forces it.
+6. One link per board instance this round; a mixed serial/UDP map is a typed refusal (a later item).
+7. Pacing is per scheduler tick, catches up without skipping, never re-anchors, one event per overrun;
+   overrun events are added after scoring so no score reads the clock.
+8. Serial writes are chunked at 64 bytes with the wire time between, on every serial path.
+9. HELLO is never retried on a byte stream.
+10. The Bind check is strict (the lead's ruling): absent board parameters are refused too.
+11. The board's I/O log is written on the edge side, signed and chained (ADR-005 section 4), fsynced
+    before the reply; a write failure returns `DATA_LOSS` and poisons the log.
+12. `power_control` is an edge-service operation (the lead's ruling, superseding the manager's first
+    plan of running `cmd:` in the kernel), on a separate `BoardEdgeService` in a new `board.proto`
+    (`LockstepService` untouched, so the shim and `services/lockstep-ref` need no change).
+13. A power cycle, then the container path's lockstep RESET; re-handshake and re-Bind after a real
+    board reboot are a HIL-day item (the stand-in cannot exercise a reboot).
+14. The edge log's end is pinned on the board trajectory's provenance (the lead's ruling), taken
+    before SHUTDOWN, with exactly one SHUTDOWN record required after it.
+15. Board replay is a separate entry point, `execute_with_board_replay`; a `ReplayConfig` field would
+    be the mechanical alternative.
+16. The board test harness refuses a missing or stale `av-edge-board` binary (scanning the six local
+    crates it is built from and `proto/altavista/v1`), and the README gate builds it first:
+    `cargo test -p av-kernel` does not rebuild another package's binary, and a stale one ran once.
+17. The cFS image is not rebuilt or re-tagged mid-round (the lead re-pins at the merge); the Renode
+    test's posix half runs the recorded image, whose shim speaks the unchanged `lockstep.proto`.
+18. No wrapper runs a command the shell policy refuses (the lead's correction); a manager wrapper
+    used once for `buf` on task 1 was deleted and its result withdrawn, the lead's runs stand.
+19. Defect 2 was fixed this round (the lead's ruling), in the PSP with a backstop in `sch_lockstep`.
+20. The boot recipe's default output is the ZCU102-`psu_init` stand-in, never named `BOOT.BIN`.
+21. `docs/roadmap-status.md` is left to the lead.
+
+### Found, not fixed this round
+
+1. **The ZCU104's full `psu_init` is not open source**; `BOOT.BIN` waits on the user's decision on
+   where it comes from.
+2. **The MicroBlaze target libraries are not bit-reproducible** (no root cause; mitigated by pinning
+   the PMU firmware's output hash).
+3. **Narrowing what `av-cdm` compiles for the shim** would stop unrelated proto edits moving the cFS
+   image; a later item.
+4. **A real board reboot** after a power cycle needs the edge service to re-handshake and the kernel to
+   re-Bind; not built (no way to exercise it here).
+5. **Mixed `port_devices` maps** (several links per board instance) are refused.
+6. **`BoardBinding.edge_node_id` is resolved through `board.edge_address`**, a system parameter, like
+   the container's address; a deployment-level edge-node directory would keep the address out of the
+   system definition's hash.

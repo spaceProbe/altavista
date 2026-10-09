@@ -35,6 +35,7 @@ package altavista.v1;
 
 import "altavista/v1/core.proto";
 import "altavista/v1/envelope.proto";
+import "altavista/v1/lockstep.proto";
 
 // A signed, chained, labelled batch of measurements from one producer. See this file's
 // header comment for the canonical hash/signature definition and its relationship to
@@ -378,4 +379,103 @@ service EdgeIngest {
   // Per-partition chain verification, over the wire, matching `GET
   // /admin/api/evidence/verify`'s content exactly.
   rpc VerifyLedger(VerifyRequest) returns (VerifyResponse);
+}
+
+// Which exchange a `BoardIoRecord` records.
+enum BoardIoKind {
+  BOARD_IO_KIND_UNSPECIFIED = 0;
+  // The BIND exchange (`LockstepBindRequest` -> `LockstepBindResponse`).
+  BOARD_IO_KIND_BIND = 1;
+  // One lockstep STEP: the inputs delivered to the board and the outputs it returned.
+  BOARD_IO_KIND_STEP = 2;
+  // A RESET of the flight software (`LockstepResetRequest`).
+  BOARD_IO_KIND_RESET = 3;
+  // The SHUTDOWN exchange.
+  BOARD_IO_KIND_SHUTDOWN = 4;
+  // The edge service ran its power control channel for a power-cycle fault
+  // (`BoardEdgeService.PowerCycle`, board.proto; question 242 (c)). Written only for a
+  // channel that was started (performed or failed), not for a refusal. The fields that
+  // apply: `run_id`, `instance`, `reset_tai_ns` (the fault's epoch), `reset_reason`
+  // ("fault:<fault id>"), `error` (set for a failure), and `request_written_unix_ns` /
+  // `response_read_unix_ns`, here the edge-node instants the channel was started and
+  // finished. No other exchange field applies.
+  BOARD_IO_KIND_POWER_CYCLE = 5;
+}
+
+// One exchange between the edge node and the hardware-in-the-loop board's flight software,
+// as the edge side saw it: a signed, hash-chained record in the edge node's durable board
+// I/O log (question 242 (a); ADR-005 section 4: "BOARD: ... every input and output logged
+// as a signed batch (ADR-004) so the rest of the run replays"). A replay substitutes this
+// log for the board, so the port payloads are exactly the bytes that crossed the link.
+//
+// Chain and signature (the `MeasurementBatch` definition above, applied to this message):
+//   - body bytes = `prost::Message::encode_to_vec` of the record with its own `record_hash`
+//     and `signature` fields cleared (`prev_hash` stays in);
+//   - `prev_hash` = the literal ASCII bytes of "GENESIS" for the log's first record, else
+//     the previous record's 32 raw `record_hash` bytes;
+//   - `record_hash` = SHA-256(prev_hash || body bytes), 32 raw bytes;
+//   - `signature` = ECDSA P-384 over the 32 `record_hash` bytes, DER encoded.
+// The records are stored in a file framed `[payload_len u32 LE][record_hash 32 bytes][payload]`
+// with `payload` the whole encoded record; `crates/av-edge/src/board_log.rs` documents it.
+message BoardIoRecord {
+  // The edge node that wrote the record (`--edge-node-id`); constant within a log.
+  string producer_id = 1;
+  // Position in this log: 1 for the first record, +1 per record, no gaps.
+  uint64 sequence = 2;
+  // See the chain definition above.
+  bytes prev_hash = 3;
+  // See the chain definition above.
+  bytes record_hash = 4;
+  // ECDSA P-384 over `record_hash`. Never empty in a written log.
+  bytes signature = 5;
+  // Lowercase hex SHA-256 of the signing certificate's DER encoding (what
+  // `MeasurementBatch.signer_cert_sha256` carries). Covered by the signature.
+  string signer_cert_sha256 = 6;
+
+  // The run and instance as the kernel's Bind named them (`LockstepBindRequest.run_id`,
+  // `.instance`); empty only if an exchange arrived before any Bind.
+  string run_id = 7;
+  string instance = 8;
+  BoardIoKind kind = 9;
+
+  // STEP and RESET: the lockstep sequence of the request (`LockstepStepRequest.sequence`,
+  // `LockstepResetRequest.sequence`). The response echoes it (checked by the service).
+  uint64 lockstep_sequence = 10;
+  // STEP: `LockstepStepRequest.until_tai_ns`, which the board's response must reach.
+  int64 until_tai_ns = 11;
+  // STEP: the request's inputs, in the order delivered (`PortMessage.payload` is the exact
+  // bytes the board received).
+  repeated PortMessage inputs = 12;
+  // STEP: the response's outputs, in the order returned (the exact bytes the board sent).
+  repeated PortMessage outputs = 13;
+  // STEP: the response's named scalar outputs (`output.<instance>.<name>@time`).
+  map<string, double> named_outputs = 14;
+
+  // BIND: the request as forwarded to the board (the board-link parameters
+  // `board.edge_node_id` / `board.port_device` already stripped, so these are the bytes the
+  // flight software received) and the board's response (unset if the exchange failed).
+  LockstepBindRequest bind_request = 15;
+  LockstepBindResponse bind_response = 16;
+
+  // RESET: `LockstepResetRequest.tai_ns` and `.reason` ("power_cycle", "watchdog",
+  // "fault:<id>").
+  int64 reset_tai_ns = 17;
+  string reset_reason = 18;
+
+  // Empty if the exchange completed. Otherwise why it did not (a protocol error, a link
+  // failure, a peer ERROR frame); the request fields are still recorded, the response
+  // fields are empty.
+  string error = 19;
+
+  // Wall-clock instants, Unix epoch nanoseconds, measured on the edge node: when the last
+  // byte of the request had been handed to the link, and when the last byte of the
+  // response had been read from it (0 if that never happened). Informational (they are
+  // not simulation time and a replay does not use them) but signed with the rest.
+  int64 request_written_unix_ns = 20;
+  int64 response_read_unix_ns = 21;
+
+  // Lowercase hex SHA-256 of the board link's canonical configuration
+  // (`av_edge::board::BoardLink::config_hash_hex`: edge node, device, baud), so the log
+  // names the link it was recorded over.
+  string link_config_sha256 = 22;
 }

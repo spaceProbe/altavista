@@ -39,6 +39,10 @@ binding"](#container-lockstep-binding-m132-question-107) below), honour `DrmOpti
   third-party parser crate), unit-checked before evaluation, evaluated against
   `ExprRunProducts` (trajectories, events, outputs). See ["Scoring"](#scoring-the-expression-
   language-and-runproducts-expr-adr-005-sec-6-m91) below.
+- **`pacing`** (question 242) -- `Pacer`: the kernel clock slaved to wall time at 1:1 when,
+  and only when, some instance is bound to a board, with every overrun measured, counted and
+  recorded. See ["Real-time pacing"](#real-time-pacing-pacing-adr-005-sec-2-question-242)
+  below.
 - **`drm`** (M6.1, driven by `HeteroKernel` as of M9.1) -- the DRM executor: `schema` (YAML
   authoring format), `hash` (canonical SHA-256), `binding` (bind a `SystemInstance` to a real
   `DynamicsModel`), `fault` (DYNAMICS fault injection), `maneuver` (M10.1, question 97 --
@@ -1435,7 +1439,7 @@ and throwaway registry they start (`Drop` guards around every `docker` resource,
 | `covariance` | Selects `HeteroKernel::run_with_covariance` instead of plain `HeteroKernel::run` (M9.1 -- see "`HeteroKernel` is the only kernel" below; before M9.1 this selected `Kernel<StmAugmented<AnyModel>>::run_with_covariance`/`Kernel<AnyModel>::run`). |
 | `nearest_spd_projection` | Passed straight through to `run_with_covariance`'s parameter of the same name (question 83, `crate::kernel`'s existing mechanism -- unchanged by this task). |
 | `accept_missing_stm_terms` | Passed to `GmatModel::new` (question 82) **and** checked a second time by `classify_binding`, before any GMAT call, so a covariance request against a declared `RelativisticCorrection` force model is refused early. |
-| `real_time` | `true` -> `DrmError::RealTimeNotSupported`. ADR-005's real-time runtime is still Planned and this crate only ever runs lockstep -- refused rather than silently honoured as lockstep anyway. |
+| `real_time` | `true` with no board-bound instance -> `DrmError::RealTimeNotSupported` (ADR-005 sec 2 enters real-time pacing only when the configuration binds a board; the flag alone is refused, never honoured as lockstep). With a `BINDING_KIND_BOARD` instance pacing is **forced** whatever the flag says -- see ["Real-time pacing"](#real-time-pacing-pacing-adr-005-sec-2-question-242). |
 
 Every one of these six fields is read and actually changes behaviour; none is parsed and
 dropped.
@@ -2102,6 +2106,202 @@ anything from it -- threading it into the viewer's own scene through
 a separate, later task. Nothing here silently drops the field; it simply is not this task's job
 to surface in the viewer yet.
 
+## Real-time pacing (`pacing`, ADR-005 sec 2, question 242)
+
+Lockstep is the default. When some instance is `BINDING_KIND_BOARD`
+(`drm::executor::run_requires_real_time`; `DrmOptions.real_time` does not enter it) the kernel
+clock is slaved to wall time at 1:1 and every deviation is counted. It is a mode of the same
+kernel: `HeteroKernel::run_with_ports_paced` and `HeteroScheduler::advance_to_with_ports_paced`
+take an `Option<&mut Pacer>`, and `None` is the lockstep path (one `Option` test per
+iteration, no clock read, no allocation).
+
+- **Anchor.** Once per run: wall `W0` = the instant the first tick is released, mapped to
+  sim `T0` = the scenario start; sim `t` is due at `W0 + (t - T0)`. The executor's
+  boundary-bounded spans share one `Pacer`, so later spans continue the schedule, and the time
+  spent re-binding models at a boundary shows up as lateness, not as a new anchor.
+- **Granularity.** One tick per iteration of `advance_to_with_ports` (one distinct step-end
+  epoch `t`; `next_due_ns` is a step's end). The work is released no earlier than
+  `wall(t - base_period)` and is due at `wall(t)`, so an output period coarser than a board's
+  step period still releases the board's steps one period apart. A physical system's catch-up
+  step past the output target is paced at `min(t, target)` (it belongs to the tick that needs
+  it); ticks are keyed by sim epoch, so a repeated epoch (a span boundary) is paced once.
+- **Overrun.** A tick finishing after its deadline is an overrun, `finish - deadline`. The next
+  tick is released at its own time or at once if that has passed: catch-up, no skipped step, no
+  re-anchor. `finish_run` records the run's final lateness and then holds to `wall(T_end)`.
+- **Products.** `RunProducts.pacing` (`PacingReport`: mode, base period, forcing instances,
+  ticks, overrun count / worst / total, a fixed-edge histogram, worst and mean work, final
+  lateness, wall-clock start in UNIX ns) is set only for a paced run; a lockstep run's encoding
+  has no such field. One `EVENT_KIND_MARKER` event per overrun (`name = "pacing_overrun"`,
+  `tai_ns` = the tick's epoch, `values = {overrun_ns, work_ns}`, no entity). Scores are
+  evaluated before the overrun events are added, so no score depends on the wall clock.
+  `pacing::WALL_CLOCK_DEPENDENT` names these two products (and the few other fields a board
+  replay cannot reproduce) for a replay to exclude; see ["Replaying a board-bound
+  run"](#replaying-a-board-bound-run-from-its-signed-edge-log-hilprep-2b).
+- **Refusals.** `real_time = true` without a board stays `RealTimeNotSupported`; a board with
+  `covariance` is `InvalidDrmOptions`. Since hilprep-3a a board instance is classified and bound
+  (see ["Binding a board"](#binding-a-board-binding_kind_board-question-242-hilprep-3a)), so a
+  board-bound run is paced end to end: `tests/drm_board_pacing.rs`.
+- **No board result is claimed.** Nothing here has run against a ZCU104.
+
+## Binding a board (`BINDING_KIND_BOARD`, question 242, hilprep-3a)
+
+A `BINDING_KIND_BOARD` instance is bound by dialling the board's **edge service**
+(`crates/av-edge-board`, binary `av-edge-board`) over the same `altavista.v1.LockstepService`
+client a container uses; the edge service speaks lockstep-local to the flight software over the
+board's serial line or UDP. Steps, `Reset`, `Shutdown`, the typed protocol errors and the
+port-traffic sidecar are the container machinery unchanged: `classify_binding` returns
+`Classification::Container(spec)` with `spec.board = Some(BoardSpec)` (one marker instead of a
+parallel variant that would copy every container match arm). A board-bound run is paced
+(`run_requires_real_time`), so its `RunProducts.pacing` is set and overruns become events.
+
+**The SoS instance** carries `Binding { kind: BINDING_KIND_BOARD, board: BoardBinding {
+edge_node_id, port_devices, power_control } }` (YAML: `binding: { kind: BINDING_KIND_BOARD,
+board: { edge_node_id: ..., port_devices: { <port>: "udp://host:port" | "/dev/<name>@<baud>" } } }`).
+`port_devices` must name **every** declared port of the system, all mapped to the **same** device
+(one link per board instance; a mixed map, a missing or an undeclared port, an unparsable spec or
+an empty `edge_node_id` is `DrmError::BoardLink` naming the instance, `av_edge::board` giving
+the reason).
+
+**The system definition** carries the kernel-side `board.*` parameters (see
+`drms/demo_attitude_control_controller_board.system.yaml`); any other name is
+`DrmError::UnknownParameter`, and `board.*` never reaches the peer:
+
+| parameter | |
+|---|---|
+| `board.edge_address` | required: `host:port` of the running `av-edge-board` (its `--grpc-addr`, default `127.0.0.1:50081`). Plaintext only on loopback (question 155, `DrmError::BoardPlaintextNonLoopback`); otherwise `board.tls` = 1 |
+| `board.seed_key` | required: a key of `Scenario.seeds` (`UnknownBoardSeed` if absent) |
+| `board.tls`, `board.ca_file`, `board.client_cert`, `board.client_key` | as the `container.*` mTLS set |
+| `board.step_timeout_ms` | `Step`/`Reset`/`Shutdown` with no reply in this long is `ContainerError::StepTimeout` (as `DrmError::ContainerProtocol`) / `ResetRpc` / `ShutdownRpc`. Default 5000, bounds 10..=600000 |
+| `board.bind_timeout_ms` | the connect and `Bind` (the edge service waits for the flight software's HELLO inside it). Default 30000, same bounds. Expiry is `DrmError::BoardBind` / `BoardConnect` |
+| `board.power_control_timeout_ms` | how long to wait for the edge service's `PowerCycle` reply (see "Power control" below). Default 60000, same bounds. Expiry is a `PowerControlError::TimedOut` |
+
+`av-lockstep`'s blocking client has no deadline, so each board call runs on a worker thread
+(`TimedLockstep`) and the caller waits with `recv_timeout`; after a timeout the link is not used
+again and the worker exits when its stuck call returns. A late reply is an *overrun* (counted by
+the pacer); the timeout is only for silence. Containers keep the direct client.
+
+**Bind.** The request is the container's, plus `board.edge_node_id` and `board.port_device` (the
+canonical form of the one device) from `av_edge::board::BoardLink::bind_parameters`; the edge
+service refuses a mismatch with `lockstep_capable = false` and a reason
+(`DrmError::BoardRefused`, nothing forwarded to the flight software) and strips both parameters
+on a match, so the flight software's BIND is the container's.
+
+**Reported kind and hashes.** `ModelInfo.id` is `board.<instance>`, `depth` `board-lockstep`.
+The instance's `Trajectory.provenance.attributes` are `binding_kind = BINDING_KIND_BOARD`,
+`board_binding_hash` (the `binding_hash` of the flight software's `Bind` response, relayed by the
+edge service) and `board_link_hash` (SHA-256 of the kernel-side `BoardLink`: edge node, canonical
+device, sorted ports) in place of a container's `container_binding_hash`.
+
+**Power control (question 242 (c), hilprep-4).** `BoardBinding.power_control` is the **edge
+node's** power control channel (`av_edge::board::parse_power_control`: `cmd:<absolute path>`;
+empty is none; `gpio://...` is reserved and refused), and the board may hang off this host or a
+separate Linux edge node, so **the kernel never runs it**: `src/drm/power.rs`'s `PowerControl`
+trait has one production implementation, `EdgePowerControl`, a client of
+`altavista.v1.BoardEdgeService` (`proto/altavista/v1/board.proto`; the client is
+`av_lockstep::board_edge`) at the same `board.edge_address` with the same TLS and loopback rules as
+the board's lockstep link. The edge service runs its own configured channel locally and returns a
+typed result (`av-edge-board`'s README, "Power control"). A `FAULT_TARGET_KIND_HARDWARE` /
+`power_cycle` fault on a board instance is a boundary like a container's; at the fault's epoch the
+executor calls `PowerControl::power_cycle`, **then** sends the same lockstep `RESET`
+(`reason = "fault:<id>"`) a container gets (`power::perform` fixes the order), and records the
+container-style `fault:<id>` event plus one `marker:power_cycle:<id>` event (`values.duration_ns`;
+wall-clock dependent in its `detail` and `values.duration_ns`, which `pacing::WALL_CLOCK_DEPENDENT`
+names for a replay to exclude; `is_wall_clock_event` recognises the event). A refused or failed power cycle (no channel, a different
+channel or edge node, non-zero exit, a signal, a timeout, a failed RPC) ends the run with
+`DrmError::BoardPowerCycle` carrying the edge service's reason, and no `RESET` is sent. The
+stall of a real channel shows in the pacing report as an overrun of the tick after the fault.
+Load-time: a malformed `power_control` is `DrmError::BoardPowerControl` even with no fault; a
+power-cycle fault on a board with an empty `power_control` is `BoardPowerCycleNeedsChannel`; any
+other HARDWARE kind on a board is `HardwareFaultKindNotSupported`, as for a container. A recording
+fake (`RecordingPowerControl`) implements the same trait for the kernel's own unit tests; the
+end-to-end fake sits behind the same RPC (an `av-edge-board` with `--power-control cmd:<a tiny
+executable>`). **Not done (HIL-day item):** a board that really reboots needs the edge service to
+re-handshake (HELLO once) and the kernel to re-`Bind` before the `RESET`; the stand-in's guest stays
+up through the "power cycle", so that path is unwritten and unexercised (`power.rs` module doc).
+
+**Proven against stand-ins only**: `tests/drm_board_pacing.rs`, `tests/drm_board_refusals.rs` and
+`tests/drm_board_power.rs` run the real `av-edge-board` binary in front of a fake lockstep-local guest on a loopback UDP
+socket (the fake answers each STEP with an empty STEP_DONE, so the board-bound controller is
+silent); `tests/drm_board_replay.rs` gives the fake non-empty, step-dependent answers (below). No
+ZCU104, no Renode, no Docker.
+
+## Replaying a board-bound run from its signed edge log (hilprep-2b)
+
+The contract is `src/drm/board_replay.rs`'s module doc; this is the summary. A replay substitutes
+the board edge service's signed I/O log for the board: **no board is bound, nothing is dialled,
+the power control is never called, and the run is lockstep** (no `PacingReport`, no overrun events:
+ADR-005 pacing "only when the configuration binds a board").
+
+- **Entry point.** `execute_with_board_replay(cfg, &[BoardLogReplay { instance, log_path,
+  certificate_pem, expected }])` (`execute(cfg)` is the same with no logs; `RunConfig` and
+  `ReplayConfig` are unchanged, because both are built field by field at every existing call
+  site). On the command line: `av-run --replay-board-log <instance>=<log> --board-log-cert <pem>
+  --board-log-pins <the live run's --out file>` (see `av-run --help`).
+- **The pin.** At the end of a board-bound run the kernel asks the edge service where its log ends
+  (`BoardEdgeService.BoardIoLogHead`, `proto/altavista/v1/board.proto`) and records it on the
+  board instance's `Trajectory.provenance.attributes`: `board_io_log_chain_head` (hex),
+  `board_io_log_records`, `board_io_log_signer_cert_sha256`. A hash chain cannot show that records
+  were removed from the end of a log; the pin does. It is taken **after the last STEP and before
+  the SHUTDOWN** (the service records the SHUTDOWN and exits, so it cannot answer after it): the
+  pin counts every record before the SHUTDOWN, and a replay requires exactly that many records,
+  the pinned hash at that position, the pinned signer, and then exactly one more record, the
+  SHUTDOWN. A log cut at any point is refused (`Truncated`, `ShutdownMissing`), as are one with
+  anything else after the pin (`UnpinnedTail`) and a rewritten history re-signed with the genuine
+  key (`ChainHeadMismatch`).
+- **Verification, before anything binds** (`DrmError::BoardReplay { instance, refusal }`,
+  `BoardReplayRefusal`): the certificate (a bare key is refused) is the pinned signer; chain and
+  every signature verify against it; no torn tail; the pin; every record's run id and instance are
+  the run being replayed and none is of a failed exchange; and the log is **this run's shape**: the
+  BIND's start, period, seed, ports and parameters, one STEP for every step from `start + period`
+  to the end in order, and each power cycle (`POWER_CYCLE` then `RESET`, right after the step
+  that ends at its epoch) one the DRM declares. A board answers every STEP, so unlike a
+  port-traffic replay there are no quiet steps and no undetectable leading or trailing deletion.
+- **Which output becomes which recorded frame.** A STEP's `outputs` go through the one function a
+  live response goes through (`binding::outbox_from_lockstep_outputs`): each keeps its port, its
+  own `tai_ns` and its payload; the router then records it at that `tai_ns`, or, when it is 0 ("no
+  epoch of its own"), at the STEP's end. `board_replay::out_frames_of_log` states this
+  independently and `tests/drm_board_replay.rs` compares it with the live run's own
+  `port_traffic.pb` OUT records, record for record (50 of 50, both branches). The STEP's
+  `named_outputs` become the replayed `StepResult.outputs`, so `output.<instance>.<name>` scores
+  reproduce (a port-traffic replay cannot: the same DRM fails with `InvalidExpression`).
+- **Power cycles.** The `fault:<id>` event is reproduced as the live run built it (a replay of
+  any container-classified instance now emits it; it used to be dropped). The board's outcome
+  event (`marker:power_cycle:<id>`) is reproduced from the log's `POWER_CYCLE` record: same id,
+  epoch, entity and `performed`, with `values.duration_ns` computed from the record's two
+  edge-node instants; its `detail` and `duration_ns` are the wall-clock values that differ.
+- **Choosing the source.** A log supplied for a board instance replays it from the log. A board in
+  the default replay set (`ReplayConfig.instances` empty: every container-classified instance,
+  boards included) **needs its log** (`NeedsEdgeLog`): it is never dialled and never silently
+  replayed from the weaker source. Naming the board in `ReplayConfig.instances` without a log is
+  the explicit choice to replay it from `port_traffic.pb`, as a container.
+- **The comparison contract.** `pacing::WALL_CLOCK_DEPENDENT` is the one named set and
+  `board_replay::strip_replay_exclusions(&mut pb::RunProducts, board, ReplaySource)` removes
+  exactly it. For an **edge-log** replay: `RunProducts.pacing`, the overrun events, the outcome
+  event's `detail` and `values["duration_ns"]`. Nothing else: the board segment's `dynamics_*`
+  and the binding-hash provenance are reproduced exactly (the declared configuration plus the
+  version and binding hash of the log's BIND record) and the verified pin is re-stamped on the
+  replayed trajectory, so they compare equal. For a **`port_traffic.pb`** replay of a board, also
+  the outcome event whole and the board segment's `dynamics_*` and binding / pin attributes, as a
+  replayed container's. Everything else (trajectories, other events, measurements, scores,
+  provenance, `port_traffic_hash`, the sidecar bytes) is compared with `==`.
+
+`tests/drm_board_replay.rs` (stand-in: the real `av-edge-board` in front of a fake guest that
+answers with a deterministic function of the step's inputs encoded with the controller's declared
+codec) proves it on the attitude-control DRM, 5 s real time with a power-cycle fault, replayed from
+the edge log, from `port_traffic.pb`, through `av-run`, and refused when cut, torn, tampered,
+re-signed, extended, or given the wrong certificate, run or pin. No ZCU104 is involved.
+
+**HIL-day run.** Start the guest's link, then `av-edge-board --port-device <spec> --edge-node-id
+<id> --io-log <new file> --signing-key <pem> --signing-cert <pem>` (see its README); give the
+SoS instance the matching `BoardBinding`; set `board.edge_address` (and `board.seed_key`, with
+that key in `Scenario.seeds`; add `--power-control cmd:<path>` to the service and the same
+`power_control` to the `BoardBinding` if a power-cycle fault is used) on the controller's system, recomputing its hash
+(`cargo run -p av-kernel --example drm_hash -- system <file>`); run `av-run` as for any DRM. No
+CLI flag is needed: a board instance forces pacing. To replay that run later without the board:
+`av-run <the same --drm/--sos/--system/--run-id> --out <new file in the same directory> --replay-board-log
+<instance>=<the --io-log file> --board-log-cert <the --signing-cert file> --board-log-pins <the live
+run's --out file>`.
+
 ## Determinism (ADR-002 / ADR-004)
 
 - Simulated time is TAI nanoseconds, `i64` (`clock::Clock`) -- never a float.
@@ -2109,6 +2309,10 @@ to surface in the viewer yet.
   `kernel::Kernel`) -- never `HashMap`.
 - No RNG anywhere in this crate.
 - No wall-clock read that affects a result: the clock only advances by an explicit `tick()`.
+  The one exception is real-time pacing (a board-bound run): only `RunProducts.pacing`, the
+  `pacing_overrun` events and the wall-clock values of a board power cycle's outcome event depend on the wall clock
+  (`pacing::WALL_CLOCK_DEPENDENT`); a lockstep
+  run reads no clock and its products are byte-for-byte unchanged by the pacing code.
 
 ## Known limitations / approximations, stated plainly
 

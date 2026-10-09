@@ -458,6 +458,18 @@ impl ModelRegistry {
         ModelHandle { model, t0_tai_ns: epoch_tai_ns, x0_si: Vec::new(), settings: BTreeMap::new() }
     }
 
+    /// Hilprep-2b: the board counterpart of [`ModelRegistry::construct_replay_container`] -- a
+    /// `BINDING_KIND_BOARD` instance played from the board edge service's signed I/O log
+    /// (`crate::drm::board_replay`). Unlike a replayed container, the `ModelInfo` here is **not**
+    /// synthetic: `info` is `binding::board_model_info` built from the instance's declared
+    /// configuration and the version the log's BIND record carries, i.e. exactly what the live
+    /// board instance reported, so the replayed segment's `dynamics_model` / `dynamics_hash` /
+    /// `dynamics_depth` equal the live run's.
+    pub fn construct_replay_board(instance: &str, info: ModelInfo, epoch_tai_ns: i64, script: std::sync::Arc<crate::drm::board_replay::BoardReplayScript>) -> ModelHandle {
+        let model = AnyModel::Replay(ReplayModel::from_board_script(instance, info, script));
+        ModelHandle { model, t0_tai_ns: epoch_tai_ns, x0_si: Vec::new(), settings: BTreeMap::new() }
+    }
+
     /// Build a real `gmat_sys::model::GmatModel` (`crate::drm::binding::materialize_gmat`,
     /// unchanged -- see that function's own doc comment for exactly what it configures and,
     /// question 96, that its `t0_tai_ns` is now always the caller's own exact `epoch_tai_ns`)

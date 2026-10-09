@@ -77,6 +77,17 @@
 //!    state then); R6.1 does not narrow it, but it does make a new, undetected partial-loss shape
 //!    possible where none existed before, because a call's own frames are no longer atomic.
 //!
+//! ## A board instance, from its signed edge log (hilprep-2b)
+//!
+//! [`ReplayModel::from_board_script`] plays a `BINDING_KIND_BOARD` instance from the board edge
+//! service's signed I/O log instead (`crate::drm::board_replay`'s module doc has the contract:
+//! verification, the pin, the STEP-output-to-epoch mapping, power cycles). It differs from the
+//! port-traffic playback above in three ways: it plays **by STEP**, not by epoch window -- the
+//! step whose end epoch equals the call's end plays exactly that STEP record's `outputs`, through
+//! the one function a live board's response goes through; it also plays the STEP's
+//! `named_outputs` as `StepResult.outputs`; and it has **no quiet steps** -- a board answers every
+//! STEP, so a step with no record is [`ReplayError::MissingBoardStep`], not legitimate silence.
+//!
 //! ## Reconstructing the ORIGINAL model's own `ModelInfo` (`describe()`/`state_dim()`)
 //!
 //! `crate::trajectory::build_trajectory` stamps `TrajectorySegment.dynamics_model`/
@@ -98,11 +109,14 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use av_cdm::pb::{ModelInfo, PortDirection, PortTrafficLog};
 use av_dynamics::{AppliedCommand, DynamicsModel, Inbox, Outbox, StepResult};
 use prost::Message as _;
 
+use super::binding::outbox_from_lockstep_outputs;
+use super::board_replay::BoardReplayScript;
 use super::hash;
 use super::DrmError;
 
@@ -120,6 +134,13 @@ pub struct ReplayConfig {
     /// (`crate::drm::executor::execute`'s own resolution of this default); non-empty names
     /// exactly the instances to replay, of ANY binding kind -- naming a `BINDING_KIND_MODEL`
     /// instance here is what makes a Docker-free acceptance test possible at all.
+    ///
+    /// **Board instances (hilprep-2b).** The default includes every `BINDING_KIND_BOARD` instance
+    /// (a board classifies as a container carrying a `BoardSpec`), but a board is never dialled
+    /// in a replay and is replayed from its signed edge log, supplied to
+    /// `crate::drm::executor::execute_with_board_replay`; without one the default is refused
+    /// (`BoardReplayRefusal::NeedsEdgeLog`). Naming a board here **without** a log is the
+    /// explicit choice to replay it from this `port_traffic.pb`, as a container.
     pub instances: Vec<String>,
 }
 
@@ -150,6 +171,10 @@ pub(crate) fn verify_and_load(cfg: &ReplayConfig) -> Result<PortTrafficLog, DrmE
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ReplayError {
     MissingFrame { instance: String, tai_ns: i64 },
+    /// A board replayed from its edge log has no STEP record ending at `tai_ns`. Unreachable for
+    /// a script that passed `LoadedBoardLog::into_script` against the run's own shape; kept as a
+    /// typed error so a mismatch between that check and the run can never be a silent quiet step.
+    MissingBoardStep { instance: String, tai_ns: i64 },
 }
 impl std::fmt::Display for ReplayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,6 +183,7 @@ impl std::fmt::Display for ReplayError {
                 f,
                 "replay: instance {instance:?} has no recorded OUT frame at emission epoch {tai_ns} tai_ns, and that epoch is strictly between its own first and last recorded epochs -- an interior gap (a deleted or corrupted PortTrafficRecord), not a legitimately quiet leading/trailing step"
             ),
+            ReplayError::MissingBoardStep { instance, tai_ns } => write!(f, "replay: board instance {instance:?} has no STEP record in its edge I/O log ending at {tai_ns} tai_ns: a board answers every step, so this is a missing record, never a quiet step"),
         }
     }
 }
@@ -194,9 +220,18 @@ pub(crate) struct ReplayModel {
     /// comment's "missing-frame rule" section for exactly how these two bound it.
     first_epoch: Option<i64>,
     last_epoch: Option<i64>,
+    /// `Some` for a board replayed from its edge log: the script is played by STEP and
+    /// `frames_by_epoch` is empty. See the module doc, "A board instance, from its signed edge log".
+    board: Option<Arc<BoardReplayScript>>,
 }
 
 impl ReplayModel {
+    /// A board instance played from its verified edge log. `info` is the `ModelInfo` the live
+    /// board instance reported (`binding::board_model_info`).
+    pub(crate) fn from_board_script(instance: &str, info: ModelInfo, script: Arc<BoardReplayScript>) -> Self {
+        Self { instance: instance.to_string(), info, state_dim: 0, frames_by_epoch: BTreeMap::new(), first_epoch: None, last_epoch: None, board: Some(script) }
+    }
+
     pub(crate) fn new(instance: &str, info: ModelInfo, state_dim: usize, log: &PortTrafficLog) -> Self {
         let mut frames_by_epoch: BTreeMap<i64, Vec<(String, Vec<u8>)>> = BTreeMap::new();
         for record in &log.records {
@@ -207,7 +242,7 @@ impl ReplayModel {
         }
         let first_epoch = frames_by_epoch.keys().next().copied();
         let last_epoch = frames_by_epoch.keys().next_back().copied();
-        Self { instance: instance.to_string(), info, state_dim, frames_by_epoch, first_epoch, last_epoch }
+        Self { instance: instance.to_string(), info, state_dim, frames_by_epoch, first_epoch, last_epoch, board: None }
     }
 }
 
@@ -246,6 +281,12 @@ impl DynamicsModel for ReplayModel {
     /// `AppliedCommand` (there is no real controller logic left behind it to have applied one).
     fn step_with_ports(&self, state: &[f64], t_tai_ns: i64, _controls: &[f64], dt_ns: i64, _inbox: &Inbox) -> Result<(StepResult, Outbox, Vec<AppliedCommand>), Self::Error> {
         let end = t_tai_ns + dt_ns;
+        if let Some(script) = &self.board {
+            // A board: play the STEP whose end is this call's end, exactly as the live response
+            // went through `ContainerModel::step_with_ports`.
+            let step = script.steps.get(&end).ok_or_else(|| ReplayError::MissingBoardStep { instance: self.instance.clone(), tai_ns: end })?;
+            return Ok((StepResult { state: state.to_vec(), t_tai_ns: end, outputs: step.named_outputs.clone() }, outbox_from_lockstep_outputs(&step.outputs), Vec::new()));
+        }
         let mut outbox = Outbox::new();
         // Every recorded epoch this call's own window covers, ascending -- `BTreeMap::range`
         // already returns them in key order, so no separate sort is needed.
@@ -454,6 +495,42 @@ mod tests {
         let err = verify_and_load(&cfg).unwrap_err();
         assert!(matches!(err, DrmError::ReplayLogHashMismatch { .. }), "{err:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn board_script() -> Arc<BoardReplayScript> {
+        use crate::drm::board_replay::ScriptedStep;
+        let msg = |port: &str, tai_ns: i64, payload: &[u8]| av_cdm::pb::PortMessage { port: port.to_string(), tai_ns, payload: payload.to_vec() };
+        let steps = BTreeMap::from([
+            (1_000, ScriptedStep { outputs: vec![msg("tm", 0, b"a"), msg("tm", 950, b"b")], named_outputs: BTreeMap::from([("n".to_string(), 1.5)]) }),
+            (2_000, ScriptedStep { outputs: vec![], named_outputs: BTreeMap::new() }),
+        ]);
+        Arc::new(BoardReplayScript::for_test("obc", steps))
+    }
+
+    /// A board replayed from its edge log plays the STEP whose end is the call's end: every output
+    /// with the epoch it was logged with (0 stays "no epoch of its own"; the router stamps the
+    /// step's end), the named outputs as `StepResult.outputs`, and an answered-with-nothing STEP
+    /// as nothing.
+    #[test]
+    fn a_board_script_plays_the_step_ending_at_the_calls_end() {
+        let model = ReplayModel::from_board_script("obc", info(), board_script());
+        let (result, outbox, applied) = model.step_with_ports(&[], 0, &[], 1_000, &Inbox::empty()).unwrap();
+        assert_eq!((result.t_tai_ns, result.outputs.get("n").copied(), applied.len()), (1_000, Some(1.5), 0));
+        let sent: Vec<(&str, i64, &[u8])> = outbox.messages().iter().map(|m| (m.port.as_str(), m.tai_ns, m.payload.as_slice())).collect();
+        assert_eq!(sent, [("tm", 0, b"a".as_slice()), ("tm", 950, b"b".as_slice())]);
+        let (result, outbox, _) = model.step_with_ports(&[], 1_000, &[], 1_000, &Inbox::empty()).unwrap();
+        assert!(outbox.is_empty() && result.outputs.is_empty() && result.t_tai_ns == 2_000);
+    }
+
+    /// A board answers every STEP, so a step with no record is never a quiet step -- not before
+    /// the first record, not after the last (what the port-traffic playback must tolerate).
+    #[test]
+    fn a_board_step_without_a_record_is_a_typed_error_never_a_quiet_step() {
+        let model = ReplayModel::from_board_script("obc", info(), board_script());
+        for (t, dt) in [(-1_000, 1_000), (2_000, 1_000), (500, 1_000)] {
+            let err = model.step_with_ports(&[], t, &[], dt, &Inbox::empty()).unwrap_err();
+            assert_eq!(err, ReplayError::MissingBoardStep { instance: "obc".to_string(), tai_ns: t + dt });
+        }
     }
 
     /// `verify_and_load` accepts a matching hash and returns the decoded log.
