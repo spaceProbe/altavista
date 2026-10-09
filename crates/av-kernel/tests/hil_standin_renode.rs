@@ -2,7 +2,7 @@
 //!
 //! **STAND-IN: Renode 1.16.1 emulating the ZynqMP RPU, not the ZCU104. No board is involved and
 //! nothing here is a board result.** What is real is the code path a board run takes: the real
-//! reproducible RTEMS ELF (`a5a5fe7b...2eb5`, question 240) free-running in Renode (`start`, not
+//! reproducible RTEMS ELF (`de96907f...caf3`, question 240; `a5a5fe7b...2eb5` before the tick-count fix) free-running in Renode (`start`, not
 //! `RunFor`; `third_party/renode/hil_standin/renode_realtime_pty.py`), its UART1 on a host
 //! pseudo-terminal, the real `av-edge-board` edge service speaking lockstep-local over that
 //! pseudo-terminal at 115200 baud, the kernel binding the `"controller"` of
@@ -43,22 +43,30 @@
 //! the test asserts the measured ratio over the run; the host-to-guest bytes must reach UART1 at
 //! 115200 baud in *virtual* time (`uart_rx_paced_hook.py`), because at the wall-clock rate a guest
 //! running at 0.1 to 0.6 of real time dropped a STEP and stalled (3 of 3 runs with
-//! `AV_HIL_STANDIN_RX_PATH=pty`); the first STEP takes the guest's whole 2000 ms output wait, which
-//! at that speed makes nearly every later tick late (the pacing report says so, and is asserted to
-//! be consistent, not small); and after the in-place `RESET` the controller is silent for as many
-//! ticks as had passed before it (`psp_lockstep_init` zeroes the tick count, `sch_lockstep` keeps its
-//! own last-seen count), so run (b)'s remaining 50 steps are answered empty, each after the 2000 ms
-//! wait, which is why `board.step_timeout_ms` is 180 s here. The records-only hash comparison of
-//! run (a) is unaffected by any of it.
+//! `AV_HIL_STANDIN_RX_PATH=pty`); and the first STEP takes the guest's whole 2000 ms output wait,
+//! which at that speed makes nearly every later tick late (the pacing report says so, and is asserted
+//! to be consistent, not small).
+//!
+//! **After the in-place `RESET` the controller must publish again within two steps** (asserted on
+//! run (b)'s recorded port traffic, see `assert_controller_resumes_after_the_reset`). The first
+//! version of this test found that it did not: `psp_lockstep_init` zeroed the tick count that
+//! `sch_lockstep` compares with its own last-seen count, so a RESET after N steps silenced the
+//! controller for N more (here all 50 remaining steps, each after the 2000 ms output wait, which is
+//! why that version needed a 180 s step timeout). Fixed in `services/cfs` (the count is monotonic);
+//! the ELF `a5a5fe7b...` is the old code and fails the assertion (0 outputs in 50 steps), the rebuilt
+//! `de96907f...` passes (first output one step after the RESET, 50 of 50). The
+//! records-only hash comparison of run (a) is unaffected.
 //!
 //! Opt-in: `AV_HIL_STANDIN_TESTS=1` (a visible `SKIPPED` line otherwise). `AV_RENODE_BIN` and
 //! `AV_RENODE_CORE_CPU1_EXE` override the Renode binary and the ELF as in the Renode test (the ELF's
 //! SHA-256 is checked either way); `AV_HIL_STANDIN_KEEP=1` keeps the scratch directory on a pass;
-//! `AV_HIL_STANDIN_RX_PATH` and `AV_HIL_STANDIN_STEP_TIMEOUT_MS` are experiment knobs (below).
+//! `AV_HIL_STANDIN_RX_PATH`, `AV_HIL_STANDIN_STEP_TIMEOUT_MS` and `AV_HIL_STANDIN_ELF_SHA256` (the
+//! expected ELF hash, to run the pre-fix ELF) are experiment knobs.
 //! Needs `scripts/dev/cargo-slot build -p av-edge-board --bins` first (the harness fails visibly on
 //! a stale binary). No Docker, no GMAT engine beyond what `execute` takes itself. Wall time,
-//! measured on a loaded host (load average 11 to 18): 153 s and 184 s for the whole test (two boots
-//! of 14 to 25 s, run (a) 10 to 22 s, run (b) 110 to 117 s, the replays 0.05 to 0.1 s each).
+//! measured on a loaded host (load average 11 to 18): 53 s for the whole test (two boots
+//! of 14 to 25 s, runs (a) and (b) about 10 s each, the replays 0.05 to 0.1 s each; the previous
+//! version, whose run (b) spent 110 s in silent steps, took 153 to 184 s).
 mod drm_board_common;
 
 use std::collections::BTreeMap;
@@ -87,8 +95,13 @@ const RX_PATH_ENV: &str = "AV_HIL_STANDIN_RX_PATH";
 const STEP_TIMEOUT_ENV: &str = "AV_HIL_STANDIN_STEP_TIMEOUT_MS";
 const STAND_IN_LINE: &str = "STAND-IN: Renode 1.16.1 emulating the ZynqMP RPU, not the ZCU104";
 
-/// SHA-256 of the reproducible `core-cpu1.exe` (question 240: four builds from four paths).
-const ELF_SHA256: &str = "a5a5fe7b0d87714478c748cd08ca1888d68c6385657626d2cf42e36bc37a2eb5";
+/// SHA-256 of the reproducible `core-cpu1.exe` built from this tree by
+/// `third_party/rtems-container/build-elf.sh` (question 240: builds from different paths agree).
+/// hilprep-6 changed it: the previous value, `a5a5fe7b...2eb5`, is the ELF before the tick-count fix
+/// in `services/cfs/psp-lockstep` (see the module doc); `AV_HIL_STANDIN_ELF_SHA256` names another
+/// expected value (that old ELF, to show the post-RESET assertion failing on it).
+const ELF_SHA256: &str = "de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3";
+const ELF_SHA256_ENV: &str = "AV_HIL_STANDIN_ELF_SHA256";
 /// The lockstep reference: the records-only hash of the 998 decoded port-traffic records of the
 /// posix container and of the Renode lockstep run (`drm_attitude_control_renode.rs`), 10 s at 10 Hz.
 const LOCKSTEP_RECORDS_ONLY_HASH: &str = "8e518964f6253559d3ac23868ffdeba43fb3dde67c6af2ccfd94c425c4948fd2";
@@ -102,10 +115,11 @@ const FAULT_AT_S: i64 = 5;
 /// A real-time ratio above this over the run's window fails: the helper holds virtual time to 1:1
 /// plus a 100 ms backlog allowance, which is 1.01 over 10 s; the rest is the marks' polling jitter.
 const MAX_RATIO: f64 = 1.05;
-/// `board.step_timeout_ms`: after the in-place RESET the guest answers every STEP with an empty
-/// STEP_DONE for a while (README.md), each after the guest's own 2000 ms (virtual) wait for an
-/// output, which at Renode's 0.1 to 0.6 virtual-to-wall ratio is 3 to 20 s of wall time per step.
-const STEP_TIMEOUT_MS: f64 = 180_000.0;
+/// `board.step_timeout_ms` (the default is 5000). The slowest legitimate STEP is the first: it carries no
+/// inputs, so `IO_LOCKSTEP` waits its whole 2000 ms (guest time) output wait, which at Renode's
+/// measured virtual-to-wall ratio of 0.1 on a heavily loaded host is 20 s of wall time. 60 s is three
+/// times that; every later STEP answered in under 3 s in the recorded runs.
+const STEP_TIMEOUT_MS: f64 = 60_000.0;
 
 // ------------------------------------------------------------------------------------------
 // Files, gates
@@ -502,6 +516,25 @@ fn report_and_check_pacing(live: &Live) {
     assert!(r.ratio > 0.0 && r.ratio <= MAX_RATIO, "Renode's virtual time stayed at or below 1:1 over the run: {}", r.ratio);
 }
 
+/// The controller's `wheel_torque_out` OUT records after the fault's epoch, read off the port traffic.
+/// Each carries the epoch of the STEP that produced it (the STEP's `until_tai_ns`; one per step at
+/// 10 Hz). The first strictly after the fault must be within TWO steps of it: the first post-RESET
+/// step is expected, the second is slack for a wakeup that lands one scheduler poll late. Nearly every
+/// later step (all but two) must have one too.
+fn assert_controller_resumes_after_the_reset(sidecar: &Path, fault_tai_ns: i64) {
+    let (log, _) = sidecar_records(sidecar);
+    let after: Vec<i64> = log.records.iter().filter(|r| r.instance == CONTROLLER && r.port == "wheel_torque_out" && r.direction == PortDirection::Out as i32 && r.tai_ns > fault_tai_ns).map(|r| r.tai_ns).collect();
+    let steps_after = (ARC_S - FAULT_AT_S) * 10;
+    let first = after.first().copied();
+    println!("POST-RESET OUTPUT: fault epoch {fault_tai_ns}; first controller output after it {first:?} ({} steps later); {} outputs over the {steps_after} post-RESET steps", first.map(|t| (t - fault_tai_ns) / PERIOD_NS).unwrap_or(-1), after.len());
+    assert!(
+        first.is_some_and(|t| t <= fault_tai_ns + 2 * PERIOD_NS),
+        "the controller must publish again within two steps of the RESET (first output after the fault: {first:?}, fault epoch {fault_tai_ns}; {} outputs in the {steps_after} post-RESET steps): after a RESET at step N the scheduler stayed silent for N steps (psp_lockstep_init zeroed the tick count sch_lockstep compares against)",
+        after.len()
+    );
+    assert!(after.len() as i64 >= steps_after - 2, "the controller must keep publishing after the RESET: {} outputs in the {steps_after} post-RESET steps", after.len());
+}
+
 fn sidecar_records(path: &Path) -> (PortTrafficLog, Vec<u8>) {
     let bytes = std::fs::read(path).unwrap();
     (PortTrafficLog::decode(bytes.as_slice()).unwrap(), bytes)
@@ -632,8 +665,9 @@ fn corrupt_one_step_output_and_replay(live: &Live) {
 fn check_elf() {
     let elf = renode_elf();
     let sha = sha256_hex(&std::fs::read(&elf).unwrap());
-    println!("ELF {} SHA-256 {sha} (expected {ELF_SHA256})", elf.display());
-    assert_eq!(sha, ELF_SHA256, "the guest must be the reproducible ELF of question 240 (set AV_RENODE_CORE_CPU1_EXE to a copy of it)");
+    let expected = std::env::var(ELF_SHA256_ENV).unwrap_or_else(|_| ELF_SHA256.to_string());
+    println!("ELF {} SHA-256 {sha} (expected {expected})", elf.display());
+    assert_eq!(sha, expected, "the guest must be the reproducible ELF built from this tree (set AV_RENODE_CORE_CPU1_EXE to a copy of it)");
 }
 
 #[test]
@@ -731,6 +765,7 @@ fn a_board_bound_run_against_the_real_elf_in_renode_in_real_time_replays_from_it
     let outcome = b.products.events.iter().find(|e| av_kernel::drm::power::is_power_cycle_event(e)).expect("the power-cycle outcome event");
     assert_eq!((outcome.id.as_str(), outcome.tai_ns), ("marker:power_cycle:pc1", fault_tai));
     assert_eq!(outcome.values["performed"], 1.0);
+    assert_controller_resumes_after_the_reset(&b.sidecar_copy, fault_tai);
     compare_replay(&b, "replay of (b) from its edge log");
     assert_eq!(b.channel_calls.len(), 1);
 

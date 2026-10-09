@@ -141,3 +141,37 @@ def test_release_tick_rejects_non_increasing_time(tmp_path: Path) -> None:
     binary_path = compile_cached("reject", src, [PSP_SRC], PSP_INC, link_args=("-lpthread",))
     result = run_compiled(binary_path)
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_tick_count_survives_a_reset_so_the_scheduler_is_not_silenced(tmp_path: Path) -> None:
+    """hilprep-6. `psp_lockstep_init` runs again on every RESET (a power cycle). It used to zero
+    `psp_lockstep_tick_count()`; `services/cfs/apps/sch_lockstep` dispatches one wakeup per tick
+    between its own last-seen count and the current one, so after a RESET at tick N it sent no
+    wakeup for the next N ticks (a controller that answered N steps with no output). The clock
+    starts over at the new epoch; the count only grows, so the first tick after a RESET is
+    `last_seen + 1`. A wrong implementation that re-zeroes it fails the second check."""
+    src = r"""
+    #include <stdio.h>
+    #include "psp_lockstep.h"
+    int main(void) {
+        psp_lockstep_init(1000);
+        for (int i = 1; i <= 5; ++i) {
+            if (psp_lockstep_release_tick(1000 + 100 * i) != 0) { fprintf(stderr, "release %d refused\n", i); return 1; }
+            psp_lockstep_external_sync(0);
+        }
+        if (psp_lockstep_tick_count() != 5) { fprintf(stderr, "expected 5 ticks before the reset, got %llu\n", (unsigned long long)psp_lockstep_tick_count()); return 1; }
+        psp_lockstep_init(1500); /* the RESET: the clock restarts at 1500 */
+        if (psp_lockstep_current_tai_ns() != 1500) { fprintf(stderr, "clock did not restart at the reset epoch\n"); return 1; }
+        if (psp_lockstep_tick_count() != 5) { fprintf(stderr, "the reset zeroed the tick count (%llu): the scheduler would be silent for 5 steps\n", (unsigned long long)psp_lockstep_tick_count()); return 1; }
+        if (psp_lockstep_release_tick(1600) != 0) { fprintf(stderr, "first post-reset release refused\n"); return 1; }
+        psp_lockstep_external_sync(0);
+        if (psp_lockstep_tick_count() != 6) { fprintf(stderr, "first post-reset tick did not advance the count past the last-seen 5 (got %llu)\n", (unsigned long long)psp_lockstep_tick_count()); return 1; }
+        if (psp_lockstep_current_tai_ns() != 1600) { fprintf(stderr, "wrong clock after the first post-reset tick\n"); return 1; }
+        printf("OK\n");
+        return 0;
+    }
+    """
+    binary_path = compile_cached("reset_count", src, [PSP_SRC], PSP_INC, link_args=("-lpthread",))
+    result = run_compiled(binary_path)
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert result.stdout.strip() == "OK"

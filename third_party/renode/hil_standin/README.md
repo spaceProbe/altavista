@@ -3,7 +3,7 @@
 **Renode 1.16.1 emulating the ZynqMP RPU. This is not the ZCU104, and nothing here is a board
 result.** The board is not on hand; this is the same code path a board run takes (pacing, serial
 transport, the signed I/O log, replay) exercised against the real reproducible RTEMS ELF
-(`core-cpu1.exe`, SHA-256 `a5a5fe7b...2eb5`, question 240) in an emulator, so that the HIL code is
+(`core-cpu1.exe`, SHA-256 `de96907f...caf3` since the hilprep-6 tick-count fix, `a5a5fe7b...2eb5` before it; question 240) in an emulator, so that the HIL code is
 not first tried on hardware.
 
 - `renode_realtime_pty.py`: starts Renode with this repository's `zynqmp.repl` and the ELF, lets it
@@ -110,26 +110,29 @@ Both findings were reproduced with the real service, not assumed.
   pacing catches up without skipping and never re-anchors. So the pacing report shows an overrun on
   97 to 100 of the 100 ticks, a worst overrun of 2.8 to 12 s at the start of the run, and a final
   lateness that is 0 only when the host was quiet enough for the guest to recover it.
-- **After the in-place RESET the controller is silent for as many ticks as had passed before it
-  (a defect in the flight software, root-caused, not fixed here).** A power-cycle fault makes the
-  kernel ask the edge service to run the power channel and then send the guest a RESET frame;
-  `io_lockstep`'s `handle_reset` calls `psp_lockstep_init(tai)`, which sets `g_tick_count = 0`
-  (`services/cfs/psp-lockstep/src/psp_lockstep.c`). `sch_lockstep`'s main loop dispatches one
-  wakeup for each tick it has not yet seen: `for (; last_seen_tick_count < current_tick_count; ...)`
-  (`services/cfs/apps/sch_lockstep/fsw/src/sch_lockstep_app.c`), and its `last_seen_tick_count` is a
-  local that nothing resets, so after the counter drops to 0 no wakeup is sent until it has climbed
-  back to where it was. The ADCS gets no wakeup, publishes nothing, and every STEP is answered
-  empty after `IO_LOCKSTEP`'s full 2000 ms output wait. Evidence: the recorded-frame driver with a
-  RESET after 8 STEPs gave exactly 8 empty STEP_DONEs (2.0 s each) and then outputs again; after 5
-  and 10 STEPs 5 and 10; after 20 about 25; in the 5 s fault run (50 STEPs before the RESET) all 50
-  remaining STEPs came back empty (proof 2) and the run, which has 100, ends before the controller
-  recovers. It is platform-independent (the same code runs in the posix container, whose
-  power-cycle test asserts only that the run continues). A fix is a one-line change in
-  `psp_lockstep.c` (do not reset `g_tick_count` on a re-init) or in `sch_lockstep` (re-read the
-  count after a RESET); it changes the cFS image, so it is not made here. Until then a
-  power-cycle fault on a cFS-bound controller silences it for the rest of any run shorter than
-  twice the fault's time. `board.step_timeout_ms` is 180 s in the test so that those empty steps,
-  3 to 20 s of wall time each at Renode's speed, do not end the run.
+- **After the in-place RESET the controller was silent for as many ticks as had passed before it (a
+  defect in the flight software, found by this stand-in, root-caused and FIXED in hilprep-6).** A
+  power-cycle fault makes the kernel ask the edge service to run the power channel and then send the
+  guest a RESET frame; `io_lockstep`'s `handle_reset` calls `psp_lockstep_init(tai)`, which used to set
+  `g_tick_count = 0` (`services/cfs/psp-lockstep/src/psp_lockstep.c`). `sch_lockstep`'s main loop
+  dispatches one wakeup for each tick it has not yet seen, `for (; last_seen_tick_count <
+  current_tick_count; ...)` (`services/cfs/apps/sch_lockstep/fsw/src/sch_lockstep_app.c`), and its
+  `last_seen_tick_count` is a local nothing reset, so after the counter dropped to 0 no wakeup was sent
+  until it had climbed back to where it was. The ADCS got no wakeup, published nothing, and every STEP
+  was answered empty after `IO_LOCKSTEP`'s full 2000 ms output wait. Evidence: the recorded-frame
+  driver with a RESET after 8 STEPs gave exactly 8 empty STEP_DONEs and then outputs again; after 5 and
+  10 STEPs 5 and 10; in the 5 s fault run (50 STEPs before the RESET) all 50 remaining STEPs came back
+  empty and the run ended before the controller recovered. It is platform independent: the posix
+  container image failed the same way (0 outputs in 50 post-RESET steps).
+  The fix: the tick count is monotonic (`psp_lockstep_init` no longer zeroes it; the clock still starts
+  over at the new epoch), with a backstop in `sch_lockstep` that restarts its last-seen count if a count
+  is ever seen going backwards. A reset-time hook in `sch_lockstep` alone was not sound: after a RESET at
+  count 1 the first new tick has count 1 == `last_seen`, which no comparison can tell from "no new
+  tick", so a tick would be lost; a counter that never goes backwards has no such case. The test
+  asserts the controller publishes again within two steps of the RESET and for all but two of the
+  following steps; with the fix it published on the very next step and on 50 of 50. The ELF is
+  therefore `de96907f...caf3` now (it was `a5a5fe7b...2eb5`; two builds from different staging paths
+  agree), and the test's `board.step_timeout_ms` is 60 s instead of the 180 s the silent steps needed.
 
 ## What HIL day changes, as the code has it
 

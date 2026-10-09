@@ -75,7 +75,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, EventKind, Fault, FaultTargetKind, Provenance, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, EventKind, Fault, FaultTargetKind, PortDirection, PortTrafficLog, Provenance, SosConfiguration, SystemDefinition};
+use prost::Message;
 use av_kernel::drm::replay::ReplayConfig;
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
 use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id, DockerTestLock};
@@ -186,6 +187,16 @@ fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosC
 // ------------------------------------------------------------------------------------------
 
 const CFS_LOCAL_IMAGE: &str = "altavista-cfs-lockstep:local";
+/// hilprep-6: `AV_CFS_TEST_IMAGE` names another local image to run these tests against (default
+/// [`CFS_LOCAL_IMAGE`], unchanged). It exists so the app code can be tested from a run-scoped
+/// test-only tag built from a working tree without touching `altavista-cfs-lockstep:local`, the
+/// image whose digest `services/cfs/IMAGE_DIGEST.md` records.
+const CFS_IMAGE_OVERRIDE_ENV: &str = "AV_CFS_TEST_IMAGE";
+
+fn cfs_image() -> String {
+    std::env::var(CFS_IMAGE_OVERRIDE_ENV).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| CFS_LOCAL_IMAGE.to_string())
+}
+
 const CFS_LOCAL_IMAGE_BUILD_HINT: &str = "run `docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .` from the repository root once (services/cfs/Dockerfile's own top comment has the av-lockstep-shim prebuild step this needs first)";
 
 /// Question 194 (M23.4 round 5-6): the pre-R6.3 shape here was `println!("SKIPPED ...")` then
@@ -199,7 +210,7 @@ const CFS_LOCAL_IMAGE_BUILD_HINT: &str = "run `docker build -f services/cfs/Dock
 /// `return`s, with nothing asserted, is exactly the defect question 194 requires fixed. Returns
 /// `true` iff the calling test must skip.
 fn skip_if_cfs_image_unavailable(test_name: &str) -> bool {
-    match av_lockstep::docker::image_gate_status(CFS_LOCAL_IMAGE, CFS_LOCAL_IMAGE_BUILD_HINT) {
+    match av_lockstep::docker::image_gate_status(&cfs_image(), CFS_LOCAL_IMAGE_BUILD_HINT) {
         Ok(()) => false,
         Err(reason) => {
             let line = av_lockstep::docker::announce_gate_skip(test_name, &reason);
@@ -320,7 +331,7 @@ fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerCon
     // new one) -- see this function's own doc comment above for the proof that this tag and
     // CFS_LOCAL_IMAGE resolve to the same id, and why that makes labeling it dangerous rather
     // than merely impossible.
-    docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
+    docker_cmd(&["tag", &cfs_image(), &tagged]);
     let image_guard = DockerImageGuard(tagged.clone());
     // The registry container has only just been started: retry the push briefly until the
     // registry process inside it accepts connections.
@@ -773,6 +784,14 @@ fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_d
 // (crates/av-kernel/tests/drm_container.rs's own `a_power_cycle_fault_on_a_container_instance_
 // resets_the_integrator_and_the_run_continues`) -- there is no ADCS-side accumulator to reset in
 // the first place. That gap (ADCS has no reset handler at all) is disclosed here, not hidden.
+//
+// hilprep-6 added the assertion that the controller RESUMES: the "run continues" assertion above hid
+// a defect for as long as this test existed. `psp_lockstep_init` zeroed the tick count that
+// `sch_lockstep` compares with its own last-seen count, so a RESET after N steps silenced the
+// scheduler (and with it the ADCS) for N steps -- with the fault at 5 s of 10 s, for the rest of the
+// run. The posix image built before the fix (`altavista-cfs-lockstep:local`, `4a9a6aee...`) fails the
+// assertion with 0 outputs in the 50 post-RESET steps; an image built from the fixed tree passes with
+// 50 of 50 (`AV_CFS_TEST_IMAGE` points the tests at such a test-only image).
 // ------------------------------------------------------------------------------------------
 
 const RESET_DURATION_S: i64 = 10;
@@ -800,7 +819,11 @@ fn run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepte
     let drm = container_drm("attitude_control_cfs_reset_drm", &sos.id, RESET_DURATION_S, faults);
 
     let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
-    let products = execute(run_config(&gmat, &drm, &sos, &systems, "test-run-cfs-reset")).expect("a power-cycle HARDWARE fault on the container-bound \"controller\" instance must be accepted, not refused, and the run must complete");
+    let dir = replay_scratch_dir("power-cycle");
+    let cfg = RunConfig { products_dir: Some(dir.clone()), ..run_config(&gmat, &drm, &sos, &systems, "test-run-cfs-reset") };
+    let products = execute(cfg).expect("a power-cycle HARDWARE fault on the container-bound \"controller\" instance must be accepted, not refused, and the run must complete");
+    let sidecar = std::fs::read(dir.join("port_traffic.pb")).unwrap_or_else(|e| panic!("reading port_traffic.pb: {e}"));
+    let _ = std::fs::remove_dir_all(&dir);
 
     let fault_events: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::Fault as i32).collect();
     assert_eq!(fault_events.len(), 1, "exactly one FAULT event expected: {:?}", products.events);
@@ -813,6 +836,23 @@ fn run_a_power_cycle_hardware_fault_on_the_container_bound_controller_is_accepte
     // scenario, not just the pre-fault span.
     let traj = products.trajectories.get("attitude").expect("the \"attitude\" instance produced a trajectory");
     assert_eq!(traj.samples.len(), (RESET_DURATION_S + 1) as usize, "expected samples covering the full {RESET_DURATION_S}s scenario (1 Hz output grid), got tai_ns values {:?}", traj.samples.iter().map(|s| s.tai_ns).collect::<Vec<_>>());
+
+    // hilprep-6: the controller RESUMES after the RESET. Before the fix `psp_lockstep_init` zeroed the
+    // tick count that `sch_lockstep` compares with its own last-seen count, so after a RESET at step N
+    // the scheduler sent no wakeup for N steps and the ADCS published nothing (here: the 50 steps from
+    // the fault, i.e. the rest of the run). Read off the port traffic the executor recorded: the
+    // `wheel_torque_out` OUT records of "controller" carry the epoch of the STEP that produced them
+    // (the STEP's `until_tai_ns`), 10 Hz, one per step. The first one strictly after the fault's epoch
+    // must be within TWO steps of it (the first post-RESET step is expected; the second is the slack
+    // for a wakeup landing one poll late), and nearly every later step must have one.
+    let log = PortTrafficLog::decode(sidecar.as_slice()).expect("port_traffic.pb decodes");
+    let step_ns = 100_000_000i64;
+    let after: Vec<i64> = log.records.iter().filter(|r| r.instance == "controller" && r.port == "wheel_torque_out" && r.direction == PortDirection::Out as i32 && r.tai_ns > fault_tai_ns).map(|r| r.tai_ns).collect();
+    let steps_after = (RESET_DURATION_S - RESET_FAULT_TAI_OFFSET_S) * 10;
+    let first = after.first().copied();
+    println!("POST-RESET OUTPUT: fault epoch {fault_tai_ns}; first controller output after it {:?} ({} steps later); {} outputs over the {steps_after} post-RESET steps", first, first.map(|t| (t - fault_tai_ns) / step_ns).unwrap_or(-1), after.len());
+    assert!(first.is_some_and(|t| t <= fault_tai_ns + 2 * step_ns), "the controller must publish again within two steps of the RESET (first output after the fault: {first:?}, fault epoch {fault_tai_ns}; {} outputs in the {steps_after} post-RESET steps): after a RESET at step N the scheduler stayed silent for N steps (psp_lockstep_init zeroed the tick count sch_lockstep compares against)", after.len());
+    assert!(after.len() as i64 >= steps_after - 2, "the controller must keep publishing after the RESET: {} outputs in the {steps_after} post-RESET steps", after.len());
 }
 
 // ------------------------------------------------------------------------------------------

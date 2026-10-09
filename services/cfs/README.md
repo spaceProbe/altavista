@@ -58,6 +58,15 @@ One shim process serves exactly one peer connection for its lifetime — a fresh
 bound flight-software process) starts per container/run, matching `Bind`'s own one-shot-per-process
 contract; `Reset` exists precisely so a *bound* process can be power-cycled without a fresh `Bind`.
 
+A `Reset` restarts the lockstep **clock** at the request's `tai_ns` (`psp_lockstep_init`) but not the
+**tick count** (`psp_lockstep_tick_count`, ticks consumed since the process started, which only grows).
+`sch_lockstep` dispatches one wakeup per tick between its own last-seen count and the current one, so a
+count that started over would silence the scheduler, and every app it wakes, for as many steps as had
+passed before the `Reset` (found by the hilprep-6 stand-in run: a controller that answered 50 steps with
+no output after a `Reset` at step 50; `tests/test_psp_lockstep_clock.py` and the power-cycle test of
+`crates/av-kernel/tests/drm_attitude_control_cfs.rs` pin it). The apps themselves are not reset: `Reset`
+re-arms the clock bookkeeping only (`io_lockstep`'s `handle_reset`).
+
 ## Endianness: little-endian, deliberately, and why that differs from CCSDS elsewhere
 
 **Every multi-byte integer in this protocol is little-endian.** This is a deliberate choice, not
