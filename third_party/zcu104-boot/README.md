@@ -79,7 +79,7 @@ lock holder; run it plainly:
 
 `BOOT_RPU_ELF` names the RPU ELF (default `third_party/rtems-container/output/elf/core-cpu1.exe`, in
 this tree or the main tree, built by `third_party/rtems-container/build-elf.sh`); its SHA-256 must be
-`a5a5fe7b0d87714478c748cd08ca1888d68c6385657626d2cf42e36bc37a2eb5`. The header of the script
+`de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3`. The header of the script
 documents every parameter. Outputs (default `third_party/zcu104-boot/output/`, ignored): the image,
 `fsbl.elf`, `pmufw.elf`, `boot.bif`, `bootgen-read.txt`, `structural-check.txt`, `SHA256SUMS`,
 `logs/`. The fetched cache (`cache/`, ignored, about 2 GB with both toolchains) is reused.
@@ -106,7 +106,7 @@ Three phases, three `docker run --rm` of the same image, none leaving a tag or i
 | `bootgen` | `https://github.com/Xilinx/bootgen` commit `6f448fece5d999985128fd454ae047e065a5e45d` (`xilinx_v2024.2`), tree manifest `743a2822746eb3a738d151d6500b3794e9323a339cf5f62f1cbd9925a500c60a` |
 | binutils / gcc / newlib / gmp / mpfr / mpc | 2.42 / 13.3.0 / 4.4.0.20231231 / 6.3.0 / 4.2.1 / 1.3.1, sha256 in `pinned-inputs.sh` |
 | toolchain trees | manifest hashes in `pinned-inputs.sh`: aarch64 `cc6a9e38...`, MicroBlaze `9b8b3632...` (the latter without its target libraries, see "Found") |
-| RPU ELF | sha256 `a5a5fe7b0d87714478c748cd08ca1888d68c6385657626d2cf42e36bc37a2eb5` |
+| RPU ELF | sha256 `de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3` |
 | `SOURCE_DATE_EPOCH` | `1791331200` (2026-10-07 00:00:00 UTC) |
 
 Why release 2024.2: it is the last release before AMD's 2025 restructuring of `lib/sw_apps`, still
@@ -140,6 +140,13 @@ reach an artifact; none of the three artifacts contains a host path. Phase 3 com
 | C | `~/hp5-stageC/deeper/s` | `~/hp5-outC` | container | cache 2 (rebuilt from scratch) | same | same | same |
 
 `cmp` is silent on all of image, FSBL, PMU firmware, `.bif`, `bootgen-read.txt` between A, B and C.
+
+Re-pinned 2026-10-09: the RPU ELF moved from `a5a5fe7b…` to `de96907f…` (the fix that keeps a
+RESET from silencing the scheduler, `services/cfs/psp-lockstep`), so the image moved from
+`0711bc86…` to `72fd2d6f64d49ac53a64edba34ede15e7863f3e8cbebb4766a830a649797d489`; the FSBL and the PMU
+firmware did not (they do not contain the ELF), and `bootgen-read.txt` is unchanged (the RPU
+partitions keep their load addresses, entry and sizes). Two cached, network-free builds from different
+staging and output paths gave the new image byte for byte, with the structural check passing.
 Perturbation (`BOOT_SOURCE_DATE_EPOCH` one day later): the FSBL differs in 1 byte (the day digit of the
 banner's `Oct  7`), the PMU firmware in 1 byte (the same digit in its banner), and the image in 2 bytes:
 file offsets 81042 (inside the PMU firmware block, which starts at 0x2800) and 237739 (inside the FSBL

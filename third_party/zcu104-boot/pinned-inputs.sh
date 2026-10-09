@@ -147,7 +147,7 @@ MICROBLAZE_TOOLCHAIN_MANIFEST_EXCLUDE="microblazeel-xilinx-elf/lib/"
 
 # ---- The RPU application: the reproducible RTEMS 6.1 zynqmp_rpu_lock_step cFS ELF
 # (third_party/rtems-container/build-elf.sh, docs/open-questions.md question 240).
-RPU_ELF_SHA256="a5a5fe7b0d87714478c748cd08ca1888d68c6385657626d2cf42e36bc37a2eb5"
+RPU_ELF_SHA256="de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3"
 
 # ---- Build date for every __DATE__/__TIME__ (FSBL and PMU firmware banners): 2026-10-07 00:00:00 UTC.
 PINNED_SOURCE_DATE_EPOCH="1791331200"
@@ -161,4 +161,4 @@ PINNED_SOURCE_DATE_EPOCH="1791331200"
 # psu_init is not checked against them.
 PMUFW_ELF_SHA256="81701d2bcc3ffd507e276e6e3c2b705cc094504fac8f28555b9aa02958cca8a0"
 STANDIN_FSBL_ELF_SHA256="61f8b9451b62c8ff4b148ac13550247e475f63250e2771e28adb0b7ce1df3d45"
-STANDIN_BOOT_BIN_SHA256="0711bc866f21b04ec43fd65ff72259bc26239c08c6a58e57e7ac5df72f538e46"
+STANDIN_BOOT_BIN_SHA256="72fd2d6f64d49ac53a64edba34ede15e7863f3e8cbebb4766a830a649797d489"

@@ -45,7 +45,7 @@ CHECKER = RECIPE / "container" / "structural-check.py"
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "zcu104_boot" / "bootgen-read.txt"
 
 DIGEST = r"sha256:[0-9a-f]{64}"
-RPU_ELF_SHA256 = "a5a5fe7b0d87714478c748cd08ca1888d68c6385657626d2cf42e36bc37a2eb5"
+RPU_ELF_SHA256 = "de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3"
 
 
 def _code_lines(path: Path) -> list[str]:
