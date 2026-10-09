@@ -96,7 +96,10 @@ def test_fragment_ports_match_their_sources():
     print(f"checked {len(fragment['ports'])} fragment [ports.*] rows "
           f"({len(const_rows)} kind=\"const\") against {len(port_map)} owned port map entries "
           f"({len(exempt_rows)} const row(s) explicitly exempted: {sorted(exempt_rows)})")
-    assert len(port_map) == 9, sorted(port_map)
+    # 10 since question 242 added `av-edge-board` (127.0.0.1:50081), the board's edge-node service:
+    # it runs on the edge node beside the board, not in the deployed suite, so it has an owned-map
+    # row and no fragment row.
+    assert len(port_map) == 10, sorted(port_map)
     assert const_rows - exempt_rows <= set(port_map), (
         "every non-exempt const row must have owned-map provenance", const_rows, exempt_rows, port_map
     )

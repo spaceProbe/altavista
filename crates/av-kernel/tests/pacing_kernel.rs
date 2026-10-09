@@ -192,12 +192,21 @@ fn an_output_period_coarser_than_the_step_period_does_not_bunch_the_steps() {
     let offs = offsets_ms(&r.board_log);
     assert_eq!(offs.len(), 10);
     println!("coarse_output: release offsets (ms) = {:?}", offs.iter().map(|(_, o)| (o * 10.0).round() / 10.0).collect::<Vec<_>>());
+    // Each release is measured against its own scheduled instant, not against the previous
+    // release: a bunched implementation releases the five steps of an output tick together, i.e.
+    // before their scheduled instants. (The manager's gate found the first form of this check, a
+    // gap >= 95 ms between consecutive releases, failing on a loaded host: one release ~7-10 ms late
+    // from sleep overshoot followed by an on-time one gives a ~90 ms gap with nothing bunched.)
+    for (end_ms, off) in &offs {
+        let k = end_ms / 100;
+        let scheduled = (k - 1) as f64 * 100.0;
+        assert!(*off >= scheduled - ANCHOR_SLACK.as_secs_f64() * 1e3, "step {k} was released at {off:.3} ms, before its scheduled {scheduled} ms: bunched");
+        assert!(*off <= scheduled + 50.0, "step {k} was released at {off:.3} ms, more than 50 ms after its scheduled {scheduled} ms");
+    }
     for w in offs.windows(2) {
         let gap = w[1].1 - w[0].1;
-        // Each release is 100 ms after the previous one, within the overshoot of one sleep; a
-        // bunched implementation would show gaps of ~0 ms inside each output tick.
-        assert!(gap >= 95.0, "steps {} and {} were released {gap:.3} ms apart: bunched", w[0].0 / 100, w[1].0 / 100);
-        assert!(gap <= 150.0, "steps {} and {} were released {gap:.3} ms apart", w[0].0 / 100, w[1].0 / 100);
+        // Bunching shows as gaps near 0 ms; overshoot jitter only ever moves a gap by tens of ms.
+        assert!(gap >= 50.0, "steps {} and {} were released {gap:.3} ms apart: bunched", w[0].0 / 100, w[1].0 / 100);
     }
 }
 
