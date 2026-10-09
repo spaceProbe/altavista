@@ -5,7 +5,7 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "ab5821a8e3cc27e503e11992f15ae900ec34cfb7718d39aa7aa001f9b6632b24"
+          "content": "1727a3c0fd8f7e94de2c40b03bdbab15780e26e1d9ea4e0c3569bfcf807a6600"
         }
       ],
       "name": "av-edge-plugin",
@@ -58,16 +58,16 @@
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "9d366f65299c83577f198524d865e5bed5838c4a887499becbe42f6002e14767"
+          "content": "1304e39777d93a4fe9534c7731a6bfebf1739d7f5e7900f6726a7950c9f75719"
         }
       ],
       "name": "edge-plugin-image",
       "type": "container",
       "version": "av-edge-plugin:local"
     },
-    "timestamp": "2026-10-07T22:16:43Z"
+    "timestamp": "2026-10-09T21:03:57Z"
   },
-  "serialNumber": "urn:uuid:a28223fd-d8ad-4116-6a2d-0eb2d346264a",
+  "serialNumber": "urn:uuid:5a3a20a3-297a-be9a-ab04-fa2e71f5fbcb",
   "specVersion": "1.5",
   "version": 1
 }
