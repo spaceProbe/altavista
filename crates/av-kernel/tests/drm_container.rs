@@ -786,7 +786,9 @@ fn docker_cmd(args: &[&str]) -> String {
 struct DockerContainerGuard(String);
 impl Drop for DockerContainerGuard {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("docker").args(["rm", "-f", &self.0]).output();
+        // `-v`: the throwaway `registry:2` declares `VOLUME /var/lib/registry`; without it every
+        // registry left an anonymous volume behind.
+        let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
     }
 }
 struct DockerImageGuard(String);

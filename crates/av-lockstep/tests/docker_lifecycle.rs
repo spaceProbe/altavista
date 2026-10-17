@@ -69,7 +69,9 @@ fn docker(args: &[&str]) -> String {
 struct ContainerGuard(String);
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+        // `-v`: `registry:2` declares `VOLUME /var/lib/registry`; without it every throwaway
+        // registry left an anonymous volume behind.
+        let _ = Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
     }
 }
 

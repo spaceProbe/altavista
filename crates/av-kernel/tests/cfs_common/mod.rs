@@ -118,10 +118,13 @@ pub fn docker_cmd(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Removes the container on drop, **with its anonymous volumes** (`-v`): `registry:2` declares
+/// `VOLUME /var/lib/registry`, so every throwaway registry made one, and `rm -f` alone left it
+/// dangling (measured: +1 volume per registry, question 245's round).
 pub struct DockerContainerGuard(pub String);
 impl Drop for DockerContainerGuard {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+        let _ = Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
     }
 }
 pub struct DockerImageGuard(pub String);
