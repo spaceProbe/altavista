@@ -53,7 +53,8 @@
 //! `BoardBinding` (validated by `av_edge::board::BoardLink`: edge node, every `port_devices` spec
 //! parsed, one link, complete against the system's declared ports) and the `board.*` vocabulary
 //! (`board.edge_address`, `board.seed_key`, `board.tls`/`ca_file`/`client_cert`/`client_key`,
-//! `board.step_timeout_ms`, `board.bind_timeout_ms`; anything else is `UnknownParameter`).
+//! `board.step_timeout_ms`, `board.bind_timeout_ms`, `board.power_control_timeout_ms`,
+//! `board.rehandshake_timeout_ms`; anything else is `UnknownParameter`).
 //! [`materialize_board`] connects, adds `board.edge_node_id` and `board.port_device` to the `Bind`
 //! parameters for the edge service's check, and runs every later call through a deadline
 //! (`TimedLockstep`) so a silent board is a typed error. The instance reports
@@ -62,7 +63,10 @@
 //! `BoardBinding.power_control` (parsed at load by `av_edge::board::parse_power_control`) is the
 //! edge node's power control channel, run by the edge service, never by the kernel: a
 //! power-cycle fault asks it over `BoardEdgeService` (`drm::power`), then sends the lockstep
-//! `RESET`; `board.power_control_timeout_ms` bounds that call.
+//! `RESET`; `board.power_control_timeout_ms` bounds that call. A DRM that declares
+//! `board.rehandshake_timeout_ms` says the power cycle reboots the peer: the edge service re-handshakes
+//! with it and the kernel re-`Bind`s it (the run's same Bind request) before the `RESET`, and waits
+//! for the call for the two budgets together (`drm::power`, "A board that really reboots").
 //! `crates/av-kernel/README.md`, "Binding a board", has the parameter table and what is proven.
 //!
 //! ## Container (lockstep) binding (M13.2, question 107)
@@ -1232,10 +1236,21 @@ pub enum ContainerError {
     /// never a hang. Fatal like every variant here: the run stops. The late reply, if one ever
     /// comes, is discarded and the instance's link is not used again.
     StepTimeout { timeout_ms: u64 },
+    /// Question 245 (6): after a power cycle the edge service re-handshook with the rebooted
+    /// peer, and the kernel's re-`Bind` of it (the run's same `Bind` request) failed at the
+    /// transport/gRPC-status level.
+    RebindRpc { detail: String },
+    /// The re-`Bind` got no reply within `board.bind_timeout_ms`.
+    RebindTimeout { timeout_ms: u64 },
+    /// The rebooted peer answered the re-`Bind` with `lockstep_capable = false` (`reason` is its own).
+    RebindRefused { reason: String },
 }
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ContainerError::RebindRpc { detail } => write!(f, "re-Bind of the rebooted board failed: {detail}"),
+            ContainerError::RebindTimeout { timeout_ms } => write!(f, "re-Bind of the rebooted board got no reply within {timeout_ms} ms (board.bind_timeout_ms)"),
+            ContainerError::RebindRefused { reason } => write!(f, "the rebooted board refused the re-Bind (lockstep_capable=false): {reason}"),
             ContainerError::StepTimeout { timeout_ms } => write!(f, "Step got no reply within {timeout_ms} ms (board.step_timeout_ms): the board or its edge service is silent"),
             ContainerError::Connect { address, detail } => write!(f, "connecting to lockstep process at {address:?}: {detail}"),
             ContainerError::BindRpc { detail } => write!(f, "Bind RPC failed: {detail}"),
@@ -1343,6 +1358,12 @@ enum LockstepIo {
 }
 
 impl LockstepIo {
+    fn bind(&mut self, request: LockstepBindRequest, timeout: std::time::Duration) -> Result<av_lockstep::LockstepBindResponse, IoError> {
+        match self {
+            LockstepIo::Direct(c) => c.bind(request).map_err(|e| IoError::Rpc(e.to_string())),
+            LockstepIo::Timed { worker, .. } => worker.call(timeout, move |c| c.bind(request).map_err(|e| e.to_string())),
+        }
+    }
     fn step(&mut self, request: LockstepStepRequest) -> Result<av_lockstep::LockstepStepResponse, IoError> {
         match self {
             LockstepIo::Direct(c) => c.step(request).map_err(|e| IoError::Rpc(e.to_string())),
@@ -1429,6 +1450,11 @@ pub(crate) struct BoardPower {
     power_control: String,
     run_id: String,
     instance: String,
+    /// The `Bind` request this instance was bound with, kept so that a power cycle that reboots the
+    /// peer re-`Bind`s it with exactly that (question 245 (6)).
+    bind_request: LockstepBindRequest,
+    /// `board.bind_timeout_ms`: bounds the re-`Bind` like the first.
+    bind_timeout: std::time::Duration,
 }
 
 impl DynamicsModel for ContainerModel {
@@ -1543,7 +1569,25 @@ impl ContainerModel {
             return Err(power::PerformError::PowerCycle(PowerControlError::BadResponse { detail: "power_cycle_then_reset called on an instance that is not a board".to_string() }));
         };
         let call = PowerCycleCall { run_id: bp.run_id.clone(), instance: bp.instance.clone(), fault_id: fault_id.to_string(), tai_ns, edge_node_id: bp.edge_node_id.clone(), power_control: bp.power_control.clone() };
-        power::perform(bp.control.as_ref(), &call, || self.reset(tai_ns, reason))
+        power::perform(bp.control.as_ref(), &call, || self.rebind(bp), || self.reset(tai_ns, reason))
+    }
+
+    /// Bind the rebooted peer again with the run's same `Bind` request (question 245 (6)): its new
+    /// lockstep-local session knows nothing until bound. A refusal is typed; a `binding_hash` that
+    /// differs from the first `Bind`'s is accepted and noted on stderr (the signed edge log holds
+    /// both answers, and this instance's provenance keeps the first).
+    fn rebind(&self, bp: &BoardPower) -> Result<(), ContainerError> {
+        let response = self.client.borrow_mut().bind(bp.bind_request.clone(), bp.bind_timeout).map_err(|e| match e {
+            IoError::TimedOut { timeout_ms } => ContainerError::RebindTimeout { timeout_ms },
+            other => ContainerError::RebindRpc { detail: other.to_string() },
+        })?;
+        if !response.lockstep_capable {
+            return Err(ContainerError::RebindRefused { reason: response.refusal_reason });
+        }
+        if response.binding_hash != self.binding_hash {
+            eprintln!("av-kernel: board instance {:?}: the re-Bind after the power cycle answered binding_hash {:?}, not the first Bind's {:?}; accepted", bp.instance, response.binding_hash, self.binding_hash);
+        }
+        Ok(())
     }
 
     /// Send `Shutdown` and, for a Docker-run instance ([`ContainerModel::managed`] is `Some`),
@@ -1967,6 +2011,8 @@ pub(crate) fn materialize_board(
         parameters: bind_parameters,
     };
     let mut worker = TimedLockstep::new(client);
+    // Kept for a re-Bind after a power cycle that reboots the peer (question 245 (6)).
+    let bind_request = request.clone();
     let response = worker
         .call(bind_timeout, move |c| c.bind(request).map_err(|e| e.to_string()))
         .map_err(|e| DrmError::BoardBind { instance: instance_name.to_string(), detail: e.to_string() })?;
@@ -1979,8 +2025,19 @@ pub(crate) fn materialize_board(
     let io = LockstepIo::Timed { worker, step_timeout: std::time::Duration::from_millis(board.step_timeout_ms) };
     // The power-control seam: a client of the same edge service, same address and TLS rules.
     let tls = spec.tls_paths().map(|(ca, cert, key)| (ca.to_string(), cert.to_string(), key.to_string()));
-    let control = EdgePowerControl::new(spec.address.clone(), tls, std::time::Duration::from_millis(board.power_control_timeout_ms));
-    let board_power = BoardPower { control: Box::new(control), edge_node_id: board.link.edge_node_id().to_string(), power_control: board.power_control.canonical(), run_id: run_id.to_string(), instance: instance_name.to_string() };
+    let mut control = EdgePowerControl::new(spec.address.clone(), tls, std::time::Duration::from_millis(board.power_control_timeout_ms));
+    if board.rehandshake_timeout_ms > 0 {
+        control = control.with_rehandshake(std::time::Duration::from_millis(board.rehandshake_timeout_ms));
+    }
+    let board_power = BoardPower {
+        control: Box::new(control),
+        edge_node_id: board.link.edge_node_id().to_string(),
+        power_control: board.power_control.canonical(),
+        run_id: run_id.to_string(),
+        instance: instance_name.to_string(),
+        bind_request,
+        bind_timeout,
+    };
     let model = ContainerModel { client: RefCell::new(io), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(None), board_link_hash: Some(link_hash), board_power: Some(board_power) };
     Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
 }
@@ -2337,6 +2394,14 @@ pub struct BoardSpec {
     /// `board.power_control_timeout_ms`: how long the kernel waits for the edge service's
     /// `PowerCycle` reply. Default [`power::POWER_CONTROL_TIMEOUT_DEFAULT_MS`].
     pub power_control_timeout_ms: u64,
+    /// `board.rehandshake_timeout_ms` (question 245 (6)): the DRM's declaration that this board's
+    /// power cycle reboots the peer, and how long the edge service may take to re-handshake with it
+    /// (its `--rehandshake-timeout-ms`). `0` (the default, when the parameter is absent) declares
+    /// nothing. When declared, the kernel waits for the `PowerCycle` reply for
+    /// `power_control_timeout_ms` **plus** this, refuses a service that did not re-handshake
+    /// ([`power::PowerControlError::RehandshakeExpected`]), and re-`Bind`s the instance after one that
+    /// did. See `drm::power`'s module doc.
+    pub rehandshake_timeout_ms: u64,
 }
 
 /// `board.step_timeout_ms` default: 5 s. A board's step is answered over a serial line or UDP by
@@ -3163,7 +3228,8 @@ fn parse_container_spec(context: &str, params: &BTreeMap<String, Parameter>, con
 ///   `board.tls` / `board.ca_file` / `board.client_cert` / `board.client_key` (as `container.*`,
 ///   with the same question 155 refusal of a non-loopback plaintext address,
 ///   [`DrmError::BoardPlaintextNonLoopback`]), `board.step_timeout_ms` and
-///   `board.bind_timeout_ms` and `board.power_control_timeout_ms` (see [`BoardSpec`]). `output.*`
+///   `board.bind_timeout_ms`, `board.power_control_timeout_ms` and `board.rehandshake_timeout_ms`
+///   (see [`BoardSpec`]). `output.*`
 ///   is accepted as for a container. Any other name is [`DrmError::UnknownParameter`].
 /// - `BoardBinding.power_control` parsed by `av_edge::board::parse_power_control`
 ///   ([`DrmError::BoardPowerControl`]), whether or not any fault uses it.
@@ -3173,6 +3239,7 @@ fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, 
     let mut step_timeout_ms = BOARD_STEP_TIMEOUT_DEFAULT_MS;
     let mut bind_timeout_ms = BOARD_BIND_TIMEOUT_DEFAULT_MS;
     let mut power_control_timeout_ms = power::POWER_CONTROL_TIMEOUT_DEFAULT_MS;
+    let mut rehandshake_timeout_ms = 0u64;
     let power_control = parse_power_control(&board_binding.power_control).map_err(|source| DrmError::BoardPowerControl { instance: instance_name.to_string(), source })?;
     let timeout_ms = |name: &str, p: &Parameter| -> Result<u64, DrmError> {
         let v = p.value;
@@ -3198,6 +3265,7 @@ fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, 
             "step_timeout_ms" => step_timeout_ms = timeout_ms(name, p)?,
             "bind_timeout_ms" => bind_timeout_ms = timeout_ms(name, p)?,
             "power_control_timeout_ms" => power_control_timeout_ms = timeout_ms(name, p)?,
+            "rehandshake_timeout_ms" => rehandshake_timeout_ms = timeout_ms(name, p)?,
             _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
         }
     }
@@ -3218,7 +3286,7 @@ fn parse_board_spec(instance_name: &str, context: &str, sys: &SystemDefinition, 
             }
         }
     }
-    spec.board = Some(BoardSpec { link, step_timeout_ms, bind_timeout_ms, power_control, power_control_timeout_ms });
+    spec.board = Some(BoardSpec { link, step_timeout_ms, bind_timeout_ms, power_control, power_control_timeout_ms, rehandshake_timeout_ms });
     Ok(spec)
 }
 
@@ -4755,6 +4823,23 @@ mod tests {
             let mut params = board_params();
             params.push(param("board.step_timeout_ms", value));
             classify_board(Some(good_board()), params).expect("the bounds are inclusive");
+        }
+    }
+
+    /// Question 245 (6): `board.rehandshake_timeout_ms` is the DRM's declaration that this board's power
+    /// cycle reboots the peer. Absent it is 0 (nothing declared: the existing stand-ins); present it
+    /// is bounded like the other board timeouts.
+    #[test]
+    fn board_rehandshake_timeout_is_declared_by_a_parameter_and_absent_means_not_declared() {
+        assert_eq!(classify_board(Some(good_board()), board_params()).unwrap().board.unwrap().rehandshake_timeout_ms, 0);
+        let mut params = board_params();
+        params.push(param("board.rehandshake_timeout_ms", 90_000.0));
+        assert_eq!(classify_board(Some(good_board()), params).unwrap().board.unwrap().rehandshake_timeout_ms, 90_000);
+        for value in [0.0, 9.0, 600_001.0, 1.5] {
+            let mut params = board_params();
+            params.push(param("board.rehandshake_timeout_ms", value));
+            let err = classify_board(Some(good_board()), params).unwrap_err();
+            assert!(matches!(err, DrmError::InvalidBinding { ref reason } if reason.contains("board.rehandshake_timeout_ms")), "{value}: {err:?}");
         }
     }
 

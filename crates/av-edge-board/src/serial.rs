@@ -243,6 +243,14 @@ impl SerialPort {
     pub fn baud(&self) -> u32 {
         self.baud
     }
+
+    /// Discard whatever the driver has queued for reading (`tcflush(TCIFLUSH)`) and return 0 or
+    /// 1: 1 if a flush was requested and succeeded. The byte count is not knowable. A re-handshake
+    /// calls this before each HELLO.
+    pub fn discard_input(&mut self) -> usize {
+        // SAFETY: the descriptor is open for the life of `self`; `tcflush` takes no pointer.
+        usize::from(unsafe { libc::tcflush(self.fd.get_ref().as_raw_fd(), libc::TCIFLUSH) } == 0)
+    }
 }
 
 impl AsyncRead for SerialPort {

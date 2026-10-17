@@ -51,6 +51,7 @@ use av_lockstep_shim::pb::{LockstepBindRequest, LockstepBindResponse, LockstepRe
 use av_lockstep_shim::service::ShimService;
 use av_lockstep_shim::PeerLink;
 use crate::iolog::BoardIoLog;
+use crate::relink::PeerCell;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use tonic::{Request, Response, Status};
@@ -104,7 +105,7 @@ pub fn check_bind(own_edge_node_id: &str, own_device: &PortDevice, parameters: &
 
 /// The kernel-facing service for one board link.
 pub struct BoardService<S> {
-    inner: ShimService<S>,
+    cell: Arc<PeerCell<S>>,
     edge_node_id: String,
     device: PortDevice,
     shutdown: Arc<Notify>,
@@ -114,7 +115,13 @@ pub struct BoardService<S> {
 impl<S> BoardService<S> {
     /// `log` is the board I/O log every exchange is recorded in before its reply returns.
     pub fn new(peer: Arc<PeerLink<S>>, edge_node_id: String, device: PortDevice, log: Arc<BoardIoLog>) -> Self {
-        Self { inner: ShimService::new(peer), edge_node_id, device, shutdown: Arc::new(Notify::new()), log }
+        Self::with_cell(Arc::new(PeerCell::new(peer)), edge_node_id, device, log)
+    }
+
+    /// As [`BoardService::new`], over a [`PeerCell`] that may be re-handshaken after a power cycle
+    /// (question 245 (6)); the same cell is given to `power::BoardEdge::with_relink`.
+    pub fn with_cell(cell: Arc<PeerCell<S>>, edge_node_id: String, device: PortDevice, log: Arc<BoardIoLog>) -> Self {
+        Self { cell, edge_node_id, device, shutdown: Arc::new(Notify::new()), log }
     }
 
     /// Notified (once, with a stored permit) after a Shutdown RPC succeeded.
@@ -143,9 +150,11 @@ where
             BindCheck::Matched => eprintln!("av-edge-board: Bind board parameters match this link; stripped them and forwarding the BIND to the board"),
         }
         let exchange = self.log.begin().await?;
+        // After the gate: a power cycle's re-handshake holds it and may have installed a new PeerLink.
+        let inner = ShimService::new(self.cell.current()?);
         self.log.set_run(&req.run_id, &req.instance);
         let mut draft = BoardIoRecord { kind: BoardIoKind::Bind as i32, run_id: req.run_id.clone(), instance: req.instance.clone(), bind_request: Some(req.clone()), ..Default::default() };
-        let result = self.inner.bind(Request::new(req)).await;
+        let result = inner.bind(Request::new(req)).await;
         match &result {
             Ok(r) => draft.bind_response = Some(r.get_ref().clone()),
             Err(status) => draft.error = error_text(status),
@@ -157,9 +166,11 @@ where
 
     async fn step(&self, request: Request<LockstepStepRequest>) -> Result<Response<LockstepStepResponse>, Status> {
         let exchange = self.log.begin().await?;
+        // After the gate: a power cycle's re-handshake holds it and may have installed a new PeerLink.
+        let inner = ShimService::new(self.cell.current()?);
         let req = request.into_inner();
         let mut draft = BoardIoRecord { kind: BoardIoKind::Step as i32, lockstep_sequence: req.sequence, until_tai_ns: req.until_tai_ns, inputs: req.inputs.clone(), ..Default::default() };
-        let result = self.inner.step(Request::new(req)).await;
+        let result = inner.step(Request::new(req)).await;
         match &result {
             Ok(r) => {
                 draft.outputs = r.get_ref().outputs.clone();
@@ -174,9 +185,11 @@ where
 
     async fn reset(&self, request: Request<LockstepResetRequest>) -> Result<Response<LockstepResetResponse>, Status> {
         let exchange = self.log.begin().await?;
+        // After the gate: a power cycle's re-handshake holds it and may have installed a new PeerLink.
+        let inner = ShimService::new(self.cell.current()?);
         let req = request.into_inner();
         let mut draft = BoardIoRecord { kind: BoardIoKind::Reset as i32, lockstep_sequence: req.sequence, reset_tai_ns: req.tai_ns, reset_reason: req.reason.clone(), ..Default::default() };
-        let result = self.inner.reset(Request::new(req)).await;
+        let result = inner.reset(Request::new(req)).await;
         if let Err(status) = &result {
             draft.error = error_text(status);
         }
@@ -188,12 +201,21 @@ where
         let exchange = self.log.begin().await?;
         let req = request.into_inner();
         let mut draft = BoardIoRecord { kind: BoardIoKind::Shutdown as i32, run_id: req.run_id.clone(), ..Default::default() };
-        let result = self.inner.shutdown(Request::new(req)).await;
+        // A lost link (a power cycle's re-handshake found no peer) has nobody to tell: the SHUTDOWN
+        // is logged with the reason, the process still leaves (a run that failed on the lost link
+        // must not leave this service running), and the kernel is told the link is lost.
+        let (result, link_lost) = match self.cell.current() {
+            Ok(peer) => (ShimService::new(peer).shutdown(Request::new(req)).await, false),
+            Err(status) => (Err(status), true),
+        };
         if let Err(status) = &result {
             draft.error = error_text(status);
         }
         let logged = self.log.record(&exchange, draft).await;
-        if result.is_ok() {
+        if link_lost {
+            eprintln!("av-edge-board: Shutdown on a lost link: nothing sent to the board; exiting once the reply is sent");
+            self.shutdown.notify_one();
+        } else if result.is_ok() {
             // The guest has left its loop whether or not the record could be written; the
             // process exits once the reply (or the log failure) has been sent.
             eprintln!("av-edge-board: Shutdown acknowledged by the board; exiting once the reply is sent");

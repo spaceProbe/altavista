@@ -42,17 +42,41 @@
 //! it, for a replay to exclude. The container-style `EVENT_KIND_FAULT` event (`fault:<id>`) carries
 //! nothing wall-clock dependent and is compared.
 //!
-//! # Not in this round: the board that really reboots (HIL-day item)
+//! # A board that really reboots (question 245 (6))
 //!
 //! A real board that power-cycles drops its lockstep-local link and boots new flight software. The
-//! sequence that has to exist for it, and does not: the **edge service** waits for the board to
-//! come back and performs the lockstep-local v1 handshake again (HELLO once, as at startup, on
-//! the same link), and the **kernel** re-`Bind`s the instance (a new `LockstepBindRequest` to the
-//! same address, accepting a new `binding_hash`, restarting its `Step` sequence) before the
-//! `RESET`. Today the kernel sends `RESET` straight after the power cycle, which is correct for
-//! the stand-in (the fake guest, or the Renode binding, stays up through the "power cycle") and
-//! wrong for a board that reboots. That path cannot be exercised without a board, so it is not
-//! written; the call site in `executor::run_shared_group` says so too.
+//! sequence for it, built and proven against a stand-in (a `docker restart` of the cFS posix
+//! container stands in for the board reboot; **no board has been involved**):
+//!
+//! 1. The **edge service** is told (by its operator, `av-edge-board --power-cycle-reboots-peer`) that
+//!    its power channel reboots the peer. After a channel that performed it re-handshakes with the
+//!    rebooted flight software on the same link (HELLO re-sent at its declared interval until the
+//!    peer answers, or its declared deadline) and says so in the response
+//!    (`PowerCycleResponse.peer_rehandshaken`). A peer that never answers is a typed failure
+//!    (`REHANDSHAKE_TIMEOUT`), which this module turns into
+//!    [`PowerControlError::RehandshakeFailed`], naming the deadline: the run stops with
+//!    [`DrmError::BoardPowerCycle`], no `Bind`, no `RESET`.
+//! 2. The **kernel** then re-`Bind`s the instance with the run's **same** `LockstepBindRequest`
+//!    (kept from the first `Bind`) before the `RESET`: the new flight-software session knows nothing
+//!    until bound. The new `lockstep_capable = false` is [`ContainerError::RebindRefused`]; a
+//!    different `binding_hash` is accepted (the second BIND is a record of the signed edge log, with
+//!    the guest's answer, and the run's provenance keeps the first). The lockstep sequence numbers
+//!    continue (the guest echoes whatever it is sent; nothing in the protocol restarts them).
+//!    [`perform`] fixes the order: power cycle, re-Bind **iff the service re-handshook**, `RESET`.
+//! 3. The kernel declares, per board instance, whether its power cycle is expected to reboot the
+//!    peer: `board.rehandshake_timeout_ms` (default 0: not declared). It does two things. The
+//!    kernel's wait for the `PowerCycle` reply is `board.power_control_timeout_ms` **plus** this (the
+//!    channel's time and the re-handshake's deadline are two separate budgets, so a legitimate
+//!    re-handshake cannot be cut off by a shorter client timeout); and a declared board whose edge
+//!    service did *not* re-handshake (it was started without `--power-cycle-reboots-peer`) is
+//!    [`PowerControlError::RehandshakeExpected`] at once, instead of a `RESET` sent to a guest that is
+//!    waiting for a HELLO. The operator keeps the two declarations equal; the response's own
+//!    `rehandshake_timeout_ms` is recorded.
+//!
+//! The outcome event ([`power_cycle_event`]) carries `values["rehandshaken"] = 1.0` for a
+//! re-handshaken power cycle, and the re-handshake's HELLO count and duration (wall-clock dependent:
+//! `pacing::WALL_CLOCK_DEPENDENT`, excluded by a replay). A power cycle of the existing stand-ins
+//! (whose guest stays up) produces the event it always did, byte for byte.
 use std::time::Duration;
 
 use av_cdm::pb::{Event, EventKind, Provenance};
@@ -90,6 +114,16 @@ pub struct PowerCycleCall {
     pub power_control: String,
 }
 
+/// What the edge service's re-handshake with the rebooted peer reported (question 245 (6)); the
+/// HELLO count and the duration are wall-clock facts (see the module doc).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RehandshakeReport {
+    pub hellos_sent: u32,
+    pub duration_ns: i64,
+    /// The edge service's own deadline for it, ms.
+    pub timeout_ms: u32,
+}
+
 /// What a performed power cycle reports (edge-node wall-clock facts: see the module doc).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PowerCycleReport {
@@ -99,6 +133,10 @@ pub struct PowerCycleReport {
     pub stderr_tail: String,
     /// The channel the edge service ran, canonical.
     pub power_control: String,
+    /// `Some` iff the edge service re-handshook with the rebooted peer (the peer's lockstep-local
+    /// session is new: the kernel re-`Bind`s before its `RESET`). `None` for a power cycle after
+    /// which the peer's session survives (the existing stand-ins).
+    pub rehandshake: Option<RehandshakeReport>,
 }
 
 /// Why a power cycle was not performed.
@@ -111,10 +149,19 @@ pub enum PowerControlError {
     /// The RPC failed at the transport or gRPC level (the edge service's own board I/O log
     /// failing is `DATA_LOSS` / `FAILED_PRECONDITION` here).
     Rpc { detail: String },
-    /// No reply within `board.power_control_timeout_ms`.
+    /// No reply within `board.power_control_timeout_ms` (plus `board.rehandshake_timeout_ms` when
+    /// the DRM declares a re-handshake: the reported `timeout_ms` is the sum).
     TimedOut { timeout_ms: u64 },
     /// The response named no outcome the kernel knows.
     BadResponse { detail: String },
+    /// The channel performed, but the edge service could not re-handshake with the rebooted peer
+    /// (`REHANDSHAKE_TIMEOUT`: no answer within its deadline, `timeout_ms`; `REHANDSHAKE_REFUSED`: an
+    /// answer it could not proceed with). The peer's session is lost: the run stops.
+    RehandshakeFailed { failure: String, timeout_ms: u32, hellos_sent: u32, detail: String },
+    /// The DRM declares (`board.rehandshake_timeout_ms`) that this board's power cycle reboots the
+    /// peer, but the edge service performed it without re-handshaking (it was not started with
+    /// `--power-cycle-reboots-peer`).
+    RehandshakeExpected { declared_timeout_ms: u64 },
 }
 
 impl std::fmt::Display for PowerControlError {
@@ -138,6 +185,11 @@ impl std::fmt::Display for PowerControlError {
             PowerControlError::Rpc { detail } => write!(f, "the PowerCycle RPC to the edge service failed: {detail}"),
             PowerControlError::TimedOut { timeout_ms } => write!(f, "the edge service gave no PowerCycle reply within {timeout_ms} ms (board.power_control_timeout_ms)"),
             PowerControlError::BadResponse { detail } => write!(f, "the edge service's PowerCycle response is not understood: {detail}"),
+            PowerControlError::RehandshakeFailed { failure, timeout_ms, hellos_sent, detail } => write!(f, "the power cycle was performed but the edge service could not re-handshake with the rebooted peer ({failure}; its deadline was {timeout_ms} ms, {hellos_sent} HELLO(s) sent): {detail}"),
+            PowerControlError::RehandshakeExpected { declared_timeout_ms } => write!(
+                f,
+                "the DRM declares that this board's power cycle reboots the peer (board.rehandshake_timeout_ms = {declared_timeout_ms}) but the edge service did not re-handshake after it: it was not started with --power-cycle-reboots-peer, so the peer's new session was never established and no RESET was sent"
+            ),
         }
     }
 }
@@ -162,13 +214,24 @@ pub struct EdgePowerControl {
     /// `Some((ca_file, client_cert, client_key))` for mTLS, `None` for plaintext loopback.
     tls: Option<(String, String, String)>,
     timeout: Duration,
+    /// `board.rehandshake_timeout_ms`: zero when the DRM does not declare that this board's power
+    /// cycle reboots the peer. Added to `timeout` for the RPC's own deadline, and a declared board
+    /// whose service did not re-handshake is [`PowerControlError::RehandshakeExpected`].
+    rehandshake: Duration,
 }
 
 impl EdgePowerControl {
     /// `address` is the board's `board.edge_address` (`host:port`); `tls` its mTLS paths if
-    /// `board.tls` is set.
+    /// `board.tls` is set. No re-handshake is declared (see [`EdgePowerControl::with_rehandshake`]).
     pub fn new(address: String, tls: Option<(String, String, String)>, timeout: Duration) -> Self {
-        Self { address, tls, timeout }
+        Self { address, tls, timeout, rehandshake: Duration::ZERO }
+    }
+
+    /// Declare that this board's power cycle reboots the peer and that the edge service may take up
+    /// to `deadline` to re-handshake with it (`board.rehandshake_timeout_ms`; module doc, item 3).
+    pub fn with_rehandshake(mut self, deadline: Duration) -> Self {
+        self.rehandshake = deadline;
+        self
     }
 }
 
@@ -182,9 +245,16 @@ pub fn interpret_response(response: av_lockstep::board_edge::PowerCycleResponse)
             finished_unix_ns: response.finished_unix_ns,
             stderr_tail: response.stderr_tail,
             power_control: response.power_control,
+            rehandshake: response.peer_rehandshaken.then_some(RehandshakeReport { hellos_sent: response.rehandshake_hellos_sent, duration_ns: response.rehandshake_duration_ns, timeout_ms: response.rehandshake_timeout_ms }),
         }),
         Ok(BoardPowerCycleOutcome::Refused) => Err(PowerControlError::Refused {
             refusal: name(response.refusal, &|v| BoardPowerCycleRefusal::try_from(v).ok().map(|r| r.as_str_name())),
+            detail: response.detail,
+        }),
+        Ok(BoardPowerCycleOutcome::Failed) if matches!(BoardPowerCycleFailure::try_from(response.failure), Ok(BoardPowerCycleFailure::RehandshakeTimeout | BoardPowerCycleFailure::RehandshakeRefused)) => Err(PowerControlError::RehandshakeFailed {
+            failure: name(response.failure, &|v| BoardPowerCycleFailure::try_from(v).ok().map(|r| r.as_str_name())),
+            timeout_ms: response.rehandshake_timeout_ms,
+            hellos_sent: response.rehandshake_hellos_sent,
             detail: response.detail,
         }),
         Ok(BoardPowerCycleOutcome::Failed) => Err(PowerControlError::Failed {
@@ -209,6 +279,8 @@ impl PowerControl for EdgePowerControl {
             power_control: call.power_control.clone(),
         };
         let (address, tls) = (self.address.clone(), self.tls.clone());
+        let declared = self.rehandshake;
+        let wait = self.timeout + declared;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("av-board-power".to_string())
@@ -220,14 +292,18 @@ impl PowerControl for EdgePowerControl {
                     }
                     .map_err(|e| PowerControlError::Rpc { detail: format!("connecting to {address:?}: {e}") })?;
                     let response = client.power_cycle(request).map_err(|status| PowerControlError::Rpc { detail: format!("{:?}: {}", status.code(), status.message()) })?;
-                    interpret_response(response)
+                    let report = interpret_response(response)?;
+                    if !declared.is_zero() && report.rehandshake.is_none() {
+                        return Err(PowerControlError::RehandshakeExpected { declared_timeout_ms: declared.as_millis() as u64 });
+                    }
+                    Ok(report)
                 })();
                 let _ = tx.send(result);
             })
             .expect("spawning the board power-control thread");
-        match rx.recv_timeout(self.timeout) {
+        match rx.recv_timeout(wait) {
             Ok(result) => result,
-            Err(_) => Err(PowerControlError::TimedOut { timeout_ms: self.timeout.as_millis() as u64 }),
+            Err(_) => Err(PowerControlError::TimedOut { timeout_ms: wait.as_millis() as u64 }),
         }
     }
 }
@@ -237,15 +313,22 @@ impl PowerControl for EdgePowerControl {
 pub enum PerformError {
     /// The power cycle was refused or failed; no `RESET` was sent.
     PowerCycle(PowerControlError),
+    /// The power cycle was performed and the edge service re-handshook, and the kernel's re-`Bind`
+    /// of the rebooted peer failed (no reply, an RPC error, or `lockstep_capable = false`).
+    Rebind(ContainerError),
     /// The power cycle was performed and the lockstep `RESET` that follows it failed.
     Reset(ContainerError),
 }
 
-/// The order of a board power-cycle boundary, in one place: `power_cycle` first, and only if it
-/// was performed, `reset` (the lockstep `RESET` with `reason = "fault:<id>"`). Returns the report
-/// of the performed power cycle.
-pub fn perform(control: &dyn PowerControl, call: &PowerCycleCall, reset: impl FnOnce() -> Result<(), ContainerError>) -> Result<PowerCycleReport, PerformError> {
+/// The order of a board power-cycle boundary, in one place: `power_cycle` first, then, only if the
+/// edge service re-handshook with a rebooted peer, `rebind` (the same `Bind` request again), and
+/// only if all of that went well, `reset` (the lockstep `RESET` with `reason = "fault:<id>"`).
+/// Returns the report of the performed power cycle.
+pub fn perform(control: &dyn PowerControl, call: &PowerCycleCall, rebind: impl FnOnce() -> Result<(), ContainerError>, reset: impl FnOnce() -> Result<(), ContainerError>) -> Result<PowerCycleReport, PerformError> {
     let report = control.power_cycle(call).map_err(PerformError::PowerCycle)?;
+    if report.rehandshake.is_some() {
+        rebind().map_err(PerformError::Rebind)?;
+    }
     reset().map_err(PerformError::Reset)?;
     Ok(report)
 }
@@ -255,7 +338,7 @@ impl PerformError {
     pub fn into_drm_error(self, instance: &str, fault_id: &str) -> DrmError {
         match self {
             PerformError::PowerCycle(source) => DrmError::BoardPowerCycle { instance: instance.to_string(), fault_id: fault_id.to_string(), source: Box::new(source) },
-            PerformError::Reset(source) => DrmError::ContainerProtocol { instance: instance.to_string(), source },
+            PerformError::Rebind(source) | PerformError::Reset(source) => DrmError::ContainerProtocol { instance: instance.to_string(), source },
         }
     }
 }
@@ -269,6 +352,16 @@ pub fn power_cycle_event(fault_id: &str, instance: &str, tai_ns: i64, report: &P
     if !report.stderr_tail.trim().is_empty() {
         detail.push_str(&format!("; its standard error ended: {:?}", report.stderr_tail.trim_end()));
     }
+    let mut values = std::collections::BTreeMap::from([("performed".to_string(), 1.0), ("duration_ns".to_string(), report.duration_ns as f64)]);
+    if let Some(r) = &report.rehandshake {
+        // The peer rebooted and the edge service re-handshook with it (the kernel re-Bound it before the
+        // RESET): `rehandshaken` is compared by a replay; the HELLO count and the duration are the
+        // wall-clock facts `pacing::WALL_CLOCK_DEPENDENT` names.
+        detail.push_str(&format!("; the peer rebooted and the edge service re-handshook with it in {} ms ({} HELLO(s) sent)", r.duration_ns / 1_000_000, r.hellos_sent));
+        values.insert("rehandshaken".to_string(), 1.0);
+        values.insert("rehandshake_hellos_sent".to_string(), r.hellos_sent as f64);
+        values.insert("rehandshake_duration_ns".to_string(), r.duration_ns as f64);
+    }
     Event {
         id: format!("{POWER_CYCLE_EVENT_ID_PREFIX}{fault_id}"),
         entity_id: instance.to_string(),
@@ -276,7 +369,7 @@ pub fn power_cycle_event(fault_id: &str, instance: &str, tai_ns: i64, report: &P
         kind: EventKind::Marker as i32,
         name: POWER_CYCLE_EVENT_NAME.to_string(),
         detail,
-        values: std::collections::BTreeMap::from([("performed".to_string(), 1.0), ("duration_ns".to_string(), report.duration_ns as f64)]),
+        values,
         reference_id: fault_id.to_string(),
         provenance: Some(provenance),
         ..Default::default()
@@ -330,12 +423,20 @@ mod tests {
                 Ok(PowerCycleReport::default())
             }
         }
-        let report = perform(&Ordered(&order), &call(), || {
-            order.borrow_mut().push("reset");
-            Ok(())
-        })
+        let report = perform(
+            &Ordered(&order),
+            &call(),
+            || {
+                order.borrow_mut().push("rebind");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("reset");
+                Ok(())
+            },
+        )
         .expect("performed");
-        assert_eq!(*order.borrow(), ["power_cycle", "reset"]);
+        assert_eq!(*order.borrow(), ["power_cycle", "reset"], "no re-handshake: the peer's session survived, so no re-Bind");
         assert_eq!(report, PowerCycleReport::default());
     }
 
@@ -348,7 +449,7 @@ mod tests {
         ] {
             let fake = RecordingPowerControl::failing(error.clone());
             let reset_ran = RefCell::new(false);
-            let err = perform(&fake, &call(), || {
+            let err = perform(&fake, &call(), || Ok(()), || {
                 *reset_ran.borrow_mut() = true;
                 Ok(())
             })
@@ -365,7 +466,7 @@ mod tests {
     #[test]
     fn a_failing_reset_after_a_performed_power_cycle_is_the_lockstep_protocol_error() {
         let fake = RecordingPowerControl::ok();
-        let err = perform(&fake, &call(), || Err(ContainerError::ResetRpc { detail: "link down".into() })).expect_err("reset failed");
+        let err = perform(&fake, &call(), || Ok(()), || Err(ContainerError::ResetRpc { detail: "link down".into() })).expect_err("reset failed");
         assert_eq!(fake.calls.borrow().len(), 1, "the power cycle itself was performed");
         assert!(matches!(err.into_drm_error("controller", "pc1"), DrmError::ContainerProtocol { source: ContainerError::ResetRpc { .. }, .. }));
     }
@@ -373,7 +474,7 @@ mod tests {
     #[test]
     fn each_response_shape_is_interpreted() {
         let performed = PowerCycleResponse { outcome: BoardPowerCycleOutcome::Performed as i32, duration_ns: 9, started_unix_ns: 1, finished_unix_ns: 2, stderr_tail: "ok\n".into(), power_control: "cmd:/x".into(), ..Default::default() };
-        assert_eq!(interpret_response(performed), Ok(PowerCycleReport { duration_ns: 9, started_unix_ns: 1, finished_unix_ns: 2, stderr_tail: "ok\n".into(), power_control: "cmd:/x".into() }));
+        assert_eq!(interpret_response(performed), Ok(PowerCycleReport { duration_ns: 9, started_unix_ns: 1, finished_unix_ns: 2, stderr_tail: "ok\n".into(), power_control: "cmd:/x".into(), rehandshake: None }));
 
         let refused = PowerCycleResponse { outcome: BoardPowerCycleOutcome::Refused as i32, refusal: BoardPowerCycleRefusal::ChannelMismatch as i32, detail: "differs".into(), ..Default::default() };
         assert_eq!(interpret_response(refused), Err(PowerControlError::Refused { refusal: "BOARD_POWER_CYCLE_REFUSAL_CHANNEL_MISMATCH".into(), detail: "differs".into() }));
@@ -388,6 +489,75 @@ mod tests {
             let r = PowerCycleResponse { outcome: bad, detail: "?".into(), ..Default::default() };
             assert!(matches!(interpret_response(r), Err(PowerControlError::BadResponse { .. })), "outcome {bad}");
         }
+    }
+
+    fn rehandshaken_report() -> PowerCycleReport {
+        PowerCycleReport { power_control: "cmd:/x".into(), rehandshake: Some(RehandshakeReport { hellos_sent: 3, duration_ns: 2_012_000_000, timeout_ms: 60_000 }), ..Default::default() }
+    }
+
+    /// Question 245 (6): the order with a re-handshake is power cycle, re-Bind, RESET; a re-Bind that
+    /// fails sends no RESET and is the lockstep protocol error; a power cycle that did not
+    /// re-handshake never re-Binds.
+    #[test]
+    fn a_rehandshake_is_followed_by_the_rebind_and_then_the_reset() {
+        let order = RefCell::new(Vec::<&str>::new());
+        let fake = RecordingPowerControl { calls: Default::default(), answer: RefCell::new(Ok(rehandshaken_report())) };
+        let report = perform(
+            &fake,
+            &call(),
+            || {
+                order.borrow_mut().push("rebind");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("reset");
+                Ok(())
+            },
+        )
+        .expect("performed");
+        assert_eq!(*order.borrow(), ["rebind", "reset"]);
+        assert_eq!(report.rehandshake.as_ref().unwrap().hellos_sent, 3);
+
+        let reset_ran = RefCell::new(false);
+        let err = perform(&fake, &call(), || Err(ContainerError::RebindRefused { reason: "no".into() }), || {
+            *reset_ran.borrow_mut() = true;
+            Ok(())
+        })
+        .expect_err("the re-Bind failed");
+        assert!(!*reset_ran.borrow(), "no RESET to a peer that could not be re-bound");
+        assert!(matches!(err.into_drm_error("controller", "pc1"), DrmError::ContainerProtocol { source: ContainerError::RebindRefused { .. }, .. }));
+    }
+
+    #[test]
+    fn the_rehandshake_response_shapes_are_interpreted() {
+        let rehandshaken = PowerCycleResponse { outcome: BoardPowerCycleOutcome::Performed as i32, peer_rehandshaken: true, rehandshake_hellos_sent: 3, rehandshake_duration_ns: 7, rehandshake_timeout_ms: 60_000, power_control: "cmd:/x".into(), ..Default::default() };
+        assert_eq!(interpret_response(rehandshaken).unwrap().rehandshake, Some(RehandshakeReport { hellos_sent: 3, duration_ns: 7, timeout_ms: 60_000 }));
+
+        for failure in [BoardPowerCycleFailure::RehandshakeTimeout, BoardPowerCycleFailure::RehandshakeRefused] {
+            let r = PowerCycleResponse { outcome: BoardPowerCycleOutcome::Failed as i32, failure: failure as i32, rehandshake_timeout_ms: 1500, rehandshake_hellos_sent: 5, detail: "no peer answered a lockstep-local HELLO within 1500 ms".into(), ..Default::default() };
+            let e = interpret_response(r).unwrap_err();
+            assert!(matches!(&e, PowerControlError::RehandshakeFailed { failure: f, timeout_ms: 1500, hellos_sent: 5, .. } if f == failure.as_str_name()), "{e:?}");
+            assert!(e.to_string().contains("1500 ms") && e.to_string().contains("5 HELLO"), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_event_of_a_rehandshaken_power_cycle_says_so_and_the_event_of_any_other_is_unchanged() {
+        let plain = power_cycle_event("pc1", "controller", 1_000, &PowerCycleReport { duration_ns: 12_000_000, power_control: "cmd:/x".into(), ..Default::default() }, Provenance::default());
+        assert_eq!(plain.values.keys().map(String::as_str).collect::<Vec<_>>(), ["duration_ns", "performed"], "a stand-in's power cycle: exactly the event it always was");
+        let e = power_cycle_event("pc1", "controller", 1_000, &rehandshaken_report(), Provenance::default());
+        assert_eq!((e.values["rehandshaken"], e.values["rehandshake_hellos_sent"], e.values["rehandshake_duration_ns"]), (1.0, 3.0, 2_012_000_000.0));
+        assert!(e.detail.contains("re-handshook") && e.detail.contains("3 HELLO"), "{}", e.detail);
+    }
+
+    #[test]
+    fn a_declared_rehandshake_that_the_service_did_not_do_is_refused_and_the_rpc_waits_for_the_deadline_too() {
+        // A stand-in edge service is the integration test; here only the budget arithmetic that needs
+        // no server: a silent peer is `TimedOut` with the sum of the two budgets.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let quiet = EdgePowerControl::new(silent.local_addr().unwrap().to_string(), None, Duration::from_millis(300)).with_rehandshake(Duration::from_millis(200));
+        let err = quiet.power_cycle(&call()).expect_err("silent");
+        assert_eq!(err, PowerControlError::TimedOut { timeout_ms: 500 });
     }
 
     #[test]

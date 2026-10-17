@@ -35,6 +35,16 @@ pub enum BoardStream {
 }
 
 impl BoardStream {
+    /// Discard what the link has queued for reading (UDP: every waiting datagram and the unread
+    /// rest of the current one; serial: the driver's input queue). Returns how many were
+    /// discarded where that is knowable. See `crate::relink`.
+    pub fn discard_pending(&mut self) -> usize {
+        match self {
+            BoardStream::Udp(u) => u.discard_pending(),
+            BoardStream::Serial(s) => s.discard_input(),
+        }
+    }
+
     /// The UDP counters, when this is a UDP link.
     pub fn udp_stats(&self) -> Option<Arc<UdpStats>> {
         match self {

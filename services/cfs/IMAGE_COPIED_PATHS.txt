@@ -82,6 +82,12 @@
 #         the honest answer rather than an assumed one.
 #     Still not caught here: the spoore checkout (`../spoore`, outside this repository; its
 #     commit is printed by build-shim.sh as a build input).
+#   - services/cfs/bin/av-lockstep-relay (question 245 (6)): the second COPYed prebuilt binary, the
+#     frame-aware UDP carrier the board stand-in runs in place of the shim. Git-ignored like the
+#     shim, built by the same services/cfs/build-shim.sh from the same crate (a second [[bin]] of
+#     crates/av-lockstep-shim using only that crate's library), so it is covered BY ITS SOURCES
+#     exactly as the shim is: crates/av-lockstep-shim, crates/av-cdm, proto/altavista/v1,
+#     services/cfs/build-shim.sh, Cargo.lock and Cargo.toml above. No new path is needed.
 #   - services/cfs/build-image.sh itself: it orchestrates the build; it is not a source the
 #     image's bytes are compiled from.
 #   - services/cfs/IMAGE_DIGEST.md, services/cfs/IMAGE_CONTEXT_MANIFEST.txt, and the rest of

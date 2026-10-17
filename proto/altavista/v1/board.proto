@@ -98,6 +98,16 @@ enum BoardPowerCycleFailure {
   BOARD_POWER_CYCLE_FAILURE_SIGNALED = 3;
   // The executable did not finish within the edge service's timeout and was killed.
   BOARD_POWER_CYCLE_FAILURE_TIMEOUT = 4;
+  // The channel reported success, the edge service was told its power cycle reboots the peer
+  // (`av-edge-board --power-cycle-reboots-peer`), and no peer answered the re-sent lockstep-local
+  // HELLO within `--rehandshake-timeout-ms` (`PowerCycleResponse.rehandshake_timeout_ms`). The
+  // link is lost: every later exchange is refused until a re-handshake succeeds. `detail` names
+  // the deadline.
+  BOARD_POWER_CYCLE_FAILURE_REHANDSHAKE_TIMEOUT = 5;
+  // As above, but a peer did answer, and its answer was not a lockstep-local v1 HELLO this
+  // service can proceed with (a version or magic mismatch). The service has sent the peer an
+  // ERROR frame; `detail` carries the typed protocol error. The link is lost as above.
+  BOARD_POWER_CYCLE_FAILURE_REHANDSHAKE_REFUSED = 6;
 }
 
 message PowerCycleResponse {
@@ -126,6 +136,22 @@ message PowerCycleResponse {
   // started and finished (0 when nothing was started).
   int64 started_unix_ns = 10;
   int64 finished_unix_ns = 11;
+
+  // Question 245 (6). True iff the edge service was told this power cycle reboots the peer
+  // (`--power-cycle-reboots-peer`), the channel performed, and the peer answered a fresh HELLO:
+  // the lockstep-local session is new, so the kernel must `Bind` again (with the run's same Bind
+  // request) before its `Reset`. False for every other outcome and for a service that was not
+  // told its channel reboots the peer (the existing stand-ins: the peer's session survives).
+  bool peer_rehandshaken = 12;
+  // How many HELLO frames the re-handshake sent (0 when none was attempted). Depends on how long
+  // the peer took to boot: informational, a replay does not compare it.
+  uint32 rehandshake_hellos_sent = 13;
+  // Wall-clock duration of the re-handshake on the edge node, nanoseconds (0 when none was
+  // attempted). Informational, like `duration_ns`.
+  int64 rehandshake_duration_ns = 14;
+  // The deadline the edge service was configured with, milliseconds (0 when it was not told its
+  // channel reboots the peer). Set whenever a re-handshake was attempted, so the failure names it.
+  uint32 rehandshake_timeout_ms = 15;
 }
 
 // Which run's log head is asked for. The edge service compares both with the run and instance

@@ -21,6 +21,7 @@ av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<p
               [--handshake-timeout-ms <n>] [--udp-local <addr:port>]
               --io-log <path> --signing-key <pem> --signing-cert <pem>
               [--power-control cmd:/abs/path] [--power-timeout-ms <n>]
+              [--power-cycle-reboots-peer [--rehandshake-interval-ms <n>] [--rehandshake-timeout-ms <n>]]
 ```
 
 - `--io-log`, `--signing-key`, `--signing-cert`: **required** (usage error, status 2, naming the
@@ -41,6 +42,13 @@ av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<p
   `cmd:<absolute path>`, or absent for none. `gpio://...` is reserved and refused at start, as is
   anything malformed. `--power-timeout-ms`: how long one run of the channel may take before it is
   killed (default 30000, 10 to 600000).
+- `--power-cycle-reboots-peer`: **declares** that the power channel reboots the flight software (a real
+  board always would; the existing stand-ins' power cycles, the fake channel and Renode, do not and
+  must not set it). After a power cycle that performed, the service re-handshakes with the rebooted
+  peer (see "Re-handshake after a reboot" below). It needs `--power-control`.
+  `--rehandshake-interval-ms` (default 1000, 100 to 60000, not above the timeout) is the time between
+  re-sent HELLOs; `--rehandshake-timeout-ms` (default 60000, 200 to 600000) is the deadline, counted
+  from the first re-sent HELLO. Both are usage errors without the declaration.
 - `--udp-local`: UDP only; the local address to bind (default: an ephemeral port on the wildcard
   address). A board whose target is statically configured needs a fixed port here.
 
@@ -49,61 +57,122 @@ handshake, listening, each Bind decision, Shutdown, and (UDP) the datagram count
 link per process. The process exits with status 0 after a successful Shutdown RPC (once the reply
 is sent) or on SIGINT/SIGTERM; status 1 for any startup failure, 2 for a usage error.
 
-## The handshake: HELLO is sent once
+## The handshake: HELLO is sent once (at startup)
 
 The service speaks first (as the shim does). The guest, `io_lockstep_app.c` on the RTEMS build,
 reads that HELLO **once**, answers, and then expects BIND; a second HELLO where BIND is expected
-fails the guest. So HELLO is never retried, on any transport. A HELLO sent before the guest's end
-of the link is open is simply lost (UART) or unanswered (UDP) and the handshake times out with a
-typed error: start the service after the board's end of the link is up.
+fails the guest. So the startup HELLO is never retried, on any transport. A HELLO sent before the
+guest's end of the link is open is simply lost (UART) or unanswered (UDP) and the handshake times out
+with a typed error: start the service after the board's end of the link is up. The one place HELLO
+is sent again is the re-handshake after a declared reboot, below.
 
-## Serial transport (`src/serial.rs`)
+## Re-handshake after a reboot (question 245 (6))
 
-- Opened `O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC`, then raw 8N1 through `libc` termios
-  (`cfmakeraw`, `CS8`, no parity, one stop bit, no flow control, `VMIN=1`), the baud on both
-  directions, and a read-back that fails if the driver did not apply the baud or the line format.
-  Input already queued is flushed. Taken exclusively with `TIOCEXCL` (a second open by another
-  non-root process fails with `EBUSY`; **Linux enforces this on a pty slave, macOS's pty driver
-  does not**, so the test asserts it on Linux only, where it passes).
-- Baud: on Linux only the standard `Bxxx` rates exist (50 to 4 000 000); any other rate is a typed
-  `UnsupportedBaud` at open, never a silent nearest rate. On macOS `speed_t` is the rate itself and
-  the driver decides.
-- No new registry dependency (`libc` only; no `serialport`, `nix`, `tokio-serial`).
-- Hang-up (`EIO` on Linux) reads as end of file.
+A peer that really reboots loses its lockstep-local session: it needs a fresh HELLO, then a fresh BIND
+from the kernel, before RESET and STEP. **A `docker restart` of the cFS container stands in for a board
+reboot in every proof here; no board has been involved.**
 
-### Paced writes, always
+- **When:** only when the operator declared `--power-cycle-reboots-peer`, and only after a power cycle
+  whose channel **performed**. Without the declaration nothing changes (their tests are unchanged and
+  green: `tests/power_cycle.rs`, the kernel's `drm_board_*`).
+- **What:** inside the same exchange gate as the power cycle (no STEP, RESET or BIND interleaves), the
+  service discards what the link has queued (UDP: every waiting datagram; serial: `tcflush`), builds a
+  fresh `PeerLink` on the same link (`relink::SharedStream` is a cloneable handle on the one stream;
+  `av-lockstep-shim` is unchanged) and sends HELLO; if the peer has not answered within the interval,
+  it discards and sends again, until an answer or the deadline. A frame that is not a HELLO where the
+  answer should be is noise: the cadence is kept, not a HELLO per datagram. A HELLO answer of another
+  protocol version or magic is not retried: `REHANDSHAKE_REFUSED`, with the typed protocol error.
+- **The result is in the `PowerCycle` response** (`board.proto`, additive): `peer_rehandshaken`,
+  `rehandshake_hellos_sent`, `rehandshake_duration_ns`, `rehandshake_timeout_ms`; a peer that never
+  answers is outcome `FAILED` with failure `REHANDSHAKE_TIMEOUT` (`detail` names the deadline). The
+  kernel then `Bind`s again with the run's same Bind request before its RESET.
+- **A lost link stays lost:** after a failed re-handshake every Bind, Step and Reset is refused with
+  `UNAVAILABLE` ("the link to the board is lost") before anything is written to the board; a later
+  power cycle that re-handshakes successfully clears it. A Shutdown on a lost link is logged with the
+  reason, answered `UNAVAILABLE`, and still ends the process (a failed run must not leave this service
+  running).
+- **Logged:** one `BOARD_IO_KIND_LINK_REHANDSHAKE` record (`edge.proto`, additive: the kind and
+  `rehandshake_hellos_sent`, `rehandshake_timeout_ms`), written after the `POWER_CYCLE` record and
+  durable before the reply, with the edge-node instants the first HELLO was sent and the re-handshake
+  ended, and `error` set for a failure. The kernel's second BIND is an ordinary `BIND` record. One
+  chain: `BIND, STEP.., POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET, STEP.., SHUTDOWN`.
+  `av-edge-board-log` prints `link_rehandshakes:` and the record. The HELLO count and the durations are
+  wall-clock dependent (how long the peer took to boot); a replay consumes the records and compares
+  none of them.
+- **Why re-sending HELLO is safe, and the numbers:** (1) nothing reaches a guest before it is
+  listening: the cFS stand-in's relay (`av-lockstep-relay`, `services/cfs/README.md`) drops datagrams
+  while no guest is connected, as a UART whose receiver is not open would; (2) the interval is far
+  longer than the guest's HELLO reply time, so the answer to one HELLO is read before the next is
+  sent. **Interval: 1000 ms by default. Measured reply time of the real cFS guest (a HELLO datagram to
+  the relay in its container, the answer back): 0.32 ms before the restart and 0.36 ms after it**
+  (container started to guest connected: 1.73 s; after `docker restart`, three HELLOs were sent a
+  second apart, the relay dropped the first two because the guest was not yet connected, the third
+  was answered 2.29 s after the restart began; the guest bound twice and logged no failure). Those
+  numbers were taken inside the Docker VM, see "Docker on macOS" below.
+- **Residual risks, stated plainly.** (a) A lost *answer* (a dropped datagram, a corrupted byte) makes
+  the service send another HELLO to a guest that has already answered and is waiting for BIND, which
+  fails it. On loopback or the container network that does not happen; on a real serial board a
+  corrupted reply is possible and unhandled. (b) A real serial board whose UART receiver buffers bytes
+  while its firmware is still booting (a hardware FIFO of 16 to 64 bytes holds up to five 11-byte
+  HELLOs) delivers several HELLOs to the booted guest, which reads one, answers, and then reads the
+  next where it expects BIND. The relay avoids this for the container because it drops; a serial board
+  has no such guard, and the interval cannot know the board's boot time. The mitigation on HELLO day is
+  a `--rehandshake-interval-ms` longer than the board's boot time, giving up that responsiveness, or a
+  board-side drain of its UART before it reads HELLO. Neither is decided or measured here. (c) The
+  discard before each HELLO removes frames of the dead session that arrived before it, not ones that
+  arrive during the attempt (noise is handled as above).
 
-Writes go out **in chunks of at most 64 bytes, with each chunk's 8N1 wire time (10 bits per byte at
-the baud rate) between a chunk and the next**. Why: question 238 found that a frame injected into
-the RTEMS UART in one burst overflowed termios' 256-byte raw input ring (the Renode UART model has
-an unbounded receive FIFO) and bytes were dropped, so the guest blocked forever mid-frame; bursts
-of 64 bytes (the Cadence UART's real receive FIFO depth) paced at the baud rate always delivered.
-A host pseudo-terminal feeding Renode has no pacing of its own, and on real hardware the UART
-paces at the baud rate but the host's tty driver queues far more than 64 bytes ahead of it, so the
-pacing is unconditional and there is no switch to turn it off. A 305-byte STEP takes about 26 ms at
-115 200 baud, the line's own wire time. The next chunk is released a wire time after the previous
-`write` returned, never earlier, so the real line rate is slightly below the nominal one (the
-measured median gap between full chunks over a pty was 6.1 to 7.3 ms against a 5.56 ms wire time:
-tokio's timers round up to the millisecond).
+### Docker on macOS: why the edge service runs inside the Colima VM (measured)
 
-## UDP transport (`src/udp.rs`)
+**A `docker restart` of the container stands in for a board reboot, and no board is involved.** The
+real-container proof also needs the edge service to exchange UDP datagrams with the container's
+published port, and **on this host that cannot be done from the macOS host**: Colima 0.10.3 / Lima 2.1.4
+(`vmType: vz`) is configured with `portForwarder: ssh` (`~/.colima/default/colima.yaml`), and Colima's
+own comment on that setting says "ssh is more stable but supports only TCP". Measured with a throwaway
+echo container: a datagram sent from the host to `127.0.0.1:<published UDP port>` is never delivered, a
+container's datagram to the host gateway never reaches a host socket either, and the Lima host agent
+(`~/.colima/_lima/colima/ha.stderr.log`) logs `Forwarding TCP from 127.0.0.1:N` for every published TCP
+port and nothing for the UDP port its guest agent reported. The same exchange run **inside the VM**
+works (replies from `127.0.0.1:<port>`, the container seeing the NAT address 172.17.0.1). Changing the
+forwarder (`grpc` carries UDP, marked experimental) restarts the shared VM, so it was not done (native
+round decision 15).
 
-Lockstep-local over UDP, **one whole frame per datagram**, the length prefix kept, so the bytes are
-the same frames the other transports carry. It is an `AsyncRead + AsyncWrite` adapter, so `PeerLink`
-runs unchanged: reads serve the bytes of one validated datagram, writes buffer until a whole frame
-is present and then send one datagram. (A frame-level seam in `PeerLink` would have meant a
-second trait in the shim, which is compiled into the cFS image, for no behavioural gain.)
+So the test launches the **Linux build of `av-edge-board` inside the Colima VM**, which stands in for the
+edge node the board hangs off, and keeps the kernel (the test's `BlockingLockstepClient`) on the host:
 
-- A received datagram that is not exactly one complete frame (shorter than the 5-byte minimum,
-  declared length 0 or over the 16 MiB frame limit, shorter than its declared frame, or with bytes
-  after the frame) is a typed `DatagramError`. It is counted and fails the read that was waiting for
-  it (a request-response exchange cannot continue past a lost reply); the stream stays usable. The
-  error reaches `PeerLink` inside `FrameError::Io`; `udp::datagram_error` recovers it.
-- Datagrams from any address other than the configured peer (every address the host resolves to,
-  at the configured port) are dropped, counted and logged (the first five). The socket is not
-  `connect`ed on purpose: the kernel would filter silently and nothing could be counted.
-- A frame that cannot fit one datagram (65 507 bytes) is a typed write error. No retransmission,
-  no reordering protection: a lost datagram is a stalled exchange, surfaced by the caller's timeout.
+- `services/cfs/build-edge-board.sh` builds `av-edge-board` and `av-edge-board-log` for linux/aarch64
+  in the digest-pinned Rust builder `build-shim.sh` uses (`rust:1.90-bookworm@sha256:3914072c...`; a
+  test pins that the two scripts name the same digest). Output: `target-docker-linux/edge-board/`
+  (git-ignored). It is not the byte-reproducible build the shim is: libssl-dev and pkg-config are
+  installed unpinned (their versions are printed; the run recorded libssl-dev 3.0.22-1~deb12u1) and the
+  binary runs against the VM's own `libssl.so.3`.
+- The test starts it with `colima ssh -- <launch script>`, the I/O log, the signing identity, the
+  power-cycle fixture and the service's stderr under `$HOME/av-edge-board-cfs-restart-stage-<pid>/` (the
+  VM mounts `$HOME` at the same path). The launch script records its pid and `exec`s the service under
+  `timeout 1500`, so the VM-side process cannot outlive its cap. The fixture is the VM's own
+  `/usr/bin/docker restart -t 2 <container>`.
+- The host reaches the service's gRPC (`--grpc-addr 127.0.0.1:<port>`, loopback in the VM) over TCP: Lima
+  forwards a guest `127.0.0.1:<port>` listener to the host's `127.0.0.1:<port>` (observed: the test
+  connects from the host and runs the whole session through it).
+- At the end of the test, and when it panics (a perturbation that panics right after the service came
+  up was run), a guard stops the VM-side process; the test then checks with `pgrep -f` inside the VM
+  that none remains (the `pgrep` pattern was shown to find a live process and to find none after it
+  ended), that no container of the run's label remains, and the stage directories are removed.
+- The kernel's end-to-end test of a board that reboots mid-run, `crates/av-kernel/tests/drm_board_cfs_restart.rs`,
+  uses this same path (the kernel on the host, `board.edge_address` the Lima-forwarded
+  `127.0.0.1:<port>`, the service in the VM with `--port-device udp://127.0.0.1:<published port>`).
+- A host where UDP reaches the published port (Linux Docker, or a UDP-capable forwarder) is detected by
+  sending the relay one datagram from the host; the test then runs the host build of the service
+  instead. A host where neither path works is a visible SKIPPED naming both reasons (a panic under
+  `AV_REQUIRE_DOCKER_TESTS=1`).
+
+**Measured, real cFS container, through that path** (`scratch`: `cfs_container_restart-1.log`): the
+startup handshake completed in under 1 ms (HELLO sent to answer read); `PowerCycle` (a real
+`docker restart -t 2`, which returned in 0.28 s) took 2.3 s in all: HELLO #1 at +0 ms, #2 at +1001 ms
+and #3 at +2007 ms, answered 1 ms after it was sent (the first two were dropped by the relay, the guest
+not being connected yet); the guest bound twice and logged no failure; the signed log holds
+`BIND, STEP x3, POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET, STEP x5, SHUTDOWN`. Reply times measured
+more finely by a driver run inside the VM: HELLO answer 0.32 ms before and 0.36 ms after the restart.
 
 ## The Bind-time check (`src/service.rs`)
 
@@ -148,10 +217,9 @@ that implements `LockstepService` changes). `src/power.rs` has the full contract
   `reset_tai_ns` (the fault's epoch), `reset_reason` (`fault:<id>`), `error` for a failure, and
   the instants the channel was started and finished. It shares the log's exchange gate, so no
   STEP interleaves; a failed log refuses it before anything runs.
-- **Not done (HIL-day item):** this service performs the power cycle and nothing more. A board that
-  really reboots drops the lockstep-local link; the service must then re-handshake (HELLO once) and
-  the kernel must re-`Bind` before its `RESET`. Neither exists, and the stand-in cannot exercise
-  it: the fake guest and the Renode binding stay up through the "power cycle".
+- **A peer that reboots:** with `--power-cycle-reboots-peer` the service re-handshakes after the
+  power cycle (see "Re-handshake after a reboot"); without it this service performs the power cycle
+  and nothing more, which is right for the stand-ins whose guest stays up (the fake guest, Renode).
 - **The fake for tests** (also what the stand-in run uses): `--power-control cmd:<a tiny
   executable>` that appends one JSON line per call beside itself and exits 0, or fails or sleeps on
   demand; `tests/common/mod.rs` `FakeChannel` (and the kernel's `tests/drm_board_common`).
@@ -173,7 +241,8 @@ the run replays".
   the link's config hash, and two wall-clock instants: when the last byte of the request had been
   handed to the link and when the last byte of the response had been read from it
   (`timed::TimedStream`; informational, signed, not used by a replay). A power cycle the service
-  ran is a `BOARD_IO_KIND_POWER_CYCLE` record (see "Power control").
+  ran is a `BOARD_IO_KIND_POWER_CYCLE` record (see "Power control"), followed by a
+  `BOARD_IO_KIND_LINK_REHANDSHAKE` record when it re-handshook (see "Re-handshake after a reboot").
 - **Chain and signature:** `record_hash = SHA-256(prev_hash || canonical body)`, the first
   `prev_hash` the ASCII `GENESIS`, `signature` = ECDSA P-384 over `record_hash` (the
   `MeasurementBatch` definition). File framing `[payload_len u32 LE][record_hash 32][payload]`, as
@@ -256,6 +325,24 @@ scripts/dev/cargo-slot test -p av-edge-board
 - `tests/power_inprocess.rs`: the `POWER_CYCLE` record is written and synced before the reply
   returns; a failed sync is `DATA_LOSS`, and the failed log refuses the next power cycle before the
   channel runs.
+- `tests/rehandshake.rs` (question 245 (6)): the real binary, the kernel's clients, a power channel
+  that signals a **fake guest that really loses its session** (down for a time, then waiting for a
+  HELLO, a second HELLO where BIND is expected is a recorded violation) over loopback UDP: the
+  reboot is re-handshaken, re-Bound and the run continues, the log is one chain with the
+  `LINK_REHANDSHAKE` record and the second BIND, and the reader tool counts it; a guest that never
+  returns fails the power cycle at the deadline within a bounded time and the lost link refuses
+  everything (nothing more reaches the guest) while Shutdown still ends the process; another protocol
+  version is refused at once; noise in place of an answer is not an answer; a stale frame queued before
+  the re-handshake is discarded; the control (no declaration) leaves the rebooted guest unanswered; the
+  flags' usage errors; and that without the declaration a power cycle re-sends nothing and adds no
+  record.
+- `tests/cfs_container_restart.rs` (question 245 (6)): **the real cFS container** (`io_lockstep`
+  unchanged, the relay in place of the shim) behind the real service over UDP, through a real
+  `docker restart` standing in for a board reboot, driven by the kernel's `BlockingLockstepClient`:
+  HELLO, BIND, STEPs, `PowerCycle`, re-handshake, BIND again, RESET, STEPs. Docker-gated, takes the
+  docker lock itself (never wrap it). On this host the service runs inside the Colima VM (see "Docker
+  on macOS"); it needs `AV_CFS_TEST_IMAGE` to name an image that has the relay and, for the VM path,
+  the Linux binary (`services/cfs/build-edge-board.sh`, or `AV_EDGE_BOARD_LINUX`).
 - `tests/log_head_inprocess.rs` (hilprep-2b): `BoardIoLogHead` equals the end of the verified log
   (count, last record's hash, signer, link, producer), writes nothing, moves with the log, and is
   refused before a Bind, for another run or instance, and from a failed log. The kernel's end-to-end
@@ -268,7 +355,8 @@ builder image `services/cfs/build-shim.sh` uses; the I/O log additions have not 
 
 - No board has been involved; no real UART, USB-UART bridge or Ethernet MAC.
 - No TLS: the kernel-facing gRPC link is plaintext on loopback, as the shim's (question 155).
-- No reconnect: one link per process, HELLO once; so no re-handshake after a power cycle that
-  really reboots the board (see "Power control"). `gpio://` power control is reserved.
+- No reconnect on a dropped link: one link per process. The only re-handshake is after a power cycle
+  declared to reboot the peer (see "Re-handshake after a reboot", with its residual risks for a real
+  serial board). `gpio://` power control is reserved.
 - Only one link kind per board instance; a mixed `port_devices` map is refused by
   `av_edge::board::BoardLink` and this service takes a single device.

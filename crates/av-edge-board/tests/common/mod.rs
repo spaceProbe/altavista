@@ -331,6 +331,14 @@ impl Service {
         Self { child, grpc_addr, stderr_path, dir, identity, io_log, board_params }
     }
 
+    /// A `Service` for a process the caller started itself (the cFS restart test runs the Linux
+    /// build inside the Docker VM through `colima ssh`): `child` is whatever should be killed at
+    /// drop, `stderr_path` is where the service's stderr lands (a file both sides can see), `dir`
+    /// is removed at drop.
+    pub fn from_parts(child: Child, grpc_addr: String, stderr_path: PathBuf, dir: PathBuf, identity: TestIdentity, io_log: PathBuf, board_params: BTreeMap<String, String>) -> Self {
+        Self { child, grpc_addr, stderr_path, dir, identity, io_log, board_params }
+    }
+
     /// `extra` (the instance's own Bind parameters) plus this service's board parameters.
     pub fn bind_params(&self, extra: &BTreeMap<String, String>) -> BTreeMap<String, String> {
         let mut p = extra.clone();

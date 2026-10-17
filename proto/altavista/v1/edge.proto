@@ -400,6 +400,19 @@ enum BoardIoKind {
   // `response_read_unix_ns`, here the edge-node instants the channel was started and
   // finished. No other exchange field applies.
   BOARD_IO_KIND_POWER_CYCLE = 5;
+  // After a power cycle of a peer the edge service was told reboots (`av-edge-board
+  // --power-cycle-reboots-peer`, question 245 (6)), the edge service re-did the lockstep-local
+  // HELLO handshake with the rebooted flight software over the same link: HELLO re-sent every
+  // `--rehandshake-interval-ms` until the peer answered or `--rehandshake-timeout-ms` passed.
+  // Written after the `BOARD_IO_KIND_POWER_CYCLE` record of the same power cycle, durable before
+  // the PowerCycle reply returns. The fields that apply: `run_id`, `instance`, `reset_tai_ns` (the
+  // fault's epoch), `reset_reason` ("fault:<fault id>"), `rehandshake_hellos_sent`,
+  // `rehandshake_timeout_ms`, `error` (set when no peer answered: the link was lost and stays
+  // lost until a later re-handshake succeeds), and `request_written_unix_ns` /
+  // `response_read_unix_ns`, here the edge-node instants the first HELLO was sent and the
+  // re-handshake ended (answered, or its deadline passed). The kernel's second BIND, which
+  // follows, is an ordinary `BOARD_IO_KIND_BIND` record.
+  BOARD_IO_KIND_LINK_REHANDSHAKE = 6;
 }
 
 // One exchange between the edge node and the hardware-in-the-loop board's flight software,
@@ -478,4 +491,10 @@ message BoardIoRecord {
   // (`av_edge::board::BoardLink::config_hash_hex`: edge node, device, baud), so the log
   // names the link it was recorded over.
   string link_config_sha256 = 22;
+
+  // LINK_REHANDSHAKE: how many HELLO frames the edge service sent (at least 1; a count that
+  // depends on how long the peer took to boot, so a wall-clock-dependent field a replay never
+  // compares) and the deadline it was given, in milliseconds (`--rehandshake-timeout-ms`).
+  uint32 rehandshake_hellos_sent = 23;
+  uint32 rehandshake_timeout_ms = 24;
 }

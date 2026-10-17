@@ -83,6 +83,7 @@ fn main() -> ExitCode {
     println!("resets: {}", s.resets);
     println!("shutdowns: {}", s.shutdowns);
     println!("power_cycles: {}", s.power_cycles);
+    println!("link_rehandshakes: {}", s.link_rehandshakes);
     println!("failed_exchanges: {}", s.failed_exchanges);
     println!("first_epoch_tai_ns: {}", opt(s.first_epoch_tai_ns));
     println!("last_epoch_tai_ns: {}", opt(s.last_epoch_tai_ns));

@@ -59,8 +59,19 @@
 #                     Never installs to SHIM_OUT's default location (refuses unless SHIM_OUT is set
 #                     explicitly to somewhere else).
 #
+#   RELAY_OUT         where the stripped relay binary is copied (default: av-lockstep-relay beside
+#                     SHIM_OUT, so services/cfs/bin/av-lockstep-relay by default and next to a custom
+#                     SHIM_OUT otherwise).
+#
+# The one `cargo build -p av-lockstep-shim` builds every binary of that package: the shim and, since
+# question 245 (6), `av-lockstep-relay` (the frame-aware UDP carrier the board stand-in runs in the
+# container in place of the shim, services/cfs/container-entrypoint.sh). The relay is a second
+# [[bin]] that uses only the crate's library, so the shim's own bytes do not depend on it: the
+# native-ct-2 report compares the shim built with and without the relay.
+#
 # Outputs, in SHIM_ARTIFACT_DIR: av-lockstep-shim (unstripped, with line tables:
-# `[profile.release] debug = 1`) and av-lockstep-shim-stripped. It prints the build inputs
+# `[profile.release] debug = 1`) and av-lockstep-shim-stripped, and the same pair for
+# av-lockstep-relay. It prints the build inputs
 # (this repo's commit and dirtiness under the shim's source paths, spoore's commit) and the SHA-256
 # of both binaries. A different spoore commit is a different input, not a reproducibility failure.
 
@@ -92,6 +103,7 @@ SHIM_ARTIFACT_DIR="${SHIM_ARTIFACT_DIR:-${REPO_ROOT}/target-docker-linux}"
 SPOORE_ROOT="${SPOORE_ROOT:-${REPO_ROOT}/../spoore}"
 DEFAULT_OUT="${SCRIPT_DIR}/bin/av-lockstep-shim"
 SHIM_OUT="${SHIM_OUT:-${DEFAULT_OUT}}"
+RELAY_OUT="${RELAY_OUT:-$(dirname "${SHIM_OUT}")/av-lockstep-relay}"
 SPOORE_MOUNT="/Users/probe/code/spoore"
 TARGET_MOUNT="${SHIM_CARGO_TARGET:-/av-shim-target}"
 
@@ -150,21 +162,27 @@ docker create --name "${BUILD_CTR}" \
     sh -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends ${APT_PROTOBUF} \
         && cargo build --release --locked -p av-lockstep-shim --target-dir ${TARGET_MOUNT}" >/dev/null
 docker start -a "${BUILD_CTR}"
-rm -f "${SHIM_ARTIFACT_DIR}/av-lockstep-shim" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped"
+rm -f "${SHIM_ARTIFACT_DIR}/av-lockstep-shim" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay-stripped"
 docker cp "${BUILD_CTR}:${TARGET_MOUNT}/release/av-lockstep-shim" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim"
+docker cp "${BUILD_CTR}:${TARGET_MOUNT}/release/av-lockstep-relay" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay"
 
 # 2. Strip, on the Dockerfile's own digest-pinned ubuntu base.
 STRIP_CTR="av-shim-strip-$$"
 CONTAINERS+=("${STRIP_CTR}")
 docker create --name "${STRIP_CTR}" "${UBUNTU_IMAGE}" \
     sh -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends ${APT_BINUTILS} \
-        && strip -o /av-lockstep-shim-stripped /av-lockstep-shim" >/dev/null
+        && strip -o /av-lockstep-shim-stripped /av-lockstep-shim \
+        && strip -o /av-lockstep-relay-stripped /av-lockstep-relay" >/dev/null
 docker cp "${SHIM_ARTIFACT_DIR}/av-lockstep-shim" "${STRIP_CTR}:/av-lockstep-shim"
+docker cp "${SHIM_ARTIFACT_DIR}/av-lockstep-relay" "${STRIP_CTR}:/av-lockstep-relay"
 docker start -a "${STRIP_CTR}"
 docker cp "${STRIP_CTR}:/av-lockstep-shim-stripped" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped"
+docker cp "${STRIP_CTR}:/av-lockstep-relay-stripped" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay-stripped"
 
 # 3. Install and report.
 mkdir -p "$(dirname "${SHIM_OUT}")"
+mkdir -p "$(dirname "${RELAY_OUT}")"
 cp "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped" "${SHIM_OUT}"
+cp "${SHIM_ARTIFACT_DIR}/av-lockstep-relay-stripped" "${RELAY_OUT}"
 echo "build-shim.sh: result"
-shasum -a 256 "${SHIM_ARTIFACT_DIR}/av-lockstep-shim" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped" "${SHIM_OUT}"
+shasum -a 256 "${SHIM_ARTIFACT_DIR}/av-lockstep-shim" "${SHIM_ARTIFACT_DIR}/av-lockstep-shim-stripped" "${SHIM_OUT}" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay" "${SHIM_ARTIFACT_DIR}/av-lockstep-relay-stripped" "${RELAY_OUT}"

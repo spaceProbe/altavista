@@ -15,6 +15,19 @@
 # yaml declares the same 50070) -- and for cFS's own connection on the Unix socket at
 # `/var/run/lockstep/lockstep-local.sock` (`io_lockstep_app.c`'s own `IO_LOCKSTEP_SOCKET_PATH`
 # default, unchanged).
+#
+# Question 245 (6): the process that listens on that Unix socket is chosen by the environment
+# variable LOCKSTEP_TRANSPORT, default `shim` (everything above, unchanged). `udp` runs
+# `av-lockstep-relay` there instead, the frame-aware UDP carrier for the board stand-in: the
+# kernel's edge service (`av-edge-board`) on the host reaches the guest over UDP, one whole
+# lockstep-local frame per datagram, and the relay carries the frames between the guest's Unix
+# socket and that UDP peer. It serves no gRPC and answers for neither end. It listens on UDP
+# 0.0.0.0:${LOCKSTEP_UDP_PORT:-50090}; ${LOCKSTEP_UDP_PEER}, if set (ADDR:PORT), pins the one peer
+# it accepts datagrams from and sends to (otherwise the peer is learned from the datagrams it
+# receives, which is what a host reaching the container through a published port needs). While no
+# guest is connected, the relay drops (and counts) datagrams, so a re-sent HELLO can only reach a
+# guest that is listening. The cFS side is identical in both modes; a restart of the container
+# starts the whole sequence again from this script.
 set -eu
 
 SOCKET_DIR=/var/run/lockstep
@@ -22,7 +35,21 @@ SOCKET_PATH="$SOCKET_DIR/lockstep-local.sock"
 mkdir -p "$SOCKET_DIR"
 rm -f "$SOCKET_PATH"
 
-/cfs/av-lockstep-shim --socket-path "$SOCKET_PATH" --grpc-addr 0.0.0.0:50070 &
+LOCKSTEP_TRANSPORT="${LOCKSTEP_TRANSPORT:-shim}"
+case "$LOCKSTEP_TRANSPORT" in
+    shim)
+        CARRIER=av-lockstep-shim
+        /cfs/av-lockstep-shim --socket-path "$SOCKET_PATH" --grpc-addr 0.0.0.0:50070 &
+        ;;
+    udp)
+        CARRIER=av-lockstep-relay
+        /cfs/av-lockstep-relay --socket-path "$SOCKET_PATH" --udp-listen "0.0.0.0:${LOCKSTEP_UDP_PORT:-50090}" ${LOCKSTEP_UDP_PEER:+--peer "$LOCKSTEP_UDP_PEER"} &
+        ;;
+    *)
+        echo "container-entrypoint: LOCKSTEP_TRANSPORT=$LOCKSTEP_TRANSPORT is not one of: shim, udp" >&2
+        exit 2
+        ;;
+esac
 SHIM_PID=$!
 
 # `io_lockstep`'s own connect_to_shim() makes exactly one attempt (question 153's README: "the
@@ -35,13 +62,13 @@ SHIM_PID=$!
 i=0
 while [ ! -S "$SOCKET_PATH" ]; do
     if ! kill -0 "$SHIM_PID" 2>/dev/null; then
-        echo "container-entrypoint: av-lockstep-shim (pid $SHIM_PID) exited before creating $SOCKET_PATH" >&2
+        echo "container-entrypoint: $CARRIER (pid $SHIM_PID) exited before creating $SOCKET_PATH" >&2
         wait "$SHIM_PID" || true
         exit 1
     fi
     i=$((i + 1))
     if [ "$i" -gt 100 ]; then
-        echo "container-entrypoint: av-lockstep-shim never created $SOCKET_PATH within 10s" >&2
+        echo "container-entrypoint: $CARRIER never created $SOCKET_PATH within 10s" >&2
         kill "$SHIM_PID" 2>/dev/null || true
         exit 1
     fi
