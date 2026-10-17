@@ -1,0 +1,231 @@
+{
+  "metadata": {
+    "annotations": {
+      "av.job.id.full": "nocmd-83692-1792247483726145000"
+    },
+    "creationTimestamp": "2026-10-17T14:31:27Z",
+    "generateName": "av-job-nocmd-83692-179224748372-57982f1655282-",
+    "generation": 1,
+    "labels": {
+      "av.job": "1",
+      "av.job.id": "nocmd-83692-1792247483726145000",
+      "av.test": "1",
+      "av.test.run_id": "83692-1792247483726145000",
+      "batch.kubernetes.io/controller-uid": "56d2c652-96c1-4b06-9369-6a9c7a308277",
+      "batch.kubernetes.io/job-name": "av-job-nocmd-83692-179224748372-57982f1655282",
+      "controller-uid": "56d2c652-96c1-4b06-9369-6a9c7a308277",
+      "job-name": "av-job-nocmd-83692-179224748372-57982f1655282"
+    },
+    "name": "av-job-nocmd-83692-179224748372-57982f1655282-qhgtm",
+    "namespace": "av-heavy-ct-83692-1792247483726145000",
+    "ownerReferences": [
+      {
+        "apiVersion": "batch/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "Job",
+        "name": "av-job-nocmd-83692-179224748372-57982f1655282",
+        "uid": "56d2c652-96c1-4b06-9369-6a9c7a308277"
+      }
+    ],
+    "resourceVersion": "1054236",
+    "uid": "f52893b5-9892-4c2c-9b09-87b28d49b954"
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "/no/such/binary-av-k8s-test"
+        ],
+        "image": "alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+        "imagePullPolicy": "Never",
+        "name": "job",
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "20m",
+            "memory": "8Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 10001,
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": false,
+    "nodeName": "colima",
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "restartPolicy": "Never",
+    "schedulerName": "default-scheduler",
+    "securityContext": {},
+    "serviceAccount": "default",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 5,
+    "tolerations": [
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      }
+    ],
+    "volumes": [
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-nocmd-83692-179224748372-57982f1655282/in",
+          "type": "Directory"
+        },
+        "name": "in"
+      },
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-nocmd-83692-179224748372-57982f1655282/out",
+          "type": "Directory"
+        },
+        "name": "out"
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:31:29Z",
+        "observedGeneration": 1,
+        "status": "False",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:31:27Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:31:27Z",
+        "observedGeneration": 1,
+        "reason": "PodFailed",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:31:27Z",
+        "observedGeneration": 1,
+        "reason": "PodFailed",
+        "status": "False",
+        "type": "ContainersReady"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:31:27Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "allocatedResources": {
+          "cpu": "20m",
+          "memory": "8Mi"
+        },
+        "containerID": "docker://3fb826c0da098175d98b352034cd91264e59d7e2454895b6586009a8b8dcd7fd",
+        "image": "alpine:latest",
+        "imageID": "docker-pullable://alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+        "lastState": {},
+        "name": "job",
+        "ready": false,
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "20m",
+            "memory": "8Mi"
+          }
+        },
+        "restartCount": 0,
+        "started": false,
+        "state": {
+          "terminated": {
+            "containerID": "docker://3fb826c0da098175d98b352034cd91264e59d7e2454895b6586009a8b8dcd7fd",
+            "exitCode": 127,
+            "finishedAt": "2026-10-17T14:31:28Z",
+            "message": "failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: \"/no/such/binary-av-k8s-test\": stat /no/such/binary-av-k8s-test: no such file or directory",
+            "reason": "ContainerCannotRun",
+            "startedAt": "2026-10-17T14:31:28Z"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.5.1",
+    "hostIPs": [
+      {
+        "ip": "192.168.5.1"
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Failed",
+    "podIP": "10.42.0.14",
+    "podIPs": [
+      {
+        "ip": "10.42.0.14"
+      }
+    ],
+    "qosClass": "Burstable",
+    "startTime": "2026-10-17T14:31:27Z"
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "annotations": {
+      "av.job.id.full": "raw-never-pull"
+    },
+    "creationTimestamp": "2026-10-17T14:33:36Z",
+    "generation": 1,
+    "labels": {
+      "av.job": "1",
+      "av.job.id": "raw-never-pull",
+      "av.test": "1",
+      "av.test.run_id": "85920-1792247616173167000"
+    },
+    "name": "av-raw-859201792247616173167000",
+    "namespace": "av-heavy-ct-85920-1792247616173167000",
+    "resourceVersion": "1054566",
+    "uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 60,
+    "backoffLimit": 0,
+    "completionMode": "NonIndexed",
+    "completions": 1,
+    "manualSelector": false,
+    "parallelism": 1,
+    "podReplacementPolicy": "Failed",
+    "selector": {
+      "matchLabels": {
+        "batch.kubernetes.io/controller-uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d"
+      }
+    },
+    "suspend": false,
+    "template": {
+      "metadata": {
+        "annotations": {
+          "av.job.id.full": "raw-never-pull"
+        },
+        "labels": {
+          "av.job": "1",
+          "av.job.id": "raw-never-pull",
+          "av.test": "1",
+          "av.test.run_id": "85920-1792247616173167000",
+          "batch.kubernetes.io/controller-uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d",
+          "batch.kubernetes.io/job-name": "av-raw-859201792247616173167000",
+          "controller-uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d",
+          "job-name": "av-raw-859201792247616173167000"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/bin/true"
+            ],
+            "image": "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "imagePullPolicy": "Never",
+            "name": "job",
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "256Mi"
+              },
+              "requests": {
+                "cpu": "50m",
+                "memory": "32Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "runAsGroup": 10001,
+              "runAsNonRoot": true,
+              "runAsUser": 10001,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/av-job/in",
+                "name": "in",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/av-job/out",
+                "name": "out"
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": false,
+        "nodeName": "colima",
+        "restartPolicy": "Never",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 1,
+        "volumes": [
+          {
+            "hostPath": {
+              "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/raw-85920-1792247616173167000-in",
+              "type": "Directory"
+            },
+            "name": "in"
+          },
+          {
+            "hostPath": {
+              "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/raw-85920-1792247616173167000-out",
+              "type": "Directory"
+            },
+            "name": "out"
+          }
+        ]
+      }
+    },
+    "ttlSecondsAfterFinished": 300
+  },
+  "status": {
+    "active": 1,
+    "ready": 0,
+    "startTime": "2026-10-17T14:33:36Z",
+    "terminating": 0,
+    "uncountedTerminatedPods": {}
+  }
+}

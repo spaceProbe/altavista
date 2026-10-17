@@ -1,0 +1,147 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "annotations": {
+      "av.job.id.full": "slow-85920-1792247600010698000"
+    },
+    "creationTimestamp": "2026-10-17T14:33:20Z",
+    "generation": 1,
+    "labels": {
+      "av.job": "1",
+      "av.job.id": "slow-85920-1792247600010698000",
+      "av.test": "1",
+      "av.test.run_id": "85920-1792247600010698000"
+    },
+    "name": "av-job-slow-85920-1792247600010-57b24d17a8500",
+    "namespace": "av-heavy-ct-85920-1792247600010698000",
+    "resourceVersion": "1054540",
+    "uid": "566dfb46-95da-4cec-ad8b-321a30948454"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 5,
+    "backoffLimit": 0,
+    "completionMode": "NonIndexed",
+    "completions": 1,
+    "manualSelector": false,
+    "parallelism": 1,
+    "podReplacementPolicy": "Failed",
+    "selector": {
+      "matchLabels": {
+        "batch.kubernetes.io/controller-uid": "566dfb46-95da-4cec-ad8b-321a30948454"
+      }
+    },
+    "suspend": false,
+    "template": {
+      "metadata": {
+        "annotations": {
+          "av.job.id.full": "slow-85920-1792247600010698000"
+        },
+        "labels": {
+          "av.job": "1",
+          "av.job.id": "slow-85920-1792247600010698000",
+          "av.test": "1",
+          "av.test.run_id": "85920-1792247600010698000",
+          "batch.kubernetes.io/controller-uid": "566dfb46-95da-4cec-ad8b-321a30948454",
+          "batch.kubernetes.io/job-name": "av-job-slow-85920-1792247600010-57b24d17a8500",
+          "controller-uid": "566dfb46-95da-4cec-ad8b-321a30948454",
+          "job-name": "av-job-slow-85920-1792247600010-57b24d17a8500"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "echo before-sleep; sleep 120"
+            ],
+            "image": "alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+            "imagePullPolicy": "Never",
+            "name": "job",
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "memory": "64Mi"
+              },
+              "requests": {
+                "cpu": "20m",
+                "memory": "8Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "runAsGroup": 10001,
+              "runAsNonRoot": true,
+              "runAsUser": 10001,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+            "volumeMounts": [
+              {
+                "mountPath": "/av-job/in",
+                "name": "in",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/av-job/out",
+                "name": "out"
+              }
+            ]
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": false,
+        "nodeName": "colima",
+        "restartPolicy": "Never",
+        "schedulerName": "default-scheduler",
+        "securityContext": {},
+        "terminationGracePeriodSeconds": 5,
+        "volumes": [
+          {
+            "hostPath": {
+              "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-slow-85920-1792247600010-57b24d17a8500/in",
+              "type": "Directory"
+            },
+            "name": "in"
+          },
+          {
+            "hostPath": {
+              "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-slow-85920-1792247600010-57b24d17a8500/out",
+              "type": "Directory"
+            },
+            "name": "out"
+          }
+        ]
+      }
+    },
+    "ttlSecondsAfterFinished": 600
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastProbeTime": "2026-10-17T14:33:25Z",
+        "lastTransitionTime": "2026-10-17T14:33:25Z",
+        "message": "Job was active longer than specified deadline",
+        "reason": "DeadlineExceeded",
+        "status": "True",
+        "type": "FailureTarget"
+      }
+    ],
+    "failed": 1,
+    "ready": 0,
+    "startTime": "2026-10-17T14:33:20Z",
+    "terminating": 1,
+    "uncountedTerminatedPods": {}
+  }
+}

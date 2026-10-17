@@ -288,6 +288,7 @@ version = "0.1.0"
 dependencies = [
  "av-catalog",
  "av-cdm",
+ "av-http1",
  "av-label",
  "av-lockstep",
  "av-store",
@@ -295,6 +296,7 @@ dependencies = [
  "openssl",
  "prost",
  "serde_json",
+ "serde_yaml",
  "thiserror",
  "tokio",
 ]

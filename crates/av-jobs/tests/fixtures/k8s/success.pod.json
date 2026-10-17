@@ -1,0 +1,233 @@
+{
+  "metadata": {
+    "annotations": {
+      "av.job.id.full": "real-83692-1792247520907798000"
+    },
+    "creationTimestamp": "2026-10-17T14:32:01Z",
+    "generateName": "av-job-real-83692-1792247520907-579fe775b7d86-",
+    "generation": 1,
+    "labels": {
+      "av.job": "1",
+      "av.job.id": "real-83692-1792247520907798000",
+      "av.test": "1",
+      "av.test.run_id": "83692-1792247520907798000",
+      "batch.kubernetes.io/controller-uid": "678efcc6-8343-4caf-b1d3-8593ce9ef1e6",
+      "batch.kubernetes.io/job-name": "av-job-real-83692-1792247520907-579fe775b7d86",
+      "controller-uid": "678efcc6-8343-4caf-b1d3-8593ce9ef1e6",
+      "job-name": "av-job-real-83692-1792247520907-579fe775b7d86"
+    },
+    "name": "av-job-real-83692-1792247520907-579fe775b7d86-8rv9n",
+    "namespace": "av-heavy-ct-83692-1792247520907798000",
+    "ownerReferences": [
+      {
+        "apiVersion": "batch/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "Job",
+        "name": "av-job-real-83692-1792247520907-579fe775b7d86",
+        "uid": "678efcc6-8343-4caf-b1d3-8593ce9ef1e6"
+      }
+    ],
+    "resourceVersion": "1054350",
+    "uid": "c49b7d7e-cc57-4d7e-bcef-2bd541ca0b2a"
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "/bin/sh",
+          "-c",
+          "echo \"uid=$(id -u) gid=$(id -g)\"; grep -E 'NoNewPrivs|Seccomp:|CapEff' /proc/self/status; (echo x > /rootprobe) 2>/dev/null; echo root_write_exit=$?; (echo x > /av-job/in/probe) 2>/dev/null; echo in_write_exit=$?; tr a-z A-Z < /av-job/in/000 > /av-job/out/zz-upper; cat /av-job/in/001 /av-job/in/000 > /av-job/out/aa-cat; echo stderr-line >&2; echo done"
+        ],
+        "image": "alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+        "imagePullPolicy": "Never",
+        "name": "job",
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "20m",
+            "memory": "8Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 10001,
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": false,
+    "nodeName": "colima",
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "restartPolicy": "Never",
+    "schedulerName": "default-scheduler",
+    "securityContext": {},
+    "serviceAccount": "default",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 5,
+    "tolerations": [
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      }
+    ],
+    "volumes": [
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-real-83692-1792247520907-579fe775b7d86/in",
+          "type": "Directory"
+        },
+        "name": "in"
+      },
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/av-job-real-83692-1792247520907-579fe775b7d86/out",
+          "type": "Directory"
+        },
+        "name": "out"
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:32:03Z",
+        "observedGeneration": 1,
+        "status": "False",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:32:01Z",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:32:01Z",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:32:01Z",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "False",
+        "type": "ContainersReady"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:32:01Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "allocatedResources": {
+          "cpu": "20m",
+          "memory": "8Mi"
+        },
+        "containerID": "docker://32030a52f39b9ef4559043f09e3c084e2a03e56b3c69911c901d6c26e9cb0b77",
+        "image": "alpine:latest",
+        "imageID": "docker-pullable://alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+        "lastState": {},
+        "name": "job",
+        "ready": false,
+        "resources": {
+          "limits": {
+            "cpu": "250m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "20m",
+            "memory": "8Mi"
+          }
+        },
+        "restartCount": 0,
+        "started": false,
+        "state": {
+          "terminated": {
+            "containerID": "docker://32030a52f39b9ef4559043f09e3c084e2a03e56b3c69911c901d6c26e9cb0b77",
+            "exitCode": 0,
+            "finishedAt": "2026-10-17T14:32:01Z",
+            "reason": "Completed",
+            "startedAt": "2026-10-17T14:32:01Z"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.5.1",
+    "hostIPs": [
+      {
+        "ip": "192.168.5.1"
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Succeeded",
+    "podIP": "10.42.0.17",
+    "podIPs": [
+      {
+        "ip": "10.42.0.17"
+      }
+    ],
+    "qosClass": "Burstable",
+    "startTime": "2026-10-17T14:32:01Z"
+  }
+}

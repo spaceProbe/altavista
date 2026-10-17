@@ -6,6 +6,12 @@
 //! dependency-free PNG encoder). See `crate::tiler`'s own module doc for the tiler's full
 //! design.
 //!
+//! `JOB_EXECUTOR_KIND_CONTAINER` jobs run through one of two executors: `crate::container::
+//! ContainerExecutor` (a local `docker run`) or, as of question 245's heavy container round,
+//! `crate::k8s::K8sJobExecutor` (a Kubernetes `batch/v1` Job, one pod, never retried; its API
+//! client speaks through the in-workspace `av-http1`, and its `hostPath` data plane is
+//! single-node by construction -- see `crate::k8s`'s own module doc).
+//!
 //! # Why a file-backed hash chain, not a broker
 //!
 //! `docs/heavy-plan.md`'s own H3 milestone text: "a runner that takes jobs from a durable,
@@ -79,6 +85,7 @@
 pub mod clock;
 pub mod container;
 pub mod hash;
+pub mod k8s;
 pub mod log;
 pub mod png;
 pub mod queue;

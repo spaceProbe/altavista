@@ -338,7 +338,7 @@ fn output_rejected(detail: String) -> pb::JobFailure {
 /// `<image>@<want_digest>` -- see this module's own doc, "Never pulls; the digest gate", for the
 /// full account. Returns that same digest-pinned reference on success, so the actual `docker run`
 /// is always given a content-addressed reference, never the bare name.
-fn digest_gate(image: &str, want_digest: &str) -> Result<String, pb::JobFailure> {
+pub(crate) fn digest_gate(image: &str, want_digest: &str) -> Result<String, pb::JobFailure> {
     if image.is_empty() || want_digest.is_empty() {
         return Err(start_failed("JobSpec.container_image / container_image_digest is empty -- nothing to run".to_string()));
     }
