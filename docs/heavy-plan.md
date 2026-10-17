@@ -3028,3 +3028,412 @@ bundle is for the lead's regeneration at the merge (`AV_SBOM_REBUILD` was not se
 - **The cFS image** is stale by provenance after the proto change; native team or the lead at the
   merge.
 - `scenario_to_cdm` does not write `visual_model_uri` (decision 9).
+
+## Status (heavy manager, 2026-10-17) — container round (question 245)
+
+This round does not reopen the plan. It delivers the four heavy items question 245 chartered, on
+this host's Colima: a digest-pinned ClickHouse container and the single-node k3s. It also
+delivers three items the lead added mid-round: questions 247 and 248, the image-tag guard, and
+the k3s network and lock rules. Nothing here needs or claims a board. Every "several" claim is
+several pods on **one node**, not several hosts. `## Delivered` stands.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `64fa905` | `av-http1`: one blocking HTTP/1.1 client over the system OpenSSL, used by both new clients |
+| `b50c2dd` | develop merged (question 246's deny excusal) |
+| `83c955b` | Task 4: the container-executor probe image pinned by digest, so its test runs |
+| `0f55bbe` | Task 3: each stream position's dwell sized from latency observed on the path (question 244) |
+| `cac4699` | Task 1a: the ClickHouse image pinned by digest, and the kit carrying it |
+| `8c3b447` | develop merged (question 247) |
+| `5806810` | Task 1c: the ClickHouse image held out of the kit pending a licence review (question 247) |
+| `10d10d4` | Task 1b: the ClickHouse study store |
+| `f5b8d50` | Task 5: `ImageTagGuard` never deletes an image that existed before its load |
+| `1b56681` | Task 2a: the Kubernetes Jobs executor |
+| `2a69e47` | Task 2b: a feasibility sweep fanned out as k3s Jobs |
+| `d24173d` | The sweep sample image re-pinned from the clean committed tree |
+| this commit | this status section |
+
+### `av-http1`: one HTTP/1.1 client for both new clients
+
+Both new clients speak HTTP, and both callers are synchronous: `StudyStore`, and `Executor` in
+`av-jobs`, which has no async runtime by design. So `crates/av-http1` is one small blocking client.
+
+- Its only dependencies are `openssl` and `thiserror`, and it added no registry package. Question
+  218's "one copy" reasoning: no second parser.
+- Plaintext is refused unless the host is a loopback literal or `localhost` (question 155).
+- TLS:
+  - trust comes from an in-memory or file CA, which replaces the system store;
+  - the client identity is held in memory;
+  - hostname and IP-SAN verification is always on, with no CN fallback and no switch to turn it
+    off.
+- One connection per request (`Connection: close`). Responses are read by chunked,
+  Content-Length or close framing, under header and body limits. CR, LF and NUL are refused
+  before a byte is written.
+- Tests: 62 (fake server, a TLS suite with a CA generated at test time, mTLS, the IP SAN). The
+  manager's perturbation, chunk sizes read as decimal, failed 4 of the 33 fake-server tests.
+- Hostname verification was **not** perturbed. The worker's temporary edit to disable it was
+  denied by the permission classifier, and the lead ruled it must not be retried in any form. The
+  TLS suite's own controls stand in: the same certificate is accepted when the host matches, by
+  name or by IP, and refused when it does not.
+
+### Task 1: ClickHouse for sweep MoEs
+
+**The image (1a, then 1c).** The official `clickhouse/clickhouse-server` 26.8.29.10, the latest
+LTS line, pinned by its multi-arch index digest `sha256:6ded2b2c…b41e4`. That is also this
+host's image id; the arm64 manifest is `sha256:b4e4a09d…1cb0`. `services/clickhouse/IMAGE_DIGEST.md`
+records the measured user and env behaviour:
+- `CLICKHOUSE_USER` alone creates a network-reachable user with an empty password, so it is never
+  run that way;
+- HTTPS is off by default;
+- the image's anonymous `VOLUME`, which `--tmpfs` handles;
+- the licence: Apache-2.0, confirmed upstream, because the image ships no LICENSE file and no
+  licence label;
+- the 1,443 statically linked libraries the binary lists, with the LGPL, GPL-or-BSD and MPL rows
+  named.
+
+**Question 247 (the user's decision): the image is not in the air-gap kit** pending a licence
+review of those static LGPL libraries. `cac4699` wired it into the kit; `5806810` removes that
+wiring, restoring four kit files byte for byte to `cac4699^`. It keeps the pin, the dpkg
+inventory, the licence inventory and the record test, which now fails if `clickhouse-image`
+reappears in the kit.
+
+**The store (1b)**, `crates/av-sweep/src/clickhouse/`:
+- `ClickHouseStudyStore: StudyStore`, selected by configuration (`--store-clickhouse` with
+  database, user, password-env and CA-file flags, beside `--store-dir`).
+- Store mode adds `--read-study` and `--import-study`.
+- The client uses ClickHouse's HTTP interface over `av-http1`.
+- Exact floats come from `RowBinary` both ways; queries use parameters, never built SQL strings.
+- Server exceptions are typed by code. The password comes from a named environment variable and
+  appears in no URL, `Debug` output or error.
+- The schema is 8 explicit columnar tables. Every proto field is mapped by exhaustive
+  destructuring, so a new proto field breaks the build rather than silently dropping.
+- The migration is idempotent. Opening a store verifies `system.columns` and refuses a mismatch
+  typed, never migrating over it.
+
+A write is all-or-nothing to readers without transactions:
+- every row carries a random write id;
+- the header row goes in last, with the study's SHA-256;
+- readers read only the header's write id, and re-check counts and the hash.
+
+Typed errors cover a refused write (including three read-only-user shapes), a schema mismatch, an
+unreachable server, TLS, and server exception codes. They are shown against the real pinned server
+and a fake one. TLS works against the real server with a CA generated at test time (the shell
+policy refuses the `openssl` CLI). A wrong CA, the system store, a hostname mismatch and plaintext
+to the TLS port are each refused.
+
+**Proof (manager's re-run):**
+- `cargo test -p av-sweep`: 136 passed.
+- One real GMAT sweep (`demo_two_instance_sweep`, 8 samples, 12 aggregates) was written through
+  both stores in the same run:
+  - canonical JSON sha256 `45e733d9…fbdb` from each store;
+  - protobuf sha256 `c9c92544…0f54` from the file store, the ClickHouse store and `--out-dir`;
+  - every field bit-equal, and `samples.jsonl` regenerated from ClickHouse byte-identical.
+  The hashes vary between runs only through `products_uri`'s temp path.
+- A synthetic study round-trips bit for bit: `-0.0`, subnormals, `±inf`, NaN payloads, an
+  unknown enum value, a failed sample and unsorted samples.
+- **The MoE query is answered in SQL** and is bit-identical to `av_sweep::aggregate`. It uses an
+  order-fixed `arrayFold` from `-0.0`, not `avg()`/`sum()`. Measured: native `avg()` differs in
+  sign for an all-`-0.0` group and near the 13th digit over 150,000 draws.
+- **The feasibility panel's data path** (`tests/test_clickhouse_sweep_panel.py`): a study read out
+  of ClickHouse and posted to `POST /api/cdm/sweep` publishes the same scenario as the
+  file-backed copy (with `test_cdm_sweep.py`, 13 passed).
+- Perturbations, each caught: the write-id filter dropped, min and max swapped, the fold's seed,
+  and (manager) the SQL standard deviation divided by `n − 1` (3 tests failed).
+
+### Task 2: a Kubernetes Jobs executor, and a sweep fanned out over it
+
+**The executor (2a)**, `crates/av-jobs/src/k8s/`. `K8sJobExecutor` is a `Sync` CONTAINER executor
+that runs each job as a `batch/v1` Job. It talks to the API server over `av-http1` with the
+kubeconfig's CA and client certificate, held in memory. A kubeconfig that authenticates by token,
+exec plugin, auth provider, user and password, impersonation, `insecure-skip-tls-verify`,
+`tls-server-name` or `proxy-url` is refused, typed.
+
+The Job:
+- one pod: `backoffLimit: 0`, `podReplacementPolicy: Failed`, `restartPolicy: Never`;
+- `activeDeadlineSeconds`, and CPU/memory requests and limits;
+- `<image>@<digest>` through the same digest gate as the docker executor, with
+  `imagePullPolicy: Never`;
+- the docker hardening expressed as a `securityContext`;
+- no service-account token;
+- `nodeName` pinned. A cluster with more than one node and none named is refused, as are a
+  non-Docker runtime and a scratch root outside `$HOME`. **The data plane is `hostPath` and
+  single-node**; several hosts would need the object store as the data plane, which is a
+  different executor.
+- The pod log is captured and capped.
+- The exit maps onto existing `JobFailureKind` values (no proto change; the table is in the
+  module doc).
+- A second pod, or a Job counter above one, fails the job as `Retried`: it is never silently
+  retried.
+
+Network, on the lead's ruling, **fails closed by default**:
+- `new()` creates a default-deny ingress-and-egress NetworkPolicy for `av.job=1` pods.
+- k3s enforces it on this node, but only after a measured 1–2 s window: a pod's first 2–4
+  connects succeed.
+- So `new()` refuses a configuration that has neither a digest-pinned init-container network gate
+  nor the explicit opt-in `accept_startup_network_window`. The gate gave 24 attempts, 0 connected;
+  it fails closed when egress is open.
+
+**Tests hold the docker-test lock for their pods' whole life**, from the first Job create until
+the namespace is gone in the API and in Docker. The pods' sandboxes keep `av.test=1`, so a crashed
+run's leftovers can be swept. **The label plus the lock is the contract** with the native team's
+`prune_stale_test_resources`, which removes every container with that label under the same lock.
+A test proves a pod exists only while the lock is held.
+
+**Proof (manager's re-run):**
+- `cargo test -p av-jobs`: 192 passed, 0 skipped. The 14 real-cluster tests took 1,037 s, mostly
+  waiting on the lock.
+- Four pods were scheduled at 16:35:25Z, started at 16:35:27–28Z and finished at 16:35:35–36Z:
+  four at once, on one node.
+- Every failure is typed, with exactly one pod: exit 7, a missing command, a refused image, a
+  deadline, `docker kill` (137), a deleted pod, `ErrImageNeverPull`.
+- Defect found and fixed: a deadline Job's `terminating` counter was counted as a retry. A
+  recorded fixture is the regression test.
+- Perturbations: `backoffLimit: 1` (k3s really started a second pod, caught as `Retried`), the
+  multi-node refusal, the policy removed under the gate, and (manager) the retry threshold raised
+  to two pods (3 tests failed).
+
+**The sweep (2b).**
+- `av-sweep` gains a `gmat` feature (question 230's pattern). Without it, no `gmat-sys` is linked,
+  and `--gmat-startup` and `gmat.` models are refused, typed.
+- `--executor process|container|k8s`; `process` is the default and unchanged.
+- Each sample becomes one JobSpec with hash-verified inputs: a mismatch is
+  `INPUT_HASH_MISMATCH` and no job is created.
+- Up to `--workers` jobs run at once, and one `finalize` makes the record whatever ran the sample.
+  A failed job is a failed sample, never a retry.
+- `services/sweep` is the linux/arm64 sample image: `av-sweep --no-default-features`, non-root,
+  carrying the four GMAT data files the native orbital model reads, recorded by hash. It is not a
+  kit component (the lead's ruling).
+- Fixture: `drms/leo_orbital_native_sweep`, 4 points × 3 draws.
+
+**Proof (manager's re-run, `crates/av-sweep/tests/k8s_sweep.rs`, 4 passed):**
+- Same `--out-dir` path for every run.
+- **The k8s study equals the container study of the same image, byte for byte:** 14 of 14 hashes
+  (`sweep_results.pb` `21290adc…bc28` in the manager's run, `sweep_results.json` and all 12
+  `run_products.pb`).
+- At most 4 pods alive at one instant, all on node `colima`.
+- A `docker kill`ed sample pod is one `NONZERO_EXIT` 137 sample naming its pod, with no second
+  pod. The 11 survivors equal the reference, and a clean rerun is byte-identical (`8a9ea020…d699`
+  both).
+- Perturbations: a wrong input hash (no job for that sample); half the outputs (caught by the
+  decode, and by the equality test with the decode skipped); (manager) a forced 1 s deadline,
+  which turned every sample into a typed deadline failure. The manager's first attempt at that was
+  masked by the CLI's own deadline flag and was redone after it.
+
+**Question 248, a finding, not a defect:** this macOS host's native run differs from the Linux
+image on 14 of 14 hashes. The differences are only in trajectory means, covariances and score
+values, by ulps. Root cause: libm. Apple's and glibc's `sin`, `cos`, `acos`, `asin`, `atan2`,
+`hypot`, `exp` and `powf` disagree by 1 ulp on some inputs, measured function by function and
+traced through `fk5` nutation into the gravity derivative. **Byte-for-byte reproducibility holds
+for the same image and the same libm, not across platforms.** The test asserts k8s equals
+container and records the native comparison. `av-orbital` is unchanged this round.
+
+### Task 3: question 244's tile-streaming flake
+
+`web/js/layers_stream_check.mjs` sized every position's dwell from one cold calibration fetch,
+which measured 30–35 ms against a path median of 17–21 ms. When the path slowed, too few tiles
+settled. Now one round trip is the median of the last 5 loads completed on the path, re-read every
+frame; the calibration fetch only seeds the first position. The default multiplier is 2.5 observed
+round trips (it was 1 calibration round trip), measured. No budget moved.
+
+| Condition | Old harness | Fixed harness |
+| --- | --- | --- |
+| Dwell shortened to 0.5 or 0.3 | 0 evicted on 7 of 16 runs | — |
+| A proxy delaying every request after the first by 30, 60 or 100 ms | fails 18 of 18 (the 30 ms case gives question 244's exact 6 tiles / 5,112 bytes) | eviction and cancellation nonzero, 36 of 36 |
+| One busy process per core | — | nonzero, 42 of 42 |
+| Generous budget | — | never evicts, 30 of 30 |
+| Manager's re-run, 60 ms proxy | 0 evicted, 3 of 3 | 9 evicted, 3 of 3 |
+| Manager's re-run, CPU load | — | 9–10 evicted and 4 cancelled, 3 of 3 |
+
+Reverting only the estimate to the calibration sample fails at 60 and 100 ms. The bare harness
+still prints its usage and exits 1.
+
+### Task 4: the container-executor test that always skipped
+
+Root cause: the record named the floating `alpine:latest`, and upstream moved the tag between
+2026-09-17 and 09-18. Local copies are evicted by bulk image removals and re-fetched by ad-hoc
+`docker pull alpine`, never by repository code.
+
+- The record now names `alpine@sha256:294b683c…77e6`, and the test asserts that digest equals the
+  recorded id.
+- `digest_gate` inspects `<image>@<digest>`, never the bare name.
+- `tests/test_edge_plugin_hardening_alpine.py` is pinned to the same digest.
+
+Both tests run and pass with no skip. A record reverted to the tag fails loudly; a wrong digest
+skips visibly.
+
+### Task 5 (the lead's addition): `ImageTagGuard` deleted pre-existing images
+
+On this host's containerd image store (Docker 29.5.2), `docker rmi <repo:tag>` deletes the image
+in two cases:
+- the tag is its last name;
+- its only other references are a dangling placeholder or a digest reference in the same
+  repository.
+That is moby's `daemon/containerd/image_delete.go`, `getSameReferences`; the classic store also
+deletes on the last reference.
+
+`scripts/kit/docker_image_tags.py`, the P5 kit owner's module, assumed `rmi` only untags. Its
+`repository:tag` snapshot cannot see a nameless or digest-only image, and a plain
+`docker image ls` hides dangling images on this store. It was reproduced deleting a throwaway
+pre-existing image.
+
+The fix:
+- list every image;
+- skip the load when the image is already present and would not survive the untag;
+- refuse rather than `rmi`;
+- assert that no pre-existing image disappeared.
+
+`tests/test_docker_image_tags.py`: 10 tests on throwaway images only. Reverting the fix fails 5;
+listing without dangling images fails 3 (manager). The image-event log shows no event that matches
+the guard deleting a pinned image, so the history of vanishing pinned images is not explained by
+the log alone. **The lead tells the native team** this module changed.
+
+### Defects found, and their root causes
+
+1. **The tile-streaming flake** (question 244): a dwell sized from one cold sample. Definitively
+   root-caused and fixed (task 3).
+2. **The always-skipping container test:** a floating tag behind a pinned id. Definitively
+   root-caused and fixed (task 4).
+3. **`ImageTagGuard` could delete a pre-existing image:** containerd image-store semantics. Root
+   cause definitive; fixed (task 5).
+4. **The k8s retry false positive:** a deadline Job's `terminating` count read as a second pod.
+   Fixed, with a regression fixture.
+5. **`docker rmi <alias>` deletes the ClickHouse image** when the alias is its last name. This is
+   the same mechanism as defect 3, recorded in the image record as "never `rmi` the alias".
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. `target/debug/deps` held 49,588 entries at the start of the round and 90,155 at the gate's
+   start, both under cargo-slot's 100,000, so it was not moved (question 236's rule is triggered
+   by a warning).
+2. One blocking HTTP/1.1 client crate, `av-http1`, serves both new clients. Both callers are
+   synchronous traits, `av-jobs` has no async runtime by design, and question 218 asks for one
+   copy, not two.
+3. The ClickHouse client and store are a module of `av-sweep`, not a new crate.
+4. No proto change this round. Kubernetes outcomes map onto existing `JobFailureKind` values,
+   with a Rust-typed error and the Kubernetes reason in `detail`.
+5. The k8s data plane is `hostPath` under `$HOME`, with `nodeName` pinned. A multi-node cluster
+   with no node named is refused. This is single-node, and stated as such.
+6. ClickHouse studies are immutable (decision 18). A write is all-or-nothing to readers through a
+   write id named in a header row inserted last.
+7. Task 1 was split into 1a (image) and 1b (store), and task 2 into 2a (executor) and 2b (sweep).
+   They ran in the order 0, then {1b, 2a}, then 2b. Tasks 1a, 3 and 4 ran beside task 0.
+8. `av-http1`'s hostname verification was not perturbed (the lead's ruling, after the permission
+   classifier denied a temporary disable). Its accept-and-refuse-by-host controls stand in for
+   that perturbation. The manager perturbed the parser instead.
+9. develop was merged twice for the lead's rulings: `b50c2dd` (question 246) and `8c3b447`
+   (question 247).
+10. Task 4 also pinned `tests/test_edge_plugin_hardening_alpine.py` (the lead's ruling).
+    `test_edge_plugin_container.py` only mentions alpine in comments and was left unchanged.
+11. Rulings added mid-round to every worker's brief: never pull an image by a floating tag; never
+    weaken TLS verification; never `docker rmi` a pinned image or its alias.
+12. Task 3's default dwell is 2.5 observed round trips, chosen by measurement: 2 stalled one
+    CPU-loaded run, and 3 cut cancellation to 2. No budget moved.
+13. Task 1a uses ClickHouse 26.8.29.10 LTS, the default Ubuntu variant, pinned by index digest.
+    The licence is confirmed upstream, not from the image.
+14. The `docker rmi <alias>` hazard was first recorded as the kit owner's problem, then brought
+    into the round as task 5 (decision 16).
+15. Question 247: the kit wiring is removed in its own commit (`5806810`), and `cac4699` stays in
+    history. The pin, the record test and both inventories are kept for the licence review.
+16. `ImageTagGuard` is the P5 kit owner's module. It is fixed here on the lead's ruling, and the
+    lead tells the native team.
+17. The k3s executor has a default-deny NetworkPolicy. Its enforcement on this node was proven,
+    together with its 1–2 s start-up window (decision 23).
+18. The two store backends differ deliberately: ClickHouse refuses different content under an
+    existing `sweep_id`, while `FileStudyStore` still overwrites. The file store is unchanged
+    because changing it would alter F2's behaviour, outside this charter. Matching it is proposed.
+19. ClickHouse requests carry no ClickHouse settings, so read-only users can read. The tests
+    never `docker rmi`. Orphan collection, retry and pooling are documented as absent.
+20. 1b's real-sweep fixture has no failed sample; the synthetic studies cover that case.
+21. The lead's cross-track rule: a k3s test holds the docker-test lock for its pods' whole life,
+    and deletes the namespace before releasing the lock. The pods keep `av.test=1`. The label plus
+    the lock is the contract.
+22. Task 5 skips a load whose image is already present and fragile, rather than loading and
+    restoring, because a digest-only reference cannot be recreated by `docker tag`. The backstop
+    refuses rather than deletes.
+23. The lead's ruling: the k3s network fails closed by default. `new()` refuses a configuration
+    with neither the digest-pinned network gate nor the explicit opt-in
+    `accept_startup_network_window`.
+24. The lead's ruling: `av-jobs` uses `serde_yaml` behind one function, this round only, because
+    it is already locked. Question 246's migration scope gains `av-jobs` as a fifth crate (the lead
+    amends 246).
+25. kubectl mutations are refused by the shell policy and were never wrapped. Namespaces are
+    managed through the executor's own API client.
+26. The sweep sample image is not a kit component this round (the lead's ruling). Any inclusion
+    also falls under `kit-operator-supplied.md`'s base-image rule.
+27. The sweep image was re-pinned from the clean committed tree (`d24173d`). The binary is
+    byte-identical, but the image id moved, so the image is not reproducible at the image id. The
+    earlier image is left untagged for the lead and was not removed.
+28. Question 248: the sweep test asserts that k8s equals container and records the native macOS
+    comparison, which differs through libm. `av-orbital` is unchanged.
+29. `buf breaking` was run against this branch's own base as well, because the main tree's proto
+    had moved to develop with the native round's additions.
+30. The manager ran one bare `cargo tree` (a read-only metadata query) outside `cargo-slot`
+    while attributing the SBOM failures. It was repeated through `cargo-slot`, which gave the same
+    answer. This is recorded as a deviation from the every-cargo-through-cargo-slot rule.
+31. The proposer container flake is recorded with its root cause and not fixed (outside the
+    charter). The fix is proposed.
+
+### Found, not fixed
+
+- `ContainerExecutor` (docker) returns no job log; the k8s executor does (the lead's ruling:
+  recorded).
+- The sweep sample image is reproducible at the binary (`331c4a09…`) but not at the image id:
+  `53dc51a0…` became `6e7ca17b…` on a clean rebuild. The earlier image `53dc51a0…` is still
+  present, untagged, for the lead.
+- `FileStudyStore` overwrites where `ClickHouseStudyStore` refuses different content (decision 18).
+- No ClickHouse orphan collection, retry or connection pooling (documented in the module).
+- The native team's other `docker rmi` calls (Rust helpers) are not audited for defect 3's
+  behaviour.
+- `serde_yaml` in `av-jobs`: question 246's migration scope gains a fifth crate (the lead amends
+  246).
+
+### Gates
+
+The gate ran at `d24173d`, the last code commit, by
+`/Users/probe/code/altavista-lead/rounds/heavy-ct/gate/run_gate.sh`. Its phases ran in sequence,
+and each phase's whole output was captured before it was read. `target/debug/deps` held 90,155
+entries at the start and 130,453 at the end, under cargo-slot's 100,000 at the start, so it was
+not moved.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against` the main tree's proto | **exit 100**, reporting 9 "deleted" values in `board.proto` and `edge.proto`. These are the native round's additions, merged into develop (`dc0483f`) after this branch's base; the comparison tree moved. This branch changed no proto since `4e3140d`. **Against its own base** (`.git#ref=4e3140d,subdir=proto`): **clean, exit 0** |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **174 binaries, 1793 passed, 0 failed, 4 ignored, exit 0**, 1704 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-kernel --all-targets --no-default-features -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-run --all-targets --no-default-features -- -D warnings` | **clean, exit 0** |
+| `cargo clippy -p av-sweep --all-targets --no-default-features -- -D warnings` (new this round) | **clean, exit 0** |
+| required-features lint (steps inline through `cargo-slot`) | **clean**: 4 groups (`av-kernel`/`av-run`/`av-sweep` `gmat`, `av-jobs` `store-fixture`). `av-sweep`'s group is new: two GMAT-only tests declare `required-features = ["gmat"]` |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0 |
+| `cargo test -p av-kernel --no-fail-fast` | **55 binaries, 972 passed, 0 failed, 1 ignored, exit 0**, 508 s |
+| every `web/js/**/*_check.mjs` | **25 of 29 exit 0**. The four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` exit 1) and are run with inputs by pytest, where they pass |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1101 passed, 9 failed, 17 skipped**, 660 s; every skip is a visible opt-in gate or the absent proof kit |
+
+**The nine Python failures, each attributed:**
+- **Seven** are the Rust SBOM epoch. `test_sbom.py::test_the_epoch_is_never_wall_clock` fails for
+  the six Rust components, and so does `test_all_six_rust_components_share_exactly_one_epoch_from_git`.
+  This round's Rust commits move the committed SBOMs' epoch. None of the six components gained a
+  package (`cargo-slot tree`: no `av-http1` or `av-jobs` in any of them; their `serde_yaml` was
+  already there). **For the lead's regeneration:** the six Rust SBOMs' epochs, then `SHA256SUMS`
+  and `BUNDLE.md`. No image SBOM moves, because the ClickHouse component was removed again
+  (question 247).
+- **One** is `services/cfs/tests/test_image_digest.py`. The host's `altavista-cfs-lockstep:local`
+  is now `e51b896d…`, built 2026-10-17 11:50 CDT by the native round and recorded on develop.
+  This branch still records `a6bb91d4…`. It resolves at the merge; it is not this team's.
+- **One** is `tests/test_proposer_container.py`, a flake, root-caused from its own captured log.
+  The gateway container runs `av-command` and `av-gateway` writing to one stderr, and their lines
+  interleaved byte by byte. `av-gateway`'s readiness line arrived split around `av-command`'s
+  output, so the substring wait never matched, although both processes printed and were
+  listening. Three reruns passed 3 of 3. Not fixed this round; the fix is to wait on readiness by
+  connecting, or on separately captured streams, not on substrings of a shared stream.
+
+### What remains, each with its reason
+
+- The user's licence review of the ClickHouse image before any kit inclusion (question 247).
+- Cross-platform reproducibility of numeric results (question 248). A fix would be a portable math
+  library in `av-orbital`, which was not to be changed this round.
+- A multi-host job runner: it needs the object store as the data plane instead of `hostPath`.
+- The secondary-viewport precision defect (question 240), outside this round by question 245.
