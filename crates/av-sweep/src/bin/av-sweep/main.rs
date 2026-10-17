@@ -32,6 +32,7 @@
 
 mod cli;
 mod sample_mode;
+mod store_mode;
 mod study;
 
 use std::process::ExitCode;
@@ -54,5 +55,6 @@ fn run(args: &[String]) -> Result<(), String> {
             study::run_study(a, &exe)
         }
         cli::Cli::Sample(a) => sample_mode::run_sample(a),
+        cli::Cli::Store(a) => store_mode::run_store(a),
     }
 }

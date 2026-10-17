@@ -32,9 +32,13 @@
 //!   pass_fraction across a study's draws.
 //! - [`json`] -- the proto3 canonical JSON encoder for `SweepResults` and everything it reaches.
 //! - [`store`] -- [`store::StudyStore`] (F2), the study-store trait, [`store::FileStudyStore`],
-//!   and the (deferred, typed-refusal) ClickHouse backend seam.
+//!   and the `open_store` seam over both backends.
+//! - [`clickhouse`] -- [`clickhouse::ClickHouseStudyStore`] (question 245), the ClickHouse
+//!   implementation of [`store::StudyStore`]: columnar tables, an all-or-nothing write without
+//!   transactions, exact-float `RowBinary`, a verified schema, and the MoE query answered in SQL.
 
 pub mod aggregate;
+pub mod clickhouse;
 pub mod error;
 pub mod grid;
 pub mod hash;

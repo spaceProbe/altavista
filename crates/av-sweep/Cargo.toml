@@ -1,7 +1,7 @@
 [package]
 name = "av-sweep"
 publish = false
-description = "F1-F2 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it. F2 (also src/lib.rs: aggregate.rs, store.rs, json.rs) adds per-point score aggregates and the study store (file-backed now, ClickHouse deferred behind the same trait)."
+description = "F1-F2 (docs/feasibility-plan.md): the feasibility-mode parameter sweep executor. F1a (src/lib.rs) is a pure, GMAT-free library -- sweep grid expansion, per-sample seed derivation, per-sample DRM/SOS configuration. F1b (src/bin/av-sweep/) is the process-parallel study/sample executor built on top of it. F2 (also src/lib.rs: aggregate.rs, store.rs, json.rs) adds per-point score aggregates and the study store (file-backed, plus the ClickHouse implementation of question 245 behind the same trait: src/clickhouse/)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,3 +33,16 @@ serde_yaml = "0.9"
 # `[bans]` list, per ADR-004's crypto rule: SHA-256 only, through the system OpenSSL only.
 openssl = "0.10"
 thiserror.workspace = true
+
+# Question 245: the blocking HTTP/1.1 client over the system OpenSSL that the ClickHouse study
+# store (src/clickhouse/) speaks through. In-workspace path dependency (no registry crate); it
+# supplies TLS with always-on hostname verification and refuses plaintext off loopback (question
+# 155), so this crate adds no TLS or HTTP code of its own.
+av-http1 = { path = "../av-http1" }
+
+[dev-dependencies]
+# tests/clickhouse_store.rs and tests/clickhouse_real_sweep.rs run the pinned ClickHouse image
+# under the host-wide docker lock with the same gate/lock/label/prune discipline as
+# crates/av-store/tests/minio_store.rs. Dev-only: this crate's production code has no reason to
+# know Docker exists.
+av-lockstep = { path = "../av-lockstep" }

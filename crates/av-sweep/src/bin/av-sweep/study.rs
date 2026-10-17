@@ -39,6 +39,14 @@
 //! sample) that F1b's own tests and this task's per-sample replay both depend on unchanged. When
 //! `--store-dir` is omitted, no store directory is created or written at all.
 //!
+//! Question 245 adds a second additional, optional destination, selected by
+//! `--store-clickhouse <url> --clickhouse-database <db> --clickhouse-user <user>
+//! [--clickhouse-password-env <VAR>] [--clickhouse-ca-file <pem>]`: the same finished
+//! `SweepResults` is also written through `av_sweep::clickhouse::ClickHouseStudyStore`. Both
+//! stores may be given; each gets the same message. The ClickHouse store is opened (connected and
+//! its schema verified, or migrated when it has no tables yet) **before the first sample runs**,
+//! so a wrong URL, password variable, CA or schema fails in seconds, not after the study.
+//!
 //! ## Question 192 additions: `seeds`, event axes and `dispersed`
 //!
 //! `SweepSample.seed` (one projected value) no longer exists -- [`Running`] now carries the
@@ -64,7 +72,7 @@ use std::time::Duration;
 
 use av_cdm::pb;
 use av_kernel::drm::ExecutionErrorMode;
-use av_sweep::store::{FileStudyStore, StudyStore};
+use av_sweep::store::{open_store, FileStudyStore, StoreBackend, StudyStore};
 use av_sweep::{json, SampleConfig};
 use prost::Message;
 
@@ -320,6 +328,15 @@ fn build_samples(loaded: &Loaded, points: &[av_sweep::GridPoint], draws: u32) ->
 
 pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
     let loaded = preflight(&args)?;
+    // Question 245: open the ClickHouse store first (see the write below for why).
+    let clickhouse_store = match &args.clickhouse {
+        None => None,
+        Some(config) => {
+            let label = format!("the ClickHouse study store at {} (database {})", config.url, config.database);
+            let store = open_store(StoreBackend::ClickHouse(config.clone())).map_err(|e| format!("opening {label}: {e}"))?;
+            Some((label, store))
+        }
+    };
     let points = av_sweep::expand_grid(&loaded.sweep).map_err(|e| format!("{}: {e}", args.sweep.display()))?;
     let draws = loaded.sweep.monte_carlo_draws;
     // Question 192(d): Sampled when the sweep declares more than one draw OR when it forces
@@ -415,6 +432,13 @@ pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
         let mut store = FileStudyStore::new(store_dir);
         let location = store.put_study(&sweep_results).map_err(|e| format!("writing the study store at {}: {e}", store_dir.display()))?;
         eprintln!("av-sweep: study store written to {location}");
+    }
+    // Question 245: the ClickHouse store, opened (connected, schema verified) BEFORE any sample
+    // ran, so an unreachable server or a mismatching schema fails in seconds rather than after
+    // the whole study. It gets the same SweepResults as the file store.
+    if let Some((label, mut store)) = clickhouse_store {
+        let location = store.put_study(&sweep_results).map_err(|e| format!("writing study {:?} to {label}: {e}", sweep_results.sweep_id))?;
+        eprintln!("av-sweep: study written to {location}");
     }
 
     eprintln!("av-sweep: study {:?}: {} sample(s), {failed_count} failed", loaded.sweep.id, sweep_results.samples.len());
@@ -579,6 +603,7 @@ mod tests {
             workers: 2,
             gmat_startup: None,
             store_dir: None,
+            clickhouse: None,
         }
     }
 
@@ -804,6 +829,7 @@ exit 0"#;
             workers: 1,
             gmat_startup: None,
             store_dir: None,
+            clickhouse: None,
         };
         // Not `.unwrap_err()`: that requires the `Ok` side (`Loaded`) to implement `Debug` for
         // its own panic message, which it does not (mirrors `store.rs`'s own tests, which use
@@ -862,6 +888,7 @@ exit 7"#;
             workers: 1,
             gmat_startup: None,
             store_dir: None,
+            clickhouse: None,
         };
         let result = run_study(args, &exe);
         assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
