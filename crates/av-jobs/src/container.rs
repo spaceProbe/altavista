@@ -101,19 +101,31 @@
 //!
 //! # Never pulls (question 154); the digest gate (question 212(a))
 //!
-//! [`digest_gate`] runs `docker image inspect <JobSpec.container_image> --format {{.Id}}` --
-//! resolving only an image already present on this host, exactly like
-//! `av_lockstep::docker::local_image_id` -- and compares the result against
-//! `JobSpec.container_image_digest`: the job's own request plays the role
-//! `av_lockstep::docker::recorded_digest_gate`'s own `recorded_id` parameter plays for a test
-//! (question 212(a)'s "a test trusts an image only after comparing the running image to a
-//! recorded digest, and refuses rather than trusts on a mismatch" -- applied at RUN time, with
-//! the caller's own requested digest as the thing trusted only after comparison). Three
-//! distinct, typed outcomes, none of them a `docker pull`: the image absent entirely, the image
-//! present under a DIFFERENT id than requested (refused, never silently substituted), or a
-//! match -- in which case `docker run` is given the fully digest-pinned reference
-//! (`"<image>@<digest>"`), never the bare name, so the daemon itself enforces content
-//! addressing for the actual run.
+//! [`digest_gate`] runs `docker image inspect <JobSpec.container_image>@<JobSpec.
+//! container_image_digest> --format {{.Id}}` -- a reference by CONTENT ADDRESS, resolving only an
+//! image already present on this host (exactly like `av_lockstep::docker::local_image_id`), and
+//! compares the id it reports against `JobSpec.container_image_digest`: the job's own request
+//! plays the role `av_lockstep::docker::recorded_digest_gate`'s own `recorded_id` parameter plays
+//! for a test (question 212(a)'s "a test trusts an image only after comparing the running image
+//! to a recorded digest, and refuses rather than trusts on a mismatch" -- applied at RUN time,
+//! with the caller's own requested digest as the thing trusted only after comparison). The gate
+//! inspects the digest reference, never the bare name, so a floating tag (`alpine:latest`) that
+//! moves, or is garbage-collected and re-pulled at a newer digest, cannot make a pinned image
+//! look absent or substitute a different one (heavy-ct-4: the recorded `alpine:latest` id went
+//! stale that way). Three distinct, typed outcomes, none of them a `docker pull`:
+//!
+//! 1. the image absent entirely (neither the digest reference nor the bare name resolves);
+//! 2. the digest reference does not resolve, or resolves to a different id than requested, while
+//!    the bare name may resolve to some OTHER image -- refused, never silently substituted (the
+//!    bare name is inspected only afterwards, only to make the refusal message say what IS
+//!    present; it is never the trust path);
+//! 3. a match -- in which case `docker run` is given the same fully digest-pinned reference
+//!    (`"<image>@<digest>"`), never the bare name, so the daemon itself enforces content
+//!    addressing for the actual run.
+//!
+//! On this host's containerd image store `{{.Id}}` of an index-pinned image IS the index digest,
+//! so the recorded digest, the `@sha256:` reference and the id all coincide (measured; see
+//! `tests/CONTAINER_EXECUTOR_IMAGE_DIGEST.md`).
 //!
 //! # Failure-kind reuse (not a new `JobFailureKind` -- see `heavy.proto`'s own enum)
 //!
@@ -321,34 +333,51 @@ fn output_rejected(detail: String) -> pb::JobFailure {
     pb::JobFailure { kind: pb::JobFailureKind::OutputRejected as i32, detail: format!("CONTAINER executor: {detail}"), exit_code: 0 }
 }
 
-/// Resolves and verifies `image` (a bare reference, e.g. `"alpine:latest"`, never itself
-/// carrying a digest) against `want_digest` (`"sha256:..."`, `JobSpec.container_image_digest`)
-/// -- see this module's own doc, "Never pulls; the digest gate", for the full account. Returns
-/// the fully digest-pinned reference (`"<image>@<want_digest>"`) on success, so the actual
-/// `docker run` is always given a content-addressed reference, never the bare name.
+/// Resolves and verifies `image` (a bare reference, e.g. `"alpine"`, never itself carrying a
+/// digest) against `want_digest` (`"sha256:..."`, `JobSpec.container_image_digest`) by inspecting
+/// `<image>@<want_digest>` -- see this module's own doc, "Never pulls; the digest gate", for the
+/// full account. Returns that same digest-pinned reference on success, so the actual `docker run`
+/// is always given a content-addressed reference, never the bare name.
 fn digest_gate(image: &str, want_digest: &str) -> Result<String, pb::JobFailure> {
     if image.is_empty() || want_digest.is_empty() {
         return Err(start_failed("JobSpec.container_image / container_image_digest is empty -- nothing to run".to_string()));
     }
-    let output = Command::new("docker")
-        .args(["image", "inspect", image, "--format", "{{.Id}}"])
-        .output()
-        .map_err(|e| unavailable(format!("could not launch docker to inspect image {image:?}: {e}")))?;
-    if !output.status.success() {
-        return Err(unavailable(format!(
-            "image {image:?} is not present locally -- this runner never runs `docker pull` (question 154); \
-             pull/build it once, out of band, then retry: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if actual != want_digest {
-        return Err(unavailable(format!(
-            "image {image:?} is present locally as {actual}, but JobSpec.container_image_digest names {want_digest} -- \
+    let pinned = format!("{image}@{want_digest}");
+    match inspect_image_id(&pinned) {
+        Ok(actual) if actual == want_digest => Ok(pinned),
+        Ok(actual) => Err(unavailable(format!(
+            "image {pinned:?} is present locally as {actual}, but JobSpec.container_image_digest names {want_digest} -- \
              refused rather than trusted (question 212(a))"
-        )));
+        ))),
+        Err(pinned_err) => {
+            // Diagnostics only (never the trust path): say what the bare name resolves to, so
+            // "absent entirely" and "present, but not at the requested digest" stay distinct.
+            match inspect_image_id(image) {
+                Ok(actual) => Err(unavailable(format!(
+                    "image {image:?} is present locally as {actual}, but JobSpec.container_image_digest names {want_digest}, \
+                     which is not present locally -- refused rather than trusted (question 212(a)); this runner never runs \
+                     `docker pull` (question 154)"
+                ))),
+                Err(_) => Err(unavailable(format!(
+                    "image {pinned:?} is not present locally -- this runner never runs `docker pull` (question 154); \
+                     pull it once, out of band, by digest, then retry: {pinned_err}"
+                ))),
+            }
+        }
     }
-    Ok(format!("{image}@{want_digest}"))
+}
+
+/// `docker image inspect <reference> --format {{.Id}}`: the local id, or the failure's text
+/// (daemon unreachable, or the reference not present).
+fn inspect_image_id(reference: &str) -> Result<String, String> {
+    let output = Command::new("docker")
+        .args(["image", "inspect", reference, "--format", "{{.Id}}"])
+        .output()
+        .map_err(|e| format!("could not launch docker to inspect image {reference:?}: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn unavailable(detail: String) -> pb::JobFailure {
@@ -436,5 +465,16 @@ mod tests {
         let err = digest_gate("alpine:latest", "").unwrap_err();
         assert_eq!(err.kind, pb::JobFailureKind::ExecutorStartFailed as i32);
         assert!(err.detail.contains("is empty"), "{:?}", err.detail);
+    }
+
+    // A digest reference that cannot exist is refused as EXECUTOR_UNAVAILABLE (never a pull, never
+    // a run) whether or not a Docker daemon is reachable: with one, `docker image inspect` reports
+    // "No such image"; without one, the launch/connection failure takes the same refusal path.
+    #[test]
+    fn digest_gate_refuses_a_digest_reference_that_cannot_exist_as_executor_unavailable() {
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let err = digest_gate("av-jobs-no-such-image-for-digest-gate-test", &wrong).unwrap_err();
+        assert_eq!(err.kind, pb::JobFailureKind::ExecutorUnavailable as i32, "{err:?}");
+        assert!(err.detail.contains("not present locally"), "{:?}", err.detail);
     }
 }
