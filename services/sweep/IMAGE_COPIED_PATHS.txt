@@ -1,0 +1,36 @@
+# services/sweep/IMAGE_COPIED_PATHS.txt -- the paths av-sweep-sample:local's content is derived
+# from (question 232, extending question 212(a): every image records the commit it was built
+# from, and a docker-gated test refuses when a commit touching these paths has landed since).
+#
+# ONE list, read by services/sweep/build-image.sh (to record whether the tree was dirty under
+# these paths at build time) and by crates/av-sweep/tests/k8s_sweep.rs (to run
+# `git log <recorded_commit>..HEAD -- <these paths>`) -- never duplicated between the two.
+#
+# Chosen, not guessed: `crates/av-sweep` itself, its committed `proto/altavista/v1` input
+# (crates/av-cdm/build.rs compiles it), and the transitive closure of av-sweep's own LOCAL
+# (within-this-repository) `normal`+`build` dependencies in the image's feature state --
+# `cargo tree -p av-sweep --no-default-features -e normal,build --prefix none --locked`, filtered
+# to path dependencies (log: rounds/heavy-ct/scratch/t2b/logs/cargo-tree-nodefault.log). That is
+# the same set with GMAT out: `gmat-sys` is not in it (`cargo tree -p av-sweep --no-default-features
+# -i gmat-sys` finds nothing). Dev-only edges are filtered out, as for services/tiles/.
+#
+# Deliberately NOT covered: the root Cargo.lock/Cargo.toml (a registry-crate bump anywhere would
+# fire this check for every unrelated image; same reasoning as services/tiles/), this directory's
+# build-image.sh (it orchestrates the build; it is not a source the bytes are compiled from),
+# IMAGE_DIGEST.md and out/sweep-image/ (the build's own output), and the GMAT data files (they have
+# their own record: IMAGE_DATA_FILES.txt, verified by SHA-256 at build time).
+proto/altavista/v1
+crates/av-cdm
+crates/av-codec
+crates/av-dynamics
+crates/av-edge
+crates/av-grpc
+crates/av-http1
+crates/av-jobs
+crates/av-kernel
+crates/av-label
+crates/av-lockstep
+crates/av-orbital
+crates/av-sweep
+services/sweep/Dockerfile
+services/sweep/IMAGE_DATA_FILES.txt

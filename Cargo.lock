@@ -436,6 +436,7 @@ version = "0.1.0"
 dependencies = [
  "av-cdm",
  "av-http1",
+ "av-jobs",
  "av-kernel",
  "av-lockstep",
  "gmat-sys",

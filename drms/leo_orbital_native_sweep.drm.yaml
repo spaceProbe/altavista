@@ -1,0 +1,86 @@
+# DesignReferenceMission for the heavy-ct-2b sweep fixture (question 245, docs/open-questions.md):
+# a feasibility sweep whose every sample runs with NO GMAT, so it can be dispatched as a job into
+# the sample image (services/sweep/, av-sweep built --no-default-features) under k3s and compared
+# byte for byte with the same study run locally. A NEW file, modelled on
+# drms/demo_two_instance_sweep.drm.yaml (F1b's fixture: same Gates execution_error shape, same
+# seeds idea) over the native bundle's unmodified leo_1day_orbital_native.system.yaml (the one
+# instance `leo`, JGM2 8x8 + Sun/Moon, model orbital.earth.jgm2_8x8.sun_moon) and
+# drms/leo_orbital_native_sweep.sos.yaml (that bundle's SOS with a 60 s native step instead of 300 s;
+# its header says why).
+#
+# The scenario is the bundle's own one-day window (leo_1day_orbital_native.drm.yaml): start
+# 2026-01-01T00:00:00Z = 1767225637 TAI s, end start + 86400 s, sampled every 300 s. One event on
+# top of it: burn1, a small prograde (VNB) impulsive burn on `leo` at start + 21600 s (06:00:00),
+# 1.0 m/s commanded -- the baseline for drms/leo_orbital_native_sweep.sweep.yaml's event axis on
+# burn1's dv_x -- with question 100's Gates execution_error block, so that
+# ExecutionErrorMode::Sampled (which av-sweep selects whenever a sweep declares
+# monte_carlo_draws > 1) makes the draws of one grid point genuinely differ. Without
+# Scenario.seeds a Monte Carlo sweep would run the identical sample N times
+# (av_sweep::SweepError::DrawsAboveOneWithoutSeeds), so the single key `burn_seed` is declared; the
+# value here is never itself run against, av-sweep derives one per (point, draw).
+#
+# Scores (all evaluated by the kernel at run end, in the sample job): two measures, which report a
+# raw value with no pass/fail concept, and one objective, which does -- so the per-point aggregates
+# (av_sweep::aggregate) carry a pass rate as well as the mean/spread of the draws:
+#   leo_speed_at_end   output.leo.speed@end   (the kernel's derived |velocity| output)
+#   leo_pos_x_at_end   entity.leo.pos_x@end
+#   leo_speed_ok       an Objective on the same expression: target 7611.8 m/s, tolerance 0.25 m/s.
+#                      Chosen from a first measured run of this fixture (end speeds, m/s: point 0
+#                      7612.098 / 7611.958 / 7611.906; point 1 7606.466 / 7606.859 / 7606.803;
+#                      point 2 7611.645 / 7611.661 / 7611.595; point 3 about 7606.4), so that the
+#                      pass rate differs by point -- 2 of 3 draws for point 0, 3 of 3 for point 2,
+#                      none for points 1 and 3 -- non-trivial aggregates, not a golden comparison.
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_drm_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- drm drms/leo_orbital_native_sweep.drm.yaml
+id: leo_orbital_native_sweep_drm
+version: "1"
+name: LEO one day, native orbital model -- Gates-dispersed prograde burn, seeded Monte Carlo draws (heavy-ct-2b fixture)
+sos_configuration_id: leo_orbital_native_sweep_sos
+scenario:
+  start_tai_ns: 1767225637000000000
+  end_tai_ns: 1767312037000000000
+  events:
+    - id: burn1
+      tai_ns: 1767247237000000000
+      kind: maneuver
+      instance: leo
+      values:
+        dv_x: 1.0
+        dv_y: 0.0
+        dv_z: 0.0
+      attributes:
+        frame_id: AXES_KIND_VNB
+      execution_error:
+        sigma_magnitude_fixed_mps: 0.01
+        sigma_magnitude_proportional: 0.02
+        sigma_pointing_fixed_mps: 0.01
+        sigma_pointing_proportional_rad: 0.002
+        seed: burn_seed
+  seeds:
+    burn_seed: 1
+objectives:
+  - name: leo_speed_ok
+    expression: "output.leo.speed@end"
+    target: 7611.8
+    tolerance: 0.25
+    unit: UNIT_METER_PER_SECOND
+measures:
+  - name: leo_speed_at_end
+    expression: "output.leo.speed@end"
+    unit: UNIT_METER_PER_SECOND
+  - name: leo_pos_x_at_end
+    expression: "entity.leo.pos_x@end"
+    unit: UNIT_METER
+options:
+  covariance: false
+  default_step_rate_hz: 0.0033333333333333335
+  sample_interval_s: 300.0
+  real_time: false
+  nearest_spd_projection: false
+  accept_missing_stm_terms: false
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-sweep heavy-ct-2b fixture authoring"
+hash: "98a63aea4d64b755146eb3f384ebdc30332e2b0216b0777e22b7884ebaf06c3d"

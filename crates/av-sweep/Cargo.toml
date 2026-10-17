@@ -8,6 +8,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["gmat"]
+# Question 245 (heavy-ct-2b), the same pattern as `av-run`'s (question 230): forwards to
+# `av-kernel`'s own `gmat` feature and gates this binary's own direct `gmat-sys` use (sample
+# mode's `Gmat::setup`, the live handle a `gmat.`-model DRM run needs). Default-on, because
+# every current caller wants the real engine. Built `--no-default-features` (the sample image,
+# `services/sweep/`), sample mode runs only DRMs whose instances name no GMAT model (the kernel
+# refuses a `gmat.` model typed: `DrmError::GmatFeatureDisabled`) and `--gmat-startup` is a typed
+# refusal. `cargo tree -p av-sweep --no-default-features -i gmat-sys` finds nothing.
+gmat = ["dep:gmat-sys", "av-kernel/gmat"]
+
 [dependencies]
 av-cdm = { path = "../av-cdm" }
 # Reused for its DRM/SOS/SystemDefinition YAML loader (av_kernel::drm::schema) and canonical
@@ -15,11 +26,15 @@ av-cdm = { path = "../av-cdm" }
 # of those rather than reimplementing DRM/SOS parsing or hashing a second time (see this
 # crate's REPORT.md and each module's own doc comment for exactly what is reused vs.
 # transcribed locally, and why).
-av-kernel = { path = "../av-kernel" }
+# `default-features = false` (question 230): otherwise av-kernel's own `default = ["gmat"]` would
+# stay on regardless of this crate's own `--no-default-features`; this crate's `gmat` feature
+# turns it back on through the `av-kernel/gmat` forward above.
+av-kernel = { path = "../av-kernel", default-features = false }
 # F1b (this crate's own task brief): sample mode is the one place in this binary that
 # constructs a live gmat_sys::Gmat handle (mirroring crates/av-run/src/main.rs's own reason for
 # depending on gmat-sys directly rather than only transitively through av-kernel).
-gmat-sys = { path = "../gmat-sys" }
+# `optional = true` behind the `gmat` feature above (question 230, heavy-ct-2b).
+gmat-sys = { path = "../gmat-sys", optional = true }
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -40,9 +55,26 @@ thiserror.workspace = true
 # 155), so this crate adds no TLS or HTTP code of its own.
 av-http1 = { path = "../av-http1" }
 
+# Question 245 (heavy-ct-2b): study mode can dispatch each sample as one job through an `av-jobs`
+# executor (`--executor container|k8s`): `ContainerExecutor` (docker) or `K8sJobExecutor` (k3s).
+# In-workspace path dependency (no registry crate). `av-jobs` has no dependency on this crate.
+av-jobs = { path = "../av-jobs" }
+
 [dev-dependencies]
 # tests/clickhouse_store.rs and tests/clickhouse_real_sweep.rs run the pinned ClickHouse image
 # under the host-wide docker lock with the same gate/lock/label/prune discipline as
 # crates/av-store/tests/minio_store.rs. Dev-only: this crate's production code has no reason to
 # know Docker exists.
 av-lockstep = { path = "../av-lockstep" }
+
+# Question 245 (heavy-ct-2b), the mechanism of questions 234/237: these two targets run a
+# `gmat.`-model DRM (`drms/demo_two_instance_sweep.*`) through the real `av-sweep` binary, which
+# needs the GMAT-backed half of it. `required-features` (not an inner `#![cfg]`) makes cargo skip
+# the target entirely under `--no-default-features`, instead of linking an empty test binary.
+[[test]]
+name = "fixture_study"
+required-features = ["gmat"]
+
+[[test]]
+name = "clickhouse_real_sweep"
+required-features = ["gmat"]

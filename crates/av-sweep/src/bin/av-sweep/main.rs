@@ -24,6 +24,19 @@
 //!   `av_kernel::drm::execute` exactly as `av-run` does and writes the resulting `RunProducts`
 //!   protobuf to `--out`.
 //!
+//! ## Question 245 (heavy-ct-2b): the `gmat` feature, and samples as jobs
+//!
+//! - **`gmat` cargo feature** (default-on, exactly `av-run`'s pattern, question 230). Built
+//!   `--no-default-features`, `gmat-sys` is not a dependency (`cargo tree -p av-sweep
+//!   --no-default-features -i gmat-sys` finds nothing), sample mode runs only DRMs whose instances
+//!   name no `gmat.` model, and `--gmat-startup` is a typed refusal. That build is what the sample
+//!   image (`services/sweep/`) carries.
+//! - **`--executor process|container|k8s`** (study mode; `jobs.rs`). `process`, the default, is the
+//!   child-process-per-sample behaviour above, unchanged. `container` and `k8s` make each sample
+//!   one `av-jobs` job -- `--run-sample` on the sample image, its `drm.pb`/`sos.pb`/`sys_*.pb` as
+//!   hash-verified inputs -- and then record the sample exactly as a child process's would be
+//!   (`study::finalize`): a study is byte-identical whatever ran its samples.
+//!
 //! See `study.rs`, `sample_mode.rs` and `cli.rs` for the rest -- each carries its own module doc
 //! comment for the part of this task's brief it implements. The proto3 canonical JSON encoder
 //! (`json.rs`) moved to the library as of F2 (`av_sweep::json`) so `av-sweep`'s own study-store
@@ -31,6 +44,7 @@
 //! module.
 
 mod cli;
+mod jobs;
 mod sample_mode;
 mod store_mode;
 mod study;

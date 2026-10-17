@@ -63,6 +63,17 @@
 //! draw per point. [`preflight`] mirrors `av_sweep::sample::sample_config`'s own
 //! `DispersedWithoutSeeds` refusal (`sweep.dispersed` with empty `Scenario.seeds`) the same way
 //! it already mirrors `DrawsAboveOneWithoutSeeds`.
+//!
+//! ## Question 245 (heavy-ct-2b): `--executor`, and one `finalize` for both
+//!
+//! `--executor process` (the default) is the loop above, unchanged. `container` and `k8s`
+//! ([`Dispatch::Jobs`]) hand the queue to `jobs::run_jobs`, which runs each sample as one `av-jobs`
+//! job and writes the job's output as `run_products.pb` and its log as `stderr.txt` in the sample
+//! directory. [`finalize`] is then the single place a sample becomes its `SweepSample`, for a
+//! child's exit ([`Ended::Exit`]) and for a job's result ([`Ended::Job`]) alike, which is what
+//! makes the study record the same shape whatever ran the samples. The executor is opened (image
+//! present under its digest, cluster preconditions met) before the first sample runs, like the
+//! ClickHouse store; a failed job is a failed sample, never a retry and never fatal.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -76,7 +87,8 @@ use av_sweep::store::{open_store, FileStudyStore, StoreBackend, StudyStore};
 use av_sweep::{json, SampleConfig};
 use prost::Message;
 
-use crate::cli::StudyArgs;
+use crate::cli::{Dispatch, StudyArgs};
+use crate::jobs;
 
 /// The maximum number of stderr bytes a failed sample's own [`pb::SweepSample::error`] message
 /// quotes -- this task's own brief: "cap the stderr at 4096 bytes and say explicitly in the
@@ -197,19 +209,48 @@ fn read_capped_stderr(path: &Path) -> String {
     }
 }
 
-/// One sample currently running as a child process, carrying everything [`finalize`] needs once
-/// it exits.
+/// Everything [`finalize`] needs to know about one sample once whatever ran it has ended: the
+/// identity the `SweepSample` record carries and where its files are. Shared by both ways of
+/// running a sample (a child process, a job) -- question 245 factored this out of what used to be
+/// the child-process-only `Running`, so the record has one shape whatever ran the sample.
+pub struct SampleRun {
+    pub point_index: u32,
+    pub draw_index: u32,
+    pub run_id: String,
+    pub config_hash: String,
+    pub axis_values: BTreeMap<String, f64>,
+    pub seeds: BTreeMap<String, u64>,
+    pub sample_dir: PathBuf,
+    pub stderr_path: PathBuf,
+    pub out_path: PathBuf,
+}
+
+impl SampleRun {
+    pub fn new(cfg: &SampleConfig, run_id: &str, sample_dir: &Path) -> SampleRun {
+        SampleRun {
+            point_index: cfg.point_index,
+            draw_index: cfg.draw_index,
+            run_id: run_id.to_string(),
+            config_hash: cfg.config_hash.clone(),
+            axis_values: cfg.axis_values.clone(),
+            seeds: cfg.seeds.clone(),
+            sample_dir: sample_dir.to_path_buf(),
+            stderr_path: sample_dir.join("stderr.txt"),
+            out_path: sample_dir.join("run_products.pb"),
+        }
+    }
+}
+
+/// One sample currently running as a child process.
 struct Running {
-    point_index: u32,
-    draw_index: u32,
-    run_id: String,
-    config_hash: String,
-    axis_values: BTreeMap<String, f64>,
-    seeds: BTreeMap<String, u64>,
-    sample_dir: PathBuf,
-    stderr_path: PathBuf,
-    out_path: PathBuf,
+    run: SampleRun,
     child: Child,
+}
+
+/// How a sample ended: its child process exited, or its job finished (`Err`: the typed failure).
+pub enum Ended {
+    Exit(ExitStatus),
+    Job(Result<(), pb::JobFailure>),
 }
 
 /// Spawns one sample's child (`exe --run-sample ...`), stderr redirected straight to
@@ -219,37 +260,26 @@ struct Running {
 /// deadlock without needing a reader thread at all, and satisfies "stderr.txt ... always
 /// written" for free (the file exists, even empty, from the moment the child is spawned).
 fn spawn_sample(exe: &Path, inputs: &SampleInputPaths, cfg: &SampleConfig, run_id: &str, error_mode: ExecutionErrorMode, gmat_startup: Option<&str>, sample_dir: &Path) -> Result<Running, String> {
-    let out_path = sample_dir.join("run_products.pb");
-    let stderr_path = sample_dir.join("stderr.txt");
-    let stderr_file = std::fs::File::create(&stderr_path).map_err(|e| format!("creating {}: {e}", stderr_path.display()))?;
+    let run = SampleRun::new(cfg, run_id, sample_dir);
+    let (out_path, stderr_path) = (&run.out_path, &run.stderr_path);
+    let stderr_file = std::fs::File::create(stderr_path).map_err(|e| format!("creating {}: {e}", stderr_path.display()))?;
 
     let mut cmd = Command::new(exe);
     cmd.arg("--run-sample").arg("--drm-pb").arg(&inputs.drm_pb).arg("--sos-pb").arg(&inputs.sos_pb);
     for sp in &inputs.system_pbs {
         cmd.arg("--system-pb").arg(sp);
     }
-    cmd.arg("--run-id").arg(run_id).arg("--error-mode").arg(if error_mode == ExecutionErrorMode::Sampled { "sampled" } else { "nominal" }).arg("--out").arg(&out_path);
+    cmd.arg("--run-id").arg(run_id).arg("--error-mode").arg(if error_mode == ExecutionErrorMode::Sampled { "sampled" } else { "nominal" }).arg("--out").arg(out_path);
     if let Some(s) = gmat_startup {
         cmd.arg("--gmat-startup").arg(s);
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(stderr_file));
 
     let child = cmd.spawn().map_err(|e| format!("spawning sample child for run_id {run_id:?}: {e}"))?;
-    Ok(Running {
-        point_index: cfg.point_index,
-        draw_index: cfg.draw_index,
-        run_id: run_id.to_string(),
-        config_hash: cfg.config_hash.clone(),
-        axis_values: cfg.axis_values.clone(),
-        seeds: cfg.seeds.clone(),
-        sample_dir: sample_dir.to_path_buf(),
-        stderr_path,
-        out_path,
-        child,
-    })
+    Ok(Running { run, child })
 }
 
-fn failed_sample(r: &Running, error: String) -> pb::SweepSample {
+fn failed_sample(r: &SampleRun, error: String) -> pb::SweepSample {
     pb::SweepSample {
         point_index: r.point_index,
         draw_index: r.draw_index,
@@ -269,8 +299,18 @@ fn failed_sample(r: &Running, error: String) -> pb::SweepSample {
 /// failed sample is a value, not a control-flow error, which is exactly what makes "a failed
 /// sample never aborts the study" true by construction rather than by a caller remembering to
 /// catch something.
-fn finalize(r: Running, status: ExitStatus) -> pb::SweepSample {
-    if status.success() {
+///
+/// Question 245: the one place a sample becomes its record, for a child process ([`Ended::Exit`])
+/// and for a job ([`Ended::Job`], the output already written to `r.out_path` and the log to
+/// `r.stderr_path` by `jobs::run_one`) alike -- the study record has one shape whatever ran the
+/// sample. A child's messages are unchanged byte for byte; a job's say "job" and carry the typed
+/// failure (kind, exit code, the executor's detail).
+pub fn finalize(r: SampleRun, ended: Ended) -> pb::SweepSample {
+    let (who, ok) = match &ended {
+        Ended::Exit(status) => ("child exited 0", status.success()),
+        Ended::Job(result) => ("job succeeded", result.is_ok()),
+    };
+    if ok {
         match std::fs::read(&r.out_path) {
             Ok(bytes) => match pb::RunProducts::decode(bytes.as_slice()) {
                 Ok(products) => {
@@ -288,17 +328,22 @@ fn finalize(r: Running, status: ExitStatus) -> pb::SweepSample {
                     };
                 }
                 Err(e) => {
-                    let msg = format!("sample child exited 0 but {} did not decode as altavista.v1.RunProducts: {e}; stderr: {}", r.out_path.display(), read_capped_stderr(&r.stderr_path));
+                    let msg = format!("sample {who} but {} did not decode as altavista.v1.RunProducts: {e}; stderr: {}", r.out_path.display(), read_capped_stderr(&r.stderr_path));
                     return failed_sample(&r, msg);
                 }
             },
             Err(e) => {
-                let msg = format!("sample child exited 0 but its output at {} could not be read: {e}; stderr: {}", r.out_path.display(), read_capped_stderr(&r.stderr_path));
+                let msg = format!("sample {who} but its output at {} could not be read: {e}; stderr: {}", r.out_path.display(), read_capped_stderr(&r.stderr_path));
                 return failed_sample(&r, msg);
             }
         }
     }
-    let msg = format!("sample child {}; stderr: {}", describe_exit(&status), read_capped_stderr(&r.stderr_path));
+    let msg = match &ended {
+        Ended::Exit(status) => format!("sample child {}; stderr: {}", describe_exit(status), read_capped_stderr(&r.stderr_path)),
+        Ended::Job(Err(f)) => format!("{}; stderr: {}", jobs::describe_failure(f), read_capped_stderr(&r.stderr_path)),
+        // Not reachable (a succeeded job takes the branch above); a message, not a panic.
+        Ended::Job(Ok(())) => "sample job succeeded but was not finalized as a success".to_string(),
+    };
     failed_sample(&r, msg)
 }
 
@@ -327,6 +372,19 @@ fn build_samples(loaded: &Loaded, points: &[av_sweep::GridPoint], draws: u32) ->
 }
 
 pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
+    run_study_with(args, exe, None)
+}
+
+/// [`run_study`], with an optional job backend injected (unit tests drive the job dispatch with a
+/// fake one; `None` opens the real executor `--executor` selected). Ignored for
+/// [`Dispatch::Process`].
+fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBackend>) -> Result<(), String> {
+    // Question 245: a GMAT startup file has nothing to be given to in a build without GMAT (and
+    // every child would refuse it): refused once, here, before any sample runs.
+    #[cfg(not(feature = "gmat"))]
+    if args.gmat_startup.is_some() {
+        return Err(crate::sample_mode::GMAT_STARTUP_REFUSAL.to_string());
+    }
     let loaded = preflight(&args)?;
     // Question 245: open the ClickHouse store first (see the write below for why).
     let clickhouse_store = match &args.clickhouse {
@@ -347,48 +405,73 @@ pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
 
     let (mut results, mut queue) = build_samples(&loaded, &points, draws);
 
-    let mut running: Vec<Running> = Vec::new();
     let mut failed_count = 0usize;
-    loop {
-        while running.len() < args.workers as usize {
-            let Some(cfg) = queue.pop_front() else { break };
-            let sample_dir = args.out_dir.join(format!("sample_p{}_d{}", cfg.point_index, cfg.draw_index));
-            let run_id = format!("{}_p{}_d{}", loaded.sweep.id, cfg.point_index, cfg.draw_index);
-            let inputs = write_sample_inputs(&sample_dir, &cfg).map_err(|e| format!("writing sample inputs for p{} d{}: {e}", cfg.point_index, cfg.draw_index))?;
-            let r = spawn_sample(exe, &inputs, &cfg, &run_id, error_mode, args.gmat_startup.as_deref(), &sample_dir)?;
-            running.push(r);
-        }
-        if running.is_empty() {
-            break;
-        }
-
-        let mut progressed = false;
-        let mut i = 0;
-        while i < running.len() {
-            match running[i].child.try_wait() {
-                Ok(Some(status)) => {
-                    let r = running.remove(i);
-                    let sample = finalize(r, status);
-                    if !sample.error.is_empty() {
-                        failed_count += 1;
-                    }
-                    results.push(sample);
-                    progressed = true;
+    match &args.dispatch {
+        // Today's behaviour, unchanged: up to `--workers` children of this binary at a time.
+        Dispatch::Process => {
+            let mut running: Vec<Running> = Vec::new();
+            loop {
+                while running.len() < args.workers as usize {
+                    let Some(cfg) = queue.pop_front() else { break };
+                    let sample_dir = args.out_dir.join(format!("sample_p{}_d{}", cfg.point_index, cfg.draw_index));
+                    let run_id = format!("{}_p{}_d{}", loaded.sweep.id, cfg.point_index, cfg.draw_index);
+                    let inputs = write_sample_inputs(&sample_dir, &cfg).map_err(|e| format!("writing sample inputs for p{} d{}: {e}", cfg.point_index, cfg.draw_index))?;
+                    let r = spawn_sample(exe, &inputs, &cfg, &run_id, error_mode, args.gmat_startup.as_deref(), &sample_dir)?;
+                    running.push(r);
                 }
-                Ok(None) => i += 1,
-                Err(e) => {
-                    // A `try_wait` I/O error is rare (bad pid, platform quirk) but must not
-                    // abort the study either -- recorded the same as any other sample failure.
-                    let r = running.remove(i);
-                    let msg = format!("polling sample child (run_id {:?}) failed: {e}", r.run_id);
-                    results.push(failed_sample(&r, msg));
-                    failed_count += 1;
-                    progressed = true;
+                if running.is_empty() {
+                    break;
+                }
+
+                let mut progressed = false;
+                let mut i = 0;
+                while i < running.len() {
+                    match running[i].child.try_wait() {
+                        Ok(Some(status)) => {
+                            let r = running.remove(i);
+                            let sample = finalize(r.run, Ended::Exit(status));
+                            if !sample.error.is_empty() {
+                                failed_count += 1;
+                            }
+                            results.push(sample);
+                            progressed = true;
+                        }
+                        Ok(None) => i += 1,
+                        Err(e) => {
+                            // A `try_wait` I/O error is rare (bad pid, platform quirk) but must not
+                            // abort the study either -- recorded the same as any other sample failure.
+                            let r = running.remove(i);
+                            let msg = format!("polling sample child (run_id {:?}) failed: {e}", r.run.run_id);
+                            results.push(failed_sample(&r.run, msg));
+                            failed_count += 1;
+                            progressed = true;
+                        }
+                    }
+                }
+                if !progressed {
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             }
         }
-        if !progressed {
-            std::thread::sleep(Duration::from_millis(20));
+        // Question 245: one job per sample through an av-jobs executor (jobs.rs), up to
+        // `--workers` at once.
+        Dispatch::Jobs(j) => {
+            let opened;
+            let backend: &dyn jobs::JobBackend = match injected {
+                Some(b) => b,
+                None => {
+                    opened = jobs::open_backend(j, &args.out_dir)?;
+                    opened.as_ref()
+                }
+            };
+            let finished = jobs::run_jobs(backend, args.workers as usize, queue, &args.out_dir, &loaded.sweep.id, error_mode, &j.image)?;
+            failed_count += finished.iter().filter(|s| !s.error.is_empty()).count();
+            results.extend(finished);
+            // The default scratch root, now empty (the executors remove each job's directory); an
+            // operator-chosen --job-scratch-root is left alone.
+            if j.scratch_root.is_none() {
+                let _ = std::fs::remove_dir(args.out_dir.join(".job-scratch"));
+            }
         }
     }
 
@@ -604,6 +687,7 @@ mod tests {
             gmat_startup: None,
             store_dir: None,
             clickhouse: None,
+            dispatch: Dispatch::Process,
         }
     }
 
@@ -734,6 +818,75 @@ exit 0"#;
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A job backend that finishes every job with a decodable `RunProducts` carrying one score
+    /// (derived from the job's own id), except the one job id it is told to fail.
+    struct ScriptedBackend {
+        fail_suffix: &'static str,
+        runs: std::sync::Mutex<Vec<String>>,
+    }
+    impl jobs::JobBackend for ScriptedBackend {
+        fn run(&self, spec: &pb::JobSpec, _inputs: &[av_jobs::runner::JobInput]) -> jobs::JobOutcome {
+            self.runs.lock().unwrap().push(spec.job_id.clone());
+            if spec.job_id.ends_with(self.fail_suffix) {
+                let f = pb::JobFailure { kind: pb::JobFailureKind::NonzeroExit as i32, detail: format!("scripted failure of {}; log tail: \"the tail\"", spec.job_id), exit_code: 137 };
+                return jobs::JobOutcome { result: Err(f), log: Some("the whole log\nthe tail\n".into()), placement: None, warning: None };
+            }
+            let value = spec.job_id.len() as f64;
+            let score = pb::ScoreResult { name: "m".to_string(), value, unit: pb::Unit::Meter as i32, passed: None };
+            let bytes = pb::RunProducts { run_id: spec.job_id.clone(), scores: BTreeMap::from([("m".to_string(), score)]), ..Default::default() }.encode_to_vec();
+            jobs::JobOutcome { result: Ok(vec![av_jobs::runner::JobOutput { bytes, media_type: String::new(), manifest: false }]), log: Some("ok\n".into()), placement: None, warning: None }
+        }
+    }
+
+    /// Question 245: `--executor container|k8s` records the SAME study shape as child processes --
+    /// 8 samples sorted `(point, draw)`, successes with scores and a `products_uri`, the one failed
+    /// job a failed sample naming its kind, exit code and log tail, no sample run twice, per-point
+    /// aggregates computed, `run_products.pb`/`stderr.txt` in every sample directory, and no scratch
+    /// directory left behind.
+    #[test]
+    fn a_job_dispatched_study_records_the_same_shape_and_a_failed_job_is_one_failed_sample() {
+        let dir = temp_dir("jobs-dispatch");
+        let out_dir = dir.join("out");
+        let mut args = study_args_for_fake_child(&out_dir);
+        args.workers = 3;
+        let image = crate::cli::ImageRef { name: "av-sweep-sample".to_string(), digest: format!("sha256:{}", "1".repeat(64)) };
+        args.dispatch = Dispatch::Jobs(Box::new(crate::cli::JobsArgs { target: crate::cli::JobsTarget::Container, image, scratch_root: None, labels: BTreeMap::new() }));
+        let backend = ScriptedBackend { fail_suffix: "_p1_d0", runs: std::sync::Mutex::new(Vec::new()) };
+        // `exe` is never spawned in this dispatch mode.
+        let result = run_study_with(args, Path::new("/no/such/exe"), Some(&backend));
+        assert!(result.is_ok(), "a failed job must never be fatal to the study: {result:?}");
+
+        let results = read_results(&out_dir);
+        assert_eq!(results.samples.len(), 8);
+        let pairs: Vec<(u32, u32)> = results.samples.iter().map(|s| (s.point_index, s.draw_index)).collect();
+        assert_eq!(pairs, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)]);
+        let failed: Vec<&pb::SweepSample> = results.samples.iter().filter(|s| !s.error.is_empty()).collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!((failed[0].point_index, failed[0].draw_index), (1, 0));
+        for want in ["JOB_FAILURE_KIND_NONZERO_EXIT", "exit code 137", "scripted failure of demo_two_instance_sweep_p1_d0", "the tail"] {
+            assert!(failed[0].error.contains(want), "error lacks {want:?}: {}", failed[0].error);
+        }
+        assert!(failed[0].scores.is_empty() && failed[0].products_uri.is_empty());
+        for s in results.samples.iter().filter(|s| s.error.is_empty()) {
+            assert_eq!(s.scores["m"].value, s.run_id.len() as f64);
+            assert!(s.products_uri.ends_with(&format!("sample_p{}_d{}", s.point_index, s.draw_index)), "{}", s.products_uri);
+            assert!(out_dir.join(format!("sample_p{}_d{}", s.point_index, s.draw_index)).join("run_products.pb").is_file());
+        }
+        assert!(out_dir.join("sample_p1_d0").join("stderr.txt").is_file());
+        assert_eq!(std::fs::read_to_string(out_dir.join("sample_p1_d0").join("stderr.txt")).unwrap(), "the whole log\nthe tail\n");
+        // Point 1 has one failed draw and one good one; its aggregate counts the good one only.
+        assert!(!results.aggregates.is_empty());
+        // Each of the 8 samples was run once, and none twice.
+        let mut runs = backend.runs.lock().unwrap().clone();
+        runs.sort();
+        runs.dedup();
+        assert_eq!(runs.len(), 8);
+        assert_eq!(backend.runs.lock().unwrap().len(), 8, "no sample is run twice");
+        assert!(!out_dir.join(".job-scratch").exists(), "the default scratch root is not left behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn capped_stderr_marks_truncation_and_reports_the_real_content() {
         let dir = temp_dir("stderr-cap");
@@ -830,6 +983,7 @@ exit 0"#;
             gmat_startup: None,
             store_dir: None,
             clickhouse: None,
+            dispatch: Dispatch::Process,
         };
         // Not `.unwrap_err()`: that requires the `Ok` side (`Loaded`) to implement `Debug` for
         // its own panic message, which it does not (mirrors `store.rs`'s own tests, which use
@@ -889,6 +1043,7 @@ exit 7"#;
             gmat_startup: None,
             store_dir: None,
             clickhouse: None,
+            dispatch: Dispatch::Process,
         };
         let result = run_study(args, &exe);
         assert!(result.is_ok(), "a failed sample must never be fatal to the study: {result:?}");
