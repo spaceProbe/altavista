@@ -233,6 +233,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-http1"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "thiserror",
+]
+
+[[package]]
 name = "av-ingest"
 version = "0.1.0"
 dependencies = [
