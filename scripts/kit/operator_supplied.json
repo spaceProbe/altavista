@@ -1,0 +1,24 @@
+{
+  "doc": "docs/kit-operator-supplied.md",
+  "schema": 1,
+  "components": {
+    "debian-bookworm-slim-base-image": {
+      "base_of": ["edge-plugin-image"],
+      "digest": "sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+      "item": 2,
+      "kind": "container-base-image",
+      "licences": "GPL (e.g. bash, coreutils, tar, sed, findutils, login), LGPL (libc6, libgnutls30, libgmp10)",
+      "reference": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+      "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
+    },
+    "ubuntu-22.04-base-image": {
+      "base_of": ["cfs-image"],
+      "digest": "sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc",
+      "item": 1,
+      "kind": "container-base-image",
+      "licences": "GPL-2.0/3.0 (e.g. grep, gzip, util-linux, procps, dpkg, apt), LGPL-2.1 (libc6, libgnutls30, libgpg-error0)",
+      "reference": "ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc",
+      "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
+    }
+  }
+}

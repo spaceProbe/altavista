@@ -10,7 +10,7 @@
 #   scripts/kit/install.sh <kit-dir> <target-dir>
 #   (or, more commonly now -- see below: <kit-dir>/installer/install.sh <kit-dir> <target-dir>)
 #
-# <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 4 -- the shape
+# <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 5 -- the shape
 # scripts/kit/build_kit.py writes). <target-dir> must not exist yet, or must exist and be empty
 # -- this installer refuses to write into a non-empty directory rather than silently merging
 # into (or clobbering) whatever is already there.

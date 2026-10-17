@@ -105,6 +105,23 @@ changed and why:
   installer is what a real deployment would need to add; nothing in `install.py`/`manifest.py` does
   or could do that step on the kit's own behalf.
 
+- **Question 250(a), the first half: the kit carries each image's APPLICATION LAYER, not the
+  image** (`kit_format` 4 -> 5). `--with-images` used to `docker save` the two whole images, base
+  layers included, which redistributed the Ubuntu 22.04 and Debian 12 userlands (GPL/LGPL); those
+  bases are operator-supplied now (`docs/kit-operator-supplied.md` items 1 and 2, pinned in the
+  committed `scripts/kit/operator_supplied.json`, which every kit carries as
+  `installer/operator_supplied.json`). The `images` section changes shape: per component it
+  records the tag, the recorded image id, the RECORDED RUNTIME-CONTENT HASH (question 185), the
+  pinned base (`base`), the runtime Dockerfile's kit path (`dockerfile`), every file of the
+  runtime-content set with its image path, kit path, sha256, mode and size (`files`; the installer
+  needs modes, `KIT_MANIFEST.files` has none), and the Debian packages the image adds, carried as
+  recorded `.deb`s (`packages`). There is no `tarball_sha256`/`tarball_size` any more, and no
+  `images/*.tar`. New content roles: `image-dockerfile`, `image-rootfs`, `image-package`,
+  `image-package-licence`. A host-side step builds each image with `docker build --network none
+  --pull=false images/<component>` on a host that already holds the base, and compares the built
+  image's runtime-content hash with the recorded one (the image id may differ). This is a real
+  `kit_format` bump: a 4 installer expects tarballs where a 5 kit carries none.
+
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
 Measured directly, not assumed: three independent `cargo auditable build`s of the identical
@@ -167,7 +184,7 @@ or calls `sys.exit`.
 ensure_ascii=False)` plus one trailing newline. It contains:
 
 - `kit_format` (int, bumped whenever this shape changes -- `KIT_FORMAT` below is the one source
-  of truth for its current value, 4 as of round 3; see this module's own top doc for the whole
+  of truth for its current value, 5 as of question 250(a); see this module's own top doc for the whole
   bump history and what changed at each step. This line said "2 as of this round" through two
   later bumps, which is exactly the failure mode a hand-copied number has -- it now names the
   constant instead).
@@ -184,7 +201,7 @@ ensure_ascii=False)` plus one trailing newline. It contains:
   unresolved `os.readlink` string. This is the one place a kit is allowed to carry a symlink at
   all (see this module's own top doc); `verify_manifest` cross-checks every symlink it finds
   anywhere in the kit against this list, not merely its presence.
-- `images` -- unchanged from round 1.
+- `images` -- question 250(a): per image component, `{tag, recorded_digest, collected, runtime_content_hash, base, dockerfile, files, packages, network_used}` -- see this module's top doc.
 - `sboms` -- unchanged from round 1.
 - `packs` -- Decision K's descriptors, extended in round 2 with `"copied"` (bool) and, when true,
   `"copy"` (`{"kit_path", "copied_file_count", "copied_symlink_count", "copied_total_bytes"}`) --
@@ -222,10 +239,12 @@ from typing import Optional
 # mutating sys.path itself.
 import sbom  # noqa: E402  (see comment above -- caller is responsible for sys.path)
 
-#: 4 as of round 3 (question 217(c)): the kit now carries its own installer (`installer/`), which
-#: this module's own top doc records as a REQUIRED shape change, not an additive one -- see "P5
-#: track round 3, question 217(c)" above for the full reasoning.
-KIT_FORMAT = 4
+#: 5 as of question 250(a): the `images` section carries each image's application layer (a runtime
+#: Dockerfile, the files at their image paths with modes, recorded `.deb`s, the runtime-content
+#: hash and the pinned base) instead of a `docker save` tarball. 4 was round 3 (question 217(c)):
+#: the kit carries its own installer (`installer/`). Both are REQUIRED shape changes, not additive
+#: ones -- see this module's own top doc.
+KIT_FORMAT = 5
 
 # --- Round-1 fixed gap reasons, unchanged. Round-2 gaps that can be genuinely collected
 # (cargo-vendor, python-wheels) move to `build_gaps` below, which decides per-build whether they
@@ -608,23 +627,6 @@ def read_recorded_image(component: str) -> dict:
     return {"tag": meta["version"], "recorded_digest": f"sha256:{digest_hex}"}
 
 
-def uncollected_images() -> dict:
-    """The `images` manifest section when `--with-images` was not requested: every recorded
-    digest is still present (Decision J: recording the two `IMAGE_DIGEST.md`s is IN scope even
-    when the gated `docker save` step is not run), `collected` is `false`, and the tarball fields
-    are explicit `None` rather than simply absent -- so a reader (or `test_images_step_is_gated`)
-    never has to distinguish "field omitted" from "field known false"."""
-    return {
-        component: {
-            **read_recorded_image(component),
-            "collected": False,
-            "tarball_sha256": None,
-            "tarball_size": None,
-        }
-        for component in sbom.IMAGE_COMPONENTS
-    }
-
-
 # =================================================================================================
 # Walking a kit root to build the `files` list
 # =================================================================================================
@@ -649,8 +651,16 @@ def _classify_role(rel_posix: str) -> str:
         return "sbom"
     if rel_posix.endswith("IMAGE_DIGEST.md"):
         return "image-digest"
-    if rel_posix.startswith("images/") and rel_posix.endswith(".tar"):
-        return "image-tarball"
+    if rel_posix.startswith("images/"):
+        parts = rel_posix.split("/")
+        if len(parts) == 3 and parts[2] == "Dockerfile":
+            return "image-dockerfile"
+        if len(parts) >= 4 and parts[2] == "rootfs":
+            return "image-rootfs"
+        if len(parts) == 3 and parts[2].endswith(".deb"):
+            return "image-package"
+        if len(parts) == 3 and parts[2].endswith(".copyright"):
+            return "image-package-licence"
     if rel_posix.startswith("packs/"):
         return "pack-file"
     if rel_posix.startswith("vendor/"):

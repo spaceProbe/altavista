@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 KIT_DIR = REPO_ROOT / "scripts" / "kit"
 sys.path.insert(0, str(KIT_DIR))
 import build_kit  # noqa: E402  (path insert must precede this import)
+import image_layer  # noqa: E402
 import manifest as kmanifest  # noqa: E402
 import sbom  # noqa: E402
 
@@ -291,10 +292,10 @@ def test_pack_descriptor_records_a_symlinked_out_of_worktree_pack_honestly(tmp_p
 
 def test_images_step_is_gated(tmp_path):
     """With `--with-images` not passed (the default), KIT_MANIFEST still records both images'
-    recorded digests (Decision J: that much is in scope unconditionally) but says plainly that
-    neither tarball was collected -- `collected` is `False`, not merely absent, and no
-    `images/*.tar` file or `"image-tarball"`-role entry exists anywhere in the kit. Needs no
-    Docker at all; runs unconditionally as part of the default gate."""
+    recorded ids, recorded runtime-content hashes and pinned bases (Decision J: that much is in
+    scope unconditionally) but says plainly that nothing was collected -- `collected` is `False`,
+    the collected-only fields are explicit empty values, and no `images/` directory exists.
+    Needs no Docker at all; runs unconditionally as part of the default gate."""
     kit_root, manifest_path, _digest = _build_kit(tmp_path)
     doc = json.loads(manifest_path.read_text())
 
@@ -302,13 +303,16 @@ def test_images_step_is_gated(tmp_path):
     for component in sbom.IMAGE_COMPONENTS:
         entry = doc["images"][component]
         assert entry["collected"] is False
-        assert entry["tarball_sha256"] is None
-        assert entry["tarball_size"] is None
+        assert entry["dockerfile"] is None and entry["files"] == [] and entry["packages"] == []
+        assert entry["network_used"] is False
+        assert "tarball_sha256" not in entry and "tarball_size" not in entry
         assert entry["recorded_digest"].startswith("sha256:")
+        assert entry["runtime_content_hash"].startswith("sha256:")
+        assert entry["base"]["reference"].endswith(entry["base"]["digest"])
         assert entry["tag"]
 
     assert not (kit_root / "images").exists(), "no images/ directory should exist when --with-images was not requested"
-    assert all(f["role"] != "image-tarball" for f in doc["files"])
+    assert not any(f["path"].startswith("images/") for f in doc["files"])
 
 
 IMAGES_OPT_IN_VAR = "AV_KIT_WITH_IMAGES"
@@ -329,9 +333,10 @@ def _docker_available() -> bool:
 def _compute_images_skip_reason() -> "str | None":
     if not _images_opted_in():
         return (
-            f"{IMAGES_OPT_IN_VAR} is not set -- this test runs the real, gated `docker save` "
-            "path (an image-digest comparison against each component's recorded digest, then "
-            "`docker save`, for both recorded images, under the host-wide docker-test lock). "
+            f"{IMAGES_OPT_IN_VAR} is not set -- this test runs the real, gated application-layer "
+            "path (an image-id comparison against each component's recorded id, then `docker create`/"
+            "`docker cp`/`docker rm -v` of the runtime-content set and a runtime-content-hash "
+            "comparison, for both recorded images, under the host-wide docker-test lock). "
             "The default suite skips it; set AV_KIT_WITH_IMAGES=1 on the command line to opt in."
         )
     if not _docker_available():
@@ -345,7 +350,7 @@ def _compute_images_skip_reason() -> "str | None":
         if result.returncode != 0:
             return (
                 f"image {tag!r} ({component}) has not been built on this host -- this test only "
-                f"inspects/saves an already-built image, it never builds one."
+                f"reads an already-built image, it never builds one."
             )
     return None
 
@@ -354,37 +359,55 @@ _IMAGES_SKIP_REASON = _compute_images_skip_reason()
 
 
 @pytest.mark.skipif(_IMAGES_SKIP_REASON is not None, reason=_IMAGES_SKIP_REASON or "")
-def test_images_step_with_the_flag_set_runs_the_real_docker_save_path(tmp_path):
-    """`AV_KIT_WITH_IMAGES=1`: the real path. `build_kit.collect_images` (called by
+def test_images_step_with_the_flag_set_carries_the_application_layer(tmp_path):
+    """`AV_KIT_WITH_IMAGES=1`: the real path (question 250(a)). `build_kit.collect_images` (called by
     `build_kit.build` when `with_images=True`) itself takes `altavista.docker_test_lock.
-    lock_docker_tests()` for this step's ENTIRE body and compares each image's LIVE `docker
-    image inspect` id to its recorded digest BEFORE ever running `docker save` (question 212).
+    lock_docker_tests()` for its whole Docker step and compares each image's LIVE `docker image
+    inspect` id to its recorded digest (question 212), then reads ONLY the runtime-content set's
+    files out of it (`docker create`, `docker cp`, `docker rm -v`) and refuses unless their
+    runtime-content hash equals the recorded one (question 185).
 
     This test deliberately does NOT wrap the call in a second `lock_docker_tests()` of its own:
     `fcntl.flock` locks are attached to one OPEN FILE DESCRIPTION, not reentrant within a single
     process across independent `os.open()` calls (see `altavista/docker_test_lock.py`'s own
     "Why flock, not a PID file" section) -- a second, independent lock acquisition here, while
     `collect_images` already holds the first, would deadlock this test rather than compose with
-    it. The lock genuinely covers this step's whole body either way: by the ONE production code
-    path this test and the real CLI (`scripts/kit/build.sh --with-images`) both share, rather
-    than by test-local, duplicated locking logic that could drift from it."""
+    it."""
     kit_root, manifest_path, _digest = _build_kit(tmp_path, with_images=True)
     doc = json.loads(manifest_path.read_text())
+    files_by_path = {f["path"]: f for f in doc["files"]}
 
+    assert not list(kit_root.rglob("*.tar")), "no image tarball may enter the kit"
     for component in sbom.IMAGE_COMPONENTS:
         entry = doc["images"][component]
         assert entry["collected"] is True
-        assert entry["tarball_sha256"] is not None
-        tar_path = kit_root / "images" / f"{component}.tar"
-        assert tar_path.is_file()
-        assert sbom.sha256_file(tar_path) == entry["tarball_sha256"]
-        assert tar_path.stat().st_size == entry["tarball_size"]
+        assert entry["dockerfile"]["kit_path"] == f"images/{component}/Dockerfile"
+        assert files_by_path[entry["dockerfile"]["kit_path"]]["role"] == "image-dockerfile"
+        assert entry["runtime_content_hash"] == image_layer.read_recorded_runtime_hash(REPO_ROOT, component)
+        # The manifest's own per-file records re-hash to the runtime-content hash (package files
+        # included: they are recorded, with their sha256, even though their bytes live in the .deb).
+        assert image_layer.runtime_content_hash({f["image_path"]: f["sha256"] for f in entry["files"]}) == \
+            entry["runtime_content_hash"]
+        for f in entry["files"]:
+            if f["source"] == "kit":
+                on_disk = kit_root / f["kit_path"]
+                assert sbom.sha256_file(on_disk) == f["sha256"]
+                assert f"{on_disk.stat().st_mode & 0o7777:04o}" == f["mode"]
+                assert files_by_path[f["kit_path"]]["role"] == "image-rootfs"
+            else:
+                assert f["kit_path"] is None and f["source"].startswith("package:")
+        for package in entry["packages"]:
+            assert sbom.sha256_file(kit_root / package["kit_path"]) == package["sha256"]
+            assert files_by_path[package["kit_path"]]["role"] == "image-package"
+            assert files_by_path[package["licence_kit_path"]]["role"] == "image-package-licence"
+    assert doc["images"]["edge-plugin-image"]["network_used"] is True
 
     # Question 148: an exit code (or a green test) is not evidence -- print what was actually
     # observed and compared.
     print(f"\n--- images step, observed ---\n" + "\n".join(
         f"{c}: tag={doc['images'][c]['tag']} recorded_digest={doc['images'][c]['recorded_digest']} "
-        f"tarball_sha256={doc['images'][c]['tarball_sha256']}"
+        f"runtime_content_hash={doc['images'][c]['runtime_content_hash']} "
+        f"files={len(doc['images'][c]['files'])}"
         for c in sbom.IMAGE_COMPONENTS
     ))
 
@@ -464,38 +487,35 @@ def test_verify_manifest_catches_a_symlink_that_escapes_the_kit_via_dotdot(tmp_p
 
 
 # =================================================================================================
-# 12. docker save is measured (not assumed) to be byte-reproducible on this host (review D3-3)
+# 12. Two image-bearing kits from the same commit are byte-identical (question 250(a); the
+#     tarball-reproducibility measurement this section used to hold is retired with the tarballs)
 # =================================================================================================
 
 @pytest.mark.skipif(_IMAGES_SKIP_REASON is not None, reason=_IMAGES_SKIP_REASON or "")
-def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_tarball_hashes(tmp_path):
-    """Decision I's reproducibility argument covers the metadata path (Decision J's `images`
-    dict when `--with-images` is off); it does NOT, by itself, cover `docker save`'s own output
-    format, which is not documented to be byte-for-byte deterministic across independent runs.
-    This test measures whether it actually is, on THIS host/docker version (recorded in
-    scripts/kit/README.md alongside `docker --version`) -- two full `--with-images` builds must
-    produce identical tarball hashes AND therefore an identical KIT_MANIFEST hash. If a future
-    Docker/BuildKit ever makes `docker save` non-deterministic, this is the test that says so."""
+def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest(tmp_path):
+    """Decision I's headline claim for the `--with-images` shape: two full builds produce a
+    byte-identical `KIT_MANIFEST` (hence identical file hashes and modes for everything under
+    `images/`), whether the recorded `.deb` came from the network or from `.av-test-tmp/kit-deb-cache`
+    (the manifest records the pinned URL and hash, never "fetched this time")."""
     kit_a, manifest_a, digest_a = _build_kit(tmp_path, name="img-a", with_images=True)
     kit_b, manifest_b, digest_b = _build_kit(tmp_path, name="img-b", with_images=True)
 
     assert digest_a == digest_b, "two --with-images builds from the same commit produced different KIT_MANIFEST hashes"
     assert manifest_a.read_bytes() == manifest_b.read_bytes()
 
-    doc_a = json.loads(manifest_a.read_text())
-    doc_b = json.loads(manifest_b.read_text())
-    for component in sbom.IMAGE_COMPONENTS:
-        sha_a = doc_a["images"][component]["tarball_sha256"]
-        sha_b = doc_b["images"][component]["tarball_sha256"]
-        assert sha_a is not None and sha_a == sha_b, (component, sha_a, sha_b)
-        tar_a = (kit_a / "images" / f"{component}.tar").read_bytes()
-        tar_b = (kit_b / "images" / f"{component}.tar").read_bytes()
-        assert tar_a == tar_b, f"{component}: docker save produced different tarball bytes across two runs"
+    images_a = sorted(p.relative_to(kit_a).as_posix() for p in (kit_a / "images").rglob("*") if p.is_file())
+    images_b = sorted(p.relative_to(kit_b).as_posix() for p in (kit_b / "images").rglob("*") if p.is_file())
+    assert images_a == images_b and images_a
+    for rel in images_a:
+        assert (kit_a / rel).read_bytes() == (kit_b / rel).read_bytes(), rel
+        assert (kit_a / rel).stat().st_mode & 0o7777 == (kit_b / rel).stat().st_mode & 0o7777, rel
 
-    print(f"\n--- docker save reproducibility, observed ---\n" + "\n".join(
-        f"{c}: tarball_sha256={doc_a['images'][c]['tarball_sha256']} (identical across both builds)"
+    doc = json.loads(manifest_a.read_text())
+    print(f"\n--- image-bearing kits, observed ---\n" + "\n".join(
+        f"{c}: runtime_content_hash={doc['images'][c]['runtime_content_hash']} "
+        f"({len(doc['images'][c]['files'])} files; identical across both builds)"
         for c in sbom.IMAGE_COMPONENTS
-    ))
+    ) + f"\nKIT_MANIFEST sha256 {digest_a} (both builds)")
 
 
 # =================================================================================================
@@ -504,14 +524,15 @@ def test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_
 # were removed (they now ship inside the altavista wheel instead), then question 217(c) moved it
 # 3 -> 4 when the kit gained its own bundled installer (manifest.py's own top doc, "P5 track round
 # 3", has the full reasoning for both bumps -- why each counts as a real format change and not
-# merely an internal refactor).
+# merely an internal refactor). Question 250(a) moved it 4 -> 5: the `images` section carries each
+# image's application layer instead of a `docker save` tarball.
 # =================================================================================================
 
-def test_kit_format_is_bumped_for_round_3(tmp_path):
+def test_kit_format_is_bumped_for_question_250a(tmp_path):
     _kit_root, manifest_path, _digest = _build_kit(tmp_path)
     doc = json.loads(manifest_path.read_text())
-    assert doc["kit_format"] == 4
-    assert kmanifest.KIT_FORMAT == 4
+    assert doc["kit_format"] == 5
+    assert kmanifest.KIT_FORMAT == 5
 
 
 # =================================================================================================
@@ -540,6 +561,9 @@ def test_the_kit_carries_its_own_installer(tmp_path):
     for name in build_kit.INSTALLER_SOURCE_FILES:
         on_disk = kit_root / "installer" / name
         assert on_disk.is_file(), on_disk
+    assert "operator_supplied.json" in build_kit.INSTALLER_SOURCE_FILES
+    assert (kit_root / "installer" / "operator_supplied.json").read_bytes() == \
+        (KIT_DIR / "operator_supplied.json").read_bytes()
     assert os.access(kit_root / "installer" / "install.sh", os.X_OK), (
         "installer/install.sh must keep its executable bit (shutil.copy2 preserves it, but this "
         "asserts the real, on-disk result rather than trusting the copy call alone)"

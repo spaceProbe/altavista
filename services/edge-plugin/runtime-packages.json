@@ -1,0 +1,24 @@
+{
+  "image": "edge-plugin-image",
+  "notes": "Debian packages the edge-plugin image adds over its operator-supplied base (debian:bookworm-slim). The kit carries each one's .deb (fetched once at kit-build time from snapshot_url, TLS verified, refused unless sha256 and size match) and services/edge-plugin/Dockerfile.kit installs it with dpkg -i. scripts/kit/build_kit.py --with-images proves, for every build, that each regular file the image holds from the package equals the .deb's byte for byte.",
+  "packages": [
+    {
+      "architecture": "arm64",
+      "filename": "libssl3_3.0.22-1~deb12u1_arm64.deb",
+      "licence": {
+        "binary_package_licence": "Apache-2.0",
+        "copyright_sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+        "licence_fields": ["Apache-2.0", "Artistic or GPL-1+", "Artistic", "GPL-1+"],
+        "note": "Read from usr/share/doc/libssl3/copyright inside the .deb. 'Files: *' and 'Files: debian/*' are Apache-2.0 (the shared libraries). The 'Artistic or GPL-1+' stanza covers 'Files: external/perl/Text-Template-1.56/*', a Perl module in the OpenSSL SOURCE tree used by its build; the .deb holds no file from it (its data member is the three engines, the two shared libraries, legacy.so and three doc files). The remaining 'License:' fields are the full texts of those same licences. Ruled by the lead (question 250's native round): carrying the .deb is accepted, because every file it ships is Apache-2.0; the Artistic-or-GPL-1+ stanza names a build-time source-tree helper that is not in the package. The licence reviews themselves remain the user's (questions 6 and 247).",
+        "source": "usr/share/doc/libssl3/copyright in the .deb"
+      },
+      "package": "libssl3",
+      "size": 1827612,
+      "sha256": "026105b99749b437b03d0de5b3a58c0cabefb9791bc6f9cf916d18691ee7519a",
+      "snapshot_sha1": "4893681e9be922a7a13c25ccbd83bbfb07371653",
+      "snapshot_url": "https://snapshot.debian.org/archive/debian-security/20260925T031318Z/pool/updates/main/o/openssl/libssl3_3.0.22-1~deb12u1_arm64.deb",
+      "version": "3.0.22-1~deb12u1"
+    }
+  ],
+  "schema": 1
+}

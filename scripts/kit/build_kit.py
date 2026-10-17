@@ -31,7 +31,9 @@ import, copied into `<kit>/installer/`, unconditionally, no flag -- replacing th
 additive: `kit_format` bumps again (3 -> 4, `manifest.py`'s own top doc, same section).
 
 GATED, opt-in, off by default:
-- `--with-images` -- `docker save` of the two recorded images.
+- `--with-images` -- question 250(a): each recorded image's APPLICATION LAYER (runtime Dockerfile,
+  the runtime-content set's files with their modes, recorded `.deb`s), not the image: the base
+  images are operator-supplied (`docs/kit-operator-supplied.md`). See `scripts/kit/image_layer.py`.
 - `--with-pack <name>` (repeatable) -- an additional pack's DESCRIPTOR (content hash only).
 - `--copy-pack <name>` (repeatable) -- round 2: that pack's real BYTES, copied into the kit
   (implies the descriptor too; `--max-pack-bytes` still gates it). Round 2 also copied `web`/
@@ -87,6 +89,7 @@ from packaging.requirements import Requirement
 # plain `import manifest` / `import sbom` below work without any path manipulation; tests that
 # import this module instead do the identical `sys.path.insert(0, KIT_DIR)` `test_sbom.py`
 # already establishes as this workspace's convention.
+import image_layer  # noqa: E402  (question 250(a): the application-layer step)
 import manifest as kit_manifest  # noqa: E402
 import sbom  # noqa: E402
 
@@ -176,6 +179,9 @@ def assemble_sboms(repo_root: Path, kit_root: Path) -> dict:
 #: list is that the installer never needs a third-party package on the target machine it runs on.
 INSTALLER_SOURCE_FILES: tuple[str, ...] = (
     "install.sh", "install.py", "manifest.py", "sbom.py", "licences.py",
+    # Question 250(a): the committed pins of what the operator supplies (base images today;
+    # GMAT and the out-of-kit services later). Data, not code: `install.py` does not import it.
+    "operator_supplied.json",
 )
 
 
@@ -325,8 +331,8 @@ def assemble_runs(repo_root: Path, kit_root: Path) -> dict:
 
 
 # =================================================================================================
-# The gated `--with-images` step (Decision J): docker save, only after a digest comparison,
-# only under the host-wide lock.
+# The gated `--with-images` step (Decision J, rewritten by question 250(a)): each image's application
+# layer, only after a digest comparison and a runtime-content-hash comparison, only under the lock.
 # =================================================================================================
 
 def _docker_available() -> bool:
@@ -349,28 +355,42 @@ def _docker_image_id(tag: str) -> str:
     return result.stdout.strip()
 
 
-def collect_images(repo_root: Path, kit_root: Path) -> dict:
+def prepare_images(repo_root: Path) -> dict:
+    """Everything `--with-images` can refuse that needs no Docker, done BEFORE the kit is touched:
+    the operator-supplied pins against both Dockerfiles, the runtime Dockerfiles against the
+    development ones, the recorded runtime-content hashes, and each recorded `.deb` (from
+    `.av-test-tmp/kit-deb-cache/<sha256>/`, or fetched once from its pinned snapshot URL over
+    verified TLS -- the one network use of this step, at kit-build time, question 154) checked
+    against its sha256, size, control fields and copyright record."""
+    return image_layer.prepare_components(repo_root, sbom.IMAGE_COMPONENTS)
+
+
+def collect_images(repo_root: Path, kit_root: Path, prepared: "dict | None" = None) -> dict:
     """The gated `--with-images` step. For each of `sbom.IMAGE_COMPONENTS`: read the recorded
     digest (`manifest.read_recorded_image`), compare it to the LIVE `docker image inspect` id
-    BEFORE ever running `docker save` (question 212's own ordering), and only then save a tarball
-    into `<kit_root>/images/<component>.tar`.
+    (question 212's own ordering), then read ONLY the runtime-content set's files out of the live
+    image (`docker create` never started, `docker cp`, `docker rm -v`), recompute the
+    runtime-content hash over what was read and refuse unless it equals the recorded one
+    (question 185), and write `images/<component>/` (the runtime Dockerfile, `rootfs/` at the
+    files' image paths with their modes, the recorded `.deb`s and their copyright files). No
+    tarball, and no base-image layer, ever enters the kit.
 
-    Held under `altavista.docker_test_lock.lock_docker_tests()` for the whole step. A digest
-    mismatch is a hard `RuntimeError`, never a silent save of the wrong bits under the right
-    name."""
+    Held under `altavista.docker_test_lock.lock_docker_tests()` for the whole Docker step. Any
+    mismatch is a hard error, never a silent copy of the wrong bits under the right name."""
     from altavista.docker_test_lock import lock_docker_tests
+
+    if prepared is None:
+        prepared = prepare_images(repo_root)
 
     if not _docker_available():
         raise RuntimeError(
             "--with-images was requested but `docker info` failed -- this step only inspects "
-            "and saves an already-built image, it never builds one (Decision I). Make Docker "
+            "and reads an already-built image, it never builds one (Decision I). Make Docker "
             "available and re-run, or omit --with-images to leave the two images recorded-but-"
             "not-collected in KIT_MANIFEST."
         )
 
-    images_dir = kit_root / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
+    run_id = image_layer.new_run_id()
     result: dict[str, dict] = {}
     with lock_docker_tests():
         for component in sbom.IMAGE_COMPONENTS:
@@ -386,26 +406,13 @@ def collect_images(repo_root: Path, kit_root: Path) -> dict:
                 raise RuntimeError(
                     f"{component}: built image {tag!r} has digest {built_digest}, which does NOT "
                     f"match its recorded digest {recorded['recorded_digest']} (question 212) -- "
-                    f"refusing to save a tarball of a different image under this component's "
+                    f"refusing to read files of a different image under this component's "
                     f"name. Rebuild with the component's own build-image.sh and update its "
                     f"IMAGE_DIGEST.md, or investigate the mismatch before retrying --with-images."
                 )
-            tar_path = images_dir / f"{component}.tar"
-            save = subprocess.run(
-                ["docker", "save", "-o", str(tar_path), tag],
-                capture_output=True, text=True, timeout=300,
+            result[component] = image_layer.collect_component(
+                repo_root, kit_root, component, prepared[component], recorded, tag=tag, run_id=run_id,
             )
-            if save.returncode != 0:
-                raise RuntimeError(
-                    f"`docker save -o {tar_path} {tag}` failed (rc={save.returncode}): "
-                    f"{save.stderr.strip()}"
-                )
-            result[component] = {
-                **recorded,
-                "collected": True,
-                "tarball_sha256": sbom.sha256_file(tar_path),
-                "tarball_size": tar_path.stat().st_size,
-            }
     return result
 
 
@@ -990,6 +997,9 @@ def build(
     kit_root = out
     if kit_root.exists() and any(kit_root.iterdir()):
         raise RuntimeError(f"--out {kit_root} already exists and is not empty -- pass an empty or new directory")
+    # Question 250(a): every refusal that needs no Docker (pins, Dockerfiles, the recorded `.deb`'s
+    # hash) happens before a single byte is written into the kit.
+    prepared_images = prepare_images(repo_root) if with_images else None
     kit_root.mkdir(parents=True, exist_ok=True)
 
     assemble_suite_and_site(repo_root, kit_root, site)
@@ -1020,7 +1030,10 @@ def build(
             desc["copy"] = copy_result
         packs[name] = desc
 
-    images = collect_images(repo_root, kit_root) if with_images else kit_manifest.uncollected_images()
+    images = (
+        collect_images(repo_root, kit_root, prepared_images) if with_images
+        else image_layer.uncollected_images(repo_root)
+    )
 
     if with_vendor:
         vendor = collect_vendor(repo_root, kit_root)
@@ -1081,8 +1094,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--with-images", action="store_true",
-        help="gated: docker save the two recorded images into the kit, after comparing each to "
-             "its recorded digest (question 212). Off by default -- see manifest.py's 'images' doc.",
+        help="gated: carry each recorded image's application layer (runtime Dockerfile, the "
+             "runtime-content set's files with modes, recorded .debs) -- not the image -- after "
+             "comparing the live image to its recorded id (question 212) and its runtime-content "
+             "hash to the recorded one (question 185). May fetch one pinned .deb from "
+             "snapshot.debian.org (cached). Off by default -- see manifest.py's 'images' doc.",
     )
     p.add_argument(
         "--with-pack", action="append", default=[], dest="with_pack",

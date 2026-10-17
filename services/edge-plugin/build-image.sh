@@ -34,6 +34,29 @@
 #   7. Stops the docker-events capture, writing services/edge-plugin/build/
 #      last-build-events.jsonl (question 194's own attribution record).
 #
+# The runtime-content hash (step 3a below; docs/open-questions.md question 185, question 250(a)):
+# the same algorithm services/cfs/IMAGE_DIGEST.md defines for the cFS image, applied to this
+# image. It is a hash of exactly what this image adds over its pinned base, independent of any
+# Docker implementation detail (an image id changes with every layer timestamp; this does not),
+# so the kit can ship the application layer and the installer can rebuild the image offline
+# on the operator-supplied base and compare.
+#
+#   Runtime-content set (paths as they exist inside the image) --
+#     * /usr/local/bin/av-edge-plugin
+#     * every regular file under /opt/edge-plugin, recursively (the two fixtures and the
+#       default plugin config)
+#     * every regular file the `libssl3` package owns (`dpkg -L libssl3`, kept when the path
+#       is a regular file that is not a symlink: the shared libraries and the package's
+#       /usr/share/doc files), so the hash covers everything the image adds over its base
+#   Hash -- SHA-256 over the UTF-8 bytes of one line `<path> <sha256 of the file>` per file
+#   (one space, lowercase hex, no other metadata), sorted bytewise (LC_ALL=C) by the whole
+#   line, each line ending in "\n"; reported as `sha256:<hex>`.
+#
+# Two independent implementations must agree (question 164): this script's (sha256sum run
+# inside the built image) and scripts/kit/image_layer.py's (Python, over a `docker export` of
+# the image or over a kit's files); the kit builder refuses a mismatch with the value this
+# script writes into IMAGE_DIGEST.md.
+#
 # This script is NEVER invoked by any test (services/cfs/build-image.sh's own rule,
 # verbatim) -- tests/test_edge_plugin_container.py only ever inspects an already-built
 # image and skips VISIBLY, naming this script, when it is absent (question 194).
@@ -255,6 +278,24 @@ case "${RUNTIME_BASE_IMAGE}" in
     *) die "the Dockerfile's FROM line (${RUNTIME_BASE_IMAGE}) is not pinned by digest -- question 154/185's own rule: every base image is pinned by content digest, never a floating tag." ;;
 esac
 
+# --- 3a. The runtime-content hash (question 185, applied to this image by question 250(a)); the
+# set and the line format are defined in this script's header. Computed with sha256sum inside
+# the just-built image (no network, nothing mounted); `dpkg -L libssl3` names the package's
+# files, and a path is kept only when it is a regular file that is not a symlink. Sorting and
+# hashing happen on the host so the algorithm does not depend on the image's own tools.
+log "computing runtime-content hash (question 185)"
+RUNTIME_CONTENT_HASH="$(docker run --rm --network none --entrypoint sh "${IMAGE_TAG}" -c '
+    find /opt/edge-plugin -type f -exec sha256sum {} +
+    sha256sum /usr/local/bin/av-edge-plugin
+    dpkg -L libssl3 | while IFS= read -r p; do
+        if [ -f "$p" ] && [ ! -L "$p" ]; then sha256sum "$p"; fi
+    done' \
+    | awk '{print $2, $1}' \
+    | LC_ALL=C sort \
+    | shasum -a 256 | awk '{print $1}')"
+[ -n "${RUNTIME_CONTENT_HASH}" ] || die "runtime-content hash computation produced no output"
+log "runtime-content hash: sha256:${RUNTIME_CONTENT_HASH}"
+
 # --- 3b. Question 232 (extending 212(a)): the commit HEAD points at, and whether the tree was
 # dirty UNDER THIS IMAGE'S OWN COPIED PATHS (never the whole tree) at build time. Read from
 # COPIED_PATHS_FILE -- the ONE list this script and tests/heavy_stack.py's own
@@ -295,6 +336,8 @@ DURATION_S=$(( SECONDS - START_SECONDS ))
     printf '```\n%s\n```\n' "${PREBUILD_BASE_IMAGE}"
     printf -- '- Prebuilt `av-edge-plugin` binary SHA-256 (%s):\n' "${BIN_PATH#"${REPO_ROOT}"/}"
     printf '```\nsha256:%s\n```\n' "${BIN_SHA256}"
+    printf -- '- Runtime-content hash (question 185, applied to this image by question 250(a); the set is defined in services/edge-plugin/build-image.sh, step 3a):\n'
+    printf '```\nsha256:%s\n```\n' "${RUNTIME_CONTENT_HASH}"
     printf -- '- Built from commit (question 232, extending question 212(a) -- the paths this covers are services/edge-plugin/IMAGE_COPIED_PATHS.txt):\n'
     if [ "${DIRTY_COUNT}" -gt 0 ]; then
         printf '```\n%s (working tree dirty: %s modified paths under the copied paths)\n```\n' "${BUILD_COMMIT}" "${DIRTY_COUNT}"
@@ -315,4 +358,5 @@ printf 'image_id=%s\n' "${IMAGE_ID}"
 printf 'runtime_base_image=%s\n' "${RUNTIME_BASE_IMAGE}"
 printf 'prebuild_base_image=%s\n' "${PREBUILD_BASE_IMAGE}"
 printf 'prebuilt_binary_sha256=%s\n' "${BIN_SHA256}"
+printf 'runtime_content_hash=sha256:%s\n' "${RUNTIME_CONTENT_HASH}"
 printf 'build_duration_s=%s\n' "${DURATION_S}"

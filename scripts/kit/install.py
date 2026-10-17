@@ -1,6 +1,6 @@
 """scripts/kit/install.py -- D3's second half (docs/p5-plan.md, P5 track round 2 task 3b, round 3
 questions 217(b)/217(c)): the real logic behind scripts/kit/install.sh. Installs a kit
-(scripts/kit/build_kit.py's own output, `kit_format` 4) into a fresh, empty target directory,
+(scripts/kit/build_kit.py's own output, `kit_format` 5) into a fresh, empty target directory,
 using nothing beyond the kit itself, a
 Python interpreter, and a shell -- no network, ever (question 154: "a kit is built with network
 once and installed with none" -- this half is the "installed with none" clause, proved for real
@@ -86,7 +86,7 @@ it").
 2. The target directory exists and is not empty.
 3. `KIT_MANIFEST` is missing a top-level section this installer's own understanding of
    `kit_format` requires (`_REQUIRED_TOP_LEVEL_KEYS`) -- a structural gap, never guessed past.
-4. `kit_format` is not the one version (`manifest.KIT_FORMAT`, `4` as of round 3 question 217(c))
+4. `kit_format` is not the one version (`manifest.KIT_FORMAT`, `5` as of question 250(a))
    this installer understands.
 5. A wheel the viewer actually needs is absent from the kit: either the whole `wheels` step was
    never collected (`wheels.collected` is `false`), or one of the viewer's own required

@@ -1,0 +1,31 @@
+# services/cfs/Dockerfile.kit (question 250(a)) -- the RUNTIME Dockerfile the air-gap kit carries
+# for the cFS lockstep image, as `images/cfs-image/Dockerfile`. It is the final stage of
+# services/cfs/Dockerfile with one difference: that stage copies the cFS build out of a builder
+# stage (a network build), this one copies the same files out of the kit (`rootfs/`, written by
+# scripts/kit/build_kit.py --with-images from the recorded image, hash-checked against the
+# runtime-content hash in services/cfs/IMAGE_DIGEST.md). Nothing here needs the network: the
+# base is the operator-supplied Ubuntu image (docs/kit-operator-supplied.md item 1), pinned by
+# digest and identical to services/cfs/Dockerfile's FROM lines (tests/test_kit_image_layer.py
+# asserts it), and the kit never redistributes it.
+#
+# Build, from a built kit, on a host that already holds the base image:
+#
+#   docker build --network none --pull=false -t <tag> images/cfs-image
+#
+# The legacy builder must accept this file (question 190: this host has no BuildKit), so: no
+# `COPY --chmod`, no heredocs. The configuration instructions below (ENTRYPOINT, and any
+# LABEL/USER/WORKDIR/VOLUME/ENV the development stage gains) are asserted equal to
+# services/cfs/Dockerfile's final stage by tests/test_kit_image_layer.py. The image id of the
+# result may differ from the recorded one (layer timestamps); what is compared is the
+# runtime-content hash (question 185).
+FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
+COPY rootfs/cfs/cpu1 /cfs/cpu1
+COPY rootfs/cfs/av-lockstep-shim /cfs/av-lockstep-shim
+COPY rootfs/cfs/av-lockstep-relay /cfs/av-lockstep-relay
+COPY rootfs/cfs/container-entrypoint.sh /cfs/container-entrypoint.sh
+# The first three are what services/cfs/Dockerfile chmods; the last two are the executables the
+# builder stage installed under /cfs/cpu1, re-asserted here because a kit carried across a medium
+# that drops unix modes must still build a runnable image.
+RUN chmod +x /cfs/av-lockstep-shim /cfs/av-lockstep-relay /cfs/container-entrypoint.sh \
+    && chmod +x /cfs/cpu1/core-cpu1 /cfs/cpu1/container-start
+ENTRYPOINT ["/cfs/container-entrypoint.sh"]

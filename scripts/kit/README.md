@@ -50,12 +50,16 @@ Flags:
 
 - `--site <path>` -- one of `deploy/secdeploy`'s standalone site files. Defaults to the eval
   site, `deploy/secdeploy/secsite.altavista-eval.toml`.
-- `--with-images` -- gated, off by default. Runs `docker save` on the two recorded images
-  (`av-edge-plugin:local`, `altavista-cfs-lockstep:local`) into the kit as tarballs, but only
-  AFTER comparing each image's live `docker image inspect` digest to its own recorded digest in
-  `services/edge-plugin/IMAGE_DIGEST.md` / `services/cfs/IMAGE_DIGEST.md` (question 212) -- a
-  mismatch is a hard error, never a tarball saved under the wrong name. Takes the host-wide
-  Docker test lock (`altavista.docker_test_lock.lock_docker_tests`) for the whole step.
+- `--with-images` -- gated, off by default. **Question 250(a): carries each image's APPLICATION
+  LAYER, not the image.** For the two recorded images (`av-edge-plugin:local`,
+  `altavista-cfs-lockstep:local`) it compares the live `docker image inspect` id to the recorded id
+  in `services/edge-plugin/IMAGE_DIGEST.md` / `services/cfs/IMAGE_DIGEST.md` (question 212), then
+  reads ONLY the runtime-content set's files out of the image (`docker create`, never started;
+  `docker cp`; `docker rm -v`), recomputes the runtime-content hash (question 185) and refuses
+  unless it equals the recorded one, and writes `images/<component>/` -- see "Image application
+  layers" below. No `docker save`, no tarball, no base-image layer. Takes the host-wide Docker
+  test lock (`altavista.docker_test_lock.lock_docker_tests`) for the Docker part; may fetch one
+  pinned `.deb` first (the network note below).
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
   the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
   (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
@@ -125,8 +129,8 @@ recorded in a committed file, or a hash computed over an artefact that already e
 live output of a fresh `cargo build` or `docker build` run as part of assembling the kit. So the
 builder only ever *collects and hashes*: it calls `deploy/secdeploy/merge.py`'s own functions
 over already-committed TOML, copies the already-committed SBOMs/`IMAGE_DIGEST.md`s byte-for-byte,
-and (gated, opt-in) `docker save`s an image that is already built, only after re-confirming it
-still matches its own already-recorded digest.
+and (gated, opt-in) reads the runtime-content files out of an image that is already built, only
+after re-confirming it still matches its own already-recorded digest and runtime-content hash.
 
 `tests/test_kit_manifest.py::test_two_kits_from_the_same_commit_have_the_same_manifest_hash`
 builds two kits into two separate temp directories and asserts their `KIT_MANIFEST` files are
@@ -137,10 +141,11 @@ byte-identical -- this is the test that would fail first if that rule were ever 
 JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trailing newline; see
 `scripts/kit/manifest.py`'s own module doc for the full field-by-field description):
 
-- `kit_format` -- an integer, bumped whenever this shape changes. **4 as of round 3** (question
-  217(b) removed the `web`/`profiles` packs at 2 -> 3; question 217(c) then required the kit to
-  carry its own installer at 3 -> 4 -- see `scripts/kit/manifest.py`'s own top doc and "The kit
-  carries its own installer" below).
+- `kit_format` -- an integer, bumped whenever this shape changes. **5 as of question 250(a)**
+  (the `images` section carries application layers instead of tarballs, 4 -> 5; before that,
+  question 217(b) removed the `web`/`profiles` packs at 2 -> 3 and question 217(c) required the
+  kit to carry its own installer at 3 -> 4 -- see `scripts/kit/manifest.py`'s own top doc and "The
+  kit carries its own installer" below). The installer refuses any other value.
 - `git_commit` / `git_dirty` / `git_status` -- the full HEAD SHA, whether the tree that built the
   kit was clean, and the sorted, verbatim `git status --porcelain` lines. `git_dirty` alone is a
   permanently-`true` flag IN THIS WORKTREE specifically: it carries pre-existing, untracked
@@ -152,12 +157,25 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
   path. Round 2 adds five new roles: `pack-file` (a copied pack's own regular files), `vendor` /
   `vendor-config` (`--with-vendor`), `wheel` (`--with-wheels`), `binary` (`--with-binaries`),
   `run-fixture` (the recorded kernel runs, always present). Round 3 adds a sixth, `installer`
-  (question 217(c)) -- every file under `installer/`, always present, unconditional.
+  (question 217(c)) -- every file under `installer/` (including `operator_supplied.json`, the pins
+  of what the operator supplies), always present, unconditional. Question 250(a) adds
+  `image-dockerfile`, `image-rootfs`, `image-package` and `image-package-licence` (all under
+  `images/`, `--with-images` only) and retires `image-tarball`.
 - `pack_symlinks` -- **new in round 2**: every symlink inside a COPIED pack (`packs/<name>/...`),
   `{path, pack, link_target}`, sorted by path -- see "Pack symlinks", below. A kit may contain
   ZERO symlinks anywhere else (round 1's original rule, unchanged).
-- `images` -- the two recorded image digests, and (only when `--with-images` ran) each tarball's
-  own SHA-256/size.
+- `images` -- per image component (`edge-plugin-image`, `cfs-image`), always present:
+  `{tag, recorded_digest, collected, runtime_content_hash, base, dockerfile, files, packages,
+  network_used}`. `recorded_digest` is the recorded image id; `runtime_content_hash` the recorded
+  hash of what the image adds over its base (question 185); `base` the pinned operator-supplied base
+  (`{id, item, reference, digest}`, from `operator_supplied.json`). When `--with-images` ran,
+  `dockerfile` is `{kit_path}`, `files` lists every runtime-content-set file as `{image_path,
+  kit_path, sha256, mode, size, source}` (`mode` an octal string; `source` is `kit` or
+  `package:<name>`, whose `kit_path` is null because its bytes are in the `.deb`), and `packages`
+  lists each carried `.deb` as `{name, version, architecture, filename, kit_path, sha256, size,
+  snapshot_url, licence_fields, licence_kit_path, copyright_sha256, dpkg_excluded_files}`;
+  otherwise those three are `null`/`[]`. `network_used` is a fact about the step (the edge-plugin
+  image carries a `.deb` fetched at kit-build time), never about whether this run hit the network.
 - `sboms` -- component name -> SHA-256, taken directly from the kit's own copy of the committed
   `SHA256SUMS`.
 - `packs` -- the Decision-K pack descriptors actually included, each now also carrying `copied`
@@ -271,19 +289,46 @@ one missing something, and it is the case people forget), or (see "Pack symlinks
 symlink anywhere in the kit that is not exactly what `pack_symlinks` declares. An empty list means
 the kit is exactly what its manifest claims.
 
-## `docker save` is measured to be byte-reproducible here -- but that is a measurement, not a promise
+## Image application layers (question 250(a))
 
-Decision I's reproducibility argument does not, by itself, cover the `--with-images` tarballs:
-`docker save`'s own output format is not documented to be byte-for-byte deterministic across
-runs. Measured directly on this host (`docker --version`: **Docker version 29.6.2, build
-dfc4efb1e2**), it is: `tests/test_kit_manifest.py::
-test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest_and_tarball_hashes`
-(gated the same way as every other `--with-images` test, `AV_KIT_WITH_IMAGES=1`) builds two
-`--with-images` kits and asserts both the two tarball SHA-256s and the two `KIT_MANIFEST` hashes
-come out identical. That is a measured property of THIS host and THIS docker version, not a
-guarantee this repository controls -- if a future Docker/BuildKit ever makes `docker save`
-non-deterministic (embedding a timestamp, say), that test is what will say so first, and the
-"images" half of the headline claim would need re-examining at that point.
+The base images are operator-supplied (`docs/kit-operator-supplied.md` items 1 and 2), so the kit
+carries only what each image adds over its base. `scripts/kit/operator_supplied.json` pins the
+bases by digest (and is copied into `installer/`); `scripts/kit/image_layer.py` does the work.
+For each component `--with-images` writes:
+
+- `images/<component>/Dockerfile` -- the committed runtime Dockerfile, `services/cfs/Dockerfile.kit`
+  or `services/edge-plugin/Dockerfile.kit`: `FROM <base>@<digest>`, `COPY` of the files below, and
+  only `RUN`s that need no network (`chmod`, `dpkg -i`, `groupadd`/`useradd`, `mkdir`/`chown`),
+  plus the same `LABEL`/`USER`/`WORKDIR`/`VOLUME`/`ENTRYPOINT` as the development Dockerfile's final
+  stage. The legacy builder accepts it (question 190: no BuildKit): no `COPY --chmod`, no heredocs.
+- `images/<component>/rootfs/...` -- the runtime-content set's files at their image paths. Their
+  modes are in `KIT_MANIFEST.images.<component>.files` (`KIT_MANIFEST.files` has none).
+- edge-plugin only: `images/edge-plugin-image/libssl3_<version>_<arch>.deb` and
+  `libssl3.copyright`. The `.deb` is recorded in `services/edge-plugin/runtime-packages.json`
+  (package, version, arch, snapshot URL, sha256, size, licence read from the `.deb`'s own copyright
+  file). The builder takes it from `.av-test-tmp/kit-deb-cache/<sha256>/` or fetches it once from
+  snapshot.debian.org (TLS verified), refuses unless sha256 and size match the record, and proves
+  every regular file the image holds from the package equals the `.deb`'s byte for byte (that is
+  what makes the runtime-content hash reproducible from the kit).
+
+A host-side step builds each image from a built kit with
+
+    docker build --network none --pull=false -t <tag> images/<component>
+
+on a host that already holds the pinned base, and compares the built image's runtime-content hash
+with `images.<component>.runtime_content_hash`. The image id does not have to match (layer
+timestamps), and `docker image inspect .Config` (Entrypoint, Cmd, User, WorkingDir, Volumes,
+Labels, Env) does. The runtime-content hash is defined in `services/cfs/IMAGE_DIGEST.md` (cFS) and
+`services/edge-plugin/build-image.sh` step 3a (edge plugin); `image_layer.py` is the second,
+independent implementation (question 164). The installer that does this build is task 1b; this
+task proves it by hand (its report has the log).
+
+The `images` section is reproducible by construction: every value is either read from a committed
+record or computed over bytes that were just checked against one. Two `--with-images` kits from the
+same commit have a byte-identical `KIT_MANIFEST` (`tests/test_kit_manifest.py::
+test_two_image_bearing_kits_from_the_same_commit_have_the_same_manifest`, gated `AV_KIT_WITH_IMAGES=1`),
+whether the `.deb` came from the cache or the network. The `docker save` byte-reproducibility
+measurement this section used to record is retired with the tarballs.
 
 ## Reproducibility and a cross-built binary
 
@@ -332,8 +377,14 @@ kit builder is offline EXCEPT:
   `binaries.network_used` records it. An earlier revision of this README claimed this step had
   "no network of its own", which was simply wrong -- corrected by review rather than left standing.
 
-Nothing else -- `--with-images` only inspects/saves an already-built local image, and every
-remaining step reads files already in this worktree.
+- `--with-images` -- fetches the recorded `libssl3` `.deb` once from snapshot.debian.org over
+  verified TLS, at kit-build time only, when `.av-test-tmp/kit-deb-cache/<sha256>/` does not
+  already hold it; the bytes are refused unless they match the sha256 and size committed in
+  `services/edge-plugin/runtime-packages.json`. `KIT_MANIFEST` records `network_used: true` for the
+  edge-plugin image as a fact about the step, never whether this run hit the network, so the
+  manifest is byte-identical either way. The rest of the step reads an already-built local image.
+
+Nothing else -- every remaining step reads files already in this worktree.
 
 ## Regenerating the compliance documents (round 3, question 227)
 

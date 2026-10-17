@@ -1,0 +1,55 @@
+# services/edge-plugin/Dockerfile.kit (question 250(a)) -- the RUNTIME Dockerfile the air-gap kit
+# carries for the edge-plugin image, as `images/edge-plugin-image/Dockerfile`. It is
+# services/edge-plugin/Dockerfile with the one network step removed: that file installs libssl3
+# with `apt-get` from a live mirror; this one installs the recorded, hash-pinned `.deb` the kit
+# carries (services/edge-plugin/runtime-packages.json: package, version, arch, snapshot URL,
+# sha256, size, licence), and copies the application files out of the kit (`rootfs/`, written by
+# scripts/kit/build_kit.py --with-images from the recorded image, hash-checked against the
+# runtime-content hash in services/edge-plugin/IMAGE_DIGEST.md). The base is the operator-supplied
+# Debian image (docs/kit-operator-supplied.md item 2), pinned by digest and identical to
+# services/edge-plugin/Dockerfile's FROM line (tests/test_kit_image_layer.py asserts it); the kit
+# never redistributes it.
+#
+# Build, from a built kit, on a host that already holds the base image:
+#
+#   docker build --network none --pull=false -t <tag> images/edge-plugin-image
+#
+# The legacy builder must accept this file (question 190: this host has no BuildKit), so: no
+# `COPY --chmod`, no heredocs. LABEL, WORKDIR, VOLUME, USER and ENTRYPOINT are asserted equal to
+# services/edge-plugin/Dockerfile by tests/test_kit_image_layer.py; see that Dockerfile's header
+# for why each exists (container hardening, question 207). The image id of the result may differ
+# from the recorded one (layer timestamps); what is compared is the runtime-content hash
+# (question 185).
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+LABEL org.altavista.project="altavista"
+LABEL org.altavista.component="edge-plugin"
+
+# libssl3 from the kit's recorded .deb (no mirror, no network). dpkg -i installs exactly the
+# files the .deb holds, which are the files `apt-get install libssl3` put in the development image
+# (scripts/kit/build_kit.py proves that byte for byte when it builds the kit).
+COPY libssl3_3.0.22-1~deb12u1_arm64.deb /tmp/libssl3.deb
+RUN DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/libssl3.deb \
+    && rm -f /tmp/libssl3.deb
+
+RUN groupadd --gid 10001 edgeplugin \
+    && useradd --uid 10001 --gid edgeplugin --no-create-home --shell /usr/sbin/nologin edgeplugin
+
+WORKDIR /opt/edge-plugin
+
+COPY rootfs/usr/local/bin/av-edge-plugin /usr/local/bin/av-edge-plugin
+RUN chmod +x /usr/local/bin/av-edge-plugin
+
+COPY rootfs/opt/edge-plugin/fixtures/run_products.pb /opt/edge-plugin/fixtures/run_products.pb
+COPY rootfs/opt/edge-plugin/fixtures/port_traffic.pb /opt/edge-plugin/fixtures/port_traffic.pb
+COPY rootfs/opt/edge-plugin/plugin-config.default.json /opt/edge-plugin/plugin-config.default.json
+
+RUN mkdir -p /var/lib/edge-plugin && chown edgeplugin:edgeplugin /var/lib/edge-plugin
+VOLUME ["/var/lib/edge-plugin"]
+
+USER edgeplugin
+
+ENTRYPOINT ["/usr/local/bin/av-edge-plugin", \
+    "--run-products", "/opt/edge-plugin/fixtures/run_products.pb", \
+    "--port-traffic", "/opt/edge-plugin/fixtures/port_traffic.pb", \
+    "--plugin-config", "/opt/edge-plugin/plugin-config.default.json"]
