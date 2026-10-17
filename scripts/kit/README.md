@@ -11,8 +11,9 @@ re-verified later to detect a missing, tampered, or undeclared file.
 P5 track round 1 (task D3's first half) covered assembling and self-verifying a kit with
 DESCRIPTORS only -- no pack bytes, no vendor tree, no wheels, no binaries. **Round 2 (task 3a,
 lead ruling 214(b)) is this file's own second half**: the kit now carries real bytes for what a
-zero-egress install actually needs -- a copied GMAT data pack, `cargo vendor`'s crate sources,
-the viewer's wheels, and cross-built Linux service binaries -- each behind its own opt-in flag,
+zero-egress install actually needs -- `cargo vendor`'s crate sources, the viewer's wheels, and
+cross-built Linux service binaries (and, in round 2, a copied GMAT data pack: GMAT is operator-supplied
+since question 250(a), see "GMAT is operator-supplied" below) -- each behind its own opt-in flag,
 off by default so the default test gate stays fast. It still does NOT cover installing one: the
 zero-egress install proof itself -- unpacking a kit with the network disabled, running
 `install.sh`, and confirming the result is actually usable -- is P5 track round 2 task 3b, a
@@ -39,10 +40,10 @@ A full kit -- every gated step, real bytes for everything this round can collect
 
     .venv/bin/python scripts/kit/build_kit.py --out out/kit/full \
         --with-images --with-vendor --with-wheels --with-binaries \
-        --copy-pack data-time --copy-pack gmat --max-pack-bytes 900000000
+        --copy-pack data-time --with-pack gmat --max-pack-bytes 900000000
 
-(`--max-pack-bytes` must exceed the GMAT pack's own ~738 MB, or that step refuses rather than
-silently skipping it.) `--with-wheels`, `--with-binaries` and (only if `cargo vendor --offline`
+(`--max-pack-bytes` must exceed the GMAT tree's own ~770 MB, or that step refuses rather than
+silently skipping it; `--with-pack gmat` records GMAT's descriptor and carries none of its bytes.) `--with-wheels`, `--with-binaries` and (only if `cargo vendor --offline`
 genuinely fails) `--with-vendor` are the steps that touch the network, and only at kit-build time
 (question 154) -- see "Where this uses the network" below.
 
@@ -63,7 +64,8 @@ Flags:
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
   the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
   (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
-  content hash, a file count, a byte count) is recorded. Round 2 task 3c added `web` and
+  content hash, a file count, a byte count) is recorded. For `gmat` this is the only way in (see
+  "GMAT is operator-supplied") and the entry also carries an `operator_supplied` marker. Round 2 task 3c added `web` and
   `profiles` here too (the viewer's own static assets and profile/policy store, copied in EVERY
   kit unconditionally, since neither shipped in the `altavista` wheel); round 3 (question 217(b))
   removed both again -- `pyproject.toml`/`setup.py` now ship both INSIDE the `altavista` wheel
@@ -76,7 +78,11 @@ Flags:
   symlinks: carried verbatim when safe, refused at build time when not" below -- and an unsafe
   one is a hard build-time refusal, never a silent copy. Nothing is copied unconditionally any
   more (round 3 removed the `web`/`profiles` special case along with the packs themselves) --
-  pass this flag explicitly for any pack you want real bytes for.
+  pass this flag explicitly for any pack you want real bytes for. **`--copy-pack gmat` is refused**
+  (question 250(a), task 2; exit 2, nothing written, the message names `--with-pack gmat`): GMAT is
+  operator-supplied. Refused rather than accepted as a synonym because the flag's name promises
+  bytes, and a build script that still passes it would otherwise get a kit without GMAT and no
+  failure at the point where it matters.
 - `--max-pack-bytes <n>` -- refuse (never silently skip) any `--with-pack`/`--copy-pack` pack
   whose total size exceeds this. Default 50,000,000 bytes -- comfortably above the small in-tree
   `data-time` pack, well below the ~738 MB `gmat` pack, so a big pack needs an explicit larger
@@ -184,7 +190,9 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
   `SHA256SUMS`.
 - `packs` -- the Decision-K pack descriptors actually included, each now also carrying `copied`
   (bool) and, when true, `copy` (`{kit_path, copied_file_count, copied_symlink_count,
-  copied_total_bytes}`).
+  copied_total_bytes}`). `gmat` has `copied: false` always and an `operator_supplied` key
+  (`{component, doc, item, reason, pins_file, measured_on_build_host, platforms_matching_this_descriptor}`;
+  see "GMAT is operator-supplied").
 - `vendor` -- **new in round 2**: `{collected, network_used, offline_error}`, always present.
 - `wheels` -- **new in round 2**: `{collected, network_used, fetched}`, `fetched` a list of
   `{name, version, filename, sha256}`.
@@ -209,8 +217,9 @@ this builder let `deploy/secdeploy/merge.py::merge` plant a `deploy` symlink poi
 ABSOLUTE path into the user's own secdeploy checkout, and the FIRST cut of `verify_manifest` did
 not even see it). That defence still stands for everything outside a copied pack.
 
-Round 2 (lead ruling 214(b)) needs to carry `GMAT R2026a` as real bytes, and that install
-genuinely ships 183 symlinks -- measured directly, every one a RELATIVE, same-directory target
+Round 2 (lead ruling 214(b)) carried `GMAT R2026a` as real bytes (question 250(a), task 2, stopped
+that: GMAT is operator-supplied now; the rule below still governs every other copied pack), and that
+install genuinely ships 183 symlinks -- measured directly, every one a RELATIVE, same-directory target
 (`find . -type l -exec readlink {} \;` shows names like `libwx_osx_cocoau_xrc-3.2.0.dylib`; zero
 absolute targets). Dereferencing them would both bloat the kit and lose the install's own
 structure, so `manifest.copy_pack_bytes` carries them verbatim (`os.symlink`, never followed) --
@@ -265,6 +274,81 @@ real anchor of trust is `KIT_MANIFEST`'s own SHA-256, computed and recorded INDE
 kit by whoever built or received it (this task's own report, and this test's own printed/asserted
 hash, are exactly that) -- comparing that independently-held hash before ever running the kit's
 installer is what a real deployment still needs to add on its own side.
+
+## GMAT is operator-supplied (question 250(a), task 2)
+
+GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL), so the kit never carries it
+(`docs/kit-operator-supplied.md` item 3). `--with-pack gmat` records its pack descriptor and the
+`operator_supplied` marker in `packs.gmat`; no file lands under `packs/gmat` and `copied` stays
+`false`. The installer verifies the operator's own copy against a per-platform pin.
+
+**The pin** is the `gmat-r2026a` component of `scripts/kit/operator_supplied.json` (carried in every
+kit as `installer/operator_supplied.json`): `platforms` maps a platform key to a pin or to `null`
+("no pin recorded for this platform yet"), and `scope` says what the measurement leaves out. A pin
+holds `content_hash`, `file_count`, `total_bytes` (the fields `pack_descriptor` computes) and
+`symlink_count`, `symlink_listing_hash` (below). The key is `<os>-<uname -m>`: `macos-arm64` is
+pinned; `linux-aarch64` and `linux-x86_64` are `null`.
+
+**What is measured** (`manifest.measure_tree(root, scope)`, the one function the builder and the
+installer both call): `pack_descriptor`'s walk and hash over regular files, minus the scope.
+
+- *Scope.* `output/`, `bin/api_startup_file.txt` and every `__pycache__/` directory are left out.
+  Measured on the GMAT install of this host, the whole-tree descriptor is not stable: GMAT rewrites
+  `output/GmatLog.txt` on every run (3,969 bytes on 2026-10-17; the value recorded in
+  `docs/kit-operator-supplied.md` item 3, 768,931,073 bytes, was taken before a run changed it, and
+  `pack_descriptor` now reads 768,932,620 bytes and hash `sha256:6eb7d09b...`), the Python API leaves
+  bytecode in `bin/gmatpy/**/__pycache__/`, and `api/BuildApiStartupFile.py` generates
+  `bin/api_startup_file.txt` with the install's absolute path in it, so the same release unpacked
+  elsewhere hashes differently. The twelve files outside the scope are exactly the files of the tree
+  newer than the release (`find . -type f -newermt 2026-03-27`). Everything else, including the 13
+  `.DS_Store` files the macOS archive ships, is inside it.
+- *Symlinks.* `pack_descriptor` skips symlinks (`_iter_pack_files`), so its hash cannot see GMAT's
+  183 links (library names such as `libOpenThreads.21.dylib` -> `libOpenThreads.3.3.1.dylib`): a
+  retargeted link changes nothing it computes. The pin therefore also records the count and a hash of
+  the listing (`symlink_listing_hash`: one line per link, `json.dumps([path, target])`, sorted by
+  path; targets are read with `readlink`, never followed). The recorded macOS pin of the other three
+  fields is unaffected by this addition.
+- *Not covered* (`not_covered` in the pin component and in `INSTALL_RECORD`): file modes, ownership,
+  timestamps, extended attributes and empty directories; the scope's files; and any change after the
+  install-time check (the generated startup file lists the plugins GMAT loads; it is the operator's
+  to generate and is not verified).
+
+**The builder.** `--copy-pack gmat` is refused (above). `--with-pack gmat --max-pack-bytes N` (N above
+the tree's ~770 MB) records `packs.gmat` as `pack_descriptor` returns it for the build host's tree plus
+`operator_supplied.measured_on_build_host` (the scoped measurement) and
+`platforms_matching_this_descriptor` (the pinned platforms whose pin equals it; empty when the build
+host's GMAT matches none, which does not fail the build).
+
+**The installer.** When the kit has `packs.gmat`:
+
+    <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform macos-arm64
+
+`--gmat-root` is the operator's unpacked GMAT R2026a, `--gmat-platform` is its platform key; neither
+has a default and the platform is not guessed from the installing host, because the installer also
+runs in a Linux container over a macOS tree (question 217), where the host says nothing about the
+tree. Refusals (exit 2, before the target directory is created; `OperatorSuppliedRefused.code`):
+`gmat-root-missing` (names every pinned platform with hash, files, bytes), `gmat-root-not-a-directory`,
+`gmat-platform-missing`, `gmat-no-pin-for-platform` (lists the platforms that have a pin),
+`gmat-root-unreadable`, `gmat-descriptor-differs` (expected and found hash, files, bytes, symlinks and
+which fields differ), `gmat-kit-not-operator-supplied` (a `packs.gmat` without the marker, i.e. a kit
+built before this change) and `gmat-pin-malformed`. A match is recorded in
+`INSTALL_RECORD.installed.operator_supplied.gmat` (platform, root exactly as given, `found`, `pin`,
+`scope`, `not_covered`) and nothing is copied; the operator points `GMAT_ROOT` at that directory.
+A kit without `packs.gmat` does not need GMAT and the record says `required: false`.
+`INSTALL_RECORD.installed.packs` lists packs whose bytes were copied; `packs_descriptor_only` the rest.
+
+**Adding a pin for another platform** (a kit built for Linux, say): unpack the GMAT R2026a release
+for that platform, then
+
+    .venv/bin/python scripts/kit/build_kit.py --out out/kit/gmat-linux --with-pack gmat --max-pack-bytes 900000000
+
+on a host where `GMAT R2026a` at the repository root resolves to that tree (or, without a kit,
+`manifest.measure_tree(Path(root), scope)` with the component's `scope`), take the five fields from
+`packs.gmat.operator_supplied.measured_on_build_host`, and replace that platform's `null` in
+`operator_supplied.json` with them. Rebuild the kit (the pins file is part of it) and run the
+installer against that tree with `--gmat-platform <key>` before relying on the pin; the pin is only
+as good as the release it was measured from, so measure the unpacked release, not an install that has
+been run (the scope covers what a run writes, not everything an operator might change).
 
 ## The recorded kernel run
 

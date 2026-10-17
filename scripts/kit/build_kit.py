@@ -36,7 +36,8 @@ GATED, opt-in, off by default:
   images are operator-supplied (`docs/kit-operator-supplied.md`). See `scripts/kit/image_layer.py`.
 - `--with-pack <name>` (repeatable) -- an additional pack's DESCRIPTOR (content hash only).
 - `--copy-pack <name>` (repeatable) -- round 2: that pack's real BYTES, copied into the kit
-  (implies the descriptor too; `--max-pack-bytes` still gates it). Round 2 also copied `web`/
+  (implies the descriptor too; `--max-pack-bytes` still gates it). Refused for `gmat` (question
+  250(a), task 2): GMAT is operator-supplied, `--with-pack gmat` records its descriptor. Round 2 also copied `web`/
   `profiles` this same way, unconditionally, never gated behind this flag; round 3 removed both
   packs outright (see above) -- the `altavista` wheel carries them now.
 - `--with-vendor` -- round 2: `cargo vendor --offline` (falling back to the network exactly once
@@ -184,8 +185,8 @@ INSTALLER_SOURCE_FILES: tuple[str, ...] = (
     # one helper it shares with the test tooling (the image-table parse and the measured
     # untag-versus-delete rule). Both import the standard library and each other only.
     "image_build.py", "docker_image_tags.py",
-    # Question 250(a): the committed pins of what the operator supplies (base images today;
-    # GMAT and the out-of-kit services later). Data, not code: `install.py` does not import it.
+    # Question 250(a): the committed pins of what the operator supplies (the base images and GMAT
+    # today; the out-of-kit services later). Data, not code: `install.py` does not import it.
     "operator_supplied.json",
 )
 
@@ -1017,6 +1018,18 @@ def build(
     kit_root = out
     if kit_root.exists() and any(kit_root.iterdir()):
         raise RuntimeError(f"--out {kit_root} already exists and is not empty -- pass an empty or new directory")
+    # Question 250(a), task 2: the kit never carries an operator-supplied pack's bytes (GMAT). Refused
+    # before anything is written, naming the flag that records the descriptor instead.
+    copy_set = set(copy_pack_names or [])
+    operator_copy = sorted(copy_set & set(kit_manifest.OPERATOR_SUPPLIED_PACKS))
+    if operator_copy:
+        raise kit_manifest.OperatorSuppliedPackError(
+            f"--copy-pack {' --copy-pack '.join(operator_copy)}: operator-supplied "
+            f"(docs/kit-operator-supplied.md), so the kit never carries its bytes -- use "
+            f"{' '.join('--with-pack ' + n for n in operator_copy)} to record its descriptor; the "
+            f"installer verifies the operator's own copy against the pin in "
+            f"scripts/kit/operator_supplied.json (--gmat-root, --gmat-platform)"
+        )
     # Question 250(a): every refusal that needs no Docker (pins, Dockerfiles, the recorded `.deb`'s
     # hash) happens before a single byte is written into the kit.
     prepared_images = prepare_images(repo_root) if with_images else None
@@ -1032,7 +1045,6 @@ def build(
     # Round 3 (question 217(b)) removed both packs -- the `altavista` wheel carries them now (see
     # manifest.py's own top doc) -- so nothing is unioned in any more; a caller's own explicit
     # `--copy-pack` request is still honoured for every other pack exactly as before.
-    copy_set = set(copy_pack_names or [])
     pack_names = list(dict.fromkeys([kit_manifest.DEFAULT_PACK, *(with_pack_names or []), *copy_set]))
     unknown_packs = [n for n in pack_names if n not in kit_manifest.PACKS]
     if unknown_packs:
@@ -1048,6 +1060,12 @@ def build(
             copy_result = kit_manifest.copy_pack_bytes(name, source_path, kit_root)
             desc["copied"] = True
             desc["copy"] = copy_result
+        if name in kit_manifest.OPERATOR_SUPPLIED_PACKS:
+            # Descriptor only, never bytes: `copied` stays False, and the entry says why and what the
+            # installer will compare (the pins file the kit carries as installer/operator_supplied.json).
+            desc["operator_supplied"] = kit_manifest.operator_supplied_marker(
+                name, source_path, kit_manifest.load_operator_pins(repo_root / "scripts" / "kit" / "operator_supplied.json"),
+            )
         packs[name] = desc
 
     images = (
@@ -1129,6 +1147,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--copy-pack", action="append", default=[], dest="copy_pack",
         help="repeatable: copy that pack's real BYTES into the kit (round 2), not merely its "
              "descriptor -- implies --with-pack for that name. --max-pack-bytes still gates it. "
+             "Refused for gmat, which is operator-supplied (use --with-pack gmat). "
              "Nothing is copied unconditionally any more (round 3, question 217(b), removed the "
              "web/profiles packs that once were) -- pass it explicitly for any pack you want.",
     )
@@ -1166,16 +1185,20 @@ def main(argv: list[str] | None = None) -> int:
     if not site.is_absolute():
         site = REPO_ROOT / site
 
-    manifest_path, manifest_sha256 = build(
-        repo_root=REPO_ROOT, out=out, site=site,
-        with_images=args.with_images,
-        with_pack_names=list(args.with_pack),
-        copy_pack_names=list(args.copy_pack),
-        max_pack_bytes=args.max_pack_bytes,
-        with_vendor=args.with_vendor,
-        with_wheels=args.with_wheels,
-        with_binaries=args.with_binaries,
-    )
+    try:
+        manifest_path, manifest_sha256 = build(
+            repo_root=REPO_ROOT, out=out, site=site,
+            with_images=args.with_images,
+            with_pack_names=list(args.with_pack),
+            copy_pack_names=list(args.copy_pack),
+            max_pack_bytes=args.max_pack_bytes,
+            with_vendor=args.with_vendor,
+            with_wheels=args.with_wheels,
+            with_binaries=args.with_binaries,
+        )
+    except kit_manifest.OperatorSuppliedPackError as e:
+        print(f"scripts/kit/build_kit.py: REFUSED -- {e}", file=sys.stderr)
+        return 2
     print(f"wrote kit to {manifest_path.parent}")
     print(f"wrote {manifest_path}")
     print(f"KIT_MANIFEST sha256: {manifest_sha256}")

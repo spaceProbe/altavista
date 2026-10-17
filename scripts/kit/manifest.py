@@ -123,6 +123,16 @@ changed and why:
   already holds the base, and compares the built image's runtime-content hash with the recorded one
   (the image id may differ). This is a real
   `kit_format` bump: a 4 installer expects tarballs where a 5 kit carries none.
+- **Question 250(a), task 2: GMAT is operator-supplied** (`OPERATOR_SUPPLIED_PACKS`). GMAT R2026a
+  bundles OpenSceneGraph and wxWidgets (LGPL), so the kit records its pack descriptor and never
+  carries a byte of it: `copy_pack_bytes` refuses such a pack (`OperatorSuppliedPackError`), the
+  builder refuses `--copy-pack gmat`, and `packs.gmat` carries an `operator_supplied` marker
+  (`operator_supplied_marker`). What the operator's tree must be is the per-platform pin in
+  `scripts/kit/operator_supplied.json` (`content_hash`, `file_count`, `total_bytes`, plus a
+  symlink-listing hash and count); the installer recomputes it with `measure_tree`, which is the
+  one function both sides use. The shape of `packs` did not change (one added key on one pack), so
+  `kit_format` stays 5: format 5 has not left the question-250(a) round, and an installer refuses a
+  `packs.gmat` without the marker (a kit built before this task) rather than skipping the check.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -360,6 +370,19 @@ PACKS: dict[str, str] = {
 #: descriptor-only unless `--copy-pack data-time` is also passed.
 DEFAULT_PACK = "data-time"
 
+#: Question 250(a), task 2: the packs the kit never carries. Pack name -> the id of the component in
+#: `operator_supplied.json` that pins it (`docs/kit-operator-supplied.md` item 3 for GMAT). The kit
+#: records such a pack's descriptor only; the installer recomputes it over the operator's copy.
+OPERATOR_SUPPLIED_PACKS: dict[str, str] = {"gmat": "gmat-r2026a"}
+
+#: The pins file beside this module (`scripts/kit/` in the repository, `installer/` in a kit).
+PINS_FILE = Path(__file__).resolve().parent / "operator_supplied.json"
+
+#: The fields of one per-platform pin, all required. The first three are `pack_descriptor`'s fields
+#: that do not depend on where the tree lives; the last two cover the symlinks `pack_descriptor`
+#: skips (see `symlink_listing_hash`).
+PIN_FIELDS = ("content_hash", "file_count", "total_bytes", "symlink_count", "symlink_listing_hash")
+
 #: Generous for any small in-tree pack (data/time is ~16 KB), far short of the 738 MB GMAT
 #: pack -- so requesting a big pack needs an explicit, larger `--max-pack-bytes` alongside
 #: `--with-pack`, never a silent multi-minute hash by default (Decision K).
@@ -371,6 +394,11 @@ class PackTooLargeError(RuntimeError):
     Decision K's "documented `--max-pack-bytes` refusal rather than silently skipping". Raised
     BEFORE any file content is read (only `os.stat` size information is needed to decide this),
     so refusing a 738 MB pack costs a directory walk, never a multi-minute hash."""
+
+
+class OperatorSuppliedPackError(RuntimeError):
+    """Raised when a caller asks for the bytes of a pack the operator supplies
+    (`OPERATOR_SUPPLIED_PACKS`). Never a partial copy: nothing is written before it is raised."""
 
 
 class UnsafePackSymlinkError(RuntimeError):
@@ -434,17 +462,35 @@ class Finding:
 # Pack descriptors (Decision K)
 # =================================================================================================
 
-def _iter_pack_files(root: Path):
+def scope_excludes(rel_posix: str, scope: Optional[dict]) -> bool:
+    """Whether the path `rel_posix` (relative to the tree root, POSIX form) is outside a pin's
+    measurement scope: it is, or lies under, one of `scope["exclude_paths"]`, or some directory
+    component on the way to it is named in `scope["exclude_dir_names"]`. `None` excludes nothing."""
+    if not scope:
+        return False
+    for p in scope.get("exclude_paths", ()):
+        if rel_posix == p or rel_posix.startswith(p + "/"):
+            return True
+    names = scope.get("exclude_dir_names", ())
+    return any(part in names for part in rel_posix.split("/")[:-1])
+
+
+def _iter_pack_files(root: Path, scope: Optional[dict] = None):
     """Yields every regular, non-symlink file under `root`, in a stable (sorted, per-directory)
     order. `followlinks=False` (the `os.walk` default) and an explicit symlink check on both
     directories and files: a pack directory containing a symlink to something else entirely is a
     real possibility on this host (this repo's own top level has several), and this walker must
-    never silently follow one into content that is not actually part of the pack."""
+    never silently follow one into content that is not actually part of the pack.
+
+    `scope` (question 250(a), task 2; `scope_excludes`) leaves out the files of a pin's measurement
+    scope; `pack_descriptor` never passes one, so its result is unchanged."""
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if not (Path(dirpath) / d).is_symlink())
         for fn in sorted(filenames):
             full = Path(dirpath) / fn
             if full.is_symlink():
+                continue
+            if scope and scope_excludes(full.relative_to(root).as_posix(), scope):
                 continue
             yield full
 
@@ -538,6 +584,133 @@ def pack_descriptor(
     }
 
 
+# --- Question 250(a), task 2: operator-supplied packs (GMAT) --------------------------------------
+# What the builder records for such a pack, what the pins file holds for it, and the one measurement
+# the installer repeats over the operator's copy. Stdlib only, like everything the installer imports.
+
+def symlink_listing(root: Path, scope: Optional[dict] = None) -> list[tuple[str, str]]:
+    """Every symlink under `root` (file links and directory links alike, none of them followed or
+    descended into) that is inside `scope` (`scope_excludes`): `(path relative to root in POSIX form,
+    raw os.readlink target)`, sorted by path. `pack_descriptor`'s content hash walks regular files
+    only (`_iter_pack_files` skips every symlink), so a swapped or retargeted link changes nothing it
+    computes; this is the part it leaves out."""
+    return sorted(
+        (rel, os.readlink(full))
+        for full, kind in _walk_kit_entries(root) if kind == "symlink"
+        for rel in (full.relative_to(root).as_posix(),)
+        if not scope_excludes(rel, scope)
+    )
+
+
+def symlink_listing_hash(listing: list[tuple[str, str]]) -> str:
+    """`"sha256:<hex>"` over one line per link, in listing order: `json.dumps([path, target])` plus
+    `\\n` (JSON, so a path or target containing a space, a tab or an arrow cannot be misread; ASCII
+    output, so a non-UTF-8 name is escaped rather than rejected). An empty listing hashes the empty
+    stream."""
+    h = hashlib.sha256()
+    for rel, target in listing:
+        h.update((json.dumps([rel, target]) + "\n").encode("ascii"))
+    return f"sha256:{h.hexdigest()}"
+
+
+def measure_tree(root: Path, scope: Optional[dict] = None) -> dict:
+    """The fields a per-platform pin records, measured over the tree at `root` (a symlink to it is
+    followed once, like `pack_descriptor`): `pack_descriptor`'s `content_hash`, `file_count` and
+    `total_bytes` (the same helpers, so the values are identical for the same tree when `scope` is
+    `None`), plus `symlink_count` and `symlink_listing_hash`. `scope` (the pin component's own
+    `scope`, `scope_excludes`) leaves out what the operator's own use of the tree writes. No size
+    gate, no path of the host in the result."""
+    real = Path(os.path.realpath(root))
+    files = list(_iter_pack_files(real, scope))
+    links = symlink_listing(real, scope)
+    return {
+        "content_hash": _pack_content_hash(real, files),
+        "file_count": len(files),
+        "total_bytes": sum(f.stat().st_size for f in files),
+        "symlink_count": len(links),
+        "symlink_listing_hash": symlink_listing_hash(links),
+    }
+
+
+def compare_to_pin(found: dict, pin: dict) -> list[str]:
+    """The `PIN_FIELDS` on which `found` (a `measure_tree` result) differs from `pin`; empty means
+    the tree is what the pin records."""
+    return [f for f in PIN_FIELDS if found.get(f) != pin.get(f)]
+
+
+def load_operator_pins(pins_file: Optional[Path] = None) -> dict:
+    """The `components` of the pins file (`PINS_FILE` by default). Raises OSError / ValueError /
+    KeyError; callers turn those into their own typed refusal."""
+    return json.loads((pins_file or PINS_FILE).read_text(encoding="utf-8"))["components"]
+
+
+def pin_problems(platforms: object) -> list[str]:
+    """What is wrong with a component's `platforms` mapping (empty list: nothing). A platform maps to
+    `null` (no pin recorded for it yet) or to an object holding every `PIN_FIELDS` field, with a
+    `sha256:<64 hex>` hash and non-negative integer counts."""
+    if not isinstance(platforms, dict) or not platforms:
+        return ["`platforms` is missing or not a non-empty object"]
+    problems: list[str] = []
+    for key, pin in platforms.items():
+        if pin is None:
+            continue
+        if not isinstance(pin, dict):
+            problems.append(f"{key}: neither null nor an object")
+            continue
+        for field in PIN_FIELDS:
+            v = pin.get(field)
+            if field.endswith("hash"):
+                ok = isinstance(v, str) and len(v) == 71 and v.startswith("sha256:") and all(c in "0123456789abcdef" for c in v[7:])
+            else:
+                ok = isinstance(v, int) and not isinstance(v, bool) and v >= 0
+            if not ok:
+                problems.append(f"{key}.{field}: {v!r} is not valid")
+    return problems
+
+
+def scope_problems(scope: object) -> list[str]:
+    """What is wrong with a component's `scope` (empty list: nothing): an object whose
+    `exclude_paths` and `exclude_dir_names` are lists of plain relative POSIX names (no empty, `.`,
+    `..` or absolute entries, no trailing slash; a directory name is a single component)."""
+    if not isinstance(scope, dict):
+        return ["`scope` is missing or not an object"]
+    problems: list[str] = []
+    for key in ("exclude_paths", "exclude_dir_names"):
+        entries = scope.get(key)
+        if not isinstance(entries, list):
+            problems.append(f"scope.{key} is not a list")
+            continue
+        for e in entries:
+            parts = e.split("/") if isinstance(e, str) else []
+            if not parts or any(x in ("", ".", "..") for x in parts) or (key == "exclude_dir_names" and len(parts) != 1):
+                problems.append(f"scope.{key}: {e!r} is not a plain relative name")
+    return problems
+
+
+def operator_supplied_marker(name: str, tree_root: Path, pins: dict) -> dict:
+    """The `operator_supplied` key of `packs.<name>` for a pack in `OPERATOR_SUPPLIED_PACKS`: says the
+    kit does not carry the pack and why (the pin's own `why`, with its doc item), records what the
+    installer will measure on the build host's own copy (`measure_tree` under the component's `scope`;
+    `pack_descriptor`, on the pack entry beside this, covers the whole tree), and names the pinned
+    platforms whose pin equals that measurement. The list is empty when the pack on the build host
+    matches none, the normal state while a new platform has no pin; the kit is still built, since
+    building it is how that pin is read."""
+    component_id = OPERATOR_SUPPLIED_PACKS[name]
+    component = pins[component_id]
+    measured = measure_tree(tree_root, component["scope"])
+    return {
+        "component": component_id,
+        "doc": "docs/kit-operator-supplied.md",
+        "item": component["item"],
+        "measured_on_build_host": {"scope": component["scope"], **measured},
+        "pins_file": "installer/operator_supplied.json",
+        "platforms_matching_this_descriptor": sorted(
+            p for p, pin in component["platforms"].items() if pin is not None and not compare_to_pin(measured, pin)
+        ),
+        "reason": component["why"],
+    }
+
+
 def copy_pack_bytes(name: str, source_path: Path, kit_root: Path) -> dict:
     """Round 2 (lead ruling 214(b), superseding round 1's decision 11): copies a pack's real
     bytes into `<kit_root>/packs/<name>/`, preserving its own internal symlinks verbatim
@@ -564,6 +737,12 @@ def copy_pack_bytes(name: str, source_path: Path, kit_root: Path) -> dict:
     ends up in `KIT_MANIFEST` comes from `build_manifest`'s own walk of the finished kit
     (`files`/`pack_symlinks`), exactly like every other kit content -- this function never writes
     manifest data itself, only bytes."""
+    if name in OPERATOR_SUPPLIED_PACKS:
+        raise OperatorSuppliedPackError(
+            f"pack {name!r} is operator-supplied (docs/kit-operator-supplied.md): a kit records its "
+            f"descriptor and never carries its bytes -- use --with-pack {name} and let the installer "
+            f"verify the operator's copy"
+        )
     if not source_path.is_dir():
         raise FileNotFoundError(f"pack {name!r}: {source_path} does not exist or is not a directory")
 

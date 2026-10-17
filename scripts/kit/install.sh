@@ -10,6 +10,11 @@
 #   scripts/kit/install.sh <kit-dir> <target-dir>
 #   (or, more commonly now -- see below: <kit-dir>/installer/install.sh <kit-dir> <target-dir>)
 #
+# A kit that records a GMAT pack (packs.gmat) does not carry GMAT: add the operator's own unpacked
+# GMAT R2026a and its platform, and the installer verifies it against the pin, never copying it
+# (question 250(a); install.py's module doc, "GMAT is operator-supplied"):
+#   <kit-dir>/installer/install.sh <kit-dir> <target-dir> --gmat-root PATH --gmat-platform macos-arm64
+#
 # Images are built by a separate, host-side step of this same installer (question 250(a)): the
 # files install above runs inside the enclave and never gets the Docker socket. On the Docker host:
 #   <kit-dir>/installer/install.sh --build-images <kit-dir> [--image-tag COMPONENT=REF ...]

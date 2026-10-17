@@ -41,16 +41,18 @@ KIT_DOCKERFILES = {c: REPO_ROOT / d / "Dockerfile.kit" for c, d in image_layer.I
 def test_the_pins_file_has_the_two_base_images_with_their_doc_item_numbers():
     doc = image_layer.load_operator_supplied()
     assert doc["schema"] == 1 and doc["doc"] == "docs/kit-operator-supplied.md"
-    by_item = {c["item"]: c for c in doc["components"].values()}
+    bases = {cid: c for cid, c in doc["components"].items() if c["kind"] == "container-base-image"}
+    by_item = {c["item"]: c for c in bases.values()}
     assert set(by_item) == {1, 2}
+    # every other component is the operator's GMAT (item 3, test_kit_install.py): a data tree, not a base image
+    assert {c["kind"] for cid, c in doc["components"].items() if cid not in bases} == {"data-tree"}
     assert by_item[1]["reference"] == (
         "ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc")
     assert by_item[1]["base_of"] == ["cfs-image"]
     assert by_item[2]["reference"] == (
         "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171")
     assert by_item[2]["base_of"] == ["edge-plugin-image"]
-    for c in doc["components"].values():
-        assert c["kind"] == "container-base-image"
+    for c in bases.values():
         assert re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", c["reference"])
         assert c["reference"].endswith("@" + c["digest"])
         assert c["why"].strip() and c["licences"].strip()

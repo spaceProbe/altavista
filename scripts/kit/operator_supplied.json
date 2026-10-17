@@ -11,6 +11,35 @@
       "reference": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
       "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
     },
+    "gmat-r2026a": {
+      "how_to_add_a_pin": "see scripts/kit/README.md, 'GMAT is operator-supplied': measure the unpacked release with manifest.measure_tree(root, scope) on the target platform and replace that platform's null with the five fields",
+      "item": 3,
+      "kind": "data-tree",
+      "licences": "OSGPL (LGPL-2.1 with extra permissions: libosg*, libOpenThreads, osgdb_* plugins), wxWindows Library Licence (LGPL-2.0+ with a binary exception: libwx_*); GMAT itself is Apache-2.0",
+      "not_covered": [
+        "file modes, ownership, timestamps, extended attributes and empty directories: the content hash covers the relative path and bytes of each regular file, the symlink listing covers each link's path and target",
+        "everything the scope leaves out: files the operator's own use of the tree writes (output/, __pycache__ bytecode, bin/api_startup_file.txt, which api/BuildApiStartupFile.py generates and which holds the install's absolute path)",
+        "anything that changes after the install-time check"
+      ],
+      "pack": "gmat",
+      "platforms": {
+        "linux-aarch64": null,
+        "linux-x86_64": null,
+        "macos-arm64": {
+          "content_hash": "sha256:d21cddbbffbd3c44982bd98a7fb3a221b79ae6e26f2696eff4046f745d1eca39",
+          "file_count": 2060,
+          "symlink_count": 183,
+          "symlink_listing_hash": "sha256:f788ebf2fa73ef4d22e8ca2f4c1d51bb92a6a30dda34d0366ef19c3a719b5420",
+          "total_bytes": 764662632
+        }
+      },
+      "reference": "GMAT R2026a, NASA's release for the target platform (SourceForge), unpacked",
+      "scope": {
+        "exclude_dir_names": ["__pycache__"],
+        "exclude_paths": ["output", "bin/api_startup_file.txt"]
+      },
+      "why": "GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL); the kit records GMAT's pack descriptor and never carries its bytes (docs/kit-operator-supplied.md item 3). The installer measures the operator's unpacked release and compares it with the pin for the target platform"
+    },
     "ubuntu-22.04-base-image": {
       "base_of": ["cfs-image"],
       "digest": "sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc",

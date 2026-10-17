@@ -52,6 +52,26 @@ The image step writes its own record (`IMAGE_BUILD_RECORD`) rather than amending
 it runs on a different machine at a different time and the files install's target is not
 necessarily reachable from the Docker host.
 
+# GMAT is operator-supplied and verified here, never copied (question 250(a), task 2)
+
+GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL), so a kit records GMAT's pack descriptor
+(`packs.gmat`, with an `operator_supplied` marker) and never carries a byte of it
+(`docs/kit-operator-supplied.md` item 3). When the kit has `packs.gmat`, the operator brings an
+unpacked GMAT R2026a for the target platform and says where it is and which platform it is:
+
+    <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform KEY
+
+`verify_operator_gmat` measures the tree (`manifest.measure_tree`, under the pin's `scope`) and
+compares it with the pin recorded for KEY in the installer's own `operator_supplied.json`: content
+hash, file count, total bytes, and the count and hash of the symlink listing. A match is recorded in
+`INSTALL_RECORD.installed.operator_supplied.gmat` (platform, root exactly as given, what was found,
+the pin) and the tree is not touched or copied. The platform is never guessed from the installing
+host: this installer also runs in a Linux container over a macOS tree (question 217), where the
+host says nothing about the tree. KEY is `<os>-<uname -m>`, e.g. `macos-arm64`. When the kit has no
+`packs.gmat` the install does not need GMAT and says so in the record. The measurement is a check at
+install time over what the pin covers (`not_covered` in the pin component, repeated in the record);
+it does not prove the tree is unchanged afterwards.
+
 # Why this is a separate module from install.sh
 
 Exactly the split scripts/kit/manifest.py's own top doc argues for between the manifest format
@@ -124,6 +144,15 @@ it").
    viewer with no `web/` static root or no `profiles/` store to read from still cannot serve a
    single request, so this is exactly as load-bearing as it always was.
 
+7. **(question 250(a), task 2)** `packs.gmat` is in the kit and the operator's GMAT is not what its
+   pin says, each with a `gmat-*` code (`OperatorSuppliedRefused.code`): `gmat-root-missing`
+   (no `--gmat-root`; names every pinned platform with hash, files, bytes),
+   `gmat-root-not-a-directory`, `gmat-platform-missing`, `gmat-no-pin-for-platform` (lists the
+   platforms that have pins), `gmat-root-unreadable`, `gmat-descriptor-differs` (expected and found
+   hash, file count, bytes, symlinks), and, for a broken kit or pins file,
+   `gmat-kit-not-operator-supplied` and `gmat-pin-malformed`. All of them happen before the target
+   directory is created.
+
 Every refusal exits 2 and prints one clearly-labelled line to stderr naming exactly what was
 wrong -- never a bare non-zero exit with no explanation (this task's own "an exit code is not
 evidence" rule applies just as much to a REFUSAL as to a success).
@@ -157,6 +186,9 @@ sys.path.insert(0, str(SCRIPT_DIR))  # so `import manifest` finds scripts/kit/ma
 
 import image_build  # noqa: E402  (question 250(a): the host-side image step this module dispatches to)
 import manifest as kit_manifest  # noqa: E402  (path insert must precede this import)
+
+#: The kit pack the operator supplies (question 250(a), task 2); `manifest.OPERATOR_SUPPLIED_PACKS` names its pin.
+GMAT_PACK = "gmat"
 
 #: The two flags `main` hands to `image_build.main` instead of running the files install.
 IMAGE_STEP_FLAGS = ("--build-images", "--probe-offline-build")
@@ -200,6 +232,15 @@ class InstallRefused(RuntimeError):
     "What this refuses"). Caught once, in `main`, and printed as a single labelled stderr line
     plus exit code 2 -- never a bare traceback for a condition this installer itself detected and
     named."""
+
+
+class OperatorSuppliedRefused(InstallRefused):
+    """An `InstallRefused` about an operator-supplied component, with a stable `code` (see this
+    module's top doc, refusal 7) tests and callers can match on; the message starts with it."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
 
 
 def _normalize_dist_name(name: str) -> str:
@@ -404,6 +445,117 @@ def _install_wheels_into_venv(kit_dir: Path, target_dir: Path) -> dict:
     }
 
 
+def _describe_pin(pin: dict) -> str:
+    return (
+        f"content_hash {pin['content_hash']}, {pin['file_count']} files, {pin['total_bytes']} bytes, "
+        f"{pin['symlink_count']} symlinks (listing hash {pin['symlink_listing_hash']})"
+    )
+
+
+def _describe_pins(platforms: dict) -> str:
+    pinned = {k: v for k, v in sorted(platforms.items()) if v is not None}
+    return "; ".join(f"{k}: {_describe_pin(v)}" for k, v in pinned.items()) or "(none)"
+
+
+def verify_operator_gmat(
+    doc: dict, *, gmat_root: "str | None", gmat_platform: "str | None", pins_file: "Path | None" = None,
+) -> dict:
+    """GMAT's operator-supplied check (module doc, "GMAT is operator-supplied"): returns what was
+    found and verified, for `INSTALL_RECORD.installed.operator_supplied.gmat`, or raises
+    `OperatorSuppliedRefused`. Reads nothing but `gmat_root`, which it never writes or copies; the
+    pins come from the installer's own `operator_supplied.json` (`pins_file` for tests).
+
+    Refusal order, cheapest first, the hash last: no root, root not a directory, no platform, no pin
+    for the platform, then the measurement."""
+    entry = doc["packs"].get(GMAT_PACK)
+    if entry is None:
+        record = {
+            "required": False, "verified": False,
+            "reason": "the kit has no packs.gmat, so its contents do not need GMAT; nothing was checked",
+        }
+        if gmat_root is not None:
+            record["root_given_but_unused"] = gmat_root
+        return record
+
+    component_id = kit_manifest.OPERATOR_SUPPLIED_PACKS[GMAT_PACK]
+    marker = entry.get("operator_supplied")
+    if entry.get("copied") or not isinstance(marker, dict) or marker.get("component") != component_id:
+        raise OperatorSuppliedRefused(
+            "gmat-kit-not-operator-supplied",
+            f"KIT_MANIFEST's packs.gmat is not marked operator-supplied (copied={entry.get('copied')!r}, "
+            f"operator_supplied={marker!r}) -- a kit built before question 250(a), task 2, or by another "
+            f"builder; this installer will not skip the check for it. Rebuild the kit with --with-pack gmat.",
+        )
+    pins_path = pins_file or kit_manifest.PINS_FILE
+    try:
+        component = kit_manifest.load_operator_pins(pins_path)[component_id]
+        platforms = component["platforms"]
+        scope = component["scope"]
+        problems = kit_manifest.pin_problems(platforms) + kit_manifest.scope_problems(scope)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise OperatorSuppliedRefused(
+            "gmat-pin-malformed",
+            f"the installer's pins file {pins_path} has no usable {component_id!r} component "
+            f"({type(e).__name__}: {e})",
+        ) from e
+    if problems:
+        raise OperatorSuppliedRefused(
+            "gmat-pin-malformed", f"{pins_path}: {component_id!r}: " + "; ".join(problems),
+        )
+    item = component.get("item")
+    pinned = {k: v for k, v in platforms.items() if v is not None}
+
+    if gmat_root is None:
+        raise OperatorSuppliedRefused(
+            "gmat-root-missing",
+            f"this kit needs GMAT R2026a (operator-supplied: docs/kit-operator-supplied.md item {item}); the kit "
+            f"does not carry it. Unpack GMAT R2026a for the target platform and pass --gmat-root PATH and "
+            f"--gmat-platform KEY. Pinned platforms: {_describe_pins(platforms)}",
+        )
+    if not Path(gmat_root).is_dir():
+        raise OperatorSuppliedRefused(
+            "gmat-root-not-a-directory", f"--gmat-root {gmat_root!r} is not a directory",
+        )
+    if gmat_platform is None:
+        raise OperatorSuppliedRefused(
+            "gmat-platform-missing",
+            f"--gmat-platform KEY is required with --gmat-root (never guessed from this host: the installer may "
+            f"run in a Linux container over a macOS tree). Pinned platforms: {_describe_pins(platforms)}",
+        )
+    pin = platforms.get(gmat_platform)
+    if pin is None:
+        raise OperatorSuppliedRefused(
+            "gmat-no-pin-for-platform",
+            f"no GMAT pin is recorded for platform {gmat_platform!r}. Platforms with a pin: {sorted(pinned)}; "
+            f"known platforms without one: {sorted(k for k, v in platforms.items() if v is None)}. A pin for a new "
+            f"platform is added when a kit is built for it (scripts/kit/README.md, 'GMAT is operator-supplied')",
+        )
+
+    print(f"verifying GMAT at {gmat_root!r} against the {gmat_platform} pin (reads every file once) ...",
+          file=sys.stderr, flush=True)
+    try:
+        found = kit_manifest.measure_tree(Path(gmat_root), scope)
+    except OSError as e:
+        raise OperatorSuppliedRefused(
+            "gmat-root-unreadable", f"--gmat-root {gmat_root!r} could not be read ({type(e).__name__}: {e})",
+        ) from e
+    differs = kit_manifest.compare_to_pin(found, pin)
+    if differs:
+        raise OperatorSuppliedRefused(
+            "gmat-descriptor-differs",
+            f"the GMAT tree at {gmat_root!r} is not what the {gmat_platform} pin records (differs in "
+            f"{', '.join(differs)}). expected: {_describe_pin(pin)}. found: {_describe_pin(found)}. Not "
+            f"installing against a GMAT that is not the pinned release.",
+        )
+    return {
+        "required": True, "verified": True, "copied": False,
+        "component": component_id, "item": item,
+        "platform": gmat_platform, "root": gmat_root,
+        "found": found, "pin": pin, "scope": scope,
+        "not_covered": component.get("not_covered", []),
+    }
+
+
 def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
     """What `INSTALL_RECORD` says about images: this install built none (it has no path to the
     daemon), which step does, and what that step must reproduce for each image."""
@@ -427,8 +579,11 @@ def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
     }
 
 
-def install(kit_dir: Path, target_dir: Path) -> dict:
-    """Runs the whole install: verify, refuse-checks, copy, chmod, pip install, INSTALL_RECORD.
+def install(
+    kit_dir: Path, target_dir: Path, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
+) -> dict:
+    """Runs the whole install: verify, refuse-checks (GMAT included, when the kit needs it), copy,
+    chmod, pip install, INSTALL_RECORD.
     Returns the INSTALL_RECORD dict (also written to `<target_dir>/INSTALL_RECORD`). Raises
     `InstallRefused` for every named refusal condition -- callers (this module's own `main`, and
     tests) get one typed exception, never a bare traceback for a condition this function itself
@@ -441,6 +596,8 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
     _check_required_sections(doc)
     _check_required_wheels(doc)
     _check_viewer_assets_in_wheel(kit_dir, doc)
+    # Question 250(a), task 2: before the target directory exists, so a refusal leaves nothing behind.
+    gmat_record = verify_operator_gmat(doc, gmat_root=gmat_root, gmat_platform=gmat_platform)
     _check_target_dir(target_dir)
 
     installed_kit_dir = _copy_kit_tree(kit_dir, target_dir)
@@ -462,7 +619,11 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
         "installed": {
             "kit_tree": "kit",
             "binaries_made_executable": binaries_made_executable,
-            "packs": sorted(doc["packs"].keys()),
+            # Only packs whose bytes the kit carried are installed; a descriptor-only pack (data-time by
+            # default, and GMAT always: operator-supplied) is named separately, so the record never says
+            # a pack was installed that was not.
+            "packs": sorted(n for n, e in doc["packs"].items() if e.get("copied")),
+            "packs_descriptor_only": sorted(n for n, e in doc["packs"].items() if not e.get("copied")),
             "wheels": wheels_info,
             "vendor_collected": doc["vendor"]["collected"],
             "sboms": sorted(doc["sboms"].keys()),
@@ -472,6 +633,8 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
         "gaps": doc["gaps"],
     }
     record["installed"]["images"] = _images_record(doc, kit_manifest_sha256)
+    # One entry per operator-supplied component, each the result of its own verify_* function.
+    record["installed"]["operator_supplied"] = {"gmat": gmat_record}
     record_path = target_dir / "INSTALL_RECORD"
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return record
@@ -481,6 +644,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("kit_dir", type=Path, help="an existing kit directory (KIT_MANIFEST + content)")
     p.add_argument("target_dir", type=Path, help="a fresh or empty directory to install into")
+    p.add_argument(
+        "--gmat-root", metavar="PATH", default=None,
+        help="the operator's unpacked GMAT R2026a; required when the kit has packs.gmat. Verified against the "
+             "pin for --gmat-platform, never copied",
+    )
+    p.add_argument(
+        "--gmat-platform", metavar="KEY", default=None,
+        help="the platform of that GMAT, <os>-<uname -m> (e.g. macos-arm64); required with --gmat-root and never "
+             "guessed from this host, which may be a Linux container over a macOS tree",
+    )
     return p
 
 
@@ -490,12 +663,17 @@ def main(argv: "list[str] | None" = None) -> int:
         return image_build.main(argv)
     args = build_parser().parse_args(argv)
     try:
-        record = install(args.kit_dir, args.target_dir)
+        record = install(args.kit_dir, args.target_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform)
     except InstallRefused as e:
         print(f"scripts/kit/install.py: REFUSED -- {e}", file=sys.stderr)
         return 2
     print(f"installed kit {args.kit_dir} -> {args.target_dir}")
     print(f"kit manifest sha256: {record['kit_manifest_sha256']}")
+    gmat = record["installed"]["operator_supplied"]["gmat"]
+    if gmat["verified"]:
+        print(f"GMAT at {gmat['root']} verified against the {gmat['platform']} pin (not copied)")
+    else:
+        print("GMAT not needed by this kit")
     print(f"wrote {args.target_dir / 'INSTALL_RECORD'}")
     return 0
 
