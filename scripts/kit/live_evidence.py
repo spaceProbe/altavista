@@ -39,10 +39,11 @@ process, exactly the charter's own sanctioned fallback.
 # What this module brings up, and how cheaply -- see `collect_live_ledger_verify`
 
 - **av-ingest-server** (D4b's own floor: "at minimum") -- docker, from the kit's own cross-built
-  `binaries/av-ingest-server` and the kit's own `av-edge-plugin:local` image (loaded and its
-  digest compared against what `KIT_MANIFEST` records BEFORE anything trusts it -- question 212;
-  the load restores the host's `:local` tags afterwards and the container runs from a run-scoped
-  test-only tag, never the `:local` one -- question 239, `docker_image_tags.py`),
+  `binaries/av-ingest-server` and the edge-plugin image built from the kit's application layer
+  (question 250(a): `_build_image_from_kit`, the kit's own `image_build.py`, on the operator's
+  pinned base, offline, and trusted only after its runtime-content hash equals the one
+  `KIT_MANIFEST` records; the container runs from a run-scoped test-only tag, never the `:local`
+  one -- question 239, `docker_image_tags.py`),
   inside a freshly created, LABELLED, `--internal` bridge network. The same `lock_docker_tests`/
   `prune_stale_labelled_resources`/labelled-resource discipline
   `tests/test_kit_zero_egress_install.py` already establishes -- reused here by direct import of
@@ -102,8 +103,9 @@ KIT_SCRIPT_DIR = Path(__file__).resolve().parent
 if str(KIT_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(KIT_SCRIPT_DIR))
 import evidence  # noqa: E402  (path insert must precede this import)
+import image_build  # noqa: E402  (question 250(a): the kit's own host-side image step)
 import sbom  # noqa: E402
-from docker_image_tags import ImageTagGuard, LoadedImage  # noqa: E402
+from docker_image_tags import ImageTagGuard  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT / "services" / "gmat-service"))
 from gmat_service.admin import serve_admin  # noqa: E402
@@ -234,28 +236,31 @@ def _wait_for_container_log_substring(name: str, substrings: tuple[str, ...], ti
         time.sleep(0.1)
 
 
-def _load_and_verify_image(kit_dir: Path, component: str, image_tags: ImageTagGuard) -> LoadedImage:
-    """Question 212: `docker load -i` the kit's own tarball for `component` and compare the
-    loaded image id to the digest `KIT_MANIFEST` records for it -- trusted only after this
-    comparison, both digests returned so the caller can quote them (question 148).
+def _build_image_from_kit(kit_dir: Path, component: str, run_id: str, image_tags: ImageTagGuard) -> dict:
+    """Question 250(a): the kit no longer carries an image tarball, it carries the image's
+    application layer. This builds `component`'s image from it through the kit's own host-side
+    image step (`scripts/kit/image_build.py`, the module `<kit>/installer/install.sh --build-images`
+    runs): the pinned base must already be on this host (verified by digest before anything is
+    built), the build is `--network none --pull=false`, and the image is trusted only after its
+    runtime-content hash equals the one `KIT_MANIFEST` records (question 185) and its modes and
+    `.Config` match -- the replacement for question 212's "load a tarball, compare its image id".
 
-    Question 239: `docker load` restores the tarball's OWN repository tag on the host, so a kit
-    built on an earlier day moved `av-edge-plugin:local` onto its older image (three times; the
-    host's `IMAGE_DIGEST.md` gate, question 212(a), then compared a different image to its
-    recorded digest). The load, the verification BY ID and the undo of every tag binding the load
-    created or moved are `scripts/kit/docker_image_tags.py::ImageTagGuard`'s, shared with
-    `tests/test_kit_zero_egress_install.py`; the caller runs containers from the returned
-    `LoadedImage.test_tag` (never the `:local` tag) and closes with
-    `image_tags.assert_host_tags_unchanged()` from its outermost `finally`."""
-    manifest_doc = json.loads((kit_dir / "KIT_MANIFEST").read_text(encoding="utf-8"))
-    entry = manifest_doc["images"][component]
-    tarball = kit_dir / "images" / f"{component}.tar"
-    if not tarball.is_file():
-        raise RuntimeError(f"{component}: KIT_MANIFEST claims images.{component}.collected but {tarball} is missing")
-    return image_tags.load_verified(
-        component=component, tarball=tarball, tag=entry["tag"],
-        recorded_digest=entry["recorded_digest"], keep_as_test_tag=True,
+    Question 239's tag discipline is kept: the image gets only the run-scoped, test-only name
+    `ImageTagGuard.test_only_tag(component)` (registered with the guard, so
+    `remove_test_only_tags()` removes it by name and `assert_host_tags_unchanged()` proves it is
+    gone); the kit's `:local` tag is never touched. Returns `{"test_tag", "evidence"}` -- the
+    evidence is the step's own record for the component."""
+    test_tag = image_tags.test_only_tag(component)
+    record_dir = REPO_ROOT / ".av-test-tmp" / "live_evidence" / run_id
+    record_dir.mkdir(parents=True, exist_ok=True)
+    record = image_build.build_images(
+        image_build.docker_runner, kit_dir, image_tags=[f"{component}={test_tag}"], components=[component],
+        record_path=record_dir / f"IMAGE_BUILD_RECORD.{component}",
+        container_labels={TEST_LABEL_KEY: TEST_LABEL_VALUE, "av.test.run_id": run_id},
+        out=lambda _line: None,
     )
+    image_tags.test_only_tags.append(test_tag)
+    return {"test_tag": test_tag, "evidence": record["images"][component]}
 
 
 # =================================================================================================
@@ -280,15 +285,19 @@ def bring_up_av_ingest_server(kit_dir: Path, run_id: str) -> dict:
         }
 
     prune_stale_labelled_resources()
-    # Question 239: the tag snapshot is taken before the load, outside the `try`, so the closing
+    # Question 239: the tag snapshot is taken before the build, outside the `try`, so the closing
     # `assert_host_tags_unchanged` below always has one to compare against.
     image_tags = ImageTagGuard(run_id, TEST_TAG_PREFIX)
     network_name = f"av-live-evidence-net-{run_id}"
     ingest_container = f"av-live-evidence-ingest-{run_id}"
     admin_url = "http://127.0.0.1:50071"
     try:
-        loaded_image = _load_and_verify_image(kit_dir, "edge-plugin-image", image_tags)
-        image_provenance = {key: loaded_image.evidence[key] for key in ("tag", "recorded_digest", "loaded_digest")}
+        built_image = _build_image_from_kit(kit_dir, "edge-plugin-image", run_id, image_tags)
+        image_provenance = {
+            key: built_image["evidence"][key]
+            for key in ("tag", "image_id", "runtime_content_hash_recorded", "runtime_content_hash_computed", "equal")
+        }
+        image_provenance["base"] = built_image["evidence"]["base"]
         _docker("network", "create", "--internal", *_label_args(run_id), network_name)
         _docker(
             "run", "-d", "--name", ingest_container, "--network", network_name, *_label_args(run_id),
@@ -296,9 +305,9 @@ def bring_up_av_ingest_server(kit_dir: Path, run_id: str) -> dict:
             "-v", f"{kit_dir}/binaries:/kit/binaries:ro",
             "-v", f"{VERIFY_PUB_PEM}:/keys/verify.pub.pem:ro",
             "--entrypoint", "/kit/binaries/av-ingest-server",
-            # The run-scoped test-only tag, not `image_provenance["tag"]` (`av-edge-plugin:local`):
-            # that host tag is what the load no longer lets this module trust (question 239).
-            loaded_image.test_tag,
+            # The run-scoped test-only tag the image was built under, never the kit's `:local` tag
+            # (question 239).
+            built_image["test_tag"],
             "--grpc-bind", "127.0.0.1:50070", "--admin-bind", "127.0.0.1:50071",
             "--log-dir", "/data/ingest-log",
             "--no-require-client-cert", "--verify-key", f"{PRODUCER_ID}:/keys/verify.pub.pem",
@@ -316,8 +325,8 @@ def bring_up_av_ingest_server(kit_dir: Path, run_id: str) -> dict:
             image_tags.remove_test_only_tags()
             _assert_nothing_labelled_left(run_id)
         finally:
-            # Runs on the failure path too (a load that failed, a digest mismatch, a container
-            # that never came up): every code path that loads ends with the host's tags as found.
+            # Runs on the failure path too (a refused build, a hash mismatch, a container that
+            # never came up): every code path that builds ends with the host's tags as found.
             image_tags.assert_host_tags_unchanged()
 
     return {

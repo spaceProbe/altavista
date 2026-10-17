@@ -428,8 +428,10 @@ def test_collect_component_writes_the_application_layer_and_the_dockerfile_copie
 
     entry = image_layer.collect_component(
         REPO_ROOT, kit, component, prepared, recorded, tag=recorded["tag"], run_id="t",
-        copier_factory=fake_copier_factory(image_root),
+        copier_factory=fake_copier_factory(image_root), config={"Entrypoint": ["/e"], "Hostname": "x"},
     )
+    assert entry["runtime_set"] == image_layer.runtime_set_entry(component)
+    assert entry["config"] == image_layer.config_subset({"Entrypoint": ["/e"]})
 
     root = kit / "images" / component
     assert (root / "Dockerfile").read_bytes() == KIT_DOCKERFILES[component].read_bytes()
@@ -555,6 +557,8 @@ def _patch_docker(monkeypatch, tmp_path, ids: dict[str, str] | None = None):
     by_tag = {recorded[c]["tag"]: c for c in sbom.IMAGE_COMPONENTS}
     monkeypatch.setattr(build_kit, "_docker_available", lambda: True)
     monkeypatch.setattr(build_kit, "_docker_image_id", lambda tag: (ids or {}).get(tag, recorded[by_tag[tag]]["recorded_digest"]))
+    monkeypatch.setattr(build_kit, "_docker_image_config", lambda tag: image_layer.config_subset(
+        {"Entrypoint": [f"/entry-of/{by_tag[tag]}"], "User": "u", "Env": ["PATH=/x"], "Hostname": "ignored"}))
     import altavista.docker_test_lock as lock_module
     monkeypatch.setattr(lock_module, "lock_docker_tests", lambda: nullcontext())
     monkeypatch.setattr(image_layer, "image_copier", lambda tag, run_id: fake_copier_factory(images[by_tag[tag]][0])(tag, run_id))
@@ -588,6 +592,10 @@ def test_collect_images_end_to_end_with_docker_faked(tmp_path, monkeypatch):
         assert entry["base"]["reference"] == image_layer.base_pin_for(component)["reference"]
         assert entry["dockerfile"] == {"kit_path": f"images/{component}/Dockerfile"}
         assert (kit / "images" / component / "Dockerfile").is_file()
+        # The installer's image step (image_build.py) reads the roots to hash and the .Config to compare from here.
+        assert entry["runtime_set"] == image_layer.runtime_set_entry(component)
+        assert entry["config"] == image_layer.config_subset({"Entrypoint": [f"/entry-of/{component}"], "User": "u", "Env": ["PATH=/x"]})
+        assert set(entry["config"]) == set(image_layer.CONFIG_KEYS) and "Hostname" not in entry["config"]
     assert not list(kit.rglob("*.tar"))
 
 
@@ -603,3 +611,10 @@ def test_build_refuses_a_bad_deb_hash_before_anything_is_written_into_the_kit(tm
         build_kit.build(repo_root=REPO_ROOT, out=out, site=REPO_ROOT / build_kit.DEFAULT_SITE, with_images=True)
     assert not out.exists()
     assert not (REPO_ROOT / image_layer.DEB_CACHE_DIR / wrong["sha256"]).exists()
+
+
+def test_the_runtime_set_the_manifest_records_is_the_one_the_builder_hashes():
+    """`image_build.py` (shipped in the kit) reads these roots out of the image it builds; they must be the
+    builder's `RUNTIME_SETS`, which the recorded hashes were computed over."""
+    for component, rset in image_layer.RUNTIME_SETS.items():
+        assert image_layer.runtime_set_entry(component) == {"files": list(rset.files), "trees": list(rset.trees), "packages": list(rset.packages)}

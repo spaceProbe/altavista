@@ -119,19 +119,24 @@ def docker_tag_snapshot() -> dict:
     return _tags_of(docker_image_table())
 
 
-def docker_image_table() -> dict:
+def docker_image_table(run: Optional[Callable[[list], str]] = None) -> dict:
     """`image id -> [(repository or None, tag or None), ...]` for EVERY image on this host, one row
     per reference `docker image ls` prints (one `--format` call). A real tag is `(repo, tag)`; a
     reference by digest only (`repo@sha256:...`, from a pull by digest) prints as `(repo, None)`; an
     image with no name at all (dangling, known only by its id) is `(None, None)`. Unlike the tag
-    snapshot, nothing is dropped, so an image no `repository:tag` names is still seen."""
+    snapshot, nothing is dropped, so an image no `repository:tag` names is still seen.
+
+    `run(args) -> stdout text` (raising on a non-zero exit) replaces the real `docker` call; the
+    kit's bundled installer (`image_build.py`, question 250(a)) passes its own injectable runner so
+    its refusals can be tested without Docker."""
     table: dict = {}
+    runner = run or (lambda args: _docker(*args).stdout)
     # A plain `docker image ls` hides the nameless images on the containerd store (measured: 0
     # `<none>:<none>` rows against 20 under `--filter dangling=true` on this host), so they are
     # listed separately. `-a` is not used: it adds the manifests and children of every image.
     for extra in ((), ("--filter", "dangling=true")):
-        result = _docker("image", "ls", "--no-trunc", *extra, "--format", "{{.Repository}}\t{{.Tag}}\t{{.ID}}")
-        for line in result.stdout.splitlines():
+        stdout = runner(["image", "ls", "--no-trunc", *extra, "--format", "{{.Repository}}\t{{.Tag}}\t{{.ID}}"])
+        for line in stdout.splitlines():
             if not line.strip():
                 continue
             repo, tag, image_id = line.split("\t")
@@ -343,6 +348,62 @@ class ImageTagGuard:
                     f"created or moved --\n" + "\n".join(problems)
                 )
         return LoadedImage(evidence=evidence, test_tag=test_tag, changed=changed)
+
+    def load_base_verified(self, *, component: str, tarball: Path, expected_id: str) -> dict:
+        """Question 250(a): the operator-supplied BASE image from a tarball saved BY DIGEST
+        (`scripts/kit/save_base_images.py`: `docker save <name>@sha256:...`, which carries no
+        `RepoTags`; measured: `manifest.json` has `"RepoTags": null`, `index.json` names the digest).
+
+        1. The tarball's own `index.json`/`manifest.json` must name `expected_id` (the pin), and
+           carry no repository names at all: a name would be restored on the host by the load, and
+           removing it again could delete the base (this module's heavy-ct-5 section), so such a
+           tarball is refused rather than loaded.
+        2. If `expected_id` is already on the host, the load is SKIPPED, not run: measured on this
+           host, `docker load` of a tarball whose image is present adds a nameless (dangling) reference
+           to that image, a mutation of a pinned image for no gain. The present image is verified by
+           id exactly as a loaded one would be.
+        3. Otherwise `docker load -i` runs, and the image it produced is verified BY ID.
+
+        Never tags, never removes. Returns the evidence dict (what was read, what was done); raises
+        `ImageHygieneError` on any disagreement. The caller holds the docker lock."""
+        ids, names = _tarball_identity(tarball)
+        if expected_id not in ids:
+            raise ImageHygieneError(
+                f"{component}: {tarball} names image(s) {sorted(ids)!r}, not the pinned {expected_id} -- "
+                f"refusing to load a tarball that is not the pinned base"
+            )
+        if names:
+            raise ImageHygieneError(
+                f"{component}: {tarball} carries repository name(s) {sorted(names)!r}; a base tarball must be "
+                f"saved by digest (scripts/kit/save_base_images.py) so that loading it names nothing on the host"
+            )
+        before_table = docker_image_table()
+        before_load = _tags_of(before_table)
+        if expected_id in before_table:
+            action = "skipped: the pinned image is already on this host (a load would only add a nameless reference to it)"
+        else:
+            load = subprocess.run(["docker", "load", "-i", str(tarball)], capture_output=True, text=True, timeout=300)
+            if load.returncode != 0:
+                raise ImageHygieneError(f"{component}: docker load -i {tarball} failed (rc={load.returncode}): {load.stderr}")
+            action = load.stdout.strip()
+        after_load = _tags_of(docker_image_table())
+        if after_load != before_load:
+            moved = {t: (before_load.get(t), after_load.get(t)) for t in set(before_load) | set(after_load) if before_load.get(t) != after_load.get(t)}
+            raise ImageHygieneError(f"{component}: loading {tarball} changed repository tag(s) on this host: {moved!r}")
+        verify = subprocess.run(
+            ["docker", "image", "inspect", expected_id, "--format", "{{.Id}}"], capture_output=True, text=True, timeout=30,
+        )
+        actual = verify.stdout.strip()
+        if verify.returncode != 0 or actual != expected_id:
+            raise ImageHygieneError(
+                f"{component}: after the load, `docker image inspect {expected_id}` gave "
+                f"{actual or verify.stderr.strip()!r}, not the pinned id"
+            )
+        return {
+            "component": component, "tarball": str(tarball), "tarball_image_ids": sorted(ids),
+            "expected_id": expected_id, "host_id": actual, "present_before": expected_id in before_table,
+            "docker_load": action,
+        }
 
     def _fragile_preexisting_image(self, component: str, tarball: Path, before_table: dict) -> Optional[str]:
         """The id of the image `tarball` carries when that image is ALREADY on the host and no

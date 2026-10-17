@@ -171,14 +171,19 @@ def assemble_sboms(repo_root: Path, kit_root: Path) -> dict:
 
 
 #: Question 217(c): the exact, recursively-checked import closure `scripts/kit/install.py` needs
-#: to run -- `install.py` imports `manifest`, which imports `sbom`, which imports `licences`; none
-#: of the four imports anything else outside the standard library (see `tests/
+#: to run -- `install.py` imports `manifest`, which imports `sbom`, which imports `licences`, and
+#: `image_build` (question 250(a)), which imports `manifest` and `docker_image_tags`; none of them
+#: imports anything else outside the standard library (see `tests/
 #: test_kit_manifest.py::test_install_py_stays_importable_with_only_the_standard_library`, which
 #: proves this dynamically, not merely by reading the source). `build_kit.py` itself is
 #: DELIBERATELY excluded -- it imports `packaging` (question 217(e)), and the whole point of this
 #: list is that the installer never needs a third-party package on the target machine it runs on.
 INSTALLER_SOURCE_FILES: tuple[str, ...] = (
     "install.sh", "install.py", "manifest.py", "sbom.py", "licences.py",
+    # Question 250(a), second half: the host-side image step (`install.sh --build-images`) and the
+    # one helper it shares with the test tooling (the image-table parse and the measured
+    # untag-versus-delete rule). Both import the standard library and each other only.
+    "image_build.py", "docker_image_tags.py",
     # Question 250(a): the committed pins of what the operator supplies (base images today;
     # GMAT and the out-of-kit services later). Data, not code: `install.py` does not import it.
     "operator_supplied.json",
@@ -355,6 +360,20 @@ def _docker_image_id(tag: str) -> str:
     return result.stdout.strip()
 
 
+def _docker_image_config(tag: str) -> dict:
+    """`.Config` of the recorded image `tag` (`docker image inspect`), the subset the installer's image
+    step compares against the image it builds (`image_layer.CONFIG_KEYS`; question 250(a))."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", tag, "--format", "{{json .Config}}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"`docker image inspect {tag} --format {{{{json .Config}}}}` failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+    return image_layer.config_subset(json.loads(result.stdout))
+
+
 def prepare_images(repo_root: Path) -> dict:
     """Everything `--with-images` can refuse that needs no Docker, done BEFORE the kit is touched:
     the operator-supplied pins against both Dockerfiles, the runtime Dockerfiles against the
@@ -412,6 +431,7 @@ def collect_images(repo_root: Path, kit_root: Path, prepared: "dict | None" = No
                 )
             result[component] = image_layer.collect_component(
                 repo_root, kit_root, component, prepared[component], recorded, tag=tag, run_id=run_id,
+                config=_docker_image_config(tag),
             )
     return result
 

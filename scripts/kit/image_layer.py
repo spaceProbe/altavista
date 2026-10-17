@@ -14,12 +14,13 @@ per image, exactly what the image adds over its base:
   recorded modes in `KIT_MANIFEST`;
 - for the edge-plugin image, the recorded `libssl3` `.deb` and its copyright file.
 
-A host-side step builds the image from that directory with
-`docker build --network none --pull=false` on a host that already holds the base image, and
-compares the result with the recorded RUNTIME-CONTENT HASH (question 185), not the image id (an
-id changes with every layer timestamp). This module is the builder-side half: pins, the
-runtime-content hash, extraction from the recorded image, and the `.deb` record. It does not
-build or install anything.
+A host-side step (`scripts/kit/image_build.py`, run as `installer/install.sh --build-images`)
+builds the image with `docker build --network none --pull=false` on a host that already holds the
+base image, and compares the result with the recorded RUNTIME-CONTENT HASH (question 185), not the
+image id (an id changes with every layer timestamp). This module is the builder-side half: pins, the
+runtime-content hash, extraction from the recorded image, the `.deb` record, and what the installer's
+step needs to know about the image it will build (`runtime_set`: the roots the hash is taken over;
+`config`: the recorded image's `.Config` subset). It does not build or install anything.
 
 # The runtime-content hash (question 185)
 
@@ -109,6 +110,28 @@ RUNTIME_SETS: dict[str, RuntimeSet] = {
         packages=("libssl3",),
     ),
 }
+
+
+def runtime_set_entry(component: str) -> dict:
+    """`RUNTIME_SETS[component]` as the manifest records it (`images.<component>.runtime_set`): the
+    installer's image step reads the built image through exactly these roots, so a file added under
+    one of them (or a package file the kit did not record) changes the hash it computes."""
+    rset = RUNTIME_SETS[component]
+    return {"files": list(rset.files), "trees": list(rset.trees), "packages": list(rset.packages)}
+
+
+#: The `docker image inspect .Config` keys the installer's image step compares (question 250(a)):
+#: what decides how a container made from the image behaves. `Hostname`, `Image`, `Domainname` and
+#: the like describe the build, not the image.
+CONFIG_KEYS = (
+    "Entrypoint", "Cmd", "User", "WorkingDir", "Volumes", "Labels", "Env",
+    "ExposedPorts", "Healthcheck", "StopSignal", "OnBuild", "Shell",
+)
+
+
+def config_subset(config: Mapping[str, object]) -> dict:
+    """`CONFIG_KEYS` out of a `.Config` object, every key present (absent ones `None`)."""
+    return {k: config.get(k) for k in CONFIG_KEYS}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -687,7 +710,9 @@ def uncollected_images(repo_root: Path = REPO_ROOT) -> dict:
             **kit_manifest.read_recorded_image(component),
             "collected": False,
             "runtime_content_hash": read_recorded_runtime_hash(repo_root, component),
+            "runtime_set": runtime_set_entry(component),
             "base": base_entry(base_pin_for(component, repo_root)),
+            "config": None,
             "dockerfile": None,
             "files": [],
             "packages": [],
@@ -699,6 +724,7 @@ def uncollected_images(repo_root: Path = REPO_ROOT) -> dict:
 
 def collected_entry(
     recorded: dict, prepared: PreparedComponent, extracted: ExtractedRuntime, component: str,
+    config: Optional[dict] = None,
 ) -> dict:
     root = f"images/{component}"
     files = []
@@ -723,7 +749,12 @@ def collected_entry(
         **recorded,
         "collected": True,
         "runtime_content_hash": extracted.content_hash,
+        "runtime_set": runtime_set_entry(component),
         "base": base_entry(prepared.base),
+        # `.Config` of the recorded image (`CONFIG_KEYS`), read from the live image at kit-build time:
+        # what the installer's image step compares the image it builds with. `None` only when a
+        # caller (a test with a faked image) supplied none; the installer refuses such a kit.
+        "config": config_subset(config) if config is not None else None,
         "dockerfile": {"kit_path": f"{root}/Dockerfile"},
         "files": files,
         "packages": packages,
@@ -761,7 +792,7 @@ def write_component(repo_root: Path, kit_root: Path, component: str, prepared: P
 
 def collect_component(
     repo_root: Path, kit_root: Path, component: str, prepared: PreparedComponent, recorded: dict,
-    *, tag: str, run_id: str, copier_factory=None,
+    *, tag: str, run_id: str, copier_factory=None, config: Optional[dict] = None,
 ) -> dict:
     """One component: extract the runtime set from the live image, refuse unless its runtime-content
     hash equals the recorded one, write the kit's `images/<component>/`, return the manifest entry."""
@@ -776,7 +807,7 @@ def collect_component(
                 f"build-image.sh and update its record, or investigate the mismatch."
             )
         write_component(repo_root, kit_root, component, prepared, extracted)
-    return collected_entry(recorded, prepared, extracted, component)
+    return collected_entry(recorded, prepared, extracted, component, config)
 
 
 def new_run_id() -> str:

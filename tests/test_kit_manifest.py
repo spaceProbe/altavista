@@ -310,6 +310,9 @@ def test_images_step_is_gated(tmp_path):
         assert entry["runtime_content_hash"].startswith("sha256:")
         assert entry["base"]["reference"].endswith(entry["base"]["digest"])
         assert entry["tag"]
+        # Question 250(a): what the installer's image step reads out of a built image is recorded even
+        # when nothing was collected; the recorded `.Config` needs the live image, so it is None here.
+        assert entry["runtime_set"] == image_layer.runtime_set_entry(component) and entry["config"] is None
 
     assert not (kit_root / "images").exists(), "no images/ directory should exist when --with-images was not requested"
     assert not any(f["path"].startswith("images/") for f in doc["files"])
@@ -384,6 +387,8 @@ def test_images_step_with_the_flag_set_carries_the_application_layer(tmp_path):
         assert entry["dockerfile"]["kit_path"] == f"images/{component}/Dockerfile"
         assert files_by_path[entry["dockerfile"]["kit_path"]]["role"] == "image-dockerfile"
         assert entry["runtime_content_hash"] == image_layer.read_recorded_runtime_hash(REPO_ROOT, component)
+        assert entry["runtime_set"] == image_layer.runtime_set_entry(component)
+        assert set(entry["config"]) == set(image_layer.CONFIG_KEYS) and entry["config"]["Entrypoint"], entry["config"]
         # The manifest's own per-file records re-hash to the runtime-content hash (package files
         # included: they are recorded, with their sha256, even though their bytes live in the .deb).
         assert image_layer.runtime_content_hash({f["image_path"]: f["sha256"] for f in entry["files"]}) == \
@@ -1217,7 +1222,7 @@ def test_install_py_stays_importable_with_only_the_standard_library():
     here rather than passing by accident because this test's own venv happens to have everything
     installed."""
     installer_and_deps = [KIT_DIR / "install.py", KIT_DIR / "manifest.py", KIT_DIR / "sbom.py",
-                           KIT_DIR / "licences.py"]
+                           KIT_DIR / "licences.py", KIT_DIR / "image_build.py", KIT_DIR / "docker_image_tags.py"]
     for path in installer_and_deps:
         for forbidden in ("build_kit", "packaging"):
             hits = _modules_importing_top_level_package([path], forbidden)
@@ -1233,6 +1238,8 @@ def test_install_py_stays_importable_with_only_the_standard_library():
         "import install\n"
         "import manifest\n"
         "import sbom\n"
+        "import image_build\n"
+        "import docker_image_tags\n"
         "print('OK')\n"
     )
     result = subprocess.run(

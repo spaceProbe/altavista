@@ -12,10 +12,15 @@ scratch inside the enclave, not an already-built plugin image run directly).
 
 # What this file proves, and in what order
 
-1. **Image provenance (question 212).** `docker load -i` each image tarball
-   `out/kit/proof/images/*.tar` carries, on the HOST, under `lock_docker_tests()`, and assert the
-   loaded image id equals the digest `KIT_MANIFEST` records for that component -- an image is
-   trusted only after that comparison, and both digests are printed (question 148).
+1. **Base provenance (question 250(a)).** The kit carries no image and no base layer: only each
+   image's application layer (`images/<component>/`). The two operator-supplied BASE images come
+   from separately saved tarballs OUTSIDE the kit (`out/kit/proof-bases/`, made on the connected
+   machine by `scripts/kit/save_base_images.py`, which `docker save`s each pinned base BY DIGEST and
+   writes a sha256 list). The test re-checks that list, loads each tarball on the HOST under
+   `lock_docker_tests()` through `ImageTagGuard.load_base_verified` (no host tag moves; a pinned
+   image already on the host is verified, not re-loaded), and asserts the id equals the pin. It also
+   asserts the kit holds no `images/*.tar` and no file whose sha256 equals a (non-empty) file of
+   either base image (a quick per-file check; task 7 writes the full inventory test).
 2. A freshly created, labelled **`--internal`** bridge network -- no route off this host, proven
    (the egress probe below), not merely named.
 3. The egress probe, from inside that network, BEFORE any install activity and again AFTER --
@@ -23,17 +28,38 @@ scratch inside the enclave, not an already-built plugin image run directly).
    ENETUNREACH-shaped error. Naming a public address on an `--internal` network touches no actual
    network (there is no default route to even attempt sending a packet), which is why this
    satisfies question 154 despite the addresses being real.
-4. **The install**, inside a labelled container on that same network, with the kit bind-mounted
-   **read-only**: `scripts/kit/install.sh <kit> <fresh-dir-in-a-labelled-volume>`, using
-   `--no-index` for the one `pip install` it runs. Must succeed with the container's OWN network
-   already proven to have no route out.
+4. **The files install**, inside a labelled container on that same network, with the kit
+   bind-mounted **read-only**: `<kit>/installer/install.sh <kit> <fresh-dir-in-a-labelled-volume>`,
+   using `--no-index` for the one `pip install` it runs. Must succeed with the container's OWN
+   network already proven to have no route out. **The container never gets the Docker socket,
+   `DOCKER_HOST` or any other path to the daemon** (the lead's ruling: such a container could start
+   a networked container and defeat the `--internal` isolation this proof rests on):
+   `_assert_no_docker_daemon_access` checks the very argument list handed to `docker run`, the
+   daemon's own record of the container (`docker inspect`: binds, env, privileged) is checked
+   afterwards, and a probe container with the same mounts looks for a socket and `DOCKER_HOST`.
+4b. **The image step**, on the HOST, from the kit's OWN bundled installer
+   (`<kit>/installer/install.py --build-images`, not this repository's `scripts/kit/`): it builds
+   both images from the application layer on the loaded bases with `docker build --network none
+   --pull=false`, and trusts each only after its runtime-content hash (question 185), file modes
+   and `.Config` equal what the kit records. Proved around it: `docker events` over the whole
+   window shows no `pull` and no `start` of any container the step created; a probe build through
+   the same code path whose `RUN` tries the network fails with the network-unreachable error
+   (`--probe-offline-build`); each built id did not exist before; and the runtime-content hash is
+   recomputed here by a DIFFERENT implementation (`sha256sum` inside the image, as the
+   `build-image.sh` scripts do, formatted and sorted by this file) and compared with the recorded
+   one; `.Config` is compared with the recorded `:local` images'. Two perturbations: a kit whose
+   pinned base digest names an image the host does not hold is refused before any build (a typed
+   `base-image-missing` refusal; the build is never issued, so nothing can reach a registry); and an
+   attacker-consistent kit (one application file changed, every hash in `KIT_MANIFEST` re-computed so
+   it verifies) builds and is then refused on the runtime-content hash, naming both hashes, leaving
+   no tag behind.
 5. **The demo path**, run from the just-installed tree, inside the same network, in order:
    a. the viewer server, started from the INSTALLED wheels (`altavista.server.create_app`, the
       package `python -m altavista` itself is), proven alive by a real HTTP GET over loopback from
       a second container sharing its network namespace;
    b. `av-ingest-server`, started from the kit's own cross-built `binaries/av-ingest-server`,
       proven alive by its own `GRPC_LISTENING`/`ADMIN_LISTENING` readiness lines;
-   c. the edge plugin, from the image this file itself just `docker load`-ed in step 1 (not
+   c. the edge plugin, from the image the kit's own image step just built (step 4b; not
       whatever tag happened to already be on the host), joined to the ingest's network namespace
       (`--network container:<ingest>`), delivering the pinned demo-ground-segment batch set that
       `crates/av-edge/tests/fixtures/ground_segment/README.md` documents and
@@ -138,13 +164,15 @@ and cross-checks it rather than trusting anything the kit says about itself).
 # Gating (question 194) -- computed once, at import time
 
 `_compute_skip_reason()` requires: Docker; the `python:3.13-slim` probe image already present
-(never pulled here, question 154); and the EXPENSIVE proof kit already built, out-of-band, at
+(never pulled here, question 154); the EXPENSIVE proof kit already built, out-of-band, at
 `out/kit/proof` (`_KIT_DIR`), with its `images`/`wheels`/`binaries`/`packs` sections all actually
-collected and its own manifest verifying clean. Building that kit takes real minutes (a Rust cross-
-build, `cargo vendor`, a `pip download` against PyPI, two `docker save`s) and reaches the network
-(question 154's one build-time exception) -- doing that inside a test would violate "no network at
-test time" outright, so this test never builds it; it only ever consumes an already-built one and
-skips, by name, with the exact command that builds it, when it is missing. This mirrors `tests/
+collected and its own manifest verifying clean; the saved base-image tarballs at
+`out/kit/proof-bases/` (`_PROOF_BASES_CMD` makes them); and both recorded `:local` images on the
+host at their recorded ids (their `.Config` is what the built images are compared with). Building
+the kit takes real minutes (a Rust cross-build, `cargo vendor`, a `pip download` against PyPI) and
+reaches the network (question 154's one build-time exception) -- doing that inside a test would
+violate "no network at test time" outright, so this test never builds it; it only ever consumes an
+already-built one and skips, by name, with the exact command that builds it, when it is missing. This mirrors `tests/
 test_edge_plugin_container.py::_compute_skip_reason` precisely: run for real, or skip visibly
 naming why, never silently pass (question 194).
 
@@ -195,13 +223,27 @@ implementation, `scripts/kit/docker_image_tags.py::ImageTagGuard`, shared with
 file keeps only the kit-specific parts (which components, the test-only tag prefix, `KIT_MANIFEST`).
 The restore now also runs on the failure paths of a single load (load failed, tag missing, digest
 mismatch), not only after a verified one.
+
+Question 250(a): the kit carries no image tarball any more, so there is no kit tarball to `docker
+load`; what is loaded is the two operator-supplied BASE tarballs (`ImageTagGuard.load_base_verified`,
+which loads nothing already on the host and names nothing), and the images are built by the kit's
+own installer under test-only tags (`_TEST_TAG_PREFIX/<component>:<run id>`), registered with both
+`ResourceGuard` (removed by name at the end) and `ImageTagGuard.test_only_tags` (so
+`assert_host_tags_unchanged` proves they are gone and that no other tag moved). Each built id is
+checked absent from the host's image table before the build, so removing the tag removes only what
+this run created.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import os
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 import zipfile
@@ -215,7 +257,8 @@ sys.path.insert(0, str(KIT_DIR))
 import build_kit  # noqa: E402  (path insert must precede this import)
 import manifest as kit_manifest  # noqa: E402
 import sbom  # noqa: E402
-from docker_image_tags import ImageTagGuard  # noqa: E402  (question 239: shared with live_evidence.py)
+import save_base_images  # noqa: E402  (question 250(a): the operator's side of the bases)
+from docker_image_tags import ImageTagGuard, docker_image_table  # noqa: E402  (question 239: shared with live_evidence.py)
 
 from altavista.container_hardening import (  # noqa: E402
     TEST_LABEL_KEY,
@@ -234,6 +277,11 @@ _PROOF_KIT_BUILD_CMD = (
     ".venv/bin/python scripts/kit/build_kit.py --out out/kit/proof "
     "--with-images --with-vendor --with-wheels --with-binaries --copy-pack data-time"
 )
+
+#: Question 250(a): the operator-supplied base images, saved by digest on the connected machine
+#: (`scripts/kit/save_base_images.py`) -- NOT part of the kit, which carries no base layer.
+_PROOF_BASES_DIR = REPO_ROOT / "out" / "kit" / "proof-bases"
+_PROOF_BASES_CMD = ".venv/bin/python scripts/kit/save_base_images.py --out out/kit/proof-bases"
 
 PROBE_IMAGE = "python:3.13-slim"
 
@@ -299,8 +347,11 @@ def _proof_kit_missing_sections(doc: dict, kit_dir: Path) -> list[str]:
     if doc.get("kit_format") != kit_manifest.KIT_FORMAT:
         missing.append(f"kit_format (proof kit is {doc.get('kit_format')!r}, this worktree builds {kit_manifest.KIT_FORMAT!r})")
     for component in sbom.IMAGE_COMPONENTS:
-        if not doc.get("images", {}).get(component, {}).get("collected"):
+        entry = doc.get("images", {}).get(component, {})
+        if not entry.get("collected"):
             missing.append(f"images.{component}")
+        elif not entry.get("runtime_set") or not entry.get("config"):
+            missing.append(f"images.{component}.runtime_set/config (the installer's image step needs both)")
     if not doc.get("wheels", {}).get("collected"):
         missing.append("wheels")
     if not doc.get("vendor", {}).get("collected"):
@@ -370,6 +421,27 @@ def _compute_skip_reason() -> "str | None":
             f"the kit at {_PROOF_KIT_DIR} does NOT verify against its own KIT_MANIFEST "
             f"({len(findings)} finding(s)) -- rebuild with: {_PROOF_KIT_BUILD_CMD}"
         )
+    try:
+        save_base_images.verify_sums(_PROOF_BASES_DIR)
+        wanted = {f"{pin_id}.tar" for pin_id in save_base_images.base_pins()}
+        have = {n for n in (_PROOF_BASES_DIR / "SHA256SUMS").read_text().split() if n.endswith(".tar")}
+    except (save_base_images.SaveRefused, OSError) as e:
+        return (
+            f"the saved base-image tarballs are not at {_PROOF_BASES_DIR} ({e}) -- the kit carries no base "
+            f"layer (question 250(a)), so this proof loads the operator's bases from tarballs saved by digest "
+            f"outside it. Make them on a machine that holds the pinned images with: {_PROOF_BASES_CMD}"
+        )
+    if wanted != have:
+        return f"{_PROOF_BASES_DIR}/SHA256SUMS lists {sorted(have)}, expected {sorted(wanted)} -- re-make them with: {_PROOF_BASES_CMD}"
+    for component in sbom.IMAGE_COMPONENTS:
+        entry = doc["images"][component]
+        got = subprocess.run(["docker", "image", "inspect", entry["tag"], "--format", "{{.Id}}"], capture_output=True, text=True, timeout=30)
+        if got.returncode != 0 or got.stdout.strip() != entry["recorded_digest"]:
+            return (
+                f"the recorded image {entry['tag']} is not on this host at its recorded id {entry['recorded_digest']} "
+                f"(found {got.stdout.strip() or got.stderr.strip()!r}); the built images' .Config is compared with it. "
+                f"Rebuild it with its services/*/build-image.sh (under the docker lock) and re-record."
+            )
     return None
 
 
@@ -451,11 +523,11 @@ class ResourceGuard:
         assert remaining_networks == "", f"network(s) labelled {label_filter} still exist after cleanup: {remaining_networks!r}"
         remaining_volumes = _docker("volume", "ls", "--filter", label_filter, "-q").stdout.strip()
         assert remaining_volumes == "", f"volume(s) labelled {label_filter} still exist after cleanup: {remaining_volumes!r}"
-        # This test builds no image of its own (it only ever loads the kit's own tarballs under
-        # their already-recorded tags, and runs PROBE_IMAGE/those loaded tags) -- confirm none
-        # carries this run's label rather than silently assuming it.
+        # The images the kit's installer builds carry the kit's own labels, not this run's `av.test`
+        # labels, and are removed by name above (`images`); confirm none carries this run's label
+        # rather than silently assuming it.
         remaining_images = _docker("images", "--filter", label_filter, "-q").stdout.strip()
-        assert remaining_images == "", f"no image should ever carry {label_filter} (this test creates none), but found: {remaining_images!r}"
+        assert remaining_images == "", f"no image should ever carry {label_filter}, but found: {remaining_images!r}"
 
 
 def _wait_for_container_log_substring(name: str, substrings: tuple[str, ...], timeout_s: float) -> list[str]:
@@ -557,65 +629,318 @@ def test_zero_egress_install_and_demo_from_the_kit_alone():
         _run_zero_egress_install_and_demo_from_the_kit_alone()
 
 
-#: Round 5 (question 234): the one component this file still references by TAG NAME after B.1 --
-#: `edge-plugin-image` (`av-edge-plugin:local` in the kit's own `KIT_MANIFEST`), used by both
-#: `_run_ingest_from_installed_kit` (as the image `av-ingest-server` runs under) and
-#: `_run_edge_plugin_from_kit_image` (the plugin binary's own image). `cfs-image` is loaded and
-#: id-verified in `_load_and_verify_images` like every other component, but nothing below this
-#: point ever names its tag again -- it needs no test-only tag, since the undo step's own
-#: untag-vs-restore choice (never a bare-id `docker rmi`) is already safe for it without one.
-_COMPONENTS_REFERENCED_AFTER_LOAD = frozenset({"edge-plugin-image"})
-
-#: Round 5 (question 234): a name no other track's own image tag can collide with (the exact
-#: shape the brief for this task names) -- `run_id` is this test run's own `uuid.uuid4().hex[:12]`.
+#: Round 5 (question 234): a name no other track's own image tag can collide with -- `run_id` is
+#: this test run's own `uuid.uuid4().hex[:12]`. Question 250(a): the names the kit's own image step
+#: builds the two images under (`_test_image_tag`), never the kit's recorded `:local` tags.
 _TEST_TAG_PREFIX = "av-kit-zero-egress-test"
 
+#: The kit's OWN bundled installer, run on the HOST for the image step (never this repository's
+#: `scripts/kit/`); `-I` (isolated mode) so that nothing but the kit's directory can supply a module.
+_KIT_INSTALLER_PY = Path("installer") / "install.py"
 
-def _load_and_verify_images(image_tags: ImageTagGuard) -> tuple[dict, dict[str, str]]:
-    """B.1: `docker load -i` each image tarball the kit carries, on the host, and compare the
-    loaded image id to the digest `KIT_MANIFEST` records for that component -- an image is
-    trusted only after this comparison (question 212). Runs BEFORE any network/volume/container
-    of this test's own is created; needs no label of its own (it never creates a container).
 
-    Round 5 (question 234), moved by question 239 into `scripts/kit/docker_image_tags.py`
-    (`ImageTagGuard`) so `scripts/kit/live_evidence.py`, which `docker load`s the same tarballs,
-    shares one implementation instead of a copy: `docker load` restores the tarball's OWN
-    repository tag on the host, unconditionally, so every load there is bracketed by a `docker
-    image ls` snapshot, verified BY ID, and whatever `repository:tag -> id` binding it created
-    (`docker rmi <repository:tag>`, untag only) or moved (`docker tag <previous_id>
-    <repository:tag>`) is undone before the next component loads, on the failure paths too. The
-    one component this file still references by tag afterward (`_COMPONENTS_REFERENCED_AFTER_LOAD`)
-    is re-tagged under a test-only name BEFORE that undo step runs, so undoing the host tag can
-    never risk deleting the only reference to the image this test still needs; `ResourceGuard`
-    removes that test-only tag (registered through `ImageTagGuard`'s `on_test_tag`).
+def _test_image_tag(run_id: str, component: str) -> str:
+    return f"{_TEST_TAG_PREFIX}/{component}:{run_id}"
 
-    Returns `(evidence, test_tag_by_component)` -- `test_tag_by_component` names the test-only tag
-    created for each component in `_COMPONENTS_REFERENCED_AFTER_LOAD`, for the caller to hand to
-    `_run_ingest_from_installed_kit`/`_run_edge_plugin_from_kit_image` in place of the old
-    hardcoded `"av-edge-plugin:local"` literal (that tag is exactly what this function no longer
-    lets the rest of this file trust)."""
-    manifest_doc = json.loads((_PROOF_KIT_DIR / "KIT_MANIFEST").read_text(encoding="utf-8"))
-    evidence = {}
-    test_tag_by_component: dict[str, str] = {}
-    for component in sbom.IMAGE_COMPONENTS:
-        entry = manifest_doc["images"][component]
-        tarball = _PROOF_KIT_DIR / "images" / f"{component}.tar"
-        assert tarball.is_file(), f"{component}: kit claims images.{component}.collected but {tarball} is missing"
 
-        loaded = image_tags.load_verified(
-            component=component, tarball=tarball, tag=entry["tag"], recorded_digest=entry["recorded_digest"],
-            keep_as_test_tag=component in _COMPONENTS_REFERENCED_AFTER_LOAD,
+def _load_bases(image_tags: ImageTagGuard) -> list[dict]:
+    """B.1 (question 250(a)): the operator-supplied base images come from the separately saved
+    tarballs, not from the kit. Each tarball's sha256 is re-checked against the saved list, then
+    `ImageTagGuard.load_base_verified` loads it on the host (or, when the pinned image is already
+    there, verifies that one rather than adding a reference to it) and the id is compared with the
+    pin; the digest-qualified reference the kit's Dockerfiles start FROM must resolve to the pin."""
+    save_base_images.verify_sums(_PROOF_BASES_DIR)
+    evidence = []
+    for pin_id, pin in save_base_images.base_pins().items():
+        tarball = _PROOF_BASES_DIR / f"{pin_id}.tar"
+        assert tarball.is_file(), tarball
+        loaded = image_tags.load_base_verified(component=pin_id, tarball=tarball, expected_id=pin["digest"])
+        assert loaded["host_id"] == pin["digest"], loaded
+        by_reference = _docker("image", "inspect", pin["reference"], "--format", "{{.Id}}").stdout.strip()
+        assert by_reference == pin["digest"], f"{pin['reference']} resolves to {by_reference}, not the pinned {pin['digest']}"
+        evidence.append({**loaded, "reference": pin["reference"], "tarball_sha256": sbom.sha256_file(tarball)})
+    return evidence
+
+
+def _tarball_file_hashes(tarball: Path) -> set[str]:
+    """sha256 of every non-empty regular file in every layer of an OCI-layout `docker save`
+    tarball (stdlib only; the saved bases carry gzip layers)."""
+    hashes: set[str] = set()
+    with tarfile.open(tarball) as outer:
+        def blob(digest: str) -> "bytes | None":
+            try:
+                return outer.extractfile(f"blobs/sha256/{digest.split(':', 1)[1]}").read()
+            except KeyError:
+                return None
+
+        def walk(descriptor: dict) -> None:
+            data = blob(descriptor["digest"])
+            if data is None:
+                return
+            doc = json.loads(data)
+            for sub in doc.get("manifests", []):
+                walk(sub)
+            for layer in doc.get("layers", []):
+                media_type = layer.get("mediaType", "")
+                if "tar" not in media_type and "rootfs.diff" not in media_type:
+                    continue   # an attestation (in-toto) descriptor, not a filesystem layer
+                assert "zstd" not in media_type, f"zstd layer in {tarball}: this check reads tar and tar+gzip only"
+                layer_bytes = blob(layer["digest"])
+                if layer_bytes is None:
+                    continue
+                with tarfile.open(fileobj=io.BytesIO(layer_bytes), mode="r:*") as layer_tar:
+                    for member in layer_tar:
+                        if member.isreg() and member.size > 0:
+                            hashes.add(hashlib.sha256(layer_tar.extractfile(member).read()).hexdigest())
+
+        for descriptor in json.load(outer.extractfile("index.json"))["manifests"]:
+            walk(descriptor)
+    assert hashes, f"no file read from any layer of {tarball}"
+    return hashes
+
+
+def _assert_kit_carries_no_base_content(manifest_doc: dict) -> dict:
+    """The kit holds no `images/*.tar`, and none of its (non-empty) files is byte-identical to a file
+    of either base image: every file `KIT_MANIFEST` lists (their hashes were just re-verified by the
+    gate) against every file of the two saved bases. A quick per-file check; task 7 of this round
+    writes the full inventory test."""
+    tars = sorted(p.relative_to(_PROOF_KIT_DIR).as_posix() for p in (_PROOF_KIT_DIR / "images").rglob("*.tar"))
+    assert tars == [], f"the kit carries image tarball(s): {tars}"
+    base_hashes: dict[str, set[str]] = {}
+    for pin_id in save_base_images.base_pins():
+        base_hashes[pin_id] = _tarball_file_hashes(_PROOF_BASES_DIR / f"{pin_id}.tar")
+    overlap = {
+        pin_id: sorted((f["path"], f["role"]) for f in manifest_doc["files"] if f["size"] > 0 and f["sha256"] in hashes)
+        for pin_id, hashes in base_hashes.items()
+    }
+    # One measured, deliberate exception: `images/edge-plugin-image/libssl3.copyright` is the carried
+    # `.deb`'s copyright NOTICE (role `image-package-licence`, kept so the recorded package's licence is
+    # in the kit) and is byte-identical (sha256 6a7da622...) to Ubuntu 22.04's own
+    # /usr/share/doc/libssl3/copyright, because both packages ship the same upstream OpenSSL notice. A
+    # licence text is not base-image userland content; any other role is a failure.
+    allowed_roles = {"image-package-licence"}
+    unexpected = {pin_id: [p for p, role in found if role not in allowed_roles] for pin_id, found in overlap.items()}
+    assert not any(unexpected.values()), f"the kit carries file(s) byte-identical to a base-image file: {unexpected}"
+    return {
+        "kit_files_checked": sum(1 for f in manifest_doc["files"] if f["size"] > 0),
+        "base_files_hashed": {pin_id: len(h) for pin_id, h in base_hashes.items()},
+        "overlap_other_than_licence_notices": 0,
+        "licence_notices_identical_to_a_base_file": {pin_id: [p for p, role in found if role in allowed_roles] for pin_id, found in overlap.items()},
+    }
+
+
+class _ImageEvents:
+    """`docker events` (image and container events) over a window, to a file under the run scratch.
+    The image step is the only thing that runs inside it, so what the daemon logged is what the step
+    caused."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._proc = None
+        self._fh = None
+
+    def __enter__(self):
+        self._fh = self.path.open("w")
+        self._proc = subprocess.Popen(
+            ["docker", "events", "--format", "{{json .}}", "--filter", "type=image", "--filter", "type=container"],
+            stdout=self._fh, stderr=subprocess.STDOUT,
         )
-        evidence[component] = loaded.evidence
-        if loaded.changed:
-            print(
-                f"\n--- {component}: tag binding(s) this load created/changed, undone (question 199/234) ---\n"
-                + json.dumps({rt: {"before": old, "after": new} for rt, (old, new) in loaded.changed.items()}, indent=2)
-            )
-        if loaded.test_tag is not None:
-            test_tag_by_component[component] = loaded.test_tag
+        time.sleep(1.5)
+        return self
 
-    return evidence, test_tag_by_component
+    def __exit__(self, *exc):
+        time.sleep(1.5)
+        self._proc.terminate()
+        self._proc.wait(timeout=10)
+        self._fh.close()
+        return False
+
+    def events(self) -> list[dict]:
+        return [json.loads(line) for line in self.path.read_text().splitlines() if line.startswith("{")]
+
+
+def _events_summary(events: list[dict], run_id: str) -> dict:
+    counts: dict[str, int] = {}
+    for e in events:
+        key = f"{e.get('Type')}:{str(e.get('Action')).split(':')[0]}"
+        counts[key] = counts.get(key, 0) + 1
+    ours = [
+        e for e in events
+        if e.get("Type") == "container" and (e.get("Actor") or {}).get("Attributes", {}).get("av.test.run_id") == run_id
+        and str((e.get("Actor") or {}).get("Attributes", {}).get("image", "")).startswith(_TEST_TAG_PREFIX + "/")
+    ]
+    return {
+        "event_count": len(events), "by_type_and_action": dict(sorted(counts.items())),
+        "pulls": [e for e in events if e.get("Type") == "image" and e.get("Action") == "pull"],
+        "extract_container_events": sorted({str(e["Action"]).split(":")[0] for e in ours}),
+        "extract_containers_started": [e for e in ours if str(e["Action"]).startswith("start")],
+    }
+
+
+def _run_kit_installer(kit: Path, args: list[str], *, timeout: float = 900.0) -> subprocess.CompletedProcess:
+    """The KIT's bundled installer (`<kit>/installer/install.py`), isolated mode, on the host."""
+    return subprocess.run(
+        [sys.executable, "-I", str(kit / _KIT_INSTALLER_PY), *args], capture_output=True, text=True, timeout=timeout,
+    )
+
+
+#: The in-image shell implementations of the runtime-content set -- the commands
+#: `services/cfs/build-image.sh` (2b) and `services/edge-plugin/build-image.sh` (3a) run inside the
+#: image. This file only formats and sorts their output (its own code, not the installer's).
+_IN_IMAGE_HASH_SHELL = {
+    "cfs-image": (
+        "find /cfs/cpu1 -type f -exec sha256sum {} + ; "
+        "sha256sum /cfs/av-lockstep-shim /cfs/av-lockstep-relay /cfs/container-entrypoint.sh"
+    ),
+    "edge-plugin-image": (
+        "find /opt/edge-plugin -type f -exec sha256sum {} +\n"
+        "sha256sum /usr/local/bin/av-edge-plugin\n"
+        "dpkg -L libssl3 | while IFS= read -r p; do\n"
+        "    if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then sha256sum \"$p\"; fi\n"
+        "done"
+    ),
+}
+
+
+def _independent_runtime_hash(guard: ResourceGuard, image_ref: str, component: str) -> tuple[str, int]:
+    """A second implementation of question 185's hash: `sha256sum` inside the image (no `docker
+    cp`, no tar parsing), then this file's own sort and format. Run only after the installer's own
+    check passed."""
+    out = _docker(
+        "run", "--rm", "--network", "none", *guard.label_args(), "--entrypoint", "sh", image_ref, "-c",
+        _IN_IMAGE_HASH_SHELL[component],
+    ).stdout
+    pairs = {}
+    for line in out.splitlines():
+        if line.strip():
+            digest, _, path = line.partition("  ")
+            pairs[path] = digest
+    assert pairs, f"{component}: the in-image sha256sum printed nothing"
+    text = "".join(f"{line}\n" for line in sorted(f"{path} {digest}" for path, digest in pairs.items()))
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(), len(pairs)
+
+
+_CONFIG_KEYS = ("Entrypoint", "Cmd", "User", "WorkingDir", "Volumes", "Labels", "Env")
+
+
+def _config_view(image_ref: str) -> dict:
+    config = json.loads(_docker("image", "inspect", image_ref, "--format", "{{json .Config}}").stdout)
+    view = {k: config.get(k) or None for k in _CONFIG_KEYS}
+    if view["Labels"]:
+        view["Labels"] = {k: v for k, v in view["Labels"].items() if not k.startswith("org.altavista.kit-")} or None
+    return view
+
+
+def _run_image_step_and_verify(guard: ResourceGuard, image_tags: ImageTagGuard, run_id: str, run_scratch: Path, manifest_doc: dict) -> tuple[dict, dict]:
+    """B.2b (question 250(a)): the host-side image step, from the kit's own installer, with the
+    proofs listed in this module's doc, item 4b. Returns `(image tag by component, evidence)`."""
+    tags = {component: _test_image_tag(run_id, component) for component in sbom.IMAGE_COMPONENTS}
+    table_before = docker_image_table()
+    record_path = run_scratch / "IMAGE_BUILD_RECORD"
+    build_args = ["--build-images", str(_PROOF_KIT_DIR), "--record", str(record_path)]
+    for component, tag in tags.items():
+        build_args += ["--image-tag", f"{component}={tag}"]
+    build_args += ["--extract-container-label", f"{TEST_LABEL_KEY}={TEST_LABEL_VALUE}", "--extract-container-label", f"av.test.run_id={run_id}"]
+
+    with _ImageEvents(run_scratch / "docker-events.jsonl") as events:
+        probe = _run_kit_installer(_PROOF_KIT_DIR, ["--probe-offline-build", str(_PROOF_KIT_DIR)])
+        assert probe.returncode == 0, f"the offline probe build failed:\n{probe.stdout}\n{probe.stderr}"
+        build = _run_kit_installer(_PROOF_KIT_DIR, build_args)
+    assert build.returncode == 0, f"the kit's image step failed (rc={build.returncode}):\n--- stdout ---\n{build.stdout}\n--- stderr ---\n{build.stderr}"
+    summary = _events_summary(events.events(), run_id)
+    assert summary["pulls"] == [], f"docker logged a pull while the images were built: {summary['pulls']}"
+    assert summary["extract_containers_started"] == [], f"a container the step created was started: {summary['extract_containers_started']}"
+    assert "create" in summary["extract_container_events"], f"the step's extract containers left no docker event -- the window is not observing: {summary}"
+    print(f"\n--- offline probe builds, from the kit's installer (question 154) ---\n{probe.stdout}")
+    print(f"\n--- image step, from the kit's own installer, stdout ---\n{build.stdout}")
+    print(f"\n--- docker events over the probe and the builds ---\n{json.dumps({k: v for k, v in summary.items() if k != 'pulls'}, indent=2)}")
+
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["kit_manifest_sha256"] == sbom.sha256_file(_PROOF_KIT_DIR / "KIT_MANIFEST")
+    evidence: dict = {"probe": probe.stdout.strip().splitlines(), "events": {k: v for k, v in summary.items() if k != "pulls"}, "images": {}}
+    for component in sbom.IMAGE_COMPONENTS:
+        r = record["images"][component]
+        entry = manifest_doc["images"][component]
+        assert r["tag"] == tags[component]
+        # Each built id did not exist before this run: removing the tag later removes only what it made.
+        assert r["image_id"] not in table_before and r["image_id_existed_before"] is False, f"{component}: {r['image_id']} existed before the build"
+        guard.track_image(tags[component])
+        image_tags.test_only_tags.append(tags[component])
+        assert r["equal"] is True and r["runtime_content_hash_computed"] == r["runtime_content_hash_recorded"] == entry["runtime_content_hash"]
+        assert r["modes_equal"] and r["config_equal"]
+        assert r["base"]["digest"] == entry["base"]["digest"] and r["base"]["verified_by"] in ("Id", "RepoDigests")
+        assert r["build"]["flags"][:3] == ["--network", "none", "--pull=false"]
+        assert _docker("image", "inspect", tags[component], "--format", "{{.Id}}").stdout.strip() == r["image_id"]
+        # The recorded hash, recomputed by a DIFFERENT implementation (sha256sum inside the image).
+        independent, n_files = _independent_runtime_hash(guard, tags[component], component)
+        assert independent == r["runtime_content_hash_recorded"], (
+            f"{component}: sha256sum inside the built image gives {independent}, the kit records {r['runtime_content_hash_recorded']}"
+        )
+        # `.Config` against the RECORDED `:local` image's (the gate checked it is at its recorded id).
+        built_view, recorded_view = _config_view(tags[component]), _config_view(entry["tag"])
+        assert built_view == recorded_view, f"{component}: .Config differs from {entry['tag']}'s: built {built_view} vs recorded {recorded_view}"
+        evidence["images"][component] = {
+            "tag": tags[component], "built_image_id": r["image_id"], "recorded_image_id": entry["recorded_digest"],
+            "runtime_content_hash_recorded": r["runtime_content_hash_recorded"], "installer_computed": r["runtime_content_hash_computed"],
+            "independent_in_image_sha256sum": independent, "files": n_files, "config_compared_with": entry["tag"], "config": built_view,
+        }
+    print(f"\n--- built images, checked (question 185/250(a)) ---\n{json.dumps(evidence['images'], indent=2)}")
+    return tags, evidence
+
+
+def _assert_no_docker_daemon_access(run_args: list[str]) -> None:
+    """The lead's ruling (question 250(a)): the enclave container never holds the Docker socket,
+    `DOCKER_HOST`, or any other path to the daemon -- a container that controls the daemon can start
+    a networked container and defeat the `--internal` isolation the proof rests on. `run_args` is the
+    exact `docker run` argument list for the installing container, built in one place."""
+    daemon_words = ("docker.sock", "docker_engine", "podman.sock", "containerd.sock", "DOCKER_HOST", "unix://", "tcp://")
+    forbidden_flags = {"--privileged", "--pid", "--ipc", "--userns", "--device", "--cap-add", "--security-opt", "--volumes-from"}
+    for i, arg in enumerate(run_args):
+        assert not any(w in arg for w in daemon_words), f"the installing container's docker run arguments name a path to the daemon: {arg!r}"
+        assert arg.split("=")[0] not in forbidden_flags, f"the installing container's docker run arguments include {arg!r}"
+        if arg in ("-v", "--volume", "--mount"):
+            spec = run_args[i + 1]
+            source = spec.split(":")[0] if arg != "--mount" else next((kv.split("=", 1)[1] for kv in spec.split(",") if kv.startswith(("source=", "src="))), "")
+            if source.startswith("/"):
+                resolved = Path(source)
+                assert not (resolved.exists() and stat.S_ISSOCK(resolved.stat().st_mode)), f"{source} is a socket"
+                assert not source.endswith(".sock") and not source.startswith(("/var/run", "/run")), f"{source} looks like a runtime socket path"
+        if arg in ("-e", "--env", "--env-file"):
+            value = run_args[i + 1]
+            if arg == "--env-file":
+                value += Path(value).read_text() if Path(value).is_file() else ""
+            assert "DOCKER" not in value.upper(), f"the installing container is given {value!r}"
+
+
+_NO_DAEMON_PROBE_SCRIPT = (
+    "import glob, json, os, socket\n"
+    "found = [p for p in glob.glob('/var/run/*') + glob.glob('/run/*') + ['/var/run/docker.sock', '/run/docker.sock'] if os.path.exists(p)]\n"
+    "socks = [p for p in found if p.endswith('.sock')]\n"
+    "s = socket.socket(socket.AF_UNIX)\n"
+    "try:\n"
+    "    s.connect('/var/run/docker.sock'); connect = 'CONNECTED (unexpected)'\n"
+    "except OSError as e:\n"
+    "    connect = type(e).__name__\n"
+    "print(json.dumps({'sockets': socks, 'docker_env': sorted(k for k in os.environ if 'DOCKER' in k.upper()), 'connect_to_docker_sock': connect}))\n"
+)
+
+
+def _prove_no_daemon_inside(guard: ResourceGuard, run_id: str, network_name: str, install_volume: str, installer_container: str, mount_args: list[str]) -> dict:
+    """The daemon's own record of the installing container, and a probe container with the same
+    mounts that looks for a socket and `DOCKER_HOST` from the inside."""
+    inspected = json.loads(_docker("inspect", installer_container).stdout)[0]
+    host_config, config = inspected["HostConfig"], inspected["Config"]
+    binds = host_config.get("Binds") or []
+    assert not any("docker" in b.lower() and "sock" in b.lower() for b in binds) and not any(b.split(":")[0].endswith(".sock") for b in binds), binds
+    assert not [e for e in (config.get("Env") or []) if "DOCKER" in e.upper()], config.get("Env")
+    assert host_config.get("Privileged") is False and not host_config.get("PidMode") and host_config.get("NetworkMode") == network_name, host_config
+    probe = _docker(
+        "run", "--rm", "--network", network_name, *guard.label_args(), *mount_args,
+        PROBE_IMAGE, "python3", "-c", _NO_DAEMON_PROBE_SCRIPT,
+    )
+    inside = json.loads(probe.stdout.strip().splitlines()[-1])
+    assert inside["sockets"] == [] and inside["docker_env"] == [] and inside["connect_to_docker_sock"] != "CONNECTED (unexpected)", inside
+    return {"binds": binds, "privileged": host_config.get("Privileged"), "network_mode": host_config.get("NetworkMode"), "inside": inside}
 
 
 def _run_zero_egress_install_and_demo_from_the_kit_alone():
@@ -640,11 +965,12 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
 
     try:
         # ---------------------------------------------------------------------------------
-        # B.1 -- image provenance, on the host, before anything else.
+        # B.1 -- base-image provenance, on the host, before anything else.
         # ---------------------------------------------------------------------------------
-        image_evidence, test_tag_by_component = _load_and_verify_images(image_tags)
-        print(f"\n--- image provenance (question 212) ---\n{json.dumps(image_evidence, indent=2)}")
-        edge_plugin_image_ref = test_tag_by_component["edge-plugin-image"]
+        base_evidence = _load_bases(image_tags)
+        print(f"\n--- base-image provenance, from the saved tarballs (question 250(a)) ---\n{json.dumps(base_evidence, indent=2)}")
+        no_base_content = _assert_kit_carries_no_base_content(manifest_doc)
+        print(f"\n--- the kit carries only application layers (question 250(a)) ---\n{json.dumps(no_base_content)}")
 
         # ---------------------------------------------------------------------------------
         # The labelled --internal network every later step shares.
@@ -676,18 +1002,22 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
             "-v", f"{_PROOF_KIT_DIR}:/kit:ro",
             "-v", f"{install_volume}:/target",
         ]
-        _assert_no_repo_source_mounted(install_mount_args)
-
         installer_container = _labelled_id(run_id, "installer")
         guard.track_container(installer_container)
-        install_start = time.monotonic()
-        install_run = _docker(
+        install_run_args = [
             "run", "--name", installer_container, "--network", network_name, *guard.label_args(),
             *install_mount_args,
             PROBE_IMAGE, "/kit/installer/install.sh", "/kit", "/target",
-            timeout=180.0,
-        )
+        ]
+        _assert_no_repo_source_mounted(install_run_args)
+        # Question 250(a), the lead's ruling: the enclave container gets no Docker socket, no
+        # DOCKER_HOST, no path to the daemon at all -- asserted over the real argument list.
+        _assert_no_docker_daemon_access(install_run_args)
+        install_start = time.monotonic()
+        install_run = _docker(*install_run_args, timeout=180.0)
         install_elapsed_s = time.monotonic() - install_start
+        no_daemon_evidence = _prove_no_daemon_inside(guard, run_id, network_name, install_volume, installer_container, install_mount_args)
+        print(f"\n--- no path to the Docker daemon in the enclave (question 250(a)) ---\n{json.dumps(no_daemon_evidence, indent=2)}")
         assert "installed kit" in install_run.stdout, f"install.sh did not report success:\n{install_run.stdout}"
         assert "--no-index" not in install_run.stderr, "unexpected: --no-index itself should never appear as an error"
         print(f"\n--- install.sh, inside the enclave (question 148) ---\nelapsed={install_elapsed_s:.2f}s\n{install_run.stdout}")
@@ -715,6 +1045,11 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         # carries both (`scripts/kit/install.py::install`'s own comment on why that key was
         # removed). `_run_viewer_from_installed_kit`, below, is this test's own proof that the
         # viewer actually finds them with no such path at all.
+        images_record = install_record["installed"]["images"]
+        assert images_record["built"] is False and images_record["built_by"] is None, images_record
+        assert "--build-images" in images_record["build_step"]
+        for component in sbom.IMAGE_COMPONENTS:
+            assert images_record["components"][component]["expected_runtime_content_hash"] == manifest_doc["images"][component]["runtime_content_hash"]
         assert "viewer_assets" not in install_record["installed"], (
             f"INSTALL_RECORD still names a viewer_assets path -- task 3c's web/profiles packs "
             f"were supposed to be fully removed (round 3, question 217(b)): "
@@ -727,6 +1062,13 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         # ---------------------------------------------------------------------------------
         probe_after = _run_egress_probe(guard, run_id, "after-install", network_name)
         print(f"\n--- egress probe, after install (question 154) ---\n{json.dumps(probe_after)}")
+
+        # ---------------------------------------------------------------------------------
+        # B.2b -- the images, built on the HOST by the kit's own installer (question 250(a)):
+        # offline, on the bases loaded above, checked against the recorded runtime-content hash.
+        # ---------------------------------------------------------------------------------
+        image_tag_by_component, _image_step_evidence = _run_image_step_and_verify(guard, image_tags, run_id, run_scratch, manifest_doc)
+        edge_plugin_image_ref = image_tag_by_component["edge-plugin-image"]
 
         # ---------------------------------------------------------------------------------
         # B.4a -- the viewer server, started from the INSTALLED wheels.
@@ -743,11 +1085,11 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         print(f"\n--- av-ingest-server, from the kit's own binary (question 148) ---\n{json.dumps(ingest_evidence)}")
 
         # ---------------------------------------------------------------------------------
-        # B.4c -- the edge plugin, from the image this test itself loaded in B.1.
+        # B.4c -- the edge plugin, from the image the kit's own installer built in B.2b.
         # ---------------------------------------------------------------------------------
         plugin_evidence = _run_edge_plugin_from_kit_image(guard, run_id, ingest_container, run_scratch, edge_plugin_image_ref)
         reached["4c_plugin"] = True
-        print(f"\n--- edge plugin, from the kit's own loaded image (question 148) ---\n{json.dumps(plugin_evidence)}")
+        print(f"\n--- edge plugin, from the image the kit's installer built (question 148) ---\n{json.dumps(plugin_evidence)}")
 
         # ---------------------------------------------------------------------------------
         # B.4d -- the recorded kernel runs, re-hashed and re-decoded from the INSTALLED tree.
@@ -1080,6 +1422,183 @@ def _rehash_and_decode_runs(guard: ResourceGuard, run_id: str, network_name: str
         )
         assert obs["config_hash"], f"{stem}: config_hash decoded to a falsy value -- expected a real 64-hex-char SHA-256"
     return observed
+
+
+# =================================================================================================
+# B.5 -- the image step's refusals, on perturbed copies of the proof kit (question 250(a)).
+# Each runs the KIT'S OWN installer on the host, under the docker lock, on a hard-linked copy of the
+# kit under the run scratch (files are replaced, never written through a link, so the shared proof
+# kit is untouched), and ends with the host's image table exactly as it began.
+# =================================================================================================
+
+def _hardlink_copy_kit(src: Path, dst: Path) -> None:
+    shutil.copytree(src, dst, symlinks=True, copy_function=os.link)
+
+
+def _replace_file(path: Path, data: bytes) -> None:
+    mode = path.stat().st_mode & 0o7777
+    path.unlink()   # never write through a hard link shared with the proof kit
+    path.write_bytes(data)
+    path.chmod(mode)
+
+
+def _rewrite_kit_manifest(kit: Path, edit) -> None:
+    """Applies `edit(doc)` to `KIT_MANIFEST` and rewrites it with every file hash recomputed: a kit
+    whose manifest verifies against its (changed) content -- what someone who can change the kit can
+    always produce (`manifest.py`'s top doc: consistency is not authenticity)."""
+    doc = json.loads((kit / "KIT_MANIFEST").read_text(encoding="utf-8"))
+    edit(doc)
+    fresh = kit_manifest.build_manifest(
+        kit_root=kit, git_commit=doc["git_commit"], git_dirty=doc["git_dirty"], git_status=doc["git_status"],
+        images=doc["images"], sboms=doc["sboms"], packs=doc["packs"], vendor=doc["vendor"], wheels=doc["wheels"],
+        binaries=doc["binaries"], runs=doc["runs"], gaps=doc["gaps"],
+    )
+    (kit / "KIT_MANIFEST").unlink()
+    kit_manifest.write_manifest(fresh, kit)
+    assert kit_manifest.verify_manifest(kit) == []
+
+
+def _perturbation_test_body(body) -> None:
+    run_id = uuid.uuid4().hex[:12]
+    run_scratch = SCRATCH_ROOT / f"perturb-{run_id}"
+    run_scratch.mkdir(parents=True, exist_ok=True)
+    guard = ResourceGuard(run_id)
+    prune_stale_labelled_resources()
+    image_tags = ImageTagGuard(run_id, _TEST_TAG_PREFIX, on_test_tag=guard.track_image)
+    try:
+        _load_bases(image_tags)
+        table_before = docker_image_table()
+        body(run_id, run_scratch, table_before)
+        assert docker_image_table() == table_before, "the host's image table changed across a refused image step"
+    finally:
+        guard.cleanup()
+        shutil.rmtree(run_scratch, ignore_errors=True)
+        image_tags.assert_host_tags_unchanged()
+    guard.assert_nothing_left()
+
+
+def _step_args(kit: Path, run_id: str, record: Path) -> tuple[list[str], dict[str, str]]:
+    tags = {component: _test_image_tag(run_id, component) for component in sbom.IMAGE_COMPONENTS}
+    args = ["--build-images", str(kit), "--record", str(record)]
+    for component, tag in tags.items():
+        args += ["--image-tag", f"{component}={tag}"]
+    args += ["--extract-container-label", f"{TEST_LABEL_KEY}={TEST_LABEL_VALUE}", "--extract-container-label", f"av.test.run_id={run_id}"]
+    return args, tags
+
+
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
+def test_image_step_refuses_a_pinned_base_the_host_does_not_hold_before_any_build():
+    """Perturbation 1: the kit pins the edge-plugin base at a digest no image on this host has (the
+    Dockerfile's FROM, the installer's own pin and `KIT_MANIFEST.images` all say so, and the manifest
+    is re-hashed so the kit verifies). The step must refuse with the typed `base-image-missing`,
+    naming the expected reference and digest, BEFORE any build is issued -- so nothing can reach for
+    the base on a registry. A build is never attempted here, because `docker build` on a base that
+    is absent would contact one; the proof is that the pre-build digest check stands in front of it:
+    no build, no image event, no container, no pull."""
+    fake_digest = "sha256:" + hashlib.sha256(b"av-fabricated-base-image").hexdigest()
+
+    def body(run_id: str, run_scratch: Path, table_before: dict) -> None:
+        kit = run_scratch / "kit-fabricated-base"
+        _hardlink_copy_kit(_PROOF_KIT_DIR, kit)
+        pin = save_base_images.base_pins()["debian-bookworm-slim-base-image"]
+        old_ref, old_digest = pin["reference"], pin["digest"]
+        new_ref = old_ref.replace(old_digest, fake_digest)
+        for rel in ("images/edge-plugin-image/Dockerfile", "installer/operator_supplied.json"):
+            path = kit / rel
+            text = path.read_text(encoding="utf-8")
+            assert old_digest in text, rel
+            _replace_file(path, text.replace(old_digest, fake_digest).encode("utf-8"))
+
+        def edit(doc):
+            base = doc["images"]["edge-plugin-image"]["base"]
+            assert base["digest"] == old_digest
+            base["digest"], base["reference"] = fake_digest, new_ref
+        _rewrite_kit_manifest(kit, edit)
+        assert _docker("image", "inspect", new_ref, check=False).returncode != 0, "the fabricated base unexpectedly exists on this host"
+
+        args, tags = _step_args(kit, run_id, run_scratch / "record")
+        with _ImageEvents(run_scratch / "docker-events.jsonl") as events:
+            result = _run_kit_installer(kit, args)
+        assert result.returncode == 2, f"expected the typed refusal (exit 2), got rc={result.returncode}\n{result.stdout}\n{result.stderr}"
+        assert "REFUSED [base-image-missing]" in result.stderr, result.stderr
+        assert new_ref in result.stderr and fake_digest in result.stderr and "docker load" in result.stderr, result.stderr
+        assert not (run_scratch / "record").exists()
+        all_events = events.events()
+        mentions = [e for e in all_events if fake_digest in json.dumps(e) or any(t in json.dumps(e) for t in tags.values())]
+        assert mentions == [], f"docker logged events for the refused step: {mentions}"
+        assert not [e for e in all_events if e.get("Type") == "image" and e.get("Action") == "pull"], "a pull happened"
+        for tag in tags.values():
+            assert _docker("image", "inspect", tag, check=False).returncode != 0, f"{tag} exists after a refused step"
+        print(f"\n--- perturbation: pinned base absent from the host ---\nrc={result.returncode}\n{result.stderr.strip()}\n"
+              f"docker events during the step touching the fabricated digest or the test tags: {len(mentions)}")
+
+    with lock_docker_tests():
+        _perturbation_test_body(body)
+
+
+@pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
+def test_image_step_refuses_an_attacker_consistent_kit_on_the_runtime_content_hash():
+    """Perturbation 2: one application file of the edge-plugin image is changed and every hash in
+    `KIT_MANIFEST` is recomputed (its `files`, and the `images.*.files` entry of that file), so the
+    kit verifies and the build succeeds. The step must then refuse on the runtime-content hash,
+    naming the recorded one and the one it computed (here recomputed independently from the
+    manifest's per-file hashes), and leave no tag behind -- the cFS image, which built fine first,
+    is removed too."""
+    def body(run_id: str, run_scratch: Path, table_before: dict) -> None:
+        kit = run_scratch / "kit-changed-file"
+        _hardlink_copy_kit(_PROOF_KIT_DIR, kit)
+        component, image_path = "edge-plugin-image", "/opt/edge-plugin/plugin-config.default.json"
+        path = kit / "images" / component / "rootfs" / image_path.lstrip("/")
+        changed = path.read_bytes() + b" \n"
+        _replace_file(path, changed)
+        recorded = json.loads((kit / "KIT_MANIFEST").read_text(encoding="utf-8"))["images"][component]
+        new_sha = hashlib.sha256(changed).hexdigest()
+
+        def edit(doc):
+            entry = next(f for f in doc["images"][component]["files"] if f["image_path"] == image_path)
+            entry["sha256"], entry["size"] = new_sha, len(changed)
+        _rewrite_kit_manifest(kit, edit)
+
+        lines = {f["image_path"]: (new_sha if f["image_path"] == image_path else f["sha256"]) for f in recorded["files"]}
+        expected_computed = "sha256:" + hashlib.sha256("".join(f"{line}\n" for line in sorted(f"{p} {d}" for p, d in lines.items())).encode()).hexdigest()
+        assert expected_computed != recorded["runtime_content_hash"]
+
+        args, tags = _step_args(kit, run_id, run_scratch / "record")
+        result = _run_kit_installer(kit, args)
+        assert result.returncode == 2, f"expected the typed refusal (exit 2), got rc={result.returncode}\n{result.stdout}\n{result.stderr}"
+        assert "REFUSED [runtime-content-mismatch]" in result.stderr, result.stderr
+        assert recorded["runtime_content_hash"] in result.stderr and expected_computed in result.stderr, (
+            f"the refusal must name both hashes ({recorded['runtime_content_hash']} and {expected_computed}):\n{result.stderr}"
+        )
+        assert "internally inconsistent" in result.stderr, (
+            "the refusal also says the kit's own per-file records do not hash to the recorded value (that is where the file shows up)"
+        )
+        assert tags["cfs-image"] in result.stdout, "the cFS image was built (and then removed) before the plugin image was refused"
+        assert not (run_scratch / "record").exists()
+        for tag in tags.values():
+            assert _docker("image", "inspect", tag, check=False).returncode != 0, f"{tag} was left behind"
+        print(f"\n--- perturbation: attacker-consistent kit, one application file changed ---\nrc={result.returncode}\n{result.stderr.strip()}\n"
+              f"expected computed hash (independent): {expected_computed}")
+
+    with lock_docker_tests():
+        _perturbation_test_body(body)
+
+
+def test_the_daemon_access_assertion_refuses_a_socket_a_docker_host_and_privilege(tmp_path):
+    """The assertion that backs the lead's ruling must itself refuse what it exists to refuse."""
+    clean = ["run", "--name", "n", "--network", "net", "-v", f"{tmp_path}:/kit:ro", "-v", "vol:/target", "img", "/kit/installer/install.sh"]
+    _assert_no_docker_daemon_access(clean)
+    for bad in (
+        [*clean[:5], "-v", "/var/run/docker.sock:/var/run/docker.sock", *clean[5:]],
+        [*clean[:5], "-v", "/run/user/1000/podman/podman.sock:/s", *clean[5:]],
+        [*clean[:5], "-v", "/Users/someone/.colima/default/docker.sock:/s", *clean[5:]],
+        [*clean[:5], "-e", "DOCKER_HOST=tcp://10.0.0.1:2375", *clean[5:]],
+        [*clean[:5], "--env", "DOCKER_HOST", *clean[5:]],
+        [*clean[:5], "--privileged", *clean[5:]],
+        [*clean[:5], "--mount", "type=bind,source=/var/run/docker.sock,target=/d", *clean[5:]],
+    ):
+        with pytest.raises(AssertionError):
+            _assert_no_docker_daemon_access(bad)
 
 
 # =================================================================================================

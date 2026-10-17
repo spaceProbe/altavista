@@ -10,6 +10,12 @@
 #   scripts/kit/install.sh <kit-dir> <target-dir>
 #   (or, more commonly now -- see below: <kit-dir>/installer/install.sh <kit-dir> <target-dir>)
 #
+# Images are built by a separate, host-side step of this same installer (question 250(a)): the
+# files install above runs inside the enclave and never gets the Docker socket. On the Docker host:
+#   <kit-dir>/installer/install.sh --build-images <kit-dir> [--image-tag COMPONENT=REF ...]
+#   <kit-dir>/installer/install.sh --probe-offline-build <kit-dir>
+# (install.py hands both flags to image_build.py; its module doc is the specification).
+#
 # <kit-dir> is an existing kit (KIT_MANIFEST plus its content, kit_format 5 -- the shape
 # scripts/kit/build_kit.py writes). <target-dir> must not exist yet, or must exist and be empty
 # -- this installer refuses to write into a non-empty directory rather than silently merging
@@ -34,21 +40,34 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
 # A Python interpreter is the one thing this installer needs beyond a shell and the kit itself
-# (task 3b's own hard requirement) -- prefer python3, fall back to a bare `python` (some minimal
-# images, e.g. this proof's own python:3.13-slim, only ever provide python3, but a "python"
-# alias is checked too rather than assuming one name universally). $PYTHON lets a caller pin an
-# exact interpreter (e.g. a specific venv's own binary) without this script guessing.
+# (task 3b's own hard requirement). It must be Python >= 3.11: the bundled modules read TOML with the
+# standard library's `tomllib` (sbom.py), which older interpreters lack -- measured on this host, where
+# a bare `python3` on PATH is /usr/bin/python3 3.9.6 and the install died in a ModuleNotFoundError
+# traceback. So: the first of python3.13, python3.12, python3.11, python3, python on PATH that
+# is new enough (the minimal images this proof runs in, e.g. python:3.13-slim, only provide python3).
+# $PYTHON lets a caller pin an exact interpreter (e.g. a specific venv's own binary) without this
+# script guessing; it is used as given.
 if [ -n "${PYTHON:-}" ]; then
     PY="${PYTHON}"
-elif command -v python3 >/dev/null 2>&1; then
-    PY=python3
-elif command -v python >/dev/null 2>&1; then
-    PY=python
 else
-    echo "scripts/kit/install.sh: refusing -- no python3/python interpreter found on PATH." \
-         "This installer needs a shell and a Python interpreter and nothing else; install" \
-         "Python 3 (no other dependency, no network fetch) and re-run." >&2
-    exit 1
+    PY=""
+    for candidate in python3.13 python3.12 python3.11 python3 python; do
+        if command -v "${candidate}" >/dev/null 2>&1 &&
+           "${candidate}" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+            PY="${candidate}"
+            break
+        fi
+    done
+    if [ -z "${PY}" ]; then
+        echo "scripts/kit/install.sh: refusing -- no Python >= 3.11 interpreter (python3.13, python3.12," \
+             "python3.11, python3 or python) found on PATH. This installer needs a shell and Python 3.11" \
+             "or newer and nothing else (no other dependency, no network fetch); install it, or set" \
+             "PYTHON to one, and re-run." >&2
+        exit 1
+    fi
 fi
 
-exec "${PY}" "${SCRIPT_DIR}/install.py" "$@"
+# PYTHONDONTWRITEBYTECODE: an installer run from inside a kit must not add `__pycache__/` files to it
+# (the kit would no longer verify against its own KIT_MANIFEST); install.py also sets
+# sys.dont_write_bytecode itself, this covers the interpreter's own start-up imports.
+PYTHONDONTWRITEBYTECODE=1 exec "${PY}" "${SCRIPT_DIR}/install.py" "$@"

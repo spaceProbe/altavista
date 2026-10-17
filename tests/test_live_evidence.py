@@ -28,9 +28,11 @@ What this file proves:
    `av-edge-plugin:local` onto its 2026-09-15 image three times. The shared helper,
    `scripts/kit/docker_image_tags.py::ImageTagGuard`, is proved on scratch images under a
    test-only repository (a moved tag, a created tag, a digest mismatch, a leaked tag the closing
-   assertion must refuse), and `bring_up_av_ingest_server`'s failure path is proved through a
-   scratch kit -- none of these touches a `:local` tag. The real-kit test below also compares the
-   host's whole tag table before and after.
+   assertion must refuse). Question 250(a): the kit no longer carries an image tarball, so
+   `bring_up_av_ingest_server` builds the plugin image from the kit's application layer through
+   the kit's own image step (`image_build.py`) under a run-scoped test-only tag, and its failure
+   path is proved through a scratch kit that is refused -- none of these touches a `:local` tag.
+   The real-kit test below also compares the host's whole tag table before and after.
 
 No test mutates `os.environ` (question 199). No test writes anywhere but `tmp_path`/its own
 labelled docker resources (cleaned up and asserted gone, same discipline as
@@ -124,6 +126,19 @@ def _kit_skip_reason() -> "str | None":
     doc = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not doc.get("binaries", {}).get("results", {}).get("av-ingest-server", {}).get("included"):
         return f"{live_evidence.DEFAULT_KIT_DIR} carries no binaries.av-ingest-server"
+    # Question 250(a): the plugin image is built from the kit's application layer by the kit's own image
+    # step, so the kit must be the current format with the image collected (an older proof kit carried a
+    # tarball instead) and the pinned base must be on this host (the step never pulls).
+    plugin = doc.get("images", {}).get("edge-plugin-image", {})
+    if doc.get("kit_format") != 5 or not plugin.get("collected") or not plugin.get("config"):
+        return (
+            f"{live_evidence.DEFAULT_KIT_DIR} is kit_format {doc.get('kit_format')!r} with images.edge-plugin-image "
+            f"collected={plugin.get('collected')!r}; the image step needs a current --with-images kit -- see "
+            f"tests/test_kit_zero_egress_install.py's own _PROOF_KIT_BUILD_CMD"
+        )
+    base = plugin.get("base", {}).get("reference", "")
+    if subprocess.run(["docker", "image", "inspect", base], capture_output=True, timeout=30).returncode != 0:
+        return f"the operator-supplied base {base!r} is not on this host; the image step never pulls (docker load the base first)"
     return None
 
 
@@ -286,7 +301,9 @@ def test_av_ingest_server_returns_a_real_verify_result_from_the_kit():
     # -- a real, correctly-shaped response, not a placeholder (crates/av-ingest/src/admin.rs's own
     # verify_body returns {shard_key: {...}} per shard that has EVER received a batch).
     assert entry["result"] == {}
-    assert result["evidence"]["image_provenance"]["loaded_digest"] == result["evidence"]["image_provenance"]["recorded_digest"]
+    provenance = result["evidence"]["image_provenance"]
+    assert provenance["equal"] is True and provenance["runtime_content_hash_computed"] == provenance["runtime_content_hash_recorded"]
+    assert provenance["tag"].startswith(f"{live_evidence.TEST_TAG_PREFIX}/edge-plugin-image:"), provenance["tag"]
 
     remaining = subprocess.run(
         ["docker", "ps", "-a", "--filter", "label=av.test=1", "--filter", f"label=av.test.run_id={run_id}", "-q"],
@@ -454,28 +471,24 @@ def test_the_closing_assertion_refuses_a_moved_a_surviving_and_a_new_tag(scratch
 
 
 @requires_docker
-def test_bring_up_av_ingest_server_restores_tags_when_the_loaded_image_is_refused(scratch_images, tmp_path):
-    """`bring_up_av_ingest_server`'s own failure path, through a scratch kit whose KIT_MANIFEST
-    records a digest the tarball's image does not have: the call raises, and the whole host tag
-    table is as it was (the scratch tag moved by the load is back on its previous image)."""
+def test_bring_up_av_ingest_server_restores_tags_when_the_kit_is_refused(scratch_images, tmp_path):
+    """`bring_up_av_ingest_server`'s own failure path (question 250(a)): a scratch kit whose
+    KIT_MANIFEST lists a file the kit does not hold is refused by the image step before any
+    docker call that builds, the call raises, and the whole host tag table is as it was."""
+    import image_build
+
     kit = tmp_path / "kit"
-    (kit / "images").mkdir(parents=True)
-    (kit / "binaries").mkdir()
-    (kit / "binaries" / "av-ingest-server").write_bytes(b"not run: the load is refused first")
-    b_id = scratch_images.make("kit")
-    ref = f"{scratch_images.repo}/kit:1"
-    scratch_images.tarball_carrying(ref, kit / "images" / "edge-plugin-image.tar")
-    scratch_images.drop_tag(ref)
-    a_id = scratch_images.make("kit")
+    (kit / "binaries").mkdir(parents=True)
+    (kit / "binaries" / "av-ingest-server").write_bytes(b"not run: the image step refuses the kit first")
     (kit / "KIT_MANIFEST").write_text(json.dumps({
-        "images": {"edge-plugin-image": {"tag": ref, "recorded_digest": "sha256:" + "1" * 64}},
+        "kit_format": 5, "files": [{"path": "images/edge-plugin-image/Dockerfile", "sha256": "0" * 64, "size": 1, "role": "image-dockerfile"}],
+        "pack_symlinks": [], "images": {"edge-plugin-image": {"collected": True}},
     }), encoding="utf-8")
 
     before = docker_tag_snapshot()
-    with pytest.raises(ImageHygieneError, match="refusing to trust it"):
+    with pytest.raises(image_build.KitRefused, match="does NOT verify"):
         live_evidence.bring_up_av_ingest_server(kit, scratch_images.run_id)
     assert docker_tag_snapshot() == before
-    assert scratch_images.id_of(ref) == a_id and a_id != b_id
 
 
 # =================================================================================================

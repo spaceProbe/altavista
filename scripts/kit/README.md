@@ -165,10 +165,14 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
   `{path, pack, link_target}`, sorted by path -- see "Pack symlinks", below. A kit may contain
   ZERO symlinks anywhere else (round 1's original rule, unchanged).
 - `images` -- per image component (`edge-plugin-image`, `cfs-image`), always present:
-  `{tag, recorded_digest, collected, runtime_content_hash, base, dockerfile, files, packages,
-  network_used}`. `recorded_digest` is the recorded image id; `runtime_content_hash` the recorded
-  hash of what the image adds over its base (question 185); `base` the pinned operator-supplied base
-  (`{id, item, reference, digest}`, from `operator_supplied.json`). When `--with-images` ran,
+  `{tag, recorded_digest, collected, runtime_content_hash, runtime_set, base, config, dockerfile,
+  files, packages, network_used}`. `recorded_digest` is the recorded image id; `runtime_content_hash`
+  the recorded hash of what the image adds over its base (question 185); `runtime_set` the roots
+  that hash is taken over (`{files, trees, packages}`, `image_layer.RUNTIME_SETS`), which the
+  installer's image step reads out of the image it builds; `base` the pinned operator-supplied base
+  (`{id, item, reference, digest}`, from `operator_supplied.json`); `config` the recorded image's
+  `.Config` subset (`image_layer.CONFIG_KEYS`) the built image is compared with (`null` when
+  `--with-images` did not run). When `--with-images` ran,
   `dockerfile` is `{kit_path}`, `files` lists every runtime-content-set file as `{image_path,
   kit_path, sha256, mode, size, source}` (`mode` an octal string; `source` is `kit` or
   `package:<name>`, whose `kit_path` is null because its bytes are in the `.deb`), and `packages`
@@ -311,17 +315,56 @@ For each component `--with-images` writes:
   every regular file the image holds from the package equals the `.deb`'s byte for byte (that is
   what makes the runtime-content hash reproducible from the kit).
 
-A host-side step builds each image from a built kit with
-
-    docker build --network none --pull=false -t <tag> images/<component>
-
-on a host that already holds the pinned base, and compares the built image's runtime-content hash
-with `images.<component>.runtime_content_hash`. The image id does not have to match (layer
-timestamps), and `docker image inspect .Config` (Entrypoint, Cmd, User, WorkingDir, Volumes,
-Labels, Env) does. The runtime-content hash is defined in `services/cfs/IMAGE_DIGEST.md` (cFS) and
+The runtime-content hash is defined in `services/cfs/IMAGE_DIGEST.md` (cFS) and
 `services/edge-plugin/build-image.sh` step 3a (edge plugin); `image_layer.py` is the second,
-independent implementation (question 164). The installer that does this build is task 1b; this
-task proves it by hand (its report has the log).
+independent implementation (question 164), and `image_build.py` (below) the third.
+
+### Building the images: the installer's host-side image step (question 250(a), second half)
+
+The files install (`installer/install.sh <kit> <target>`) runs inside the enclave and never holds
+the Docker socket or `DOCKER_HOST`: a container that controls the daemon could start a networked
+container and defeat the `--internal` isolation the zero-egress proof rests on. Images are built by
+a separate step of the same bundled installer, run by the operator ON THE DOCKER HOST (stdlib Python
+>= 3.11 and the `docker` CLI), on a host that already holds the two pinned bases:
+
+    <kit>/installer/install.sh --build-images <kit> [--component C ...] [--image-tag COMPONENT=REF ...] [--record FILE]
+    <kit>/installer/install.sh --probe-offline-build <kit>
+
+Bases come from the operator (`docs/kit-operator-supplied.md`). On a connected machine that holds
+them, `scripts/kit/save_base_images.py --out DIR` runs `docker save <name>@sha256:<digest>` for each
+pin (by digest, never a floating tag; the tarballs carry no repository name) and writes `DIR/SHA256SUMS`;
+on the Docker host, `docker load -i` each tarball after checking that list.
+
+`--build-images` (`scripts/kit/image_build.py` is the specification; each refusal exits 2 with a
+typed line):
+
+1. verifies the kit against `KIT_MANIFEST` first, then checks each image's recorded base against the
+   installer's own `operator_supplied.json` and that the Dockerfile starts `FROM` exactly the pinned
+   reference;
+2. before ANY build, `docker image inspect <base reference>` for every image: accepted only if `Id`
+   equals the pinned digest (containerd image store, this host) or `RepoDigests` contains it
+   (classic store); otherwise `base-image-missing` / `base-image-digest-differs`, naming the
+   expected reference and digest and telling the operator to `docker load` it;
+3. builds from a context it assembles itself (the Dockerfile, each file at its image path with its
+   RECORDED MODE, the `.deb`) with `docker build --network none --pull=false --no-cache --force-rm
+   --rm=true -t <tag> --label org.altavista.kit-manifest-sha256=<hash> -` (the legacy builder, as on
+   this host). Default tag `av-kit/<component>:<first 12 hex of KIT_MANIFEST's sha256>`; never the
+   recorded `:local` tag, never a tag that already exists;
+4. before anything is started, `docker create` (never `start`), `docker cp <container>:<root> -` per
+   runtime root, the question-185 hash over the regular files, `docker rm -v`: the hash must equal
+   `runtime_content_hash`, every file's mode the recorded one, and `.Config` the recorded `config`
+   (the step's own `org.altavista.kit-*` labels removed). The image id is reported, not compared;
+5. any refusal removes every tag the run created (by name; an image that existed before the run is
+   never deleted); success writes `IMAGE_BUILD_RECORD` (default `./IMAGE_BUILD_RECORD`, never
+   overwritten, not inside the kit): per image the tag, built id, base reference/digest and how it
+   was verified, recorded and computed hashes with `equal: true`, the mode and `.Config` checks, and
+   the build flags.
+
+`--probe-offline-build` shows that the BUILD is offline, not just the enclave: through the same code
+path and flags it builds throwaway images whose `RUN` tries the network (a TCP connect to
+1.1.1.1:443; a name lookup of example.com) and requires both to fail with the unreachable /
+name-resolution error. `INSTALL_RECORD.installed.images` says the files install built nothing
+(`built: false`) and which command builds them.
 
 The `images` section is reproducible by construction: every value is either read from a committed
 record or computed over bytes that were just checked against one. Two `--with-images` kits from the

@@ -114,12 +114,14 @@ changed and why:
   records the tag, the recorded image id, the RECORDED RUNTIME-CONTENT HASH (question 185), the
   pinned base (`base`), the runtime Dockerfile's kit path (`dockerfile`), every file of the
   runtime-content set with its image path, kit path, sha256, mode and size (`files`; the installer
-  needs modes, `KIT_MANIFEST.files` has none), and the Debian packages the image adds, carried as
-  recorded `.deb`s (`packages`). There is no `tarball_sha256`/`tarball_size` any more, and no
+  needs modes, `KIT_MANIFEST.files` has none), the roots that hash is taken over (`runtime_set`),
+  the recorded image's `.Config` subset (`config`, for the installer's image step to compare), and
+  the Debian packages the image adds, carried as recorded `.deb`s (`packages`). There is no `tarball_sha256`/`tarball_size` any more, and no
   `images/*.tar`. New content roles: `image-dockerfile`, `image-rootfs`, `image-package`,
-  `image-package-licence`. A host-side step builds each image with `docker build --network none
-  --pull=false images/<component>` on a host that already holds the base, and compares the built
-  image's runtime-content hash with the recorded one (the image id may differ). This is a real
+  `image-package-licence`. A host-side step (the installer's `image_build.py`, `install.sh
+  --build-images`) builds each image with `docker build --network none --pull=false` on a host that
+  already holds the base, and compares the built image's runtime-content hash with the recorded one
+  (the image id may differ). This is a real
   `kit_format` bump: a 4 installer expects tarballs where a 5 kit carries none.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
@@ -201,7 +203,7 @@ ensure_ascii=False)` plus one trailing newline. It contains:
   unresolved `os.readlink` string. This is the one place a kit is allowed to carry a symlink at
   all (see this module's own top doc); `verify_manifest` cross-checks every symlink it finds
   anywhere in the kit against this list, not merely its presence.
-- `images` -- question 250(a): per image component, `{tag, recorded_digest, collected, runtime_content_hash, base, dockerfile, files, packages, network_used}` -- see this module's top doc.
+- `images` -- question 250(a): per image component, `{tag, recorded_digest, collected, runtime_content_hash, runtime_set, base, config, dockerfile, files, packages, network_used}` -- see this module's top doc.
 - `sboms` -- unchanged from round 1.
 - `packs` -- Decision K's descriptors, extended in round 2 with `"copied"` (bool) and, when true,
   `"copy"` (`{"kit_path", "copied_file_count", "copied_symlink_count", "copied_total_bytes"}`) --

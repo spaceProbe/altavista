@@ -33,6 +33,25 @@ whoever built or received it, and compared before this installer is ever run -- 
 `manifest.py`'s own top doc, "P5 track round 3, question 217(c)", for the fuller version of this
 same argument.
 
+# Images are NOT built here (question 250(a), second half; the lead's ruling)
+
+This install runs inside the enclave container, which never holds the Docker socket, `DOCKER_HOST`
+or any other path to the daemon: a container that controls the host's daemon can start a networked
+container, which would defeat the `--internal` isolation the zero-egress proof rests on. Building
+an image needs the daemon, so it is a separate step the operator runs ON THE DOCKER HOST with the
+same kit and the same bundled installer:
+
+    <kit>/installer/install.sh --build-images <kit> [--image-tag COMPONENT=REF ...] [--record FILE]
+    <kit>/installer/install.sh --probe-offline-build <kit>
+
+`main` below dispatches those two flags to `image_build.py` (its module doc is the specification);
+everything else here is the files install, unchanged in shape. `INSTALL_RECORD.installed.images`
+says so in the record itself: `built: false`, who builds them and with which command, and for each
+image the pinned base, the runtime-content hash the build must reproduce and the default tag.
+The image step writes its own record (`IMAGE_BUILD_RECORD`) rather than amending this one, because
+it runs on a different machine at a different time and the files install's target is not
+necessarily reachable from the Docker host.
+
 # Why this is a separate module from install.sh
 
 Exactly the split scripts/kit/manifest.py's own top doc argues for between the manifest format
@@ -128,10 +147,19 @@ import sys
 import zipfile
 from pathlib import Path
 
+# An installer that runs from inside a kit must not add files to it: the modules imported below would
+# otherwise leave `__pycache__/` next to them in `<kit>/installer/`, and the kit would no longer verify
+# against its own `KIT_MANIFEST` (found running the host-side image step on a real kit, question 250(a)).
+sys.dont_write_bytecode = True
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))  # so `import manifest` finds scripts/kit/manifest.py
 
+import image_build  # noqa: E402  (question 250(a): the host-side image step this module dispatches to)
 import manifest as kit_manifest  # noqa: E402  (path insert must precede this import)
+
+#: The two flags `main` hands to `image_build.main` instead of running the files install.
+IMAGE_STEP_FLAGS = ("--build-images", "--probe-offline-build")
 
 #: `KIT_MANIFEST` top-level keys this installer's own understanding of `kit_format` 3 requires --
 #: exactly `manifest.build_manifest`'s own parameter list (that function is this format's one
@@ -376,6 +404,29 @@ def _install_wheels_into_venv(kit_dir: Path, target_dir: Path) -> dict:
     }
 
 
+def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
+    """What `INSTALL_RECORD` says about images: this install built none (it has no path to the
+    daemon), which step does, and what that step must reproduce for each image."""
+    components = {}
+    for component, entry in sorted(doc["images"].items()):
+        components[component] = {
+            "collected": entry.get("collected", False),
+            "base_reference": (entry.get("base") or {}).get("reference"),
+            "expected_runtime_content_hash": entry.get("runtime_content_hash"),
+            "default_tag": image_build.default_tag(component, kit_manifest_sha256),
+        }
+    return {
+        "built": False,
+        "built_by": None,
+        "reason": (
+            "the files install runs without the Docker socket or DOCKER_HOST (question 250(a)); images are built on "
+            "the Docker host by the kit's own image step, from bases the operator loaded"
+        ),
+        "build_step": "<kit>/installer/install.sh --build-images <kit> [--image-tag COMPONENT=REF ...]",
+        "components": components,
+    }
+
+
 def install(kit_dir: Path, target_dir: Path) -> dict:
     """Runs the whole install: verify, refuse-checks, copy, chmod, pip install, INSTALL_RECORD.
     Returns the INSTALL_RECORD dict (also written to `<target_dir>/INSTALL_RECORD`). Raises
@@ -420,6 +471,7 @@ def install(kit_dir: Path, target_dir: Path) -> dict:
         },
         "gaps": doc["gaps"],
     }
+    record["installed"]["images"] = _images_record(doc, kit_manifest_sha256)
     record_path = target_dir / "INSTALL_RECORD"
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return record
@@ -433,6 +485,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in IMAGE_STEP_FLAGS:
+        return image_build.main(argv)
     args = build_parser().parse_args(argv)
     try:
         record = install(args.kit_dir, args.target_dir)
