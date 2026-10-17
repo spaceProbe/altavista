@@ -2,6 +2,25 @@
   "doc": "docs/kit-operator-supplied.md",
   "schema": 1,
   "components": {
+    "clickhouse": {
+      "arm64_manifest_digest": "sha256:b4e4a09d5c05a17640315aeb72aeab3fe03c96a937f414526a7c1ebda3201cb0",
+      "digest": "sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4",
+      "held": {
+        "question": 247,
+        "summary": "held pending licence review"
+      },
+      "item": 4,
+      "kind": "container-image",
+      "licences": "LGPL (libgsasl, libssh, mariadb-connector-c, numactl, xz, lemmagen-c), GPL-2.0-or-BSD (ittapi), MPL-2.0; ClickHouse itself is Apache-2.0",
+      "reference": "clickhouse/clickhouse-server@sha256:6ded2b2c2f2c46f12784bd8000c75f8aa7363372ed64afccaa932456b8cb41e4",
+      "source_record": "services/clickhouse/IMAGE_DIGEST.md",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
+      "version": "26.8.29.10 LTS",
+      "why": "Static LGPL libraries in the server binary. Held out of the kit pending the user's licence review (question 247): the builder refuses to declare it, so the kit never needs it and the list reports it outside the kit"
+    },
     "debian-bookworm-slim-base-image": {
       "base_of": ["edge-plugin-image"],
       "digest": "sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
@@ -9,6 +28,10 @@
       "kind": "container-base-image",
       "licences": "GPL (e.g. bash, coreutils, tar, sed, findutils, login), LGPL (libc6, libgnutls30, libgmp10)",
       "reference": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
       "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
     },
     "gmat-r2026a": {
@@ -38,7 +61,39 @@
         "exclude_dir_names": ["__pycache__"],
         "exclude_paths": ["output", "bin/api_startup_file.txt"]
       },
+      "verification": {
+        "method": "manifest.measure_tree over the operator's unpacked tree under the pin's scope, compared with the pin for the named platform (content hash, file count, total bytes, symlink count, symlink listing hash)",
+        "step": "files"
+      },
       "why": "GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL); the kit records GMAT's pack descriptor and never carries its bytes (docs/kit-operator-supplied.md item 3). The installer measures the operator's unpacked release and compares it with the pin for the target platform"
+    },
+    "minio": {
+      "digest": "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
+      "item": 5,
+      "kind": "container-image",
+      "licences": "AGPL-3.0, run unmodified and reached over S3 HTTP (question 39)",
+      "reference": "quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
+      "source_record": "services/store/IMAGE_DIGEST.md",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
+      "version": "RELEASE.2025-04-22T22-12-26Z",
+      "why": "Network service (the heavy track's object store); outside the kit unless a site that deploys it builds the kit with --declare-operator-supplied minio"
+    },
+    "postgis": {
+      "digest": "sha256:f8a700accce9a1fb24e14b73a3abf8e90439ce8f192c57b8cb93cc650694e8dd",
+      "item": 6,
+      "kind": "container-image",
+      "licences": "PostGIS is GPL-2.0-or-later (PostgreSQL itself is the permissive PostgreSQL licence), run unmodified over the Postgres wire protocol",
+      "reference": "imresamu/postgis@sha256:f8a700accce9a1fb24e14b73a3abf8e90439ce8f192c57b8cb93cc650694e8dd",
+      "source_record": "services/catalog/IMAGE_DIGEST.md",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
+      "version": "17-3.5-alpine, PostGIS 3.5.4",
+      "why": "Network service (the catalog's PostgreSQL + PostGIS); outside the kit unless a site that deploys it builds the kit with --declare-operator-supplied postgis"
     },
     "ubuntu-22.04-base-image": {
       "base_of": ["cfs-image"],
@@ -47,6 +102,10 @@
       "kind": "container-base-image",
       "licences": "GPL-2.0/3.0 (e.g. grep, gzip, util-linux, procps, dpkg, apt), LGPL-2.1 (libc6, libgnutls30, libgpg-error0)",
       "reference": "ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
       "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
     }
   }

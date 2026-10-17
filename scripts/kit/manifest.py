@@ -229,6 +229,12 @@ ensure_ascii=False)` plus one trailing newline. It contains:
 - `gaps` -- Decision J's declared, out-of-scope items, now assembled by `build_gaps` (below) from
   what the caller actually collected, rather than a fixed constant -- always present, but its
   membership varies with which flags a given kit build used.
+- `operator_supplied_declared` -- NEW in question 250(a), task 3: a sorted list of ids from
+  `operator_supplied.json` (MinIO, PostGIS; never a held one such as ClickHouse) of the service images
+  the site that deploys this kit supplies itself, set by `build_kit.py --declare-operator-supplied`;
+  always present, `[]` by default. It is what makes the installer's two steps (`operator_check.py`)
+  verify such an image by digest; nothing else about the kit changes, so `kit_format` stays 5 and an
+  installer refuses a kit without the key rather than guess that it declares nothing.
 
 No timestamps, no absolute paths, no hostname, no username anywhere in the output -- see
 `pack_descriptor`'s own doc comment for how a pack that lives outside this worktree is recorded
@@ -966,9 +972,12 @@ def build_manifest(
     binaries: dict,
     runs: dict,
     gaps: list[dict],
+    operator_supplied_declared: Optional[list[str]] = None,
 ) -> dict:
     """Assemble the KIT_MANIFEST dict (Decision L, round-2-extended) for the kit already
-    assembled at `kit_root`.
+    assembled at `kit_root`. `operator_supplied_declared` (question 250(a), task 3) is the sorted,
+    de-duplicated list of service images the site that gets this kit deploys and so must supply
+    (`build_kit.py --declare-operator-supplied`); always written, empty by default.
 
     `files` and `pack_symlinks` are derived by walking `kit_root` itself right now
     (`_walk_kit_files`/`_classify_role`, `_pack_symlinks_list`) -- so this function's caller
@@ -1010,6 +1019,7 @@ def build_manifest(
         "binaries": binaries,
         "runs": runs,
         "gaps": gaps,
+        "operator_supplied_declared": sorted(set(operator_supplied_declared or [])),
     }
 
 

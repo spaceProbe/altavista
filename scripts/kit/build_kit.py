@@ -47,6 +47,9 @@ GATED, opt-in, off by default:
   the ONE step that always uses the network (question 154), never at test time.
 - `--with-binaries` -- round 2: cross-built Linux service binaries (`av-ingest-server`,
   `av-command`) the zero-egress install proof will start inside a container.
+- `--declare-operator-supplied NAME` (repeatable) -- question 250(a), task 3: a service image (MinIO,
+  PostGIS) the site receiving the kit deploys and supplies itself; recorded in
+  `KIT_MANIFEST.operator_supplied_declared`, never carried. ClickHouse is refused (question 247).
 
 OUT, as `manifest.build_gaps` names explicitly (some conditionally, per the flags above):
 the seccert trust root (always -- see `manifest.py`'s own `_SECCERT_ROOT_REASON`), standing the
@@ -92,6 +95,7 @@ from packaging.requirements import Requirement
 # already establishes as this workspace's convention.
 import image_layer  # noqa: E402  (question 250(a): the application-layer step)
 import manifest as kit_manifest  # noqa: E402
+import operator_check  # noqa: E402  (question 250(a), task 3: validates --declare-operator-supplied)
 import sbom  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -185,8 +189,11 @@ INSTALLER_SOURCE_FILES: tuple[str, ...] = (
     # one helper it shares with the test tooling (the image-table parse and the measured
     # untag-versus-delete rule). Both import the standard library and each other only.
     "image_build.py", "docker_image_tags.py",
-    # Question 250(a): the committed pins of what the operator supplies (the base images and GMAT
-    # today; the out-of-kit services later). Data, not code: `install.py` does not import it.
+    # Question 250(a), task 3: what the kit needs of the operator's components and what is printed
+    # (stdlib and `manifest` only; both steps of the installer import it).
+    "operator_check.py",
+    # Question 250(a): the committed pins of the six components the operator supplies (the two bases,
+    # GMAT, and the three service images). Data, not code: `install.py` does not import it.
     "operator_supplied.json",
 )
 
@@ -1011,13 +1018,24 @@ def build(
     with_vendor: bool = False,
     with_wheels: bool = False,
     with_binaries: bool = False,
+    declare_operator_supplied: list[str] | None = None,
 ) -> tuple[Path, str]:
     """Assembles a kit at `out` and writes its `KIT_MANIFEST`. Returns `(manifest_path,
     manifest_sha256)` -- the sha256 is computed AFTER writing, never embedded in the manifest
-    itself (Decision L)."""
+    itself (Decision L). `declare_operator_supplied` names service images (MinIO, PostGIS) the
+    receiving site supplies itself; recorded in `KIT_MANIFEST.operator_supplied_declared`, refused
+    before anything is written if a name is not a declarable pin (`operator_check.declaration_problems`)."""
     kit_root = out
     if kit_root.exists() and any(kit_root.iterdir()):
         raise RuntimeError(f"--out {kit_root} already exists and is not empty -- pass an empty or new directory")
+    declared = sorted(set(declare_operator_supplied or []))
+    declaration_problems = operator_check.declaration_problems(
+        declared, kit_manifest.load_operator_pins(repo_root / "scripts" / "kit" / "operator_supplied.json"),
+    )
+    if declaration_problems:
+        raise kit_manifest.OperatorSuppliedPackError(
+            "--declare-operator-supplied: " + "; ".join(declaration_problems)
+        )
     # Question 250(a), task 2: the kit never carries an operator-supplied pack's bytes (GMAT). Refused
     # before anything is written, naming the flag that records the descriptor instead.
     copy_set = set(copy_pack_names or [])
@@ -1105,7 +1123,7 @@ def build(
     manifest_doc = kit_manifest.build_manifest(
         kit_root=kit_root, git_commit=git_commit, git_dirty=git_dirty, git_status=git_status,
         images=images, sboms=sboms, packs=packs, vendor=vendor, wheels=wheels, binaries=binaries,
-        runs=runs, gaps=gaps,
+        runs=runs, gaps=gaps, operator_supplied_declared=declared,
     )
     manifest_path = kit_manifest.write_manifest(manifest_doc, kit_root)
     manifest_sha256 = sbom.sha256_file(manifest_path)
@@ -1172,6 +1190,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="gated (round 2): cross-build av-ingest-server/av-command for Linux (built once "
              "per commit, cached, never rebuilt per kit) into <kit>/binaries/.",
     )
+    p.add_argument(
+        "--declare-operator-supplied", action="append", default=[], dest="declare_operator_supplied", metavar="NAME",
+        help="repeatable (question 250(a), task 3): a service image the site receiving this kit deploys and "
+             "supplies itself (docs/kit-operator-supplied.md items 5-6: minio, postgis), recorded in "
+             "KIT_MANIFEST.operator_supplied_declared so the installer's image step verifies it by digest. The "
+             "kit never carries it. Refused for a name that is not a declarable service image in "
+             "scripts/kit/operator_supplied.json, and for clickhouse (held out of the kit, question 247).",
+    )
     return p
 
 
@@ -1195,6 +1221,7 @@ def main(argv: list[str] | None = None) -> int:
             with_vendor=args.with_vendor,
             with_wheels=args.with_wheels,
             with_binaries=args.with_binaries,
+            declare_operator_supplied=list(args.declare_operator_supplied),
         )
     except kit_manifest.OperatorSuppliedPackError as e:
         print(f"scripts/kit/build_kit.py: REFUSED -- {e}", file=sys.stderr)

@@ -53,16 +53,16 @@ def _make_tree(root: Path) -> Path:
 
 
 def _pins_doc(tree: Path) -> dict:
-    return {
-        "doc": "docs/kit-operator-supplied.md", "schema": 1,
-        "components": {
-            "gmat-r2026a": {
-                "item": 3, "kind": "data-tree", "pack": "gmat", "scope": SCOPE,
-                "why": "synthetic pin for a test", "not_covered": ["a thing the test knows is not covered"],
-                "platforms": {PLATFORM: kmanifest.measure_tree(tree, SCOPE), "testos-x2": None},
-            }
-        },
+    """The real pins file with GMAT replaced by a synthetic pin for `tree` (task 3: the installer
+    validates and lists all six components, so a pins file with GMAT alone is no longer a pins file)."""
+    doc = json.loads((KIT_DIR / "operator_supplied.json").read_text(encoding="utf-8"))
+    doc["components"]["gmat-r2026a"] = {
+        "item": 3, "kind": "data-tree", "pack": "gmat", "scope": SCOPE,
+        "licences": "synthetic", "verification": {"step": "files", "method": "synthetic"},
+        "why": "synthetic pin for a test", "not_covered": ["a thing the test knows is not covered"],
+        "platforms": {PLATFORM: kmanifest.measure_tree(tree, SCOPE), "testos-x2": None},
     }
+    return doc
 
 
 @pytest.fixture()

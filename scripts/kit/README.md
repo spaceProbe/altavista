@@ -350,6 +350,55 @@ installer against that tree with `--gmat-platform <key>` before relying on the p
 as good as the release it was measured from, so measure the unpacked release, not an install that has
 been run (the scope covers what a run writes, not everything an operator might change).
 
+## Every operator-supplied component is verified and listed (question 250(a), task 3)
+
+`scripts/kit/operator_supplied.json` pins all six components of `docs/kit-operator-supplied.md`: the two
+base images (items 1 and 2, `container-base-image`), GMAT (item 3, `data-tree`, per platform) and the
+three service images (items 4 to 6, `container-image`: ClickHouse, MinIO, PostGIS). Each entry records
+its doc item, kind, the licences that make it operator-supplied, and `verification` (which step checks it
+and how). `tests/test_kit_operator_supplied.py` fails if the pins file and the doc's table disagree on
+any digest, or if a service pin differs from the digest in `services/<store|catalog|clickhouse>/IMAGE_DIGEST.md`.
+
+**What the kit needs** is derived from `KIT_MANIFEST` in one place, `operator_check.requirement_for`: a
+base image for each image the kit carries (`images.<c>.collected`), GMAT when `packs.gmat` is present, a
+service image only when `KIT_MANIFEST.operator_supplied_declared` names it. That list is filled by
+
+    .venv/bin/python scripts/kit/build_kit.py --out DIR --declare-operator-supplied minio --declare-operator-supplied postgis
+
+for a site that deploys the heavy track (default: empty). The builder refuses a name that is not a service
+image in the pins file, a base or GMAT (those follow from what the kit carries), and `clickhouse`, which
+is held out of the kit pending the user's licence review (question 247); the installer refuses a
+manifest that declares any of them.
+
+**Two steps, one list.** The files install never holds the Docker socket, so it cannot look at an image,
+and the host-side image step reads no tree. Each prints the whole list, one line per component, always
+all six, in item order:
+
+    operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified sha256:2edbbc5dc405… via Id
+    operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
+    operator-supplied: minio  required (declared at build time: --declare-operator-supplied minio)  verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)
+    operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
+    operator-supplied: postgis  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied postgis)
+    operator-supplied: debian-bookworm-slim-base-image  not required (the kit carries no application layer for edge-plugin-image), not verified
+
+(digests shortened to 12 hex digits in the line, whole in the records). To read the two outputs together:
+every line that says `required` must say `verified ...` in exactly one of the two outputs and
+`verified by the ... , not here` in the other. `NOT VERIFIED [code]` is a refusal: that step printed the
+lines up to and including it and exited 2, so the operator sees what was found before the refusal. The
+structured form of each step's list is `INSTALL_RECORD.installed.operator_supplied.components` (the
+earlier `.gmat` entry is kept) and `IMAGE_BUILD_RECORD.operator_supplied.components`; neither step reads
+the other's record, because the two run at different times and, usually, on different machines.
+
+Where each is checked: trees (GMAT) by `install.sh <kit> <target> --gmat-root ... --gmat-platform ...`, or
+without installing by `install.sh --check-operator-supplied <kit> [--gmat-root ... --gmat-platform ...]`;
+container images by `install.sh --build-images <kit>` (the printed list comes before any build) or
+`install.sh --probe-offline-build <kit>`. An image is accepted only if `docker image inspect <reference>`
+reports the pinned digest as its `Id` or in `RepoDigests`; absent or different is `base-image-missing` /
+`base-image-digest-differs` for a base and `operator-image-missing` / `operator-image-digest-differs` for
+a declared service image, each naming reference and digest. Nothing is pulled or loaded. Each component's
+check is one function returning a typed result (`operator_check.Verification`: found, expected,
+verified, reason, code), and the step turns an unverified result into its own refusal.
+
 ## The recorded kernel run
 
 `tests/fixtures/*.runproducts.bin` is carried into `<kit>/runs/`, byte-for-byte, unconditionally

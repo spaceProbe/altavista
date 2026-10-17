@@ -39,7 +39,15 @@ step the operator runs ON THE DOCKER HOST, with the same kit, after (or before) 
    contains `...@<digest>` (the classic store); measured on this host: `Id` matches. Absent, or
    present but a different digest: a typed refusal naming the expected reference and digest and
    telling the operator to `docker load` it. No build is issued without this, so no build can reach
-   for a base on a registry (`--pull=false` is the second guard, not the first).
+   for a base on a registry (`--pull=false` is the second guard, not the first). (Question 250(a),
+   task 3: this check is `operator_check.verify_image`, run through `operator_check.verify_all`, which
+   prints one line for each of the six components of `docs/kit-operator-supplied.md` -- the bases, any
+   service image the kit declares in `KIT_MANIFEST.operator_supplied_declared` (verified the same way,
+   by digest), the rest listed as outside the kit or as the files install's (GMAT). The refusals keep
+   their kinds: `base-image-missing`, `base-image-digest-differs`, and for a declared service image
+   `operator-image-missing`, `operator-image-digest-differs`. The same list goes into the record's
+   `operator_supplied`. `operator_check.py`'s module doc says how to read this output together with
+   the files install's.)
 4. The tag for each image: `--image-tag COMPONENT=REF`, default `av-kit/<component>:<first 12 hex of
    KIT_MANIFEST's sha256>`. Never the recorded `:local` tag (refused), and never a tag that already
    exists on the host: this step only ever creates a name, so it can later remove exactly the name
@@ -107,6 +115,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import docker_image_tags  # noqa: E402  (path insert must precede this import)
 import manifest as kit_manifest  # noqa: E402
+import operator_check  # noqa: E402  (question 250(a), task 3: what the kit needs of the operator, and the printed list)
 
 PROG = "install.sh --build-images"
 RECORD_FORMAT = 1
@@ -157,6 +166,26 @@ class BaseImageMissing(ImageBuildRefused):
 
 class BaseImageDigestDiffers(ImageBuildRefused):
     kind = "base-image-digest-differs"
+
+
+class OperatorImageMissing(ImageBuildRefused):
+    """A service image the kit declared (`operator_supplied_declared`) is not on the Docker host."""
+
+    kind = "operator-image-missing"
+
+
+class OperatorImageDigestDiffers(ImageBuildRefused):
+    kind = "operator-image-digest-differs"
+
+
+#: `operator_check.Verification.code` of an unverified image -> the refusal this step raises for it
+#: (a code with no entry here is a problem with the kit or the pins file: `KitRefused`).
+_REFUSAL_BY_CODE = {
+    "base-image-missing": BaseImageMissing,
+    "base-image-digest-differs": BaseImageDigestDiffers,
+    "image-missing": OperatorImageMissing,
+    "image-digest-differs": OperatorImageDigestDiffers,
+}
 
 
 class TagRefused(ImageBuildRefused):
@@ -245,6 +274,7 @@ class KitPlan:
     doc: dict
     manifest_sha256: str
     components: dict[str, dict]
+    pins: dict = field(default_factory=dict)   # the installer's pins file, `components` (validated)
 
 
 def load_kit(kit_dir: Path, pins_file: Optional[Path] = None) -> KitPlan:
@@ -271,6 +301,11 @@ def load_kit(kit_dir: Path, pins_file: Optional[Path] = None) -> KitPlan:
     images = doc.get("images")
     if not isinstance(images, dict) or not images:
         raise KitRefused("KIT_MANIFEST has no images section")
+    if not isinstance(doc.get("operator_supplied_declared"), list):
+        raise KitRefused(
+            "KIT_MANIFEST has no operator_supplied_declared list -- a kit built before question 250(a), task 3; "
+            "this step will not guess that it declares nothing. Rebuild the kit"
+        )
     pins = _load_pins(pins_file)
     for component, entry in sorted(images.items()):
         if not entry.get("collected"):
@@ -286,15 +321,19 @@ def load_kit(kit_dir: Path, pins_file: Optional[Path] = None) -> KitPlan:
             )
         _check_pin(component, entry, pins)
         _check_dockerfile_from(kit_dir, component, entry)
-    return KitPlan(kit_dir, doc, kit_manifest.sbom.sha256_file(manifest_path), dict(sorted(images.items())))
+    return KitPlan(kit_dir, doc, kit_manifest.sbom.sha256_file(manifest_path), dict(sorted(images.items())), pins)
 
 
 def _load_pins(pins_file: Optional[Path]) -> dict:
     path = pins_file or (SCRIPT_DIR / "operator_supplied.json")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))["components"]
+        pins = json.loads(path.read_text(encoding="utf-8"))["components"]
     except (OSError, ValueError, KeyError) as e:
         raise KitRefused(f"the installer's pins file {path} could not be read ({type(e).__name__}: {e})") from e
+    problems = operator_check.pins_problems(pins)
+    if problems:
+        raise KitRefused(f"the installer's pins file {path} is malformed: " + "; ".join(problems))
+    return pins
 
 
 def _check_pin(component: str, entry: dict, pins: dict) -> None:
@@ -384,32 +423,34 @@ def check_docker(docker: Runner) -> None:
         raise DockerUnavailable(f"the Docker daemon is not reachable (`docker version` rc={r.returncode}): {_text(r.stderr).strip()}")
 
 
-def verify_base(docker: Runner, base: dict) -> dict:
-    """Step 3. The base, found by its digest-qualified reference, must BE the pinned digest."""
-    ref, digest = base["reference"], base["digest"]
-    r = docker(["image", "inspect", ref], timeout=60.0)
-    if r.returncode != 0:
-        raise BaseImageMissing(
-            f"the base image {ref} is not on this Docker host (expected digest {digest}; `docker image inspect` "
-            f"rc={r.returncode}: {_text(r.stderr).strip()}). Load the operator-supplied base first -- `docker load -i "
-            f"<tarball>` of an image saved from exactly that digest (scripts/kit/save_base_images.py makes one) -- and "
-            f"re-run. Nothing was built and nothing was pulled."
-        )
+def verify_operator_components(
+    docker: Runner, plan: KitPlan, out: Callable[[str], None],
+) -> tuple[list, dict[str, dict]]:
+    """Step 3 (question 250(a), task 3). Every component of the installer's pins file, in item order,
+    one printed line each (`operator_check.verify_all`): the bases of the images this run builds and any
+    service image the kit declares are found with `docker image inspect <reference>` and accepted only
+    if they ARE the pinned digest (`operator_check.verify_image`); the GMAT tree belongs to the files
+    install and is listed as such. For EVERY image, before any build. Returns `(results, bases)`, `bases`
+    being `{image component: {reference, digest, image_id, verified_by}}` for the record. A required
+    image that is absent or different raises its typed refusal after its line (and those before it) were
+    printed; nothing was built and nothing was pulled."""
+    def verify(pin_id: str, pin: dict, requirement: operator_check.Requirement) -> operator_check.Verification:
+        return operator_check.verify_image(docker, pin_id, pin, requirement)
+
     try:
-        info = json.loads(_text(r.stdout))[0]
-    except (ValueError, IndexError, TypeError) as e:
-        raise BaseImageMissing(f"`docker image inspect {ref}` gave output this step cannot read: {e}") from e
-    image_id, repo_digests = info.get("Id"), info.get("RepoDigests") or []
-    if image_id == digest:
-        via = "Id"
-    elif any(d.endswith("@" + digest) for d in repo_digests):
-        via = "RepoDigests"
-    else:
-        raise BaseImageDigestDiffers(
-            f"the image found for {ref} has Id {image_id} and RepoDigests {repo_digests!r}; neither is the pinned digest "
-            f"{digest}. Load the operator-supplied base saved from exactly that digest and re-run."
+        results = operator_check.verify_all(
+            operator_check.STEP_IMAGES, plan.doc, plan.pins,
+            verifiers={operator_check.KIND_BASE: verify, operator_check.KIND_IMAGE: verify},
+            out=out, images=set(plan.components),
         )
-    return {"reference": ref, "digest": digest, "image_id": image_id, "verified_by": via}
+    except operator_check.ComponentRefused as e:
+        raise _REFUSAL_BY_CODE.get(e.result.code, KitRefused)(e.result.reason) from e
+    by_id = {r.component: r for r in results}
+    bases = {}
+    for component, entry in plan.components.items():
+        detail = by_id[entry["base"]["id"]].detail
+        bases[component] = {k: detail[k] for k in ("reference", "digest", "image_id", "verified_by")}
+    return results, bases
 
 
 def image_id(docker: Runner, ref: str) -> Optional[str]:
@@ -727,10 +768,7 @@ def build_images(
     if record_path.exists():
         raise ImageBuildRefused(f"{record_path} already exists; refusing to overwrite a record -- choose --record elsewhere")
     check_docker(docker)
-    bases = {}
-    for component, entry in plan.components.items():
-        bases[component] = verify_base(docker, entry["base"])
-        out(f"base {bases[component]['reference']} verified by {bases[component]['verified_by']} ({bases[component]['image_id']})")
+    operator_results, bases = verify_operator_components(docker, plan, out)
     run_text = _text_runner(docker)
     before_table = docker_image_tags.docker_image_table(run_text)
     existing = docker_image_tags._tags_of(before_table)
@@ -769,6 +807,11 @@ def build_images(
     record = {
         "record_format": RECORD_FORMAT, "step": PROG, "kit_manifest_sha256": plan.manifest_sha256,
         "kit_format": plan.doc["kit_format"], "kit_git_commit": plan.doc["git_commit"], "images": record_images,
+        "operator_supplied": {
+            "step": "image step", "declared": list(plan.doc["operator_supplied_declared"]),
+            "components": [r.to_record() for r in operator_results],
+            "note": "a GMAT tree is verified by the files install (INSTALL_RECORD); this step reads no tree and does not read that record",
+        },
     }
     partial = record_path.with_name(record_path.name + f".{uuid.uuid4().hex}.partial")
     partial.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -782,9 +825,8 @@ def probe_offline_build(docker: Runner, kit_dir: Path, *, run_id: Optional[str] 
     plan = load_kit(kit_dir, pins_file)
     check_docker(docker)
     run_id = run_id or uuid.uuid4().hex[:12]
-    bases = {}
-    for entry in plan.components.values():
-        bases[entry["base"]["reference"]] = verify_base(docker, entry["base"])
+    _results, verified = verify_operator_components(docker, plan, out)
+    bases = {b["reference"]: b for b in verified.values()}
     run_text = _text_runner(docker)
     results = []
     for reference in sorted(bases):

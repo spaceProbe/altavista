@@ -15,6 +15,11 @@
 # (question 250(a); install.py's module doc, "GMAT is operator-supplied"):
 #   <kit-dir>/installer/install.sh <kit-dir> <target-dir> --gmat-root PATH --gmat-platform macos-arm64
 #
+# Every operator-supplied component the kit needs is listed, one line each, by both steps (question
+# 250(a), task 3; operator_check.py's module doc says how to read the two lists together). To verify
+# what this step can reach (GMAT) and print the list without installing anything:
+#   <kit-dir>/installer/install.sh --check-operator-supplied <kit-dir> [--gmat-root PATH --gmat-platform KEY]
+#
 # Images are built by a separate, host-side step of this same installer (question 250(a)): the
 # files install above runs inside the enclave and never gets the Docker socket. On the Docker host:
 #   <kit-dir>/installer/install.sh --build-images <kit-dir> [--image-tag COMPONENT=REF ...]

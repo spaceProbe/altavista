@@ -44,8 +44,9 @@ def test_the_pins_file_has_the_two_base_images_with_their_doc_item_numbers():
     bases = {cid: c for cid, c in doc["components"].items() if c["kind"] == "container-base-image"}
     by_item = {c["item"]: c for c in bases.values()}
     assert set(by_item) == {1, 2}
-    # every other component is the operator's GMAT (item 3, test_kit_install.py): a data tree, not a base image
-    assert {c["kind"] for cid, c in doc["components"].items() if cid not in bases} == {"data-tree"}
+    # every other component is the operator's GMAT (item 3, test_kit_install.py: a data tree) or one of the
+    # three service images (items 4-6, test_kit_operator_supplied.py): neither is a base image
+    assert {c["kind"] for cid, c in doc["components"].items() if cid not in bases} == {"data-tree", "container-image"}
     assert by_item[1]["reference"] == (
         "ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc")
     assert by_item[1]["base_of"] == ["cfs-image"]
