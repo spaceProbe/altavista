@@ -16,7 +16,7 @@ why "source state" is the commit AND the working tree on top of it, never the co
 
 # What this half assembles (round 2)
 
-IN, always: the merged suite/site files, the ten committed SBOMs + `SHA256SUMS`, the two
+IN, always: the merged suite/site files, the eleven committed SBOMs + `SHA256SUMS`, the three
 `IMAGE_DIGEST.md` records, the recorded kernel runs (`tests/fixtures/*.runproducts.bin`), the
 Decision-K pack descriptors (`data/time` by default), the git commit/dirty state, and
 `KIT_MANIFEST` itself. **Task 3c added, round 3 (question 217(b)) removed**: real BYTES for the
@@ -31,7 +31,8 @@ import, copied into `<kit>/installer/`, unconditionally, no flag -- replacing th
 additive: `kit_format` bumps again (3 -> 4, `manifest.py`'s own top doc, same section).
 
 GATED, opt-in, off by default:
-- `--with-images` -- `docker save` of the two recorded images.
+- `--with-images` -- `docker save` of the three recorded images (the two we build, plus the
+  third-party `clickhouse-image`, question 245).
 - `--with-pack <name>` (repeatable) -- an additional pack's DESCRIPTOR (content hash only).
 - `--copy-pack <name>` (repeatable) -- round 2: that pack's real BYTES, copied into the kit
   (implies the descriptor too; `--max-pack-bytes` still gates it). Round 2 also copied `web`/
@@ -97,11 +98,14 @@ MERGE_FRAGMENT = Path("deploy") / "secdeploy" / "suite.altavista.toml"
 SBOM_SOURCE_DIR = Path("docs") / "compliance" / "sbom"
 RUN_FIXTURES_DIR = Path("tests") / "fixtures"
 
-#: The two components' own committed digest records, repo-relative -- copied byte-for-byte into
+#: The image components' own committed digest records, repo-relative -- copied byte-for-byte into
 #: the kit at the identical relative path (`services/<name>/IMAGE_DIGEST.md`), never regenerated.
+#: `clickhouse-image` (question 245, heavy-ct round 1a) is the official third-party ClickHouse
+#: server image: fetched once by digest, never built here, so its record is the pin itself.
 IMAGE_DIGEST_SOURCES: dict[str, Path] = {
     "edge-plugin-image": Path("services") / "edge-plugin" / "IMAGE_DIGEST.md",
     "cfs-image": Path("services") / "cfs" / "IMAGE_DIGEST.md",
+    "clickhouse-image": Path("services") / "clickhouse" / "IMAGE_DIGEST.md",
 }
 
 
@@ -364,7 +368,7 @@ def collect_images(repo_root: Path, kit_root: Path) -> dict:
         raise RuntimeError(
             "--with-images was requested but `docker info` failed -- this step only inspects "
             "and saves an already-built image, it never builds one (Decision I). Make Docker "
-            "available and re-run, or omit --with-images to leave the two images recorded-but-"
+            "available and re-run, or omit --with-images to leave the images recorded-but-"
             "not-collected in KIT_MANIFEST."
         )
 
@@ -388,7 +392,10 @@ def collect_images(repo_root: Path, kit_root: Path) -> dict:
                     f"match its recorded digest {recorded['recorded_digest']} (question 212) -- "
                     f"refusing to save a tarball of a different image under this component's "
                     f"name. Rebuild with the component's own build-image.sh and update its "
-                    f"IMAGE_DIGEST.md, or investigate the mismatch before retrying --with-images."
+                    f"IMAGE_DIGEST.md, or investigate the mismatch before retrying --with-images. "
+                    f"(clickhouse-image is third-party and never built here: its tag is a local "
+                    f"alias for the pulled digest, `docker tag <registry reference in "
+                    f"services/clickhouse/IMAGE_DIGEST.md> {tag}` -- see that file's 'Kit tag'.)"
                 )
             tar_path = images_dir / f"{component}.tar"
             save = subprocess.run(
@@ -1081,7 +1088,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--with-images", action="store_true",
-        help="gated: docker save the two recorded images into the kit, after comparing each to "
+        help="gated: docker save the recorded images into the kit, after comparing each to "
              "its recorded digest (question 212). Off by default -- see manifest.py's 'images' doc.",
     )
     p.add_argument(

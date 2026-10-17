@@ -1,5 +1,5 @@
 """scripts/kit/sbom.py -- D2 (docs/compliance/sbom): deterministic CycloneDX SBOMs, one
-generator behind one interface, for every suite component plus the two recorded container
+generator behind one interface, for every suite component plus the three recorded container
 images.
 
 Stdlib only. Three generators (Decision D -- where each SBOM's package list comes from):
@@ -18,9 +18,10 @@ Stdlib only. Three generators (Decision D -- where each SBOM's package list come
   `(name, version)` -- this venv reports `altavista 0.1.0` twice (a stale, gitignored
   `altavista.egg-info` left on `sys.path` from an older install, and the real `.dist-info`);
   the candidate carrying real license metadata wins a tie, broken deterministically otherwise.
-- `image_sbom` -- from the two components' own committed, hand-maintained records
-  (`IMAGE_DIGEST.md`, `IMAGE_CONTEXT_MANIFEST.txt`), never by running docker or reading a live
-  daemon. `services/edge-plugin/IMAGE_DIGEST.md` has one clean "most recent build" section this
+- `image_sbom` -- from the three images' own committed, hand-maintained records
+  (`IMAGE_DIGEST.md`, `IMAGE_CONTEXT_MANIFEST.txt`; for the third-party `clickhouse-image`,
+  `IMAGE_DIGEST.md` plus the dpkg inventory `IMAGE_PACKAGES.txt`), never by running docker or
+  reading a live daemon. `services/edge-plugin/IMAGE_DIGEST.md` has one clean "most recent build" section this
   reads directly; `services/cfs/IMAGE_DIGEST.md` is a long changelog with no single current-
   state table, so this reads the structured, always-regenerated header lines of
   `IMAGE_CONTEXT_MANIFEST.txt` instead ("Built image ID for this manifest" / "Runtime-content
@@ -56,6 +57,7 @@ from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import quote
 
 import licences  # scripts/kit/licences.py -- the one source of truth for FREE_TEXT_ALIASES
                   # (D2-2: the SBOM must never emit a licence string licences.py itself cannot
@@ -150,8 +152,10 @@ PYTHON_COMPONENTS: tuple[str, ...] = ("av-viewer", "gmat-service")
 #: own module doc for why the lock file is a real SBOM input now, not merely a cache of the venv.
 PYTHON_EPOCH_PATHS: list[str] = ["pyproject.toml", "scripts/kit/python-lock.json"]
 
-#: The two recorded container images (Decision G/D2 deliverable 6's "declared in one place").
-IMAGE_COMPONENTS: tuple[str, ...] = ("edge-plugin-image", "cfs-image")
+#: The recorded container images (Decision G/D2 deliverable 6's "declared in one place"). The
+#: first two we build; `clickhouse-image` (question 245, heavy-ct round 1a) is the official
+#: third-party `clickhouse/clickhouse-server` image, fetched once and pinned by digest.
+IMAGE_COMPONENTS: tuple[str, ...] = ("edge-plugin-image", "cfs-image", "clickhouse-image")
 
 #: Per-image epoch paths (Decision H: "for an image its IMAGE_DIGEST.md (and
 #: IMAGE_CONTEXT_MANIFEST.txt where one exists)") -- named once here so the generator and
@@ -159,6 +163,7 @@ IMAGE_COMPONENTS: tuple[str, ...] = ("edge-plugin-image", "cfs-image")
 IMAGE_EPOCH_PATHS: dict[str, list[str]] = {
     "edge-plugin-image": ["services/edge-plugin/IMAGE_DIGEST.md"],
     "cfs-image": ["services/cfs/IMAGE_DIGEST.md", "services/cfs/IMAGE_CONTEXT_MANIFEST.txt"],
+    "clickhouse-image": ["services/clickhouse/IMAGE_DIGEST.md", "services/clickhouse/IMAGE_PACKAGES.txt"],
 }
 
 
@@ -747,11 +752,120 @@ def _cfs_image_sbom() -> dict:
     return _assemble_document("cfs-image", meta_component, components, epoch)
 
 
+#: `clickhouse-image` is a third-party image we did not build (question 245): there is no build
+#: context to enumerate, so its SBOM is assembled from two committed inputs -- the pin
+#: (`services/clickhouse/IMAGE_DIGEST.md`) and the dpkg inventory read out of the pinned image
+#: (`services/clickhouse/IMAGE_PACKAGES.txt`, written by `extract_image_packages.py`). The
+#: ClickHouse server packages in that inventory carry the image's licence; every distro package
+#: carries an explicit no-licence-metadata property, because the distro's own per-package
+#: licences live in `/usr/share/doc/<pkg>/copyright` inside the image and are not read here.
+CLICKHOUSE_IMAGE_DIR = Path("services") / "clickhouse"
+CLICKHOUSE_OWN_PACKAGE_PREFIX = "clickhouse-"
+
+
+def _clickhouse_package_inventory(text: str) -> tuple[str, list[tuple[str, str, str]]]:
+    """`(os_name, [(name, version, architecture), ...])` from IMAGE_PACKAGES.txt's header and rows."""
+    os_name = ""
+    rows: list[tuple[str, str, str]] = []
+    for line in text.splitlines():
+        if line.startswith("# os:"):
+            os_name = line[len("# os:"):].strip()
+        if not line or line.startswith("#"):
+            continue
+        name, version, arch = line.split("\t")
+        rows.append((name, version, arch))
+    return os_name, rows
+
+
+def _clickhouse_image_sbom() -> dict:
+    digest_text = (REPO_ROOT / CLICKHOUSE_IMAGE_DIR / "IMAGE_DIGEST.md").read_text()
+    packages_text = (REPO_ROOT / CLICKHOUSE_IMAGE_DIR / "IMAGE_PACKAGES.txt").read_text()
+
+    registry_ref = _fenced_block_after(digest_text, "Registry reference")
+    image_id = _fenced_block_after(digest_text, "docker image inspect")
+    image_tag = re.search(r"Tag this digest carried when it was pulled:\s*`([^`]+)`", digest_text).group(1)
+    arm64_manifest = re.search(r"arm64 manifest digest:\s*`sha256:([0-9a-f]{64})`", digest_text).group(1)
+    licence = re.search(r"Licence \(SPDX\):\s*`([^`]+)`", digest_text).group(1)
+    os_name, packages = _clickhouse_package_inventory(packages_text)
+
+    licenses_field, _ = _license_field(licence)
+    components = []
+    for name, version, arch in packages:
+        props = [{"name": PROP_SOURCE, "value": "dpkg"}]
+        comp = {
+            "type": "library",
+            "name": name,
+            "version": version,
+            "purl": f"pkg:deb/ubuntu/{name}@{quote(version, safe='')}?arch={arch}",
+        }
+        if name.startswith(CLICKHOUSE_OWN_PACKAGE_PREFIX):
+            comp["licenses"] = licenses_field
+            props.append({
+                "name": PROP_PREFIX + "licence-source",
+                "value": (
+                    "upstream ClickHouse repository LICENSE (SPDX Apache-2.0); the image itself ships "
+                    "no LICENSE file and no org.opencontainers.image.licenses label "
+                    "(services/clickhouse/IMAGE_DIGEST.md, Licence)"
+                ),
+            })
+        else:
+            props.append({"name": PROP_NO_LICENCE, "value": "true"})
+        comp["properties"] = sorted(props, key=lambda p: (p["name"], p["value"]))
+        components.append(comp)
+
+    props = [
+        {"name": PROP_PREFIX + "upstream-reference", "value": registry_ref},
+        {"name": PROP_PREFIX + "arm64-manifest-digest", "value": f"sha256:{arm64_manifest}"},
+        {"name": PROP_PREFIX + "base-os", "value": os_name},
+        {
+            "name": PROP_PREFIX + "package-inventory",
+            "value": f"services/clickhouse/IMAGE_PACKAGES.txt (dpkg status of the pinned image, {len(packages)} packages)",
+        },
+        {
+            "name": PROP_GAP,
+            "value": (
+                "third-party image we did not build: there is no build context or source tree here; "
+                "the pin (index digest, arm64 manifest digest) and the dpkg inventory are all that "
+                "were read from it, with no network fetch"
+            ),
+        },
+        {
+            "name": PROP_GAP,
+            "value": (
+                "statically linked third-party libraries are not enumerated: the clickhouse binary "
+                "links many bundled libraries (its own system.licenses table lists them; the count "
+                "and the copyleft rows are recorded in services/clickhouse/IMAGE_DIGEST.md), none "
+                "of which appears in dpkg"
+            ),
+        },
+        {
+            "name": PROP_GAP,
+            "value": (
+                "distro package licences are not read: each Ubuntu package's licence is in "
+                "/usr/share/doc/<package>/copyright inside the image, so those components carry "
+                "an explicit no-licence-metadata property"
+            ),
+        },
+    ]
+    epoch = git_epoch(IMAGE_EPOCH_PATHS["clickhouse-image"])
+    meta_component = {
+        "type": "container",
+        "name": "clickhouse-image",
+        "version": image_tag,
+        "hashes": [{"alg": "SHA-256", "content": image_id.removeprefix("sha256:")}],
+        "licenses": licenses_field,
+        "properties": sorted(props, key=lambda p: (p["name"], p["value"])),
+    }
+    return _assemble_document("clickhouse-image", meta_component, components, epoch)
+
+
 def image_sbom(component: str) -> dict:
     if component == "edge-plugin-image":
         return _edge_plugin_image_sbom()
     if component == "cfs-image":
         return _cfs_image_sbom()
+    if component == "clickhouse-image":
+        return _clickhouse_image_sbom()
     raise ValueError(f"unknown image component: {component!r}")
 
 

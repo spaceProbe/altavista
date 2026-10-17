@@ -2,7 +2,7 @@
 
 A "kit" is a directory that collects, in one place, everything a deployment needs that this
 repository already builds, records, or commits elsewhere -- the merged secdeploy suite/site
-files, the ten CycloneDX SBOMs, the two recorded container-image digests, the recorded kernel
+files, the eleven CycloneDX SBOMs, the three recorded container-image digests, the recorded kernel
 runs, a set of Decision-K "pack" descriptors (environment data such as `data/time`, and, as of
 round 2, real pack BYTES when asked for) -- plus a `KIT_MANIFEST` that lists every file (and,
 round 2, every pack symlink) the kit carries with its SHA-256, and that can be independently
@@ -50,12 +50,20 @@ Flags:
 
 - `--site <path>` -- one of `deploy/secdeploy`'s standalone site files. Defaults to the eval
   site, `deploy/secdeploy/secsite.altavista-eval.toml`.
-- `--with-images` -- gated, off by default. Runs `docker save` on the two recorded images
-  (`av-edge-plugin:local`, `altavista-cfs-lockstep:local`) into the kit as tarballs, but only
-  AFTER comparing each image's live `docker image inspect` digest to its own recorded digest in
-  `services/edge-plugin/IMAGE_DIGEST.md` / `services/cfs/IMAGE_DIGEST.md` (question 212) -- a
-  mismatch is a hard error, never a tarball saved under the wrong name. Takes the host-wide
-  Docker test lock (`altavista.docker_test_lock.lock_docker_tests`) for the whole step.
+- `--with-images` -- gated, off by default. Runs `docker save` on the three recorded images
+  (`av-edge-plugin:local`, `altavista-cfs-lockstep:local`, and the third-party
+  `clickhouse/clickhouse-server:26.8.29.10`) into the kit as tarballs, but only AFTER comparing
+  each image's live `docker image inspect` digest to its own recorded digest in
+  `services/edge-plugin/IMAGE_DIGEST.md` / `services/cfs/IMAGE_DIGEST.md` /
+  `services/clickhouse/IMAGE_DIGEST.md` (question 212) -- a mismatch is a hard error, never a
+  tarball saved under the wrong name. Takes the host-wide Docker test lock
+  (`altavista.docker_test_lock.lock_docker_tests`) for the whole step. The ClickHouse image
+  (question 245) is the official `clickhouse/clickhouse-server`, fetched once by digest and never
+  built here; its tag is a local alias created once after the pull (`services/clickhouse/
+  IMAGE_DIGEST.md`, "Kit tag"), so a host that only pulled by digest must `docker tag` it before
+  `--with-images`. Its SBOM (`clickhouse-image`) is built from that file plus
+  `services/clickhouse/IMAGE_PACKAGES.txt` (the image's dpkg inventory) and names what is not
+  known: no build context, no statically-linked-library list, no per-package distro licences.
 - `--with-pack <name>` (repeatable) -- include an additional Decision-K pack DESCRIPTOR beyond
   the default, `data-time`. Known packs: `data-time`, `gmat`, `mirrors`, `cspice`, `cfs`
   (`scripts/kit/manifest.py`'s `PACKS`). Only the descriptor (a name, where it resolves, a
@@ -156,7 +164,7 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
 - `pack_symlinks` -- **new in round 2**: every symlink inside a COPIED pack (`packs/<name>/...`),
   `{path, pack, link_target}`, sorted by path -- see "Pack symlinks", below. A kit may contain
   ZERO symlinks anywhere else (round 1's original rule, unchanged).
-- `images` -- the two recorded image digests, and (only when `--with-images` ran) each tarball's
+- `images` -- the three recorded image digests, and (only when `--with-images` ran) each tarball's
   own SHA-256/size.
 - `sboms` -- component name -> SHA-256, taken directly from the kit's own copy of the committed
   `SHA256SUMS`.
@@ -338,7 +346,7 @@ remaining step reads files already in this worktree.
 ## Regenerating the compliance documents (round 3, question 227)
 
 `scripts/kit/regenerate_compliance.py` is the one committed script for the whole cross-track
-compliance-document regeneration cycle: it regenerates the ten SBOMs
+compliance-document regeneration cycle: it regenerates the eleven SBOMs
 (`scripts/kit/sbom.py --out docs/compliance/sbom`), commits them, computes
 `docs/compliance/BUNDLE.md`'s bundle hash (`scripts/kit/evidence.py`, no `--kit`/`--ledger-dir`),
 records it (both the fenced hash block and a new row in that file's "Regeneration history"
