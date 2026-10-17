@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "doc": "scripts/kit/kit_inventory.py (tests/test_kit_no_copyleft.py): the components the kit carries whose declared licence matches GPL, LGPL, AGPL, MPL, EPL, CDDL, EUPL, SSPL or BUSL and which are accepted anyway, each with its reason. A component the operator supplies (altavista:sbom:operator-supplied=true) needs no entry here. A match with neither is a failure. Every entry must match a component in the SBOMs scanned (a stale entry fails). Licence reviews themselves remain the user's (questions 6 and 247).",
+  "accepted": [
+    {
+      "component": "certifi",
+      "licence": "MPL-2.0",
+      "kind": "sbom-component",
+      "reason": "MPL-2.0 is file-level weak copyleft. The kit ships the certifi wheel unmodified, so the condition (source for the covered files, which the wheel itself is) is met by the wheel as carried. Listed in docs/kit-operator-supplied.md, 'What the kit carries itself'."
+    }
+  ]
+}

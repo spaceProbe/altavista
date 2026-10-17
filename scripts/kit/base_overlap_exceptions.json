@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "doc": "scripts/kit/kit_inventory.py (tests/test_kit_no_copyleft.py) and tests/test_kit_zero_egress_install.py both read this file: the ONE definition of what may be byte-identical to a file of an operator-supplied base image. Anything not listed here is a failure. See docs/kit-operator-supplied.md.",
+  "excluded_hashes": [
+    {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "what": "the empty file",
+      "reason": "An empty file carries no content, so being byte-identical to an empty file of a base image (a package's __init__.py, py.typed, an .keep placeholder) shows nothing about where the kit file came from. Zero-length files are not compared by hash. They are still compared by path, so an empty file at a base package's path still fails."
+    },
+    {
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "what": "a file of one newline byte",
+      "reason": "Content of a single newline identifies nothing: the uvicorn wheel's PEP 561 marker uvicorn/py.typed is exactly this, and so is Debian's /usr/share/gcc/python/libstdcxx/__init__.py (libstdc++6). Measured: it is the only non-empty hash outside the two accepted overlaps below that the proof kit shares with a base image. Compared by path like the empty file."
+    }
+  ],
+  "accepted_overlaps": [
+    {
+      "id": "libssl3-copyright",
+      "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+      "kit_paths": [
+        "images/edge-plugin-image/libssl3.copyright",
+        "images/edge-plugin-image/libssl3_3.0.22-1~deb12u1_arm64.deb!/usr/share/doc/libssl3/copyright",
+        "edge-plugin-image:/usr/share/doc/libssl3/copyright"
+      ],
+      "base_files": [
+        {"image": "cfs-image", "package": "libssl3", "path": "/usr/share/doc/libssl3/copyright"}
+      ],
+      "reason": "The kit carries the libssl3 .deb's copyright notice beside the .deb (role image-package-licence) so the recorded package's licence is in the kit. Ubuntu 22.04's own libssl3 package ships the same upstream OpenSSL notice at /usr/share/doc/libssl3/copyright, byte for byte. A licence notice is not base-image userland (task 1b decision 8, accepted by the lead). Exempt only at these kit paths with this sha256: the notice file itself (the kit path the lead accepted), the same notice as the member of the carried .deb it was read out of, and the same notice as the .deb installs it into the image's application layer (the layer entry, named component:image-path). The same bytes at any other kit path fail."
+    },
+    {
+      "id": "apache-2.0-licence-text",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "kit_paths": null,
+      "base_files": [
+        {"image": "cfs-image", "package": "base-files", "path": "/usr/share/common-licenses/Apache-2.0"},
+        {"image": "edge-plugin-image", "package": "base-files", "path": "/usr/share/common-licenses/Apache-2.0"}
+      ],
+      "reason": "The canonical Apache License 2.0 text. Vendored crates (encoding_rs, multiversion_no_op, first seen when question 246's serde-saphyr brought them in) carry a LICENSE-APACHE that is byte-identical to the file both bases' base-files package ships at /usr/share/common-licenses/Apache-2.0. A permissive licence's own text is not base-image userland (the manager's ruling for question 250's round). Exempt by sha256 at any kit path: the same bytes do not exempt any other content, and a base file with that sha256 that is NOT one of the base_files listed here is still a failure."
+    }
+  ]
+}

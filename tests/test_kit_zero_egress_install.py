@@ -266,6 +266,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 KIT_DIR = REPO_ROOT / "scripts" / "kit"
 sys.path.insert(0, str(KIT_DIR))
 import build_kit  # noqa: E402  (path insert must precede this import)
+import kit_inventory  # noqa: E402  (question 250(a), task 7: the one definition of what may overlap a base image)
 import manifest as kit_manifest  # noqa: E402
 import sbom  # noqa: E402
 import save_base_images  # noqa: E402  (question 250(a): the operator's side of the bases)
@@ -795,44 +796,40 @@ def _tarball_file_hashes(tarball: Path) -> set[str]:
 def _assert_kit_carries_no_base_content(manifest_doc: dict) -> dict:
     """The kit holds no `images/*.tar`, and none of its (non-empty) files is byte-identical to a file
     of either base image: every file `KIT_MANIFEST` lists (their hashes were just re-verified by the
-    gate) against every file of the two saved bases. A quick per-file check; task 7 of this round
-    writes the full inventory test."""
+    gate) against every file of the two saved bases. A quick per-file check of the whole files;
+    `tests/test_kit_no_copyleft.py` is the full inventory (archive members, image paths, the
+    operator-supplied marker, the copyleft scan).
+
+    What may overlap is defined once, in `scripts/kit/base_overlap_exceptions.json`
+    (`kit_inventory.load_overlap_policy`), which that test also reads: the empty file and the
+    one-newline file are not compared by hash, and two measured overlaps are accepted by kit path
+    and sha256 (the libssl3 copyright notice; the canonical Apache-2.0 text). Any other overlap
+    fails."""
     tars = sorted(p.relative_to(_PROOF_KIT_DIR).as_posix() for p in (_PROOF_KIT_DIR / "images").rglob("*.tar"))
     assert tars == [], f"the kit carries image tarball(s): {tars}"
+    policy = kit_inventory.load_overlap_policy()
     base_hashes: dict[str, set[str]] = {}
     for pin_id in save_base_images.base_pins():
         base_hashes[pin_id] = _tarball_file_hashes(_PROOF_BASES_DIR / f"{pin_id}.tar")
     overlap = {
-        pin_id: sorted((f["path"], f["role"]) for f in manifest_doc["files"] if f["size"] > 0 and f["sha256"] in hashes)
+        pin_id: sorted(
+            (f["path"], f["role"]) for f in manifest_doc["files"]
+            if f["size"] > 0 and f["sha256"] not in policy.excluded_hashes and f["sha256"] in hashes
+        )
         for pin_id, hashes in base_hashes.items()
-    }
-    # One measured, deliberate exception: `images/edge-plugin-image/libssl3.copyright` is the carried
-    # `.deb`'s copyright NOTICE (role `image-package-licence`, kept so the recorded package's licence is
-    # in the kit) and is byte-identical (sha256 6a7da622...) to Ubuntu 22.04's own
-    # /usr/share/doc/libssl3/copyright, because both packages ship the same upstream OpenSSL notice. A
-    # licence text is not base-image userland content; any other role is a failure.
-    allowed_roles = {"image-package-licence"}
-    # A second measured exception (manager, question 250's round): the canonical Apache License 2.0
-    # TEXT. `cargo vendor` carries crates whose LICENSE-APACHE is byte-identical to the base images'
-    # /usr/share/common-licenses/Apache-2.0 (owned by `base-files`); first seen when question 246's
-    # serde-saphyr brought `encoding_rs` and `multiversion_no_op` into the vendor tree. A permissive
-    # licence's own text is not base-image userland. Exempt by exact sha256 only; the same bytes do
-    # not exempt any other content, and any other overlap fails.
-    allowed_licence_texts = {
-        "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30": "/usr/share/common-licenses/Apache-2.0",
     }
     sha_by_path = {f["path"]: f["sha256"] for f in manifest_doc["files"]}
 
-    def accepted(path: str, role: str) -> bool:
-        return role in allowed_roles or sha_by_path[path] in allowed_licence_texts
+    def accepted(path: str) -> bool:
+        return kit_inventory.covers_kit_file(policy, path, sha_by_path[path]) is not None
 
-    unexpected = {pin_id: [p for p, role in found if not accepted(p, role)] for pin_id, found in overlap.items()}
+    unexpected = {pin_id: [p for p, _role in found if not accepted(p)] for pin_id, found in overlap.items()}
     assert not any(unexpected.values()), f"the kit carries file(s) byte-identical to a base-image file: {unexpected}"
     return {
-        "kit_files_checked": sum(1 for f in manifest_doc["files"] if f["size"] > 0),
+        "kit_files_checked": sum(1 for f in manifest_doc["files"] if f["size"] > 0 and f["sha256"] not in policy.excluded_hashes),
         "base_files_hashed": {pin_id: len(h) for pin_id, h in base_hashes.items()},
         "overlap_other_than_licence_notices": 0,
-        "licence_notices_identical_to_a_base_file": {pin_id: [p for p, role in found if accepted(p, role)] for pin_id, found in overlap.items()},
+        "licence_notices_identical_to_a_base_file": {pin_id: [p for p, _role in found if accepted(p)] for pin_id, found in overlap.items()},
     }
 
 

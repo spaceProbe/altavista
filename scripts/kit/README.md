@@ -735,3 +735,35 @@ field. The edge-plugin image's kit-carried `libssl3` is listed apart, `altavista
   (`licences.evaluate_sbom_components`, `tests/test_sbom.py` section 14).
 - A licence value is a CycloneDX `license.id` only when it equals an SPDX identifier byte for byte
   (`spdx-license-ids.json`); otherwise it is `license.name`, verbatim.
+
+## The proof that the kit carries no copyleft from a base image (question 250(a))
+
+`scripts/kit/kit_inventory.py KIT [--sbom-dir DIR]... [--list FILE.tsv]` and
+`tests/test_kit_no_copyleft.py` (ungated over a fast kit; gated with `AV_KIT_WITH_IMAGES=1` over
+`out/kit/proof`, plus perturbations with `/bin/grep` and `libc.so.6` read out of the pinned Ubuntu
+base under the docker lock). Two proofs; the module's top doc has the details.
+
+- **No file from a base-image package is in the kit.** Everything the kit carries is listed with its
+  origin and size (every `KIT_MANIFEST.files` entry, pack symlinks, the image application layers file
+  by file, and the members of every wheel, of the carried `.deb`, and of the vendored static
+  libraries), and compared with every packaged and unowned file of both committed base inventories:
+  by image path (an application layer against its own base, merged-/usr folded) and by sha256 (any
+  path, either base). A match names the kit file and the base package.
+- **The operator-supplied marker is proven true.** Each component carrying
+  `altavista:sbom:operator-supplied=true` in an image SBOM must resolve to an inventory entry, each
+  inventory package must be marked, and no file those components own is anywhere in the kit.
+- **One definition of what may overlap:** `scripts/kit/base_overlap_exceptions.json`, read by this
+  proof and by `tests/test_kit_zero_egress_install.py`: the empty file and the one-newline file are
+  not compared by hash; the libssl3 copyright notice is accepted at three named kit paths (the
+  notice file, its member in the carried `.deb`, its entry in the image layer) and the canonical
+  Apache-2.0 text by sha256 at any path. Each names the base files that carry the same bytes and the
+  reason; any other overlap fails.
+- **The copyleft scan.** Every SBOM component licence matching GPL, LGPL, AGPL, MPL, EPL, CDDL,
+  EUPL, SSPL or BUSL is operator-supplied (reported) or has an entry in
+  `scripts/kit/copyleft_accepted.json` with its reason (today `certifi`, MPL-2.0, shipped
+  unmodified); a stale entry fails. The kit's wheel inventory (`KIT_MANIFEST.wheels`) must show no
+  bundled library with a GPL-family or other copyleft licence; operator-supplied wheels (numpy) are
+  listed, and the kit must not carry them. It scans the SBOM copies in the kit, the image SBOMs
+  regenerated now by `sbom.py`, and any `--sbom-dir`.
+- **Not opened:** an archive nested inside a wheel or crate other than the `ar` libraries is hashed as
+  a file and listed (none in the proof kit).
