@@ -1359,6 +1359,15 @@ merely "a hash is produced") by `crates/av-lockstep/tests/docker_lifecycle.rs`, 
 identical pulled image twice with two different `IMAGE_DIGEST` values and asserts the two
 resulting hashes differ.
 
+**The segment's `dynamics_hash` excludes Docker's ephemeral address (question 245 (7)).**
+`binding::container_model_info` builds the instance's `ModelInfo`; its `settings_hash` covers
+`tls`, the Bind response's `version`, and either `image` + `image_digest` (Docker path) or the
+declared `container.address` (already-running path). The Docker path's `127.0.0.1:<host port>` is
+Docker's choice on each run and is not hashed, so two separately started containers of the same
+image report the same `dynamics_hash`. A Docker-free replay (`construct_replay_container`) still
+reports a synthetic `ModelInfo`, since the port-traffic log carries neither the Bind `version`
+nor the image, so its container segment's `dynamics_hash` is not reproduced.
+
 **No image is pushed anywhere** by this crate or its tests. Every test that needs to prove a
 *genuine* "pull by digest" (not a locally-cached tag silently reused) builds this repository's
 own `services/lockstep-ref/Dockerfile`, starts a throwaway `registry:2` container on loopback,

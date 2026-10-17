@@ -327,21 +327,13 @@ fn byte_identical_run_products_across_two_separately_spawned_cfs_containers() {
 /// each time, per `services/cfs/README.md`'s own "one shim process serves exactly one peer
 /// connection" contract -- this is not the same process answering twice).
 ///
-/// **One field is deliberately excluded, and why that is not loosening the bar.** The
-/// `"controller"` trajectory's own `segments[].dynamics_hash` (`ModelInfo::settings_hash`,
-/// `binding::materialize_container`) folds in `container.address` -- for the Docker
-/// image-lifecycle path that address is `"127.0.0.1:<host_port>"`, and Docker assigns a fresh
-/// *ephemeral* host port on every `docker run` (by design -- `ManagedContainer::pull_and_run`'s
-/// own doc comment: "letting Docker pick a free host port rather than this module guessing one
-/// and racing another listener for it"). That port is never part of any port-boundary content
-/// (no packet, no `PortMessage`, no `RunProducts` sample carries it) -- it is purely local
-/// plumbing this test's own process uses to reach a container nothing downstream ever sees the
-/// address of. Comparing it would fail this test on a property question 145 never asked about,
-/// for a reason with nothing to do with determinism. Every actually observable byte --
-/// `"attitude"`'s own trajectory (the physical effect of every wheel-torque command the
-/// container produced, samples AND the full `port_command:attitude:wheel_torque_in:<t>`
-/// event-id list), `"imu"`'s own trajectory, and `products.events`/`.scores` -- is compared
-/// unmodified, byte-identical, below.
+/// **Nothing is excluded.** The `"controller"` segment's `dynamics_hash` is compared too: the
+/// Docker path's `ModelInfo::settings_hash` (`binding::container_model_info`) hashes `image`,
+/// `image_digest`, `tls` and the Bind `version`, and not `127.0.0.1:<ephemeral host port>`, so two
+/// containers started on two different host ports must hash equal (question 245 (7)). Both values
+/// are printed. Every observable byte -- `"attitude"`'s and `"imu"`'s trajectories (samples and
+/// the full `port_command:attitude:wheel_torque_in:<t>` event-id list), `products.events` and
+/// `.scores` -- is compared unmodified below.
 fn run_byte_identical_run_products_across_two_separately_spawned_cfs_containers() {
     let _engine = gmat_sys::engine_lock();
     // Question 207: held for this whole test body -- see lock_and_prune_docker_tests's own doc
@@ -369,8 +361,12 @@ fn run_byte_identical_run_products_across_two_separately_spawned_cfs_containers(
             assert_eq!(seg_a.start_tai_ns, seg_b.start_tai_ns);
             assert_eq!(seg_a.end_tai_ns, seg_b.end_tai_ns);
             assert_eq!(seg_a.dynamics_model, seg_b.dynamics_model);
-            // seg_a.dynamics_hash/seg_b.dynamics_hash deliberately not compared for a
-            // BINDING_KIND_CONTAINER instance -- see this test's own doc comment above.
+            assert_eq!(seg_a.dynamics_depth, seg_b.dynamics_depth);
+            if name == "controller" {
+                println!("controller dynamics_hash: run A {} / run B {}", seg_a.dynamics_hash, seg_b.dynamics_hash);
+                assert!(!seg_a.dynamics_hash.is_empty(), "the container segment must carry a dynamics_hash");
+            }
+            assert_eq!(seg_a.dynamics_hash, seg_b.dynamics_hash, "instance {name:?}: dynamics_hash must not depend on the ephemeral Docker host port");
         }
     }
     assert_eq!(products_a.events, products_b.events);
@@ -422,19 +418,15 @@ fn byte_identical_products_when_the_container_bound_controller_is_replayed_docke
 /// "empty means every `BINDING_KIND_CONTAINER` instance" default, exercised here rather than
 /// naming `"controller"` explicitly, so this test also proves that default resolves correctly
 /// against a real container-bound `SosConfiguration`) from nothing but the recorded
-/// `PortTrafficLog`, produces a second `RunProducts` matching the first -- with the SAME one
-/// class of exclusion `[run_byte_identical_run_products_across_two_separately_spawned_cfs_
-/// containers]` immediately above already established for this exact instance, PLUS one more,
-/// both disclosed here rather than silently dropped:
+/// `PortTrafficLog`, produces a second `RunProducts` matching the first -- with one
+/// exclusion, disclosed here rather than silently dropped:
 ///
-/// 1. `"controller"`'s own `segments[].dynamics_hash` -- unchanged reason from the sibling test
-///    above (`container.address`'s own ephemeral Docker host port folds into `ModelInfo.
-///    settings_hash`, and is never itself observable at the port boundary).
-/// 2. `"controller"`'s own `segments[].dynamics_model`/`.dynamics_depth`, and its `Trajectory.
-///    provenance.attributes["container_binding_hash"]` -- NEW for this test, and unavoidable by
-///    construction: `crate::registry::ModelRegistry::construct_replay_container`'s own doc
-///    comment explains why a Docker-free replay of a container instance can never know these
-///    (they come only from a live `Bind` response this replay path deliberately never makes).
+/// `"controller"`'s own `segments[].dynamics_hash`/`.dynamics_model`/`.dynamics_depth`, and its
+/// `Trajectory.provenance.attributes["container_binding_hash"]`: `crate::registry::ModelRegistry::
+/// construct_replay_container` builds a synthetic `ModelInfo` because a Docker-free replay never
+/// makes the `Bind` call, and the port-traffic log does not record the Bind `version` (or the
+/// binding hash) that the live `ModelInfo` carries. (The live hash itself is now stable across
+/// runs, see the sibling test above; it is the replay that cannot reproduce it.)
 ///
 /// **Nothing else is excluded.** `"attitude"` and `"imu"` are real, unreplayed, deterministic
 /// native instances in both runs (identical seeds, identical wheel-torque commands received --

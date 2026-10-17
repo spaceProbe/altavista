@@ -1787,17 +1787,40 @@ pub(crate) fn materialize_container(
         }
     };
 
+    let info = container_model_info(spec, sys, instance_name, &response.version);
+    let model = ContainerModel { client: RefCell::new(LockstepIo::Direct(Box::new(client))), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed), board_link_hash: None, board_power: None };
+    Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
+}
+
+/// The `ModelInfo` a bound `BINDING_KIND_CONTAINER` instance reports (`id` `container.<instance>`,
+/// `depth` `container-lockstep`; `TrajectorySegment.dynamics_model`/`.dynamics_hash`/
+/// `.dynamics_depth` are stamped from it). Its `settings_hash` keeps what identifies the bound
+/// process and drops what the host chose at run time (ADR-005 section 7's canonical hash rule is
+/// untouched; this only decides which settings are identity):
+///
+/// - `tls` and `version` (the one value the process supplies, `LockstepBindResponse.version`):
+///   always.
+/// - **Docker image path** (`spec.image` set): `image` and `image_digest`, declared configuration,
+///   stay. The address does **not**: it is `127.0.0.1:<host port>` where Docker picked an
+///   ephemeral host port (`ManagedContainer::pull_and_run`), so folding it in made every run's
+///   `dynamics_hash` differ for the same bound image (question 245 (7)).
+/// - **`container.address` path**: the address is declared configuration and stays.
+///
+/// Pure in its four arguments; the address Docker published is used to connect and in error
+/// variants only and never reaches it. [`board_model_info`] is the board counterpart.
+pub(crate) fn container_model_info(spec: &ContainerSpec, sys: &SystemDefinition, instance_name: &str, bind_version: &str) -> ModelInfo {
     let mut settings = BTreeMap::new();
-    settings.insert("address".to_string(), address.clone());
     settings.insert("tls".to_string(), spec.tls.to_string());
-    settings.insert("version".to_string(), response.version.clone());
+    settings.insert("version".to_string(), bind_version.to_string());
     if let Some(image) = &spec.image {
         settings.insert("image".to_string(), image.clone());
         settings.insert("image_digest".to_string(), spec.image_digest.clone().unwrap_or_default());
+    } else {
+        settings.insert("address".to_string(), spec.address.clone());
     }
-    let info = ModelInfo {
+    ModelInfo {
         id: format!("container.{instance_name}"),
-        version: response.version,
+        version: bind_version.to_string(),
         state_space_id: sys.state_space_id.clone(),
         frame_id: String::new(),
         controls: vec![],
@@ -1805,9 +1828,7 @@ pub(crate) fn materialize_container(
         depth: "container-lockstep".to_string(),
         settings_hash: av_dynamics::settings_hash(&settings),
         goldens: vec![],
-    };
-    let model = ContainerModel { client: RefCell::new(LockstepIo::Direct(Box::new(client))), next_sequence: Cell::new(1), info, binding_hash: response.binding_hash, managed: RefCell::new(managed), board_link_hash: None, board_power: None };
-    Ok(MaterializedContainer { model, t0_tai_ns: epoch_tai_ns })
+    }
 }
 
 /// The `ModelInfo` a bound `BINDING_KIND_BOARD` instance reports (`id` `board.<instance>`, `depth`
@@ -4344,6 +4365,62 @@ mod tests {
         };
         let sys = SystemDefinition { id: "gnc_sys".to_string(), dynamics_model: "native.gnc".to_string(), parameters: params, ..Default::default() };
         (instance, sys)
+    }
+
+    fn image_spec(address: &str, image: &str, digest: &str) -> ContainerSpec {
+        ContainerSpec { address: address.to_string(), image: Some(image.to_string()), image_digest: Some(digest.to_string()), ..Default::default() }
+    }
+
+    /// Question 245 (7). **Fails against** the old construction, which folded the address into the
+    /// image path's `settings_hash`: the Docker-chosen ephemeral host port (`127.0.0.1:<port>`) made
+    /// the same bound image hash differently on every run. Two image-path specs that differ only in
+    /// address must hash equal.
+    #[test]
+    fn container_model_info_image_path_ignores_the_ephemeral_host_address() {
+        let (_, sys) = container_instance(vec![]);
+        let a = container_model_info(&image_spec("127.0.0.1:49152", "localhost:19031/cfs:t", "sha256:aa"), &sys, "controller", "io_lockstep/0.1");
+        let b = container_model_info(&image_spec("127.0.0.1:61234", "localhost:19031/cfs:t", "sha256:aa"), &sys, "controller", "io_lockstep/0.1");
+        assert_eq!(a.settings_hash, b.settings_hash, "the host address Docker picked must not reach settings_hash");
+        assert_eq!(a, b);
+    }
+
+    /// Question 245 (7). **Fails against** an implementation that drops `image_digest` along with
+    /// the address (the digest is what pins the bytes that ran, so a different digest is a
+    /// different bound model).
+    #[test]
+    fn container_model_info_image_digest_changes_the_hash() {
+        let (_, sys) = container_instance(vec![]);
+        let a = container_model_info(&image_spec("", "localhost:19031/cfs:t", "sha256:aa"), &sys, "controller", "v1");
+        let b = container_model_info(&image_spec("", "localhost:19031/cfs:t", "sha256:bb"), &sys, "controller", "v1");
+        assert_ne!(a.settings_hash, b.settings_hash);
+    }
+
+    /// Question 245 (7). **Fails against** an implementation that drops `image` (the reference is
+    /// stable configuration in a real deployment, the lead's 2026-10-07 ruling in `sil-plan.md`).
+    #[test]
+    fn container_model_info_image_reference_changes_the_hash() {
+        let (_, sys) = container_instance(vec![]);
+        let a = container_model_info(&image_spec("", "localhost:19031/cfs:t", "sha256:aa"), &sys, "controller", "v1");
+        let b = container_model_info(&image_spec("", "localhost:19031/cfs:u", "sha256:aa"), &sys, "controller", "v1");
+        assert_ne!(a.settings_hash, b.settings_hash);
+    }
+
+    /// Question 245 (7). **Fails against** an implementation that drops the address from both
+    /// paths: on the `container.address` path the address is declared configuration and identity.
+    /// Also pins that `tls` and the Bind `version` still enter the hash.
+    #[test]
+    fn container_model_info_declared_address_path_keeps_the_address() {
+        let (_, sys) = container_instance(vec![]);
+        let spec = |address: &str, tls: bool| ContainerSpec { address: address.to_string(), tls, ..Default::default() };
+        let base = container_model_info(&spec("10.0.0.5:50070", false), &sys, "controller", "v1");
+        assert_ne!(base.settings_hash, container_model_info(&spec("10.0.0.6:50070", false), &sys, "controller", "v1").settings_hash, "declared address is identity");
+        assert_ne!(base.settings_hash, container_model_info(&spec("10.0.0.5:50070", true), &sys, "controller", "v1").settings_hash, "tls is identity");
+        assert_ne!(base.settings_hash, container_model_info(&spec("10.0.0.5:50070", false), &sys, "controller", "v2").settings_hash, "the Bind version is identity");
+        assert_eq!(base.settings_hash, container_model_info(&spec("10.0.0.5:50070", false), &sys, "controller", "v1").settings_hash, "same inputs, same hash");
+        // Byte-for-byte what `materialize_container` hashed before question 245 (7) on this path
+        // (address, tls, version), so no recorded `container.address` hash moves.
+        let legacy: BTreeMap<String, String> = [("address", "10.0.0.5:50070"), ("tls", "false"), ("version", "v1")].into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(base.settings_hash, av_dynamics::settings_hash(&legacy), "the container.address path's hash is unchanged by this task");
     }
 
     /// M13.2, question 107: a well-formed `container.*` parameter set classifies into

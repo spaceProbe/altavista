@@ -71,10 +71,12 @@
 //! `start_tai_ns`/`end_tai_ns`/`dynamics_model`, plus `products.events` and `products.scores`.
 //! `dynamics_hash` is compared for the native (`"attitude"`/`"star_tracker"`/`"imu"`) segments
 //! (same GMAT settings both runs, unaffected by how `"controller"` is bound) but excluded for
-//! `"controller"`'s own segment, for the same reason the CFS test excludes it there:
-//! `ModelInfo::settings_hash` folds in `container.address`, which is *inherently* different
-//! between a Docker-published ephemeral port and the shim's own ephemeral gRPC port -- pure local
-//! plumbing no port message or trajectory sample ever carries. `RunProducts.provenance` (top
+//! `"controller"`'s own segment: the two runs bind it differently (the posix run's
+//! `ModelInfo::settings_hash` covers the image and its digest, the Renode run's the declared
+//! `container.address` of the shim fronting the bridge, `binding::container_model_info`), so the
+//! settings legitimately differ; neither is ever carried by a port message or trajectory sample.
+//! (Two posix runs of the same image now give the same controller `dynamics_hash`, question
+//! 245 (7), asserted in the CFS test.) `RunProducts.provenance` (top
 //! level and per-trajectory) is excluded too: it embeds `run_id`/`sos_hash`/`drm_hash`/`sys_hash`,
 //! which are deliberately different strings between the two runs (they bind two different
 //! `SystemDefinition`s), not a determinism signal.
@@ -720,8 +722,7 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
                 // "controller" happens to be bound -- dynamics_hash SHOULD genuinely match.
                 assert_eq!(seg_posix.dynamics_hash, seg_renode.dynamics_hash, "instance {name:?}: segment dynamics_hash (a native GMAT model's settings hash must be identical regardless of the controller's own binding kind)");
             }
-            // "controller"'s own dynamics_hash deliberately not compared -- see this file's own
-            // module doc comment (folds in container.address, inherently different).
+            // "controller"'s dynamics_hash is not compared: posix (image + digest) and Renode (container.address) are different bindings, so their settings legitimately differ.
         }
     }
     let event_diffs = event_differences(&products_posix.events, &products_renode.events);
