@@ -220,7 +220,21 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
     //    just stood up, proving the pull is genuine.
     docker(&["tag", local_tag, &pushed_ref]);
     let _pushed_image_guard = ImageGuard(pushed_ref.clone());
-    docker(&["push", &pushed_ref]);
+    // The registry was only just started. Retry the push briefly, as the cFS tests' registry
+    // helper does (crates/av-kernel/tests/cfs_common), and print every failed attempt: the
+    // 2026-10-17 merge gate saw one push reset mid-transfer ("connection reset by peer" on a
+    // blob HEAD) that 24 reruns, idle and under host and VM load, did not reproduce (question 249).
+    let push_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let out = Command::new("docker").args(["push", &pushed_ref]).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker push {pushed_ref}`: {e}"));
+        if out.status.success() {
+            break;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        assert!(Instant::now() < push_deadline, "`docker push {pushed_ref}` did not succeed within 30 s: {stderr}");
+        eprintln!("docker push {pushed_ref} failed, retrying: {stderr}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
 
     // 4. Recover the real digest Docker assigned on push (never invented/assumed).
     let repo_digests = docker(&["inspect", "--format={{index .RepoDigests 0}}", &pushed_ref]);
