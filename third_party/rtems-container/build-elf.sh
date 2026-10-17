@@ -12,7 +12,8 @@
 # Run from anywhere, on the host, with bash, by path (`third_party/rtems-container/build-elf.sh`).
 # Needs docker (Colima: only $HOME is mounted into containers, so the staging directory sits
 # under $HOME) and the network for the apt packages once per build (question 154's one-time
-# window; the cFS sources themselves come from the local bare mirrors and touch no network).
+# window: snapshot.debian.org at one fixed timestamp, see the builder bullet below; the cFS sources
+# themselves come from the local bare mirrors and touch no network).
 # THIS SCRIPT DOES NOT TAKE THE DOCKER-TEST LOCK: on this host wrap it in
 # `.venv/bin/python <lock wrapper> -- third_party/rtems-container/build-elf.sh`, like
 # services/cfs/build-shim.sh (question 207's host-wide lock; tests take the lock themselves).
@@ -36,10 +37,44 @@
 #     third_party/rtems-container is not an input.
 #   * builder: `debian:bookworm-slim` by content digest (the same image the question 171 builds
 #     used), `docker run --rm`, no tag created, no image built. The apt packages are the complete
-#     closure the last build installed (93 packages, `name=version`); a version the Debian mirror
-#     no longer carries makes `apt-get install` fail, loudly. After the install the container
-#     hashes `dpkg-query -W` (every installed package, version and architecture) and refuses to
-#     build unless it equals ELF_DPKG_SET_SHA256 below, so a dependency that floated is caught too.
+#     closure the last build installed (93 packages, `name=version`).
+#     The apt SOURCES are pinned too (question 245 (7)). The first version of this recipe pointed
+#     apt at the live deb.debian.org mirror, which only carries the CURRENT version of each package:
+#     the 2026-10 build of this tree failed at `apt-get install` ("Version '6.1.187-1' for
+#     'linux-libc-dev' was not found", rc 100) once bookworm-security moved past the pinned
+#     linux-libc-dev. So the container replaces the image's own sources
+#     (/etc/apt/sources.list.d/debian.sources, the only apt source file in bookworm-slim; it names
+#     deb.debian.org) with snapshot.debian.org at ONE fixed timestamp, SNAPSHOT_TS below, for the
+#     two archives the closure needs: `debian` (suites bookworm, bookworm-updates) and
+#     `debian-security` (bookworm-security). Only `Acquire::Check-Valid-Until=false` is relaxed
+#     (a snapshot's Release files expire, by design), on `apt-get update` only; the InRelease
+#     signatures stay verified against the image's own keyring (/usr/share/keyrings/debian-archive-
+#     keyring.gpg), so the http transport (bookworm-slim has no ca-certificates) carries no trust.
+#     How the timestamp was chosen: snapshot.debian.org's machine-readable API
+#     (/mr/binary/<name>/<version>/binfiles?fileinfo=1) gives the `first_seen` of each of the 93
+#     arm64/all .debs in its archive; the latest is 20261005T091318Z (perl, perl-base,
+#     libperl5.36 in debian-security; the closure was resolved on 2026-10-05), so the timestamp must
+#     be at or after it; SNAPSHOT_TS is the first `debian` archive snapshot after that moment,
+#     20261005T150126Z (debian-security has no snapshot at that exact second; snapshot.debian.org
+#     serves its latest one before it, 20261005T091318Z, so the security index is the one that
+#     lists the perl 5.36.0-7+deb12u4 pins). The InRelease files at SNAPSHOT_TS are content-
+#     addressed by snapshot.debian.org (the 302 target of .../dists/<suite>/InRelease):
+#       bookworm            /file/736a99b8b096598d48c438eb356bd074fecfbf23
+#       bookworm-security   /file/21c12412d34ed18e733f50bd4323ebd119933f80 (also the target for
+#                           20261005T091318Z, the snapshot actually served)
+#     Checked by running the container's apt at that
+#     timestamp: all 93 pins resolve, 93 .debs download. A timestamp before 20260908T092208Z (when
+#     linux-libc-dev 6.1.187-1 entered debian-security) fails at apt, loudly: that is the
+#     perturbation proof (ELF_SNAPSHOT_TS, non-shipping).
+#     The container then makes two checks. After the download (`apt-get install --download-only`)
+#     it hashes the fetched archive set: `sha256sum` of every .deb in /var/cache/apt/archives, sorted
+#     by file name, hashed again = ELF_DEB_SET_SHA256 below; it prints the 93 lines (this is
+#     question 154's record of the network fetch) and refuses (exit 4) on a mismatch before
+#     anything is installed. (apt already verifies each .deb against the signed Packages index;
+#     this pin is the direct record, and it also catches a dependency that floated.) After the
+#     install it hashes `dpkg-query -W` (every installed package, version and architecture) and
+#     refuses to build unless it equals ELF_DPKG_SET_SHA256 below (exit 3). A guard before apt
+#     runs refuses (exit 5) if any apt source other than the snapshot file is present.
 #   * toolchain: the RTEMS 6.1 toolchain tree (compiler, linker, BSP, rtems-syms) is mounted
 #     read-only at /output/toolchain (the toolchain cmake hardcodes that path). Its content is
 #     PINNED: a manifest of the tree -- one line per entry, sorted by relative path, `F <sha256>
@@ -86,6 +121,8 @@
 #                     shipping build; see the non-shipping rule below).
 #   ELF_BUILDDATE / ELF_BUILDHOST / ELF_BUILDUSER   override the pinned cFE metadata (the
 #                     perturbation proof sets ELF_BUILDDATE).
+#   ELF_SNAPSHOT_TS  override the snapshot.debian.org timestamp (YYYYMMDDTHHMMSSZ). NOT the shipping
+#                     build; the perturbation proof sets a timestamp before a pin existed.
 #   ELF_NO_SYMS_FIX=1 CONTROL ONLY: leave RTEMS.cmake unedited, so rtems-syms names its C file
 #                     after its pid again (the control build shows which bytes the fix removes).
 #   ELF_ALLOW_NETWORK=1  lift the GIT_ALLOW_PROTOCOL=file guard around fetch-cfs.sh.
@@ -93,7 +130,7 @@
 #                     or sudo if the host user cannot).
 #
 # Non-shipping rule: a build with any of ELF_TOOLCHAIN_ALLOW_MISMATCH, ELF_BUILDDATE,
-# ELF_BUILDHOST, ELF_BUILDUSER or ELF_NO_SYMS_FIX set refuses to run unless ELF_OUT_DIR is set
+# ELF_BUILDHOST, ELF_BUILDUSER, ELF_SNAPSHOT_TS or ELF_NO_SYMS_FIX set refuses to run unless ELF_OUT_DIR is set
 # explicitly, so such a build never lands in the default output directory (build-shim.sh's
 # SHIM_NO_REMAP rule).
 
@@ -213,6 +250,18 @@ APT_PACKAGES=(
     rpcsvc-proto=1.4.3-1
     xz-utils=5.4.1-1+deb12u2
 )
+# The apt sources: snapshot.debian.org at this one timestamp (header, "The apt SOURCES are pinned").
+SNAPSHOT_TS="20261005T150126Z"
+ELF_SNAPSHOT_TS="${ELF_SNAPSHOT_TS:-${SNAPSHOT_TS}}"
+case "${ELF_SNAPSHOT_TS}" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) echo "build-elf.sh: ELF_SNAPSHOT_TS must look like 20261005T150126Z: ${ELF_SNAPSHOT_TS}" >&2; exit 2 ;;
+esac
+SNAPSHOT_DEBIAN_URL="http://snapshot.debian.org/archive/debian/${ELF_SNAPSHOT_TS}/"
+SNAPSHOT_SECURITY_URL="http://snapshot.debian.org/archive/debian-security/${ELF_SNAPSHOT_TS}/"
+# sha256 of the sorted (by file name, C locale) `sha256sum *.deb` listing of /var/cache/apt/archives
+# after `apt-get install --download-only` of the pinned set above: the fetched archive set, 93 .debs.
+ELF_DEB_SET_SHA256="80449cf487bfbac7086fc6a03b99de97d50abd03bd4a5e859893f1b045c905a6"
 # sha256 of the sorted `dpkg-query -W -f '${Package}:${Architecture}=${Version}\n'` listing of the
 # builder container after the install above (every package, base image included). Verified inside
 # the container before the build starts.
@@ -284,6 +333,7 @@ NONSHIPPING=""
 [ "${ELF_BUILDDATE}" = "${PINNED_BUILDDATE}" ] || NONSHIPPING="${NONSHIPPING} ELF_BUILDDATE"
 [ "${ELF_BUILDHOST}" = "${PINNED_BUILDHOST}" ] || NONSHIPPING="${NONSHIPPING} ELF_BUILDHOST"
 [ "${ELF_BUILDUSER}" = "${PINNED_BUILDUSER}" ] || NONSHIPPING="${NONSHIPPING} ELF_BUILDUSER"
+[ "${ELF_SNAPSHOT_TS}" = "${SNAPSHOT_TS}" ] || NONSHIPPING="${NONSHIPPING} ELF_SNAPSHOT_TS"
 [ -z "${ELF_NO_SYMS_FIX:-}" ] || NONSHIPPING="${NONSHIPPING} ELF_NO_SYMS_FIX"
 if [ -n "${NONSHIPPING}" ] && [ "${ELF_OUT_DIR}" = "${DEFAULT_OUT_DIR}" ]; then
     echo "build-elf.sh: non-shipping build (${NONSHIPPING# }); set ELF_OUT_DIR to a non-default path" >&2
@@ -374,6 +424,9 @@ echo "  repo commit:        $(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null |
 echo "  cFS bundle commit:  $(cat "${STAGE}/third_party/cfs/PINNED_COMMIT") (mirrors: ${CFS_MIRROR_DIR})"
 echo "  builder image:      ${BASE_IMAGE}"
 echo "  apt packages:       ${#APT_PACKAGES[@]} pinned name=version entries; dpkg set sha256 ${ELF_DPKG_SET_SHA256}"
+echo "  apt sources:        ${SNAPSHOT_DEBIAN_URL} (bookworm, bookworm-updates)"
+echo "                      ${SNAPSHOT_SECURITY_URL} (bookworm-security); Check-Valid-Until=false only"
+echo "  apt .deb set:       sha256 ${ELF_DEB_SET_SHA256} (pinned; checked in the container before install)"
 echo "  toolchain:          ${ELF_TOOLCHAIN_DIR} (read-only at /output/toolchain)"
 echo "  toolchain manifest: ${TOOLCHAIN_ACTUAL} (pinned ${TOOLCHAIN_MANIFEST_SHA256})"
 echo "  cFE metadata:       BUILDDATE=${ELF_BUILDDATE} HOSTNAME=${ELF_BUILDHOST} USER=${ELF_BUILDUSER}"
@@ -386,7 +439,37 @@ echo "  output dir:         ${ELF_OUT_DIR}"
 read -r -d '' CONTAINER_SCRIPT <<'SH' || true
 set -eu
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+# The image's own source file (deb.debian.org, live) is replaced by the snapshot at one timestamp.
+cat > /etc/apt/sources.list.d/debian.sources <<EOS
+Types: deb
+URIs: ${ELF_SNAPSHOT_DEBIAN_URL}
+Suites: bookworm bookworm-updates
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: ${ELF_SNAPSHOT_SECURITY_URL}
+Suites: bookworm-security
+Components: main
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOS
+# Nothing but that one file may name an apt source.
+if [ -e /etc/apt/sources.list ] || [ "$(ls /etc/apt/sources.list.d)" != "debian.sources" ]; then
+    echo "build-elf.sh: unexpected apt source files: $(ls /etc/apt/sources.list /etc/apt/sources.list.d 2>&1)" >&2
+    exit 5
+fi
+apt-get -o Acquire::Check-Valid-Until=false update
+# shellcheck disable=SC2086
+apt-get install -y --no-install-recommends --download-only ${ELF_APT_PACKAGES}
+debs="$(cd /var/cache/apt/archives && sha256sum -- *.deb | LC_ALL=C sort -k2)"
+echo "container .deb set ($(echo "${debs}" | wc -l | tr -d ' ') files):"
+echo "${debs}"
+got="$(echo "${debs}" | sha256sum | cut -d' ' -f1)"
+echo "container .deb set sha256: ${got}"
+if [ "${got}" != "${ELF_DEB_SET_SHA256}" ]; then
+    echo "build-elf.sh: container .deb set ${got} != pinned ${ELF_DEB_SET_SHA256}" >&2
+    exit 4
+fi
 # shellcheck disable=SC2086
 apt-get install -y --no-install-recommends ${ELF_APT_PACKAGES}
 got="$(dpkg-query -W -f='${Package}:${Architecture}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d' ' -f1)"
@@ -404,7 +487,8 @@ rm -rf "${ELF_OUT_DIR}/core-cpu1.exe" "${ELF_OUT_DIR}/build-logs" "${ELF_OUT_DIR
 
 docker run --rm --name "${CONTAINER}" \
     -e "BUILDDATE=${ELF_BUILDDATE}" -e "HOSTNAME=${ELF_BUILDHOST}" -e "USER=${ELF_BUILDUSER}" \
-    -e "ELF_APT_PACKAGES=${APT_PACKAGES[*]}" -e "ELF_DPKG_SET_SHA256=${ELF_DPKG_SET_SHA256}" \
+    -e "ELF_APT_PACKAGES=${APT_PACKAGES[*]}" -e "ELF_DPKG_SET_SHA256=${ELF_DPKG_SET_SHA256}" -e "ELF_DEB_SET_SHA256=${ELF_DEB_SET_SHA256}" \
+    -e "ELF_SNAPSHOT_DEBIAN_URL=${SNAPSHOT_DEBIAN_URL}" -e "ELF_SNAPSHOT_SECURITY_URL=${SNAPSHOT_SECURITY_URL}" \
     -v "${STAGE}":/workspace \
     -v "${ELF_TOOLCHAIN_DIR}":/output/toolchain:ro \
     --entrypoint /bin/sh \

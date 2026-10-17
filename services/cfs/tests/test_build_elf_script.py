@@ -9,7 +9,12 @@ test_build_shim_script.py, so a later edit cannot quietly drop one:
   - the builder image is named by content digest, every `docker run` takes it from that pinned
     variable, the container is `--rm`, and the script builds, tags, commits and loads nothing;
   - every apt package is `name=version`, the pinned closure covers the toolchain-facing packages,
-    and the container checks the full `dpkg-query` set against a pinned SHA-256;
+    and the container checks the full `dpkg-query` set against a pinned SHA-256; the 93 pins and
+    that hash are themselves pinned here (question 245 (7) must not move them);
+  - the apt sources are snapshot.debian.org at one fixed timestamp for debian and debian-security,
+    replacing the image's own live-mirror file; no live mirror remains in executable code; the only
+    apt option is Acquire::Check-Valid-Until=false on `apt-get update` (signatures stay verified);
+    the fetched .deb set is hashed against a pin and refuses before install;
   - the toolchain is mounted read-only, its manifest hash is pinned, recomputed before any staging,
     and a mismatch refuses unless the explicit override variable is set (behaviour test, no docker);
   - cFE's BUILDDATE, HOSTNAME and USER (the variables generate_build_env.cmake reads) are pinned
@@ -107,16 +112,149 @@ def test_apt_packages_pinned_to_explicit_versions_and_set_checked() -> None:
     assert len(names) == len(pkgs), "duplicate package in APT_PACKAGES"
     # The packages the cross-build actually uses are in the pinned closure.
     assert {"cmake", "cmake-data", "build-essential", "make", "python3", "file", "patch"} <= set(names)
-    # Every apt-get install in executable code installs only the pinned set (expanded from the env).
+    # Every apt-get install in executable code installs only the pinned set (expanded from the env):
+    # one download-only pass (whose .deb set is hashed) and the install proper.
     installs = [ln for ln in _code_lines() if "apt-get install" in ln]
-    assert len(installs) == 1, installs
-    assert re.search(r"apt-get install -y --no-install-recommends \$\{ELF_APT_PACKAGES\}\s*$", installs[0]), installs
+    assert len(installs) == 2, installs
+    assert re.fullmatch(
+        r"apt-get install -y --no-install-recommends --download-only \$\{ELF_APT_PACKAGES\}", installs[0].strip()
+    ), installs
+    assert re.fullmatch(
+        r"apt-get install -y --no-install-recommends \$\{ELF_APT_PACKAGES\}", installs[1].strip()
+    ), installs
     assert '-e "ELF_APT_PACKAGES=${APT_PACKAGES[*]}"' in _script_text()
     # The full installed set is hashed in the container and compared to a pinned value.
     assert re.fullmatch(r"[0-9a-f]{64}", _assignment("ELF_DPKG_SET_SHA256"))
     text = _script_text()
     assert "dpkg-query -W" in text
     assert re.search(r'if \[ "\$\{got\}" != "\$\{ELF_DPKG_SET_SHA256\}" \]; then\n\s+echo [^\n]*\n\s+exit 3', text)
+
+
+# The 93 pins and the dpkg-set hash as they were resolved on 2026-10-05 and verified by the
+# question 239 builds. They must not move when the apt SOURCES change (question 245 (7)): the
+# snapshot work only changes where the same versions are fetched from.
+PINS_SHA256 = "5bc0ef9dbab4e03b4e8633c456a35881be32daa3fd307b9addb350bcad5dc05d"
+DPKG_SET_SHA256 = "19ed31e506cc179f2a7e7520985e6f56b9fb674302049dde380ee2102cfb7683"
+# The latest `first_seen` of any of the 93 pinned arm64/all .debs in snapshot.debian.org's archives
+# (perl, perl-base and libperl5.36 in debian-security): a snapshot before it lacks a pin.
+LATEST_PIN_FIRST_SEEN = "20261005T091318Z"
+SNAPSHOT_TS_FORMAT = r"\d{8}T\d{6}Z"
+
+
+def test_the_93_pins_and_the_dpkg_set_hash_are_unchanged() -> None:
+    pkgs = _apt_packages()
+    assert len(pkgs) == 93, len(pkgs)
+    assert hashlib.sha256(("\n".join(pkgs) + "\n").encode()).hexdigest() == PINS_SHA256
+    assert pkgs == sorted(pkgs), "the pins are kept sorted"
+    assert _assignment("ELF_DPKG_SET_SHA256") == DPKG_SET_SHA256
+
+
+def test_apt_sources_are_the_snapshot_at_one_fixed_timestamp_and_no_live_mirror_is_left() -> None:
+    ts = _assignment("SNAPSHOT_TS")
+    assert re.fullmatch(SNAPSHOT_TS_FORMAT, ts), ts
+    assert ts >= LATEST_PIN_FIRST_SEEN, "the timestamp must not precede the newest pinned .deb"
+    text = _script_text()
+    # The override is the only other source of the timestamp, and it is non-shipping.
+    assert 'ELF_SNAPSHOT_TS="${ELF_SNAPSHOT_TS:-${SNAPSHOT_TS}}"' in text
+    assert 'NONSHIPPING="${NONSHIPPING} ELF_SNAPSHOT_TS"' in text
+    assert (
+        _assignment("SNAPSHOT_DEBIAN_URL") == "http://snapshot.debian.org/archive/debian/${ELF_SNAPSHOT_TS}/"
+    )
+    assert (
+        _assignment("SNAPSHOT_SECURITY_URL")
+        == "http://snapshot.debian.org/archive/debian-security/${ELF_SNAPSHOT_TS}/"
+    )
+    code = "\n".join(_code_lines())
+    # The container replaces the image's sources file with exactly the two snapshot archives ...
+    m = re.search(
+        r"cat > /etc/apt/sources\.list\.d/debian\.sources <<EOS\n(.*?)\nEOS\n", text, re.DOTALL
+    )
+    assert m, "the container no longer writes /etc/apt/sources.list.d/debian.sources"
+    stanzas = [s for s in m.group(1).split("\n\n") if s.strip()]
+    assert len(stanzas) == 2, stanzas
+    parsed = [dict(ln.split(": ", 1) for ln in s.splitlines()) for s in stanzas]
+    assert [p["URIs"] for p in parsed] == ["${ELF_SNAPSHOT_DEBIAN_URL}", "${ELF_SNAPSHOT_SECURITY_URL}"]
+    assert [p["Suites"] for p in parsed] == ["bookworm bookworm-updates", "bookworm-security"]
+    for p in parsed:
+        assert p["Types"] == "deb" and p["Components"] == "main"
+        # Signatures stay verified with the image's own keyring.
+        assert p["Signed-By"] == "/usr/share/keyrings/debian-archive-keyring.gpg"
+        assert set(p) == {"Types", "URIs", "Suites", "Components", "Signed-By"}, p
+    # ... passes the two URLs in from the pinned variables ...
+    assert '-e "ELF_SNAPSHOT_DEBIAN_URL=${SNAPSHOT_DEBIAN_URL}"' in text
+    assert '-e "ELF_SNAPSHOT_SECURITY_URL=${SNAPSHOT_SECURITY_URL}"' in text
+    # ... and refuses if any other apt source file exists.
+    assert re.search(r'if \[ -e /etc/apt/sources\.list \] \|\| \[ "\$\(ls /etc/apt/sources\.list\.d\)" != "debian\.sources" \]; then\n\s+echo [^\n]*\n\s+exit 5', code)
+    # No live mirror and no other network location anywhere in executable code or in the sources.
+    for live in ("deb.debian.org", "security.debian.org", "ftp.debian.org", "httpredir"):
+        assert live not in code, live
+    urls = set(re.findall(r"https?://[^\s\"'`)]+", code))
+    assert all(u.startswith("http://snapshot.debian.org/archive/debian") for u in urls), urls
+
+
+def test_only_the_valid_until_check_is_relaxed_and_signatures_stay_verified() -> None:
+    code = "\n".join(_code_lines())
+    updates = [ln.strip() for ln in _code_lines() if re.search(r"\bapt-get\b.*\bupdate\b", ln)]
+    assert updates == ["apt-get -o Acquire::Check-Valid-Until=false update"], updates
+    # That is the only apt option anywhere: one -o, one Acquire:: setting, no config file written.
+    assert len(re.findall(r"\bapt-get\b[^\n]*\s-o\s", code)) == 1
+    assert re.findall(r"\b(?:Acquire|APT|Dir|Debug)::[\w:\-]+", code) == ["Acquire::Check-Valid-Until"]
+    assert "apt.conf" not in code and "/etc/apt/preferences" not in code
+    # Nothing that weakens signature checking.
+    for weaker in (
+        "--allow-unauthenticated",
+        "--allow-insecure",
+        "AllowInsecureRepositories",
+        "AllowDowngradeToInsecure",
+        "trusted=yes",
+        "[trusted",
+        "--force-yes",
+        "Check-Date",
+        "--no-check-valid",
+    ):
+        assert weaker not in code, weaker
+    assert "apt-key" not in code and "gpg --import" not in code, "the image's own keyring is the trust root"
+
+
+def test_the_fetched_deb_set_is_pinned_and_checked_before_anything_is_installed() -> None:
+    assert re.fullmatch(r"[0-9a-f]{64}", _assignment("ELF_DEB_SET_SHA256"))
+    assert _assignment("ELF_DEB_SET_SHA256") != DPKG_SET_SHA256
+    text = _script_text()
+    assert '-e "ELF_DEB_SET_SHA256=${ELF_DEB_SET_SHA256}"' in text
+    # The mismatch refuses (exit 4) ...
+    assert re.search(
+        r'if \[ "\$\{got\}" != "\$\{ELF_DEB_SET_SHA256\}" \]; then\n\s+echo [^\n]*\n\s+exit 4', text
+    )
+    code = "\n".join(_code_lines())
+    # ... the listing is printed (the record of the network fetch, question 154) ...
+    assert 'echo "${debs}"' in code
+    assert "sha256sum -- *.deb | LC_ALL=C sort -k2" in code
+    # ... and it happens after the download and before the install proper and the dpkg-set check.
+    download = code.index("--download-only")
+    check = code.index('"${got}" != "${ELF_DEB_SET_SHA256}"')
+    install = code.index("apt-get install -y --no-install-recommends ${ELF_APT_PACKAGES}")
+    dpkg_check = code.index('"${got}" != "${ELF_DPKG_SET_SHA256}"')
+    assert code.index("apt-get -o Acquire::Check-Valid-Until=false update") < download < check < install < dpkg_check
+
+
+def test_build_inputs_block_prints_the_snapshot_and_the_deb_set() -> None:
+    text = _script_text()
+    assert 'echo "  apt sources:        ${SNAPSHOT_DEBIAN_URL} (bookworm, bookworm-updates)"' in text
+    assert "${SNAPSHOT_SECURITY_URL} (bookworm-security)" in text
+    assert "apt .deb set:       sha256 ${ELF_DEB_SET_SHA256}" in text
+    # ... in the block that precedes the docker run (the record is made before the fetch).
+    code = "\n".join(_code_lines())
+    assert code.index("apt .deb set:") < code.index("docker run --rm")
+
+
+def test_the_snapshot_timestamp_override_is_validated_and_non_shipping() -> None:
+    res = _run([str(SCRIPT)], {"ELF_SNAPSHOT_TS": "yesterday"})
+    assert res.returncode == 2 and "ELF_SNAPSHOT_TS must look like" in res.stderr, (res.returncode, res.stderr)
+    res = _run([str(SCRIPT)], {"ELF_SNAPSHOT_TS": "20260907T000000Z"})
+    assert res.returncode == 2 and "non-shipping build" in res.stderr and "ELF_SNAPSHOT_TS" in res.stderr, (
+        res.returncode,
+        res.stderr,
+    )
 
 
 def test_cfe_build_metadata_is_pinned_and_passed_to_the_container() -> None:
@@ -213,6 +351,7 @@ def test_non_shipping_builds_refuse_the_default_output_dir() -> None:
         ("ELF_BUILDDATE", "199901010000"),
         ("ELF_BUILDHOST", "someone-else"),
         ("ELF_BUILDUSER", "someone"),
+        ("ELF_SNAPSHOT_TS", "20260907T000000Z"),
         ("ELF_TOOLCHAIN_ALLOW_MISMATCH", "1"),
     ):
         res = _run([str(SCRIPT)], {var: value})
