@@ -233,6 +233,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "av-http1"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "thiserror",
+]
+
+[[package]]
 name = "av-ingest"
 version = "0.1.0"
 dependencies = [
@@ -280,6 +288,7 @@ version = "0.1.0"
 dependencies = [
  "av-catalog",
  "av-cdm",
+ "av-http1",
  "av-label",
  "av-lockstep",
  "av-store",
@@ -287,6 +296,7 @@ dependencies = [
  "openssl",
  "prost",
  "serde_json",
+ "serde_yaml",
  "thiserror",
  "tokio",
 ]
@@ -425,7 +435,10 @@ name = "av-sweep"
 version = "0.1.0"
 dependencies = [
  "av-cdm",
+ "av-http1",
+ "av-jobs",
  "av-kernel",
+ "av-lockstep",
  "gmat-sys",
  "openssl",
  "prost",

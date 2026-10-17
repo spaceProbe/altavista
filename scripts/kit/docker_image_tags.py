@@ -45,10 +45,50 @@ survived `remove_test_only_tags`, and a `repository:tag` that did not exist befo
 The caller holds `altavista.docker_test_lock.lock_docker_tests()` for the whole span (the "new
 tag appeared" check relies on no other lock-taking docker test running inside it); this module
 takes no lock of its own.
+
+# `docker rmi <repo:tag>` is not "untag only" (heavy-ct-5, measured on this host's store)
+
+This host's engine uses the containerd image store (`docker info`: `driver-type
+io.containerd.snapshotter.v1`). There `docker rmi <repo:tag>` deletes the image itself ("Untagged:"
+then "Deleted: sha256:...") unless some OTHER reference survives (moby `daemon/containerd/image_delete.go`: `ImageDelete`
+untags only when `len(sameRef) != len(all)`). Measured on throwaway images, and re-proved by
+`tests/test_docker_image_tags.py`:
+
+- The last name of an image: deleted. Another tag in any repository, or in the same repository
+  under another tag: only untagged.
+- A reference `R@sha256:...` from a pull by digest keeps the image alive when the tag being
+  removed is in ANOTHER repository, but NOT when it is in the SAME repository `R`: the removal
+  prints "Untagged: R:t", "Untagged: R@sha256:...", "Deleted: sha256:..." (containerd's
+  `getSameReferences` treats the untagged digest reference of the same name as the same reference).
+- An image known only by its id (dangling, `<none>:<none>` in `docker image ls`; a tag that
+  moved off a pinned image leaves it this way) is invisible to a `repository:tag` snapshot, and the
+  dangling placeholder is always bundled into the removal ("One is dangling" in `getSameReferences`),
+  so `docker load` of a tarball that tags it and then `docker rmi <that tag>` deletes the pinned
+  image. A stopped container using the image makes the removal fail with a conflict instead.
+
+The pre-heavy-ct-5 `_undo` ran `docker rmi <repo:tag>` on every binding a load "created from
+nothing" on the assumption that it only untags, and `assert_host_tags_unchanged` compared tags
+only, so the deletion went unnoticed (reproduced on throwaway images: the image was gone and the
+closing assertion passed). Guarantees now:
+
+1. Before the load, the guard reads the whole image table (`docker image ls`, dangling rows and
+   digest-reference rows included, `docker_image_table`). If the tarball's image (read from its
+   `index.json` / `manifest.json`, best effort) is already on the host and none of its existing
+   references would survive removing the names the load would add (`_survives_untag`), the load is
+   SKIPPED: the image is verified by id as before and handed back by id, so nothing is added that
+   could later have to be removed. (A tarball that carries several such images is refused.)
+2. If the load runs anyway and ends up adding a name to such an image (the tarball could not be
+   read), `_undo` REFUSES to `docker rmi` it and raises, naming the image and the tag left in place.
+3. A test-only tag is never put on such an image either: its `LoadedImage.test_tag` is the image
+   id (a valid image reference for `docker run`), which is never removed.
+4. `assert_host_tags_unchanged` also fails when any image id present when the guard was built is
+   missing at the end.
 """
 from __future__ import annotations
 
+import json
 import subprocess
+import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -76,18 +116,89 @@ def docker_tag_snapshot() -> dict:
     `docker load` could clobber. `docker image ls --format '{{.ID}}'` prints a bare hex id with no
     `sha256:` prefix even with `--no-trunc`; every id here is normalised to the `sha256:...` form
     `docker image inspect --format '{{.Id}}'` returns, so callers can compare the two directly."""
-    result = _docker("image", "ls", "--no-trunc", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}")
-    snapshot: dict = {}
-    for line in result.stdout.splitlines():
-        if not line.strip():
+    return _tags_of(docker_image_table())
+
+
+def docker_image_table() -> dict:
+    """`image id -> [(repository or None, tag or None), ...]` for EVERY image on this host, one row
+    per reference `docker image ls` prints (one `--format` call). A real tag is `(repo, tag)`; a
+    reference by digest only (`repo@sha256:...`, from a pull by digest) prints as `(repo, None)`; an
+    image with no name at all (dangling, known only by its id) is `(None, None)`. Unlike the tag
+    snapshot, nothing is dropped, so an image no `repository:tag` names is still seen."""
+    table: dict = {}
+    # A plain `docker image ls` hides the nameless images on the containerd store (measured: 0
+    # `<none>:<none>` rows against 20 under `--filter dangling=true` on this host), so they are
+    # listed separately. `-a` is not used: it adds the manifests and children of every image.
+    for extra in ((), ("--filter", "dangling=true")):
+        result = _docker("image", "ls", "--no-trunc", *extra, "--format", "{{.Repository}}\t{{.Tag}}\t{{.ID}}")
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            repo, tag, image_id = line.split("\t")
+            if not image_id.startswith("sha256:"):
+                image_id = f"sha256:{image_id}"
+            row = (None if repo == "<none>" else repo, None if tag == "<none>" else tag)
+            if row not in table.setdefault(image_id, []):
+                table[image_id].append(row)
+    return table
+
+
+def _tags_of(table: dict) -> dict:
+    """The `repository:tag -> id` view of `docker_image_table()` (`<none>:...` rows excluded)."""
+    return {
+        f"{repo}:{tag if tag is not None else '<none>'}": image_id
+        for image_id, rows in table.items()
+        for repo, tag in rows
+        if repo is not None
+    }
+
+
+def _repository_of(name: str) -> str:
+    """`localhost:5000/a/b:t` -> `localhost:5000/a/b`; `a/b@sha256:..` -> `a/b`; `a/b` -> `a/b`."""
+    if "@" in name:
+        return name.split("@", 1)[0]
+    head, _, tail = name.rpartition(":")
+    return name if (not head or "/" in tail) else head
+
+
+def _survives_untag(rows: list, added_names) -> bool:
+    """Would the image whose pre-existing references are `rows` still exist after `docker rmi` of
+    every name in `added_names` (names added to it on top of `rows`)? Measured on the containerd
+    store: a dangling placeholder is removed together with the name, a digest reference of the SAME
+    repository is removed together with the tag, and anything else survives -- any tag (other
+    repository, or the same repository under another tag) and a digest reference of another
+    repository."""
+    added_repositories = {_repository_of(n) for n in added_names}
+    for repo, tag in rows:
+        if repo is None:
             continue
-        repo_tag, image_id = line.split("\t")
-        if repo_tag.startswith("<none>:"):
-            continue
-        if not image_id.startswith("sha256:"):
-            image_id = f"sha256:{image_id}"
-        snapshot[repo_tag] = image_id
-    return snapshot
+        if tag is not None or repo not in added_repositories:
+            return True
+    return False
+
+
+def _tarball_identity(tarball: Path) -> tuple:
+    """`(image ids, repo:tag names)` the tarball carries, read from its `index.json` (containerd
+    store: the manifest digests) and `manifest.json` (config digests, `RepoTags`). Best effort: an
+    unreadable tarball gives `(set(), set())` and `docker load` itself is then the judge."""
+    ids: set = set()
+    tags: set = set()
+    try:
+        with tarfile.open(tarball) as tf:
+            members = set(tf.getnames())
+            if "index.json" in members:
+                for desc in json.load(tf.extractfile("index.json")).get("manifests", []):
+                    ids.add(desc["digest"])
+            if "manifest.json" in members:
+                for entry in json.load(tf.extractfile("manifest.json")):
+                    tags.update(entry.get("RepoTags") or [])
+                    config = entry.get("Config", "")
+                    stem = config.rsplit("/", 1)[-1].removesuffix(".json")
+                    if stem:
+                        ids.add(f"sha256:{stem}")
+    except (OSError, tarfile.TarError, ValueError, KeyError, TypeError, AttributeError):
+        return set(), set()
+    return ids, tags
 
 
 @dataclass
@@ -97,8 +208,10 @@ class LoadedImage:
     #: The four keys the kit test and `live_evidence.py` have always recorded as image
     #: provenance: `tag`, `recorded_digest`, `loaded_digest`, `docker_load_stdout`.
     evidence: dict
-    #: The run-scoped test-only tag the caller must run containers from, or `None` when the
-    #: caller did not ask to keep the image (`keep_as_test_tag=False`).
+    #: The image reference the caller must run containers from, or `None` when the caller did not
+    #: ask to keep the image (`keep_as_test_tag=False`): the run-scoped test-only tag, or the
+    #: image id (`sha256:...`, no tag, nothing to remove) when the image was on the host before the
+    #: load and no other reference would outlive removing a tag from it.
     test_tag: Optional[str]
     #: `repository:tag -> (id before the load or None, id after the load)`, for the bindings the
     #: load created or moved. All of them were undone before `load_verified` returned.
@@ -119,7 +232,11 @@ class ImageTagGuard:
         self.run_id = run_id
         self.test_tag_prefix = test_tag_prefix
         self.on_test_tag = on_test_tag
-        self.initial_snapshot = docker_tag_snapshot()
+        initial_table = docker_image_table()
+        self.initial_snapshot = _tags_of(initial_table)
+        #: `image id -> references` of every image on the host when the guard was built; the
+        #: closing proof fails if any of them is gone at the end.
+        self.initial_images = initial_table
         self.test_only_tags: list = []
 
     def test_only_tag(self, component: str) -> str:
@@ -139,29 +256,45 @@ class ImageTagGuard:
         optionally re-tag it under a test-only name, and undo every tag binding the load created or
         moved, whatever happens in between. `tag` is the `repository:tag` the tarball carries
         (the manifest's); it is used only to find the loaded id in the after-load snapshot."""
-        before_load = docker_tag_snapshot()
+        before_table = docker_image_table()
+        before_load = _tags_of(before_table)
         changed: dict = {}
+        unsafe: dict = {}
         test_tag: Optional[str] = None
         try:
-            load = subprocess.run(
-                ["docker", "load", "-i", str(tarball)], capture_output=True, text=True, timeout=120
-            )
-            # Whatever the load did to the host's tags, it is read here, even after a failed load.
-            after_load = docker_tag_snapshot()
-            changed = {
-                repo_tag: (before_load.get(repo_tag), new_id)
-                for repo_tag, new_id in after_load.items()
-                if before_load.get(repo_tag) != new_id
-            }
-            if load.returncode != 0:
-                raise ImageHygieneError(f"docker load -i {tarball} failed (rc={load.returncode}): {load.stderr}")
-
-            loaded_id = after_load.get(tag)
-            if loaded_id is None:
-                raise ImageHygieneError(
-                    f"{component}: docker load -i {tarball} succeeded but {tag!r} is not bound "
-                    f"to any image afterward (tags currently on the host: {sorted(after_load)!r})"
+            skipped_id = self._fragile_preexisting_image(component, tarball, before_table)
+            if skipped_id is not None:
+                # The image is on the host and the names the tarball would add are the only thing
+                # between it and deletion when they are removed again: do not add them.
+                load_stdout = (
+                    f"docker load skipped: image {skipped_id} is already on this host and no reference "
+                    f"of it would outlive an untag of the tarball's names (heavy-ct-5)"
                 )
+                loaded_id = skipped_id
+                after_load = before_load
+            else:
+                load = subprocess.run(
+                    ["docker", "load", "-i", str(tarball)], capture_output=True, text=True, timeout=120
+                )
+                load_stdout = load.stdout.strip()
+                # Whatever the load did to the host's tags, it is read here, even after a failed load.
+                after_table = docker_image_table()
+                after_load = _tags_of(after_table)
+                changed = {
+                    repo_tag: (before_load.get(repo_tag), new_id)
+                    for repo_tag, new_id in after_load.items()
+                    if before_load.get(repo_tag) != new_id
+                }
+                unsafe = self._untags_that_would_delete(changed, before_table)
+                if load.returncode != 0:
+                    raise ImageHygieneError(f"docker load -i {tarball} failed (rc={load.returncode}): {load.stderr}")
+
+                loaded_id = after_load.get(tag)
+                if loaded_id is None:
+                    raise ImageHygieneError(
+                        f"{component}: docker load -i {tarball} succeeded but {tag!r} is not bound "
+                        f"to any image afterward (tags currently on the host: {sorted(after_load)!r})"
+                    )
             # Verify by id, never by re-querying the tag a second time (question 234: the tag is
             # exactly the thing this module stops trusting) -- a self-inspect by id both confirms
             # the id genuinely exists and gives the value compared to the manifest below.
@@ -178,7 +311,7 @@ class ImageTagGuard:
                 "tag": tag,
                 "recorded_digest": recorded_digest,
                 "loaded_digest": actual_digest,
-                "docker_load_stdout": load.stdout.strip(),
+                "docker_load_stdout": load_stdout,
             }
             if actual_digest != recorded_digest:
                 raise ImageHygieneError(
@@ -190,13 +323,20 @@ class ImageTagGuard:
                 # Re-tag FIRST -- before any untag/restore below runs -- so the image the caller
                 # still needs is never left with only the about-to-be-undone host tag as its
                 # sole reference.
-                test_tag = self.test_only_tag(component)
-                _docker("tag", loaded_id, test_tag)
-                self.test_only_tags.append(test_tag)
-                if self.on_test_tag is not None:
-                    self.on_test_tag(test_tag)
+                wanted = self.test_only_tag(component)
+                if loaded_id in before_table and not _survives_untag(before_table[loaded_id], {wanted}):
+                    # On the host before this load, with nothing but a dangling placeholder or a
+                    # same-repository digest reference: a tag added here could only be removed by
+                    # deleting the image. Hand back the id; there is nothing to remove later.
+                    test_tag = loaded_id
+                else:
+                    test_tag = wanted
+                    _docker("tag", loaded_id, test_tag)
+                    self.test_only_tags.append(test_tag)
+                    if self.on_test_tag is not None:
+                        self.on_test_tag(test_tag)
         finally:
-            problems = self._undo(component, changed, kept=test_tag is not None)
+            problems = self._undo(component, changed, unsafe, kept=test_tag is not None)
             if problems:
                 raise ImageHygieneError(
                     f"{component}: could not undo the tag binding(s) docker load -i {tarball} "
@@ -204,11 +344,51 @@ class ImageTagGuard:
                 )
         return LoadedImage(evidence=evidence, test_tag=test_tag, changed=changed)
 
-    def _undo(self, component: str, changed: dict, *, kept: bool) -> list:
+    def _fragile_preexisting_image(self, component: str, tarball: Path, before_table: dict) -> Optional[str]:
+        """The id of the image `tarball` carries when that image is ALREADY on the host and no
+        reference of it would survive removing the tarball's names (so loading would add names that
+        could only be removed by deleting the image); `None` when the load is safe to run."""
+        ids, names = _tarball_identity(tarball)
+        fragile = []
+        for image_id in sorted(ids & set(before_table)):
+            rows = before_table[image_id]
+            added = {n for n in names if (_repository_of(n), n.rpartition(":")[2]) not in rows}
+            if added and not _survives_untag(rows, added):
+                fragile.append(image_id)
+        if len(fragile) > 1:
+            raise ImageHygieneError(
+                f"{component}: {tarball} carries several images already on the host that a "
+                f"`docker rmi` of the loaded names would delete ({fragile!r}); refusing to load it"
+            )
+        return fragile[0] if fragile else None
+
+    def _untags_that_would_delete(self, changed: dict, before_table: dict) -> dict:
+        """`repo:tag -> why` for each binding a load created on an image that was on the host before
+        it, where removing the loaded names would delete the image."""
+        unsafe: dict = {}
+        for repo_tag, (old_id, new_id) in changed.items():
+            if old_id is not None or new_id not in before_table:
+                continue
+            added = {rt for rt, (o, n) in changed.items() if o is None and n == new_id}
+            if not _survives_untag(before_table[new_id], added):
+                unsafe[repo_tag] = (
+                    f"image {new_id} was on the host before this load with references "
+                    f"{before_table[new_id]!r}; none would outlive removing {sorted(added)!r}"
+                )
+        return unsafe
+
+    def _undo(self, component: str, changed: dict, unsafe: dict, *, kept: bool) -> list:
         problems: list = []
         for repo_tag, (old_id, new_id) in changed.items():
             try:
-                if old_id is None:
+                if repo_tag in unsafe:
+                    # Never delete an image that existed before the load (heavy-ct-5): leave the
+                    # name, say so, and let a person decide.
+                    problems.append(
+                        f"{repo_tag}: NOT removed -- {unsafe[repo_tag]}. `docker rmi` would delete "
+                        f"the image (containerd store). The extra name is left in place."
+                    )
+                elif old_id is None:
                     # The load created this binding from nothing: untag only.
                     _docker("rmi", repo_tag)
                     if kept:
@@ -248,8 +428,16 @@ class ImageTagGuard:
         `lock_docker_tests()` for the whole span, so no other lock-taking docker test can have
         created a tag inside this window: a new tag here is this run's own leak or a process that
         took no lock, and both are worth seeing."""
-        final_snapshot = docker_tag_snapshot()
+        final_table = docker_image_table()
+        final_snapshot = _tags_of(final_table)
         problems = []
+        for image_id, rows in self.initial_images.items():
+            if image_id not in final_table:
+                problems.append(
+                    f"{image_id}: an image present before this run (references {rows!r}) no longer "
+                    f"exists -- this run deleted it, or something concurrent did (a prune, kubelet "
+                    f"image GC); check the image-event log before trusting either"
+                )
         for repo_tag, before_id in self.initial_snapshot.items():
             after_id = final_snapshot.get(repo_tag)
             if after_id != before_id:

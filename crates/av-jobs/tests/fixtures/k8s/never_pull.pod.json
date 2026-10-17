@@ -1,0 +1,217 @@
+{
+  "metadata": {
+    "annotations": {
+      "av.job.id.full": "raw-never-pull"
+    },
+    "creationTimestamp": "2026-10-17T14:33:36Z",
+    "finalizers": [
+      "batch.kubernetes.io/job-tracking"
+    ],
+    "generateName": "av-raw-859201792247616173167000-",
+    "generation": 1,
+    "labels": {
+      "av.job": "1",
+      "av.job.id": "raw-never-pull",
+      "av.test": "1",
+      "av.test.run_id": "85920-1792247616173167000",
+      "batch.kubernetes.io/controller-uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d",
+      "batch.kubernetes.io/job-name": "av-raw-859201792247616173167000",
+      "controller-uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d",
+      "job-name": "av-raw-859201792247616173167000"
+    },
+    "name": "av-raw-859201792247616173167000-9c5qw",
+    "namespace": "av-heavy-ct-85920-1792247616173167000",
+    "ownerReferences": [
+      {
+        "apiVersion": "batch/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "Job",
+        "name": "av-raw-859201792247616173167000",
+        "uid": "fdf9903b-cadb-4b64-a201-272e0a40dd1d"
+      }
+    ],
+    "resourceVersion": "1054571",
+    "uid": "e76bb952-370c-4968-8cc0-b9b8a205a24b"
+  },
+  "spec": {
+    "automountServiceAccountToken": false,
+    "containers": [
+      {
+        "command": [
+          "/bin/true"
+        ],
+        "image": "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "imagePullPolicy": "Never",
+        "name": "job",
+        "resources": {
+          "limits": {
+            "cpu": "500m",
+            "memory": "256Mi"
+          },
+          "requests": {
+            "cpu": "50m",
+            "memory": "32Mi"
+          }
+        },
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "runAsGroup": 10001,
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": false,
+    "nodeName": "colima",
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "restartPolicy": "Never",
+    "schedulerName": "default-scheduler",
+    "securityContext": {},
+    "serviceAccount": "default",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 1,
+    "tolerations": [
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists",
+        "tolerationSeconds": 300
+      }
+    ],
+    "volumes": [
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/raw-85920-1792247616173167000-in",
+          "type": "Directory"
+        },
+        "name": "in"
+      },
+      {
+        "hostPath": {
+          "path": "/Users/probe/code/AltaVista-aiplane/.av-test-tmp/av-jobs-k8s-test/raw-85920-1792247616173167000-out",
+          "type": "Directory"
+        },
+        "name": "out"
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:33:37Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:33:36Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:33:36Z",
+        "message": "containers with unready status: [job]",
+        "observedGeneration": 1,
+        "reason": "ContainersNotReady",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:33:36Z",
+        "message": "containers with unready status: [job]",
+        "observedGeneration": 1,
+        "reason": "ContainersNotReady",
+        "status": "False",
+        "type": "ContainersReady"
+      },
+      {
+        "lastProbeTime": null,
+        "lastTransitionTime": "2026-10-17T14:33:36Z",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "image": "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "imageID": "",
+        "lastState": {},
+        "name": "job",
+        "ready": false,
+        "restartCount": 0,
+        "started": false,
+        "state": {
+          "waiting": {
+            "message": "Container image \"alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000\" is not present with pull policy of Never",
+            "reason": "ErrImageNeverPull"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/av-job/in",
+            "name": "in",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/av-job/out",
+            "name": "out"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.5.1",
+    "hostIPs": [
+      {
+        "ip": "192.168.5.1"
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Pending",
+    "podIP": "10.42.0.23",
+    "podIPs": [
+      {
+        "ip": "10.42.0.23"
+      }
+    ],
+    "qosClass": "Burstable",
+    "startTime": "2026-10-17T14:33:36Z"
+  }
+}

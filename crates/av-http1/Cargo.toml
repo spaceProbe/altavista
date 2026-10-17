@@ -1,0 +1,30 @@
+[package]
+name = "av-http1"
+publish = false
+description = "Question 245 (heavy container round): the one blocking HTTP/1.1 client over the system OpenSSL that the ClickHouse sweep-store client and the Kubernetes Jobs executor both speak through -- hand-rolled per question 218 (no registry crate that bundles crypto), loopback-only plaintext per question 155, one connection per request, in-memory client identities."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The system OpenSSL, through the `openssl` crate: TLS (SslConnector), the CA/identity PEM
+# parsing, and hostname/IP-SAN verification (ConnectConfiguration::connect sets the X509
+# verify parameters from the host: set_ip for an IP literal, set_host for a DNS name). ADR-004's
+# crypto rule: no ring, no rustls, no native-tls, no second TLS stack.
+openssl = "0.10"
+# HttpError's Display/Error impls.
+thiserror.workspace = true
+
+# Deliberately NOT dependencies, and why: this crate sits under two clients (a ClickHouse store
+# and a Kubernetes executor) so its dependency set is a security surface both inherit, and it
+# must stay synchronous (av-jobs deliberately has no async runtime). So no hyper/tokio (async
+# stacks), no `url` (the Endpoint grammar is the five lines this round needs, with stricter
+# refusals than a general URL parser), no base64 (the Kubernetes client decodes kubeconfig data
+# itself and hands this crate PEM bytes). Nothing is added here without the manager naming it --
+# see question 218.
+
+[dev-dependencies]
+# None: the test PKI (a CA, server and client certificates) is generated at test time with the
+# `openssl` crate above, and the fake servers are std::net::TcpListener threads.

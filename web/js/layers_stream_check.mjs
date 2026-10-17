@@ -218,10 +218,25 @@ const CAMERA_PATH = [
 // not a fixed amount of real wall-clock time (Node's own event-loop tick cost, and
 // therefore how much real network I/O gets a chance to complete between two frames,
 // varies with host load, which this task's own binding rules say to expect:
-// "this host is over-subscribed and shared with another track"). Instead, this
-// harness measures ONE real round trip against the real gateway before the camera
-// path even starts (`calibrationRoundTripMs`, below) and dwells at each position for
-// a real, polled multiple of THAT measurement -- see the camera-path loop, below.
+// "this host is over-subscribed and shared with another track"). Instead, each
+// position dwells for a real, polled multiple of the LOAD LATENCY OBSERVED ON THE
+// PATH ITSELF -- see the camera-path loop, below.
+//
+// What "a round trip" means here (question 244; the CLI's `dwellRoundTrips` is a
+// multiplier of exactly this): the MEDIAN, over the last `LATENCY_WINDOW` (5) tile
+// loads that COMPLETED on this path, of the wall-clock time one `layer.load()` took
+// (request start to verified payload, measured in the `layer.load` wrapper below),
+// re-read on EVERY frame so a latency that rises mid-position lengthens the dwell
+// as soon as slower loads start to complete. It is NOT the single calibration fetch
+// this file used to size every dwell from: that sample is made once, before the path
+// starts, so when contention later raised the path's per-tile latency to about twice
+// it, half as many tiles settled in each (fixed-length) position and a run could end
+// having fetched 6 tiles (5,112 bytes against the 11,000-byte tight budget) with
+// nothing evicted (question 244; reproduced here with a delaying proxy that adds
+// latency after the first request). The calibration fetch (`calibrationRoundTripMs`,
+// below) now only seeds the estimate for the very start of the first position, and
+// that position additionally lasts until the first load of the path has completed (or
+// `MAX_DWELL_MS`), so the estimate is path-observed from the second position on.
 // This is still "no sleeping, ever" in the sense this task's binding rule means it:
 // there is no fixed timer duration anywhere in this file: the wait is bounded by a
 // REAL measured condition (elapsed `performance.now()` since the position started,
@@ -237,13 +252,33 @@ const CAMERA_PATH = [
 // gateway: a more generous multiple, e.g. 8, let every position fully settle before
 // its own dwell window ran out, and `cancelledCount` was 0 on every run -- only
 // once both this constant AND `STREAM_MAX_CONCURRENT_LOADS` were tightened did a
-// real backlog reliably survive into the jump). 1 round trip's worth of dwell is
+// real backlog reliably survive into the jump). 2 observed round trips' worth of dwell
+// (`DWELL_ROUND_TRIPS_PER_POSITION`'s default, below; it was 1 calibration round trip) is
 // enough for a LOW-demand position (e.g. the 'far' root-tile view, 2 tiles) to
 // settle well inside its own window, while leaving a genuine backlog at a
 // HIGH-demand position for the next jump to cancel.
-const DWELL_ROUND_TRIPS_PER_POSITION = cliDwellRoundTrips === undefined ? 1 : cliDwellRoundTrips;
-const MIN_DWELL_MS = 25; // floor, in case the calibration round trip was implausibly fast (e.g. warm keep-alive)
-const MAX_DWELL_MS = 3000; // ceiling, in case the calibration round trip was implausibly slow
+// The default is 2.5 observed round trips, not the 1 calibration round trip it used to be.
+// The calibration fetch is one sequential fetch on a cold connection, and measured about
+// 1.6-1.9x the median latency of the overlapped loads the path actually makes (30-35 ms
+// against 17-21 ms on this host, no added latency), so the old "1" bought roughly 1.7
+// path round trips of dwell and 15-17 tiles over the path (13 are needed to cross the
+// 11,000-byte tight budget). With 2 concurrent slots a position settles about
+// `maxConcurrentLoads x dwellRoundTrips` tiles at ANY latency, so 1 observed round trip
+// settles ~2 per position and ended runs at 7-10 tiles with nothing evicted. Measured on
+// the tight run (tiles fetched / evicted / cancelled, 0-100 ms of added delay and under
+// one busy process per core): 2 gave 14-18 tiles, evicted 2-6 -- and one CPU-loaded run
+// of 62 stalled to 10 tiles, 0 evicted; 2.5 gave 20-23 tiles, evicted 8-10, cancelled 3-4
+// on 50 runs; 3 gave 24-26 tiles but cancelled as few as 2 (a longer dwell drains the
+// backlog the camera jump is there to cancel -- 8 round trips drained it entirely, see
+// above). 2.5 keeps both counts well clear of zero.
+const DWELL_ROUND_TRIPS_PER_POSITION = cliDwellRoundTrips === undefined ? 2.5 : cliDwellRoundTrips;
+const MIN_DWELL_MS = 25; // floor, in case the observed load latency is implausibly fast (e.g. warm keep-alive)
+const MAX_DWELL_MS = 3000; // ceiling, in case the observed load latency is implausibly slow
+// How many of the most recent completed path loads the latency estimate is the median
+// of (module comment above, "What a round trip means here"). Five: with 2 concurrent
+// slots, a step change in latency is half-reflected after 3 completions (about two
+// waves), while one outlier load cannot move the median at all.
+const LATENCY_WINDOW = 5;
 // Hard safety cap on total frames (module docstring: "a real, polled condition,
 // never a fixed sleep-then-assume") -- large enough that a healthy real gateway on
 // this host never comes close to it, small enough that a genuinely hung gateway does
@@ -257,7 +292,14 @@ const MAX_DWELL_MS = 3000; // ceiling, in case the calibration round trip was im
 // runs on the order of 60000 frames a second: budget accordingly. Scaled from the
 // dwell rather than fixed, with the old 60000 as a floor so a default run is exactly
 // what it was.
-const MAX_FRAMES = Math.max(60_000, Math.ceil(DWELL_ROUND_TRIPS_PER_POSITION * CAMERA_PATH.length * 4000));
+// Question 244: the dwell now follows the latency observed on the path, so this cap is
+// scaled to hold a path whose round trips are up to a second (60000 frames per round
+// trip per position), not the ~100 ms the old coefficient (4000) implicitly covered.
+// Measured: a path whose loads took about 115 ms (a delaying proxy, 2 round trips of
+// dwell) ran 50000-56000 frames, within sight of the old 60000 -- a cap hit there
+// leaves the camera on an early position and `cancelledCount` structurally 0, the
+// failure the paragraph above describes.
+const MAX_FRAMES = Math.max(60_000, Math.ceil(DWELL_ROUND_TRIPS_PER_POSITION * CAMERA_PATH.length * 60_000));
 
 // Per-frame commit cap (module docstring, "What a frame is") -- deliberately small
 // (well below this fixture's own total distinct-tile count, 42) so that a burst of
@@ -333,8 +375,15 @@ const decodeModeCounts = {};
 
 const layer = new GatewayImageryLayerAdapter({ manifestSha256, origin, tileBytes: declaredTileBytes });
 const realLoad = layer.load.bind(layer);
+// Wall-clock duration (ms) of every load on the path that COMPLETED with a verified
+// payload, in completion order -- what the dwell's latency estimate is read from
+// (`pathLoadLatencyEstimateMs`, below). Failed and cancelled loads are not samples: a
+// cancellation's duration is how long the camera took to move, not how long a tile
+// takes to arrive.
+const pathLoadLatenciesMs = [];
 layer.load = async (request, signal) => {
   byteCostSourceCounts[request.byteCostSource] = (byteCostSourceCounts[request.byteCostSource] || 0) + 1;
+  const loadStartedAt = performance.now();
   try {
     // Round 6 (question 231's ruling): `realLoad`'s own payload is now a real
     // `THREE.Texture`-shaped object, not the pre-round-6 `{bytes, sha256, ...}` --
@@ -342,6 +391,7 @@ layer.load = async (request, signal) => {
     // there, just relocated to `payload.userData.bytes`/`.sha256` (see
     // web/js/layers/gateway_imagery_layer.js's own module docstring, "Problem 1").
     const payload = await realLoad(request, signal);
+    pathLoadLatenciesMs.push(performance.now() - loadStartedAt);
     decodeModeCounts[payload.userData.decodeMode] = (decodeModeCounts[payload.userData.decodeMode] || 0) + 1;
     tilesFetched += 1;
     bytesFetched += payload.userData.bytes.byteLength;
@@ -473,8 +523,10 @@ function runOneFrame(view) {
 // directly (bypassing `layer.load`'s own counting wrapper -- this probe's own outcome
 // must not pollute `tilesFetched`/`etagVerifiedCount`/httpStatusCounts, it is
 // infrastructure for THIS harness, not part of what it is measuring) so this run's
-// own per-position dwell time (below) is sized against a REAL measurement of this
-// host's actual gateway round-trip latency right now, not a guess.
+// own FIRST position's dwell (below) starts from a REAL measurement of this host's
+// actual gateway round-trip latency right now, not a guess. It is only a seed: once the
+// path has completed a load of its own, `pathLoadLatencyEstimateMs()` (below) is read
+// from the path, never from this one sample (question 244).
 const calibrationController = new AbortController();
 const calibrationT0 = performance.now();
 let calibrationRoundTripMs;
@@ -482,12 +534,25 @@ try {
   await realLoad({ tile: { level: 0, x: 0, y: 0 }, url: `${origin}/api/tiles/${manifestSha256}/tiles/0/0/0` }, calibrationController.signal);
   calibrationRoundTripMs = performance.now() - calibrationT0;
 } catch (err) {
-  fail(`calibration fetch of tile 0/0/0 failed -- cannot size this run's per-position dwell time without a real round-trip measurement: ${err && err.message}`);
+  fail(`calibration fetch of tile 0/0/0 failed -- cannot seed this run's dwell estimate without a real round-trip measurement: ${err && err.message}`);
 }
-const dwellMsPerPosition = Math.min(
-  MAX_DWELL_MS,
-  Math.max(MIN_DWELL_MS, calibrationRoundTripMs * DWELL_ROUND_TRIPS_PER_POSITION),
-);
+
+/** The load latency (ms) one "round trip" means right now (module comment above, "What
+ * a round trip means here"): the median of the last `LATENCY_WINDOW` loads that
+ * completed on this path; `calibrationRoundTripMs` only until the path has completed
+ * its first load. */
+function pathLoadLatencyEstimateMs() {
+  if (pathLoadLatenciesMs.length === 0) return calibrationRoundTripMs;
+  const recent = pathLoadLatenciesMs.slice(-LATENCY_WINDOW).sort((a, b) => a - b);
+  const mid = recent.length >> 1;
+  return recent.length % 2 === 1 ? recent[mid] : (recent[mid - 1] + recent[mid]) / 2;
+}
+
+/** The dwell (ms) a position currently calls for: `DWELL_ROUND_TRIPS_PER_POSITION` round
+ * trips of the current latency estimate, clamped to [`MIN_DWELL_MS`, `MAX_DWELL_MS`]. */
+function dwellMsNow() {
+  return Math.min(MAX_DWELL_MS, Math.max(MIN_DWELL_MS, pathLoadLatencyEstimateMs() * DWELL_ROUND_TRIPS_PER_POSITION));
+}
 
 // ------------------------------------------------------------------- manifest fetch
 // Round 4 (question 228): ONE real fetch of this tile set's own manifest, over the
@@ -510,12 +575,12 @@ try {
 }
 
 // A real, idle host can run many hundreds of bare `setImmediate` round trips inside
-// even a modest `dwellMsPerPosition` window -- `PER_POSITION_MAX_FRAMES` is a second,
+// even a modest dwell window -- `PER_POSITION_MAX_FRAMES` is a second,
 // independent stopping condition (a tick-count ceiling) purely so a position with
 // nothing left to do cannot burn an unbounded slice of the global `MAX_FRAMES`
 // budget spinning through its own idle dwell window; it is intentionally large
 // enough to never itself be the reason a HIGH-demand position stops early (the real
-// wall-clock `dwellMsPerPosition` bound below is what does that job, deliberately,
+// wall-clock `dwellMsNow()` bound below is what does that job, deliberately,
 // so a real backlog survives into the next position's camera jump -- see
 // `DWELL_ROUND_TRIPS_PER_POSITION`'s own comment for why that dwell is kept short
 // rather than generous).
@@ -524,15 +589,21 @@ try {
 // on this host costs about 0.01 ms, so 2000 ticks is roughly 20 ms of wall clock --
 // shorter than a single real tile round trip (measured through the viewer-server
 // proxy against a real gateway: about 40 ms for a 3147060-byte tile). Every position
-// therefore ended on the tick ceiling before `dwellMsPerPosition` had any effect at
+// therefore ended on the tick ceiling before the dwell had any effect at
 // all, and a run against a large tile set streamed three to five tiles no matter what
 // dwell it was given. 200000 ticks is about two seconds of pure spinning, so the
 // wall-clock bound below is now genuinely the binding one and this constant is the
 // safety cap it was always documented to be.
 const PER_POSITION_MAX_FRAMES = 200_000;
 
+// What each position actually did, for the printed JSON (and the Python test's report):
+// the latency estimate and the dwell it called for when the position started and when it
+// ended, the dwell actually used (wall clock from the position's first frame to its last),
+// and how many path loads had completed by its end.
+const dwellByPosition = [];
+
 let frame = 0;
-for (const cam of CAMERA_PATH) {
+for (const [positionIndex, cam] of CAMERA_PATH.entries()) {
   const view = {
     cameraEcef: cameraEcef(cam.lonDeg, cam.latDeg, cam.heightM),
     screenHeightPx: SCREEN.screenHeightPx,
@@ -541,11 +612,21 @@ for (const cam of CAMERA_PATH) {
   view.tiles = selectTiles(view.cameraEcef, { ...SCREEN });
 
   const positionStart = performance.now();
+  const estimateMsAtStart = pathLoadLatencyEstimateMs();
+  const dwellMsAtStart = dwellMsNow();
   let positionFrames = 0;
+  // The first position is the low-demand one ('far', 2 root tiles): it additionally
+  // lasts until the path has completed its first load (bounded by `MAX_DWELL_MS`, and
+  // only while a load is actually in flight to wait for), so that the second position's
+  // dwell is sized from latency observed on the path, not from the calibration seed.
+  const warmingUp = (elapsed) => positionIndex === 0
+    && pathLoadLatenciesMs.length === 0
+    && manager.pending.size > 0
+    && elapsed < MAX_DWELL_MS;
   while (
     frame < MAX_FRAMES
     && positionFrames < PER_POSITION_MAX_FRAMES
-    && (performance.now() - positionStart) < dwellMsPerPosition
+    && (((performance.now() - positionStart) < dwellMsNow()) || warmingUp(performance.now() - positionStart))
   ) {
     runOneFrame(view);
     frame += 1;
@@ -559,6 +640,16 @@ for (const cam of CAMERA_PATH) {
     // tick-count safety ceiling -- never a fixed sleep.
     await new Promise((resolve) => setImmediate(resolve));
   }
+  dwellByPosition.push({
+    label: cam.label,
+    estimateMsAtStart,
+    dwellMsAtStart,
+    estimateMsAtEnd: pathLoadLatencyEstimateMs(),
+    dwellMsAtEnd: dwellMsNow(),
+    dwellMsUsed: performance.now() - positionStart,
+    frames: positionFrames,
+    pathLoadsCompletedAtEnd: pathLoadLatenciesMs.length,
+  });
 }
 
 // Drain: keep running frames (same real event-loop-tick yield, no sleep) until every
@@ -1090,7 +1181,7 @@ let evictionProbe = { skipped: 'could not establish a live, default-resident tar
     // four real concurrency-capped waves need (`STREAM_MAX_CONCURRENT_LOADS`-style
     // reasoning: up to 6 concurrent, ~19 real fetches, ~4 waves), the same "no fixed
     // sleep, a real polled condition against a real measured quantity" discipline
-    // this file's own `dwellMsPerPosition` already uses. `MAX_EVICTION_ATTEMPTS`
+    // this file's own `dwellMsNow()` already uses. `MAX_EVICTION_ATTEMPTS`
     // stays as a SECOND, independent safety cap (this file's own established
     // two-cap pattern, see `PER_POSITION_MAX_FRAMES`'s own comment) purely so a
     // genuinely hung run cannot spin forever even if the clock itself misbehaves.
@@ -1369,8 +1460,19 @@ const result = {
   maxFrames: MAX_FRAMES,
   maxCommitsPerFrame: MAX_COMMITS_PER_FRAME,
   maxConcurrentLoads: manager.maxConcurrentLoads,
+  // Question 244: the dwell is sized from latency observed ON THE PATH -- see the module
+  // comment ("What a round trip means here"). `calibrationRoundTripMs` is only the seed
+  // for the first position; `pathLoadLatencyEstimateMs` is the estimate at the end of the
+  // path (median of the last `latencyWindow` completed loads), `pathLoadsCompleted` how
+  // many loads that estimate could have been read from, and `dwellByPosition` records,
+  // per camera position, the estimate and the dwell at its start and end and the dwell
+  // actually used, so a caller can show what each position was given.
   calibrationRoundTripMs,
-  dwellMsPerPosition,
+  dwellRoundTrips: DWELL_ROUND_TRIPS_PER_POSITION,
+  latencyWindow: LATENCY_WINDOW,
+  pathLoadLatencyEstimateMs: pathLoadLatencyEstimateMs(),
+  pathLoadsCompleted: pathLoadLatenciesMs.length,
+  dwellByPosition,
   // Round 6 (docs/open-questions.md question 231's ruling) -- see this file's own
   // module docstring section above the GlobeLayer probe for what each field means.
   globeLayerProbe,

@@ -1,0 +1,16 @@
+# services/sweep/IMAGE_DATA_FILES.txt -- the GMAT-install data files av-sweep-sample:local carries
+# (question 245, heavy-ct-2b). Format: <sha256>  <path under $GMAT_ROOT/data/>. build-image.sh
+# copies exactly these from the GMAT R2026a install ($GMAT_ROOT, default the repository's
+# `GMAT R2026a`) into out/sweep-image/data/gmat/data/ and REFUSES to build if any file is missing or
+# its SHA-256 differs; the same list, with sizes, is recorded in IMAGE_DIGEST.md.
+#
+# Why these four (measured): the fixture study (drms/leo_orbital_native_sweep.*) completes,
+# 12 of 12 samples, with $GMAT_ROOT pointing at a directory holding only them. What reads each:
+#   gravity/earth/JGM2.cof                 force_model.gravity_file (av_orbital::cof, via binding.rs's materialize_orbital)
+#   planetary_ephem/de/leDE1941.405        the Sun/Moon point masses (force_model.point_masses; av_orbital::de)
+#   planetary_coeff/NUTATION.DAT           the FK5 body-fixed rotation (av_orbital::fk5::Fk5BodyFixedRotation::new)
+#   planetary_coeff/eopc04_08.62-now       the same rotation's Earth-orientation table
+bf182b1208e33be3716c8292a3947c1f87d4041ad6663a0c9ae621f65cafc20d  gravity/earth/JGM2.cof
+f8695149bc54be449788f4d6007d1f6a7053f5be16eae60229dc89c661f6fe4d  planetary_ephem/de/leDE1941.405
+633423d201aaed4cf4bf49427f85c5c3ed0e6c6f394f68d5c369dac673e31566  planetary_coeff/NUTATION.DAT
+52c95d6871066e892463328424ca34f5e9cedde92c747465a40f7cd0ecd86ed3  planetary_coeff/eopc04_08.62-now

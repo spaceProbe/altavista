@@ -44,6 +44,19 @@ serde_json.workspace = true
 # already depend on it) -- this crate adds no new registry dependency at all.
 openssl = "0.10"
 
+# Question 245 (heavy container round, heavy-ct-2a): crate::k8s, the Kubernetes Jobs executor.
+# av-http1 is the in-workspace blocking HTTP/1.1 client over the system OpenSSL (a path
+# dependency, not a registry crate); it is how crate::k8s::api reaches the API server with the
+# kubeconfig's CA and client certificate, hostname/IP-SAN verification always on.
+# serde_yaml: used this round ONLY because it is already locked (0.9.34; av-command, av-gateway,
+# av-kernel and av-sweep depend on it), so no new registry package. Question 246 says it is to be
+# replaced and av-jobs is a fifth crate in that migration scope, so ALL YAML parsing is the one
+# function `parse_yaml` in src/k8s/kubeconfig.rs, which returns a plain `serde_json::Value` (this
+# crate still names no `serde`); replacing it touches that body and the line below. serde_json
+# (above) also carries the Kubernetes API's JSON, read and written as `serde_json::Value`.
+av-http1 = { path = "../av-http1" }
+serde_yaml = "0.9"
+
 # H5b-1 (docs/heavy-plan.md H5, round 3): src/bin/av-tile-fixture.rs -- the committed
 # tile-set generator binary the brief requires to live IN this crate ("do NOT create a new
 # crate; a new crate moves six SBOM epochs"), yet run a REAL job through the REAL av-store/

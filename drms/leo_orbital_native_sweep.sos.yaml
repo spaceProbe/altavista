@@ -1,0 +1,29 @@
+# SosConfiguration for the heavy-ct-2b sweep fixture (question 245): leo_1day_orbital_native.sos.yaml
+# with ONE change, the native step. That bundle steps the native orbital model every 300 s (288
+# steps over the day), which a sample finishes in about 0.3 s of CPU -- shorter than the time a pod
+# needs to start, so no two sample CONTAINERS would ever visibly overlap and a `docker kill` of one
+# would race its exit. Here the step is 60 s (step_rate_hz = 1/60, 1440 steps over the day): a sample
+# takes about 1.5 s of CPU in a release build (measured, services/sweep/IMAGE_DIGEST.md's image and
+# the native release build), long enough for several sample containers to run at the same moment on
+# one node and for a kill to land mid-run, still cheap enough that the study is seconds, not
+# minutes, in a debug build. Everything else is the bundle's: the one instance `leo`, bound by
+# BINDING_KIND_MODEL to leo_1day_orbital_native.system.yaml (unmodified, the native
+# orbital.earth.jgm2_8x8.sun_moon model).
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared. Computed with:
+#   cargo run -p av-kernel --example drm_hash -- sos drms/leo_orbital_native_sweep.sos.yaml
+id: leo_orbital_native_sweep_sos
+version: "1"
+name: LEO golden physics, single native orbital instance, 60 s native step (heavy-ct-2b sweep fixture)
+instances:
+  - name: leo
+    system_id: leo_orbital_native_sys
+    binding:
+      kind: BINDING_KIND_MODEL
+      model:
+        model_id: leo_orbital_native_sys
+    step_rate_hz: 0.016666666666666666
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-sweep heavy-ct-2b fixture authoring"
+hash: "cdfe65a74c7e890c36c0fd83ec47ce105ccd3ad3e24f2d5a72366d6ebf84d482"

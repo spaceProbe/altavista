@@ -7,10 +7,12 @@
 //! `crates/av-jobs/tests/store_tiler.rs` is this file's own template for the docker-gated test
 //! shape (that file's own module doc: "`crates/av-store/tests/minio_store.rs` is this file's
 //! own template"). `image_digest_md_path`/`fenced_block_after`/`parse_image_digest_md`/`gate`/
-//! `gate_or_skip!` below are copied from `store_tiler.rs` character for character, pointed at
-//! this file's own `CONTAINER_EXECUTOR_IMAGE_DIGEST.md` instead of `services/store/
-//! IMAGE_DIGEST.md` -- see that file's own doc comment for why the digest lives beside the test
-//! that uses it (question 212(a): "the recorded digest has exactly one home").
+//! `gate_or_skip!` below are copied from `store_tiler.rs`, pointed at this file's own
+//! `CONTAINER_EXECUTOR_IMAGE_DIGEST.md` instead of `services/store/IMAGE_DIGEST.md` -- see that
+//! file's own doc comment for why the digest lives beside the test that uses it (question 212(a):
+//! "the recorded digest has exactly one home"). `parse_image_digest_md` adds one check the
+//! template lacks: the recorded reference is `alpine@<digest>` and that digest equals the recorded
+//! id, so the test never resolves a floating tag.
 //!
 //! # Why this test needs no real object store
 //!
@@ -61,9 +63,10 @@ impl ObjectSink for SharedMemorySink {
     }
 }
 
-/// `JobSpec.container_image` -- bare, tag-free (see `CONTAINER_EXECUTOR_IMAGE_DIGEST.md`'s own
-/// "Why a floating tag..." section for why the digest, not this string, is what actually pins
-/// the image).
+/// `JobSpec.container_image` -- bare, tag-free. The digest (`JobSpec.container_image_digest`),
+/// not this string, pins the image: the executor inspects and runs `alpine@<digest>`, never the
+/// floating `alpine:latest` (see `CONTAINER_EXECUTOR_IMAGE_DIGEST.md`'s own "Why the reference is
+/// a digest..." section).
 const CONTAINER_IMAGE: &str = "alpine";
 
 // -----------------------------------------------------------------------------------------
@@ -94,11 +97,20 @@ fn parse_image_digest_md() -> (String, String) {
     let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {path:?}: {e}"));
     let image_ref = fenced_block_after(&text, "Registry reference").unwrap_or_else(|| panic!("could not find the 'Registry reference' fenced code block in {path:?}"));
     let recorded_id = fenced_block_after(&text, "docker image inspect").unwrap_or_else(|| panic!("could not find the 'docker image inspect' fenced code block in {path:?}"));
+    // Heavy-ct-4: the record names a content address, not a tag, and the digest in the
+    // reference IS the recorded id (this host's containerd store reports the index digest as the
+    // image id) -- a half-edited record fails loudly here rather than turning into a skip.
+    assert_eq!(
+        image_ref.rsplit_once('@').map(|(name, digest)| (name == CONTAINER_IMAGE, digest)),
+        Some((true, recorded_id.as_str())),
+        "the 'Registry reference' in {path:?} must be `{CONTAINER_IMAGE}@<digest>` with <digest> equal to the recorded `docker image inspect` id; got {image_ref:?} / {recorded_id:?}"
+    );
     (image_ref, recorded_id)
 }
 
-/// The module-level gate (question 212(a)): docker daemon up AND the local image's id matches
-/// what `CONTAINER_EXECUTOR_IMAGE_DIGEST.md` recorded -- identical check to
+/// The module-level gate (question 212(a)): docker daemon up AND the local image, resolved BY
+/// DIGEST (`alpine@sha256:...`, never the floating `alpine:latest`), reports the id
+/// `CONTAINER_EXECUTOR_IMAGE_DIGEST.md` recorded -- the same check as
 /// `crates/av-jobs/tests/store_tiler.rs::gate`, against this file's own recorded digest.
 fn gate() -> Result<(), DockerGateReason> {
     let (image_ref, recorded_id) = parse_image_digest_md();

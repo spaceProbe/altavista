@@ -1,0 +1,39 @@
+# ParameterSweep (proto/altavista/v1/system.proto), YAML transcoding -- the heavy-ct-2b fixture
+# (question 245): a 2-axis x 3-draw study over drms/leo_orbital_native_sweep.drm.yaml (which reuses
+# leo_1day_orbital_native.sos.yaml / leo_1day_orbital_native.system.yaml completely unmodified).
+# 4 grid points x 3 draws = 12 samples, every one a pure-Rust (no GMAT) run.
+#
+# Axis 1: leo.spacecraft.X, [5950.56620450214, 5951.56620450214] km. The first value is the
+# bundle's own baseline (leo_1day_orbital_native.system.yaml's spacecraft.X); the second is
+# 1 km further out along x, a small orbit-raising offset of the initial Cartesian state
+# (spacecraft.* positions are km, velocities km/s in the system definition).
+#
+# Axis 2: an EVENT axis, event_id burn1, value_key dv_x, values [1.0, 3.0] m/s -- the commanded
+# prograde burn (drms/leo_orbital_native_sweep.drm.yaml's scenario.events[0], commanded at 1.0 m/s,
+# which is the first value) and three times it. Large against the Gates dispersion sigmas on this
+# burn (sigma_magnitude_fixed_mps 0.01, proportional 0.02: ~0.02 m/s 1-sigma at 1 m/s) so the
+# axis's own effect is not confused with per-draw noise.
+#
+# Grid: row-major with the LAST declared axis (dv_x) varying fastest
+# (crates/av-sweep/src/grid.rs::expand_grid): point 0 = (X=5950.566.., dv_x=1.0), point 1 =
+# (5950.566.., 3.0), point 2 = (5951.566.., 1.0), point 3 = (5951.566.., 3.0). monte_carlo_draws: 3
+# and the DRM declares the one Scenario.seeds key burn_seed, so av-sweep selects
+# ExecutionErrorMode::Sampled for every sample and derives one burn_seed per (point, draw).
+#
+# hash: SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-sweep/src/hash.rs::canonical_sweep_hash). Computed with:
+#   cargo run -p av-sweep --example sweep_hash -- drms/leo_orbital_native_sweep.sweep.yaml
+id: leo_orbital_native_sweep
+drm_id: leo_orbital_native_sweep_drm
+axes:
+  - instance: leo
+    parameter: spacecraft.X
+    values: [5950.56620450214, 5951.56620450214]
+  - event_id: burn1
+    value_key: dv_x
+    values: [1.0, 3.0]
+monte_carlo_draws: 3
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-sweep heavy-ct-2b fixture authoring"
+hash: "c40db69e838d5eb9e24ea07c8e4b7a82e0f27d98e763f4349750d0ceab5ae1c6"

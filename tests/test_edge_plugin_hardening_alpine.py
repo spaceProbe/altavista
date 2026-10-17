@@ -1,4 +1,4 @@
-"""A self-contained proof, using `alpine:latest`, that the container-hardening flags and
+"""A self-contained proof, using a digest-pinned alpine image (`ALPINE_IMAGE`), that the container-hardening flags and
 assertions `tests/test_edge_plugin_container.py` applies to the real `av-edge-plugin:local`
 image (docs/open-questions.md question 207, edge round 3's own review defect 2) really produce
 the claimed values on THIS Docker/Colima host TODAY -- independent of whether that plugin image
@@ -23,7 +23,7 @@ plugin image -- for four reasons:
    missing, only this file would catch it.
 3. Together the two tests separate two failures that otherwise look identical: "the hardening
    posture is broken" and "the plugin image is not on this host".
-4. It costs almost nothing: `alpine:latest` is 13.6 MB and this test runs in seconds.
+4. It costs almost nothing: the alpine image is 13.6 MB and this test runs in seconds.
 
 What this file technically proves, independent of reason 1-4 above: nothing about the plugin
 image itself guarantees that `--read-only` + `--cap-drop ALL` + `--security-opt
@@ -32,7 +32,7 @@ no-new-privileges` + a named volume at a declared mount really produce non-root
 `.HostConfig.SecurityOpt` containing `no-new-privileges`, `NoNewPrivs: 1`, `Seccomp: 2`, a
 failed write to `/`, and a successful write to the volume -- on THIS Docker version, THIS
 Colima kernel, THIS host's own default seccomp profile -- as opposed to merely being plausible
-Docker documentation. `alpine:latest` (a few MB, unrelated to the plugin image -- see
+Docker documentation. The alpine image (a few MB, unrelated to the plugin image -- see
 `_compute_skip_reason` below for what happens if it too has been evicted) lets this run for
 real, right now, regardless of the plugin image's own fate.
 
@@ -66,7 +66,7 @@ host that has only one of the two images.)
 
 The one thing this test does NOT share with `test_edge_plugin_container.py`: `--user`.
 `services/edge-plugin/Dockerfile` bakes its own non-root `USER edgeplugin` (uid/gid 10001) into
-the image, so that test passes no `--user` flag at all. `alpine:latest` declares no such user,
+the image, so that test passes no `--user` flag at all. Alpine declares no such user,
 so this test passes `--user 10001:10001` explicitly on `docker run` -- the SAME uid/gid, chosen
 for consistency (not because alpine's own `/etc/passwd` needs to agree; Docker accepts a bare
 numeric uid:gid with no matching passwd entry, and `id -u`/kernel-level checks work identically
@@ -74,7 +74,17 @@ either way).
 
 # Docker-gating, labelling, and locking -- this file's own obligations under questions 154/156/207
 
-- Question 154 (no network at test time): this test never `docker pull`s. If `alpine:latest` is
+- Image pin (heavy-ct-4, lead's ruling "never pull an image by a floating tag"): the probe image is
+  named by CONTENT ADDRESS, `alpine@sha256:294b683c...` (`ALPINE_DIGEST` below, recorded
+  2026-10-17), never by the floating `alpine:latest`. The tag had moved from `sha256:28bd5fe8...`
+  to `sha256:294b683c...` between 2026-09-17 and 09-18 (it is re-fetched whenever the kubelet
+  image collector evicts it and anyone runs `docker pull alpine`/`docker run alpine`), which is
+  what made `crates/av-jobs/tests/container.rs` skip forever; this file now cannot float the same
+  way. The presence check resolves the digest reference AND compares the id it reports to
+  `ALPINE_DIGEST` (on this host's containerd image store the id of an index-pinned image is the
+  index digest). `crates/av-jobs/tests/CONTAINER_EXECUTOR_IMAGE_DIGEST.md` records the same
+  digest for the Rust executor test; each component keeps its own record (question 212(a)).
+- Question 154 (no network at test time): this test never `docker pull`s. If the pinned image is
   not present locally (the same Colima kubelet image-GC phenomenon question 196(d)/205 already
   documents for larger images could evict even this one), `_compute_skip_reason` names that and
   the test skips visibly rather than pulling it.
@@ -106,7 +116,10 @@ from altavista.container_hardening import (
 )
 from altavista.docker_test_lock import lock_docker_tests
 
-ALPINE_IMAGE = "alpine:latest"
+# Content-addressed, never the floating `alpine:latest` (see this module's own doc, "Image pin").
+# One-time setup, outside any test: `docker pull alpine@sha256:294b683c...77e6` (full digest below).
+ALPINE_DIGEST = "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+ALPINE_IMAGE = f"alpine@{ALPINE_DIGEST}"
 # Chosen only for consistency with `services/edge-plugin/Dockerfile`'s own `edgeplugin` user --
 # see this module's own doc for why alpine needs no matching `/etc/passwd` entry for this to work.
 PROBE_UID_GID = "10001:10001"
@@ -125,16 +138,19 @@ def _docker_unavailable_reason() -> "str | None":
     return None
 
 
-def _image_present(tag: str) -> bool:
-    result = subprocess.run(["docker", "image", "inspect", tag, "--format", "{{.Id}}"], capture_output=True, timeout=30)
-    return result.returncode == 0
+def _image_present(ref: str, expected_id: "str | None" = None) -> bool:
+    """True iff `ref` resolves locally and, when `expected_id` is given, reports exactly that id."""
+    result = subprocess.run(["docker", "image", "inspect", ref, "--format", "{{.Id}}"], capture_output=True, timeout=30)
+    if result.returncode != 0:
+        return False
+    return expected_id is None or result.stdout.decode(errors="replace").strip() == expected_id
 
 
 def _compute_skip_reason() -> "str | None":
     reason = _docker_unavailable_reason()
     if reason is not None:
         return f"Docker not available: {reason}"
-    if not _image_present(ALPINE_IMAGE):
+    if not _image_present(ALPINE_IMAGE, ALPINE_DIGEST):
         return (
             f"probe image {ALPINE_IMAGE!r} is not present locally, and this test never pulls an "
             f"image itself (question 154: no network at test time) -- it may have been evicted by "
@@ -179,7 +195,7 @@ def _run_hardening_flags_produce_the_expected_posture_on_this_docker_colima_host
         created_volume = True
 
         # Prime the fresh volume's ownership to PROBE_UID_GID before the hardened, non-root
-        # container ever touches it. A brand-new named volume mounted at a path `alpine:latest`
+        # container ever touches it. A brand-new named volume mounted at a path alpine
         # does not already declare comes out root:root -- there is nothing in the image at
         # `WRITABLE_MOUNT_DEST` for Docker to propagate ownership from (the mechanism that
         # makes this a non-issue for the REAL plugin image: `services/edge-plugin/Dockerfile`

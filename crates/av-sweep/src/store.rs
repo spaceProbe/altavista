@@ -4,16 +4,19 @@
 //!
 //! ## Why a trait at all
 //!
-//! `docs/architecture.md`'s P1 row names ClickHouse as this platform's eventual store for MoEs
+//! `docs/architecture.md`'s P1 row names ClickHouse as this platform's store for MoEs
 //! ("parameter sweeps on the job runner with MoEs in ClickHouse"), and question 191 (`docs/
-//! open-questions.md`) repeats the same decision: "the study store is a trait with a
-//! file-backed implementation now and ClickHouse later". No host in this crate's own development
-//! or test environment has ClickHouse reachable (this task's own hard boundary: "No network at
-//! build, test or run time"), so F2 adds the trait and [`FileStudyStore`] now, and a typed,
-//! honest refusal ([`open_store`] with [`StoreBackend::ClickHouse`]) in place of a ClickHouse
-//! implementation that does not exist yet -- never a stub that silently pretends to work. Every
-//! caller (today: `src/bin/av-sweep/study.rs`'s `--store-dir`) goes through [`StudyStore`] alone,
-//! so swapping in a real ClickHouse-backed store later needs no caller-side change.
+//! open-questions.md`) decided "the study store is a trait with a file-backed implementation now
+//! and ClickHouse later". F2 added the trait and [`FileStudyStore`]; question 245 added the
+//! ClickHouse implementation, [`crate::clickhouse::ClickHouseStudyStore`], behind the same trait,
+//! so every caller (`src/bin/av-sweep/study.rs`'s `--store-dir` and `--store-clickhouse`) goes
+//! through [`StudyStore`] alone. [`open_store`] with [`StoreBackend::ClickHouse`] connects,
+//! verifies the live schema (migrating a store that has no tables yet) and returns the store.
+//!
+//! **The two backends differ in one deliberate way.** [`FileStudyStore::put_study`] overwrites a
+//! study of the same `sweep_id`; the ClickHouse store treats a study as immutable: the same id
+//! with identical content is an idempotent `Ok`, with different content a typed
+//! [`StoreError::RefusedWrite`] (see the `clickhouse` module doc, decision 2).
 //!
 //! ## On-disk layout ([`FileStudyStore`])
 //!
@@ -60,14 +63,88 @@ pub enum StoreError {
     #[error("{}: does not decode as altavista.v1.SweepResults: {source}", path.display())]
     Decode { path: PathBuf, #[source] source: prost::DecodeError },
 
-    /// [`open_store`] was asked for [`StoreBackend::ClickHouse`] -- deferred, not implemented,
-    /// per this module's own doc comment. `docs/architecture.md`'s P1 row: "parameter sweeps on
-    /// the job runner with MoEs in ClickHouse"; `docs/open-questions.md` question 191: "the study
-    /// store is a trait with a file-backed implementation now and ClickHouse later".
-    #[error(
-        "the ClickHouse study store backend is deferred until a host has ClickHouse reachable (docs/architecture.md's P1 row: \"parameter sweeps on the job runner with MoEs in ClickHouse\"; docs/open-questions.md question 191); dsn {dsn:?} was never connected -- use StoreBackend::File instead"
-    )]
-    ClickHouseDeferred { dsn: String },
+    /// The ClickHouse store refused to write study `sweep_id`; `reason` says whether the study
+    /// already exists with different content, or the server refused the insert.
+    #[error("study {sweep_id:?}: write refused: {reason}")]
+    RefusedWrite { sweep_id: String, reason: WriteRefusal },
+
+    /// The live ClickHouse table `table` does not have the shape this build expects: `column` is
+    /// the first column that differs, `expected` and `found` describe it (a column's name, type
+    /// and position, or `no such column`).
+    #[error("ClickHouse schema mismatch in table {table}, column {column}: expected {expected}; found {found}")]
+    SchemaMismatch { table: String, column: String, expected: String, found: String },
+
+    /// No connection could be made to the ClickHouse server at `endpoint` (connection refused, no
+    /// route, a name that does not resolve, or a timeout); `detail` is the transport's text.
+    #[error("ClickHouse at {endpoint} is unreachable: {detail}")]
+    Unreachable { endpoint: String, detail: String },
+
+    /// The TLS handshake with `endpoint` failed (an untrusted or mismatching certificate, a
+    /// protocol failure) or the TLS configuration could not be loaded; `reason` is OpenSSL's text.
+    #[error("TLS failure talking to ClickHouse at {endpoint}: {reason}")]
+    Tls { endpoint: String, reason: String },
+
+    /// The ClickHouse URL was refused before any connection: plaintext to a non-loopback host
+    /// (question 155), user information in the URL, or a malformed URL.
+    #[error("invalid ClickHouse endpoint: {detail}")]
+    InvalidEndpoint { detail: String },
+
+    /// The ClickHouse store configuration is unusable (a password environment variable that is
+    /// unset or empty, an empty database or user name).
+    #[error("invalid ClickHouse store configuration: {detail}")]
+    Config { detail: String },
+
+    /// The HTTP exchange with ClickHouse failed in a way that is neither unreachability nor TLS
+    /// (a malformed reply, an oversized reply, an I/O error mid-exchange).
+    #[error("ClickHouse at {endpoint}: transport error while {operation}: {detail}")]
+    Transport { endpoint: String, operation: String, detail: String },
+
+    /// ClickHouse answered `operation` with an exception (`exception.code` is its numeric error
+    /// code when the reply carried one).
+    #[error("ClickHouse at {endpoint} refused while {operation}: {exception}")]
+    Server { endpoint: String, operation: String, exception: crate::clickhouse::ServerException },
+
+    /// ClickHouse's reply to `operation` was unusable or disagreed with the study's own header:
+    /// truncated or malformed `RowBinary`, row counts that do not add up, or rows whose SHA-256
+    /// differs from the one recorded when they were written.
+    #[error("ClickHouse reply unusable while {operation}: {detail}")]
+    Corrupt { operation: String, detail: String },
+
+    /// The in-SQL aggregation hit the refusal [`crate::aggregate::aggregate`] gives for the same
+    /// data (`SweepError::MixedPassCriterion`).
+    #[error("aggregation: {0}")]
+    Aggregation(#[from] crate::error::SweepError),
+}
+
+/// Why [`StoreError::RefusedWrite`] was returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteRefusal {
+    /// A study with this `sweep_id` already exists with different content; studies are immutable
+    /// in the ClickHouse store (the file store overwrites).
+    DifferentContent { existing_write_id: String, existing_sha256: String, new_sha256: String },
+    /// The server refused one of the inserts (a read-only user, missing privileges, a full disk).
+    Server { code: Option<i64>, name: Option<String>, http_status: u16, message: String },
+}
+
+impl std::fmt::Display for WriteRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteRefusal::DifferentContent { existing_write_id, existing_sha256, new_sha256 } => write!(
+                f,
+                "a study with this id already exists (write {existing_write_id}, content sha256 {existing_sha256}) and the new content (sha256 {new_sha256}) differs; studies are immutable"
+            ),
+            WriteRefusal::Server { code, name, http_status, message } => {
+                write!(f, "the server refused the insert (HTTP {http_status}")?;
+                if let Some(code) = code {
+                    write!(f, ", code {code}")?;
+                }
+                if let Some(name) = name {
+                    write!(f, " {name}")?;
+                }
+                write!(f, "): {message}")
+            }
+        }
+    }
 }
 
 fn io_err(path: &Path, source: std::io::Error) -> StoreError {
@@ -193,20 +270,24 @@ impl StudyStore for FileStudyStore {
     }
 }
 
-/// Which [`StudyStore`] backend [`open_store`] should open -- the seam a future caller uses once
-/// a host has ClickHouse reachable (see this module's own doc comment).
+/// Which [`StudyStore`] backend [`open_store`] should open.
+#[derive(Debug, Clone)]
 pub enum StoreBackend {
     File { root: PathBuf },
-    ClickHouse { dsn: String },
+    /// A ClickHouse server (question 245). The config names the password's environment variable,
+    /// never the password.
+    ClickHouse(crate::clickhouse::ClickHouseConfig),
 }
 
 /// Opens a [`StudyStore`] backend. `StoreBackend::File` always succeeds (construction alone,
-/// [`FileStudyStore::new`], cannot fail); `StoreBackend::ClickHouse` always fails, typed, per this
-/// module's own doc comment -- never a stub that pretends to connect.
+/// [`FileStudyStore::new`], cannot fail). `StoreBackend::ClickHouse` connects, verifies the live
+/// schema (migrating a store that has no tables yet, refusing one whose tables differ with
+/// [`StoreError::SchemaMismatch`]) and returns the store; an unreachable server, a TLS failure or
+/// a bad configuration is a typed error, never a store that pretends to be open.
 pub fn open_store(backend: StoreBackend) -> Result<Box<dyn StudyStore>, StoreError> {
     match backend {
         StoreBackend::File { root } => Ok(Box::new(FileStudyStore::new(root))),
-        StoreBackend::ClickHouse { dsn } => Err(StoreError::ClickHouseDeferred { dsn }),
+        StoreBackend::ClickHouse(config) => Ok(Box::new(crate::clickhouse::ClickHouseStudyStore::connect(&config)?)),
     }
 }
 
@@ -308,24 +389,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `open_store(StoreBackend::ClickHouse { .. })` must be a typed refusal naming BOTH the
-    /// deferral itself and the DSN that was refused -- never silently returning `Ok` for a
-    /// backend that does not actually store anything.
+    /// The deferred refusal is gone (question 245): `open_store(StoreBackend::ClickHouse)` now
+    /// connects, so with nothing listening it is a typed `Unreachable` naming the endpoint, and a
+    /// plaintext non-loopback URL is refused before any connection. (The real-server behaviour is
+    /// `tests/clickhouse_store.rs`; the fake-server suite is `tests/clickhouse_fake_server.rs`.)
     #[test]
-    fn the_clickhouse_backend_is_a_typed_refusal_naming_the_deferral() {
-        // Not `.unwrap_err()`: that requires the `Ok` side (`Box<dyn StudyStore>`) to implement
-        // `Debug` for its own panic message, which a trait object with no `Debug` supertrait
-        // never does -- matched explicitly instead.
-        let result = open_store(StoreBackend::ClickHouse { dsn: "clickhouse://example-host:9000/altavista".to_string() });
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("StoreBackend::ClickHouse must be refused, not opened"),
+    fn the_clickhouse_backend_connects_or_refuses_with_a_typed_error_never_a_stub() {
+        use crate::clickhouse::ClickHouseConfig;
+        // Not `.unwrap_err()`: `Box<dyn StudyStore>` has no `Debug` for the panic message.
+        let closed_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
         };
-        assert!(matches!(err, StoreError::ClickHouseDeferred { ref dsn } if dsn == "clickhouse://example-host:9000/altavista"), "{err:?}");
-        let msg = err.to_string();
-        assert!(msg.contains("deferred"), "{msg}");
-        assert!(msg.contains("ClickHouse"), "{msg}");
-        assert!(msg.contains("clickhouse://example-host:9000/altavista"), "must name the real dsn that was refused: {msg}");
+        let url = format!("http://127.0.0.1:{closed_port}");
+        let mut config = ClickHouseConfig::new(url.clone(), "db", "u");
+        config.timeouts = av_http1::Timeouts::uniform(std::time::Duration::from_secs(2));
+        let err = match open_store(StoreBackend::ClickHouse(config)) {
+            Err(e) => e,
+            Ok(_) => panic!("nothing listens on {url}: the open must fail"),
+        };
+        assert!(matches!(&err, StoreError::Unreachable { endpoint, .. } if *endpoint == url), "{err:?}");
+        assert!(err.to_string().contains(&url), "{err}");
+
+        let err = match open_store(StoreBackend::ClickHouse(ClickHouseConfig::new("http://192.0.2.9:8123", "db", "u"))) {
+            Err(e) => e,
+            Ok(_) => panic!("plaintext to a non-loopback host must be refused"),
+        };
+        assert!(matches!(err, StoreError::InvalidEndpoint { .. }), "{err:?}");
 
         // Sanity: the File backend, by contrast, actually works.
         let root = temp_dir("open-store-file");

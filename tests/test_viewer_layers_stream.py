@@ -314,6 +314,36 @@ FRAME_BUDGET_MS = 16.7
 TIGHT_MEMORY_BUDGET_BYTES = 11_000
 MEMORY_BUDGET_BYTES = 3_000_000
 
+# DWELL_ROUND_TRIPS -- question 244: the tight run's eviction flaked once in the combined
+# gate (6 tiles fetched, 5,112 bytes against the 11,000-byte budget, nothing evicted).
+# Root cause, in the harness and not in the budget: `layers_stream_check.mjs` used to
+# dwell at each camera position for `dwellRoundTrips` (1) times ONE calibration fetch made
+# before the path started. The number of tiles that settle per position is
+# `maxConcurrentLoads x dwell / per-tile latency`, so when contention raised the path's
+# per-tile latency to about twice that one sample, half as many tiles settled and the
+# path ended short of the budget. Reproduced on demand (not from luck) with a delaying
+# proxy between the harness and the viewer server that adds a fixed delay to every
+# request after the first: 30 ms of added delay gave exactly 6 tiles / 5,112 bytes / 0
+# evicted on 6 of 6 runs of the old harness (60 and 100 ms: 2 tiles). The harness now
+# sizes each position's dwell from the median latency of the last five loads that
+# COMPLETED on the path, re-read every frame (see the harness's module comment, "What a
+# round trip means here"), so the tile count per position no longer depends on how the
+# latency compares to a stale sample; the tight and generous budgets above did not move.
+#
+# The number is 2.5, and not the 1 it was, because "a round trip" is now the median
+# latency of the overlapped loads the path actually makes (17-21 ms on this host
+# unperturbed), where the old calibration fetch was a sequential cold-connection fetch
+# (30-35 ms, 1.6-1.9x that), so the old "1" bought about 1.7 path round trips and 15-17
+# tiles; 1 observed round trip settles about 2 tiles per position and ended runs at 7-10
+# tiles with nothing evicted (measured, unperturbed). Measured on THIS test's tight run
+# (tiles fetched / evicted / cancelled): 2 round trips gave 14-18 tiles, 2-6 evicted, and
+# one stalled run of 62 under a busy process per core ended at 10 tiles with 0 evicted;
+# 2.5 gave 20-23 tiles, 8-10 evicted, 3-4 cancelled over 50 runs (0 to 100 ms of added
+# delay, and under CPU load); 3 gave 24-26 tiles but cancelled as few as 2, because a longer
+# dwell drains the backlog the camera jump is there to cancel. 2.5 keeps both counts well
+# clear of zero; neither budget above moved.
+DWELL_ROUND_TRIPS = 2.5
+
 READY_TIMEOUT_S = 60.0
 
 # Round 6 (docs/open-questions.md question 231's ruling, "replace or composite"): a
@@ -453,19 +483,24 @@ def _run_layers_stream_check(node: str, viewer_server, tile_set, tile_set_b, mem
     `layers_stream_check.mjs`'s own GlobeLayer probe (module docstring) uses it to
     construct "two real sets, later wins per tile" for real. The four positional
     args between the memory budget and `tile_set_b`'s own manifest hash are passed
-    EXPLICITLY, at exactly this script's own pre-round-6 DEFAULT values (maxLevel 2,
-    tileBytes 262144 == IMAGERY_TILE_BYTES, maxConcurrentLoads 2 ==
-    STREAM_MAX_CONCURRENT_LOADS, dwellRoundTrips 1 == DWELL_ROUND_TRIPS_PER_
-    POSITION -- see layers_stream_check.mjs's own module docstring for each), so
-    every OTHER measurement either run makes still runs byte-for-byte identically to
-    round 5/task 1's own runs; only the memory budget (this task's own job, see
-    `TIGHT_MEMORY_BUDGET_BYTES`/`MEMORY_BUDGET_BYTES`'s own comment above) and the
-    final, tile_set_b positional slot (task 1's own addition) differ between calls."""
+    EXPLICITLY, at exactly this script's own DEFAULT values (maxLevel 2, tileBytes
+    262144 == IMAGERY_TILE_BYTES, maxConcurrentLoads 2 == STREAM_MAX_CONCURRENT_LOADS,
+    dwellRoundTrips `DWELL_ROUND_TRIPS` == DWELL_ROUND_TRIPS_PER_POSITION -- see
+    layers_stream_check.mjs's own module docstring for each), so every OTHER
+    measurement either run makes still runs identically to round 5/task 1's own runs;
+    only the memory budget (this task's own job, see `TIGHT_MEMORY_BUDGET_BYTES`/
+    `MEMORY_BUDGET_BYTES`'s own comment above) and the final, tile_set_b positional
+    slot (task 1's own addition) differ between calls.
+
+    Question 244: `dwellRoundTrips` is a multiplier of the load latency OBSERVED ON THE
+    PATH (the harness's `pathLoadLatencyEstimateMs`), no longer of one calibration fetch
+    made before the path starts -- see `DWELL_ROUND_TRIPS` below for why the number is 2
+    now and was 1 then."""
     proc = subprocess.run(
         [
             node, str(LAYERS_STREAM_CHECK), viewer_server.origin, tile_set.manifest_sha256,
             str(FRAME_BUDGET_MS), str(memory_budget_bytes),
-            "2", "262144", "2", "1",
+            "2", "262144", "2", str(DWELL_ROUND_TRIPS),
             tile_set_b.manifest_sha256,
         ],
         cwd=str(LAYERS_STREAM_CHECK.parent), capture_output=True, text=True, timeout=180,
@@ -609,17 +644,59 @@ def test_eviction_and_cancellation_both_actually_happened(stream_result):
     gets within two orders of magnitude of a 3,000,000-byte budget) -- see
     `TIGHT_MEMORY_BUDGET_BYTES`'s own comment, above, for the real arithmetic behind
     the budget this run now uses instead."""
+    # Question 244: say what the run actually did, so a future failure carries the evidence
+    # (tiles settled, bytes, the latency estimate and the dwell each position was given)
+    # rather than only a count.
+    run = (
+        f"tilesFetched={stream_result['tilesFetched']} bytesFetched={stream_result['bytesFetched']} "
+        f"(budget {stream_result['memoryBudgetBytes']}), calibrationRoundTripMs="
+        f"{stream_result['calibrationRoundTripMs']:.1f}, pathLoadLatencyEstimateMs="
+        f"{stream_result['pathLoadLatencyEstimateMs']:.1f} over {stream_result['pathLoadsCompleted']} "
+        f"completed loads, dwellRoundTrips={stream_result['dwellRoundTrips']}, dwellMsUsed per position="
+        f"{[round(p['dwellMsUsed'], 1) for p in stream_result['dwellByPosition']]}"
+    )
     assert stream_result["evictedCount"] > 0, (
         "expected LayerManager to have evicted at least one resident tile over this "
         "real run; evictedCount == 0 would mean TIGHT_MEMORY_BUDGET_BYTES was never "
-        "actually approached, so budgetRespected would be true for the wrong reason"
+        "actually approached, so budgetRespected would be true for the wrong reason -- "
+        "bytesFetched below the budget means too few tiles settled on the path (the "
+        "dwell is sized from load latency observed during the path, question 244; this "
+        f"run: {run})"
     )
     assert stream_result["cancelledCount"] > 0, (
         "expected the deliberate camera jump (web/js/layers_stream_check.mjs's own "
         "CAMERA_PATH, 'near-0-0-close' -> 'jump-antipodal') to have cancelled at least "
         "one real in-flight fetch(); cancelledCount == 0 would mean this test never "
-        "actually exercised cancellation against real network I/O"
+        "actually exercised cancellation against real network I/O -- or that every "
+        f"position dwelt long enough to drain (this run: {run})"
     )
+
+
+@pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")
+def test_each_positions_dwell_was_sized_from_latency_observed_during_the_path(stream_result):
+    """Question 244: the harness's own record of what it did, so the fix is checked and
+    not only its consequence. What this would catch: a harness that went back to sizing
+    every position from the one calibration sample made before the path starts would
+    report a `pathLoadsCompleted` of 0 (it never reads the path) or a second position
+    whose `estimateMsAtStart` is still `calibrationRoundTripMs` to the bit; one that
+    forgot the first position must outlast the path's first completed load would leave
+    the second position on the calibration seed whenever the path is slower than the
+    seed (the perturbation this was developed against: every request after the first
+    delayed)."""
+    positions = stream_result["dwellByPosition"]
+    assert len(positions) == 6, f"expected one dwell record per CAMERA_PATH position: {positions!r}"
+    assert stream_result["pathLoadsCompleted"] > 0, f"no load completed on the path, so nothing was observed: {stream_result!r}"
+    assert stream_result["dwellRoundTrips"] == DWELL_ROUND_TRIPS
+    for p in positions:
+        assert p["dwellMsUsed"] > 0 and p["frames"] > 0, f"a position ran no frames: {p!r}"
+        assert p["dwellMsAtEnd"] >= 25, f"dwell below the harness's own floor: {p!r}"
+    # The first position outlasts the first completed load, so every later position's
+    # estimate is read from the path -- never the calibration seed.
+    assert positions[0]["pathLoadsCompletedAtEnd"] >= 1, f"the first position ended before any load completed: {positions[0]!r}"
+    for p in positions[1:]:
+        assert p["estimateMsAtStart"] != stream_result["calibrationRoundTripMs"], (
+            f"a later position's latency estimate is still the calibration seed: {p!r}"
+        )
 
 
 @pytest.mark.skipif(SKIP_REASON is not None, reason=SKIP_REASON or "")
@@ -651,7 +728,8 @@ def test_generous_budget_never_evicted_a_wanted_set_that_fits(stream_result_gene
         f"expected LayerManager to have evicted NOTHING over a run whose whole wanted set "
         f"fits its budget -- this run's budget is "
         f"{stream_result_generous['memoryBudgetBytes']} bytes against a measured cumulative "
-        f"path total of 9,372-16,188 bytes (see MEMORY_BUDGET_BYTES's own comment) -- but "
+        f"path total of 9,372-16,188 bytes (see MEMORY_BUDGET_BYTES's own comment; 15,336-17,040 "
+        f"since the question-244 dwell, which settles more tiles per position) -- but "
         f"evictedCount={stream_result_generous['evictedCount']}. If the budget printed here "
         f"is NOT comfortably above that range, this run was not given the generous budget, "
         f"and the failure is a misconfigured fixture rather than a real eviction defect."
@@ -947,7 +1025,8 @@ def test_stream_report(stream_result, stream_result_generous, capsys):
         "memoryBudgetBytes", "maxResidentBytesObserved", "budgetRespected", "softViolationTaken",
         "tilesFetched", "bytesFetched", "etagVerifiedCount", "etagMismatchCount",
         "cancelledCount", "evictedCount", "failedCount", "failureNames", "commitCount", "httpStatusCounts",
-        "settledBeforeMaxFrames", "maxConcurrentLoads", "calibrationRoundTripMs", "dwellMsPerPosition",
+        "settledBeforeMaxFrames", "maxConcurrentLoads", "calibrationRoundTripMs", "dwellRoundTrips",
+        "pathLoadLatencyEstimateMs", "pathLoadsCompleted", "dwellByPosition",
         "consoleWarnings", "unhandledRejections", "decodeModeCounts",
     )
     with capsys.disabled():
