@@ -719,13 +719,27 @@ def _assert_kit_carries_no_base_content(manifest_doc: dict) -> dict:
     # /usr/share/doc/libssl3/copyright, because both packages ship the same upstream OpenSSL notice. A
     # licence text is not base-image userland content; any other role is a failure.
     allowed_roles = {"image-package-licence"}
-    unexpected = {pin_id: [p for p, role in found if role not in allowed_roles] for pin_id, found in overlap.items()}
+    # A second measured exception (manager, question 250's round): the canonical Apache License 2.0
+    # TEXT. `cargo vendor` carries crates whose LICENSE-APACHE is byte-identical to the base images'
+    # /usr/share/common-licenses/Apache-2.0 (owned by `base-files`); first seen when question 246's
+    # serde-saphyr brought `encoding_rs` and `multiversion_no_op` into the vendor tree. A permissive
+    # licence's own text is not base-image userland. Exempt by exact sha256 only; the same bytes do
+    # not exempt any other content, and any other overlap fails.
+    allowed_licence_texts = {
+        "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30": "/usr/share/common-licenses/Apache-2.0",
+    }
+    sha_by_path = {f["path"]: f["sha256"] for f in manifest_doc["files"]}
+
+    def accepted(path: str, role: str) -> bool:
+        return role in allowed_roles or sha_by_path[path] in allowed_licence_texts
+
+    unexpected = {pin_id: [p for p, role in found if not accepted(p, role)] for pin_id, found in overlap.items()}
     assert not any(unexpected.values()), f"the kit carries file(s) byte-identical to a base-image file: {unexpected}"
     return {
         "kit_files_checked": sum(1 for f in manifest_doc["files"] if f["size"] > 0),
         "base_files_hashed": {pin_id: len(h) for pin_id, h in base_hashes.items()},
         "overlap_other_than_licence_notices": 0,
-        "licence_notices_identical_to_a_base_file": {pin_id: [p for p, role in found if role in allowed_roles] for pin_id, found in overlap.items()},
+        "licence_notices_identical_to_a_base_file": {pin_id: [p for p, role in found if accepted(p, role)] for pin_id, found in overlap.items()},
     }
 
 

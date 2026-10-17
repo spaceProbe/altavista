@@ -25,6 +25,14 @@ dependencies = [
     # The frame registry and the CDM adapter import the committed protobuf bindings at
     # import time, so protobuf is a runtime dependency, not a dev extra.
     "protobuf>=5",
+    # `altavista.server` imports `altavista.tiles_client`, which imports httpx at import time
+    # (the viewer's same-origin `/api/tiles/*` proxy, question 227), so httpx is a runtime
+    # dependency. It was declared only in `dev` until question 250's zero-egress proof showed a
+    # viewer installed from the kit's wheels failing with `ModuleNotFoundError: httpx`.
+    "httpx>=0.27",
+    # `altavista.profile` (and the policy loaders) import `yaml` at module level; it was satisfied
+    # only transitively, through `uvicorn[standard]`, until question 250's round declared it.
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]

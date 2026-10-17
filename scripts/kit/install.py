@@ -233,7 +233,7 @@ _REQUIRED_TOP_LEVEL_KEYS = (
 )
 
 #: The viewer's own required distributions (normalized dist names) -- `scripts/kit/
-#: build_kit.py::VIEWER_RUNTIME_ROOTS`'s own five keys, plus `altavista` itself (the package
+#: build_kit.py::VIEWER_RUNTIME_ROOTS`'s own keys (seven since question 250's round added `httpx` and `pyyaml`), plus `altavista` itself (the package
 #: `python -m altavista` -- the viewer server's own entry point -- actually is). Hard-coded here,
 #: deliberately NOT imported from `build_kit` (which pulls in `packaging`, a third-party
 #: dependency that a bare `python:3.13-slim` container -- this installer's own proof platform --
@@ -241,7 +241,7 @@ _REQUIRED_TOP_LEVEL_KEYS = (
 #: names to check "is the viewer's own wheel set complete", nothing more, so it names them
 #: directly rather than dragging in a dependency it would then need a wheel for just to check
 #: whether it has wheels.
-_REQUIRED_WHEEL_DIST_NAMES = ("altavista", "fastapi", "uvicorn", "websockets", "numpy", "protobuf")
+_REQUIRED_WHEEL_DIST_NAMES = ("altavista", "fastapi", "uvicorn", "websockets", "numpy", "protobuf", "httpx", "pyyaml")
 
 #: (round 3, question 217(b)) Marker paths inside the `altavista` wheel's own zip namelist that
 #: prove it was built with the round-3 packaging change (`pyproject.toml`/`setup.py`) -- one file

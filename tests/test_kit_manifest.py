@@ -1249,3 +1249,41 @@ def test_install_py_stays_importable_with_only_the_standard_library():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "OK"
+
+
+def test_every_third_party_module_the_viewer_imports_is_a_declared_runtime_dependency():
+    """Question 250's round: the kit-installed viewer failed with `ModuleNotFoundError: httpx` because
+    `altavista/tiles_client.py` imports `httpx` at import time while `pyproject.toml` declared it only
+    in `dev` (and `yaml` was satisfied only transitively, through `uvicorn[standard]`). Every
+    third-party module imported at module level anywhere in the `altavista` package must belong to a
+    distribution named in `[project].dependencies`, and those names must be exactly
+    `build_kit.VIEWER_RUNTIME_ROOTS`, so a kit's wheel set covers what the viewer imports."""
+    import ast
+    import importlib.metadata as md
+    import re
+    import tomllib
+
+    declared = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    declared_names = {re.split(r"[\[<>=!~ ;]", d, maxsplit=1)[0].lower().replace("_", "-") for d in declared}
+    assert declared_names == {n.replace("_", "-") for n in build_kit.VIEWER_RUNTIME_ROOTS}, (
+        sorted(declared_names), sorted(build_kit.VIEWER_RUNTIME_ROOTS))
+
+    dists_of = md.packages_distributions()
+    missing = []
+    for path in sorted((REPO_ROOT / "altavista").rglob("*.py")):
+        if "/pb/" in path.as_posix() or path.name.endswith("_pb2.py") or path.name.endswith("_pb2_grpc.py"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:  # module level only: a function-level import is an optional path
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module.split(".")[0]]
+            for top in names:
+                if top in sys.stdlib_module_names or top in ("altavista", "__future__"):
+                    continue
+                dists = {d.lower().replace("_", "-") for d in dists_of.get(top, [])}
+                if not dists & declared_names:
+                    missing.append((path.relative_to(REPO_ROOT).as_posix(), top, sorted(dists)))
+    assert missing == [], f"module-level imports not covered by [project].dependencies: {missing}"

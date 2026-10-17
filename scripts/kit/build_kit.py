@@ -512,6 +512,13 @@ VIEWER_RUNTIME_ROOTS: dict[str, tuple[str, ...]] = {
     "websockets": (),
     "numpy": (),
     "protobuf": (),
+    # Question 250's round (a defect the zero-egress proof found): `altavista.server` imports
+    # `altavista.tiles_client`, which imports `httpx` at import time (the `/api/tiles/*` proxy,
+    # question 227, `fd9fc15`), but `httpx` was declared only as a `dev` extra, so a viewer
+    # installed from the kit's wheels could not start.
+    "httpx": (),
+    # Imported at module level by `altavista` itself; previously present only through uvicorn[standard].
+    "pyyaml": (),
 }
 
 #: task 3b's own proof platform: `python:3.13-slim` inside a container on this (macOS/aarch64)
