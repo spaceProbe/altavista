@@ -149,7 +149,7 @@ sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-21cd1a3eb7bf62537385adab870800a195a561f2
+74566ec43be7655daa9df6117c6744c01da148ab
 ```
 
 ## Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)
