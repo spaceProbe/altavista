@@ -779,6 +779,9 @@ impl std::fmt::Display for DrmError {
                 f,
                 "fault {fault_id:?}: a FAULT_TARGET_KIND_HARDWARE power cycle names board instance {instance:?}, whose BoardBinding.power_control is empty: there is no power control channel to run (set it to cmd:<absolute path> of the edge node's executable)"
             ),
+            DrmError::BoardPowerCycle { instance, fault_id, source } if matches!(**source, power::PowerControlError::RehandshakeFailed { .. } | power::PowerControlError::RehandshakeExpected { .. }) => {
+                write!(f, "instance {instance:?}: the power cycle for fault {fault_id:?} was performed but the board's session was not re-established: {source}")
+            }
             DrmError::BoardPowerCycle { instance, fault_id, source } => write!(f, "instance {instance:?}: the power cycle for fault {fault_id:?} did not happen: {source}"),
             DrmError::BoardPlaintextNonLoopback { context, address } => write!(
                 f,

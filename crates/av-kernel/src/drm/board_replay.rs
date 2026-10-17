@@ -78,6 +78,13 @@
 //! compared. A fault the DRM declares that the log has no `POWER_CYCLE` record for, or a record
 //! the DRM does not declare, is refused ([`BoardReplayRefusal`]).
 //!
+//! A power cycle after which the edge service re-handshook with a peer that rebooted
+//! (question 245 (6)) logs, in order, `POWER_CYCLE`, `LINK_REHANDSHAKE`, the kernel's second `BIND`
+//! (the run's same Bind request) and the `RESET`. The replay accepts exactly that shape (the second
+//! BIND must equal the first and be accepted; a `LINK_REHANDSHAKE` with an error is a run that lost
+//! its link and is refused), and reproduces the outcome event's `values["rehandshaken"]` from the
+//! record; the HELLO count and the duration are the added wall-clock exclusions.
+//!
 //! # No pacing in a replay
 //!
 //! A replay substitutes the log for the board, so **no board is bound and the run is lockstep**:
@@ -345,12 +352,25 @@ pub struct ScriptedStep {
     pub named_outputs: BTreeMap<String, f64>,
 }
 
-/// A logged `POWER_CYCLE` record: the edge node's start and finish instants (Unix ns).
+/// A logged `POWER_CYCLE` record: the edge node's start and finish instants (Unix ns), and, if the
+/// edge service re-handshook with a rebooted peer (question 245 (6)), the `LINK_REHANDSHAKE` record
+/// that follows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggedPowerCycle {
     pub tai_ns: i64,
     pub started_unix_ns: i64,
     pub finished_unix_ns: i64,
+    pub rehandshake: Option<LoggedRehandshake>,
+}
+
+/// A logged `LINK_REHANDSHAKE` record: the edge node's instants for the first HELLO sent and the
+/// answer read, how many HELLOs it took and the deadline the edge service was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedRehandshake {
+    pub started_unix_ns: i64,
+    pub finished_unix_ns: i64,
+    pub hellos_sent: u32,
+    pub timeout_ms: u32,
 }
 
 /// What the replay model plays, built from a verified, pinned log that matches the run's shape.
@@ -453,20 +473,46 @@ impl LoadedBoardLog {
                     if r.reset_tai_ns != last_until {
                         return Err(mismatch(format!("record {index}: the power cycle at {} tai_ns does not follow the step that ends there (the last step ended at {last_until})", r.reset_tai_ns)));
                     }
-                    let Some(reset) = body.get(i + 1) else {
+                    // A power cycle after which the edge service re-handshook with a rebooted peer
+                    // (question 245 (6)) is followed by its LINK_REHANDSHAKE record and the kernel's
+                    // second BIND (the run's same Bind request) before the RESET.
+                    let mut next = i + 1;
+                    let mut rehandshake = None;
+                    if body.get(next).is_some_and(|rec| rec.kind == BoardIoKind::LinkRehandshake as i32) {
+                        let lr = &body[next];
+                        let lr_index = next as u64 + 1;
+                        if lr.reset_tai_ns != r.reset_tai_ns || lr.reset_reason != r.reset_reason {
+                            return Err(mismatch(format!("record {lr_index}: the LINK_REHANDSHAKE is for {:?} at {} tai_ns, not for the power cycle before it ({:?} at {})", lr.reset_reason, lr.reset_tai_ns, r.reset_reason, r.reset_tai_ns)));
+                        }
+                        if !lr.error.is_empty() {
+                            return Err(mismatch(format!("record {lr_index}: the LINK_REHANDSHAKE failed ({}): a run that lost its link does not replay", lr.error)));
+                        }
+                        let Some(rebind) = body.get(next + 1) else {
+                            return Err(mismatch(format!("record {lr_index}: the LINK_REHANDSHAKE is not followed by the kernel's second BIND")));
+                        };
+                        if rebind.kind != BoardIoKind::Bind as i32 || rebind.bind_request.as_ref() != Some(bind_request) {
+                            return Err(mismatch(format!("record {}: expected the run's same BIND request again right after the LINK_REHANDSHAKE", lr_index + 1)));
+                        }
+                        if !rebind.error.is_empty() || !rebind.bind_response.as_ref().is_some_and(|b| b.lockstep_capable) {
+                            return Err(mismatch(format!("record {}: the second BIND was not accepted by the rebooted board", lr_index + 1)));
+                        }
+                        rehandshake = Some(LoggedRehandshake { started_unix_ns: lr.request_written_unix_ns, finished_unix_ns: lr.response_read_unix_ns, hellos_sent: lr.rehandshake_hellos_sent, timeout_ms: lr.rehandshake_timeout_ms });
+                        next += 2;
+                    }
+                    let Some(reset) = body.get(next) else {
                         return Err(mismatch(format!("record {index}: the POWER_CYCLE for fault {fault_id:?} is not followed by its RESET")));
                     };
                     if reset.kind != BoardIoKind::Reset as i32 || reset.reset_tai_ns != r.reset_tai_ns || reset.reset_reason != r.reset_reason {
-                        return Err(mismatch(format!("record {}: expected the RESET for fault {fault_id:?} at {} tai_ns right after its POWER_CYCLE", index + 1, r.reset_tai_ns)));
+                        return Err(mismatch(format!("record {}: expected the RESET for fault {fault_id:?} at {} tai_ns right after its POWER_CYCLE", next + 1, r.reset_tai_ns)));
                     }
                     if reset.lockstep_sequence != next_sequence {
-                        return Err(mismatch(format!("record {}: RESET sequence {} where {next_sequence} was expected", index + 1, reset.lockstep_sequence)));
+                        return Err(mismatch(format!("record {}: RESET sequence {} where {next_sequence} was expected", next + 1, reset.lockstep_sequence)));
                     }
-                    if power_cycles.insert(fault_id.to_string(), LoggedPowerCycle { tai_ns: r.reset_tai_ns, started_unix_ns: r.request_written_unix_ns, finished_unix_ns: r.response_read_unix_ns }).is_some() {
+                    if power_cycles.insert(fault_id.to_string(), LoggedPowerCycle { tai_ns: r.reset_tai_ns, started_unix_ns: r.request_written_unix_ns, finished_unix_ns: r.response_read_unix_ns, rehandshake }).is_some() {
                         return Err(mismatch(format!("record {index}: a second power cycle for fault {fault_id:?}")));
                     }
                     next_sequence += 1;
-                    i += 2;
+                    i = next + 1;
                 }
                 other => return Err(mismatch(format!("record {index}: unexpected {} record between the BIND and the end of the run's I/O", kind_name(other as i32)))),
             }
@@ -562,7 +608,8 @@ pub enum ReplaySource {
 /// replayed from (see the module doc, "Comparing a replay with its live run").
 ///
 /// Applied to both: `RunProducts.pacing`; every pacing-overrun event; each power-cycle outcome
-/// event's `detail` and `values["duration_ns"]`. For [`ReplaySource::PortTraffic`] additionally:
+/// event's `detail` and `values["duration_ns"]`, `values["rehandshake_hellos_sent"]` and
+/// `values["rehandshake_duration_ns"]` (the last two exist only for a re-handshaken power cycle). For [`ReplaySource::PortTraffic`] additionally:
 /// the power-cycle outcome events themselves (nothing in `port_traffic.pb` records them), and the
 /// board trajectory's segment `dynamics_model` / `dynamics_hash` / `dynamics_depth` and its
 /// provenance attributes `binding_kind`, `board_binding_hash`, `board_link_hash` and the three
@@ -581,6 +628,8 @@ pub fn strip_replay_exclusions(products: &mut pb::RunProducts, board_instance: &
     for e in products.events.iter_mut().filter(|e| e.id.starts_with(POWER_CYCLE_EVENT_ID_PREFIX)) {
         e.detail.clear();
         e.values.remove("duration_ns");
+        e.values.remove("rehandshake_hellos_sent");
+        e.values.remove("rehandshake_duration_ns");
     }
     if source == ReplaySource::PortTraffic {
         if let Some(t) = products.trajectories.get_mut(board_instance) {
@@ -695,6 +744,12 @@ mod tests {
     /// BIND, `steps` STEPs, a power cycle for fault `pc` after the step ending at `after_step`
     /// (the POWER_CYCLE and its RESET), then SHUTDOWN. Every record signed and chained.
     fn fixture(tag: &str, steps: u64, pc: Option<(&str, u64)>) -> Fixture {
+        fixture_with(tag, steps, pc, false)
+    }
+
+    /// As [`fixture`]; with `rehandshake` the power cycle is followed by a LINK_REHANDSHAKE record and
+    /// the kernel's second BIND (the same request) before the RESET (question 245 (6)).
+    fn fixture_with(tag: &str, steps: u64, pc: Option<(&str, u64)>, rehandshake: bool) -> Fixture {
         let (key, cert, _) = identity("board-replay-unit");
         let mem = Mem::default();
         let mut writer = BoardIoLogWriter::with_sink(Path::new("mem"), Box::new(mem.clone()), "edge-1", "00", LogSigner::from_pem(&key, &cert).unwrap());
@@ -718,6 +773,23 @@ mod tests {
                             ..Default::default()
                         })
                         .unwrap();
+                    if rehandshake {
+                        writer
+                            .append(BoardIoRecord {
+                                kind: BoardIoKind::LinkRehandshake as i32,
+                                run_id: RUN.into(),
+                                instance: INSTANCE.into(),
+                                reset_tai_ns: tai,
+                                reset_reason: format!("fault:{fault}"),
+                                request_written_unix_ns: 2_000,
+                                response_read_unix_ns: 2_750,
+                                rehandshake_hellos_sent: 3,
+                                rehandshake_timeout_ms: 60_000,
+                                ..Default::default()
+                            })
+                            .unwrap();
+                        writer.append(bind()).unwrap();
+                    }
                     writer.append(BoardIoRecord { kind: BoardIoKind::Reset as i32, run_id: RUN.into(), instance: INSTANCE.into(), lockstep_sequence: sequence, reset_tai_ns: tai, reset_reason: format!("fault:{fault}"), ..Default::default() }).unwrap();
                     sequence += 1;
                 }
@@ -794,11 +866,66 @@ mod tests {
         let script = f.load(&f.bytes).unwrap().into_script(INSTANCE, &sh).unwrap();
         assert_eq!(script.steps.keys().copied().collect::<Vec<_>>(), (1..=10).map(|k| START + k * PERIOD).collect::<Vec<_>>());
         assert_eq!((script.bind_version.as_str(), script.binding_hash.as_str()), ("v1", "bh"));
-        assert_eq!(script.power_cycles["pc"], LoggedPowerCycle { tai_ns: START + 4 * PERIOD, started_unix_ns: 1_000, finished_unix_ns: 1_500 });
+        assert_eq!(script.power_cycles["pc"], LoggedPowerCycle { tai_ns: START + 4 * PERIOD, started_unix_ns: 1_000, finished_unix_ns: 1_500, rehandshake: None });
         assert_eq!(script.steps[&(START + 3 * PERIOD)].named_outputs["n"], 3.0);
         // The pin counts every record before the SHUTDOWN: BIND + 10 STEPs + POWER_CYCLE + RESET.
         assert_eq!(f.pin.records, 13);
         assert_eq!(f.pin.chain_head, hex_encode(&f.records[12].record_hash));
+    }
+
+    /// Question 245 (6): POWER_CYCLE, LINK_REHANDSHAKE, the second BIND, RESET is a shape the script
+    /// accepts, and the re-handshake is carried to the outcome event; anything off that shape is a
+    /// typed refusal.
+    #[test]
+    fn a_power_cycle_with_a_rehandshake_and_a_second_bind_becomes_a_script_and_a_broken_shape_is_refused() {
+        let f = fixture_with("rehandshake", 10, Some(("pc", 4)), true);
+        let mut sh = shape(10);
+        sh.power_cycles.insert("pc".into(), START + 4 * PERIOD);
+        let script = f.load(&f.bytes).unwrap().into_script(INSTANCE, &sh).unwrap();
+        assert_eq!(script.steps.len(), 10);
+        assert_eq!(
+            script.power_cycles["pc"],
+            LoggedPowerCycle { tai_ns: START + 4 * PERIOD, started_unix_ns: 1_000, finished_unix_ns: 1_500, rehandshake: Some(LoggedRehandshake { started_unix_ns: 2_000, finished_unix_ns: 2_750, hellos_sent: 3, timeout_ms: 60_000 }) }
+        );
+        // BIND + 10 STEPs + POWER_CYCLE + LINK_REHANDSHAKE + BIND + RESET are pinned; SHUTDOWN closes.
+        assert_eq!(f.pin.records, 15);
+
+        let lr_at = f.records.iter().position(|r| r.kind == BoardIoKind::LinkRehandshake as i32).unwrap();
+        let reseal_from = |records: Vec<BoardIoRecord>| {
+            let bytes = f.resealed(records, lr_at);
+            let verified = verify_bytes(&bytes, &LogVerifier::from_pem(&f.cert).unwrap()).unwrap();
+            let pin = BoardLogPin::of_log(&verified).unwrap();
+            let log_path = f.dir.join("io-rh.log");
+            std::fs::write(&log_path, &bytes).unwrap();
+            load(&BoardLogReplay { instance: INSTANCE.into(), log_path, certificate_pem: f.cert.clone(), expected: pin }, RUN)
+        };
+        let into = |loaded: Result<LoadedBoardLog, BoardReplayRefusal>| loaded.unwrap().into_script(INSTANCE, &sh).err();
+
+        // a failed re-handshake is a run that lost its link
+        let mut r = f.records.clone();
+        r[lr_at].error = "no peer answered".into();
+        // (the loader refuses any record with an error, before the script is built)
+        assert!(matches!(reseal_from(r), Err(BoardReplayRefusal::FailedExchange { record, .. }) if record == lr_at as u64 + 1));
+        // the second BIND must be the first one again
+        let mut r = f.records.clone();
+        r[lr_at + 1].bind_request.as_mut().unwrap().seed = 43;
+        let e = into(reseal_from(r)).expect("refused");
+        assert!(e.to_string().contains("same BIND request"), "{e}");
+        // and accepted
+        let mut r = f.records.clone();
+        r[lr_at + 1].bind_response.as_mut().unwrap().lockstep_capable = false;
+        let e = into(reseal_from(r)).expect("refused");
+        assert!(e.to_string().contains("not accepted"), "{e}");
+        // the re-handshake belongs to the power cycle before it
+        let mut r = f.records.clone();
+        r[lr_at].reset_reason = "fault:other".into();
+        let e = into(reseal_from(r)).expect("refused");
+        assert!(e.to_string().contains("not for the power cycle"), "{e}");
+        // a re-handshake with no second BIND
+        let mut r = f.records.clone();
+        r.remove(lr_at + 1);
+        let e = into(reseal_from(r)).expect("refused");
+        assert!(e.to_string().contains("same BIND request") || e.to_string().contains("second BIND"), "{e}");
     }
 
     /// The mapping of STEP outputs to recorded epochs: the message's own `tai_ns`, or the STEP's

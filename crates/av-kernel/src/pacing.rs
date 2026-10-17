@@ -78,19 +78,24 @@ use av_cdm::pb;
 /// (question 242 (c), `crate::drm::power::is_power_cycle_event`): its `detail` (which carries the
 /// channel's duration in ms and what it wrote to standard error) and `values["duration_ns"]` --
 /// the edge node measured them in wall time, and the replay computes the duration from the edge
-/// log's two instants. The event itself (its id, epoch, entity, name, reference and `performed`
-/// flag) is compared.
+/// log's two instants. For a power cycle after which the edge service re-handshook with a rebooted
+/// peer (question 245 (6)) the event also carries `values["rehandshake_hellos_sent"]` (how long the
+/// peer took to boot decides it) and `values["rehandshake_duration_ns"]`, the next two entries: the
+/// same kind of wall-clock fact, excluded the same way. The event itself (its id, epoch, entity,
+/// name, reference, the `performed` flag and `values["rehandshaken"]`) is compared.
 ///
 /// **Excluded only for a board replayed from `port_traffic.pb`** (the last four, marked), as a
 /// replayed container excludes them: such a replay has no record of the board's `Bind` response or
 /// of its power cycle's outcome. A board replayed from its **edge log** reproduces these exactly
 /// (the log's BIND record carries what they need), so they are *not* excluded for it. Everything
 /// else in `RunProducts` and the port-traffic sidecar is independent of the wall clock.
-pub const WALL_CLOCK_DEPENDENT: [&str; 8] = [
+pub const WALL_CLOCK_DEPENDENT: [&str; 10] = [
     "RunProducts.pacing",
     "RunProducts.events[id starts with OVERRUN_EVENT_ID_PREFIX]",
     "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].detail",
     "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].values[duration_ns]",
+    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].values[rehandshake_hellos_sent]",
+    "RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX].values[rehandshake_duration_ns]",
     "(port_traffic.pb replay of a board only) RunProducts.events[id starts with drm::power::POWER_CYCLE_EVENT_ID_PREFIX]: the whole event",
     "(port_traffic.pb replay of a board only) RunProducts.trajectories[<board>].segments[].dynamics_model / dynamics_hash / dynamics_depth",
     "(port_traffic.pb replay of a board only) RunProducts.trajectories[<board>].provenance.attributes[binding_kind, board_binding_hash, board_link_hash]",

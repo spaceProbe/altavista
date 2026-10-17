@@ -71,10 +71,12 @@
 //! `start_tai_ns`/`end_tai_ns`/`dynamics_model`, plus `products.events` and `products.scores`.
 //! `dynamics_hash` is compared for the native (`"attitude"`/`"star_tracker"`/`"imu"`) segments
 //! (same GMAT settings both runs, unaffected by how `"controller"` is bound) but excluded for
-//! `"controller"`'s own segment, for the same reason the CFS test excludes it there:
-//! `ModelInfo::settings_hash` folds in `container.address`, which is *inherently* different
-//! between a Docker-published ephemeral port and the shim's own ephemeral gRPC port -- pure local
-//! plumbing no port message or trajectory sample ever carries. `RunProducts.provenance` (top
+//! `"controller"`'s own segment: the two runs bind it differently (the posix run's
+//! `ModelInfo::settings_hash` covers the image and its digest, the Renode run's the declared
+//! `container.address` of the shim fronting the bridge, `binding::container_model_info`), so the
+//! settings legitimately differ; neither is ever carried by a port message or trajectory sample.
+//! (Two posix runs of the same image now give the same controller `dynamics_hash`, question
+//! 245 (7), asserted in the CFS test.) `RunProducts.provenance` (top
 //! level and per-trajectory) is excluded too: it embeds `run_id`/`sos_hash`/`drm_hash`/`sys_hash`,
 //! which are deliberately different strings between the two runs (they bind two different
 //! `SystemDefinition`s), not a determinism signal.
@@ -94,35 +96,27 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, Event, Fault, Parameter, PortTrafficLog, SosConfiguration, SystemDefinition};
+use av_cdm::pb::{Binding, BindingKind, ContainerBinding, DesignReferenceMission, Event, Parameter, PortTrafficLog, SosConfiguration, SystemDefinition};
 use av_kernel::drm::{execute, hash, schema, RunConfig, RunProducts};
-use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_label_args, test_run_id, DockerGateReason};
+use av_lockstep::docker::{lock_docker_tests, prune_stale_test_resources, test_run_id, DockerGateReason};
 use prost::Message;
 use gmat_sys::Gmat;
+
+// The fixture loaders (`read`, `load_system`, `container_drm`, ...), the Docker plumbing (the
+// throwaway registry on the fixed port and its guards), the `AV_CFS_TEST_IMAGE` gate and the truth
+// pointing-error helpers are shared with `drm_attitude_control_cfs.rs`: see
+// `tests/cfs_common/mod.rs`.
+mod cfs_common;
+use cfs_common::{container_drm, load_system, push_cfs_image_to_local_registry, read, repo_root, sha256_hex, truth_pointing_error_rad_at_end};
 
 /// Not a real item -- just an anchor for the module doc comment's own cross-reference above.
 #[allow(dead_code)]
 const RENODE_LOG_DISCLOSURE: () = ();
 
 // ------------------------------------------------------------------------------------------
-// Fixture loading -- mirrors drm_attitude_control_cfs.rs's own helpers exactly (same truth/
-// star tracker/IMU fixtures, same base SosConfiguration/DRM).
+// Fixture loading -- the same truth/star tracker/IMU fixtures, base SosConfiguration and DRM as
+// drm_attitude_control_cfs.rs (the loaders are `cfs_common`'s).
 // ------------------------------------------------------------------------------------------
-
-fn drms_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../drms").join(name)
-}
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-fn read(name: &str) -> String {
-    std::fs::read_to_string(drms_path(name)).unwrap_or_else(|e| panic!("reading drms/{name}: {e}"))
-}
-fn load_system(stem: &str) -> SystemDefinition {
-    let mut sys = schema::parse_system_definition_yaml(&read(&format!("{stem}.system.yaml"))).unwrap_or_else(|e| panic!("{stem}.system.yaml: {e}"));
-    sys.hash = hash::canonical_system_hash(&sys);
-    sys
-}
 
 fn load_native_fixtures_and_base_sos() -> (SystemDefinition, SystemDefinition, SystemDefinition, SosConfiguration) {
     let truth = load_system("demo_attitude_control_truth");
@@ -154,27 +148,6 @@ fn container_sos(id: &str, base_sos: &SosConfiguration, controller_system_id: &s
     sos
 }
 
-/// A DRM over `duration_s` seconds at the fixture's own 10 Hz, no objectives/measures (neither
-/// container path has an `output.controller.*` to reference) -- every assertion instead reads
-/// `RunProducts.trajectories`/`.events` directly. Identical to
-/// `drm_attitude_control_cfs.rs::container_drm` (copied, not imported: `tests/` binaries are not
-/// a library this crate exposes).
-fn container_drm(id: &str, sos_id: &str, duration_s: i64, faults: Vec<Fault>) -> DesignReferenceMission {
-    let mut drm = schema::parse_drm_yaml(&read("demo_attitude_control.drm.yaml")).expect("native DRM parses");
-    drm.id = id.to_string();
-    drm.sos_configuration_id = sos_id.to_string();
-    drm.objectives.clear();
-    drm.measures.clear();
-    {
-        let scenario = drm.scenario.as_mut().expect("native DRM declares a scenario");
-        scenario.end_tai_ns = scenario.start_tai_ns + duration_s * 1_000_000_000;
-        scenario.faults = faults;
-        scenario.seeds.insert("controller".to_string(), 42);
-    }
-    drm.hash = hash::canonical_drm_hash(&drm);
-    drm
-}
-
 fn run_config<'a>(gmat: &'a Gmat, drm: &'a DesignReferenceMission, sos: &'a SosConfiguration, systems: &'a BTreeMap<String, SystemDefinition>, run_id: &str, products_dir: PathBuf) -> RunConfig<'a> {
     RunConfig { gmat, drm, sos, systems, run_id: run_id.to_string(), error_mode: Default::default(), products_dir: Some(products_dir), replay: None, command_source: None }
 }
@@ -184,135 +157,18 @@ fn systems_map(sysvec: &[&SystemDefinition]) -> BTreeMap<String, SystemDefinitio
 }
 
 // ------------------------------------------------------------------------------------------
-// Posix-container plumbing -- identical to drm_attitude_control_cfs.rs's own, PLUS question
-// 156 housekeeping (prune_stale_test_resources/test_label_args/test_run_id) that file does not
-// yet use (disclosed in third_party/renode/M24_4c_REPORT.md, not silently fixed there: this
-// task owns crates/av-kernel/tests/drm_attitude_control_renode.rs, not that pre-existing file).
+// Posix-container plumbing -- the throwaway registry, its guards and the image gate are
+// `tests/cfs_common/mod.rs`'s, shared with drm_attitude_control_cfs.rs (question 245 (7)); the
+// Docker lock, prune and run id are taken in the test body below, so the lock scope stays this
+// file's own (question 240).
 // ------------------------------------------------------------------------------------------
 
-const CFS_LOCAL_IMAGE: &str = "altavista-cfs-lockstep:local";
 const CFS_LOCAL_IMAGE_BUILD_HINT: &str = "run `docker build -f services/cfs/Dockerfile -t altavista-cfs-lockstep:local .` from the repository root once";
 
 /// Question 194: typed, not a bare `String` -- see `crates/av-lockstep/src/docker.rs`'s
-/// `DockerGateReason`/`image_gate_status`.
+/// `DockerGateReason`/`image_gate_status`. Honours `AV_CFS_TEST_IMAGE` through the shared gate.
 fn cfs_image_unavailable_reason() -> Option<av_lockstep::docker::DockerGateReason> {
-    av_lockstep::docker::image_gate_status(CFS_LOCAL_IMAGE, CFS_LOCAL_IMAGE_BUILD_HINT).err()
-}
-
-fn docker_cmd(args: &[&str]) -> String {
-    let output = Command::new("docker").args(args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {args:?}`: {e}"));
-    if !output.status.success() {
-        panic!("`docker {args:?}` failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-struct DockerContainerGuard(String);
-impl Drop for DockerContainerGuard {
-    fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
-    }
-}
-struct DockerImageGuard(String);
-impl Drop for DockerImageGuard {
-    fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rmi", "-f", &self.0]).output();
-    }
-}
-
-/// Tags and pushes the already-built `altavista-cfs-lockstep:local` to a throwaway loopback-only
-/// local registry, labeled per question 156 (`test_label_args`) so a killed test's own registry
-/// container is swept by [`prune_stale_test_resources`] on the *next* run even if this run's own
-/// `Drop` guards never get to fire. Returns `(image_ref, real_digest, guards)`.
-///
-/// Question 239: the registry is published on the FIXED loopback port [`FIXED_REGISTRY_PORT`]
-/// (the same port and the same rules as `drm_attitude_control_cfs.rs`'s helper of the same name),
-/// so `ContainerBinding.image` -- hashed with the whole `SosConfiguration` into
-/// `sos_configuration_hash` (ADR-005 section 7) -- is the same string in every run. The
-/// docker-test lock, held by the caller, serialises the test-owned registries on that port;
-/// anything else holding it is reported, never worked around with another port.
-fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (DockerContainerGuard, DockerImageGuard)) {
-    let labels = test_label_args(run_id);
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-
-    wait_for_fixed_registry_port_free().unwrap_or_else(|e| panic!("{e}"));
-    let port_mapping = format!("127.0.0.1:{FIXED_REGISTRY_PORT}:5000");
-    let mut registry_args = vec!["run", "-d", "-p", port_mapping.as_str()];
-    registry_args.extend(label_refs.iter().copied());
-    registry_args.push("registry:2");
-    let output = Command::new("docker").args(&registry_args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {registry_args:?}`: {e}"));
-    if !output.status.success() {
-        panic!("{}", FixedRegistryError::StartFailed { port: FIXED_REGISTRY_PORT, detail: String::from_utf8_lossy(&output.stderr).trim().to_string() });
-    }
-    let registry_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let registry_guard = DockerContainerGuard(registry_id);
-    let image_ref = format!("127.0.0.1:{FIXED_REGISTRY_PORT}/altavista-cfs-lockstep");
-    let tagged = format!("{image_ref}:test");
-    // `docker tag` has no `--label` flag (it creates an alias to an existing image object, not a
-    // new one) -- the throwaway *registry container* above is this helper's own expensive/
-    // stateful leaked resource (question 156's actual four-hour incident was a running
-    // container, not a dangling tag), and that one is labeled.
-    docker_cmd(&["tag", CFS_LOCAL_IMAGE, &tagged]);
-    let image_guard = DockerImageGuard(tagged.clone());
-    // The registry container has only just been started: retry the push briefly until the
-    // registry process inside it accepts connections.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let out = Command::new("docker").args(["push", &tagged]).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker push {tagged}`: {e}"));
-        if out.status.success() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("`docker push {tagged}` did not succeed within 30 s: {}", String::from_utf8_lossy(&out.stderr));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    // The digest from the RepoDigests entry for THIS reference, not index 0 (the image may carry
-    // RepoDigests from other registries).
-    let repo_digests = docker_cmd(&["inspect", "--format={{range .RepoDigests}}{{println .}}{{end}}", &tagged]);
-    let prefix = format!("{image_ref}@");
-    let digest = repo_digests.lines().find_map(|l| l.strip_prefix(prefix.as_str())).filter(|d| d.starts_with("sha256:")).unwrap_or_else(|| panic!("a {prefix}sha256:... RepoDigests entry, got {repo_digests:?}")).to_string();
-    (image_ref, digest, (registry_guard, image_guard))
-}
-
-/// The loopback port the throwaway registry is published on: the same value as
-/// `drm_attitude_control_cfs.rs`'s `FIXED_REGISTRY_PORT` (the two files serialise on the
-/// docker-test lock). Below every OS ephemeral range and away from 5000 (macOS AirPlay Receiver).
-const FIXED_REGISTRY_PORT: u16 = 19031;
-
-/// Why a test-owned registry could not be started on [`FIXED_REGISTRY_PORT`]. Never recovered by
-/// choosing another port, which would change `ContainerBinding.image` and the
-/// `sos_configuration_hash`.
-#[derive(Debug)]
-enum FixedRegistryError {
-    /// Something still accepts connections on the port after the grace period.
-    PortOccupied { port: u16 },
-    /// `docker run` refused to start the registry on the port.
-    StartFailed { port: u16, detail: String },
-}
-impl std::fmt::Display for FixedRegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FixedRegistryError::PortOccupied { port } => write!(f, "FixedRegistryError::PortOccupied: 127.0.0.1:{port} is in use by something that is not this test's registry; free it (this test never falls back to another port, which would change ContainerBinding.image and the sos_configuration_hash)"),
-            FixedRegistryError::StartFailed { port, detail } => write!(f, "FixedRegistryError::StartFailed: `docker run` could not publish the registry on 127.0.0.1:{port}: {detail}"),
-        }
-    }
-}
-
-/// Waits (up to 15 s) for nothing to accept connections on `127.0.0.1:FIXED_REGISTRY_PORT`: a
-/// test-owned registry removed a moment ago releases the port shortly after.
-fn wait_for_fixed_registry_port_free() -> Result<(), FixedRegistryError> {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], FIXED_REGISTRY_PORT));
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(FixedRegistryError::PortOccupied { port: FIXED_REGISTRY_PORT });
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    cfs_common::cfs_image_unavailable_reason(CFS_LOCAL_IMAGE_BUILD_HINT)
 }
 
 // ------------------------------------------------------------------------------------------
@@ -565,39 +421,17 @@ fn load_renode_controller_system(address: &str) -> SystemDefinition {
 }
 
 // ------------------------------------------------------------------------------------------
-// Truth-based pointing error -- reads drms/demo_attitude_control_truth.system.yaml's own
-// q_x/q_y/q_z/q_w state directly off RunProducts (see drm_attitude_control_cfs.rs's own module
-// doc comment for why truth, not output.controller.pointing_error_rad, which the container path
-// never populates regardless of binding kind).
+// Truth-based pointing error -- `cfs_common::truth_pointing_error_rad_at_end` reads
+// drms/demo_attitude_control_truth.system.yaml's own q_x/q_y/q_z/q_w state directly off
+// RunProducts (see drm_attitude_control_cfs.rs's own module doc comment for why truth, not
+// output.controller.pointing_error_rad, which the container path never populates regardless of
+// binding kind). This file does not repeat that file's acos cross-check: its own comparison (two
+// independently built binaries agreeing on the same quaternion, byte for byte) already subsumes it.
 // ------------------------------------------------------------------------------------------
-
-const TRUTH_QX: usize = 0;
-const TRUTH_QY: usize = 1;
-const TRUTH_QZ: usize = 2;
-// TRUTH_QW (index 3) is unused here: drm_attitude_control_cfs.rs's own acos-based cross-check
-// against it is not repeated in this file -- this file's own comparison (two independently
-// built binaries agreeing on the same quaternion, byte for byte) already subsumes it.
-
-fn truth_pointing_error_rad(mean: &[f64]) -> f64 {
-    let (qx, qy, qz) = (mean[TRUTH_QX], mean[TRUTH_QY], mean[TRUTH_QZ]);
-    let vnorm = (qx * qx + qy * qy + qz * qz).sqrt();
-    2.0 * vnorm.clamp(-1.0, 1.0).asin()
-}
-fn truth_pointing_error_rad_at_end(products: &RunProducts) -> f64 {
-    let traj = products.trajectories.get("attitude").expect("the \"attitude\" truth instance produced a trajectory");
-    let last = traj.samples.last().expect("at least one sample");
-    truth_pointing_error_rad(&last.mean)
-}
 
 // ------------------------------------------------------------------------------------------
 // Port-traffic sidecar and event comparison.
 // ------------------------------------------------------------------------------------------
-
-/// Lowercase-hex SHA-256 (`openssl`, already a dependency of this crate; `sha2` is banned
-/// workspace-wide), the same function the executor hashes the sidecar with.
-fn sha256_hex(bytes: &[u8]) -> String {
-    openssl::sha::sha256(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
 
 fn read_sidecar(dir: &std::path::Path) -> (Vec<u8>, PortTrafficLog) {
     let path = dir.join("port_traffic.pb");
@@ -888,8 +722,7 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
                 // "controller" happens to be bound -- dynamics_hash SHOULD genuinely match.
                 assert_eq!(seg_posix.dynamics_hash, seg_renode.dynamics_hash, "instance {name:?}: segment dynamics_hash (a native GMAT model's settings hash must be identical regardless of the controller's own binding kind)");
             }
-            // "controller"'s own dynamics_hash deliberately not compared -- see this file's own
-            // module doc comment (folds in container.address, inherently different).
+            // "controller"'s dynamics_hash is not compared: posix (image + digest) and Renode (container.address) are different bindings, so their settings legitimately differ.
         }
     }
     let event_diffs = event_differences(&products_posix.events, &products_renode.events);

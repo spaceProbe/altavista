@@ -48,6 +48,11 @@ impl<S> TimedStream<S> {
     pub fn new(inner: S, times: Arc<LinkTimes>) -> Self {
         Self { inner, times }
     }
+
+    /// The wrapped stream, for operations that are not bytes (discarding what is queued).
+    pub fn inner_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for TimedStream<S> {

@@ -396,7 +396,9 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
         if container_id is not None:
             subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
         if registry_id is not None:
-            subprocess.run(["docker", "rm", "-f", registry_id], capture_output=True)
+            # `-v`: registry:2 declares VOLUME /var/lib/registry; without it each run left an
+            # anonymous volume behind.
+            subprocess.run(["docker", "rm", "-f", "-v", registry_id], capture_output=True)
         if pushed_ref is not None:
             subprocess.run(["docker", "rmi", "-f", pushed_ref], capture_output=True)
         subprocess.run(["docker", "rmi", "-f", local_tag], capture_output=True)

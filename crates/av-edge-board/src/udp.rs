@@ -36,7 +36,9 @@
 //!   (lockstep-local is strictly request-response, so a lost datagram is a stalled
 //!   exchange, surfaced by the caller's timeout).
 //!
-//! HELLO is sent once, like every transport: a lost HELLO is a handshake timeout, not a retry.
+//! The initial HELLO is sent once, like every transport: a lost HELLO is a handshake timeout, not a
+//! retry. (After a power cycle the operator declared reboots the peer, `crate::relink` re-sends
+//! it; see there for why that is safe.)
 use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
@@ -111,6 +113,9 @@ pub struct UdpStats {
     pub malformed: AtomicU64,
     /// Datagrams sent.
     pub sent: AtomicU64,
+    /// Datagrams read and thrown away by [`UdpFrameStream::discard_pending`] (a re-handshake
+    /// starts from an empty link). Not part of [`UdpStats::snapshot`].
+    pub discarded: AtomicU64,
 }
 
 impl UdpStats {
@@ -164,6 +169,24 @@ impl UdpFrameStream {
 
     pub fn stats(&self) -> Arc<UdpStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// Throw away what the link has queued: the unread rest of the datagram being served and every
+    /// datagram waiting in the socket (from any address), without blocking. Returns how many
+    /// datagrams were discarded (a partly served one counts). A re-handshake calls this before each
+    /// HELLO so a late frame of the dead session cannot be mistaken for the new peer's answer.
+    pub fn discard_pending(&mut self) -> usize {
+        let mut n = 0;
+        if self.rx_pos < self.rx.len() {
+            n += 1;
+        }
+        self.rx.clear();
+        self.rx_pos = 0;
+        while self.socket.try_recv_from(&mut self.recv_buf).is_ok() {
+            n += 1;
+        }
+        self.stats.discarded.fetch_add(n as u64, Ordering::Relaxed);
+        n
     }
 
     /// Move every complete frame out of `tx` into `outbox`, validating its size.

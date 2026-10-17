@@ -2584,10 +2584,10 @@ fn run_shared_group(
                         // Question 242 (c): a board's power cycle is an edge-service operation:
                         // ask the edge service to run the edge node's channel first, then send
                         // the same lockstep RESET a container gets, so the run continues. A
-                        // refused or failed power cycle ends the run (`drm::power`). HIL-day
-                        // item, not built: a board that really reboots needs the edge service to
-                        // re-handshake and the kernel to re-Bind before this RESET
-                        // (`drm::power`'s module doc, "Not in this round").
+                        // refused or failed power cycle ends the run (`drm::power`). A board
+                        // whose power cycle reboots the peer (question 245 (6)) is re-handshaken by
+                        // the edge service and re-Bound by `power_cycle_then_reset` before this
+                        // RESET (`drm::power`'s module doc, "A board that really reboots").
                         let report = span.model.power_cycle_then_reset(&f.id, boundary, format!("fault:{}", f.id)).map_err(|e| e.into_drm_error(&target, &f.id))?;
                         all_events.push(events::fault_event(f, &target, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
                         all_events.push(super::power::power_cycle_event(&f.id, &target, boundary, &report, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
@@ -2618,6 +2618,7 @@ fn run_shared_group(
                             finished_unix_ns: logged.finished_unix_ns,
                             stderr_tail: String::new(),
                             power_control: board.power_control.canonical(),
+                            rehandshake: logged.rehandshake.as_ref().map(|r| super::power::RehandshakeReport { hellos_sent: r.hellos_sent, duration_ns: r.finished_unix_ns - r.started_unix_ns, timeout_ms: r.timeout_ms }),
                         };
                         all_events.push(super::power::power_cycle_event(&f.id, &target, boundary, &report, events::event_provenance(sos_hash, &scenario.data_pack_hash, run_id, sys_hash, &sys.id)));
                         replayed_power_cycles.insert((target.clone(), f.id.clone()));

@@ -50,14 +50,20 @@
 //! If the record cannot be written after the channel ran, the reply is `DATA_LOSS` (the log is
 //! poisoned, as for every exchange).
 //!
-//! # Not done this round (HIL-day item)
+//! # The peer reboots (question 245 (6))
 //!
-//! This service performs the power cycle; it does **not** bring the flight software back. A real
-//! board that actually reboots drops the lockstep-local link, so afterwards this process must
-//! re-handshake with the new flight-software instance (HELLO once, as at startup) and the kernel
-//! must `Bind` again before its `RESET`. Neither exists: the stand-in's fake guest keeps running
-//! through the power cycle, so the existing `RESET` that the kernel sends right after works, and
-//! the re-handshake / re-`Bind` path cannot be exercised without a board. See the crate README.
+//! A power cycle on the existing stand-ins (the fake channel, Renode) does not reboot the guest, so
+//! by default this service does nothing more than run the channel and the kernel's `RESET` that
+//! follows works on the same session. When the operator **declares** that the channel reboots the
+//! peer (`--power-cycle-reboots-peer`; for a real board it would always be set) the service is
+//! built [`BoardEdge::with_relink`]: after a channel that **performed** it re-handshakes with the
+//! rebooted flight software over the same link (`crate::relink`: HELLO re-sent every
+//! `--rehandshake-interval-ms` until the peer answers or `--rehandshake-timeout-ms` passes), inside
+//! the same exchange gate, and answers `peer_rehandshaken = true` so the kernel `Bind`s again with
+//! the run's same Bind request before its `RESET`. The re-handshake is one more signed record,
+//! `BOARD_IO_KIND_LINK_REHANDSHAKE`, written after the `POWER_CYCLE` record and before the reply.
+//! A peer that never answers is a typed failure (`REHANDSHAKE_TIMEOUT`, or `REHANDSHAKE_REFUSED`
+//! for an answer that is not a usable v1 HELLO) and leaves the link lost.
 use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -69,6 +75,7 @@ use tokio::io::AsyncReadExt;
 use tonic::{Request, Response, Status};
 
 use crate::iolog::BoardIoLog;
+use crate::relink::{PeerRelink, RelinkOutcome};
 
 pub mod pb {
     //! Generated `altavista.v1.board_edge_service_server` plumbing only; the messages are
@@ -237,11 +244,20 @@ pub struct BoardEdge {
     channel: PowerControl,
     timeout: Duration,
     log: Arc<BoardIoLog>,
+    relink: Option<Arc<dyn PeerRelink>>,
 }
 
 impl BoardEdge {
     pub fn new(edge_node_id: String, channel: PowerControl, timeout: Duration, log: Arc<BoardIoLog>) -> Self {
-        Self { edge_node_id, channel, timeout, log }
+        Self { edge_node_id, channel, timeout, log, relink: None }
+    }
+
+    /// Declare that this edge node's power channel reboots the peer (`--power-cycle-reboots-peer`,
+    /// question 245 (6)): after a power cycle that performed, `relink` re-handshakes with the
+    /// peer before the reply returns (see "The peer reboots" in the module doc).
+    pub fn with_relink(mut self, relink: Arc<dyn PeerRelink>) -> Self {
+        self.relink = Some(relink);
+        self
     }
 }
 
@@ -284,7 +300,7 @@ impl BoardEdgeService for BoardEdge {
             ..Default::default()
         };
         self.log.record(&exchange, draft).await?;
-        Ok(Response::new(PowerCycleResponse {
+        let mut response = PowerCycleResponse {
             outcome: outcome as i32,
             refusal: BoardPowerCycleRefusal::Unspecified as i32,
             failure: failure as i32,
@@ -296,7 +312,59 @@ impl BoardEdgeService for BoardEdge {
             duration_ns: run.duration_ns,
             started_unix_ns: run.started_unix_ns,
             finished_unix_ns: run.finished_unix_ns,
-        }))
+            ..Default::default()
+        };
+
+        // The peer reboots (declared): re-handshake inside the same exchange gate, so no STEP,
+        // RESET or BIND interleaves, then log it. Only after a power cycle that performed.
+        if let (Some(relink), BoardPowerCycleOutcome::Performed) = (&self.relink, outcome) {
+            let report = relink.rehandshake().await;
+            let config = report.config;
+            eprintln!(
+                "av-edge-board: re-handshake after the power cycle: {:?} after {} ms, {} HELLO(s) sent (interval {} ms, deadline {} ms)",
+                report.outcome,
+                report.duration.as_millis(),
+                report.hellos_sent,
+                config.interval.as_millis(),
+                config.timeout.as_millis()
+            );
+            let error = match &report.outcome {
+                RelinkOutcome::Rehandshaken => String::new(),
+                RelinkOutcome::TimedOut => format!("no peer answered a lockstep-local HELLO within {} ms ({} sent, one every {} ms)", config.timeout.as_millis(), report.hellos_sent, config.interval.as_millis()),
+                RelinkOutcome::Refused(why) => format!("the peer answered the re-sent HELLO with something this service cannot proceed with: {why}"),
+            };
+            let draft = BoardIoRecord {
+                kind: BoardIoKind::LinkRehandshake as i32,
+                run_id: req.run_id.clone(),
+                instance: req.instance.clone(),
+                reset_tai_ns: req.tai_ns,
+                reset_reason: format!("fault:{}", req.fault_id),
+                error: error.clone(),
+                request_written_unix_ns: report.started_unix_ns,
+                response_read_unix_ns: report.finished_unix_ns,
+                rehandshake_hellos_sent: report.hellos_sent,
+                rehandshake_timeout_ms: config.timeout.as_millis() as u32,
+                ..Default::default()
+            };
+            self.log.record(&exchange, draft).await?;
+            response.rehandshake_hellos_sent = report.hellos_sent;
+            response.rehandshake_duration_ns = report.duration.as_nanos() as i64;
+            response.rehandshake_timeout_ms = config.timeout.as_millis() as u32;
+            match report.outcome {
+                RelinkOutcome::Rehandshaken => response.peer_rehandshaken = true,
+                RelinkOutcome::TimedOut => {
+                    response.outcome = BoardPowerCycleOutcome::Failed as i32;
+                    response.failure = BoardPowerCycleFailure::RehandshakeTimeout as i32;
+                    response.detail = error;
+                }
+                RelinkOutcome::Refused(_) => {
+                    response.outcome = BoardPowerCycleOutcome::Failed as i32;
+                    response.failure = BoardPowerCycleFailure::RehandshakeRefused as i32;
+                    response.detail = error;
+                }
+            }
+        }
+        Ok(Response::new(response))
     }
 
     async fn board_io_log_head(&self, request: Request<BoardIoLogHeadRequest>) -> Result<Response<BoardIoLogHeadResponse>, Status> {

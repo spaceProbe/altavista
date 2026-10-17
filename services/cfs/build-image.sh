@@ -275,7 +275,7 @@ log "built image ID: ${IMAGE_ID}"
 
 # --- 2b. Compute the runtime-content hash (docs/open-questions.md question 185): SHA-256 over
 # the sorted "<path> <sha256>" lines for every file this image actually ships and runs --
-# /cfs/av-lockstep-shim, /cfs/container-entrypoint.sh, and every file under /cfs/cpu1 (after
+# /cfs/av-lockstep-shim, /cfs/av-lockstep-relay (question 245), /cfs/container-entrypoint.sh, and every file under /cfs/cpu1 (after
 # services/cfs/build/targets.cmake's own unit-tests-off fix, that directory should hold nothing
 # but runtime-relevant artifacts -- see services/cfs/IMAGE_DIGEST.md's own "Runtime-content hash"
 # section for the canonical definition this mirrors, and services/cfs/tests/
@@ -284,7 +284,7 @@ log "built image ID: ${IMAGE_ID}"
 # keeping two implementations of one defined algorithm separate).
 log "computing runtime-content hash (question 185)"
 RUNTIME_CONTENT_HASH="$(docker run --rm --entrypoint sh "${IMAGE_TAG}" -c \
-    'find /cfs/cpu1 -type f -exec sha256sum {} + ; sha256sum /cfs/av-lockstep-shim /cfs/container-entrypoint.sh' \
+    'find /cfs/cpu1 -type f -exec sha256sum {} + ; sha256sum /cfs/av-lockstep-shim /cfs/av-lockstep-relay /cfs/container-entrypoint.sh' \
     | awk '{print $2, $1}' \
     | LC_ALL=C sort \
     | shasum -a 256 | awk '{print $1}')"

@@ -1359,6 +1359,41 @@ merely "a hash is produced") by `crates/av-lockstep/tests/docker_lifecycle.rs`, 
 identical pulled image twice with two different `IMAGE_DIGEST` values and asserts the two
 resulting hashes differ.
 
+**The segment's `dynamics_hash` excludes Docker's ephemeral address (question 245 (7)).**
+`binding::container_model_info` builds the instance's `ModelInfo`; its `settings_hash` covers
+`tls`, the Bind response's `version`, and either `image` + `image_digest` (Docker path) or the
+declared `container.address` (already-running path). The Docker path's `127.0.0.1:<host port>` is
+Docker's choice on each run and is not hashed, so two separately started containers of the same
+image report the same `dynamics_hash`. A Docker-free replay (`construct_replay_container`) still
+reports a synthetic `ModelInfo`, since the port-traffic log carries neither the Bind `version`
+nor the image, so its container segment's `dynamics_hash` is not reproduced.
+
+**Labels on the containers the kernel starts (question 245 (5)).** `binding::container_labels` gives
+every container `materialize_container` starts two labels, `av.run_id` (`RunConfig.run_id`) and
+`av.instance` (the instance name), plus every `container.label.<key>` parameter the SoS declares
+(`ContainerSpec::docker_labels`, Docker path only, refused otherwise like `container.sysctl.*`; the
+two kernel keys cannot be declared). Before this the kernel passed no labels at all, so a container
+started during a killed test (no `Drop`) was invisible to `prune_stale_test_resources`. A test
+declares `container.label.av.test = "1"` on its container instances (declared, hashed configuration;
+the kernel never reads the marker from its environment) and the next run's pre-flight sweep removes
+what the killed one left; `tests/drm_two_spacecraft_cfs.rs::the_stale_resource_sweep_finds_and_
+removes_the_kernels_containers` runs that sweep while two kernel containers are live. Two instances
+of one system have different `av.instance` values, and nothing else in the `docker run` argv
+differs (no `--name`, ephemeral host ports): several containers of one image in one run needed no
+other change.
+
+**Two spacecraft, two containers (`tests/drm_two_spacecraft_cfs.rs`, `drms/demo_two_spacecraft.*`).**
+An RPO pair, each spacecraft's attitude loop closed through its own cFS container, a ground segment
+receiving both spacecraft's telemetry and a telecommand to one of them. The proofs (identical
+decoded port traffic per container across two separately started runs, per-container tracking of
+the native counterpart and the closed form, a Docker-free replay of both, telecommand routing,
+labels and cleanup, and the negative controls: cross-wired controllers, a changed input, a swapped
+replay log, a re-routed telecommand) are described in the test's module doc comment and the
+fixtures' headers. Each `container.seed_key` is set per instance (`chaser_controller`,
+`target_controller`) because two instances of one system would otherwise share one `Scenario.seeds`
+entry; the ADCS app draws no randomness, so sharing a key changes the configuration hash and not the
+port traffic (also tested).
+
 **No image is pushed anywhere** by this crate or its tests. Every test that needs to prove a
 *genuine* "pull by digest" (not a locally-cached tag silently reused) builds this repository's
 own `services/lockstep-ref/Dockerfile`, starts a throwaway `registry:2` container on loopback,
@@ -2174,6 +2209,7 @@ the reason).
 | `board.step_timeout_ms` | `Step`/`Reset`/`Shutdown` with no reply in this long is `ContainerError::StepTimeout` (as `DrmError::ContainerProtocol`) / `ResetRpc` / `ShutdownRpc`. Default 5000, bounds 10..=600000 |
 | `board.bind_timeout_ms` | the connect and `Bind` (the edge service waits for the flight software's HELLO inside it). Default 30000, same bounds. Expiry is `DrmError::BoardBind` / `BoardConnect` |
 | `board.power_control_timeout_ms` | how long to wait for the edge service's `PowerCycle` reply (see "Power control" below). Default 60000, same bounds. Expiry is a `PowerControlError::TimedOut` |
+| `board.rehandshake_timeout_ms` | the DRM's **declaration that this board's power cycle reboots the peer**, and how long the edge service may take to re-handshake with it (its `--rehandshake-timeout-ms`; question 245 (6)). Absent means not declared (0): the existing stand-ins, whose guest stays up. Declared: the kernel waits for the `PowerCycle` reply for `power_control_timeout_ms` **plus** this, refuses a service that did not re-handshake (`PowerControlError::RehandshakeExpected`), and re-`Bind`s the instance after one that did. Same bounds |
 
 `av-lockstep`'s blocking client has no deadline, so each board call runs on a worker thread
 (`TimedLockstep`) and the caller waits with `recv_timeout`; after a timeout the link is not used
@@ -2215,15 +2251,50 @@ power-cycle fault on a board with an empty `power_control` is `BoardPowerCycleNe
 other HARDWARE kind on a board is `HardwareFaultKindNotSupported`, as for a container. A recording
 fake (`RecordingPowerControl`) implements the same trait for the kernel's own unit tests; the
 end-to-end fake sits behind the same RPC (an `av-edge-board` with `--power-control cmd:<a tiny
-executable>`). **Not done (HIL-day item):** a board that really reboots needs the edge service to
-re-handshake (HELLO once) and the kernel to re-`Bind` before the `RESET`; the stand-in's guest stays
-up through the "power cycle", so that path is unwritten and unexercised (`power.rs` module doc).
+executable>`).
+
+**A board that really reboots (question 245 (6)).** A real board that power-cycles loses its
+lockstep-local session. With `board.rehandshake_timeout_ms` declared (and the edge service started
+with `--power-cycle-reboots-peer`, which re-sends HELLO until the peer answers or its own deadline),
+`power::perform` fixes the order: power cycle, then, if the response says the peer was
+re-handshaken, **the kernel `Bind`s the instance again with the run's same `LockstepBindRequest`**
+(`ContainerModel::rebind`; a refusal is `ContainerError::RebindRefused`, no reply within
+`board.bind_timeout_ms` `RebindTimeout`; a different `binding_hash` is accepted and noted, the
+signed log holds both answers), then the `RESET`. The lockstep sequence numbers continue. A peer that
+never answers is `DrmError::BoardPowerCycle` with `PowerControlError::RehandshakeFailed` naming the
+instance, the fault, the service's deadline and the HELLOs sent, after that deadline; no second
+`Bind`, no `RESET`. The outcome event gains `values["rehandshaken"] = 1.0` and the HELLO count and
+duration (wall-clock dependent, excluded by a replay); a stand-in's power cycle produces the event it
+always did. The signed log shows `POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET`.
+**A `docker restart` of the cFS container stands in for the reboot; no board is involved**
+(`tests/drm_board_cfs_restart.rs`, below).
 
 **Proven against stand-ins only**: `tests/drm_board_pacing.rs`, `tests/drm_board_refusals.rs` and
 `tests/drm_board_power.rs` run the real `av-edge-board` binary in front of a fake lockstep-local guest on a loopback UDP
 socket (the fake answers each STEP with an empty STEP_DONE, so the board-bound controller is
 silent); `tests/drm_board_replay.rs` gives the fake non-empty, step-dependent answers (below). No
 ZCU104, no Renode, no Docker.
+
+`tests/drm_board_cfs_restart.rs` (question 245 (6)) is the one board test with Docker, the real cFS
+container, and a board that reboots mid-run. `drms/demo_attitude_control` with `"controller"` bound
+as a board to `altavista-cfs-lockstep` (started with `LOCKSTEP_TRANSPORT=udp`) behind the real
+`av-edge-board`, a `HARDWARE`/`power_cycle` fault at 3 s of 8 s whose channel is a real
+`docker restart` of the container. **The container restart stands in for a board reboot; no board is
+involved.** **The edge service runs inside the Colima VM**, because this Colima's `portForwarder:
+ssh` carries TCP only (`~/.colima/default/colima.yaml`; the Lima host agent logs `Forwarding TCP`
+for TCP ports and nothing for UDP), so the macOS host cannot reach a published UDP port; the kernel
+stays on the host and dials the service's gRPC over Lima's TCP forwarding (`board.edge_address` is the
+host-forwarded `127.0.0.1:<port>`; the service has `--port-device udp://127.0.0.1:<published port>`).
+The Linux build is `services/cfs/build-edge-board.sh`. It takes the docker lock itself (never wrap
+it) and needs `AV_CFS_TEST_IMAGE` to name an image with the relay. Three tests: the restart run (the
+controller's outputs resume 1 step after the RESET, declared at most 3; 50 of 50 later steps have one;
+the signed log holds `BIND, 30 STEP, POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET, 50 STEP, SHUTDOWN`;
+the run replays from the signed log and equals the live run after the named exclusions); a peer that
+never comes back (the channel stops the container; the run fails with the typed error naming the
+instance, the fault and the 4000 ms deadline, 7 s into the run, nothing left running); and the
+restart run with the service's re-handshake disabled (declared by the DRM: `RehandshakeExpected`
+at once and no RESET sent; declared by neither: the RESET is unanswered and the run fails by
+`board.step_timeout_ms`).
 
 ## Replaying a board-bound run from its signed edge log (hilprep-2b)
 
@@ -2268,7 +2339,11 @@ ADR-005 pacing "only when the configuration binds a board").
   any container-classified instance now emits it; it used to be dropped). The board's outcome
   event (`marker:power_cycle:<id>`) is reproduced from the log's `POWER_CYCLE` record: same id,
   epoch, entity and `performed`, with `values.duration_ns` computed from the record's two
-  edge-node instants; its `detail` and `duration_ns` are the wall-clock values that differ.
+  edge-node instants; its `detail` and `duration_ns` are the wall-clock values that differ. A power
+  cycle after which the edge service re-handshook with a rebooted peer (question 245 (6)) is logged
+  `POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET`; the replay accepts exactly that shape (the second
+  BIND must equal the first and be accepted), reproduces `values["rehandshaken"]` from the record, and
+  excludes the HELLO count and the re-handshake's duration like the other wall-clock values.
 - **Choosing the source.** A log supplied for a board instance replays it from the log. A board in
   the default replay set (`ReplayConfig.instances` empty: every container-classified instance,
   boards included) **needs its log** (`NeedsEdgeLog`): it is never dialled and never silently
@@ -2277,7 +2352,8 @@ ADR-005 pacing "only when the configuration binds a board").
 - **The comparison contract.** `pacing::WALL_CLOCK_DEPENDENT` is the one named set and
   `board_replay::strip_replay_exclusions(&mut pb::RunProducts, board, ReplaySource)` removes
   exactly it. For an **edge-log** replay: `RunProducts.pacing`, the overrun events, the outcome
-  event's `detail` and `values["duration_ns"]`. Nothing else: the board segment's `dynamics_*`
+  event's `detail` and `values["duration_ns"]` (and, for a re-handshaken power cycle,
+  `values["rehandshake_hellos_sent"]` and `values["rehandshake_duration_ns"]`). Nothing else: the board segment's `dynamics_*`
   and the binding-hash provenance are reproduced exactly (the declared configuration plus the
   version and binding hash of the log's BIND record) and the verified pin is re-stamped on the
   replayed trajectory, so they compare equal. For a **`port_traffic.pb`** replay of a board, also

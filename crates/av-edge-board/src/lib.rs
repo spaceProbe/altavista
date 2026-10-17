@@ -6,7 +6,7 @@
 //! with the same `PeerLink`, the same framing, and the same `ShimService`. The additions are
 //! the two transports ([`serial`], [`udp`]), the [`link`] that picks one, and the Bind-time
 //! board check ([`service`]), the board I/O log ([`iolog`], [`timed`]; the log itself is
-//! `av_edge::board_log`), and the edge node's power control ([`power`]: `altavista.v1.BoardEdgeService`).
+//! `av_edge::board_log`), and the edge node's power control ([`power`]: `altavista.v1.BoardEdgeService`) and the re-handshake with a peer that rebooted ([`relink`], question 245 (6)).
 //! The pure half (spec parsing, typed errors, the link's config hash, the power-control URI)
 //! is `av_edge::board`. The binary is `av-edge-board`; the crate README gives the
 //! command line.
@@ -18,6 +18,7 @@
 pub mod iolog;
 pub mod link;
 pub mod power;
+pub mod relink;
 pub mod serial;
 pub mod service;
 pub mod timed;

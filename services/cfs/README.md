@@ -264,9 +264,14 @@ HELLO-first handshake, the frame layout and every protocol check above hold as w
   prefix kept, so the bytes are identical to the other carriers'. A received datagram that is not
   exactly one complete frame is a typed error; datagrams from any address other than the configured
   peer are dropped and counted.
-- **HELLO is sent once** on every carrier and never retried (the guest reads it once; a second HELLO
-  where BIND is expected fails it), so the board's end must be open before the service starts, or
-  the handshake times out with a typed error.
+- **HELLO is sent once at startup** on every carrier and never retried (the guest reads it once; a
+  second HELLO where BIND is expected fails it), so the board's end must be open before the service
+  starts, or the handshake times out with a typed error. The one exception is after a power cycle
+  the operator declared reboots the peer (`--power-cycle-reboots-peer`, question 245 (6)): the
+  service then re-sends HELLO at a declared interval until the rebooted guest answers or a declared
+  deadline passes, which is safe only because nothing reaches a guest that is not listening yet (see
+  the relay below) and the interval is far longer than the guest's reply time; the kernel then
+  `Bind`s again before its `Reset`.
 - **Bind-time check:** the kernel sets `board.edge_node_id` and `board.port_device` in the Bind
   parameters; the service refuses a mismatch, and a Bind that lacks them (a board link is always
   checked), without forwarding it, and strips both before the BIND reaches the guest, so the
@@ -274,6 +279,35 @@ HELLO-first handshake, the frame layout and every protocol check above hold as w
 
 The crate's README has the command line and the details. Proven so far against stand-ins only (a
 host pseudo-terminal, loopback UDP, fake guests); no board has been involved.
+
+### The real guest behind `av-edge-board`: `av-lockstep-relay` (question 245 (6))
+
+The cFS posix container can also stand behind `av-edge-board`'s UDP link, so the real `io_lockstep`
+app (unchanged) is the board's guest. The guest still connects to the Unix socket
+`/var/run/lockstep/lockstep-local.sock`; what listens there is chosen by the container's
+environment, read by `container-entrypoint.sh`:
+
+- `LOCKSTEP_TRANSPORT` unset or `shim` (the default): `av-lockstep-shim` listens, serves
+  `LockstepService` on `0.0.0.0:50070`, exactly as before.
+- `LOCKSTEP_TRANSPORT=udp`: `av-lockstep-relay` listens instead and serves **no gRPC**. It is a
+  frame-aware wire, a second `[[bin]]` of `crates/av-lockstep-shim` that uses only that crate's
+  framing: each complete frame the guest writes is sent as one datagram, each valid datagram from
+  the peer is written to the guest, and **datagrams that arrive while no guest is connected are
+  dropped and counted, never queued** (as a UART whose receiver is not open would). It listens on
+  UDP `0.0.0.0:${LOCKSTEP_UDP_PORT:-50090}`; `LOCKSTEP_UDP_PEER=ADDR:PORT` pins the one peer
+  (otherwise the peer is learned from the last valid datagram, which is what a host reaching the
+  container through a published port needs). `docker run -e LOCKSTEP_TRANSPORT=udp -p
+  127.0.0.1:<host port>:50090/udp ...` publishes it.
+
+`services/cfs/build-shim.sh` builds and installs both binaries (`services/cfs/bin/av-lockstep-shim`
+and `.../av-lockstep-relay`); the Dockerfile copies both. The shim binary does not depend on the
+relay: it is byte-identical built with and without it (measured, `native-ct-2`). A `docker restart`
+of the container stands in for a board reboot: the cFS process and the relay start again from the
+entrypoint, the guest connects to the new relay and waits for a HELLO, and the host's service
+re-handshakes. **Docker for Mac needs a port forwarder that carries UDP for the host to reach the
+published port**, and Colima's `portForwarder: ssh` carries TCP only, so on this host the real-container
+test runs the edge service inside the Colima VM instead (`services/cfs/build-edge-board.sh` builds its
+Linux binary; `crates/av-edge-board/README.md`, "Docker on macOS").
 
 ## Example: hand-derived bytes for a `SHUTDOWN` frame
 

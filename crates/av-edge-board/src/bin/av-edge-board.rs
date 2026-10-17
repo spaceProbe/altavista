@@ -1,12 +1,13 @@
 //! `av-edge-board`: the board's edge service. Opens the board's link, performs the
-//! lockstep-local v1 handshake with the flight software (HELLO once, never retried), then
-//! serves `altavista.v1.LockstepService` on loopback for the kernel. See the crate README.
+//! lockstep-local v1 handshake with the flight software (HELLO once at startup, never retried),
+//! then serves `altavista.v1.LockstepService` on loopback for the kernel. See the crate README.
 //!
 //! ```text
 //! av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:<port>]
 //!               [--handshake-timeout-ms <n>] [--udp-local <addr:port>]
 //!               --io-log <path> --signing-key <pem> --signing-cert <pem>
 //!               [--power-control cmd:/abs/path] [--power-timeout-ms <n>]
+//!               [--power-cycle-reboots-peer [--rehandshake-interval-ms <n>] [--rehandshake-timeout-ms <n>]]
 //! ```
 //!
 //! `--power-control` is this edge node's power control channel (question 242 (c)): `cmd:<absolute
@@ -14,6 +15,11 @@
 //! `altavista.v1.BoardEdgeService`, served on the same gRPC address as `LockstepService`; absent
 //! means no channel (every request is refused, nothing run). `gpio://...` is reserved and refused
 //! at startup. See `power.rs`.
+//!
+//! `--power-cycle-reboots-peer` declares that the power channel reboots the flight software (a real
+//! board always would; the existing stand-ins' power cycles do not): after a power cycle that
+//! performed, the service re-handshakes, re-sending HELLO every `--rehandshake-interval-ms` until
+//! the peer answers or `--rehandshake-timeout-ms` passes. See `relink.rs`.
 //!
 //! Every stage is logged on stderr. One link per process; the process exits after a
 //! successful Shutdown RPC, or on SIGINT/SIGTERM.
@@ -28,6 +34,7 @@ use av_edge_board::iolog::BoardIoLog;
 use av_edge_board::timed::{LinkTimes, TimedStream};
 use av_edge_board::link::{open_link, LinkError, LinkOptions};
 use av_edge_board::power::{BoardEdge, BoardEdgeServiceServer, DEFAULT_POWER_TIMEOUT_MS, POWER_TIMEOUT_BOUNDS_MS};
+use av_edge_board::relink::{PeerCell, PeerRelink, RelinkConfig, RelinkSetup, SharedStream};
 use av_edge_board::service::BoardService;
 use av_lockstep_shim::pb::lockstep_service_server::LockstepServiceServer;
 use av_lockstep_shim::{PeerLink, ProtocolError};
@@ -38,6 +45,14 @@ use tokio::signal::unix::{signal, SignalKind};
 /// `av-lockstep-shim`'s 50080; no admin surface.
 const DEFAULT_GRPC_ADDR: &str = "127.0.0.1:50081";
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 60_000;
+/// Between re-sent HELLOs. A guest answers a HELLO in well under 100 ms (measured for the cFS
+/// container, see the crate README), so one second is far longer than the answer, and short enough
+/// that a guest which comes up at an arbitrary moment waits at most a second for its HELLO.
+const DEFAULT_REHANDSHAKE_INTERVAL_MS: u64 = 1_000;
+const REHANDSHAKE_INTERVAL_BOUNDS_MS: std::ops::RangeInclusive<u64> = 100..=60_000;
+/// From the first re-sent HELLO to giving up: a container restart or a board boot, with margin.
+const DEFAULT_REHANDSHAKE_TIMEOUT_MS: u64 = 60_000;
+const REHANDSHAKE_TIMEOUT_BOUNDS_MS: std::ops::RangeInclusive<u64> = 200..=600_000;
 /// How long after a Shutdown the server is given to drain before the process exits anyway.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
@@ -94,9 +109,12 @@ struct Args {
     signing_cert: PathBuf,
     power_control: String,
     power_timeout_ms: u64,
+    power_cycle_reboots_peer: bool,
+    rehandshake_interval_ms: u64,
+    rehandshake_timeout_ms: u64,
 }
 
-const USAGE: &str = "usage: av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:PORT] [--handshake-timeout-ms N] [--udp-local ADDR:PORT] --io-log PATH --signing-key PEM --signing-cert PEM [--power-control cmd:/ABS/PATH] [--power-timeout-ms N]\n  <spec> is /dev/<name>@<baud> (serial, 8N1) or udp://<host>:<port>\n  --io-log/--signing-key/--signing-cert are required: the board's I/O is logged durably as signed, hash-chained records, and a run without that log is refused (the log must not exist yet; the key and certificate are the edge node's P-384 identity)\n  --power-control is this edge node's power control channel, run here when the kernel asks for a power cycle: cmd:<absolute path> (no shell; invoked as `<path> power-cycle --edge-node-id ID --instance NAME --fault-id ID --tai-ns N`), or absent for none (gpio://... is reserved); --power-timeout-ms bounds one run (default 30000, 10..=600000)";
+const USAGE: &str = "usage: av-edge-board --port-device <spec> --edge-node-id <id> [--grpc-addr 127.0.0.1:PORT] [--handshake-timeout-ms N] [--udp-local ADDR:PORT] --io-log PATH --signing-key PEM --signing-cert PEM [--power-control cmd:/ABS/PATH] [--power-timeout-ms N] [--power-cycle-reboots-peer [--rehandshake-interval-ms N] [--rehandshake-timeout-ms N]]\n  <spec> is /dev/<name>@<baud> (serial, 8N1) or udp://<host>:<port>\n  --io-log/--signing-key/--signing-cert are required: the board's I/O is logged durably as signed, hash-chained records, and a run without that log is refused (the log must not exist yet; the key and certificate are the edge node's P-384 identity)\n  --power-control is this edge node's power control channel, run here when the kernel asks for a power cycle: cmd:<absolute path> (no shell; invoked as `<path> power-cycle --edge-node-id ID --instance NAME --fault-id ID --tai-ns N`), or absent for none (gpio://... is reserved); --power-timeout-ms bounds one run (default 30000, 10..=600000)\n  --power-cycle-reboots-peer declares that the power channel reboots the flight software (needs --power-control): after a power cycle that performed, HELLO is re-sent every --rehandshake-interval-ms (default 1000, 100..=60000, not above the timeout) until the peer answers or --rehandshake-timeout-ms (default 60000, 200..=600000) passes";
 
 fn parse_args() -> Result<Args, StartupError> {
     let mut port_device = None;
@@ -109,6 +127,9 @@ fn parse_args() -> Result<Args, StartupError> {
     let mut signing_cert = None;
     let mut power_control = String::new();
     let mut power_timeout_ms = DEFAULT_POWER_TIMEOUT_MS;
+    let mut power_cycle_reboots_peer = false;
+    let mut rehandshake_interval_ms = None;
+    let mut rehandshake_timeout_ms = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or_else(|| StartupError::Usage(format!("{flag} needs a value\n{USAGE}")));
@@ -135,9 +156,37 @@ fn parse_args() -> Result<Args, StartupError> {
                     return Err(StartupError::Usage(format!("--power-timeout-ms {power_timeout_ms} is outside {}..={}", POWER_TIMEOUT_BOUNDS_MS.start(), POWER_TIMEOUT_BOUNDS_MS.end())));
                 }
             }
+            "--power-cycle-reboots-peer" => power_cycle_reboots_peer = true,
+            "--rehandshake-interval-ms" => {
+                let v = val()?;
+                let n: u64 = v.parse().map_err(|e| StartupError::Usage(format!("--rehandshake-interval-ms {v:?} is not a number of milliseconds: {e}")))?;
+                if !REHANDSHAKE_INTERVAL_BOUNDS_MS.contains(&n) {
+                    return Err(StartupError::Usage(format!("--rehandshake-interval-ms {n} is outside {}..={}", REHANDSHAKE_INTERVAL_BOUNDS_MS.start(), REHANDSHAKE_INTERVAL_BOUNDS_MS.end())));
+                }
+                rehandshake_interval_ms = Some(n);
+            }
+            "--rehandshake-timeout-ms" => {
+                let v = val()?;
+                let n: u64 = v.parse().map_err(|e| StartupError::Usage(format!("--rehandshake-timeout-ms {v:?} is not a number of milliseconds: {e}")))?;
+                if !REHANDSHAKE_TIMEOUT_BOUNDS_MS.contains(&n) {
+                    return Err(StartupError::Usage(format!("--rehandshake-timeout-ms {n} is outside {}..={}", REHANDSHAKE_TIMEOUT_BOUNDS_MS.start(), REHANDSHAKE_TIMEOUT_BOUNDS_MS.end())));
+                }
+                rehandshake_timeout_ms = Some(n);
+            }
             "--help" | "-h" => return Err(StartupError::Usage(USAGE.to_string())),
             other => return Err(StartupError::Usage(format!("unrecognized argument: {other}\n{USAGE}"))),
         }
+    }
+    if !power_cycle_reboots_peer && (rehandshake_interval_ms.is_some() || rehandshake_timeout_ms.is_some()) {
+        return Err(StartupError::Usage(format!("--rehandshake-interval-ms / --rehandshake-timeout-ms only apply with --power-cycle-reboots-peer\n{USAGE}")));
+    }
+    if power_cycle_reboots_peer && power_control.is_empty() {
+        return Err(StartupError::Usage(format!("--power-cycle-reboots-peer declares what the power channel does, so it needs --power-control\n{USAGE}")));
+    }
+    let rehandshake_interval_ms = rehandshake_interval_ms.unwrap_or(DEFAULT_REHANDSHAKE_INTERVAL_MS);
+    let rehandshake_timeout_ms = rehandshake_timeout_ms.unwrap_or(DEFAULT_REHANDSHAKE_TIMEOUT_MS);
+    if power_cycle_reboots_peer && rehandshake_interval_ms > rehandshake_timeout_ms {
+        return Err(StartupError::Usage(format!("--rehandshake-interval-ms {rehandshake_interval_ms} is longer than --rehandshake-timeout-ms {rehandshake_timeout_ms}: not even one re-sent HELLO would get its interval\n{USAGE}")));
     }
     Ok(Args {
         port_device: port_device.ok_or_else(|| StartupError::Usage(format!("--port-device is required\n{USAGE}")))?,
@@ -150,6 +199,9 @@ fn parse_args() -> Result<Args, StartupError> {
         signing_cert: signing_cert.ok_or_else(|| StartupError::Usage(format!("--signing-cert is required: the board's I/O log names its signer by certificate\n{USAGE}")))?,
         power_control,
         power_timeout_ms,
+        power_cycle_reboots_peer,
+        rehandshake_interval_ms,
+        rehandshake_timeout_ms,
     })
 }
 
@@ -167,6 +219,12 @@ async fn run() -> Result<(), StartupError> {
         eprintln!("av-edge-board: no power control channel (--power-control absent): every PowerCycle request will be refused and nothing run");
     } else {
         eprintln!("av-edge-board: power control channel {power_control} (timeout {} ms)", args.power_timeout_ms);
+        if args.power_cycle_reboots_peer {
+            eprintln!(
+                "av-edge-board: the power channel is declared to reboot the peer: after a power cycle that performed, HELLO is re-sent every {} ms until the peer answers or {} ms pass",
+                args.rehandshake_interval_ms, args.rehandshake_timeout_ms
+            );
+        }
     }
 
     // The board's I/O log (question 242 (a)): signer first, then the log file, both before the
@@ -182,16 +240,33 @@ async fn run() -> Result<(), StartupError> {
 
     let stream = open_link(&device, &LinkOptions { udp_local: args.udp_local }).await?;
     let udp_stats = stream.udp_stats();
-    let stream = TimedStream::new(stream, times);
+    // One shared handle on the link, so a power cycle's re-handshake can build a fresh `PeerLink`
+    // on it (relink.rs). The first handshake uses it too, so there is one code path.
+    let stream = SharedStream::new(TimedStream::new(stream, times));
     eprintln!("av-edge-board: link open, performing the lockstep-local v1 handshake (timeout {} ms)", args.handshake_timeout_ms);
-    let peer = tokio::time::timeout(Duration::from_millis(args.handshake_timeout_ms), PeerLink::handshake(stream))
+    let hello_sent_at = std::time::Instant::now();
+    let peer = tokio::time::timeout(Duration::from_millis(args.handshake_timeout_ms), PeerLink::handshake(stream.clone()))
         .await
         .map_err(|_| StartupError::HandshakeTimeout { after_ms: args.handshake_timeout_ms })??;
-    eprintln!("av-edge-board: handshake complete");
+    eprintln!("av-edge-board: handshake complete ({} ms from HELLO sent to the guest's answer read)", hello_sent_at.elapsed().as_millis());
 
-    let service = BoardService::new(Arc::new(peer), link.edge_node_id().to_string(), device, Arc::clone(&log));
+    let cell = if args.power_cycle_reboots_peer {
+        let discard = |s: &SharedStream<TimedStream<av_edge_board::link::BoardStream>>| s.with(|timed| timed.inner_mut().discard_pending());
+        let setup = RelinkSetup {
+            stream: stream.clone(),
+            discard: Box::new(discard),
+            config: RelinkConfig { interval: Duration::from_millis(args.rehandshake_interval_ms), timeout: Duration::from_millis(args.rehandshake_timeout_ms) },
+        };
+        Arc::new(PeerCell::with_relink(Arc::new(peer), setup))
+    } else {
+        Arc::new(PeerCell::new(Arc::new(peer)))
+    };
+    let service = BoardService::with_cell(Arc::clone(&cell), link.edge_node_id().to_string(), device, Arc::clone(&log));
     let shutdown_after_rpc = service.shutdown_signal();
-    let board_edge = BoardEdge::new(link.edge_node_id().to_string(), power_control, Duration::from_millis(args.power_timeout_ms), Arc::clone(&log));
+    let mut board_edge = BoardEdge::new(link.edge_node_id().to_string(), power_control, Duration::from_millis(args.power_timeout_ms), Arc::clone(&log));
+    if args.power_cycle_reboots_peer {
+        board_edge = board_edge.with_relink(Arc::clone(&cell) as Arc<dyn PeerRelink>);
+    }
     eprintln!("av-edge-board: BoardEdgeService (PowerCycle) served on the same address");
     eprintln!("av-edge-board: LockstepService listening on {addr}");
 

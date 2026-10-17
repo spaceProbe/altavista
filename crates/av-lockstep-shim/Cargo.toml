@@ -10,14 +10,23 @@ repository.workspace = true
 
 [dependencies]
 # Every altavista.v1 message type (LockstepBindRequest, LockstepStepRequest, PortMessage,
-# ...) is already generated once, in av-cdm (crates/av-cdm/build.rs compiles every .proto
-# under proto/altavista/v1/ with plain prost-build). This crate's own build.rs (below)
-# extern_paths the whole package onto av_cdm::pb, exactly the way
+# ...) is already generated once, in av-cdm (crates/av-cdm/build.rs, with plain prost-build).
+# `default-features = false` is the NARROW av-cdm build (question 245 (7)): only
+# lockstep.proto and its import closure (system, core, envelope, packet) are compiled, and
+# av-cdm's hand-written modules (time, units, spoore_v0, covariance) and their dependencies
+# (spoore-cdm, nalgebra, serde, ...) are not built. This is what keeps the cFS image's shim
+# binary (services/cfs/build-shim.sh) from changing when a proto outside that closure is
+# edited (question 244's finding: any proto compiled into av-cdm reorders prost's
+# field-name literals in the shim's .rodata). It holds only while this crate is built
+# without a dependent that wants the default av-cdm (resolver 2 unifies features within the
+# selected build graph): `cargo build -p av-lockstep-shim` is narrow; this crate's own
+# dev-dependency av-lockstep, and any --workspace build, bring in `full`. This crate's own
+# build.rs (below) extern_paths the whole package onto av_cdm::pb, exactly the way
 # crates/av-dynamics-service/build.rs does for DynamicsService, so this build produces the
 # `lockstep_service_server` trait/plumbing only -- never a second, independently-generated
 # copy of the same wire types. The local-socket frame payloads below are literally these
 # same av_cdm::pb types, `prost::Message::encode_to_vec()`d -- see src/framing.rs.
-av-cdm = { path = "../av-cdm" }
+av-cdm = { path = "../av-cdm", default-features = false }
 prost.workspace = true
 prost-types.workspace = true
 thiserror.workspace = true
@@ -49,3 +58,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 [[bin]]
 name = "av-lockstep-shim"
 path = "src/bin/av-lockstep-shim.rs"
+
+# Question 245 (6): the in-container UDP carrier for lockstep-local v1 (see the file's module doc).
+# It uses only this crate's library (`framing`), so the `av-lockstep-shim` binary above is built from
+# the same code as before.
+[[bin]]
+name = "av-lockstep-relay"
+path = "src/bin/av-lockstep-relay.rs"

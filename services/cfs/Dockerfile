@@ -42,8 +42,9 @@
 # why the repo is mounted under `/Users/probe/code` rather than `/workspace`, and why rust 1.90
 # (question 208(a): the workspace's measured floor is 1.87, so the old 1.85 recipe no longer builds).
 #
-# (`target-docker-linux/` is `.dockerignore`d -- only the copied-out, stripped binary under
-# `services/cfs/bin/` is ever part of this Dockerfile's build context.) This binary links only
+# (`target-docker-linux/` is `.dockerignore`d -- only the copied-out, stripped binaries under
+# `services/cfs/bin/` (`av-lockstep-shim`, and since question 245 (6) `av-lockstep-relay`, both
+# produced by that one script) are ever part of this Dockerfile's build context.) This binary links only
 # libc/libgcc_s/libm (confirmed with `ldd` against this same `ubuntu:22.04` base -- the crate's
 # own doc comment already notes it pulls no TLS stack at all), so the final stage below needs no
 # extra runtime package for it.
@@ -155,6 +156,11 @@ FROM ubuntu:22.04@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17
 # stage's shipped binaries actually needed beyond what the base image already provides.
 COPY --from=builder /build/third_party/cfs/build-native_std/exe/cpu1 /cfs/cpu1
 COPY services/cfs/bin/av-lockstep-shim /cfs/av-lockstep-shim
+# Question 245 (6): the frame-aware UDP carrier for the board stand-in, built by the same
+# services/cfs/build-shim.sh from the same crate (a second [[bin]] using only the crate's library),
+# and run in place of the shim when the container is started with LOCKSTEP_TRANSPORT=udp (see
+# container-entrypoint.sh). The default (shim) behaviour of the image is unchanged.
+COPY services/cfs/bin/av-lockstep-relay /cfs/av-lockstep-relay
 COPY services/cfs/container-entrypoint.sh /cfs/container-entrypoint.sh
-RUN chmod +x /cfs/av-lockstep-shim /cfs/container-entrypoint.sh
+RUN chmod +x /cfs/av-lockstep-shim /cfs/av-lockstep-relay /cfs/container-entrypoint.sh
 ENTRYPOINT ["/cfs/container-entrypoint.sh"]

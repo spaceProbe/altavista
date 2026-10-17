@@ -427,7 +427,9 @@ pub fn prune_stale_test_resources(_lock: &DockerTestLock) {
     let filter = format!("label={TEST_LABEL_KEY}");
     if let Ok(out) = Command::new("docker").args(["ps", "-aq", "--filter", &filter]).output() {
         for id in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let _ = Command::new("docker").args(["rm", "-f", id]).output();
+            // `-v` removes the labelled container's anonymous volumes with it (a test's throwaway
+            // `registry:2` declares `VOLUME /var/lib/registry`); named volumes are never touched.
+            let _ = Command::new("docker").args(["rm", "-f", "-v", id]).output();
         }
     }
     if let Ok(out) = Command::new("docker").args(["images", "--filter", &filter, "--format", "{{.ID}}\t{{.Repository}}:{{.Tag}}"]).output() {

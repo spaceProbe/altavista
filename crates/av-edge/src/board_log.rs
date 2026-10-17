@@ -436,6 +436,8 @@ pub struct LogSummary {
     pub resets: u64,
     pub shutdowns: u64,
     pub power_cycles: u64,
+    /// `BOARD_IO_KIND_LINK_REHANDSHAKE` records (question 245 (6)).
+    pub link_rehandshakes: u64,
     /// Records whose `error` is non-empty.
     pub failed_exchanges: u64,
     /// `until_tai_ns` of the first and last STEP record (the simulation epochs).
@@ -460,6 +462,7 @@ impl VerifiedLog {
             resets: 0,
             shutdowns: 0,
             power_cycles: 0,
+            link_rehandshakes: 0,
             failed_exchanges: 0,
             first_epoch_tai_ns: None,
             last_epoch_tai_ns: None,
@@ -483,6 +486,7 @@ impl VerifiedLog {
                 BoardIoKind::Reset => s.resets += 1,
                 BoardIoKind::Shutdown => s.shutdowns += 1,
                 BoardIoKind::PowerCycle => s.power_cycles += 1,
+                BoardIoKind::LinkRehandshake => s.link_rehandshakes += 1,
                 BoardIoKind::Unspecified => {}
             }
             if !r.error.is_empty() {
@@ -670,6 +674,33 @@ mod tests {
             o += HEADER_LEN + len;
         }
         out
+    }
+
+    /// Question 245 (6): a LINK_REHANDSHAKE record is signed and chained like any other, carries its
+    /// own fields through the wire encoding, and is counted in the summary (and not as a bind,
+    /// step or power cycle).
+    #[test]
+    fn a_link_rehandshake_record_round_trips_and_is_counted() {
+        let (key, cert, _) = identity("edge-test");
+        let rec = Recording::default();
+        let mut w = BoardIoLogWriter::with_sink(Path::new("mem"), Box::new(rec.clone()), "edge-1", "ab".repeat(32).as_str(), LogSigner::from_pem(&key, &cert).unwrap());
+        w.append(BoardIoRecord { kind: BoardIoKind::PowerCycle as i32, run_id: "run-1".into(), ..Default::default() }).unwrap();
+        w.append(BoardIoRecord {
+            kind: BoardIoKind::LinkRehandshake as i32,
+            run_id: "run-1".into(),
+            reset_reason: "fault:pc1".into(),
+            rehandshake_hellos_sent: 4,
+            rehandshake_timeout_ms: 60_000,
+            error: "no peer answered".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let bytes = rec.bytes.lock().unwrap().clone();
+        let log = verify_bytes(&bytes, &LogVerifier::from_pem(&cert).unwrap()).unwrap();
+        assert_eq!(log.records[1].prev_hash, log.records[0].record_hash);
+        assert_eq!((log.records[1].kind, log.records[1].rehandshake_hellos_sent, log.records[1].rehandshake_timeout_ms), (BoardIoKind::LinkRehandshake as i32, 4, 60_000));
+        let s = log.summary();
+        assert_eq!((s.power_cycles, s.link_rehandshakes, s.binds, s.steps, s.failed_exchanges), (1, 1, 0, 0, 1));
     }
 
     #[test]

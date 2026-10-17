@@ -258,7 +258,7 @@ pub fn free_tcp_port() -> u16 {
 }
 
 /// A throwaway P-384 key and self-signed certificate (PEM), for the edge service's signed I/O log.
-fn write_identity(dir: &Path) -> (PathBuf, PathBuf) {
+pub fn write_identity(dir: &Path) -> (PathBuf, PathBuf) {
     use openssl::asn1::Asn1Time;
     use openssl::bn::BigNum;
     use openssl::ec::{EcGroup, EcKey};

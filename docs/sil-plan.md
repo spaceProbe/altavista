@@ -776,3 +776,263 @@ schedule) and `test_suite_declarations`' port-map count (10 rows since `av-edge-
 6. **`BoardBinding.edge_node_id` is resolved through `board.edge_address`**, a system parameter, like
    the container's address; a deployment-level edge-node directory would keep the address out of the
    system definition's hash.
+
+## Status (native manager, 2026-10-17) — the container round (question 245)
+
+The native team's container round chartered by question 245 (5)–(7). **All six tasks are
+delivered**, with three defects the round found (two of them root-caused and fixed, one
+root-caused and worked around): the reproducible ELF no longer built from the live Debian mirror;
+every throwaway test registry leaked an anonymous volume; and this host's Colima forwards no UDP.
+**No board is involved and nothing here is a board result:** a `docker restart` of the cFS
+container stands in for a board reboot. Ten commits on `edge` (one a merge of `develop`), none
+pushed, none merged.
+
+| Commit | What |
+|---|---|
+| `fe07648` | the RTEMS ELF build's apt sources on snapshot.debian.org at one timestamp; the `.deb` set pinned by hash |
+| `04d1813` | `av-cdm` narrowed for the shim: lockstep.proto's import closure only (feature `full`, default) |
+| `1c8a002` | `develop` merged (`1f1bb3b`, the RUSTSEC-2024-0449 excuse, question 246) |
+| `842e080` | the cFS test helper shared (`crates/av-kernel/tests/cfs_common/`) |
+| `962c082` | the container instance's `dynamics_hash` no longer folds in Docker's ephemeral host port |
+| `62766c0` | two spacecraft, each closing its loop through its own cFS container; kernel container labels |
+| `bfe22d7` | defect: throwaway registries removed with their anonymous volumes |
+| `21cd1a3` | re-handshake and re-Bind after a real peer restart (relay, edge service, kernel, replay) |
+| `a2e61e2` | the cFS shim and image re-pinned; the relay joins the runtime-content set |
+| this commit | this status section |
+
+### The ELF, and the round's first defect (question 245 (7), sil-plan "Found, not fixed" 2)
+
+The round's first step, `third_party/rtems-container/build-elf.sh` at `4e3140d` into the round
+folder, **failed**: `E: Version '6.1.187-1' for 'linux-libc-dev' was not found` (rc 100). The recipe
+pinned 93 packages by version but fetched them from the live `deb.debian.org`, which carries only
+each package's current version; snapshot.debian.org's API shows `linux-libc-dev 6.1.187-1` (arm64)
+entered `debian-security` at `20260908T092208Z` and the live suite has since moved past it. **Fix**
+(`fe07648`): the container's only apt source is replaced by two deb822 stanzas on
+snapshot.debian.org at `20261005T150126Z` (`debian` for bookworm and bookworm-updates,
+`debian-security` for bookworm-security; the timestamp is the first `debian` snapshot at or after the
+latest `first_seen` of the 93 pins, perl's `20261005T091318Z`, read from the API), signatures still
+verified with the image's keyring, `Acquire::Check-Valid-Until=false` the only relaxation; any other
+apt source refuses (exit 5); the downloaded `.deb` set is pinned (`80449cf4…05a6`, 93 files) and
+checked before install (exit 4). The 93 pins and the dpkg-set hash `19ed31e5…` are unchanged.
+**Reproduced:** three shipping builds from three stage directories (two by the worker, one by the
+manager) give `core-cpu1.exe` `de96907ff95fc8854723fbc71cd0c084483332c08984b60ec22ef923e7dacaf3`.
+A snapshot before `20260908` fails at apt with the nine later pins named; a flipped `.deb` pin fails
+before install; `test_build_elf_script.py` 20 passed (the manager's perturbation, the live mirror
+restored, fails it). The gate's ELF is this build (`rounds/native-ct/scratch/elf/`).
+
+### Two spacecraft, each through its own cFS container (question 245 (5); `62766c0`)
+
+`drms/demo_two_spacecraft.{sos,drm}.yaml`: an RPO pair, `chaser` and `target`, each with its own
+attitude truth plant, star tracker, IMU and a controller bound to its own `altavista-cfs-lockstep`
+container (by digest through the fixed-port test registry), starting from different pointing
+errors (0.2 rad and 0.12 rad about +z) so a cross-wired pair cannot pass; each spacecraft's telemetry
+reaches its own ground station; a scenario telecommand goes to the chaser only, to a native
+thruster instance (the cFS apps have no command port and are not changed: decision 3).
+
+- **What assumed one container:** the kernel started its containers with **no labels**
+  (`materialize_container` passed an empty `extra_labels`), so a container of a killed test was
+  invisible to `prune_stale_test_resources`. The kernel now always labels what it starts with
+  `av.run_id` and `av.instance`; `container.label.<key>` (Docker path only) declares more, the two
+  kernel keys cannot be declared, and the test SoS declares `av.test`. Container names (none set),
+  published ports (ephemeral), the sidecar's sort order, the per-instance provenance keys and
+  replay of two containers at once were checked and needed nothing.
+- **Proofs** (`crates/av-kernel/tests/drm_two_spacecraft_cfs.rs`, 16 tests): two separately started
+  runs give identical decoded records for both containers (records-only hash `16ffd975…7400`, 6,122
+  records; whole-file `port_traffic_hash` `e3250ddd…1e7d` in both) and equal products with nothing
+  excluded, the container segments' `dynamics_hash` included; each loop tracks its native
+  counterpart (chaser 0.111770 rad, target 0.067019 rad, both equal to the native run; closed forms
+  0.111565 and 0.066939); a Docker-free replay of both containers reproduces the products; the
+  telecommand reaches only the chaser (one PORT_COMMAND, one matching ack); labels are present while
+  live and nothing is left after a finished run, a typed error or a panic, and the label sweep finds
+  the kernel's containers. Perturbations: cross-wired torques fail tracking, a shared seed key
+  changes the configuration hash but not the records, a swapped replay log and a re-routed
+  telecommand move the effect. The manager's re-run in a clean clone: 16 passed; with `av.instance`
+  dropped from the kernel's labels the live-labels test fails.
+
+### Re-handshake and re-Bind after a real peer restart (question 245 (6); `21cd1a3`)
+
+**STAND-IN: a `docker restart` of the cFS container stands in for a board reboot.** The real cFS
+posix container is bound as `BINDING_KIND_BOARD` behind `av-edge-board`'s UDP link:
+
+- **The carrier.** `av-lockstep-relay`, a second bin of `av-lockstep-shim` built from the crate's
+  framing alone (the shim's bytes do not move: `b103a90e…` with and without it), carries the
+  guest's Unix-socket stream over UDP one frame per datagram and drops datagrams while no guest is
+  connected; `container-entrypoint.sh` runs it with `LOCKSTEP_TRANSPORT=udp` (default: the shim, as
+  before).
+- **The edge service.** `--power-cycle-reboots-peer` declares that the power channel reboots the
+  peer; after such a power cycle the service re-sends HELLO every `--rehandshake-interval-ms`
+  (1,000) until the peer answers or `--rehandshake-timeout-ms` passes, records a
+  `BOARD_IO_KIND_LINK_REHANDSHAKE` record on the same signed chain, and a peer that never answers is
+  a typed `REHANDSHAKE_TIMEOUT` after which the link is lost (`UNAVAILABLE`). Without the
+  declaration nothing changes (the fake channel and the Renode stand-in keep their behaviour). The
+  measured HELLO reply time of the real guest is ~0.3 ms against the 1 s interval; the residual risk
+  for a real serial board (a UART that buffers during boot would deliver several HELLOs) is recorded
+  in the README.
+- **The kernel.** `board.rehandshake_timeout_ms` declares the reboot; the kernel then waits for both
+  budgets, re-Binds with the run's first Bind request (typed `RebindRpc`/`RebindTimeout`/
+  `RebindRefused`), then sends the RESET; the power-cycle event carries the re-handshake, its
+  wall-clock fields in `pacing::WALL_CLOCK_DEPENDENT` (now 10); board replay accepts POWER_CYCLE,
+  LINK_REHANDSHAKE, the second BIND and RESET.
+- **The defect behind the topology: this Colima forwards no UDP.** `~/.colima/default/colima.yaml`
+  has `portForwarder: ssh` ("supports only TCP", its own comment); the Lima host agent logs
+  `Forwarding TCP` for every TCP port and nothing for the UDP one; the same exchange inside the VM
+  works. Colima is not changed (decision 15): the edge service runs **inside the Colima VM** (a Linux
+  build, `services/cfs/build-edge-board.sh`, the digest-pinned Rust builder; `071fcf20…`, the same
+  bytes twice but libssl-dev unpinned), standing in for the edge node, and the kernel reaches its
+  gRPC over Lima's TCP forwarding.
+- **Proofs** (`crates/av-kernel/tests/drm_board_cfs_restart.rs`, 3 tests; `av-edge-board`'s
+  `cfs_container_restart.rs` and `rehandshake.rs`, 8): the run through a real restart completes; the
+  controller publishes again 1 step after the fault (declared at most 3) and in 50 of the 50 later
+  steps; the signed log reads `BIND, 30 STEP, POWER_CYCLE, LINK_REHANDSHAKE (3 HELLOs, ~2 s), BIND,
+  RESET, 50 STEP, SHUTDOWN`; its replay from the signed log equals the live run after the named
+  exclusions (the re-handshake flag compared, not excluded; the replay's `port_traffic.pb`
+  byte-identical); a peer that never comes back fails the run with a typed `RehandshakeFailed`
+  (`REHANDSHAKE_TIMEOUT`) after the deadline, in 7–8 s, with nothing left running. Perturbations:
+  without the kernel's re-Bind the RESET reaches a guest waiting for BIND and times out (the
+  manager's own, in a clean clone: "Reset RPC failed: no reply within 10000 ms"); without the
+  service's re-handshake the run fails typed. The existing board, pacing and stand-in tests are
+  unchanged in outcome.
+
+### The container instance's `dynamics_hash` (question 245 (7); `962c082`)
+
+`binding::container_model_info` builds the container `ModelInfo` as `board_model_info` does for
+boards; ADR-005's hashing rule is unchanged. On the Docker path it hashes `image`, `image_digest`,
+`tls` and the Bind `version`, and not `127.0.0.1:<ephemeral host port>`; the declared
+`container.address` path is byte-identical to before (a test pins the legacy map). Two separately
+started cFS containers now give the same controller `dynamics_hash` (`da34e322…6f79`), asserted in
+the determinism test; feeding the dialled address back in fails it (`74c1a995…` against
+`8ce304bc…`). **No recorded hash moves:** no committed artifact carries a container segment's
+`dynamics_hash`. The Docker-free replay still cannot reproduce it (decision 10).
+
+### What `av-cdm` compiles into the shim (question 245 (7); `04d1813`)
+
+`av-cdm` gains a default feature `full` (every proto, the hand-written modules and their
+dependencies); without it, `build.rs` compiles `lockstep.proto` and protoc pulls its import closure
+(`system`, `core`, `envelope`, `packet`, read from the import lines for `rerun-if-changed`). The shim
+depends on it with `default-features = false`; resolver 2 keeps `cargo build -p av-lockstep-shim`
+(what `build-shim.sh` runs) narrow, while workspace builds and the shim's own tests get `full`.
+`Cargo.lock` unchanged. **Proof** (a throwaway clone, `build-shim.sh`): un-narrowed `28dde7bf…`; plus
+a scratch `RunProducts` field `68083e5d…` (question 244 reproduced); narrowed S1 `b103a90e…`
+(unstripped `e649fe1f…`); narrowed plus the same scratch field: S1, byte for byte; a field inside
+the closure (`packet.proto`) moves it (`8e2278cb…`); S1 again at another mount and target path. The
+scratch commits were dropped with the clone. The manager's rebuild from the shared tree gave S1.
+
+### The shared cFS test helper (question 245 (7); `842e080`)
+
+`crates/av-kernel/tests/cfs_common/mod.rs` (the `drm_board_common` pattern) holds the loaders, the
+fixed-port registry push and its guards, the image gate and the truth helpers; no test's name,
+assertions, Docker order, lock scope or skip text changed. One latent difference went: the Renode
+copy ignored `AV_CFS_TEST_IMAGE` (unchanged when unset). The cFS test file passed 5 of 5 before and
+after with identical printed values; the Renode test passed with the rebuilt ELF; with the shared
+truth helper broken (qz dropped) the cFS test fails its asin/acos cross-check.
+
+### A defect the round found: every test registry leaked a volume (`bfe22d7`)
+
+`registry:2` declares `VOLUME /var/lib/registry`, and every guard removed the throwaway registry with
+`docker rm -f`, leaving one anonymous volume per registry (about 520 dangling on this host by this
+round). The registry guards in `cfs_common`, `drm_container.rs`, `av-lockstep`'s
+`docker_lifecycle.rs` and `tests/test_lockstep_ref.py`, and `prune_stale_test_resources`' sweep of
+labelled containers, now use `docker rm -f -v` (anonymous volumes only; named volumes untouched).
+**Proof:** the two-registry test 521 → 521 volumes; without `-v` 521 → 523; `docker_lifecycle`
+523 → 523. The pre-existing dangling volumes are left for their owner.
+
+### The cFS image re-pin (`a2e61e2`)
+
+`build-shim.sh` and `build-image.sh` at `21cd1a3`, 0 dirty files under the copied paths: image
+`sha256:e51b896d34ca0ceb0e4809453768b0524cf577ca5356256840c172d74f68d8e5` (was `a6bb91d4…`),
+runtime-content hash `sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199` (was
+`49ec7ef8…`). File by file: `/cfs/av-lockstep-shim` `28dde7bf…` → `b103a90e…`, `/cfs/av-lockstep-relay`
+new `3b72b96c…`, `/cfs/container-entrypoint.sh` `6cd72f11…` → `93dac11d…`; every `/cfs/cpu1` file
+byte-identical. The relay joins the runtime-content set (definition and both implementations).
+
+### Gate
+
+Final gate at `a2e61e2` (the code head). Every phase ran in sequence and was captured whole under
+`rounds/native-ct/gate/`, from 2026-10-17 11:52 to 12:45:
+
+| Phase | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto`; `buf lint proto` | rc 0, rc 0 (the shell policy allowed `buf` this round) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 167 binaries, 1,599 passed, 0 failed, 4 ignored (`cfs_container_restart` ran against the re-pinned `:local`) |
+| `cargo clippy --workspace --all-targets -- -D warnings`; the same for `av-kernel` and `av-run` with `--no-default-features` | clean, clean, clean |
+| the required-features lint's steps through `cargo-slot` (4 groups: `av-cdm full`, `av-kernel gmat`, `av-run gmat`, `av-jobs store-fixture`) | clean |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed |
+| `cargo-slot build -p av-edge-board --bins` | ok |
+| `cargo test -p av-kernel --no-default-features` | 752 passed, 0 failed |
+| `cargo test -p av-kernel` | 1,004 passed, 0 failed, 1 ignored. Among them: `drm_attitude_control_cfs` 5, `drm_two_spacecraft_cfs` 16, `drm_board_cfs_restart` 3. The Renode test skips visibly here (no Renode in this worktree) |
+| the Renode test, `AV_RENODE_TESTS=1`, ELF `de96907f…` | passed: 998 records on both sides, records-only `8e518964…8fd2` on both, 707 s |
+| the stand-in HIL test, `AV_HIL_STANDIN_TESTS=1`, ELF `de96907f…` | passed, 69 s (run (b): `[Step, PowerCycle, Reset, Step]`, 100 steps) |
+| standalone `web/js/**/*_check.mjs`, each with its own exit code | 25 exit 0. Four are argument-driven and are run with inputs by pytest: `command_panel`, `layers_stream`, `panels`, `timeline` |
+| `pytest -q -rs` under `cargo-slot --hold` | 1,095 passed, **12 failed**, 14 skipped |
+
+The twelve pytest failures are all recorded artifacts that this round's changes move. Each is the
+lead's to regenerate or re-pin at the merge:
+- **Rust SBOM epoch, 8 tests:** the six Rust components and their shared epoch (7) move from
+  2026-10-08T05:03:45Z to 2026-10-17T16:48:23Z; the cfs-image epoch (1) moves from
+  2026-10-09T21:03:57Z to 2026-10-17T16:51:46Z.
+- **cfs-image SBOM, 1 test:** stale after the re-pin.
+- **Heavy-track image provenance, 3 tests:** the checks for `av-edge-plugin`, `av-proposer` and
+  `av-tiles` fire, because `04d1813` (`crates/av-cdm`) and `21cd1a3` (`proto/altavista/v1`) touch their
+  copied paths since the recorded `21d57f15`.
+
+The 14 skips are opt-in gates (`AV_KIT_WITH_*`, `AV_SBOM_REBUILD`, `AV_CFS_RUN_REPRO_BUILD`). The
+`:local` cFS image is `e51b896d…` throughout, its recorded digest.
+
+
+### Decisions (numbered, for the lead to ratify)
+
+1. The ELF did not reproduce from the live mirror; task 4 was the round's first defect and ran first.
+2. Order: tasks 4, 5, 6 and 3 (phase A) in parallel on disjoint files; then 3 (phase B), 1, and 2
+   (phase A after 5, phase B after 1).
+3. The cFS apps are not changed this round (they would move the reproducible ELF and the boot
+   image pinned to it); task 1's telecommand goes to a native instance of the chaser.
+4. The two spacecraft start from different pointing errors, so a cross-wired pair cannot pass.
+5. The kernel labels every container it starts (`av.run_id`, `av.instance`); a test's `av.test`
+   marker is declared in its SoS, never read by the kernel from the environment.
+6. The edge service re-handshakes only when its power channel is declared to reboot the peer; HELLO
+   is re-sent at a declared interval up to a declared deadline; the relay drops datagrams while no
+   guest is connected.
+7. The relay is a second bin of `av-lockstep-shim`, so the shim's bytes do not move.
+8. The cFS image is re-pinned once, at the end, through `build-image.sh`, with its record in the
+   same commit; workers used separately built test-only tags.
+9. `command` and `port_endpoints` stay out of the container `settings_hash`, as before.
+10. The Bind `version` is not added to the port-traffic log, so a Docker-free replay still cannot
+    reproduce the container segment's `dynamics_hash`; adding it would move every container run's
+    `port_traffic_hash`.
+11. The apt fetch has no retries: a flaky snapshot.debian.org fails the build loudly (the lead's view).
+12. `av-cdm`'s feature is a default-on `full`, not a positive `lockstep`, so no other manifest changes.
+13. The manager reviewed every task in a plain clone (`/Users/probe/code/av-native-ct-review`, beside
+    `spoore`, not a git worktree; deleted at the end), because the shared tree can stop compiling
+    while a worker is mid-edit.
+14. `drm_container.rs` (its own `docker_cmd` and guards) and `drm_shared_run.rs` (its own
+    `repo_root`) still duplicate helpers; recorded, not changed.
+15. Colima is not changed (its grpc forwarder would restart the shared VM); the edge service runs
+    inside the Colima VM, standing in for the edge node.
+16. The shell policy began refusing `cmp` mid-round; comparisons were done with `shasum`, never by
+    wrapping `cmp`.
+17. The volume-leak fix is its own commit; volumes this round did not create are not pruned.
+18. Two ground stations, because `GroundStationModel` reads one `tm_in` with last-on-port (two
+    spacecraft on one port would silently drop one; recorded below).
+19. Two instances per spacecraft carry the telemetry, because `resolve_sensor_output` allows one
+    framed-out port per system; recorded, not generalised.
+20. `/cfs/av-lockstep-relay` joins the runtime-content set, because the image now ships and runs it.
+21. `board.rehandshake_timeout_ms` (0 = undeclared) is the kernel's declaration of a rebooting peer;
+    the `PowerCycle` call waits for the power-control and re-handshake budgets together.
+22. `target/debug/deps` was absent at the start (moved aside by the lead, question 236) and was not
+    touched.
+23. `docs/roadmap-status.md` is left to the lead.
+
+### Found, not fixed this round
+
+1. **`GroundStationModel` keeps only the last frame on its `tm_in` port** in a step (last-on-port), so
+   two spacecraft on one ground port would silently drop one's telemetry.
+2. **Native tests delete the heavy team's k3s pod containers if they outlive the lock:** those pods
+   carry `av.test=1`, and `prune_stale_test_resources` removes every container with that label.
+3. **The Linux `av-edge-board` build is not byte-reproducible** (libssl-dev and pkg-config unpinned
+   in the builder; two builds gave the same bytes, `071fcf20…`).
+4. **A real serial board could see several HELLOs** if its UART buffers during boot; the container
+   relay prevents it, a board has no such guard (recorded in `av-edge-board`'s README).
+5. **The container's Docker-free replay cannot reproduce its `dynamics_hash`** (decision 10).
+6. **About 520 dangling anonymous volumes** remain on the host from registries before `bfe22d7`.
+7. **Duplicated test helpers** in `drm_container.rs` and `drm_shared_run.rs` (decision 14).
