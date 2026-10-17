@@ -1368,6 +1368,32 @@ image report the same `dynamics_hash`. A Docker-free replay (`construct_replay_c
 reports a synthetic `ModelInfo`, since the port-traffic log carries neither the Bind `version`
 nor the image, so its container segment's `dynamics_hash` is not reproduced.
 
+**Labels on the containers the kernel starts (question 245 (5)).** `binding::container_labels` gives
+every container `materialize_container` starts two labels, `av.run_id` (`RunConfig.run_id`) and
+`av.instance` (the instance name), plus every `container.label.<key>` parameter the SoS declares
+(`ContainerSpec::docker_labels`, Docker path only, refused otherwise like `container.sysctl.*`; the
+two kernel keys cannot be declared). Before this the kernel passed no labels at all, so a container
+started during a killed test (no `Drop`) was invisible to `prune_stale_test_resources`. A test
+declares `container.label.av.test = "1"` on its container instances (declared, hashed configuration;
+the kernel never reads the marker from its environment) and the next run's pre-flight sweep removes
+what the killed one left; `tests/drm_two_spacecraft_cfs.rs::the_stale_resource_sweep_finds_and_
+removes_the_kernels_containers` runs that sweep while two kernel containers are live. Two instances
+of one system have different `av.instance` values, and nothing else in the `docker run` argv
+differs (no `--name`, ephemeral host ports): several containers of one image in one run needed no
+other change.
+
+**Two spacecraft, two containers (`tests/drm_two_spacecraft_cfs.rs`, `drms/demo_two_spacecraft.*`).**
+An RPO pair, each spacecraft's attitude loop closed through its own cFS container, a ground segment
+receiving both spacecraft's telemetry and a telecommand to one of them. The proofs (identical
+decoded port traffic per container across two separately started runs, per-container tracking of
+the native counterpart and the closed form, a Docker-free replay of both, telecommand routing,
+labels and cleanup, and the negative controls: cross-wired controllers, a changed input, a swapped
+replay log, a re-routed telecommand) are described in the test's module doc comment and the
+fixtures' headers. Each `container.seed_key` is set per instance (`chaser_controller`,
+`target_controller`) because two instances of one system would otherwise share one `Scenario.seeds`
+entry; the ADCS app draws no randomness, so sharing a key changes the configuration hash and not the
+port traffic (also tested).
+
 **No image is pushed anywhere** by this crate or its tests. Every test that needs to prove a
 *genuine* "pull by digest" (not a locally-cached tag silently reused) builds this repository's
 own `services/lockstep-ref/Dockerfile`, starts a throwaway `registry:2` container on loopback,

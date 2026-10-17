@@ -92,6 +92,14 @@
 //!   PORT/SENSOR fault's seed already use) supplying `LockstepBindRequest.seed`. Resolved by
 //!   `crate::drm::executor` (which has `Scenario` in scope), not here -- [`ContainerSpec`]
 //!   only carries the *name*; see [`DrmError::UnknownContainerSeed`].
+//! - `container.label.<key>` (string value, Docker image-lifecycle path only) -- an extra
+//!   `docker run --label <key>=<value>` on the container the kernel starts (question 245 (5)). The
+//!   kernel itself always labels what it starts with `av.run_id` (`RunConfig.run_id`) and
+//!   `av.instance` (the instance name), see [`container_labels`]; a DRM that must have its
+//!   containers swept by `av_lockstep::docker::prune_stale_test_resources` after a killed test
+//!   declares `container.label.av.test = "1"`. Declared configuration, hashed with the rest of the
+//!   `SosConfiguration`; the kernel never reads the test marker from its own environment. The two
+//!   kernel keys cannot be declared (`DrmError::InvalidBinding`).
 //!
 //! [`ContainerModel`] (this module) is the `av_dynamics::DynamicsModel` that actually speaks
 //! the protocol once bound: `state_dim() == 0` (a container-bound instance in this batch
@@ -1659,6 +1667,25 @@ pub(crate) struct MaterializedContainer {
     pub t0_tai_ns: i64,
 }
 
+/// The label keys the kernel sets on every container it starts; `container.label.<key>` cannot
+/// declare them.
+const KERNEL_CONTAINER_LABELS: [&str; 2] = ["av.run_id", "av.instance"];
+
+/// The `docker run --label` set of the container the kernel starts for `instance_name` in run
+/// `run_id` (question 245 (5)): `av.run_id` and `av.instance`, always, plus the SoS-declared
+/// `container.label.*` entries. Before this the kernel passed no labels, so a container started
+/// during a test that was killed (no `Drop`) carried nothing `prune_stale_test_resources` could
+/// find; with `container.label.av.test = "1"` declared by the test's SoS it does, and a human can
+/// tell two instances (and two runs) apart in `docker ps` regardless. Two instances of one system
+/// differ in `av.instance`, which is also what the instance-level `docker ps --filter
+/// label=av.instance=<name>` selects on.
+pub(crate) fn container_labels(spec: &ContainerSpec, run_id: &str, instance_name: &str) -> BTreeMap<String, String> {
+    let mut labels = spec.docker_labels.clone();
+    labels.insert("av.run_id".to_string(), run_id.to_string());
+    labels.insert("av.instance".to_string(), instance_name.to_string());
+    labels
+}
+
 /// Connect (over `spec.address`, or a freshly pulled-and-run Docker container's own loopback
 /// address -- see below), send `Bind`, and refuse (typed, never a silent partial bind) unless
 /// the response reports `lockstep_capable = true`. `seed` is the already-resolved value for
@@ -1712,7 +1739,7 @@ pub(crate) fn materialize_container(
         let digest = spec.image_digest.clone().unwrap_or_default();
         let mut env = BTreeMap::new();
         env.insert("IMAGE_DIGEST".to_string(), digest.clone());
-        let (managed, host_port) = ManagedContainer::pull_and_run(image, &digest, &spec.command, spec.control_port, &spec.port_endpoints, &env, &spec.docker_sysctls, &BTreeMap::new())
+        let (managed, host_port) = ManagedContainer::pull_and_run(image, &digest, &spec.command, spec.control_port, &spec.port_endpoints, &env, &spec.docker_sysctls, &container_labels(spec, run_id, instance_name))
             .map_err(|e| DrmError::ContainerDockerLifecycle { instance: instance_name.to_string(), detail: e.to_string() })?;
         (Some(managed), format!("127.0.0.1:{host_port}"))
     } else {
@@ -2271,6 +2298,10 @@ pub struct ContainerSpec {
     /// `av_lockstep::docker::ManagedContainer::pull_and_run`'s own doc comment for the exact
     /// error). Threaded straight to that function's `extra_sysctls` parameter.
     pub docker_sysctls: BTreeMap<String, String>,
+    /// Question 245 (5): `"container.label.<key>"` -> extra `docker run --label <key>=<value>`
+    /// for the Docker image-lifecycle path only, on top of the two the kernel always sets
+    /// ([`container_labels`]). Threaded to `pull_and_run`'s `extra_labels`.
+    pub docker_labels: BTreeMap<String, String>,
     /// Question 242 (hilprep-3a): `Some` iff this is a `BINDING_KIND_BOARD` instance, built by
     /// [`parse_board_spec`] from a `BoardBinding` and the `board.*` parameters. A board instance
     /// is a container classification carrying this marker (not a second classification variant)
@@ -2336,6 +2367,7 @@ impl Default for ContainerSpec {
             port_endpoints: BTreeMap::new(),
             control_port: 50070,
             docker_sysctls: BTreeMap::new(),
+            docker_labels: BTreeMap::new(),
             board: None,
         }
     }
@@ -3028,6 +3060,20 @@ fn parse_container_spec(context: &str, params: &BTreeMap<String, Parameter>, con
                 }
                 spec.docker_sysctls.insert(sysctl_name.to_string(), p.string_value.clone());
             }
+            // Question 245 (5): `"container.label.<key>"` -> `docker run --label <key>=<value>`
+            // (`ContainerSpec::docker_labels`). A string value, like `container.sysctl.*`. The two
+            // keys the kernel sets itself cannot be declared: a declared `av.run_id` would make the
+            // label lie about which run started the container.
+            _ if field.starts_with("label.") => {
+                let key = field.strip_prefix("label.").expect("just matched the \"label.\" prefix above");
+                if key.is_empty() {
+                    return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() });
+                }
+                if KERNEL_CONTAINER_LABELS.contains(&key) {
+                    return Err(DrmError::InvalidBinding { reason: format!("{context}: {name} declares a label the kernel sets itself on every container it starts ({KERNEL_CONTAINER_LABELS:?})") });
+                }
+                spec.docker_labels.insert(key.to_string(), p.string_value.clone());
+            }
             _ => return Err(DrmError::UnknownParameter { context: context.to_string(), name: name.clone() }),
         }
     }
@@ -3069,6 +3115,13 @@ fn parse_container_spec(context: &str, params: &BTreeMap<String, Parameter>, con
         if !spec.docker_sysctls.is_empty() {
             return Err(DrmError::InvalidBinding {
                 reason: format!("{context}: container.sysctl.* is set but ContainerBinding.image is not -- sysctls only apply to the Docker image-lifecycle path (container.address is an already-running process; docker run is never invoked for it)"),
+            });
+        }
+        // Question 245 (5): the same for `container.label.*` -- `docker run --label` only exists on
+        // the image-lifecycle path.
+        if !spec.docker_labels.is_empty() {
+            return Err(DrmError::InvalidBinding {
+                reason: format!("{context}: container.label.* is set but ContainerBinding.image is not -- labels only apply to the Docker image-lifecycle path (container.address is an already-running process; docker run is never invoked for it)"),
             });
         }
     }
@@ -4703,6 +4756,56 @@ mod tests {
             params.push(param("board.step_timeout_ms", value));
             classify_board(Some(good_board()), params).expect("the bounds are inclusive");
         }
+    }
+
+    // ----------------------------------------------------------------------------------
+    // Question 245 (5): container labels.
+    // ----------------------------------------------------------------------------------
+
+    fn docker_binding() -> ContainerBinding {
+        ContainerBinding { image: "127.0.0.1:19031/img".to_string(), image_digest: "sha256:aa".to_string(), ..Default::default() }
+    }
+    fn container_params(extra: &[(&str, &str)]) -> BTreeMap<String, Parameter> {
+        let mut params: BTreeMap<String, Parameter> = BTreeMap::new();
+        for (n, v) in [("container.seed_key", "k")].iter().chain(extra.iter()) {
+            params.insert(n.to_string(), sparam(n, v));
+        }
+        params
+    }
+
+    #[test]
+    fn container_label_parameters_are_parsed_and_the_kernel_adds_its_own_two() {
+        let spec = parse_container_spec("ctx", &container_params(&[("container.label.av.test", "1"), ("container.label.team", "native")]), Some(&docker_binding())).expect("labels parse on the Docker path");
+        assert_eq!(spec.docker_labels, BTreeMap::from([("av.test".to_string(), "1".to_string()), ("team".to_string(), "native".to_string())]));
+        let labels = container_labels(&spec, "run-7", "chaser_controller");
+        assert_eq!(
+            labels,
+            BTreeMap::from([("av.instance".to_string(), "chaser_controller".to_string()), ("av.run_id".to_string(), "run-7".to_string()), ("av.test".to_string(), "1".to_string()), ("team".to_string(), "native".to_string())]),
+            "declared labels plus av.run_id and av.instance"
+        );
+        // Two instances of one system differ in av.instance only.
+        let other = container_labels(&spec, "run-7", "target_controller");
+        let differing: Vec<_> = labels.iter().filter(|(k, v)| other.get(*k) != Some(*v)).map(|(k, _)| k.as_str()).collect();
+        assert_eq!(differing, vec!["av.instance"]);
+        // With nothing declared the kernel still labels.
+        let bare = parse_container_spec("ctx", &container_params(&[]), Some(&docker_binding())).unwrap();
+        assert_eq!(container_labels(&bare, "r", "i").keys().map(String::as_str).collect::<Vec<_>>(), vec!["av.instance", "av.run_id"]);
+    }
+
+    #[test]
+    fn a_declared_label_cannot_take_a_key_the_kernel_sets() {
+        for key in ["av.run_id", "av.instance"] {
+            let err = parse_container_spec("ctx", &container_params(&[(&format!("container.label.{key}"), "x")]), Some(&docker_binding())).unwrap_err();
+            assert!(matches!(err, DrmError::InvalidBinding { ref reason } if reason.contains(key)), "{key}: {err:?}");
+        }
+        let err = parse_container_spec("ctx", &container_params(&[("container.label.", "x")]), Some(&docker_binding())).unwrap_err();
+        assert!(matches!(err, DrmError::UnknownParameter { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn labels_without_the_docker_path_are_refused_like_sysctls() {
+        let err = parse_container_spec("ctx", &container_params(&[("container.address", "127.0.0.1:1"), ("container.label.av.test", "1")]), None).unwrap_err();
+        assert!(matches!(err, DrmError::InvalidBinding { ref reason } if reason.contains("container.label.*")), "{err:?}");
     }
 
     #[test]

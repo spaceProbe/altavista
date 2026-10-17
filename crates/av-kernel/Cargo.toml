@@ -181,6 +181,9 @@ required-features = ["gmat"]
 name = "drm_shared_run"
 required-features = ["gmat"]
 [[test]]
+name = "drm_two_spacecraft_cfs"
+required-features = ["gmat"]
+[[test]]
 name = "dropped_messages"
 required-features = ["gmat"]
 [[test]]
