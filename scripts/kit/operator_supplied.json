@@ -81,6 +81,22 @@
       "version": "RELEASE.2025-04-22T22-12-26Z",
       "why": "Network service (the heavy track's object store); outside the kit unless a site that deploys it builds the kit with --declare-operator-supplied minio"
     },
+    "numpy-wheel-linux-aarch64": {
+      "dist": "numpy",
+      "filename": "numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+      "item": 7,
+      "kind": "python-wheel",
+      "libraries": ["libgfortran"],
+      "licences": "libgfortran (numpy.libs/libgfortran-e1b7dfc8-d8198c01.so.5.0.0) is GPL-3.0-or-later WITH GCC-exception-3.1; the wheel also bundles OpenBLAS (numpy.libs/libscipy_openblas64_-f552eb69.so), BSD-3-Clause AND BSD-3-Clause-Open-MPI, and numpy itself is BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "reference": "PyPI, numpy 2.5.3, file numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl (https://pypi.org/project/numpy/2.5.3/#files); scripts/kit/save_operator_wheels.py downloads exactly this file",
+      "sha256": "sha256:c76d5dde9f445058f83d0c02af00557a4db91de9a9a57c0df87d1535001d654b",
+      "verification": {
+        "method": "sha256 of <operator-wheels DIR>/<filename> equals sha256; the verified file is copied under the target and pip installs the copy by path",
+        "step": "files"
+      },
+      "version": "2.5.3",
+      "why": "The kit redistributes no GPL or LGPL code. numpy's linux/aarch64 wheel bundles libgfortran, GPL-3.0 code under the GCC Runtime Library Exception; the exception frees numpy as a combined work, not the library file. So the kit does not carry this wheel (KIT_MANIFEST wheels.operator_supplied) and the installer requires the operator's copy (--operator-wheels)"
+    },
     "postgis": {
       "digest": "sha256:f8a700accce9a1fb24e14b73a3abf8e90439ce8f192c57b8cb93cc650694e8dd",
       "item": 6,

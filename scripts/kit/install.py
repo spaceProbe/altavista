@@ -90,6 +90,23 @@ different is a typed refusal (exit 2), after the lines up to and including it we
 `install.sh --check-operator-supplied <kit> [--gmat-root PATH --gmat-platform KEY]` runs just this
 part (the kit's own verification, then the list) and installs nothing.
 
+# An operator-supplied wheel (question 250(a), wheel libraries)
+
+The wheel step inventories the native libraries every wheel bundles (`wheel_libs.py`; the inventory is in
+`KIT_MANIFEST.wheels.fetched[*].bundled_libraries`). A wheel that bundles a library under a GPL-family licence
+(numpy's x86_64 wheels bundle `libquadmath`; its linux/aarch64 wheel does not) is not carried: it is listed
+in `KIT_MANIFEST.wheels.operator_supplied` with its filename and sha256, and the pins file has a
+`python-wheel` component for it. Such a kit needs the operator's copy:
+
+    <kit>/installer/install.sh <kit> <target> --operator-wheels DIR
+
+`DIR/<filename>` must have the pinned sha256 (`operator_check.verify_python_wheel`). The verified file is
+COPIED to `<target>/operator-wheels/` and the copy re-hashed, and pip installs from that copy by exact path
+alongside `--find-links <kit>/wheels`: pip is never given the operator's directory as a place to search,
+so no other file in it (another version of the same package, a different package) can be picked up, and a
+file replaced between the check and the install is caught. A kit with no operator-supplied wheel needs no
+option and ignores one (`INSTALL_RECORD.installed.operator_wheels` says so).
+
 # Why this is a separate module from install.sh
 
 Exactly the split scripts/kit/manifest.py's own top doc argues for between the manifest format
@@ -173,6 +190,15 @@ it").
    file lacks (`gmat-pin-malformed`, `base-pin-missing`) or declares a component that cannot be declared
    (`declared-component-refused`) refuse the same way.
 
+8. **(question 250(a), wheel libraries)** a wheel of the viewer's closure bundles a GPL-family library, so the
+   kit does not carry it (`KIT_MANIFEST.wheels.operator_supplied`) and the operator's copy is not what its
+   pin says, each with a `wheel-*` code: `wheel-dir-missing` (no `--operator-wheels`; names the file, its
+   pinned sha256 and where it comes from), `wheel-dir-not-a-directory`, `wheel-missing` (lists the wheels
+   found), `wheel-unreadable`, `wheel-hash-differs` (expected and found sha256), `wheel-kit-entry-differs`
+   (the kit was built against another pin than this installer carries), `wheel-pin-missing`. Also refused:
+   a `wheels` section without the bundled-library inventory (a kit built before it), and a kit that
+   carries a wheel whose inventory shows a GPL-family library. See "An operator-supplied wheel", above.
+
 Every refusal exits 2 and prints one clearly-labelled line to stderr naming exactly what was
 wrong -- never a bare non-zero exit with no explanation (this task's own "an exit code is not
 evidence" rule applies just as much to a REFUSAL as to a success).
@@ -218,6 +244,12 @@ IMAGE_STEP_FLAGS = ("--build-images", "--probe-offline-build")
 #: The flag that verifies the operator-supplied components this step can reach and prints the list,
 #: without installing (question 250(a), task 3).
 CHECK_FLAG = "--check-operator-supplied"
+
+OPERATOR_WHEELS_HELP = (
+    "a directory holding the wheels this kit does not carry because they bundle a GPL-family library "
+    "(KIT_MANIFEST wheels.operator_supplied; a python-wheel component of the pins file): <DIR>/<filename> must have "
+    "the pinned sha256. Needed only by a kit that lists such a wheel"
+)
 
 #: `KIT_MANIFEST` top-level keys this installer's own understanding of `kit_format` 3 requires --
 #: exactly `manifest.build_manifest`'s own parameter list (that function is this format's one
@@ -321,7 +353,30 @@ def _check_required_wheels(doc: dict) -> None:
             "--with-wheels, so it carries no installable Python packages at all; the viewer "
             "cannot be installed from it. Rebuild the kit with --with-wheels."
         )
-    fetched_names = {_normalize_dist_name(f["name"]) for f in wheels.get("fetched", [])}
+    operator = wheels.get("operator_supplied")
+    if not isinstance(operator, list):
+        raise InstallRefused(
+            "KIT_MANIFEST's wheels section has no operator_supplied list -- this kit was built before the "
+            "wheel step inventoried the native libraries its wheels bundle (question 250(a)), so nothing says "
+            "whether a wheel it carries bundles a GPL-family library. Rebuild the kit with --with-wheels."
+        )
+    carried = wheels.get("fetched", [])
+    for entry in [*carried, *operator]:
+        if not isinstance(entry.get("bundled_libraries"), list):
+            raise InstallRefused(
+                f"KIT_MANIFEST's wheels entry for {entry.get('filename')!r} has no bundled_libraries inventory -- "
+                f"a kit built before the wheel step inventoried bundled native libraries (question 250(a)). "
+                f"Rebuild the kit with --with-wheels."
+            )
+    for entry in carried:
+        gpl = sorted({lib.get("library") for lib in entry["bundled_libraries"] if lib.get("gpl_family")})
+        if gpl:
+            raise InstallRefused(
+                f"the kit carries {entry.get('filename')!r}, which bundles {gpl} under a GPL-family licence: such a wheel "
+                f"is operator-supplied and is listed in wheels.operator_supplied, never carried "
+                f"(docs/kit-operator-supplied.md). This kit was not built by this repository's builder."
+            )
+    fetched_names = {_normalize_dist_name(f["name"]) for f in [*carried, *operator]}
     missing = [
         name for name in _REQUIRED_WHEEL_DIST_NAMES
         if _normalize_dist_name(name) not in fetched_names
@@ -414,13 +469,15 @@ def _make_binaries_executable(installed_kit_dir: Path) -> list[str]:
     return made_executable
 
 
-def _install_wheels_into_venv(kit_dir: Path, target_dir: Path) -> dict:
+def _install_wheels_into_venv(kit_dir: Path, target_dir: Path, extra_wheels: "list[Path] | tuple[Path, ...]" = ()) -> dict:
     """`python -m venv <target>/venv` (offline: ensurepip's own wheels ship inside the
     interpreter) then `<target>/venv/bin/pip install --no-index --find-links <kit>/wheels
     altavista` -- installs `altavista` and, transitively, every real runtime dependency
     `build_kit.viewer_runtime_closure` walked and the kit carries a wheel for (`--no-index` means
     pip can resolve ONLY from `--find-links`, never a real index, so an incomplete closure is a
-    hard, visible `pip` failure here -- never a silent partial install)."""
+    hard, visible `pip` failure here -- never a silent partial install). `extra_wheels` are the verified
+    operator-supplied wheels (module doc, "An operator-supplied wheel"), staged under the target: each is
+    given to pip by its exact path, so pip resolves `numpy` (say) from it and from nothing else."""
     venv_dir = target_dir / "venv"
     venv_result = subprocess.run(
         [sys.executable, "-m", "venv", str(venv_dir)],
@@ -450,7 +507,7 @@ def _install_wheels_into_venv(kit_dir: Path, target_dir: Path) -> dict:
     install_result = subprocess.run(
         [
             str(venv_pip), "install", "--no-index", "--find-links", str(wheels_dir),
-            "altavista",
+            "altavista", *[str(w) for w in extra_wheels],
         ],
         capture_output=True, text=True, timeout=180,
     )
@@ -487,6 +544,14 @@ def _tree_verifier(doc: dict, gmat_root: "str | None", gmat_platform: "str | Non
         return operator_check.verify_gmat_tree(
             pin_id, pin, requirement, entry=doc["packs"].get(pin["pack"]), root=gmat_root, platform=gmat_platform,
         )
+    return verify
+
+
+def _wheel_verifier(doc: dict, operator_wheels: "str | None"):
+    """The `python-wheel` verifier `operator_check.verify_all` takes: the operator's copy of a wheel the kit does not carry."""
+    def verify(pin_id: str, pin: dict, requirement: "operator_check.Requirement") -> "operator_check.Verification":
+        entry = next((e for e in operator_check.kit_operator_wheels(doc) if e.get("component") == pin_id), None)
+        return operator_check.verify_python_wheel(pin_id, pin, requirement, entry=entry, directory=operator_wheels)
     return verify
 
 
@@ -528,10 +593,11 @@ def verify_operator_gmat(
 def verify_operator_supplied(
     doc: dict, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
+    operator_wheels: "str | None" = None,
 ) -> "list[operator_check.Verification]":
     """The files install's half of question 250(a), task 3: every component of the pins file, in item
-    order, printed through `out` one line each; the trees this step can reach (GMAT) are verified, the
-    container images are listed as the host-side image step's. Returns the results; raises
+    order, printed through `out` one line each; the trees (GMAT) and the operator-supplied wheels this step can
+    reach are verified, the container images are listed as the host-side image step's. Returns the results; raises
     `OperatorSuppliedRefused` (code and message from the refused result) at the first required
     component that is missing or different, after printing the lines up to and including it."""
     pins_path = pins_file or kit_manifest.PINS_FILE
@@ -547,7 +613,11 @@ def verify_operator_supplied(
     try:
         return operator_check.verify_all(
             operator_check.STEP_FILES, doc, pins,
-            verifiers={operator_check.KIND_TREE: _tree_verifier(doc, gmat_root, gmat_platform)}, out=out,
+            verifiers={
+                operator_check.KIND_TREE: _tree_verifier(doc, gmat_root, gmat_platform),
+                operator_check.KIND_WHEEL: _wheel_verifier(doc, operator_wheels),
+            },
+            out=out,
         )
     except operator_check.ComponentRefused as e:
         raise OperatorSuppliedRefused(e.result.code, e.result.reason) from e
@@ -567,6 +637,34 @@ def _operator_supplied_record(results: "list[operator_check.Verification]", doc:
             "IMAGE_BUILD_RECORD; this install holds no Docker socket and does not read that record"
         ),
     }
+
+
+def _stage_operator_wheels(results: "list[operator_check.Verification]", target_dir: Path) -> list[dict]:
+    """Copies each verified operator-supplied wheel to `<target>/operator-wheels/` and re-hashes the copy:
+    pip installs from the copy, so what is installed is what was hashed (module doc, "An operator-supplied
+    wheel"). Returns `INSTALL_RECORD.installed.operator_wheels`."""
+    staged: list[dict] = []
+    verified = [r for r in results if r.kind == operator_check.KIND_WHEEL and r.verified]
+    if not verified:
+        return staged
+    dest_dir = target_dir / "operator-wheels"
+    dest_dir.mkdir()
+    for r in sorted(verified, key=lambda r: r.component):
+        source, filename, sha256 = Path(r.detail["path"]), r.detail["filename"], r.detail["sha256"]
+        dest = dest_dir / filename
+        shutil.copyfile(source, dest)
+        copied = operator_check.sha256_of_file(dest)
+        if copied != sha256:
+            raise OperatorSuppliedRefused(
+                "wheel-changed-during-install",
+                f"{source} had sha256:{sha256} when it was verified and its copy has sha256:{copied}: the operator's "
+                f"file changed during the install. Nothing was installed from it.",
+            )
+        staged.append({
+            "component": r.component, "filename": filename, "sha256": sha256,
+            "operator_path": str(source), "installed_from": f"operator-wheels/{filename}",
+        })
+    return staged
 
 
 def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
@@ -595,6 +693,7 @@ def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
 def check_operator_supplied(
     kit_dir: Path, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
+    operator_wheels: "str | None" = None,
 ) -> "list[operator_check.Verification]":
     """`install.sh --check-operator-supplied`: verifies the kit, then the operator-supplied components
     it needs (this step's share of them), printing the list through `out`, and installs nothing. Raises
@@ -604,12 +703,14 @@ def check_operator_supplied(
     _check_required_sections(doc)
     return verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
+        operator_wheels=operator_wheels,
     )
 
 
 def install(
     kit_dir: Path, target_dir: Path, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
+    operator_wheels: "str | None" = None,
 ) -> dict:
     """Runs the whole install: verify, refuse-checks (every operator-supplied component the kit needs
     that this step can reach, GMAT today), copy, chmod, pip install, INSTALL_RECORD.
@@ -629,12 +730,19 @@ def install(
     # Question 250(a), tasks 2 and 3: before the target directory exists, so a refusal leaves nothing behind.
     operator_results = verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
+        operator_wheels=operator_wheels,
     )
     _check_target_dir(target_dir)
 
+    operator_wheels_staged = _stage_operator_wheels(operator_results, target_dir)
     installed_kit_dir = _copy_kit_tree(kit_dir, target_dir)
     binaries_made_executable = _make_binaries_executable(installed_kit_dir)
-    wheels_info = _install_wheels_into_venv(kit_dir, target_dir)
+    if operator_wheels_staged:
+        wheels_info = _install_wheels_into_venv(
+            kit_dir, target_dir, [target_dir / w["installed_from"] for w in operator_wheels_staged],
+        )
+    else:
+        wheels_info = _install_wheels_into_venv(kit_dir, target_dir)
 
     # (round 3, question 217(b)) No separate "viewer_assets" entry any more -- task 3c's version
     # named `kit/packs/web`/`kit/packs/profiles` here because those were real, separate paths a
@@ -657,6 +765,8 @@ def install(
             "packs": sorted(n for n, e in doc["packs"].items() if e.get("copied")),
             "packs_descriptor_only": sorted(n for n, e in doc["packs"].items() if not e.get("copied")),
             "wheels": wheels_info,
+            # The wheels the kit does not carry (a GPL-family library inside) and the operator supplied, as installed.
+            "operator_wheels": operator_wheels_staged,
             "vendor_collected": doc["vendor"]["collected"],
             "sboms": sorted(doc["sboms"].keys()),
             "runs": sorted(doc["runs"].keys()),
@@ -686,6 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="the platform of that GMAT, <os>-<uname -m> (e.g. macos-arm64); required with --gmat-root and never "
              "guessed from this host, which may be a Linux container over a macOS tree",
     )
+    p.add_argument("--operator-wheels", metavar="DIR", default=None, help=OPERATOR_WHEELS_HELP)
     return p
 
 
@@ -702,6 +813,7 @@ def build_check_parser() -> argparse.ArgumentParser:
     p.add_argument("kit_dir", type=Path, help="an existing kit directory (KIT_MANIFEST + content)")
     p.add_argument("--gmat-root", metavar="PATH", default=None, help="the operator's unpacked GMAT R2026a")
     p.add_argument("--gmat-platform", metavar="KEY", default=None, help="the platform of that GMAT, <os>-<uname -m>")
+    p.add_argument("--operator-wheels", metavar="DIR", default=None, help=OPERATOR_WHEELS_HELP)
     return p
 
 
@@ -712,7 +824,10 @@ def main(argv: "list[str] | None" = None) -> int:
     if argv and argv[0] == CHECK_FLAG:
         args = build_check_parser().parse_args(argv[1:])
         try:
-            check_operator_supplied(args.kit_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform, out=_print_line)
+            check_operator_supplied(
+                args.kit_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform, out=_print_line,
+                operator_wheels=args.operator_wheels,
+            )
         except InstallRefused as e:
             print(f"scripts/kit/install.py {CHECK_FLAG}: REFUSED -- {e}", file=sys.stderr)
             return 2
@@ -721,6 +836,7 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         record = install(
             args.kit_dir, args.target_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform, out=_print_line,
+            operator_wheels=args.operator_wheels,
         )
     except InstallRefused as e:
         print(f"scripts/kit/install.py: REFUSED -- {e}", file=sys.stderr)
@@ -732,6 +848,8 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"GMAT at {gmat['root']} verified against the {gmat['platform']} pin (not copied)")
     else:
         print("GMAT not needed by this kit")
+    for w in record["installed"]["operator_wheels"]:
+        print(f"operator-supplied wheel {w['filename']} (sha256:{w['sha256'][:12]}…) verified and installed from {w['installed_from']}")
     print(f"wrote {args.target_dir / 'INSTALL_RECORD'}")
     return 0
 

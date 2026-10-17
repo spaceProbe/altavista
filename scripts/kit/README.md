@@ -98,7 +98,10 @@ Flags:
   container, NOT this macOS host's own platform), into `<kit>/wheels/`, plus a wheel of this
   repository's own `altavista` package (`pip wheel .`, since the viewer server is `python -m
   altavista`). **This step always uses the network**, at kit-build time only
-  (question 154) -- never triggered by any test without its own opt-in.
+  (question 154) -- never triggered by any test without its own opt-in. **Question 250(a)**: every
+  wheel it fetches is opened and the native libraries it bundles are inventoried into
+  `KIT_MANIFEST.wheels.fetched[*].bundled_libraries`, each with sha256, size, licence and the line
+  range of the wheel's own licence text that states it -- see "Native libraries inside wheels" below.
 - `--with-binaries` -- **round 2**, gated. Cross-builds `av-ingest-server` (crate `av-ingest`)
   and `av-command` (crate `av-command`) for Linux, the identical bind-mounted `docker run` idiom
   `tests/test_edge_plugin_container.py::_cross_build_ingest_server_binary` establishes, into
@@ -398,6 +401,51 @@ reports the pinned digest as its `Id` or in `RepoDigests`; absent or different i
 a declared service image, each naming reference and digest. Nothing is pulled or loaded. Each component's
 check is one function returning a typed result (`operator_check.Verification`: found, expected,
 verified, reason, code), and the step turns an unverified result into its own refusal.
+
+## Native libraries inside wheels (question 250(a))
+
+`--with-wheels` opens every wheel it fetches (`wheel_libs.py`; its module doc is the specification) and
+lists the native libraries inside it in `KIT_MANIFEST.wheels.fetched[*].bundled_libraries`: every file under a
+`<name>.libs/` directory (the auditwheel convention) and every other shared object that is not the
+package's own extension module (a name of the form Python gives an extension module AND a `PyInit_<module>`
+symbol in its bytes; those are listed apart, in `extension_modules`). Each entry has `path`, `sha256`, `size`,
+`library` (the base name: `libgfortran`, `libscipy_openblas64_`), `spdx`, `gpl_family`, `upstream` and `evidence`.
+
+The licence of a library is never guessed: it comes from the committed `bundled_libs.json` (base name to SPDX
+expression and upstream) and the build refuses unless the wheel's own licence files confirm it. numpy writes
+`Name:` / `Files:` / `License:` stanzas for its bundled libraries into `numpy-*.dist-info/licenses/LICENSE.txt`;
+a stanza whose `Files:` pattern matches the library, with exactly the table's `License:` terms, is the
+evidence, and its file and line range are recorded. A library not in the table (`unknown-library`), a text that
+does not name it (`licence-text-silent`) and a text that disagrees with the table (`licence-mismatch`) are
+refused, naming the wheel and the library. Statically linked code (pydantic_core, uvloop, ...) has no separate
+file and is not inventoried.
+
+The kit redistributes no GPL or LGPL code, so a library under a GPL-family licence moves its wheel to the
+operator-supplied list. GPL-family means a term every OR-alternative of which is a `GPL-*`, `LGPL-*` or
+`AGPL-*` licence, with or without a `WITH` exception: `GPL-3.0-or-later WITH GCC-exception-3.1` (libgfortran)
+and `LGPL-2.1-or-later` (libquadmath) are; the GCC Runtime Library Exception frees numpy as a combined work,
+not the library file. `GPL-2.0-only OR MIT` is not (the MIT alternative is a way to take the library without
+the GPL), so such a library stays carried. The kit does not carry the
+wheel, `KIT_MANIFEST.wheels.operator_supplied` records it by filename and sha256, and the builder refuses
+unless `operator_supplied.json` has a `python-wheel` component for exactly that file (`dist`, `version`,
+`filename`, `sha256`, `reference`). The installer then needs the operator's copy:
+
+    <kit>/installer/install.sh <kit> <target> --operator-wheels DIR
+
+`DIR/<filename>` must have the pinned sha256 (`wheel-dir-missing`, `wheel-dir-not-a-directory`,
+`wheel-missing`, `wheel-hash-differs`, ... are typed refusals, before the target directory exists). The
+verified file is copied under `<target>/operator-wheels/`, the copy is re-hashed, and pip installs it by exact
+path next to `--find-links <kit>/wheels`, so no other file in the operator's directory can be picked up.
+`--check-operator-supplied` takes the same option. In today's linux/aarch64/cp313 closure one wheel is
+affected: numpy 2.5.3's, which bundles `libgfortran` (and OpenBLAS, BSD). The pins file has its
+`python-wheel` component `numpy-wheel-linux-aarch64` (item 7), a `--with-wheels` kit lists the wheel in
+`wheels.operator_supplied` and carries none, and the installer needs `--operator-wheels DIR`. An x86_64 numpy
+wheel also bundles `libquadmath` (LGPL-2.1-or-later), which is in the table for that case.
+
+The connected-machine helper that makes DIR is `scripts/kit/save_operator_wheels.py --out DIR`: for every
+`python-wheel` pin it runs `pip download` of exactly that distribution, version and platform tags (a network
+use, once, default headers), refuses unless the file has the pinned name and sha256, and writes `DIR/SHA256SUMS`.
+It is the wheel counterpart of `save_base_images.py`.
 
 ## The recorded kernel run
 

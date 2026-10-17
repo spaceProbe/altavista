@@ -3,15 +3,17 @@ component the kit needs, and prints what it found.
 
 # What this is
 
-`docs/kit-operator-supplied.md` lists six components an operator downloads themselves, and
+`docs/kit-operator-supplied.md` lists the components an operator downloads themselves (six, plus the
+numpy wheel, pin item 7, until task 6 adds its row), and
 `scripts/kit/operator_supplied.json` pins each one (the pins file, carried in every kit as
 `installer/operator_supplied.json`). This module is the one place that decides, for a kit,
 
-1. which of the six the kit NEEDS (`requirement_for`, derived from `KIT_MANIFEST` and nothing else),
+1. which of them the kit NEEDS (`requirement_for`, derived from `KIT_MANIFEST` and nothing else),
 2. what "verified" means for each kind (`verify_image`: a container image by digest; `verify_gmat_tree`:
-   a tree by descriptor), each a function returning a typed `Verification` (found, expected, verified,
-   reason, code) and never raising for a component that is merely absent or different, and
-3. what is printed (`render_line`): one line per component in the pins file, always all six.
+   a tree by descriptor; `verify_python_wheel`: a wheel file by sha256), each a function returning a typed
+   `Verification` (found, expected, verified, reason, code) and never raising for a component that is
+   merely absent or different, and
+3. what is printed (`render_line`): one line per component in the pins file, always all of them (seven today).
 
 It imports the standard library and `manifest` only, so it ships inside every kit's `installer/`
 (`build_kit.INSTALLER_SOURCE_FILES`) and runs on the enclave host and on the Docker host alike.
@@ -23,9 +25,17 @@ It imports the standard library and `manifest` only, so it ships inside every ki
 | `container-base-image` | an image listed in the pin's `base_of` is carried (`images.<c>.collected`) |
 | `data-tree` (GMAT) | `packs.<pin.pack>` is present |
 | `container-image` (MinIO, PostGIS, ClickHouse) | the pin's id is in `operator_supplied_declared`, which `build_kit.py --declare-operator-supplied NAME` fills (default: empty) |
+| `python-wheel` | an entry of `wheels.operator_supplied` names the pin's id as its `component`: the wheel step found a bundled GPL-family library in that wheel (`wheel_libs.py`) and did not carry the wheel |
 
 A service image that is not declared is outside the kit and is listed as such, not verified. A pin
 with a `held` entry (ClickHouse, question 247) cannot be declared at all: the builder refuses it.
+
+A `python-wheel` pin is `{dist, version, filename, sha256, reference}`; the operator downloads that exact
+file and the files install (`--operator-wheels DIR`) accepts it only when the sha256 of `DIR/<filename>`
+is the pin's. Today's pins file has one, `numpy-wheel-linux-aarch64` (item 7): numpy's linux/aarch64 wheel
+bundles libgfortran, GPL-3.0-or-later WITH GCC-exception-3.1, and the kit redistributes no GPL or LGPL code,
+so a `--with-wheels` kit lists that wheel in `KIT_MANIFEST.wheels.operator_supplied` and does not carry it.
+`save_operator_wheels.py` is the connected-machine helper that downloads exactly the pinned file.
 
 # Two steps, one list
 
@@ -59,6 +69,7 @@ holds them in full.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -86,8 +97,9 @@ STEP_RECORDS = {
 KIND_BASE = "container-base-image"
 KIND_IMAGE = "container-image"
 KIND_TREE = "data-tree"
+KIND_WHEEL = "python-wheel"
 #: Which step verifies each kind of component.
-STEP_OF_KIND = {KIND_BASE: STEP_IMAGES, KIND_IMAGE: STEP_IMAGES, KIND_TREE: STEP_FILES}
+STEP_OF_KIND = {KIND_BASE: STEP_IMAGES, KIND_IMAGE: STEP_IMAGES, KIND_TREE: STEP_FILES, KIND_WHEEL: STEP_FILES}
 
 VERIFIED = "verified"
 REFUSED = "refused"
@@ -207,12 +219,37 @@ def pins_problems(pins: object) -> list[str]:
             held = pin.get("held")
             if held is not None and not (isinstance(held, dict) and isinstance(held.get("question"), int) and held.get("summary")):
                 problems.append(f"{cid}.held: must be {{question: int, summary: str}}")
+        elif kind == KIND_WHEEL:
+            for key in ("dist", "version", "reference"):
+                if not isinstance(pin.get(key), str) or not pin[key].strip():
+                    problems.append(f"{cid}.{key}: missing or empty")
+            filename, digest = pin.get("filename"), pin.get("sha256")
+            if not isinstance(filename, str) or not filename.endswith(".whl") or "/" in filename or "\\" in filename or filename.startswith("."):
+                problems.append(f"{cid}.filename: {filename!r} is not a bare wheel file name")
+            if not _is_digest(digest):
+                problems.append(f"{cid}.sha256: {digest!r} is not sha256:<64 hex>")
         else:
             if not isinstance(pin.get("pack"), str):
                 problems.append(f"{cid}.pack: missing")
             problems += [f"{cid}.{p}" for p in kit_manifest.pin_problems(pin.get("platforms"))]
             problems += [f"{cid}.{p}" for p in kit_manifest.scope_problems(pin.get("scope"))]
     return problems
+
+
+def wheel_pin_for(pins: Mapping[str, dict], filename: str) -> Optional[tuple[str, dict]]:
+    """`(component id, pin)` of the `python-wheel` pin for the wheel file `filename`, or None. The
+    builder's lookup, when the wheel step finds a GPL-family library in a wheel."""
+    for cid, pin in sorted(pins.items()):
+        if pin.get("kind") == KIND_WHEEL and pin.get("filename") == filename:
+            return cid, pin
+    return None
+
+
+def kit_operator_wheels(doc: dict) -> list[dict]:
+    """The `wheels.operator_supplied` entries of a parsed `KIT_MANIFEST` (empty when there are none or the
+    section predates them -- `install._check_required_wheels` refuses that case for a collected `wheels`)."""
+    entries = (doc.get("wheels") or {}).get("operator_supplied") or []
+    return [e for e in entries if isinstance(e, dict)]
 
 
 def declaration_problems(names: list[str], pins: Mapping[str, dict]) -> list[str]:
@@ -264,6 +301,10 @@ def requirement_for(pin_id: str, pin: dict, doc: dict, *, images: Optional[set] 
         if pack in (doc.get("packs") or {}):
             return Requirement(True, f"required (packs.{pack})")
         return Requirement(False, f"not required (the kit has no packs.{pack})")
+    if kind == KIND_WHEEL:
+        if any(e.get("component") == pin_id for e in kit_operator_wheels(doc)):
+            return Requirement(True, f"required (wheels.operator_supplied: {pin['filename']})")
+        return Requirement(False, "not required (no wheel of the kit bundles a GPL-family library)")
     declared = doc.get("operator_supplied_declared") or []
     if pin_id in declared:
         return Requirement(True, f"required (declared at build time: --declare-operator-supplied {pin_id})")
@@ -284,6 +325,15 @@ def _kit_pin_problems(doc: dict, pins: Mapping[str, dict], images: Optional[set]
         problems = declaration_problems([name], pins)
         if problems:
             return ("declared-component-refused", name, f"KIT_MANIFEST declares operator-supplied {problems[0]}")
+    for entry in kit_operator_wheels(doc):
+        cid = entry.get("component")
+        pin = pins.get(cid) if isinstance(cid, str) else None
+        if pin is None or pin.get("kind") != KIND_WHEEL:
+            return (
+                "wheel-pin-missing", str(cid),
+                f"KIT_MANIFEST's wheels.operator_supplied names {entry.get('filename')!r} as the operator-supplied "
+                f"component {cid!r}, but the installer's pins file has no python-wheel component of that id",
+            )
     for image, entry in sorted((doc.get("images") or {}).items()):
         if isinstance(entry, dict) and entry.get("collected") and (images is None or image in images):
             if sum(1 for p in pins.values() if p.get("kind") == KIND_BASE and image in p.get("base_of", [])) != 1:
@@ -531,4 +581,76 @@ def verify_gmat_tree(
     return Verification(
         outcome=VERIFIED, expected=pin_for_platform, found=found,
         detail={"platform": platform, "root": root, "summary": summary, "record": record}, **base,
+    )
+
+
+# =================================================================================================
+# Verifying an operator-supplied wheel (the files install)
+# =================================================================================================
+
+def sha256_of_file(path: Path) -> str:
+    """Lower-case hex sha256 of a file, read in 1 MiB chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_python_wheel(
+    pin_id: str, pin: dict, requirement: Requirement, *, entry: Optional[dict], directory: Optional[str],
+) -> Verification:
+    """The operator's copy of a wheel the kit does not carry (`wheels.operator_supplied`, module doc):
+    `directory/<pin filename>` must exist and its sha256 must be the pin's. `entry` is the kit's
+    `wheels.operator_supplied` entry for this component. Refusal order, cheapest first, the hash last:
+    the kit's entry against the pin, no directory, not a directory, no such file, unreadable, hash differs.
+    Codes are `wheel-...`. Reads one file and never writes or copies it (the installer copies it itself,
+    and re-hashes the copy)."""
+    filename, digest = pin["filename"], pin["sha256"]
+    want = digest.partition(":")[2]
+    flag = "--operator-wheels"
+    base = dict(
+        component=pin_id, item=pin["item"], kind=pin["kind"], step=STEP_FILES, required=True,
+        requirement=requirement.text, expected=digest,
+    )
+
+    def refused(code: str, reason: str, found: Any = None) -> Verification:
+        return Verification(outcome=REFUSED, code=f"wheel-{code}", reason=reason, found=found, **base)
+
+    libraries = ", ".join((entry or {}).get("gpl_family_libraries") or []) or "a GPL-family library"
+    if not isinstance(entry, dict) or entry.get("filename") != filename or entry.get("sha256") != want:
+        return refused(
+            "kit-entry-differs",
+            f"KIT_MANIFEST's wheels.operator_supplied entry for {pin_id!r} is {entry!r}, but the installer's pins file "
+            f"pins {filename} {digest}: the kit was built against another pin than this installer carries. Rebuild "
+            f"the kit, or use the installer of the kit that was built with that pin.",
+        )
+    need = (
+        f"this kit needs {filename} ({pin['dist']} {pin['version']}), which it does not carry: the wheel bundles "
+        f"{libraries} under a GPL-family licence, and the kit redistributes no GPL or LGPL code: the operator supplies it "
+        f"(docs/kit-operator-supplied.md). Download exactly that file ({pin['reference']}), put it in a directory "
+        f"and pass {flag} DIR. Pinned sha256: {digest}"
+    )
+    if directory is None:
+        return refused("dir-missing", f"{need}")
+    if not Path(directory).is_dir():
+        return refused("dir-not-a-directory", f"{flag} {directory!r} is not a directory. {need}")
+    path = Path(directory) / filename
+    if not path.is_file():
+        present = sorted(p.name for p in Path(directory).glob("*.whl"))
+        return refused("missing", f"{path} does not exist (wheels in {directory!r}: {present or 'none'}). {need}")
+    try:
+        found = sha256_of_file(path)
+    except OSError as e:
+        return refused("unreadable", f"{path} could not be read ({type(e).__name__}: {e})")
+    if found != want:
+        return refused(
+            "hash-differs",
+            f"{path} has sha256:{found}, not the pinned {digest}: it is not the wheel this kit was built against. "
+            f"Download {filename} again from the source the pin names ({pin['reference']}) and re-run.",
+            found=f"sha256:{found}",
+        )
+    return Verification(
+        outcome=VERIFIED, found=f"sha256:{found}",
+        detail={"filename": filename, "path": str(path), "sha256": found, "summary": f"{filename} {short(digest)}"}, **base,
     )

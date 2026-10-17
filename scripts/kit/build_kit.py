@@ -44,7 +44,9 @@ GATED, opt-in, off by default:
   if genuinely necessary, question 154's one exception) into `<kit>/vendor/`.
 - `--with-wheels` -- round 2: the viewer's real runtime dependency wheels, pinned to this
   worktree's own installed versions, for linux/aarch64/cp313 (task 3b's own proof platform) --
-  the ONE step that always uses the network (question 154), never at test time.
+  the ONE step that always uses the network (question 154), never at test time. Question 250(a): every
+  fetched wheel's bundled native libraries are inventoried with their licences (`wheel_libs.py`), and a
+  wheel that bundles a GPL-family library is not carried but recorded in `wheels.operator_supplied`.
 - `--with-binaries` -- round 2: cross-built Linux service binaries (`av-ingest-server`,
   `av-command`) the zero-egress install proof will start inside a container.
 - `--declare-operator-supplied NAME` (repeatable) -- question 250(a), task 3: a service image (MinIO,
@@ -97,6 +99,7 @@ import image_layer  # noqa: E402  (question 250(a): the application-layer step)
 import manifest as kit_manifest  # noqa: E402
 import operator_check  # noqa: E402  (question 250(a), task 3: validates --declare-operator-supplied)
 import sbom  # noqa: E402
+import wheel_libs  # noqa: E402  (question 250(a): the wheel step's inventory of bundled native libraries)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -607,6 +610,49 @@ def _altavista_wheel_source_date_epoch(repo_root: Path) -> str:
     return result.stdout.strip()
 
 
+def _inventoried_entry(
+    whl: Path, name: str, version: str, libraries: dict, pins: dict,
+) -> "tuple[dict, bool]":
+    """`(manifest entry, carried)` for one wheel just fetched or built: its name, version, filename and sha256,
+    the bundled-library inventory (`wheel_libs.inventory_wheel`, which refuses an unknown library or one the
+    wheel's own text does not confirm) and the wheel's own extension modules. A wheel with a library under an
+    GPL-family licence is not carried (`carried` False, the file is deleted from `wheels/`): it must have a
+    `python-wheel` pin in `operator_supplied.json` for exactly this filename and sha256 (the pin is the
+    operator's way to check the file they download), else the build is refused."""
+    inventory = wheel_libs.inventory_wheel(whl, libraries)
+    entry = {
+        "name": name, "version": version, "filename": whl.name, "sha256": sbom.sha256_file(whl),
+        "bundled_libraries": inventory.libraries, "extension_modules": inventory.extension_modules,
+    }
+    gpl = inventory.gpl_family_libraries
+    if not gpl:
+        return entry, True
+    found = operator_check.wheel_pin_for(pins, whl.name)
+    if found is None:
+        raise wheel_libs.BundledLibraryRefused(
+            "gpl-family-wheel-unpinned",
+            f"{whl.name}: bundles {gpl} under a GPL-family licence, so the kit does not carry it and the operator "
+            f"supplies it -- but scripts/kit/operator_supplied.json has no python-wheel component for this file. Add one "
+            f"(dist {name!r}, version {version!r}, filename {whl.name!r}, sha256 sha256:{entry['sha256']}, item, licences, "
+            f"why, reference, verification) and a row to docs/kit-operator-supplied.md.",
+            wheel=whl.name, library=gpl[0],
+        )
+    component, pin = found
+    if (pin["sha256"] != f"sha256:{entry['sha256']}" or _normalize_dist_name(pin["dist"]) != _normalize_dist_name(name)
+            or pin["version"] != version):
+        raise wheel_libs.BundledLibraryRefused(
+            "gpl-family-wheel-pin-differs",
+            f"{whl.name}: bundles {gpl}; its python-wheel pin {component!r} says dist {pin['dist']!r}, version "
+            f"{pin['version']!r}, sha256 {pin['sha256']}, but the wheel fetched is {name!r} {version!r} with sha256:"
+            f"{entry['sha256']}. Update the pin (and the row in docs/kit-operator-supplied.md) or fetch the pinned file.",
+            wheel=whl.name, library=gpl[0],
+        )
+    whl.unlink()
+    entry["component"] = component
+    entry["gpl_family_libraries"] = gpl
+    return entry, False
+
+
 def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
     """`--with-wheels` (question 154's one permitted network use, at kit-build time only):
     downloads the viewer's real runtime dependency closure (`viewer_runtime_closure`) at the
@@ -616,13 +662,23 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
     wheel .`, since the viewer server is `python -m altavista`). Returns `(fetch_metadata,
     wheel_gaps)` -- `wheel_gaps` is one `{"name": "wheel:<pkg>", "reason": ...}` entry per
     dependency with no matching platform wheel, sorted by name by the caller
-    (`manifest.build_gaps`)."""
+    (`manifest.build_gaps`).
+
+    Question 250(a): each wheel is then inventoried (`_inventoried_entry`): `fetched[*].bundled_libraries`
+    lists the native libraries it bundles with sha256, size, licence and the evidence in the wheel's own
+    text, `extension_modules` the wheel's own compiled modules; a wheel with a library under a GPL-family
+    licence leaves `fetched`, is deleted from `wheels/` and is listed in `operator_supplied` instead (see
+    `wheel_libs.py` and `install.py`, "An operator-supplied wheel"). The committed table's sha256 is
+    recorded as `bundled_libs_table_sha256`."""
+    libraries, table_sha256 = wheel_libs.load_table(repo_root / "scripts" / "kit" / "bundled_libs.json")
+    pins = kit_manifest.load_operator_pins(repo_root / "scripts" / "kit" / "operator_supplied.json")
     wheels_dir = kit_root / "wheels"
     wheels_dir.mkdir(parents=True, exist_ok=True)
     python = sys.executable
 
     closure = viewer_runtime_closure()
     fetched: list[dict] = []
+    operator_supplied: list[dict] = []
     gaps: list[dict] = []
     for name in sorted(closure):
         version = closure[name]
@@ -654,11 +710,8 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
                 ),
             })
             continue
-        whl = new_files[0]
-        fetched.append({
-            "name": name, "version": version, "filename": whl.name,
-            "sha256": sbom.sha256_file(whl),
-        })
+        entry, carried = _inventoried_entry(new_files[0], name, version, libraries, pins)
+        (fetched if carried else operator_supplied).append(entry)
 
     own = subprocess.run(
         [python, "-m", "pip", "wheel", ".", "--no-deps", "--no-build-isolation", "-w", str(wheels_dir)],
@@ -675,12 +728,15 @@ def collect_wheels(repo_root: Path, kit_root: Path) -> tuple[dict, list[dict]]:
         raise RuntimeError(
             "pip wheel . reported success but no altavista-*.whl appeared in the wheels directory"
         )
-    fetched.append({
-        "name": "altavista", "version": _altavista_version(repo_root),
-        "filename": own_wheels[-1].name, "sha256": sbom.sha256_file(own_wheels[-1]),
-    })
+    entry, _carried = _inventoried_entry(own_wheels[-1], "altavista", _altavista_version(repo_root), libraries, pins)
+    fetched.append(entry)
 
-    return {"collected": True, "network_used": True, "fetched": sorted(fetched, key=lambda f: f["name"])}, gaps
+    return {
+        "collected": True, "network_used": True,
+        "fetched": sorted(fetched, key=lambda f: f["name"]),
+        "operator_supplied": sorted(operator_supplied, key=lambda f: f["name"]),
+        "bundled_libs_table_sha256": table_sha256,
+    }, gaps
 
 
 # =================================================================================================
@@ -1109,7 +1165,7 @@ def build(
         wheels, wheel_gaps = collect_wheels(repo_root, kit_root)
         extra_gaps.extend(wheel_gaps)
     else:
-        wheels = {"collected": False, "network_used": False, "fetched": []}
+        wheels = {"collected": False, "network_used": False, "fetched": [], "operator_supplied": [], "bundled_libs_table_sha256": None}
 
     git_commit, git_dirty, git_status = git_state(repo_root)
 
@@ -1230,7 +1286,7 @@ def main(argv: list[str] | None = None) -> int:
             with_binaries=args.with_binaries,
             declare_operator_supplied=list(args.declare_operator_supplied),
         )
-    except kit_manifest.OperatorSuppliedPackError as e:
+    except (kit_manifest.OperatorSuppliedPackError, wheel_libs.BundledLibraryRefused) as e:
         print(f"scripts/kit/build_kit.py: REFUSED -- {e}", file=sys.stderr)
         return 2
     print(f"wrote kit to {manifest_path.parent}")

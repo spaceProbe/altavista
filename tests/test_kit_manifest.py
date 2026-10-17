@@ -957,11 +957,26 @@ def test_with_wheels_runs_the_real_pip_download_path(tmp_path):
         whl = kit_root / "wheels" / entry["filename"]
         assert whl.is_file(), entry
         assert sbom.sha256_file(whl) == entry["sha256"]
+        assert isinstance(entry["bundled_libraries"], list) and isinstance(entry["extension_modules"], list)
+
+    # Question 250(a): the inventory of bundled native libraries. numpy's linux/aarch64 wheel bundles
+    # libgfortran (GPL-3.0-or-later WITH GCC-exception-3.1) and OpenBLAS (no libquadmath). The kit
+    # redistributes no GPL or LGPL code, so with the committed pin `numpy-wheel-linux-aarch64` the kit
+    # carries NO numpy wheel: it is listed in wheels.operator_supplied, by the pinned filename and sha256.
+    assert len(doc["wheels"]["bundled_libs_table_sha256"]) == 64
+    (numpy,) = doc["wheels"]["operator_supplied"]
+    pin = kmanifest.load_operator_pins()["numpy-wheel-linux-aarch64"]
+    assert numpy["name"] == "numpy" and numpy["component"] == "numpy-wheel-linux-aarch64"
+    assert numpy["filename"] == pin["filename"] and "sha256:" + numpy["sha256"] == pin["sha256"]
+    assert numpy["gpl_family_libraries"] == ["libgfortran"]
+    assert {lib["library"] for lib in numpy["bundled_libraries"]} == {"libgfortran", "libscipy_openblas64_"}
+    assert "numpy" not in fetched_names and not list((kit_root / "wheels").glob("numpy-*"))
+    assert not any(lib["gpl_family"] for f in doc["wheels"]["fetched"] for lib in f["bundled_libraries"])
 
     findings = kmanifest.verify_manifest(kit_root)
     assert findings == [], findings
 
-    wheel_gaps = [g for g in doc["gaps"] if g["name"].startswith("wheel:")]
+    wheel_gaps =[g for g in doc["gaps"] if g["name"].startswith("wheel:")]
     print(f"\n--- --with-wheels, observed ---\nfetched={sorted(fetched_names)}\n"
           f"named gaps={[g['name'] for g in wheel_gaps]}")
 

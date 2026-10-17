@@ -45,8 +45,8 @@ CFS, PLUGIN = kib.CFS, kib.PLUGIN
 
 #: Pin id by doc item number, and the order every list is printed in.
 ID_BY_ITEM = {1: "ubuntu-22.04-base-image", 2: "debian-bookworm-slim-base-image", 3: "gmat-r2026a",
-              4: "clickhouse", 5: "minio", 6: "postgis"}
-ORDER = [ID_BY_ITEM[i] for i in range(1, 7)]
+              4: "clickhouse", 5: "minio", 6: "postgis", 7: "numpy-wheel-linux-aarch64"}
+ORDER = [ID_BY_ITEM[i] for i in range(1, 8)]
 SERVICES = ("clickhouse", "minio", "postgis")
 
 
@@ -54,7 +54,7 @@ SERVICES = ("clickhouse", "minio", "postgis")
 # 1. The pins file, the doc and the services' own digest records
 # =================================================================================================
 
-def test_the_pins_file_covers_the_six_components_of_the_doc_and_is_well_formed():
+def test_the_pins_file_covers_the_six_components_of_the_doc_and_numpys_wheel_and_is_well_formed():
     assert {c["item"]: cid for cid, c in PINS.items()} == ID_BY_ITEM
     assert operator_check.pins_problems(PINS) == []
     for cid, pin in PINS.items():
@@ -62,7 +62,8 @@ def test_the_pins_file_covers_the_six_components_of_the_doc_and_is_well_formed()
         assert pin["verification"]["step"] == operator_check.STEP_OF_KIND[pin["kind"]], cid
     assert {PINS[c]["kind"] for c in SERVICES} == {"container-image"}
     assert PINS["gmat-r2026a"]["kind"] == "data-tree"
-    assert [PINS[c]["verification"]["step"] for c in ORDER] == ["images", "images", "files", "images", "images", "images"]
+    assert [PINS[c]["verification"]["step"] for c in ORDER] == ["images", "images", "files", "images", "images", "images", "files"]
+    assert PINS["numpy-wheel-linux-aarch64"]["kind"] == "python-wheel"   # item 7: the doc's row is task 6
     # only ClickHouse is held, and why (question 247)
     assert {c for c, p in PINS.items() if p.get("held")} == {"clickhouse"}
     assert PINS["clickhouse"]["held"]["question"] == 247
@@ -337,10 +338,10 @@ def _kit_doc(*, images=(), gmat=False, declared=()):
     return doc
 
 
-def test_the_files_step_prints_all_six_lines_when_nothing_is_needed():
+def test_the_files_step_prints_every_line_when_nothing_is_needed():
     out: list[str] = []
     results = install.verify_operator_supplied(_kit_doc(), out=out.append)
-    assert [r.component for r in results] == ORDER and len(out) == 6
+    assert [r.component for r in results] == ORDER and len(out) == 7
     lines = _lines(out)
     assert list(lines) == ORDER
     assert lines["ubuntu-22.04-base-image"].endswith("not required (the kit carries no application layer for cfs-image), not verified")
@@ -451,7 +452,8 @@ def test_install_prints_the_list_and_records_it_structured(tmp_path, monkeypatch
     assert list(comps) == ORDER
     assert {c: comps[c]["outcome"] for c in ORDER} == {
         "ubuntu-22.04-base-image": "other-step", "debian-bookworm-slim-base-image": "other-step", "gmat-r2026a": "verified",
-        "clickhouse": "outside-kit", "minio": "other-step", "postgis": "outside-kit"}
+        "clickhouse": "outside-kit", "minio": "other-step", "postgis": "outside-kit",
+        "numpy-wheel-linux-aarch64": "not-required"}
     assert comps["gmat-r2026a"]["verified"] and comps["gmat-r2026a"]["found"] == comps["gmat-r2026a"]["expected"]
     assert comps["minio"]["verifies_in"] == "image step" and comps["gmat-r2026a"]["verifies_in"] == "files install"
     assert os_rec["gmat"]["verified"] and os_rec["gmat"]["platform"] == tki.PLATFORM   # the earlier, detailed form is kept
@@ -513,7 +515,7 @@ def _declared_kit(tmp_path, declared, *, gmat=False):
     return kit
 
 
-def test_the_image_step_prints_all_six_lines_and_verifies_only_the_bases_when_nothing_is_declared(tmp_path):
+def test_the_image_step_prints_every_line_and_verifies_only_the_bases_when_nothing_is_declared(tmp_path):
     kit = kib.make_kit(tmp_path)
     docker = ServiceDocker(kit)
     record, lines = kib.run_step(kit, docker, tmp_path)

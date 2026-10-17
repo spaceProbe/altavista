@@ -21,6 +21,16 @@ scratch inside the enclave, not an already-built plugin image run directly).
    image already on the host is verified, not re-loaded), and asserts the id equals the pin. It also
    asserts the kit holds no `images/*.tar` and no file whose sha256 equals a (non-empty) file of
    either base image (a quick per-file check; task 7 writes the full inventory test).
+1b. **Operator-supplied wheels (question 250(a)).** The kit does not carry numpy's linux/aarch64
+   wheel: it bundles libgfortran (GPL-3.0-or-later WITH GCC-exception-3.1) and the kit redistributes no
+   GPL or LGPL code, so `KIT_MANIFEST.wheels.operator_supplied` lists it and the pins file
+   (`numpy-wheel-linux-aarch64`, item 7) pins its filename and sha256. The wheel comes from
+   `out/kit/proof-operator-wheels/` (made on the connected machine by
+   `scripts/kit/save_operator_wheels.py`, which `pip download`s exactly the pinned file and writes a
+   sha256 list), is bind-mounted READ-ONLY into the enclave installer container, and is handed to the
+   installer as `--operator-wheels /operator-wheels`. The test asserts the kit holds no numpy wheel,
+   that the installer verified and staged the operator's file, and that the installed venv has numpy
+   2.5.3 whose wheel sha256 (pip's own `direct_url.json` for the install) equals the pin.
 2. A freshly created, labelled **`--internal`** bridge network -- no route off this host, proven
    (the egress probe below), not merely named.
 3. The egress probe, from inside that network, BEFORE any install activity and again AFTER --
@@ -167,7 +177,8 @@ and cross-checks it rather than trusting anything the kit says about itself).
 (never pulled here, question 154); the EXPENSIVE proof kit already built, out-of-band, at
 `out/kit/proof` (`_KIT_DIR`), with its `images`/`wheels`/`binaries`/`packs` sections all actually
 collected and its own manifest verifying clean; the saved base-image tarballs at
-`out/kit/proof-bases/` (`_PROOF_BASES_CMD` makes them); and both recorded `:local` images on the
+`out/kit/proof-bases/` (`_PROOF_BASES_CMD` makes them); the saved operator wheels at
+`out/kit/proof-operator-wheels/` (`_PROOF_OPERATOR_WHEELS_CMD`); and both recorded `:local` images on the
 host at their recorded ids (their `.Config` is what the built images are compared with). Building
 the kit takes real minutes (a Rust cross-build, `cargo vendor`, a `pip download` against PyPI) and
 reaches the network (question 154's one build-time exception) -- doing that inside a test would
@@ -258,6 +269,7 @@ import build_kit  # noqa: E402  (path insert must precede this import)
 import manifest as kit_manifest  # noqa: E402
 import sbom  # noqa: E402
 import save_base_images  # noqa: E402  (question 250(a): the operator's side of the bases)
+import save_operator_wheels  # noqa: E402  (question 250(a): the operator's side of the wheels the kit does not carry)
 from docker_image_tags import ImageTagGuard, docker_image_table  # noqa: E402  (question 239: shared with live_evidence.py)
 
 from altavista.container_hardening import (  # noqa: E402
@@ -282,6 +294,14 @@ _PROOF_KIT_BUILD_CMD = (
 #: (`scripts/kit/save_base_images.py`) -- NOT part of the kit, which carries no base layer.
 _PROOF_BASES_DIR = REPO_ROOT / "out" / "kit" / "proof-bases"
 _PROOF_BASES_CMD = ".venv/bin/python scripts/kit/save_base_images.py --out out/kit/proof-bases"
+
+#: Question 250(a): the operator-supplied Python wheels (numpy's linux/aarch64 wheel bundles libgfortran, GPL
+#: code the kit does not redistribute), downloaded on the connected machine by
+#: `scripts/kit/save_operator_wheels.py` -- NOT part of the kit. Mounted read-only into the enclave.
+_PROOF_OPERATOR_WHEELS_DIR = REPO_ROOT / "out" / "kit" / "proof-operator-wheels"
+_PROOF_OPERATOR_WHEELS_CMD = ".venv/bin/python scripts/kit/save_operator_wheels.py --out out/kit/proof-operator-wheels"
+#: Where the enclave installer container sees it (`--operator-wheels`).
+_OPERATOR_WHEELS_MOUNT = "/operator-wheels"
 
 PROBE_IMAGE = "python:3.13-slim"
 
@@ -354,6 +374,8 @@ def _proof_kit_missing_sections(doc: dict, kit_dir: Path) -> list[str]:
             missing.append(f"images.{component}.runtime_set/config (the installer's image step needs both)")
     if not doc.get("wheels", {}).get("collected"):
         missing.append("wheels")
+    elif not any(e.get("component") == "numpy-wheel-linux-aarch64" for e in doc["wheels"].get("operator_supplied") or []):
+        missing.append("wheels.operator_supplied (numpy-wheel-linux-aarch64: a kit built before the GPL-family rule)")
     if not doc.get("vendor", {}).get("collected"):
         missing.append("vendor")
     if not doc.get("binaries", {}).get("results", {}).get("av-ingest-server", {}).get("included"):
@@ -433,6 +455,21 @@ def _compute_skip_reason() -> "str | None":
         )
     if wanted != have:
         return f"{_PROOF_BASES_DIR}/SHA256SUMS lists {sorted(have)}, expected {sorted(wanted)} -- re-make them with: {_PROOF_BASES_CMD}"
+    try:
+        wheel_sums = save_operator_wheels.verify_sums(_PROOF_OPERATOR_WHEELS_DIR)
+        wheel_pins = save_operator_wheels.wheel_pins()
+        wanted_wheels = {pin["filename"]: pin["sha256"].partition(":")[2] for pin in wheel_pins.values()}
+    except (save_operator_wheels.SaveRefused, OSError) as e:
+        return (
+            f"the saved operator wheels are not at {_PROOF_OPERATOR_WHEELS_DIR} ({e}) -- the kit does not carry a wheel "
+            f"that bundles GPL-family code (question 250(a)), so this proof installs numpy from a wheel the operator "
+            f"saved outside it. Make it on a connected machine with: {_PROOF_OPERATOR_WHEELS_CMD}"
+        )
+    if wheel_sums != wanted_wheels:
+        return (
+            f"{_PROOF_OPERATOR_WHEELS_DIR}/SHA256SUMS lists {sorted(wheel_sums)} (sha256 {sorted(wheel_sums.values())}), the pins file "
+            f"pins {sorted(wanted_wheels)} (sha256 {sorted(wanted_wheels.values())}) -- re-make them with: {_PROOF_OPERATOR_WHEELS_CMD}"
+        )
     for component in sbom.IMAGE_COMPONENTS:
         entry = doc["images"][component]
         got = subprocess.run(["docker", "image", "inspect", entry["tag"], "--format", "{{.Id}}"], capture_output=True, text=True, timeout=30)
@@ -581,7 +618,8 @@ def _assert_no_repo_source_mounted(mount_args: list[str]) -> None:
     3b's own harness used to bind-mount it read-only into this same container (round 2's decision
     9, an openly recorded gap), which is exactly what question 217(c) closes.
 
-    `_PROOF_KIT_DIR` is the one deliberate exception, not a loophole: it is the already-built kit
+    `_PROOF_OPERATOR_WHEELS_DIR` (the wheels the operator supplies, question 250(a)) is the other, and must be
+    mounted read-only. `_PROOF_KIT_DIR` is the first deliberate exception, not a loophole: it is the already-built kit
     ARTIFACT this test consumes (under this repo's own `.gitignore`d `out/` build-output directory
     on disk, but not source this repository tracks or ships), already proven trustworthy by
     `_load_and_verify_images` and by the kit's own `KIT_MANIFEST` SHA-256 before this ever runs --
@@ -596,12 +634,67 @@ def _assert_no_repo_source_mounted(mount_args: list[str]) -> None:
             continue  # a docker volume NAME, not a host filesystem path
         host_path = Path(host_spec).resolve()
         if host_path == _PROOF_KIT_DIR.resolve():
-            continue  # the one deliberate exception -- see this function's own doc
+            continue  # the deliberate exception -- see this function's own doc
+        if host_path == _PROOF_OPERATOR_WHEELS_DIR.resolve():
+            # Question 250(a): the operator's own saved wheels, a build artefact under `out/` exactly like the
+            # kit, not source this repository tracks. It must be mounted READ-ONLY: the installer verifies
+            # a file in it by sha256 and copies it, and has no reason to write to it.
+            assert mount_args[i + 1].endswith(":ro"), f"the operator-wheels mount must be read-only: {mount_args[i + 1]}"
+            continue
         assert host_path != REPO_ROOT and REPO_ROOT not in host_path.parents, (
             f"a container mount points inside this repository's own source tree ({host_path}) -- "
             f"question 217(c): the installing container must get everything it needs from the "
             f"kit alone, never a live bind-mount of this repo"
         )
+
+
+def _assert_numpy_came_from_the_operator(
+    guard: "ResourceGuard", run_id: str, network_name: str, install_volume: str, manifest_doc: dict, install_record: dict, install_stdout: str,
+) -> dict:
+    """Question 250(a): the kit carries no numpy wheel, the installer verified the operator's file against the
+    pins file's `numpy-wheel-linux-aarch64` (printed line and `INSTALL_RECORD`), and the venv it built has numpy
+    2.5.3 installed from exactly that file: the `direct_url.json` pip wrote beside the installed numpy records the
+    sha256 of the archive it installed from (read inside the enclave), and `import numpy` works there."""
+    pin = kit_manifest.load_operator_pins()["numpy-wheel-linux-aarch64"]
+    pin_hex = pin["sha256"].partition(":")[2]
+    # 1. the kit itself: no numpy wheel on disk, none in `fetched`, the operator entry names the pin
+    on_disk = sorted(p.name for p in (_PROOF_KIT_DIR / "wheels").glob("*numpy*"))
+    assert on_disk == [], f"the kit carries a numpy wheel: {on_disk}"
+    assert not any(f["name"].lower() == "numpy" for f in manifest_doc["wheels"]["fetched"]), "KIT_MANIFEST wheels.fetched names numpy"
+    (entry,) = [e for e in manifest_doc["wheels"]["operator_supplied"] if e["name"].lower() == "numpy"]
+    assert entry["component"] == "numpy-wheel-linux-aarch64" and entry["filename"] == pin["filename"] and entry["sha256"] == pin_hex, entry
+    assert entry["gpl_family_libraries"] == ["libgfortran"], entry
+    assert not any(f["path"].endswith(".whl") and "numpy" in f["path"] for f in manifest_doc["files"]), "KIT_MANIFEST.files lists a numpy wheel"
+    # 2. the installer's own output and record
+    line = next((l for l in install_stdout.splitlines() if l.startswith("operator-supplied: numpy-wheel-linux-aarch64")), None)
+    assert line is not None and " verified " in line and pin["filename"] in line and "NOT VERIFIED" not in line, install_stdout
+    (staged,) = install_record["installed"]["operator_wheels"]
+    assert staged["filename"] == pin["filename"] and staged["sha256"] == pin_hex and staged["installed_from"] == f"operator-wheels/{pin['filename']}", staged
+    # 3. what is inside the enclave: the staged file's sha256, numpy's version, and pip's record of the archive installed
+    probe = _docker(
+        "run", "--rm", "--network", network_name, *guard.label_args(),
+        "-v", f"{install_volume}:/target:ro",
+        PROBE_IMAGE, "sh", "-c",
+        "sha256sum /target/operator-wheels/*.whl; "
+        "/target/venv/bin/python -c 'import numpy, json; print(json.dumps({\"version\": numpy.__version__, \"file\": numpy.__file__}))'; "
+        "cat /target/venv/lib/python3*/site-packages/numpy-*.dist-info/direct_url.json",
+    )
+    sha_line, version_line, direct_url_raw = probe.stdout.strip().splitlines()[0], probe.stdout.strip().splitlines()[1], "\n".join(probe.stdout.strip().splitlines()[2:])
+    assert sha_line.split()[0] == pin_hex, f"the staged operator wheel in the enclave has sha256 {sha_line}, the pin is {pin_hex}"
+    imported = json.loads(version_line)
+    assert imported["version"] == "2.5.3" and "/target/venv/" in imported["file"], imported
+    direct_url = json.loads(direct_url_raw)
+    archive = direct_url["archive_info"]
+    installed_sha = (archive.get("hashes") or {}).get("sha256") or archive.get("hash", "").partition("=")[2]
+    assert installed_sha == pin_hex, f"pip installed numpy from an archive with sha256 {installed_sha}, the pin is {pin_hex}: {direct_url}"
+    assert direct_url["url"].endswith(f"/target/operator-wheels/{pin['filename']}"), direct_url
+    installed = {p["name"].lower(): p["version"] for p in install_record["installed"]["wheels"]["installed_packages"]}
+    assert installed.get("numpy") == "2.5.3", installed
+    return {
+        "pin": {"component": "numpy-wheel-linux-aarch64", "filename": pin["filename"], "sha256": pin["sha256"]},
+        "kit_numpy_wheels": on_disk, "kit_operator_supplied_entry": {k: entry[k] for k in ("component", "filename", "sha256", "gpl_family_libraries")},
+        "installer_line": line, "staged_in_enclave_sha256": sha_line.split()[0], "imported": imported, "pip_direct_url": direct_url,
+    }
 
 
 def _run_egress_probe(guard: ResourceGuard, run_id: str, stage: str, network_name: str) -> list:
@@ -1014,6 +1107,7 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         # fresh install target volume.
         install_mount_args = [
             "-v", f"{_PROOF_KIT_DIR}:/kit:ro",
+            "-v", f"{_PROOF_OPERATOR_WHEELS_DIR}:{_OPERATOR_WHEELS_MOUNT}:ro",
             "-v", f"{install_volume}:/target",
         ]
         installer_container = _labelled_id(run_id, "installer")
@@ -1021,7 +1115,7 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
         install_run_args = [
             "run", "--name", installer_container, "--network", network_name, *guard.label_args(),
             *install_mount_args,
-            PROBE_IMAGE, "/kit/installer/install.sh", "/kit", "/target",
+            PROBE_IMAGE, "/kit/installer/install.sh", "/kit", "/target", "--operator-wheels", _OPERATOR_WHEELS_MOUNT,
         ]
         _assert_no_repo_source_mounted(install_run_args)
         # Question 250(a), the lead's ruling: the enclave container gets no Docker socket, no
@@ -1070,6 +1164,10 @@ def _run_zero_egress_install_and_demo_from_the_kit_alone():
             f"{install_record['installed'].get('viewer_assets')!r}"
         )
         print(f"\n--- INSTALL_RECORD (question 148) ---\n{json.dumps(install_record, indent=2)[:2000]}")
+
+        # Question 250(a): numpy came from the operator, not the kit.
+        operator_wheel_evidence = _assert_numpy_came_from_the_operator(guard, run_id, network_name, install_volume, manifest_doc, install_record, install_run.stdout)
+        print(f"\n--- numpy supplied by the operator, outside the kit (question 250(a)) ---\n{json.dumps(operator_wheel_evidence, indent=2)}")
 
         # ---------------------------------------------------------------------------------
         # B.3 (after) -- prove the network STILL has no route out, after the install ran.

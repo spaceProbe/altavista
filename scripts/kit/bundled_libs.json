@@ -1,0 +1,21 @@
+{
+  "doc": "Native libraries that Python wheels bundle (the auditwheel convention: <name>.libs/), by base name (the file name without its .so suffix and without auditwheel's hash suffixes). scripts/kit/wheel_libs.py reads this table at kit-build time, for every wheel the --with-wheels step fetches: a bundled library that is not listed here is refused, and a listed one is refused unless the wheel's own licence text carries a stanza (Name:/Files:/License:) whose Files: pattern matches the library and whose License: is exactly these spdx terms. A library with a GPL-family term (every OR-alternative a GPL-*, LGPL-* or AGPL-* licence, with or without a WITH exception) moves its wheel to the operator-supplied list, because the kit redistributes no GPL or LGPL code (docs/kit-operator-supplied.md; a python-wheel component of scripts/kit/operator_supplied.json). Licences are never guessed: add an entry only after reading the wheel's licence text. spdx is ' AND '-joined terms, no parentheses; each term is one SPDX id, 'id WITH exception', or 'id OR id'.",
+  "schema": 1,
+  "libraries": {
+    "libgfortran": {
+      "name": "GCC runtime library (libgfortran)",
+      "spdx": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "upstream": "https://gcc.gnu.org/git/?p=gcc.git;a=tree;f=libgfortran"
+    },
+    "libquadmath": {
+      "name": "GCC Quad-Precision Math Library (libquadmath)",
+      "spdx": "LGPL-2.1-or-later",
+      "upstream": "https://gcc.gnu.org/git/?p=gcc.git;a=tree;f=libquadmath"
+    },
+    "libscipy_openblas64_": {
+      "name": "OpenBLAS (with the LAPACK it bundles), scipy-openblas64 build",
+      "spdx": "BSD-3-Clause AND BSD-3-Clause-Open-MPI",
+      "upstream": "https://github.com/OpenMathLib/OpenBLAS/"
+    }
+  }
+}

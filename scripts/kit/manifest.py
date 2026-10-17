@@ -221,7 +221,17 @@ ensure_ascii=False)` plus one trailing newline. It contains:
 - `vendor` -- NEW in round 2: `{"collected", "network_used", "offline_error"}`, always present
   (Decision J's "always present, never conditional on what happened" pattern, matching `images`).
 - `wheels` -- NEW in round 2: `{"collected", "network_used", "fetched"}`, `fetched` a list of
-  `{"name", "version", "filename", "sha256"}`.
+  `{"name", "version", "filename", "sha256"}`. Question 250(a), wheel libraries: each entry also carries
+  `bundled_libraries` (every native library the wheel bundles, `[]` if none: `{path, sha256, size, library,
+  name, found_in, spdx, gpl_family, upstream, evidence}`, `evidence` quoting the wheel's own licence text by file
+  and line range) and `extension_modules` (the wheel's own compiled modules, set aside), and the section
+  gains `operator_supplied` (the wheels the kit does NOT carry because they bundle a GPL-family library: the
+  same entry plus `component`, the `python-wheel` pin of `operator_supplied.json`, and `gpl_family_libraries`;
+  `[]` when none) and `bundled_libs_table_sha256` (the committed `bundled_libs.json` the licences came
+  from; `null` when no wheel step ran). See `wheel_libs.py`. `kit_format` stays 5: format 5 has not left
+  the question-250(a) round, the additions are keys of an existing section, and an installer refuses a
+  collected `wheels` section without them (`install._check_required_wheels`) rather than guess that a
+  wheel it carries bundles no GPL-family library.
 - `binaries` -- NEW in round 2: `{"collected", "results"}`, `results` keyed by binary name,
   `{"included", "reason"}` (`reason` set only when a requested binary did not cross-build).
 - `runs` -- NEW in round 2: keyed by run-fixture stem, `{"config_hash", "data_pack_hash",
