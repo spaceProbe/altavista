@@ -27,7 +27,7 @@ use av_kernel::drm::DrmError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SweepError {
-    /// The sweep YAML did not parse as the expected shape at all (`serde_yaml`'s own message).
+    /// The sweep YAML did not parse as the expected shape at all (`av_yaml`'s own message).
     #[error("sweep YAML did not parse: {0}")]
     Yaml(String),
 

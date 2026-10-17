@@ -182,7 +182,7 @@ fn check_role_tables_disjoint(roles: &BTreeMap<String, Vec<String>>, service_rol
 /// table -- an empty [`GatewayAuthConfig`] denies every surface to every caller, the same
 /// "no code path starts from allow" guarantee `RoleTable::granting_role` already gives.
 pub fn load_gateway_auth_config(yaml: &str) -> Result<GatewayAuthConfig, GatewayAuthConfigLoadError> {
-    let config: GatewayAuthConfig = serde_yaml::from_str(yaml)?;
+    let config: GatewayAuthConfig = av_yaml::from_str(yaml)?;
     check_role_tables_disjoint(&config.roles, &config.service_roles)?;
     Ok(config)
 }
@@ -190,7 +190,7 @@ pub fn load_gateway_auth_config(yaml: &str) -> Result<GatewayAuthConfig, Gateway
 #[derive(Debug, Error)]
 pub enum GatewayAuthConfigLoadError {
     #[error("parsing gateway auth config: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] av_yaml::Error),
     #[error(transparent)]
     Overlap(#[from] GatewayAuthConfigError),
 }

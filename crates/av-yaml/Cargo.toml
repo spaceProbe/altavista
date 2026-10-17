@@ -1,0 +1,39 @@
+[package]
+name = "av-yaml"
+publish = false
+description = "Question 246 (chartered by question 250(b)): the one place AltaVista parses YAML. Owns the parser dependency and the YAML policy (what is read exactly as serde_yaml 0.9 read it, and what is refused with a typed error), so av-kernel, av-sweep, av-command, av-gateway and av-jobs call one `from_str`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The YAML parser (question 246, replacing `serde_yaml` 0.9 and its `unsafe-libyaml`, RUSTSEC-2024-0449).
+#
+#   serde-saphyr 2.0.0 (crates.io, 2026-10-13): MIT OR Apache-2.0 (both on deny.toml's allow list),
+#   `#![forbid(unsafe_code)]`, no dependency on `unsafe-libyaml` or any crate with an advisory,
+#   pure Rust on `granit-parser` 2.0.0 (also `forbid(unsafe_code)`, MIT OR Apache-2.0). Actively
+#   maintained: 38 releases since 2025-09-27, 25 of them in 2026, the latest four days before
+#   this choice; its test suite includes the YAML Test Suite. Chosen over `serde_yaml_ng` 0.10.0 and
+#   `serde_norway` 0.9.42 (both still ride a C port of libyaml: `unsafe-libyaml` itself, and its
+#   fork `unsafe-libyaml-norway`; last released 2024-05 and 2024-12), `serde_yml` 0.0.13 (a
+#   deprecated shim over `noyalib`, which has made 56 0.0.x releases since 2026-05-10) and
+#   `yaml-rust2` 0.13 / `saphyr` 0.2.2 (maintained, but no serde layer: a hand-written one would
+#   be a second YAML implementation of ours to maintain). The cost: MSRV 1.89 (the workspace
+#   floor moves from 1.87, see the root Cargo.toml). Question 246's report has the comparison.
+#
+#   Its defaults read YAML more loosely than `serde_yaml` 0.9 did (YAML 1.1 booleans, merge
+#   keys, tags that change types, `1_000` as an integer, case-insensitive `null`/`true`, a
+#   `\n` appended to a block scalar at end of input). Nothing here relies on those defaults:
+#   `src/lib.rs` sets the options and `src/scan.rs` / `src/dialect.rs` refuse, with a typed
+#   error, every input on which the two parsers would give different values.
+#
+#   `default-features = false`, `deserialize` only: no serializer, no `!include`, no property
+#   interpolation, no comment capture, no miette/garde/validator/figment integrations.
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

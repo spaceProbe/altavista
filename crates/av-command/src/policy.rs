@@ -579,16 +579,16 @@ struct ProfileDocument {
 
 /// Reads just the `authority:` block out of a full profile YAML document's text (e.g. the
 /// real contents of `profiles/execution.yaml`). Every other top-level key (`imagery`,
-/// `dynamics_backend`, `planes`, ...) is ignored -- `serde`/`serde_yaml` skip unrecognized
-/// fields by default, so this does not need a second copy of the whole profile schema, only
-/// the one block this crate actually reads.
+/// `dynamics_backend`, `planes`, ...) is ignored -- `serde` skips unrecognized fields by
+/// default, so this does not need a second copy of the whole profile schema, only the one
+/// block this crate actually reads.
 ///
-/// Uses `serde_yaml` (already a workspace dependency of `crates/av-kernel` and
-/// `crates/av-sweep` at the same `"0.9"` version this crate declares -- checked with `cargo
-/// tree` before adding it here, see this task's final report) rather than hand-rolling a YAML
-/// subset parser or having every caller read the profile's own scalar lines with `grep`.
-pub fn load_profile_authority_config(yaml: &str) -> Result<ProfileAuthorityConfig, serde_yaml::Error> {
-    Ok(serde_yaml::from_str::<ProfileDocument>(yaml)?.authority)
+/// Uses `av_yaml` (the workspace's one YAML parser and policy, question 246) rather than
+/// hand-rolling a YAML subset parser or having every caller read the profile's own scalar lines
+/// with `grep`. The whole document is still scanned by `av_yaml`'s policy, so a tag or a merge
+/// key anywhere in a profile is refused, not just inside `authority:`.
+pub fn load_profile_authority_config(yaml: &str) -> Result<ProfileAuthorityConfig, av_yaml::Error> {
+    Ok(av_yaml::from_str::<ProfileDocument>(yaml)?.authority)
 }
 
 /// Pins the exact `regorus` build this crate's `Cargo.toml` was set up with (moved here from

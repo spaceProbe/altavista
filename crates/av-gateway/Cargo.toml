@@ -48,9 +48,9 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # R5.1: crate::auth's own GatewayAuthConfig (roles/service_roles/group_clearance) YAML,
-# mirroring av-command's identical pin for its own authority: block (crates/av-command/
+# read through `av-yaml` (question 246) like av-command's authority: block (crates/av-command/
 # Cargo.toml). Plain data parsing only -- no crypto, no verifier logic (invariant A).
-serde_yaml = "0.9"
+av-yaml = { path = "../av-yaml" }
 
 # SHA-256 for D5's deterministic query id (mirrors crates/av-command/src/policy.rs's
 # compute_decision_id preimage convention byte for byte) -- ADR-004's crypto rule: SHA-256

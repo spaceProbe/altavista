@@ -132,7 +132,7 @@ impl RawParameterSweep {
 /// that never went through this function cannot bypass it either (see that function's own doc
 /// comment for why this is deliberately one function, not two copies).
 pub fn parse_sweep_yaml(yaml: &str) -> Result<pb::ParameterSweep, SweepError> {
-    let raw: RawParameterSweep = serde_yaml::from_str(yaml).map_err(|e| SweepError::Yaml(e.to_string()))?;
+    let raw: RawParameterSweep = av_yaml::from_str(yaml).map_err(|e| SweepError::Yaml(e.to_string()))?;
     let sweep = raw.into_pb()?;
     for axis in &sweep.axes {
         crate::grid::validate_axis_target(axis)?;

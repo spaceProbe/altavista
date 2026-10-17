@@ -74,9 +74,9 @@ av-edge = { path = "../av-edge" }
 serde.workspace = true
 serde_json.workspace = true
 # DRM authoring format (question 87): YAML, field-for-field mirroring the proto messages --
-# see src/drm/schema.rs's module doc comment. Not already a workspace dependency, so pinned
-# here with an explicit version per this task's own dependency rule.
-serde_yaml = "0.9"
+# see src/drm/schema.rs's module doc comment. Read through `av-yaml` (question 246), the one
+# crate that owns the YAML parser and its policy; this crate names no YAML parser itself.
+av-yaml = { path = "../av-yaml" }
 # SHA-256 for the DRM/SosConfiguration/SystemDefinition canonical hash (src/drm/hash.rs), via
 # the `openssl` crate (openssl-sys -> the system/Homebrew libssl/libcrypto). Question 204
 # migrated this off `sha2` (previously reused from `crates/av-dynamics` as an already-present

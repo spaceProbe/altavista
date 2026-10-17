@@ -329,8 +329,8 @@ struct ProfileDocument {
 /// `audit:` key, or one with an empty (or absent) `sink_path`, parses as
 /// [`AuditSinkConfig::Disabled`] -- never an error, and never a default path this module
 /// invents on the profile's behalf.
-pub fn load_profile_audit_config(yaml: &str) -> Result<AuditSinkConfig, serde_yaml::Error> {
-    let doc: ProfileDocument = serde_yaml::from_str(yaml)?;
+pub fn load_profile_audit_config(yaml: &str) -> Result<AuditSinkConfig, av_yaml::Error> {
+    let doc: ProfileDocument = av_yaml::from_str(yaml)?;
     Ok(if doc.audit.sink_path.is_empty() { AuditSinkConfig::Disabled } else { AuditSinkConfig::File(PathBuf::from(doc.audit.sink_path)) })
 }
 

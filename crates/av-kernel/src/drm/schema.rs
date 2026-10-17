@@ -17,7 +17,7 @@
 //! form protobuf's own canonical JSON mapping uses, not a bespoke vocabulary.
 //!
 //! **What this loader does not yet model.** `Variant` (`SystemDefinition`) is read as opaque
-//! YAML (`serde_yaml::Value`) rather than fully typed -- `Variant` (named parameter-override
+//! YAML (`serde::de::IgnoredAny`: its content is never read) rather than fully typed -- `Variant` (named parameter-override
 //! sets) has no consumer yet. Rather than silently dropping whatever a DRM author put there
 //! (exactly what question 87 exists to end), a non-empty `variants` list is a typed
 //! [`crate::drm::DrmError::UnsupportedField`] at load time: the loader refuses to proceed
@@ -77,7 +77,7 @@ fn enum_from_name<E>(field: &'static str, name: &str, from_str_name: impl Fn(&st
     from_str_name(name).map(to_i32).ok_or_else(|| DrmError::InvalidEnumValue { field, value: name.to_string() })
 }
 
-fn refuse_if_nonempty(field: &'static str, values: &[serde_yaml::Value]) -> Result<(), DrmError> {
+fn refuse_if_nonempty(field: &'static str, values: &[serde::de::IgnoredAny]) -> Result<(), DrmError> {
     if values.is_empty() {
         Ok(())
     } else {
@@ -326,7 +326,7 @@ pub struct RawSystemDefinition {
     pub ports: Vec<RawPort>,
     pub parameters: Vec<RawParameter>,
     /// Not yet modeled -- see the module doc comment. Must be empty.
-    pub variants: Vec<serde_yaml::Value>,
+    pub variants: Vec<serde::de::IgnoredAny>,
     pub dynamics_model: String,
     pub state_space_id: String,
     /// Question 94: the declared StateSpace, additive to and authoritative over
@@ -895,19 +895,19 @@ impl RawDesignReferenceMission {
 /// Parse a YAML document as a [`pb::DesignReferenceMission`] (see the module doc comment for
 /// the authoring-format rationale).
 pub fn parse_drm_yaml(yaml: &str) -> Result<pb::DesignReferenceMission, DrmError> {
-    let raw: RawDesignReferenceMission = serde_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
+    let raw: RawDesignReferenceMission = av_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
     raw.into_pb()
 }
 
 /// Parse a YAML document as a [`pb::SosConfiguration`].
 pub fn parse_sos_yaml(yaml: &str) -> Result<pb::SosConfiguration, DrmError> {
-    let raw: RawSosConfiguration = serde_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
+    let raw: RawSosConfiguration = av_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
     raw.into_pb()
 }
 
 /// Parse a YAML document as a [`pb::SystemDefinition`].
 pub fn parse_system_definition_yaml(yaml: &str) -> Result<pb::SystemDefinition, DrmError> {
-    let raw: RawSystemDefinition = serde_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
+    let raw: RawSystemDefinition = av_yaml::from_str(yaml).map_err(|e| DrmError::Yaml(e.to_string()))?;
     raw.into_pb()
 }
 

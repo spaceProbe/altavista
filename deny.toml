@@ -33,12 +33,21 @@ ignore = [
     # so a real future vulnerability advisory on any crate still fails the build; only this
     # one, specific, already-triaged advisory ID is excused.
     "RUSTSEC-2024-0436",
-    # `unsafe-libyaml` (via `serde_yaml` 0.9 in av-kernel, av-sweep, av-command and
-    # av-gateway) is an *unmaintained* advisory, not a vulnerability: upstream archived the
-    # repository; no safe upgrade exists. Unlike `paste` above it runs at run time, parsing
-    # DRM and configuration YAML, so this exemption is temporary: question 246 charters the
-    # move off `serde_yaml`, and this line goes with it. Named by ID so any vulnerability
-    # advisory on the same crate still fails the build.
+    # `unsafe-libyaml` (via `serde_yaml` 0.9) is an *unmaintained* advisory, not a vulnerability:
+    # upstream archived the repository; no safe upgrade exists. Question 246 (round chartered by
+    # question 250(b)) moved every AltaVista crate that parses YAML (av-kernel, av-sweep,
+    # av-command, av-gateway, av-jobs) to `av-yaml` over `serde-saphyr`, so NONE of this
+    # workspace's own crates reaches `unsafe-libyaml` any more. The one path left is spoore's:
+    # `spoore-tree` (/Users/probe/code/spoore/crates/spoore-tree, which this workspace must not
+    # edit, question 12) depends on `serde_yaml` and puts `serde_yaml::Mapping`/`Value` in its
+    # public API (`src/config.rs`); `av-track` -> `spoore-engine` -> `spoore-tree` pulls it in.
+    # Measured: with this line removed, `cargo deny check advisories` reports exactly
+    # `unsafe-libyaml` <- `serde_yaml` <- `spoore-tree` <- {`av-track`, `spoore-engine`}.
+    # So the exemption stays until spoore-tree moves to the same parser (the upstream proposal is
+    # in `docs/spoore-upstream.md`, "spoore-tree off `serde_yaml`"); the user applies it to
+    # spoore, then this line goes. `[bans]` below makes the exemption exact: `serde_yaml` is
+    # allowed only as a direct dependency of `spoore-tree`, so no crate of ours can bring the
+    # advisory back. Named by ID so any vulnerability advisory on the crate still fails the build.
     "RUSTSEC-2024-0449",
 ]
 
@@ -180,6 +189,18 @@ deny = [
     { name = "tokio-rustls" },
     { name = "rustls-webpki" },
     { name = "webpki-roots" },
+    # Question 246: YAML is parsed by `av-yaml` (over `serde-saphyr`) and by nothing else of
+    # ours. `serde_yaml` (deprecated; its `unsafe-libyaml` is RUSTSEC-2024-0449, ignored above)
+    # is allowed only as a direct dependency of spoore's `spoore-tree`, the one crate outside
+    # this repository that still uses it; an AltaVista crate that names it again fails here, not
+    # silently at review. `unsafe-libyaml` may only come in through `serde_yaml`, and
+    # `serde-saphyr`/`granit-parser` only through `av-yaml`/`serde-saphyr`: the YAML policy
+    # (what is read exactly as before, what is refused) lives in `crates/av-yaml`, and a crate
+    # calling the parser directly would bypass it.
+    { name = "serde_yaml", wrappers = ["spoore-tree"] },
+    { name = "unsafe-libyaml", wrappers = ["serde_yaml"] },
+    { name = "serde-saphyr", wrappers = ["av-yaml"] },
+    { name = "granit-parser", wrappers = ["serde-saphyr"] },
 ]
 
 # ---------------------------------------------------------------------------------------

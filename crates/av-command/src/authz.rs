@@ -243,8 +243,8 @@ struct DelegationsFile {
 /// delegations, never a parse error and never a wildcard-grants-everything table (there is no
 /// such shape here at all: an empty table's [`DelegationTable::get`] returns `None` for every
 /// id, which [`authorize_command`] turns into [`AuthzError::DelegationNotFound`]).
-pub fn load_delegations_file(yaml: &str) -> Result<DelegationTable, serde_yaml::Error> {
-    let file: DelegationsFile = serde_yaml::from_str(yaml)?;
+pub fn load_delegations_file(yaml: &str) -> Result<DelegationTable, av_yaml::Error> {
+    let file: DelegationsFile = av_yaml::from_str(yaml)?;
     let delegations = file.delegations.into_iter().map(|d| Delegation {
         id: d.id,
         subject: d.subject,
@@ -451,7 +451,7 @@ pub fn authorize_service_call(principal: &Principal, rpc: ServiceRpc, table: &Se
 
 /// The `authority:` block's A2.2 additions (`profiles/execution.yaml`, `profiles/README.md`)
 /// -- parsed from the *same* YAML block `crate::policy::load_profile_authority_config` reads
-/// its own A1.2 fields from (a second, independent `serde_yaml::from_str` over the identical
+/// its own A1.2 fields from (a second, independent `av_yaml::from_str` over the identical
 /// text, each pulling out only the keys it needs -- the same "deserialize just the block you
 /// need" pattern that module's own doc already establishes; unknown keys are ignored by
 /// `serde`'s default behaviour on both sides, so neither loader needs to know about the
@@ -493,13 +493,13 @@ struct ProfileDocument {
 
 /// Every way [`load_profile_authz_config`] can fail: the YAML itself does not parse, its
 /// `service_roles` block names an unrecognized rpc, or `service_roles`/`roles` are not
-/// disjoint (R3.1). Distinct from the plain `serde_yaml::Error` this function returned before
+/// disjoint (R3.1). Distinct from the plain `av_yaml::Error` this function returned before
 /// R3.1 added the two new checks -- both are load-time refusals a profile author needs to see
 /// named, not folded into one generic parse failure.
 #[derive(Debug, Error)]
 pub enum LoadProfileAuthzConfigError {
     #[error("parsing authority: block: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] av_yaml::Error),
     #[error(transparent)]
     OverlappingServiceRole(#[from] OverlappingServiceRoleError),
     #[error(transparent)]
@@ -518,7 +518,7 @@ pub enum LoadProfileAuthzConfigError {
 /// `crate::policy::load_profile_authority_config`'s own sibling loaders already follow of
 /// validating shape here and constructing the "real" runtime value at the call site).
 pub fn load_profile_authz_config(yaml: &str) -> Result<ProfileAuthzConfig, LoadProfileAuthzConfigError> {
-    let config = serde_yaml::from_str::<ProfileDocument>(yaml)?.authority;
+    let config = av_yaml::from_str::<ProfileDocument>(yaml)?.authority;
     check_service_roles_disjoint(&config.roles, &config.service_roles)?;
     ServiceRoleTable::from_config(&config.service_roles)?;
     Ok(config)

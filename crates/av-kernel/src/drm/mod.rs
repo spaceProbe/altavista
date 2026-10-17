@@ -107,7 +107,7 @@ pub use replay::ReplayConfig;
 /// silently-dropped option or a silently-skipped refusal (question 87's central complaint).
 #[derive(Debug)]
 pub enum DrmError {
-    /// The YAML did not parse as the expected shape at all (`serde_yaml`'s own message).
+    /// The YAML did not parse as the expected shape at all (`av_yaml`'s own message).
     Yaml(String),
     /// A string field that names a proto enum value did not match any of that enum's
     /// `from_str_name` variants.

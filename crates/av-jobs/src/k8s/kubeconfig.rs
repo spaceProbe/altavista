@@ -19,12 +19,14 @@
 //! The server is read from the file every time: the Colima-forwarded port changes between
 //! restarts, so nothing here (or in a caller) hard-codes it.
 //!
-//! # YAML: one function, because the YAML crate is going away (question 246)
+//! # YAML: one function (question 246)
 //!
-//! Question 246 records that the workspace's YAML crate is to be replaced, with this crate as a
-//! fifth in the migration's scope; it is used here this round only because it is already locked.
-//! So all YAML parsing is the single private function `parse_yaml`, which returns a plain
-//! `serde_json::Value`; nothing else in this crate names a type from that crate.
+//! All YAML parsing is the single private function `parse_yaml`, which reads the text through
+//! `av_yaml` (the workspace's one YAML parser and policy) into a plain `serde_json::Value`;
+//! nothing else in this crate names a type from the YAML crate. `av_yaml` refuses, rather than
+//! guesses at, the plain scalars a lenient reader would turn into another value (an unquoted
+//! `nULL`, `tRUE` or `0123`), which matters here: `insecure-skip-tls-verify`, `tls-server-name`,
+//! `proxy-url` and the credential keys are all checked by whether they are present and not null.
 
 use std::fmt;
 use std::fs;
@@ -36,7 +38,7 @@ use serde_json::Value;
 /// `text` straight into a `serde_json::Value`. Replacing the YAML crate means rewriting this body
 /// and the `[dependencies]` line in `Cargo.toml`, nothing else.
 fn parse_yaml(text: &str) -> Result<Value, KubeconfigError> {
-    serde_yaml::from_str::<Value>(text).map_err(|e| KubeconfigError::Yaml(e.to_string()))
+    av_yaml::from_str::<Value>(text).map_err(|e| KubeconfigError::Yaml(e.to_string()))
 }
 
 /// Why a kubeconfig was not usable. Every variant is a refusal a caller can show a human.
