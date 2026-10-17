@@ -8,14 +8,48 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# `full` (the default, so every crate that names `av-cdm = { path = "../av-cdm" }` is unchanged)
+# compiles every proto/altavista/v1/*.proto into `pb` and builds the hand-written modules
+# (`time`, `units`, `spoore_v0`, `covariance`) with their dependencies.
+#
+# `default-features = false` is the NARROW build, used only by crates/av-lockstep-shim
+# (question 245 (7)): build.rs then compiles lockstep.proto and its import closure only
+# (system, core, envelope, packet), and none of the hand-written modules or their
+# dependencies (spoore-cdm, nalgebra, serde, serde_json, thiserror) are built. Why: the cFS
+# image's shim binary must not change when an unrelated proto is edited, and every message in
+# `pb` moves the shim's `.rodata` literals, `.text` immediates and build-id.
+# Cargo features are additive, so the narrow build only holds while av-cdm is built with the
+# shim as its only dependent in the build graph (`cargo build -p av-lockstep-shim`, which is
+# what services/cfs/build-shim.sh runs); any workspace-wide build gets `full`.
+default = ["full"]
+full = ["dep:spoore-cdm", "dep:nalgebra", "dep:serde", "dep:serde_json", "dep:thiserror"]
+
 [dependencies]
 prost.workspace = true
 prost-types.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-spoore-cdm.workspace = true
-nalgebra.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+spoore-cdm = { workspace = true, optional = true }
+nalgebra = { workspace = true, optional = true }
 
 [build-dependencies]
 prost-build.workspace = true
+
+# These targets use the hand-written modules, which exist only under `full`.
+[[test]]
+name = "adsb_frame_resolution"
+required-features = ["full"]
+
+[[test]]
+name = "epoch_fixture"
+required-features = ["full"]
+
+[[test]]
+name = "spoore_v0"
+required-features = ["full"]
+
+[[example]]
+name = "gen_epoch_fixture"
+required-features = ["full"]

@@ -25,6 +25,17 @@
 //!   `spoore_cdm::GaussianState`'s constructor enforces, applied to a propagated covariance
 //!   *before* it crosses into a spoore type (`docs/open-questions.md` question 80): a typed,
 //!   counted error on failure, and an opt-in nearest-SPD projection.
+//!
+//! ## Features
+//!
+//! - `full` (default): everything above. `pb` holds every message in
+//!   `proto/altavista/v1/*.proto`; the hand-written modules and their dependencies
+//!   (`spoore-cdm`, `nalgebra`, `serde`, `serde_json`, `thiserror`) are built.
+//! - none (`default-features = false`): the narrow build for the cFS lockstep shim
+//!   (question 245 (7)). `pb` holds only `lockstep.proto` and its import closure
+//!   (`system.proto`, `core.proto`, `envelope.proto`, `packet.proto`); the `time`, `units`,
+//!   `spoore_v0` and `covariance` modules above do not exist (so the links to them in this
+//!   comment only resolve under `full`). See `build.rs` and `Cargo.toml`.
 
 pub mod pb {
     //! Generated `altavista.v1` types.
@@ -37,7 +48,11 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/altavista.v1.rs"));
 }
 
+#[cfg(feature = "full")]
 pub mod covariance;
+#[cfg(feature = "full")]
 pub mod spoore_v0;
+#[cfg(feature = "full")]
 pub mod time;
+#[cfg(feature = "full")]
 pub mod units;

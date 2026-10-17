@@ -1,5 +1,7 @@
 //! Compiles `proto/altavista/v1/*.proto` (the CDM v1 messages, ADR-001) into Rust with
-//! `prost-build`, exposed by `src/lib.rs` as the `av_cdm::pb` module.
+//! `prost-build`, exposed by `src/lib.rs` as the `av_cdm::pb` module. With the default `full`
+//! feature every `proto/altavista/v1/*.proto` is compiled; without it (the cFS lockstep shim) only
+//! `lockstep.proto` and its import closure are (see `main` below and `Cargo.toml`'s `[features]`).
 //!
 //! `protoc` resolution order: the `PROTOC` environment variable if set, else
 //! `/opt/homebrew/opt/protobuf/bin/protoc` -- wait, see below -- else `protoc` on `PATH`.
@@ -8,6 +10,7 @@
 //! directory is resolved the same way `protoc`'s own version is, plus a couple of
 //! Homebrew-standard fallbacks, and this build script fails loudly (rather than emitting a
 //! crate silently missing `Any`) if none of them contain it.
+use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,6 +76,33 @@ fn resolve_wkt_include_dir(protoc: &Path) -> PathBuf {
     );
 }
 
+/// `import "altavista/v1/<name>.proto";` lines of `file`, as paths under `v1_dir`. Only
+/// `altavista/v1/` imports are followed; `google/protobuf/*` well-known types live in the
+/// `protoc` include directory and are not part of this repo's proto set.
+fn v1_imports(v1_dir: &Path, file: &Path) -> Vec<PathBuf> {
+    let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("av-cdm build.rs: cannot read {}: {e}", file.display()));
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("import ")?;
+            let name = rest.trim().trim_end_matches(';').trim().trim_matches('"');
+            name.strip_prefix("altavista/v1/").map(|n| v1_dir.join(n))
+        })
+        .collect()
+}
+
+/// `root` plus every `altavista/v1` proto it imports, transitively, read from the files
+/// themselves (never a hand-kept list that could go stale), sorted and de-duplicated.
+fn import_closure(v1_dir: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(f) = todo.pop() {
+        if seen.insert(f.clone()) {
+            todo.extend(v1_imports(v1_dir, &f));
+        }
+    }
+    seen.into_iter().collect()
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = manifest_dir
@@ -83,25 +113,49 @@ fn main() {
     let proto_dir = repo_root.join("proto");
     let v1_dir = proto_dir.join("altavista").join("v1");
 
-    let mut protos: Vec<PathBuf> = std::fs::read_dir(&v1_dir)
-        .unwrap_or_else(|e| panic!("av-cdm build.rs: cannot read {}: {e}", v1_dir.display()))
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "proto"))
-        .collect();
-    protos.sort();
+    // Feature `full` (default): every .proto under proto/altavista/v1/. Without it (the cFS
+    // lockstep shim's narrow build, question 245 (7)): lockstep.proto only -- protoc pulls its
+    // import closure (system, core, envelope, packet) in through the include path, and
+    // prost-build generates code for every file protoc returns, so `pb` then holds exactly the
+    // closure. An edit to any proto outside the closure then cannot reach the shim's binary.
+    let full = env::var_os("CARGO_FEATURE_FULL").is_some();
+    let protos: Vec<PathBuf> = if full {
+        let mut all: Vec<PathBuf> = std::fs::read_dir(&v1_dir)
+            .unwrap_or_else(|e| panic!("av-cdm build.rs: cannot read {}: {e}", v1_dir.display()))
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "proto"))
+            .collect();
+        all.sort();
+        all
+    } else {
+        let lockstep = v1_dir.join("lockstep.proto");
+        assert!(lockstep.is_file(), "av-cdm build.rs: missing {}", lockstep.display());
+        vec![lockstep]
+    };
     assert!(
         !protos.is_empty(),
         "av-cdm build.rs: no .proto files found under {}",
         v1_dir.display()
     );
 
-    for proto in &protos {
+    // Watch every file that can reach the output: the compiled set, plus (narrow build) its
+    // import closure.
+    let watched: Vec<PathBuf> = if full {
+        protos.clone()
+    } else {
+        import_closure(&v1_dir, &protos[0])
+    };
+    for proto in &watched {
         println!("cargo:rerun-if-changed={}", proto.display());
     }
-    // A new .proto file must also trigger a rebuild: per-file rerun-if-changed lines only
-    // watch files that already existed at the last build (found 2026-09-04 when
-    // lockstep.proto was added and av_cdm::pb silently lacked its types).
-    println!("cargo:rerun-if-changed={}", v1_dir.display());
+    if full {
+        // A new .proto file must also trigger a rebuild: per-file rerun-if-changed lines only
+        // watch files that already existed at the last build (found 2026-09-04 when
+        // lockstep.proto was added and av_cdm::pb silently lacked its types). The narrow build
+        // compiles a fixed root and follows imports, so a new file cannot enter it unless an
+        // already-watched file imports it.
+        println!("cargo:rerun-if-changed={}", v1_dir.display());
+    }
     println!("cargo:rerun-if-env-changed=PROTOC");
     println!("cargo:rerun-if-env-changed=PROTOC_INCLUDE");
 
