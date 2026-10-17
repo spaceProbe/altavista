@@ -47,13 +47,15 @@ image actually ships and runs, independent of any Docker/BuildKit implementation
 **Runtime-content set** -- every file at these image-internal paths (paths as they exist inside
 the built container, not host paths):
 - `/cfs/av-lockstep-shim`
+- `/cfs/av-lockstep-relay` (from the 2026-10-17 pin, question 245 (6): the UDP carrier the
+  entrypoint runs instead of the shim when `LOCKSTEP_TRANSPORT=udp`)
 - `/cfs/container-entrypoint.sh`
 - every regular file under `/cfs/cpu1`, recursively (as of this round, with cFE's unit-test/
   coverage build turned off -- `services/cfs/build/targets.cmake` -- this directory should
   contain nothing else: no `coverage-*-testrunner` / `*-test` / `*_UT` harness binaries)
 
-These three roots are exactly what `services/cfs/container-entrypoint.sh` (this image's own
-`ENTRYPOINT`) reads and executes: it runs `/cfs/av-lockstep-shim` and `exec`s
+These roots are exactly what `services/cfs/container-entrypoint.sh` (this image's own
+`ENTRYPOINT`) reads and executes: it runs `/cfs/av-lockstep-shim` (or `/cfs/av-lockstep-relay`) and `exec`s
 `/cfs/cpu1/core-cpu1`, which `dlopen()`s the mission app/PSP `.so` modules and reads the table/
 startup files also under `/cfs/cpu1` -- see that script's own top comment.
 
@@ -78,13 +80,27 @@ one is unlikely to be masked by the same bug in the other):
   on this host (the Docker CLI's `buildx` component is absent and cannot be installed without
   network). See `services/cfs/R6_4_REPORT.md` and question 190.
 
-Recorded digest (re-pinned 2026-10-09 at the merge of question 242's round -- see
-"Re-pinned 2026-10-09" below -- `third_party/cfs` still pinned at
-`088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see `third_party/fetch-cfs.sh`):
+Recorded digest (re-pinned 2026-10-17 by the native team's container round, question 245 --
+`third_party/cfs` still pinned at `088b2fa828db9ff7e00733f1908e0eeb59f66ce3`, see
+`third_party/fetch-cfs.sh`):
 
 ```
-sha256:a6bb91d457680de8e58e55fdb821fe6cc5cf859211f26acbb8528c17b5d8e2e5
+sha256:e51b896d34ca0ceb0e4809453768b0524cf577ca5356256840c172d74f68d8e5
 ```
+
+Re-pinned 2026-10-17 (question 245): the shim and the image's runtime half moved for three
+source reasons, and the cFS half did not move (every `/cfs/cpu1` file byte-identical, from the
+layer cache). (1) `av-cdm` is narrowed for the shim (`04d1813`): the shim compiles only
+`lockstep.proto` and its import closure, so it moved once, `28dde7bf…` to `b103a90e…` stripped
+(`e649fe1f…` unstripped), and an edit to any proto outside that closure no longer moves it.
+(2) The image now also ships `/cfs/av-lockstep-relay` (`3b72b96c…` stripped, `21cd1a3`), the UDP
+carrier the entrypoint runs instead of the shim with `LOCKSTEP_TRANSPORT=udp`; it is in the
+runtime-content set from this pin on (definition above). (3) `container-entrypoint.sh` gained that
+switch (`6cd72f11…` to `93dac11d…`; the default path runs the shim exactly as before). Built with
+`services/cfs/build-shim.sh` and `services/cfs/build-image.sh` at `21cd1a3`, 0 dirty files under the
+copied paths; the shim equals the native team's independent builds byte for byte (the worker's in
+a throwaway clone, the manager's from the shared tree and from a review clone). The previous
+recorded ID was `sha256:a6bb91d457680de8e58e55fdb821fe6cc5cf859211f26acbb8528c17b5d8e2e5`.
 
 Re-pinned 2026-10-09: two causes, both from the HIL-preparation round (question 242). The cFS
 apps changed — `psp_lockstep_init` no longer zeroes the tick count and `sch_lockstep` resyncs if
@@ -116,6 +132,9 @@ the same Dockerfile, so the ID moved and the runtime-content hash below did not.
 previous recorded ID was `sha256:4d37036ea32564a5a23c3da8c9dcecd817dcf62893f2e4ea76982001d6d53b7d`.
 
 Recorded runtime-content hash for this pin (question 185, see the definition above; MOVED by the
+2026-10-17 re-pin: the set gained `/cfs/av-lockstep-relay`, and `/cfs/av-lockstep-shim` and
+`/cfs/container-entrypoint.sh` changed, every `/cfs/cpu1` file byte-identical; previously
+`sha256:49ec7ef8…`. MOVED by the
 2026-10-09 re-pin, for the cFS apps' RESET fix and the shim's proto-driven reordering, both
 source changes; previously `sha256:c72ad6c5…`. MOVED by the
 2026-10-07 re-pin on exactly one file, `/cfs/av-lockstep-shim` `8d61137c…` → `a044c0d2…`, a source
@@ -125,12 +144,12 @@ reproducible build (question 236), and every other runtime file is byte-identica
 pin. It also moved on 2026-09-22 for the opposite reason, an unpinned build environment; from
 this pin on, a rebuild of the same commit must not move it, and two builds below show it did not):
 ```
-sha256:49ec7ef845ff73b06dd570b00bd7c8ebebd1640befeef065e64b65ad0497bb65
+sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199
 ```
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-21d57f15df7fc0d68d32ff4c9188c78663ea175e
+21cd1a3eb7bf62537385adab870800a195a561f2
 ```
 
 ## Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)

@@ -56,7 +56,7 @@ explicit that the second must never narrow or replace the first:
 
   1. The RUNTIME-CONTENT HASH (question 185's own term): SHA-256 over the sorted
      "<path> <sha256>" lines for every file this image actually ships and runs --
-     `/cfs/av-lockstep-shim`, `/cfs/container-entrypoint.sh`, and every file under `/cfs/cpu1`
+     `/cfs/av-lockstep-shim`, `/cfs/av-lockstep-relay`, `/cfs/container-entrypoint.sh`, and every file under `/cfs/cpu1`
      (after the unit-tests-off fix, that directory should hold nothing else). See
      services/cfs/IMAGE_DIGEST.md's own "Runtime-content hash" section for the canonical
      definition this file's `runtime_content_hash()` independently re-implements (question 164's
@@ -170,7 +170,7 @@ def _docker_rmi(tag: str) -> None:
 # separate, so a bug in one is unlikely to be masked by the same bug in the other. -----------------
 RUNTIME_CONTENT_SHELL_CMD = (
     "find /cfs/cpu1 -type f -exec sha256sum {} + ; "
-    "sha256sum /cfs/av-lockstep-shim /cfs/container-entrypoint.sh"
+    "sha256sum /cfs/av-lockstep-shim /cfs/av-lockstep-relay /cfs/container-entrypoint.sh"
 )
 
 
@@ -201,7 +201,7 @@ def _parse_sha256sum_output(stdout: str) -> dict[str, str]:
 
 def runtime_content_hash(tag: str) -> str:
     """SHA-256 over the sorted "<path> <sha256>" lines for every file this image's
-    runtime-content set contains: /cfs/av-lockstep-shim, /cfs/container-entrypoint.sh, and every
+    runtime-content set contains: /cfs/av-lockstep-shim, /cfs/av-lockstep-relay, /cfs/container-entrypoint.sh, and every
     file under /cfs/cpu1 (after question 185's unit-tests-off fix, that directory should hold
     nothing but runtime-relevant artifacts). Returns the bare hex digest (no "sha256:" prefix)."""
     hashes = _parse_sha256sum_output(_docker_run_capture(tag, RUNTIME_CONTENT_SHELL_CMD))
@@ -219,7 +219,7 @@ def _all_cfs_file_hashes(tag: str) -> dict[str, str]:
 
 
 def _is_runtime_content_path(path: str) -> bool:
-    return path in ("/cfs/av-lockstep-shim", "/cfs/container-entrypoint.sh") or path.startswith(
+    return path in ("/cfs/av-lockstep-shim", "/cfs/av-lockstep-relay", "/cfs/container-entrypoint.sh") or path.startswith(
         "/cfs/cpu1/"
     )
 
@@ -285,7 +285,7 @@ def _run_two_independent_builds_produce_the_same_image_id() -> None:
             pytest.fail(
                 "runtime-content hash DIFFERS between two independent `docker build --no-cache` "
                 f"runs (sha256:{rc_hash_1} vs sha256:{rc_hash_2}) -- this hash covers every file "
-                "the image actually ships and runs (/cfs/av-lockstep-shim, "
+                "the image actually ships and runs (/cfs/av-lockstep-shim, /cfs/av-lockstep-relay, "
                 "/cfs/container-entrypoint.sh, and everything under /cfs/cpu1; see "
                 "IMAGE_DIGEST.md's 'Runtime-content hash' section for the exact definition) and "
                 "must be equal; it is never weakened or narrowed to make this pass.\n"
