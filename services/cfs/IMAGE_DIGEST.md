@@ -149,8 +149,16 @@ sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-74566ec43be7655daa9df6117c6744c01da148ab
+d7a212bf86e43c8ba0e4f499af13fbf21eac4c10
 ```
+
+## Re-recorded 2026-10-17 (question 250's native round): same image, the build commit moved
+
+Question 246's move off `serde_yaml` (`d7a212b`) changed `Cargo.lock` and `Cargo.toml`, both copied
+paths, so the record named a stale commit. `services/cfs/build-shim.sh` at `d7a212b` produced the
+same stripped shim (`b103a90e…`) and relay (`3b72b96c…`) byte for byte, and
+`services/cfs/build-image.sh` (0 dirty files under the copied paths) returned the same image id
+`sha256:e51b896d…` and runtime-content hash `sha256:56d7bd00…`. Only the recorded build commit moved.
 
 ## Re-pinned 2026-10-05 (question 236: the shim is now a reproducible cross-build)
 
