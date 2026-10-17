@@ -24,8 +24,12 @@ Stdlib only. Three generators (Decision D -- where each SBOM's package list come
   reads directly; `services/cfs/IMAGE_DIGEST.md` is a long changelog with no single current-
   state table, so this reads the structured, always-regenerated header lines of
   `IMAGE_CONTEXT_MANIFEST.txt` instead ("Built image ID for this manifest" / "Runtime-content
-  hash for this build") rather than parsing changelog prose -- and records what it cannot find
-  there (the base image digest) as a declared gap property instead of guessing.
+  hash for this build") rather than parsing changelog prose. Each image SBOM also lists every
+  package of the image's operator-supplied BASE image (question 250(a)): the packages, versions
+  and licences come from the committed `services/*/BASE_IMAGE_INVENTORY.json`
+  (`scripts/kit/base_inventory.py`'s output, itself generated once from the digest-pinned base),
+  the base's digest from `scripts/kit/operator_supplied.json`, and the edge-plugin image's
+  kit-carried `libssl3` from `services/edge-plugin/runtime-packages.json`. Still never docker.
 
 Decision H (the build epoch, never wall-clock): `metadata.timestamp` is the committer date
 (`git log -1 --format=%cI`, converted to UTC and printed with a literal `Z`) of the last commit
@@ -50,6 +54,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -61,6 +66,10 @@ import licences  # scripts/kit/licences.py -- the one source of truth for FREE_T
                   # (D2-2: the SBOM must never emit a licence string licences.py itself cannot
                   # parse as SPDX, so this module normalises through the SAME alias table
                   # licences.py's own allow-list check uses, never a second copy of it).
+# This module and licences.py are the only local modules the kit's bundled installer carries
+# (build_kit.py::INSTALLER_SOURCE_FILES, checked recursively): nothing else may be imported here.
+# scripts/kit/base_inventory.py (the docker half of question 250(a)) imports THIS module, never
+# the other way round, so the base-image constants below live here.
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,6 +82,17 @@ PROP_AUDIT_KIND = PROP_PREFIX + "audit-kind"
 PROP_SOURCE = PROP_PREFIX + "source"
 PROP_NO_LICENCE = PROP_PREFIX + "no-licence-metadata"
 PROP_GAP = PROP_PREFIX + "gap"
+PROP_OPERATOR_SUPPLIED = licences.PROP_OPERATOR_SUPPLIED  # one definition, in licences.py
+PROP_KIT_CARRIED = PROP_PREFIX + "kit-carried"
+PROP_BASE_IMAGE = PROP_PREFIX + "base-image"
+PROP_BASE_IMAGE_DIGEST = PROP_PREFIX + "base-image-digest"
+PROP_BASE_IMAGE_INVENTORY = PROP_PREFIX + "base-image-inventory"
+PROP_ARCHITECTURE = PROP_PREFIX + "architecture"
+PROP_SOURCE_PACKAGE = PROP_PREFIX + "source-package"
+PROP_LICENCE_SOURCE = PROP_PREFIX + "licence-source"
+PROP_LICENCE_FIELDS = PROP_PREFIX + "licence-fields"
+PROP_LICENCE_NOTE = PROP_PREFIX + "licence-note"
+PROP_PACKAGE_COUNT = PROP_PREFIX + "package-count"
 
 # --- Component registries (Decision G / deliverable 6: "Images are an explicit extra set,
 # declared in one place"; the eight suite components are never hard-coded -- they come from
@@ -156,9 +176,57 @@ IMAGE_COMPONENTS: tuple[str, ...] = ("edge-plugin-image", "cfs-image")
 #: Per-image epoch paths (Decision H: "for an image its IMAGE_DIGEST.md (and
 #: IMAGE_CONTEXT_MANIFEST.txt where one exists)") -- named once here so the generator and
 #: `tests/test_sbom.py::test_the_epoch_is_never_wall_clock` can never drift apart.
+#: Question 250(a): recorded image component -> its service directory, and the committed base-image
+#: inventory (`scripts/kit/base_inventory.py`'s output) that lives there. The base each image
+#: starts FROM is found through the pins file's `base_of`, never by name here.
+IMAGE_SERVICE_DIRS: dict[str, str] = {
+    "cfs-image": "services/cfs",
+    "edge-plugin-image": "services/edge-plugin",
+}
+INVENTORY_FILENAME = "BASE_IMAGE_INVENTORY.json"
+INVENTORY_SCHEMA = 1
+PINS_PATH = REPO_ROOT / "scripts" / "kit" / "operator_supplied.json"
+
+
+def inventory_relpath(image: str) -> str:
+    return f"{IMAGE_SERVICE_DIRS[image]}/{INVENTORY_FILENAME}"
+
+
+def inventory_path(image: str) -> Path:
+    return REPO_ROOT / inventory_relpath(image)
+
+
+def load_pins() -> dict:
+    return json.loads(PINS_PATH.read_text(encoding="utf-8"))
+
+
+def base_pin_for(image: str, pins: Optional[dict] = None) -> tuple[str, dict]:
+    """`(pin name, pin)` for the container-base-image pin whose `base_of` names `image`."""
+    pins = pins or load_pins()
+    found = [
+        (name, pin) for name, pin in sorted(pins["components"].items())
+        if pin.get("kind") == "container-base-image" and image in pin.get("base_of", [])
+    ]
+    if len(found) != 1:
+        raise RuntimeError(f"{image}: expected exactly one base-image pin, found {[n for n, _ in found]}")
+    return found[0]
+
+
+#: Question 250(a) added each image's committed base-image inventory (`base_inventory.py`'s output)
+#: and nothing else: the image SBOM's package list is a pure function of it, and an unrelated
+#: edit must not move the epoch (question 217's lesson). The pins file and
+#: `runtime-packages.json` also feed the SBOM but change only when a pin or a carried package
+#: changes; `test_two_generations_are_byte_identical` names a committed SBOM gone stale from one.
 IMAGE_EPOCH_PATHS: dict[str, list[str]] = {
-    "edge-plugin-image": ["services/edge-plugin/IMAGE_DIGEST.md"],
-    "cfs-image": ["services/cfs/IMAGE_DIGEST.md", "services/cfs/IMAGE_CONTEXT_MANIFEST.txt"],
+    "edge-plugin-image": [
+        "services/edge-plugin/IMAGE_DIGEST.md",
+        inventory_relpath("edge-plugin-image"),
+    ],
+    "cfs-image": [
+        "services/cfs/IMAGE_DIGEST.md",
+        "services/cfs/IMAGE_CONTEXT_MANIFEST.txt",
+        inventory_relpath("cfs-image"),
+    ],
 }
 
 
@@ -663,6 +731,183 @@ def _image_component(name: str, hash_hex: str, kind: str) -> dict:
     }
 
 
+@lru_cache()
+def _spdx_ids() -> frozenset[str]:
+    data = json.loads((REPO_ROOT / "scripts" / "kit" / "spdx-license-ids.json").read_text(encoding="utf-8"))
+    return frozenset(data["ids"])
+
+
+def _debian_licence_entry(value: str) -> dict:
+    """One Debian copyright `License:` value as a CycloneDX `licenses[]` entry. The value is
+    Debian's own short name (`GPL-2+`, `public-domain`, `Expat`, `BSD-3-clause or GPL-2`), which
+    is SPDX only by coincidence. It becomes `license.id` ONLY when it equals, byte for byte and
+    case-sensitively, an SPDX identifier in `scripts/kit/spdx-license-ids.json` (`MIT`,
+    `Apache-2.0`, `BSD-3-Clause`, `LGPL-2.1+` ...); everything else is `license.name`, verbatim,
+    never rewritten into an SPDX look-alike (`Expat` is not silently called `MIT`, `GPL-2+` is
+    not guessed to be `GPL-2.0-or-later`, and an `or`/`and` combination of Debian names is a
+    name, not an `expression`)."""
+    if value in _spdx_ids():
+        return {"license": {"id": value}}
+    return {"license": {"name": value}}
+
+
+def _deb_purl(namespace: str, name: str, version: str, arch: str, distro: str) -> str:
+    q = lambda text: urllib.parse.quote(text, safe="")  # noqa: E731
+    return f"pkg:deb/{namespace}/{q(name)}@{q(version)}?arch={arch}&distro={distro}"
+
+
+def _oci_purl(reference: str, digest: str, arch: str) -> str:
+    name_tag = reference.partition("@")[0]
+    repo, _, tag = name_tag.partition(":")
+    if "/" not in repo:
+        repo = f"docker.io/library/{repo}"
+    return f"pkg:oci/{repo.rsplit('/', 1)[-1]}@{urllib.parse.quote(digest, safe='')}?arch={arch}&repository_url={repo}&tag={tag}"
+
+
+def _sorted_props(props: list[dict]) -> list[dict]:
+    return sorted(props, key=lambda p: (p["name"], p["value"]))
+
+
+@lru_cache()
+def _base_inventory(image: str) -> dict:
+    """The committed base-image inventory for `image`, cross-checked against the pins file: its
+    recorded reference and digest must be the pinned ones, so an inventory generated from a
+    different base than the one the kit pins is refused, not listed."""
+    path = inventory_path(image)
+    if not path.is_file():
+        raise RuntimeError(
+            f"{path} is missing -- run `.venv/bin/python scripts/kit/base_inventory.py` (it takes the "
+            f"docker lock itself) and commit the result; scripts/kit/sbom.py never runs docker"
+        )
+    inv = json.loads(path.read_text(encoding="utf-8"))
+    _pin_name, pin = base_pin_for(image)
+    recorded = inv["base_image"]
+    if recorded["reference"] != pin["reference"] or recorded["digest"] != pin["digest"]:
+        raise RuntimeError(
+            f"{path}: generated from {recorded['reference']} but scripts/kit/operator_supplied.json "
+            f"pins {pin['reference']} for {image} -- regenerate the inventory"
+        )
+    if inv["schema"] != INVENTORY_SCHEMA or inv["package_count"] != len(inv["packages"]):
+        raise RuntimeError(f"{path}: malformed inventory (schema or package_count)")
+    return inv
+
+
+def _base_image_components(image: str, carried_names: frozenset[str] = frozenset()) -> list[dict]:
+    """The operator-supplied base image as one `container` component plus one `library`
+    component per package it holds. Every one carries `altavista:sbom:operator-supplied=true`
+    (docs/kit-operator-supplied.md): the kit names these and pins them, it does not ship them.
+    A base package a kit-carried `.deb` would replace is an error, not silently listed twice."""
+    inv = _base_inventory(image)
+    pin_name, pin = base_pin_for(image)
+    reference, digest = pin["reference"], pin["digest"]
+    platform_arch = inv["base_image"]["platform"].rpartition("/")[2]
+    os_id, os_version = inv["os_release"]["id"], inv["os_release"]["version_id"]
+    distro = f"{os_id}-{os_version}"
+    inventory_rel = inventory_relpath(image)
+    common = [
+        {"name": PROP_OPERATOR_SUPPLIED, "value": "true"},
+        {"name": PROP_BASE_IMAGE, "value": reference},
+        {"name": PROP_BASE_IMAGE_DIGEST, "value": digest},
+    ]
+
+    components = [{
+        "type": "container",
+        "name": reference.partition("@")[0],
+        "version": digest,
+        "purl": _oci_purl(reference, digest, platform_arch),
+        "hashes": [{"alg": "SHA-256", "content": digest.removeprefix("sha256:")}],
+        "properties": _sorted_props(common + [
+            {"name": PROP_BASE_IMAGE_INVENTORY, "value": inventory_rel},
+            {"name": PROP_NO_LICENCE, "value": "true"},
+            {"name": PROP_PACKAGE_COUNT, "value": str(inv["package_count"])},
+            {"name": PROP_PREFIX + "licences",
+             "value": f"per package: see the components carrying {PROP_BASE_IMAGE}={reference}"},
+        ]),
+    }]
+
+    for pkg in inv["packages"]:
+        if pkg["name"] in carried_names:
+            raise RuntimeError(
+                f"{image}: the base image already holds {pkg['name']} {pkg['version']}, which a "
+                f"kit-carried .deb of the same name would replace -- decide which one the SBOM lists"
+            )
+        copyright_path = f"/usr/share/doc/{pkg['name']}/copyright"
+        props = common + [
+            {"name": PROP_ARCHITECTURE, "value": pkg["architecture"]},
+            {"name": PROP_SOURCE_PACKAGE, "value": pkg["source"]},
+            {"name": PROP_LICENCE_SOURCE, "value": copyright_path},
+        ]
+        comp = {
+            "type": "library",
+            "name": pkg["name"],
+            "version": pkg["version"],
+            "purl": _deb_purl(os_id, pkg["name"], pkg["version"], pkg["architecture"], distro),
+        }
+        if pkg["licences"]:
+            comp["licenses"] = [_debian_licence_entry(v) for v in pkg["licences"]]
+            if not pkg["machine_readable"]:
+                props.append({"name": PROP_GAP, "value": (
+                    f"{copyright_path} is not machine-readable DEP-5 (no Format: header); its "
+                    f"License: lines are listed as found and may be incomplete -- read it by hand"
+                )})
+        else:
+            props.append({"name": PROP_NO_LICENCE, "value": "true"})
+            reason = (
+                "has no License: line" if pkg["copyright_file"] else "does not exist in the image"
+            )
+            props.append({"name": PROP_GAP, "value": (
+                f"no machine-readable License: field: {copyright_path} {reason}"
+                + ("" if pkg["machine_readable"] else " and is not DEP-5 (no Format: header)")
+                + " -- read the copyright file by hand"
+            )})
+        comp["properties"] = _sorted_props(props)
+        components.append(comp)
+    return components
+
+
+def _carried_package_components(image: str) -> list[dict]:
+    """Debian packages the KIT carries for `image` (services/<image>/runtime-packages.json): not
+    operator-supplied, so the licence gate applies to them in full. Only the edge-plugin image has
+    one today (`libssl3`)."""
+    path = REPO_ROOT / IMAGE_SERVICE_DIRS[image] / "runtime-packages.json"
+    if not path.is_file():
+        return []
+    record = json.loads(path.read_text(encoding="utf-8"))
+    inv = _base_inventory(image)
+    os_id, os_version = inv["os_release"]["id"], inv["os_release"]["version_id"]
+    components = []
+    for pkg in record["packages"]:
+        lic = pkg["licence"]
+        components.append({
+            "type": "library",
+            "name": pkg["package"],
+            "version": pkg["version"],
+            "purl": _deb_purl(os_id, pkg["package"], pkg["version"], pkg["architecture"], f"{os_id}-{os_version}"),
+            "hashes": [{"alg": "SHA-256", "content": pkg["sha256"]}],
+            # The binary package's own licence, as recorded and ruled in runtime-packages.json
+            # (the other 'License:' fields of its copyright file name a build-time source-tree
+            # helper the .deb holds no file from; they are kept as a property, not dropped).
+            "licenses": [_debian_licence_entry(lic["binary_package_licence"])],
+            "properties": _sorted_props([
+                {"name": PROP_KIT_CARRIED, "value": "true"},
+                {"name": PROP_ARCHITECTURE, "value": pkg["architecture"]},
+                {"name": PROP_LICENCE_SOURCE, "value": lic["source"]},
+                {"name": PROP_LICENCE_FIELDS, "value": "; ".join(lic["licence_fields"])},
+                {"name": PROP_LICENCE_NOTE, "value": lic["note"]},
+                {"name": PROP_SOURCE, "value": pkg["snapshot_url"]},
+            ]),
+        })
+    return components
+
+
+def _image_base_properties(image: str) -> list[dict]:
+    _name, pin = base_pin_for(image)
+    return [
+        {"name": PROP_BASE_IMAGE, "value": pin["reference"]},
+        {"name": PROP_BASE_IMAGE_INVENTORY, "value": inventory_relpath(image)},
+    ]
+
+
 def _edge_plugin_image_sbom() -> dict:
     digest_path = REPO_ROOT / "services" / "edge-plugin" / "IMAGE_DIGEST.md"
     text = digest_path.read_text()
@@ -682,8 +927,17 @@ def _edge_plugin_image_sbom() -> dict:
     binary_hash = binary_sha.removeprefix("sha256:")
     image_id_hash = image_id.removeprefix("sha256:")
 
+    _pin_name, pin = base_pin_for("edge-plugin-image")
+    if pin["reference"] != f"{runtime_name}@sha256:{runtime_hash}":
+        raise RuntimeError(
+            f"services/edge-plugin/IMAGE_DIGEST.md records the runtime base {runtime_base!r} but "
+            f"scripts/kit/operator_supplied.json pins {pin['reference']!r}"
+        )
+    carried = _carried_package_components("edge-plugin-image")
     components = [
-        _image_component(runtime_name, runtime_hash, "container"),
+        # the runtime base and its packages: operator-supplied, listed from the committed inventory
+        *_base_image_components("edge-plugin-image", frozenset(c["name"] for c in carried)),
+        *carried,
         _image_component(prebuild_name, prebuild_hash, "container"),
         _image_component("av-edge-plugin", binary_hash, "file"),
     ]
@@ -693,6 +947,7 @@ def _edge_plugin_image_sbom() -> dict:
         "name": "edge-plugin-image",
         "version": image_tag,
         "hashes": [{"alg": "SHA-256", "content": image_id_hash}],
+        "properties": _sorted_props(_image_base_properties("edge-plugin-image")),
     }
     return _assemble_document("edge-plugin-image", meta_component, components, epoch)
 
@@ -723,19 +978,15 @@ def _cfs_image_sbom() -> dict:
         file_hash, file_path = m.groups()
         components.append(_image_component(Path(file_path).name, file_hash, "file"))
 
+    # The base image digest used to be a declared gap here (no single current-state field in the
+    # changelog-shaped IMAGE_DIGEST.md). It now comes from scripts/kit/operator_supplied.json, the
+    # pin the kit's installer and Dockerfile.kit already use (tests/test_kit_image_layer.py asserts
+    # that FROM line equals it).
     props = [
         {"name": PROP_PREFIX + "runtime-content-hash", "value": runtime_content_hash},
-        {
-            "name": PROP_GAP,
-            "value": (
-                "base image digest not recorded: services/cfs/IMAGE_DIGEST.md has no single "
-                "current-state field for it (only narrative changelog prose, e.g. the "
-                "'Digest-pinned base, both stages' section) and "
-                "IMAGE_CONTEXT_MANIFEST.txt does not record base-image provenance -- omitted "
-                "rather than parsed out of prose that could be stale"
-            ),
-        },
+        *_image_base_properties("cfs-image"),
     ]
+    components.extend(_base_image_components("cfs-image"))
     epoch = git_epoch(IMAGE_EPOCH_PATHS["cfs-image"])
     meta_component = {
         "type": "container",

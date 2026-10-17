@@ -208,6 +208,55 @@ class LicenseFinding:
     reason: str
 
 
+#: Question 250(a): a component carrying this property with the value `true` is something the site
+#: operator supplies (docs/kit-operator-supplied.md), not something the kit redistributes. The
+#: image SBOMs list every package of the operator-supplied base image so the kit's evidence shows
+#: what the operator brings, copyleft included; the allow-list gate must not fail the kit for
+#: those. It is the ONLY thing that exempts a component, and it exempts it from the failure, not
+#: from the report (`evaluate_sbom_components`).
+PROP_OPERATOR_SUPPLIED = "altavista:sbom:operator-supplied"
+
+
+def is_operator_supplied(component: dict) -> bool:
+    return any(
+        p.get("name") == PROP_OPERATOR_SUPPLIED and p.get("value") == "true"
+        for p in component.get("properties") or []
+    )
+
+
+def component_licence_strings(component: dict) -> list[str]:
+    """The licence text of each `licenses[]` entry of one CycloneDX component: `expression`, else
+    `license.id`, else `license.name`."""
+    raws = []
+    for entry in component.get("licenses") or []:
+        lic = entry.get("license") or {}
+        raw = entry.get("expression") or lic.get("id") or lic.get("name")
+        if raw:
+            raws.append(raw)
+    return raws
+
+
+def evaluate_sbom_components(
+    sbom_name: str,
+    components: list[dict],
+    allow: FrozenSet[str],
+) -> tuple[list[LicenseFinding], list[LicenseFinding]]:
+    """`(failures, reported)` for one SBOM's components. Every licence of a component the kit
+    CARRIES is evaluated against `allow`, and a miss is a failure. The same evaluation of a
+    component marked operator-supplied (`PROP_OPERATOR_SUPPLIED`) goes to `reported` instead: it
+    is shown, never failed, because the kit does not redistribute it. Removing the marker moves
+    the component's findings from `reported` to `failures` (tests/test_sbom.py proves both ways)."""
+    failures: list[LicenseFinding] = []
+    reported: list[LicenseFinding] = []
+    for c in components:
+        target = reported if is_operator_supplied(c) else failures
+        for raw in component_licence_strings(c):
+            target.extend(
+                evaluate_license_field(sbom_name, c["name"], c["version"], raw, allow)
+            )
+    return failures, reported
+
+
 def evaluate_license_field(
     component: str,
     package: str,

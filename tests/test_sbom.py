@@ -14,6 +14,7 @@ No test here writes anywhere but `tmp_path`, and no test sets an environment var
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -120,36 +121,40 @@ def test_sha256sums_matches_the_committed_files():
 # found in any committed SBOM needs anything declared separately any more.
 
 
-def _all_licence_findings() -> list[L.LicenseFinding]:
+def _all_licence_results() -> tuple[list[L.LicenseFinding], list[L.LicenseFinding]]:
+    """`(failures, reported)` over every committed SBOM (`licences.evaluate_sbom_components`):
+    what the kit CARRIES must be allowed outright (a failure otherwise); what the operator
+    supplies (`altavista:sbom:operator-supplied=true`, question 250(a)) is evaluated the same way
+    but only reported -- the kit does not redistribute it."""
     allow = L.load_allow_list(REPO_ROOT / "deny.toml")
-    findings: list[L.LicenseFinding] = []
+    failures: list[L.LicenseFinding] = []
+    reported: list[L.LicenseFinding] = []
     for path in sorted(SBOM_DIR.glob("*.cdx.json")):
         component = path.stem.removesuffix(".cdx")
         doc = json.loads(path.read_text())
-        for c in doc["components"]:
-            for entry in c.get("licenses") or []:
-                raw = entry.get("expression") or (entry.get("license") or {}).get("id") \
-                    or (entry.get("license") or {}).get("name")
-                findings.extend(
-                    L.evaluate_license_field(component, c["name"], c["version"], raw, allow)
-                )
-    return findings
+        f, r = L.evaluate_sbom_components(component, doc["components"], allow)
+        failures.extend(f)
+        reported.extend(r)
+    return failures, reported
+
+
+def _all_licence_findings() -> list[L.LicenseFinding]:
+    return _all_licence_results()[0]
 
 
 def _all_licence_combinations() -> set[tuple[str, str, str, str]]:
-    """(component, package, version, licence) combinations actually evaluated across every
-    committed SBOM -- counted separately from `_all_licence_findings` so the test below can
-    print what it checked, not only that it came back clean (question 148)."""
+    """(component, package, version, licence) combinations actually evaluated for what the kit
+    CARRIES across every committed SBOM -- counted separately from `_all_licence_findings` so the
+    test below can print what it checked, not only that it came back clean (question 148)."""
     combos: set[tuple[str, str, str, str]] = set()
     for path in sorted(SBOM_DIR.glob("*.cdx.json")):
         component = path.stem.removesuffix(".cdx")
         doc = json.loads(path.read_text())
         for c in doc["components"]:
-            for entry in c.get("licenses") or []:
-                raw = entry.get("expression") or (entry.get("license") or {}).get("id") \
-                    or (entry.get("license") or {}).get("name")
-                if raw:
-                    combos.add((component, c["name"], c["version"], raw))
+            if L.is_operator_supplied(c):
+                continue
+            for raw in L.component_licence_strings(c):
+                combos.add((component, c["name"], c["version"], raw))
     return combos
 
 
@@ -162,9 +167,11 @@ def test_every_licence_in_every_committed_sbom_is_allowed_outright():
     combos = _all_licence_combinations()
     findings = _all_licence_findings()
     sbom_count = len(list(SBOM_DIR.glob("*.cdx.json")))
+    _failures, reported = _all_licence_results()
     print(
         f"\nlicence check: {len(combos)} (component, package, version, licence) combinations "
-        f"evaluated across {sbom_count} committed SBOMs, {len(findings)} finding(s)"
+        f"the kit carries, evaluated across {sbom_count} committed SBOMs, {len(findings)} "
+        f"finding(s); {len(reported)} operator-supplied finding(s) reported, not failed"
     )
     assert findings == [], "non-allowed licence(s) found in a committed SBOM:\n" + "\n".join(
         f"  component={f.component} package={f.package} version={f.version} "
@@ -231,6 +238,11 @@ def test_no_committed_sbom_contains_an_unparseable_licence_string():
         doc = json.loads(path.read_text())
         for c in doc["components"]:
             for entry in c.get("licenses") or []:
+                # An operator-supplied base-image package carries Debian's own short name as a
+                # `license.name` (question 250(a)): free text by design, never an SPDX claim.
+                # Its `id` and `expression` entries are still held to SPDX.
+                if L.is_operator_supplied(c) and "name" in (entry.get("license") or {}):
+                    continue
                 raw = entry.get("expression") or (entry.get("license") or {}).get("id") \
                     or (entry.get("license") or {}).get("name")
                 try:
@@ -878,3 +890,186 @@ def test_a_venv_missing_a_declared_package_fails_the_cross_check_loudly(tmp_path
         f"stdout={result_good.stdout}\nstderr={result_good.stderr}"
     )
     assert (out_good / "av-viewer.cdx.json").read_bytes() == (SBOM_DIR / "av-viewer.cdx.json").read_bytes()
+
+
+# =================================================================================================
+# 14. The image SBOMs list the operator-supplied base image's packages (question 250(a))
+# =================================================================================================
+# Generated in memory from the committed inventories (`services/*/BASE_IMAGE_INVENTORY.json`),
+# the pins file and `services/edge-plugin/runtime-packages.json`: these tests do not depend on the
+# committed `docs/compliance/sbom/*.cdx.json` being regenerated yet.
+
+sys.path.insert(0, str(KIT_DIR))
+import base_inventory as BI  # noqa: E402
+
+
+def _gpl_component(name: str, *, operator_supplied: bool) -> dict:
+    c = {
+        "type": "library", "name": name, "version": "1.0",
+        "licenses": [{"license": {"name": "GPL-2+"}}, {"license": {"id": "MIT"}}],
+    }
+    if operator_supplied:
+        c["properties"] = [{"name": L.PROP_OPERATOR_SUPPLIED, "value": "true"}]
+    return c
+
+
+def test_an_operator_supplied_gpl_component_passes_and_the_same_one_without_the_marker_fails(allow_list):
+    ok_failures, ok_reported = L.evaluate_sbom_components(
+        "fake", [_gpl_component("grep", operator_supplied=True)], allow_list)
+    assert ok_failures == []
+    assert {f.licence for f in ok_reported} == {"GPL-2+"}   # reported, not dropped
+
+    bad_failures, bad_reported = L.evaluate_sbom_components(
+        "fake", [_gpl_component("grep", operator_supplied=False)], allow_list)
+    assert {f.licence for f in bad_failures} == {"GPL-2+"} and bad_reported == []
+    assert bad_failures[0].package == "grep" and bad_failures[0].reason == "not-allowed"
+
+
+@pytest.mark.parametrize("value", ["false", "True", "", "yes"])
+def test_only_the_exact_marker_value_true_exempts_a_component(value, allow_list):
+    c = _gpl_component("grep", operator_supplied=False)
+    c["properties"] = [{"name": L.PROP_OPERATOR_SUPPLIED, "value": value}]
+    failures, reported = L.evaluate_sbom_components("fake", [c], allow_list)
+    assert failures and not reported
+
+
+@pytest.mark.parametrize("image", sbom.IMAGE_COMPONENTS)
+def test_the_generated_image_sbom_passes_the_licence_gate_only_because_of_the_marker(image, allow_list):
+    doc = sbom.generate_one(image)
+    failures, reported = L.evaluate_sbom_components(image, doc["components"], allow_list)
+    assert failures == [], f"{image}: kit-carried component(s) with a non-allowed licence: {failures}"
+    copyleft = sorted({f.package for f in reported if any(k in f.licence for k in ("GPL", "LGPL"))})
+    assert copyleft, f"{image}: the operator-supplied copyleft packages must be reported"
+    print(f"\n{image}: {len(reported)} operator-supplied finding(s) reported; GPL/LGPL packages: {len(copyleft)}")
+
+    # Remove the marker from ONE operator-supplied GPL package: exactly that package now fails.
+    victim = next(
+        c for c in doc["components"]
+        if L.is_operator_supplied(c) and c["name"] == copyleft[0]
+    )
+    stripped = copy.deepcopy(doc["components"])
+    for c in stripped:
+        if c["name"] == victim["name"] and c["version"] == victim["version"]:
+            c["properties"] = [p for p in c["properties"] if p["name"] != L.PROP_OPERATOR_SUPPLIED]
+    failures2, _reported2 = L.evaluate_sbom_components(image, stripped, allow_list)
+    assert failures2 and {f.package for f in failures2} == {victim["name"]}
+
+
+@pytest.mark.parametrize("image", sbom.IMAGE_COMPONENTS)
+def test_the_image_sbom_lists_every_base_package_as_operator_supplied(image):
+    doc = sbom.generate_one(image)
+    inv = json.loads(BI.inventory_path(image).read_text())
+    _name, pin = BI.base_pin_for(image)
+    base = [c for c in doc["components"]
+            if {"name": sbom.PROP_BASE_IMAGE, "value": pin["reference"]} in c.get("properties", [])]
+    packages = [c for c in base if c["type"] == "library"]
+    containers = [c for c in base if c["type"] == "container"]
+    assert len(packages) == inv["package_count"] > 50
+    assert len(containers) == 1 and containers[0]["version"] == pin["digest"]
+    assert containers[0]["hashes"] == [{"alg": "SHA-256", "content": pin["digest"].removeprefix("sha256:")}]
+    for c in base:
+        props = {p["name"]: p["value"] for p in c["properties"]}
+        assert props[sbom.PROP_OPERATOR_SUPPLIED] == "true"
+        assert props[sbom.PROP_BASE_IMAGE_DIGEST] == pin["digest"]
+    for c, p in zip(sorted(packages, key=lambda c: c["name"]), inv["packages"]):
+        assert (c["name"], c["version"]) == (p["name"], p["version"])
+        assert c["purl"].startswith("pkg:deb/") and "distro=" in c["purl"]
+        gaps = [q["value"] for q in c["properties"] if q["name"] == sbom.PROP_GAP]
+        if p["licences"]:
+            assert [e["license"].get("id") or e["license"]["name"] for e in c["licenses"]] == p["licences"]
+        else:
+            # a named gap per package with no machine-readable License: field, never a silent hole
+            assert "licenses" not in c and gaps and "no machine-readable License: field" in gaps[0]
+            assert any(q["name"] == sbom.PROP_NO_LICENCE for q in c["properties"])
+    # the metadata names the base image as well (cfs's old "digest not recorded" gap is gone)
+    meta_props = {p["name"]: p["value"] for p in doc["metadata"]["component"]["properties"]}
+    assert meta_props[sbom.PROP_BASE_IMAGE] == pin["reference"]
+    assert sbom.PROP_GAP not in meta_props
+
+
+def test_the_ubuntu_packages_the_audit_named_are_listed_and_libc6_is_a_named_gap():
+    doc = sbom.generate_one("cfs-image")
+    by_name = {c["name"]: c for c in doc["components"] if c["type"] == "library"}
+    assert {"grep", "gzip", "util-linux", "procps", "dpkg", "apt", "libc6", "libgnutls30"} <= set(by_name)
+    libc6 = by_name["libc6"]
+    assert "licenses" not in libc6
+    assert any(p["name"] == sbom.PROP_GAP and "libc6/copyright" in p["value"] for p in libc6["properties"])
+    grep_ids = [e["license"].get("id") or e["license"]["name"] for e in by_name["grep"].get("licenses", [])]
+    assert any("GPL" in g for g in grep_ids)
+
+
+def test_the_edge_plugin_sbom_lists_the_kit_carried_libssl3_apart_from_the_base():
+    doc = sbom.generate_one("edge-plugin-image")
+    libssl = [c for c in doc["components"] if c["name"] == "libssl3"]
+    assert len(libssl) == 1, "libssl3 is carried by the kit, not held by the debian base"
+    c = libssl[0]
+    record = json.loads((REPO_ROOT / "services/edge-plugin/runtime-packages.json").read_text())
+    pkg = next(p for p in record["packages"] if p["package"] == "libssl3")
+    assert c["version"] == pkg["version"] == "3.0.22-1~deb12u1"
+    assert c["hashes"] == [{"alg": "SHA-256", "content": pkg["sha256"]}]
+    assert c["licenses"] == [{"license": {"id": "Apache-2.0"}}]
+    props = {p["name"]: p["value"] for p in c["properties"]}
+    assert props[sbom.PROP_KIT_CARRIED] == "true"
+    assert sbom.PROP_OPERATOR_SUPPLIED not in props and L.is_operator_supplied(c) is False
+    assert "Artistic or GPL-1+" in props[sbom.PROP_LICENCE_FIELDS]   # kept, not dropped
+    assert c["purl"] == "pkg:deb/debian/libssl3@3.0.22-1~deb12u1?arch=arm64&distro=debian-12"
+
+
+def test_a_carried_package_the_base_already_holds_is_refused(monkeypatch):
+    with pytest.raises(RuntimeError, match="libssl3"):
+        sbom._base_image_components("cfs-image", frozenset({"libssl3"}))   # ubuntu holds libssl3
+
+
+def test_the_base_image_digest_is_the_pin_and_the_dockerfile_kit_starts_from_it():
+    for image in sbom.IMAGE_COMPONENTS:
+        _name, pin = BI.base_pin_for(image)
+        dockerfile = REPO_ROOT / BI.IMAGE_SERVICE_DIRS[image] / "Dockerfile.kit"
+        froms = [l.split()[1] for l in dockerfile.read_text().splitlines() if l.startswith("FROM ")]
+        assert froms == [pin["reference"]], f"{dockerfile}: FROM {froms} is not the pin {pin['reference']}"
+
+
+def test_an_inventory_generated_from_a_different_base_than_the_pin_is_refused(tmp_path, monkeypatch):
+    other = tmp_path / "inv.json"
+    inv = json.loads(BI.inventory_path("cfs-image").read_text())
+    inv["base_image"]["digest"] = "sha256:" + "f" * 64
+    other.write_text(json.dumps(inv))
+    monkeypatch.setattr(sbom, "inventory_path", lambda image: other)
+    sbom._base_inventory.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="regenerate the inventory"):
+            sbom._base_inventory("cfs-image")
+    finally:
+        sbom._base_inventory.cache_clear()
+
+
+def test_image_epoch_paths_are_the_digest_records_plus_the_inventory_and_nothing_broader():
+    assert sbom.IMAGE_EPOCH_PATHS == {
+        "edge-plugin-image": ["services/edge-plugin/IMAGE_DIGEST.md",
+                              "services/edge-plugin/BASE_IMAGE_INVENTORY.json"],
+        "cfs-image": ["services/cfs/IMAGE_DIGEST.md", "services/cfs/IMAGE_CONTEXT_MANIFEST.txt",
+                      "services/cfs/BASE_IMAGE_INVENTORY.json"],
+    }
+    for paths in sbom.IMAGE_EPOCH_PATHS.values():
+        for rel in paths:
+            assert (REPO_ROOT / rel).is_file(), rel
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("MIT", {"license": {"id": "MIT"}}),
+    ("Apache-2.0", {"license": {"id": "Apache-2.0"}}),
+    ("LGPL-2.1+", {"license": {"id": "LGPL-2.1+"}}),            # an SPDX (deprecated) id, byte for byte
+    ("GPL-2+", {"license": {"name": "GPL-2+"}}),               # Debian short name, not SPDX
+    ("Expat", {"license": {"name": "Expat"}}),                 # never rewritten to MIT
+    ("BSD-3-clause", {"license": {"name": "BSD-3-clause"}}),   # case differs from BSD-3-Clause
+    ("GPL-2+ or Artistic", {"license": {"name": "GPL-2+ or Artistic"}}),
+    ("public-domain", {"license": {"name": "public-domain"}}),
+])
+def test_a_debian_licence_value_is_an_id_only_when_it_is_exactly_an_spdx_identifier(value, expected):
+    assert sbom._debian_licence_entry(value) == expected
+
+
+@pytest.mark.parametrize("image", sbom.IMAGE_COMPONENTS)
+def test_two_in_memory_image_sbom_generations_are_byte_identical(image, tmp_path):
+    sbom.write_document(sbom.generate_one(image), tmp_path / "a.json")
+    sbom.write_document(sbom.generate_one(image), tmp_path / "b.json")
+    assert (tmp_path / "a.json").read_bytes() == (tmp_path / "b.json").read_bytes()
