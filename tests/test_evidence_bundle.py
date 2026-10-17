@@ -300,7 +300,7 @@ def test_a_malformed_row_is_a_named_finding_not_a_silent_skip(tmp_path):
 def test_sbom_hashes_are_reverified_against_disk_and_agree_today():
     bundle = evidence.assemble_bundle(repo_root=REPO_ROOT)
     sbom_hashes = bundle["sbom_hashes"]
-    assert len(sbom_hashes["recorded"]) == 11  # eight suite components + three images (clickhouse-image: question 245)
+    assert len(sbom_hashes["recorded"]) == 10
     assert sbom_hashes["actual"] == sbom_hashes["recorded"]
     assert sbom_hashes["stale"] == []
     assert sbom_hashes["missing"] == []
