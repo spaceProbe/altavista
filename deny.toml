@@ -33,6 +33,13 @@ ignore = [
     # so a real future vulnerability advisory on any crate still fails the build; only this
     # one, specific, already-triaged advisory ID is excused.
     "RUSTSEC-2024-0436",
+    # `unsafe-libyaml` (via `serde_yaml` 0.9 in av-kernel, av-sweep, av-command and
+    # av-gateway) is an *unmaintained* advisory, not a vulnerability: upstream archived the
+    # repository; no safe upgrade exists. Unlike `paste` above it runs at run time, parsing
+    # DRM and configuration YAML, so this exemption is temporary: question 246 charters the
+    # move off `serde_yaml`, and this line goes with it. Named by ID so any vulnerability
+    # advisory on the same crate still fails the build.
+    "RUSTSEC-2024-0449",
 ]
 
 # ---------------------------------------------------------------------------------------
