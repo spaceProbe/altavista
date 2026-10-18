@@ -1457,3 +1457,343 @@ Every one was found by re-running from the tree, not from a worker's claim.
    tuple and each target's `SERVICES` tuple) are why D4's live half and D5's placement are ours
    rather than secdeploy's. This needs the user, not the lead.
 8. **`av-label` waits**, unstarted, per the instruction's condition.
+
+
+## Status (native team manager, 2026-10-17) — the copyleft and YAML round (question 250)
+
+Question 250 chartered two things for this round on `edge`:
+- the six changes `docs/kit-operator-supplied.md` lists, so that the air-gap kit never redistributes
+  GPL or LGPL code;
+- question 246's move off `serde_yaml`.
+
+Both are delivered, with one part of 246 that cannot close here. The `RUSTSEC-2024-0449` ignore stays,
+because `spoore-tree` (outside this repository) still depends on `serde_yaml`. The lead ruled on four
+points during the round; they are recorded below as decisions.
+
+### What landed on `edge`
+
+| Commit | What |
+|---|---|
+| `a65ce85` | 1a: the kit carries each image's application layer, not the image. A runtime `Dockerfile.kit` `FROM` the pinned base digest, only the runtime-content set's files with their modes, the `libssl3` `.deb` with its copyright, base pins in `scripts/kit/operator_supplied.json`, `kit_format` 5. The edge-plugin image gains a recorded runtime-content hash and is re-pinned |
+| `5ad7b68` | 4: the image SBOMs list every base-image package (`services/*/BASE_IMAGE_INVENTORY.json`, `scripts/kit/base_inventory.py`), marked operator-supplied; the licence gate reports those instead of failing them |
+| `3d0b429` | 1b: the installer's host-side image step (`install.sh --build-images`, `--probe-offline-build`; `scripts/kit/image_build.py`); `scripts/kit/save_base_images.py`; the zero-egress proof reworked |
+| `b53ec76` | 2: GMAT is an operator download, pinned per platform (scoped), verified by `install.py --gmat-root/--gmat-platform`; `--copy-pack gmat` refused |
+| `d7a212b` | 8: `serde_yaml` replaced in five crates by `crates/av-yaml` over `serde-saphyr`; `deny.toml` bans; the spoore upstream proposal |
+| `dc8eb1d` | the cFS image's recorded build commit, after 8 moved `Cargo.lock` (image unchanged) |
+| `bec6611` | 3: the installer verifies every operator-supplied component the kit needs and prints the list (`scripts/kit/operator_check.py`); `--declare-operator-supplied` |
+| `3594bf5` | defects found by the zero-egress proof: the viewer's undeclared runtime imports (`httpx`, `pyyaml`); the Apache-2.0 licence text exempted by hash |
+| `03f0504` | 5: the wheel step inventories bundled native libraries; a GPL-family library moves its wheel to the operator list (numpy) |
+| `b08e869` | 7: the proof that the kit carries no copyleft from a base image (`scripts/kit/kit_inventory.py`, `tests/test_kit_no_copyleft.py`) |
+| `1f4d581` | 6: the kit carries `docs/kit-operator-supplied.md` at its root (role `operator-doc`, refused if absent); the document describes the kit as it now is |
+
+The code head is `1f4d581`; this status section is the only commit after it.
+
+### The zero-egress install, with the operator-supplied components
+
+`tests/test_kit_zero_egress_install.py`, at the code head `1f4d581`: 5 passed in 85 s
+(`rounds/native-kit/gate/kit-01-zero-egress.log`). It ran over the proof kit `out/kit/proof`
+(KIT_MANIFEST `4be6ed21…`), built in this worktree at that head with
+`--with-images --with-vendor --with-wheels --with-binaries --copy-pack data-time`.
+
+- **Brought by the operator, never in the kit:**
+  - both base images, loaded from tarballs saved by digest (`out/kit/proof-bases/`,
+    `scripts/kit/save_base_images.py`);
+  - the numpy wheel (`out/kit/proof-operator-wheels/`, `scripts/kit/save_operator_wheels.py`), mounted
+    read-only into the enclave and installed with `--operator-wheels`.
+- **What the kit carries for its images:** only the two images' application layers. It holds no
+  `images/*.tar`, and no file it carries equals a base-image file outside the committed exceptions.
+- **The files install** runs in an `--internal` container with no route out (errno 101 before and
+  after). Its only binds are the kit (read-only), the operator wheels (read-only) and its target
+  volume. It has no Docker socket and no `DOCKER_*` variable.
+- **The image step** is the kit's own installer, run on the Docker host:
+  - each base is verified by digest before any build;
+  - images are built with `docker build --network none --pull=false`;
+  - probe builds whose `RUN` tries a TCP connect and a DNS lookup fail with "Network is unreachable"
+    and "Temporary failure in name resolution";
+  - `docker events` shows no pull;
+  - the installed images' runtime-content hashes equal the recorded ones, cFS
+    `sha256:56d7bd00…6199` (13 files) and plugin `sha256:c860fcd4…c81c` (11 files), by the installer
+    and by an independent in-image `sha256sum`;
+  - `.Config` equals the `:local` images'.
+- **The demo path:** the viewer starts from the installed wheels; `av-ingest-server` runs from the
+  kit's binary; the plugin, from the installed image, delivers 900 of 900 batches (chain head
+  `d1d80d0b…`, 900 accepted, 0 rejected); the recorded runs re-hash; `av-command` runs.
+- **Both installer steps print the seven operator-supplied components:** what each requires,
+  verified here, verified by the other step, or outside the kit.
+
+### Operator-supplied components (`scripts/kit/operator_supplied.json`)
+
+| # | Component | Pin | Verified by |
+|---|---|---|---|
+| 1 | Ubuntu 22.04 base (cFS image) | `sha256:2edbbc5d…7dbc` | image step, by digest |
+| 2 | Debian bookworm-slim base (plugin image) | `sha256:88200866…4171` | image step, by digest |
+| 3 | GMAT R2026a | `macos-arm64`: `sha256:d21cddbb…ca39`, 2,060 files, 764,662,632 bytes, 183 symlinks (listing `f788ebf2…`); no Linux pin yet | files step, by descriptor |
+| 4 | ClickHouse | `sha256:6ded2b2c…41e4` (held, question 247; cannot be declared) | not verified |
+| 5 | MinIO | `sha256:a1ea29fa…015e` | image step, when declared |
+| 6 | PostGIS | `sha256:f8a700ac…e8dd` | image step, when declared |
+| 7 | numpy 2.5.3 linux/aarch64 wheel | `sha256:c76d5dde…654b` | files step, `--operator-wheels` |
+
+Python ≥ 3.11 on the installing host is an operator-supplied prerequisite (PSF licence).
+
+### The no-copyleft inventory
+
+`scripts/kit/kit_inventory.py` (and `tests/test_kit_no_copyleft.py`, gated part over the proof kit):
+
+- **Scope:** 13,060 items the kit carries are compared against the 5,885 files of the two bases.
+  The items are manifest files, pack symlinks, application-layer files, wheel members, the `.deb`'s
+  data members, and the members of vendored `ar` libraries.
+- **Result:** 0 failing matches, 5 accepted, 1 trivial. The accepted ones are the `libssl3`
+  copyright notice at its three exact kit paths, and the canonical Apache-2.0 text by sha256
+  (`cfc7749b…`, base-files' `/usr/share/common-licenses/Apache-2.0`). The single exception list is
+  `scripts/kit/base_overlap_exceptions.json`, which the zero-egress test reads too.
+- **The operator-supplied marker is proven both ways:** every marked SBOM component resolves to an
+  inventory package whose files are checked, and every inventory package is marked.
+- **Copyleft scan:**
+  - the kit's SBOM copies give 2 copyleft strings, both `certifi` MPL-2.0, which is on
+    `scripts/kit/copyleft_accepted.json`;
+  - the regenerated image SBOMs give 416 copyleft strings, all operator-supplied;
+  - the 24 carried wheels hold 0 copyleft libraries.
+- **What the kit does carry:**
+  - AltaVista's own binaries and application files;
+  - cFS (Apache-2.0);
+  - `libssl3` (Apache-2.0 for every shipped file; lead ruling);
+  - the permissive wheels and vendored crates;
+  - `data/time`.
+
+### numpy's bundled libraries (linux/aarch64)
+
+`numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl` bundles exactly two
+libraries in `numpy.libs/`:
+- `libgfortran-e1b7dfc8-d8198c01.so.5.0.0`, GPL-3.0-or-later WITH GCC-exception-3.1;
+- `libscipy_openblas64_-f552eb69.so`, BSD-3-Clause AND BSD-3-Clause-Open-MPI.
+
+It bundles no `libquadmath` (that is x86_64 only). No other wheel in the viewer's closure bundles a
+library. By the lead's GPL-family ruling, numpy is now operator-supplied.
+
+### The YAML parser (question 246)
+
+- **Choice:** `serde-saphyr` 2.0.0 on `granit-parser` 2.0.0, both MIT OR Apache-2.0. It has
+  `forbid(unsafe_code)`, is actively released, and all YAML parsing goes through it via
+  `crates/av-yaml`.
+- **Alternatives rejected:**
+  - `serde_yaml_ng` and `serde_norway` still sit on `unsafe-libyaml` or a fork of it;
+  - `serde_yml` is deprecated;
+  - `saphyr` has no serde layer.
+- **MSRV:** 1.87 → 1.89, which is serde-saphyr's declared floor. 1.87 was measured to fail; 1.89
+  is declared, not measured here.
+- **Parse equality:**
+  - every committed YAML the code reads (96 files plus the kubeconfig) parses to the same tree under
+    both parsers, bit-exact and as JSON;
+  - the typed loaders, old and new, give identical canonical and Debug hashes for 93 loads (3
+    profiles are rejected by both);
+  - differential corpora: about 1.65 M scalars and 6 M documents, 0 changed; with the scalar check
+    disabled, 355 changed;
+  - goldens and fixtures unmoved.
+
+| Input | `serde_yaml` 0.9 | Now |
+|---|---|---|
+| anchors, aliases | expanded | expanded; alias bombs and recursion refused (`LimitExceeded`) |
+| merge key `<<` | ordinary key | refused (`MergeKey`) |
+| explicit tag | ignored or kept | refused (`ExplicitTag`) |
+| duplicate key | last wins / struct error | refused (`DuplicateKey`) |
+| `0x1F`, `0o17`, `0b101`, `+1`, `1e3`, `.inf`, `.nan` | numbers | the same numbers |
+| `017`, `1_000`, `1e400`, > 128-bit integers, `nULL`, `tRUE` | strings or float | refused (`AmbiguousScalar`) |
+| `yes`/`no`/`on`/`off` | strings | strings |
+| `~`, `null`, empty | null | null |
+| more than one document | refused | refused (`MultipleDocuments`) |
+| `%YAML` directive | accepted | refused (`Directive`) |
+| raw U+0085/2028/2029 | line break | refused (`UnicodeLineBreak`) |
+| block scalar at EOF without newline | as written | refused (`BlockScalarAtEnd`) |
+| quoted scalar in a number/bool field | type error | read as the number/bool (accepted broadening; no committed file changes value) |
+
+- **`deny.toml`:**
+  - the `RUSTSEC-2024-0449` ignore stays, with its comment narrowed to the one remaining path,
+    `unsafe-libyaml` ← `serde_yaml` ← `spoore-tree` ← `av-track`/`spoore-engine`;
+  - new `[bans]` entries:
+    - `serde_yaml` only under `spoore-tree`;
+    - `unsafe-libyaml` only under `serde_yaml`;
+    - `serde-saphyr` only under `av-yaml`;
+    - `granit-parser` only under `serde-saphyr`;
+  - perturbed: `serde_yaml` added to `av-jobs` gives `error[banned]`.
+- **The upstream change for spoore** is the new proposal in `docs/spoore-upstream.md`.
+
+### Gate
+
+Every phase was captured whole under `rounds/native-kit/gate/`, with a per-phase summary in
+`gate/summary.txt` (driver `gate/run_gate.py`).
+- **Rust phases:** run at `b08e869`. `git diff b08e869..1f4d581 -- crates Cargo.toml Cargo.lock
+  proto deny.toml services` is empty, so they stand for the code head.
+- **Kit and Python phases:** run at `1f4d581`.
+
+| Phase | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto`; `buf lint proto` | rc 0, rc 0, no output (the policy allowed `buf`) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 180 binaries, 1,833 passed, 0 failed, 4 ignored (1,684 s) |
+| `cargo clippy --workspace --all-targets -- -D warnings`; the same for `av-kernel`, `av-run`, `av-sweep` with `--no-default-features` | clean, clean, clean, clean |
+| the required-features lint's steps through `cargo-slot` (5 groups: `av-cdm full`, `av-kernel gmat`, `av-run gmat`, `av-sweep gmat`, `av-jobs store-fixture`) | clean |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed |
+| `cargo-slot build -p av-edge-board --bins` | ok |
+| `cargo test -p av-kernel --no-default-features` | 752 passed, 0 failed |
+| `cargo test -p av-kernel` | 1,004 passed, 0 failed, 1 ignored (559 s; the cFS container tests ran against `e51b896d…`) |
+| the Renode test, `AV_RENODE_TESTS=1`, ELF `de96907f…` | passed: 998 records each side, records-only `8e518964…8fd2` on both, 725 s. The first attempt skipped visibly because this worktree has no Renode install (defect 5); re-run with `AV_RENODE_BIN` |
+| the stand-in HIL test, `AV_HIL_STANDIN_TESTS=1`, ELF `de96907f…` | passed, 50 s |
+| the zero-egress install, opted in by its built proof kit, bases and operator wheels | 5 passed, 85 s |
+| standalone `web/js/**/*_check.mjs`, each with its own exit code | 25 exit 0; the four argument-driven ones (`command_panel`, `layers_stream`, `panels`, `timeline`) print their usage and are run with inputs by pytest |
+| `pytest -q -rs` under `cargo-slot --hold`, `CFS_MIRROR_DIR` set | 1,384 passed, **19 failed**, 20 skipped (674 s) |
+
+**The 19 pytest failures are all recorded artifacts that this round's changes move.** They are the
+lead's to regenerate or re-pin at the merge:
+- **Stale committed SBOMs, 17 tests** (`tests/test_sbom.py`):
+  - the epoch of all ten components (10);
+  - the shared Rust epoch (1);
+  - byte-identical regeneration of `av-viewer`, `gmat-service`, `cfs-image`, `edge-plugin-image` (4);
+  - the two venv tests that compare against the committed `av-viewer` SBOM (2).
+
+  Causes:
+  - `d7a212b` moved `Cargo.lock`/`Cargo.toml`/crate manifests (the six Rust components);
+  - `3594bf5` moved `pyproject.toml` (`av-viewer`, `gmat-service`);
+  - `5ad7b68` added the base inventories, and `a65ce85` re-pinned the edge-plugin image (the two
+    image SBOMs, now with base packages).
+
+  `docs/compliance/` moves in full: all ten SBOMs, `SHA256SUMS`, `BUNDLE.md`'s hash.
+- **Heavy-track image provenance, 2 tests** (`test_proposer_container`, `test_tiles_container`):
+  `d7a212b` touched `crates/av-command`, a copied path of `av-proposer` and `av-tiles`, since their
+  recorded `74566ec`.
+
+The 20 skips are the opt-in gates (`AV_KIT_WITH_*`, `AV_KIT_MEASURE_GMAT`, `AV_SBOM_REBUILD`,
+`AV_CFS_RUN_REPRO_BUILD`). The gated kit tests were run separately:
+- `AV_KIT_WITH_IMAGES=1` `test_kit_manifest` image tests: 5 passed;
+- `test_kit_no_copyleft`: 22 passed.
+
+The cFS image's record is current (`dc8eb1d`), so no cFS re-pin is owed.
+
+### Decisions (numbered, for the lead to ratify)
+
+1. `target/debug/deps` was not moved at the start: it had 81,963 entries and `cargo-slot` gave no
+   warning. It was moved aside (to `target/deps-aside-q250-20261017`) mid-round, at 109,867 entries,
+   when `cargo-slot` warned (question 236). It is left there for the lead to delete.
+2. The `RUSTSEC-2024-0449` ignore stays: `spoore-tree` puts `serde_yaml` in its public API and spoore
+   is not ours to edit. The comment is narrowed to that one path. A `[bans]` entry with `wrappers`
+   keeps `serde_yaml` to `spoore-tree`. The upstream change is written in `docs/spoore-upstream.md`.
+   **Ruled by the lead during the round.**
+3. Order: task 8 ran in parallel with the kit chain 1a → 1b → 2 → 3 → 5 → 7 → 6, and task 4 ran
+   after 1a, in parallel with 1b. A kit step needing cross-built binaries, or the plugin's prebuild,
+   waited for task 8's commit. The binary cache key folds in the working-tree diff, and a prebuild
+   without `--locked` can rewrite `Cargo.lock`.
+4. **The installer's image step runs on the Docker host, never in the enclave** (the lead overruled
+   the manager's first design, which mounted the daemon socket into the installer container).
+   - The step verifies each base by digest before any build.
+   - It builds with `docker build --network none --pull=false`.
+   - It checks the runtime-content hash, the modes and `.Config` through `docker create` (never
+     `start`) and `docker cp`.
+   - It shows the build itself is offline with probe builds that try the network.
+5. `libssl3` is carried as a pinned `.deb` (3.0.22-1~deb12u1 arm64, sha256 `026105b9…`, from
+   snapshot.debian.org) with its copyright file, not made operator-supplied. Every file it ships is
+   Apache-2.0. The copyright's Artistic-or-GPL-1+ stanza covers `external/perl/Text-Template`, a
+   build-time source helper not in the package. **Ruled by the lead.**
+6. The edge-plugin runtime-content set is the plugin binary, `/opt/edge-plugin/**` and every regular
+   file `libssl3` owns, so the hash covers everything the image adds over its base. The plugin image
+   was re-pinned by its script (`72e727a8…` → `34d4e440…`); all 11 runtime files are byte-identical.
+7. "The installed profile needs" is derived from `KIT_MANIFEST`:
+   - a base for each image carried;
+   - GMAT when `packs.gmat` is present;
+   - the numpy wheel when the wheel step found a GPL-family library;
+   - a service image only when declared with `--declare-operator-supplied`.
+
+   ClickHouse cannot be declared (question 247).
+8. `--copy-pack gmat` is refused, not taken as a synonym, because the flag promises bytes.
+9. **The GMAT pin is scoped** to leave out `output/`, `__pycache__/` and `bin/api_startup_file.txt`,
+   and it adds a symlink count and listing hash. The audit's whole-tree `47095a23…` was taken over a
+   tree GMAT rewrites on every run. **Ratified by the lead.**
+10. The two installer steps each print the whole list. Neither reads the other's record: they run at
+    different times, usually on different machines, and the enclave must not reach the host.
+11. **A bundled library with any GPL-family licence term moves its wheel to the operator list**: GPL,
+    LGPL or AGPL, with or without the GCC Runtime Library Exception. The `.so` is GPL code even
+    though the exception frees the combined work. numpy-2.5.3 linux/aarch64 is item 7.
+    **Ruled by the lead.**
+12. Two byte-identical overlaps with base-image files are accepted, each by exact hash, in one
+    definition (`scripts/kit/base_overlap_exceptions.json`):
+    - the `libssl3` copyright notice, at three exact kit paths;
+    - the canonical Apache-2.0 text, `cfc7749b…`, which two vendored crates carry.
+
+    Both are licence texts. Any other overlap fails. Two trivial contents (the empty file and a
+    single newline) are compared by path only. **Ratified by the lead.**
+13. `httpx` and `pyyaml` became `[project].dependencies` (`3594bf5`). A test guards that every
+    module-level third-party import in `altavista` is declared, and that the declared names equal
+    `VIEWER_RUNTIME_ROOTS`. **Ratified by the lead:** an undeclared runtime import is a defect.
+14. The cFS image's build commit was re-recorded in the round (`dc8eb1d`):
+    - same shim (`b103a90e…`) and relay (`3b72b96c…`);
+    - same image `e51b896d…` and runtime-content hash `56d7bd00…`.
+
+    So no cFS re-pin is owed at the merge. **Ratified.**
+15. The proposer and tiles images, which `d7a212b` moved through `crates/av-command`, are not
+    rebuilt here. They are heavy-track images, and the lead re-pins them at the merge as in earlier
+    rounds.
+16. `kit_format` is 5 for the whole round. Every later shape change (`runtime_set`, `config`,
+    `operator_supplied_declared`, the GMAT marker, the wheel inventory, the operator document) landed
+    before format 5 left this branch. The installer refuses each missing piece by name.
+17. The operator document sits at the kit root (`kit-operator-supplied.md`). Only the files install
+    requires it.
+18. YAML policy:
+    - every input on which `serde_yaml` 0.9 and the new parser would disagree is refused with a
+      typed `av_yaml::Error`;
+    - one broadening is accepted: a quoted scalar in a number or boolean field now loads;
+    - `rust-version` 1.87 → 1.89, the dependency's declared floor, not measured here (no 1.89
+      toolchain on this host; none downloaded).
+19. Review proofs were run in throwaway clones beside `spoore` (`/Users/probe/code/av-native-kit-*`,
+    all deleted). One early full zero-egress run was taken in a clean clone at `dc8eb1d`, because
+    task 3 was mid-edit in the shared tree. Perturbations were made only in clones or kit copies.
+20. The common rules gained a rule mid-round: **no personal data in any outbound request**. The
+    task-8 worker had put the user's email address in a `curl` User-Agent to crates.io; the lead
+    recorded it to the user.
+21. The common rules wrongly said the `services/*/build-image.sh` scripts take the docker lock. They
+    do not. This was corrected, and they ran under `with_docker_lock.py`.
+22. The shell policy refused `perl -0pi` and one `pytest -p` invocation mid-round. Neither was
+    wrapped; the edits were made with the Edit tool and the tests were run without the flag.
+23. The Rust gate phases ran at `b08e869` while task 6 changed only docs and kit Python. The empty
+    Rust-relevant diff to `1f4d581` is recorded above.
+
+### Defects found, with their root causes
+
+1. **A viewer installed from the kit could not start** (`ModuleNotFoundError: httpx`), pre-existing.
+   - Root cause: since `fd9fc15` (H5b-1, 2026-09-16), `altavista.server` imports
+     `altavista.tiles_client`, which imports `httpx` at module level. `pyproject.toml` declared it
+     only in `dev`, so the kit's wheel step never fetched it.
+   - The zero-egress proof had not run since its proof kit went stale.
+   - `yaml` was the same, satisfied only through `uvicorn[standard]`.
+   - Fixed in `3594bf5`, with an import-coverage test (perturbed: removing `httpx` fails it).
+2. **The kit carried files byte-identical to a base-image file.** `serde-saphyr` brought
+   `encoding_rs` and `multiversion_no_op` into the vendor tree, and their `LICENSE-APACHE` is the
+   canonical text that `base-files` ships. The check was right to flag it; the content is a
+   permissive licence text, exempted by hash (decision 12).
+3. **Running the installer from a kit wrote `installer/__pycache__`**, and the kit then failed its
+   own verification. `PYTHONDONTWRITEBYTECODE` and `sys.dont_write_bytecode` fix it, with a test
+   (`3d0b429`).
+4. **One test missed in task 5's review run** (`test_kit_image_layer`'s pin-kind set) failed on the
+   new `python-wheel` kind. Fixed before the commit.
+5. **The manager's gate driver** ran the Renode and stand-in HIL tests without `AV_RENODE_BIN` while
+   this worktree has no Renode install, so both skipped visibly. Re-run against the lead tree's
+   `renode-1.16.1-osx-arm64` (read-only); both passed. The re-run overlapped the kit phases, with the
+   docker lock serialising the docker parts.
+6. **The GMAT descriptor in `docs/kit-operator-supplied.md` was wrong** from the audit (decision 9).
+
+### Not delivered, and why
+
+1. **The `RUSTSEC-2024-0449` ignore is not removed.** `cargo deny check` passes with it, and fails
+   without it on the one `spoore-tree` path. It goes once the user applies the proposal in
+   `docs/spoore-upstream.md` to spoore.
+2. **No Linux GMAT pin.** It needs a measured, unpacked Linux R2026a. A kit that records GMAT
+   installs only against the `macos-arm64` pin until then.
+3. **`docs/compliance/` is not regenerated** (the lead's, at the merge: all ten SBOMs, `SHA256SUMS`,
+   `BUNDLE.md`).
+4. **The `av-proposer` and `av-tiles` images are not re-pinned** (decision 15).
+5. **MSRV 1.89 is declared, not measured** (decision 18).
+6. **The cross-built binaries' dynamic-linking statement** in the operator document is carried from
+   the first audit, not re-measured.
+7. Left on the host:
+   - `target/deps-aside-q250-20261017`;
+   - `out/kit/gmat` (task 2's inspection kit, gitignored);
+   - one dangling debian base reference from a `docker load` (not removable safely on this store).
+
+   `/Users/probe/av-boot-stage` predates this round (2026-10-08) and is not this round's.
