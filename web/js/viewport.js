@@ -4,22 +4,37 @@
 // any other viewport: its own camera, its own view-frame/focus state, its own floating
 // origin, and its own copy of the precision-sensitive trajectory/footprint line geometry
 // (see this module's own docstring on `Viewport.lines`/`Viewport.footprintLines` for why
-// those -- and only those -- need a per-viewport copy). Everything else in the scene
-// (bodies, spacecraft markers, event markers, the globe, stars/grid/axes) is a single
-// shared Object3D, rendered by every viewport's camera unchanged -- see web/js/scene.js's
-// module docstring for the "one scene, many cameras" split this module is one half of.
+// those need a per-viewport copy). Everything else in the scene (bodies, the globe,
+// stars/grid/axes, and the entity objects: spacecraft markers, event markers, instanced entity
+// markers, trails, covariance / keep-out meshes, glTF models) is a single shared Object3D,
+// rendered by every viewport's camera -- the entity objects are WRITTEN per drawing viewport
+// (see the next paragraphs). See web/js/scene.js's module docstring for the "one scene, many
+// cameras" split this module is one half of.
 //
-// **Why only trajectory/footprint LINES need a per-viewport copy, and nothing else does.**
-// A `THREE.Object3D.position` (body mesh, spacecraft marker, event marker) is a plain JS
-// `number` triple -- f64, never quantized through a `Float32Array` -- and Three's own
-// `matrixWorld` composition (`Object3D.updateMatrixWorld`) stays in f64 all the way up to
-// the final `camera.matrixWorldInverse * object.matrixWorld` product; only the *finished*
-// modelview matrix is cast to float32 for the GPU uniform upload, by which point any large
-// common absolute-position term shared by camera and object (both descend from the same
-// frame-graph ancestor) has already cancelled algebraically in f64 arithmetic. A shared
-// mesh's *rendered* precision therefore does not depend on which viewport's floating
-// origin is currently in effect -- it would render identically precisely whether or not
-// `web/js/scene.js`'s `_entitiesGroup` had ever been rebased at all.
+// **A shared Object3D's rendered precision is NOT origin-independent (question 240).** A
+// `THREE.Object3D.position` is a plain JS `number` triple -- f64 -- and Three's own
+// `matrixWorld` composition stays in f64 up to the final `camera.matrixWorldInverse *
+// object.matrixWorld` product, so a large common absolute-position term shared by camera and
+// object (both descend from the same frame-graph ancestor) does cancel in f64 before the
+// modelview matrix is cast to float32. That holds for a position *assigned from an f64
+// value*. It does not hold for a position that was first rounded: `web/js/scene.js` wrote the
+// shared entity objects from `Viewer._toLocal`, i.e. `Math.fround(abs - origin)` against ONE
+// floating origin (the primary camera's), and two of them live in Float32Arrays (the instanced
+// markers' matrices, the trails' position buffers). The rounding error of that one write is
+// half a float32 step at the object's distance from THAT origin -- 0.24 m at LEO with the
+// origin at the Earth, 1.9 m at GEO, 15 m at lunar distance -- however close another
+// viewport's camera is to the object, and it hops between ticks. (An earlier version of this
+// paragraph claimed such a mesh renders identically whether or not the origin was ever
+// rebased; for these objects that was false.)
+//
+// The fix is a per-viewport WRITE, not a per-viewport copy of the objects: the shared entity
+// objects are placed for the viewport that is about to draw them, relative to that viewport's
+// own floating origin (`Viewer._placeSharedEntities`, run from `scene.onBeforeRender`, keyed by
+// the drawing camera), so each viewport sees them as precisely as its own trajectory lines.
+// The alternative (an `InstancedMesh`, trail lines, ellipsoid / keep-out meshes and glTF clones
+// per viewport on its own layer) costs memory, a build / dispose lifecycle on every viewport
+// and scenario change, and N copies of the layer manager's residency; web/VIEWER.md's "Shared
+// entity objects" section compares the two with the measured costs.
 //
 // A trajectory line's `LineGeometry` vertex buffer is different: it is *data*, written
 // once into a real `Float32Array` (`web/js/scene.js`'s `trajectoryRenderPositions()`),

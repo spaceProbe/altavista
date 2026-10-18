@@ -316,6 +316,8 @@ export class Viewer {
     this._tmpAim = new THREE.Vector3();  // scratch: the orbit target in world space (_updateEntitiesCamera)
     this._tmpQ = new THREE.Quaternion();
     this._sunDir = new THREE.Vector3(1, 0.3, 0.2);
+    this._initPlacementState();
+    this._installPlacementHook();
     this.fitRadius = 30;
     // True while an entity is framed (`_frameEntity`): near/far/minDistance are then the
     // framing range, not the whole-scenario one `_restoreFitDepthRange` puts back.
@@ -536,7 +538,10 @@ export class Viewer {
       rootObj.add(line, marker);
       const label = this._label(s.label || s.name, 'sc');
       label.style.color = s.color || '#fff';
-      this.spacecraft.set(s.name, { marker, line, interp, data: s, label, poly, visible: true, segCount: poly.times.length - 1 });
+      // `abs`: this tick's absolute (f64, scene units) position, written by update(t) and read
+      // by `_placeSharedEntities` for every view (initialised at the first sample).
+      const abs = interp.at(interp.t0, new THREE.Vector3()).multiplyScalar(SCALE);
+      this.spacecraft.set(s.name, { marker, line, interp, data: s, label, poly, abs, visible: true, segCount: poly.times.length - 1 });
     }
     // M21.2 (question 140): `spacecraftNames` is exactly `this.spacecraft`'s own key set
     // -- computed once here rather than per-event -- fed to the shared, headlessly
@@ -550,12 +555,15 @@ export class Viewer {
       const hasRenderedInstance = eventHasRenderedInstance(ev, spacecraftNames);
       const sc0 = hasRenderedInstance ? this.spacecraft.get(ev.spacecraft) : null;
       const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(1), new THREE.MeshBasicMaterial({ color: 0xffd166 }));
-      if (sc0) { sc0.interp.at(ev.t, this._tmpAbs).multiplyScalar(SCALE); this._toLocal(this._tmpAbs, mesh.position); }
+      // `abs`: the event's absolute (f64, scene units) position. An event is static, so it is
+      // computed once; `_placeSharedEntities` derives its local position for each view from it.
+      const abs = new THREE.Vector3();
+      if (sc0) { sc0.interp.at(ev.t, abs).multiplyScalar(SCALE); this._toLocal(abs, mesh.position); }
       else mesh.position.set(0, 0, 0);
       mesh.visible = hasRenderedInstance;
       rootObj.add(mesh);
       const label = this._label(ev.name, 'event');
-      this.events.push({ mesh, label, data: ev, interp: sc0 ? sc0.interp : null });
+      this.events.push({ mesh, label, data: ev, interp: sc0 ? sc0.interp : null, abs });
     }
     // Sensor footprints (M6.3, altavista/scenario.py's Scenario.footprint()): a closed
     // ring per declared footprint, updated to the *nearest* recorded sample each tick
@@ -903,6 +911,7 @@ export class Viewer {
    * unless `force` is set (used by `fit()` and `setFloatingOriginEnabled()`, where a
    * rebuild is wanted even if the numeric origin happens to already match). */
   _rebaseOriginTo(x, y, z, force = false) {
+    this._placeEpoch++; // the primary's origin moved: its placement of the shared entities is stale
     const fo = this.floatingOrigin;
     const oldEnabled = fo.isEnabledForFrame(this._originFrameId);
     const old = fo.getOrigin(this._originFrameId);
@@ -952,8 +961,7 @@ export class Viewer {
     }
     for (const e of this.events) {
       if (!e.interp) continue;
-      e.interp.at(e.data.t, this._tmpAbs).multiplyScalar(SCALE);
-      this._toLocal(this._tmpAbs, e.mesh.position);
+      this._toLocal(e.abs, e.mesh.position);
     }
     // Footprint rings are also static per-sample geometry (like trajectory lines) --
     // rebuild the currently-shown ring (if any) in the new origin-relative space
@@ -1022,7 +1030,8 @@ export class Viewer {
    * RIC frame for an RPO close-up, or `enableGlobe`'s body for a globe pane -- globe.js's
    * GlobeLayer itself stays a single shared object on the default layer, visible to every
    * viewport once enabled, same as bodies/markers; see viewport.js's module docstring for
-   * why only trajectory/footprint lines need a per-viewport copy).
+   * why only trajectory/footprint lines have a per-viewport copy, while the entity objects
+   * are one shared set written per drawing viewport, `_placeSharedEntities`).
    * @param {string} id
    * @param {HTMLCanvasElement} [canvas]
    * @param {HTMLElement} [labelLayer]
@@ -1324,6 +1333,7 @@ export class Viewer {
    * clones (`_refreshViewportGeometry`) -- and ONLY `vp`'s own; no other viewport's
    * `floatingOrigin`/lines/camera are read or written by this call. */
   _rebaseViewportOriginTo(vp, x, y, z, force = false) {
+    this._placeEpoch++; // this viewport's origin and render shift moved: its placement is stale
     const fo = vp.floatingOrigin;
     const oldEnabled = fo.isEnabledForFrame(this._originFrameId);
     const old = fo.getOrigin(this._originFrameId);
@@ -2014,6 +2024,8 @@ export class Viewer {
    * (ellipsoid/keep-out) or `model` (models) for that spacecraft.
    */
   _buildEntities(sc, rootObj) {
+    this._placedView = undefined; // new objects: nothing is placed for any view yet
+    this._placeEpoch++;
     this._entityGroups = {
       markers: new THREE.Group(), trails: new THREE.Group(), covarianceEllipsoids: new THREE.Group(),
       keepOutVolumes: new THREE.Group(), models: new THREE.Group(),
@@ -2184,63 +2196,186 @@ export class Viewer {
     if (this._entityGroups) this._entityGroups[cls].visible = !!enabled;
   }
 
-  /** Per-tick: overwrite every resident entity marker's instance matrix from the
-   * SAME already-computed, origin-relative, scaled position this tick's own
-   * body/spacecraft loop (below) just wrote into `s.marker.position` -- never
-   * `entry.payload.matrix` (`MarkerLayerAdapter.load()`'s own baked matrix is a RAW
-   * ABSOLUTE km coordinate with no scale/origin-subtraction at all, by that module's
-   * own deliberate design -- see this file's top-of-module import comment; using it
-   * directly here would reintroduce exactly the float32-precision jitter question 46's
-   * bound exists to catch). `this.layerManager`'s own resident/admission bookkeeping
-   * is untouched by this method -- it is read-only here (which spacecraft are
-   * currently resident, via `this._entityMarkerResidentNames`, which
-   * `ResidentEntityScene.sync()` refreshed from the manager earlier this tick in
-   * `_updateLayerManager`). */
-  _updateEntityMarkers() {
+  // ---- render-time placement of the shared entity objects (question 240, defect 3) ----------
+  //
+  // The entity objects (the spacecraft marker spheres, the instanced entity markers, the trail
+  // lines, the covariance / keep-out meshes, the glTF model groups and the event meshes) are
+  // ONE set of Object3Ds in `_entitiesGroup`, drawn by the primary renderer and by every extra
+  // viewport's renderer. Their positions are NOT origin-independent: a float32 sits in the
+  // path (`Math.fround` in `toRenderSpace`, the instance matrix and the trail buffers are
+  // Float32Arrays), so a position written relative to the PRIMARY camera's floating origin has
+  // a rounding error of up to half a float32 step at its distance from that origin (0.24 m at
+  // LEO with the origin at the Earth, 1.9 m at GEO, 15 m at lunar distance) however close
+  // another viewport's camera sits to the entity -- and it hops between ticks. (Trajectory
+  // and footprint LINES avoid this with a per-viewport copy; see viewport.js.)
+  //
+  // The fix is to write the objects for the view that is about to draw them. For a view `v`
+  // with floating origin `O_v` and render shift `S_v` (the primary: `this.floatingOrigin` and
+  // `_entitiesGroup.position`; a viewport: `vp.floatingOrigin` and `vp.renderGroup.position`),
+  // an object that rests under `_entitiesGroup` (shift `S_p`) is written at
+  //     local = (S_v - S_p) + fround(abs - O_v)
+  // (an f64 add of the shift difference to the float32-rounded remainder), so its world
+  // position is `S_v + fround(abs - O_v)`, the same construction the viewport's own trajectory
+  // lines have. For the primary `S_v - S_p` is exactly zero and the value is exactly what
+  // `_toLocal` gives. Where the value is stored in a Float32Array (the instance matrices, the
+  // trail position buffers) the buffer holds only `fround(abs - O_v)` and the f64 difference
+  // `S_v - S_p` is carried by the owning mesh's / line's own `position` (an f64): adding it to
+  // the buffered value would round it away again.
+  //
+  // `scene.onBeforeRender` (`_installPlacementHook`) is the trigger: it fires inside every
+  // `renderer.render(scene, camera)`, after `scene.updateMatrixWorld()`, and is keyed by the
+  // drawing camera, so every draw (the tick's, and a test's direct call) is placed for the
+  // camera that draws it. `update(t)` places the primary first (the state between ticks, and
+  // what picking, labels and Focus read), the extra viewports are placed by their own draws,
+  // and the primary is restored after the viewport loop.
+
+  /** State of the render-time placement (`_placeSharedEntities`): which view's floating origin
+   * the shared objects are currently written for (`undefined` = none yet, `null` = the
+   * primary, else a `Viewport`), the epoch that placement was written in, and scratch. Any
+   * change that moves a value (a tick, a rebase of any view, a scenario load) bumps the epoch. */
+  _initPlacementState() {
+    this._placedView = undefined;
+    this._placedEpoch = -1;
+    this._placeEpoch = 0;
+    this._placeOffset = new THREE.Vector3();
+    this._placeLocal = new THREE.Vector3();
+    this._placeMatrix = new THREE.Matrix4();
+    this._placeQuat = new THREE.Quaternion();
+    this._placeScale = new THREE.Vector3();
+  }
+
+  /** `out = off + toRenderSpace_view(abs)`; `off` null means zero, in which case the result
+   * is exactly `toRenderSpace`'s (no `+ 0`, which would turn a `-0` into `0`). */
+  _toViewLocal(fo, abs, off, out) {
+    const r = fo.toRenderSpace(this._originFrameId, abs);
+    if (off) return out.set(r.x + off.x, r.y + off.y, r.z + off.z);
+    return out.set(r.x, r.y, r.z);
+  }
+
+  /** Install the `scene.onBeforeRender` hook that places the shared entity objects for the
+   * camera about to draw (primary camera -> primary, a viewport's camera -> that viewport,
+   * any other camera -> primary). Called once from the constructor. */
+  _installPlacementHook() {
+    this.scene.onBeforeRender = (renderer, scene, camera) => this._onSceneBeforeRender(camera);
+  }
+
+  _onSceneBeforeRender(camera) {
+    let vp = null;
+    if (camera !== this.camera) {
+      for (const v of this.viewports.values()) if (v.camera === camera) { vp = v; break; }
+    }
+    this._placeSharedEntities(vp);
+  }
+
+  /**
+   * Write every shared entity object for the view `vp` (a `Viewport`, or `null` for the primary
+   * camera). A no-op when the objects are already placed for this view in this epoch (the
+   * epoch moves with each tick and each rebase of any view). Reads this tick's cached f64
+   * absolute positions (`s.abs`, `e.abs`, the trail slices `rec.slicePoly`), so it
+   * interpolates nothing. Because three runs `scene.updateMatrixWorld()` BEFORE
+   * `scene.onBeforeRender`, the world matrices of everything moved are updated here.
+   * Each viewport has its own WebGLRenderer, so a buffer rewritten for a view is re-uploaded
+   * by exactly the contexts that draw afterwards (three's `WebGLAttributes` compares the
+   * attribute's `version` with the version it uploaded to THAT renderer), once per context per
+   * frame, as before.
+   */
+  _placeSharedEntities(vp) {
+    if (this._placedView === vp && this._placedEpoch === this._placeEpoch) return;
+    this._placedView = vp;
+    this._placedEpoch = this._placeEpoch;
+    const fo = vp ? vp.floatingOrigin : this.floatingOrigin;
+    // S_v - S_p; exactly zero for the primary.
+    const off = this._placeOffset;
+    if (vp) off.copy(vp.renderGroup.position).sub(this._entitiesGroup.position); else off.set(0, 0, 0);
+    const offAdd = vp ? off : null;
+    const local = this._placeLocal;
+
+    for (const s of this.spacecraft.values()) {
+      this._toViewLocal(fo, s.abs, offAdd, s.marker.position);
+      s.marker.updateWorldMatrix(false, false);
+    }
+    for (const e of this.events) {
+      if (!e.interp) continue;
+      this._toViewLocal(fo, e.abs, offAdd, e.mesh.position);
+      e.mesh.updateWorldMatrix(false, false);
+    }
+    if (!this._entityGroups) return;
+    this._placeEntityMarkers(fo, off);
+    this._placeEntityTrails(fo, off);
+    for (const [name, rec] of this._entityCovarianceMeshes) {
+      const s = this.spacecraft.get(name);
+      if (!s) continue;
+      this._toViewLocal(fo, s.abs, offAdd, local);
+      rec.mesh.position.copy(local);
+      rec.mesh.updateWorldMatrix(false, false);
+      const koRec = this._entityKeepoutMeshes.get(name);
+      if (koRec) { koRec.mesh.position.copy(local); koRec.mesh.updateWorldMatrix(false, false); }
+    }
+    for (const [name, entity] of this._entityModelEntities) {
+      const s = this.spacecraft.get(name);
+      if (!s) continue;
+      this._toViewLocal(fo, s.abs, offAdd, entity.group.position);
+      entity.group.updateMatrixWorld(true);
+    }
+  }
+
+  /** The instanced entity markers' placement. Their instance matrices come from the SAME
+   * absolute, scaled position `s.abs` (never `entry.payload.matrix`: `MarkerLayerAdapter.
+   * load()`'s baked matrix is a RAW ABSOLUTE km coordinate with no scale/origin-subtraction at
+   * all, by that module's own deliberate design -- see this file's top-of-module import
+   * comment; using it would reintroduce exactly the float32-precision jitter question 46's
+   * bound exists to catch). `this.layerManager`'s own resident/admission bookkeeping is
+   * untouched -- it is read-only here (which spacecraft are resident, via
+   * `this._entityMarkerResidentNames`, which `ResidentEntityScene.sync()` refreshed from the
+   * manager earlier this tick in `_updateLayerManager`). */
+  _placeEntityMarkers(fo, off) {
     const mesh = this._entityMarkerMesh;
     if (!mesh) return;
-    const m4 = this._tmpEntityMatrix || (this._tmpEntityMatrix = new THREE.Matrix4());
-    const scaleVec = this._tmpEntityScale || (this._tmpEntityScale = new THREE.Vector3());
-    const q = this._tmpEntityQuat || (this._tmpEntityQuat = new THREE.Quaternion());
+    const m4 = this._placeMatrix, scaleVec = this._placeScale, q = this._placeQuat;
     let any = false;
     this._entityMarkerResidentNames.forEach((name, i) => {
       const s = this.spacecraft.get(name);
       if (!s) return;
       any = true;
       // Unit scale: the marker's size is in screen pixels (the material's vertex shader),
-      // the instance matrix carries the position only.
+      // the instance matrix carries the position only. The matrix is a Float32Array, so it
+      // holds the view's origin-relative remainder alone (small, exactly a float32); the
+      // render-shift difference `off` rides on the mesh's own f64 position instead, where
+      // adding it to the matrix would round it away again.
       scaleVec.setScalar(1);
-      m4.compose(s.marker.position, q.identity(), scaleVec);
+      this._toViewLocal(fo, s.abs, null, this._placeLocal);
+      m4.compose(this._placeLocal, q.identity(), scaleVec);
       mesh.setMatrixAt(i, m4);
     });
     mesh.instanceMatrix.needsUpdate = true;
+    mesh.position.copy(off);
+    mesh.updateWorldMatrix(false, false);
     mesh.visible = any;
   }
 
-  /** Per-tick: rebuild each resident trail's "recent track" -- the last
-   * `ENTITY_TRAIL_RECENT_SAMPLES` polyline samples up to (and including) the sample
-   * nearest `t` -- into its PREALLOCATED position buffer, via `trajectoryRenderPositions`
-   * (this file, above): the SAME origin-safe scale+subtract+single-fround pipeline the
-   * primary trajectory line already uses, never `entry.payload.line`'s own raw-absolute
-   * geometry (identical reasoning to `_updateEntityMarkers`'s own doc comment). */
+  /** Per-tick, view-independent half of the trails: select each resident trail's "recent
+   * track" -- the last `ENTITY_TRAIL_RECENT_SAMPLES` polyline samples up to (and including)
+   * the sample nearest `t` -- and cache the slice (`rec.slicePoly`, f64 absolute km) and the
+   * draw range. `_placeSharedEntities` turns the slice into the PREALLOCATED position buffer
+   * for each view, via `trajectoryRenderPositions` (this file, above): the SAME origin-safe
+   * scale+subtract+single-fround pipeline the primary trajectory line already uses, against
+   * the drawing view's own floating origin, never `entry.payload.line`'s own raw-absolute
+   * geometry. */
   _updateEntityTrails(t) {
     for (const [name, rec] of this._entityTrailLines) {
+      rec.slicePoly = null;
       const s = this.spacecraft.get(name);
       if (!s || !s.poly || !s.poly.times.length) { rec.line.visible = false; continue; }
       const idx = nearestSampleIndex(t, s.poly.times);
       if (idx < 0) { rec.line.visible = false; continue; }
       const start = Math.max(0, idx - rec.maxPoints + 1);
       const count = idx - start + 1;
-      const slicePoly = { points: s.poly.points.slice(start * 3, (idx + 1) * 3) };
-      const rendered = trajectoryRenderPositions(slicePoly, this.floatingOrigin, this._originFrameId);
       // `trajectoryRenderPositions` degrades a <2-point input to a fixed 2-point
       // placeholder (its own documented "never throw" contract for a too-short
-      // polyline) -- only trust/copy it when it genuinely covers `count` points.
-      if (count >= 2 && rendered.length === count * 3) {
-        rec.positions.set(rendered, 0);
+      // polyline) -- only trust it when the slice genuinely covers `count` >= 2 points.
+      if (count >= 2) {
+        rec.slicePoly = { points: s.poly.points.slice(start * 3, (idx + 1) * 3) };
         rec.line.geometry.setDrawRange(0, count);
-        rec.line.geometry.attributes.position.needsUpdate = true;
-        rec.line.geometry.computeBoundingSphere();
         rec.line.visible = true;
       } else {
         rec.line.visible = false;
@@ -2248,8 +2383,19 @@ export class Viewer {
     }
   }
 
-  /** Per-tick: covariance ellipsoids + keep-out volumes. Position follows the SAME
-   * live, continuous `s.marker.position` every tick (like `_updateEntityMarkers`);
+  _placeEntityTrails(fo, off) {
+    for (const rec of this._entityTrailLines.values()) {
+      if (!rec.slicePoly) continue;
+      rec.positions.set(trajectoryRenderPositions(rec.slicePoly, fo, this._originFrameId), 0);
+      rec.line.geometry.attributes.position.needsUpdate = true;
+      rec.line.geometry.computeBoundingSphere();
+      rec.line.position.copy(off); // f64, for the reason given in _placeEntityMarkers
+      rec.line.updateWorldMatrix(false, false);
+    }
+  }
+
+  /** Per-tick: covariance ellipsoids + keep-out volumes. The position follows the live,
+   * continuous absolute spacecraft position every tick, per view (`_placeSharedEntities`);
    * SHAPE (semi-axes/orientation) only recomputes when the nearest native sample
    * index changes (never interpolated -- see `nearestSampleIndex`'s own doc comment),
    * the same split `_updateFootprint` already uses for ring geometry vs. this file's
@@ -2262,8 +2408,6 @@ export class Viewer {
       const s = this.spacecraft.get(name);
       const koRec = this._entityKeepoutMeshes.get(name);
       if (!s) { rec.mesh.visible = false; if (koRec) koRec.mesh.visible = false; continue; }
-      rec.mesh.position.copy(s.marker.position);
-      if (koRec) koRec.mesh.position.copy(s.marker.position);
       const idx = nearestSampleIndex(t, s.data.t);
       if (idx !== rec.lastIndex) {
         rec.lastIndex = idx;
@@ -2304,17 +2448,16 @@ export class Viewer {
     }
   }
 
-  /** Per-tick: glTF model entities -- position from the live spacecraft marker
-   * (like `_updateEntityMarkers`), attitude driven by `ModelEntity.update(t)` via the
-   * shared body-frame attitude source (`_entityAttitudeSourceFor`, above). A no-op for
-   * an entity whose model has not finished loading yet (`entity.modelLoaded` false --
-   * `_loadEntityModel` is async; this stays invisible, never a placeholder shown as
-   * "the model", until it genuinely has content). */
+  /** Per-tick: glTF model entities -- attitude driven by `ModelEntity.update(t)` via the
+   * shared body-frame attitude source (`_entityAttitudeSourceFor`, above); the position
+   * is `_placeSharedEntities`'s, per view. A no-op for an entity whose model has not
+   * finished loading yet (`entity.modelLoaded` false -- `_loadEntityModel` is async; this
+   * stays invisible, never a placeholder shown as "the model", until it genuinely has
+   * content). */
   _updateEntityModels(t) {
     for (const [name, entity] of this._entityModelEntities) {
       const s = this.spacecraft.get(name);
       if (!s || !entity.modelLoaded) { entity.group.visible = false; continue; }
-      entity.group.position.copy(s.marker.position);
       entity.update(t);
       entity.group.visible = this.entityOptions.models;
     }
@@ -2323,6 +2466,7 @@ export class Viewer {
   // ------------------------------------------------------------------ per frame
   update(t) {
     this._lastT = t;
+    this._placeEpoch++; // new epoch: every view's placement of the shared entities is stale
     const cam = this.camera;
     // Structural completeness: FrameGraph.update() drives any frame with a declared
     // origin track (interp.js's TrajectoryInterp, Hermite w/ velocity). `root` has
@@ -2331,7 +2475,98 @@ export class Viewer {
     // real origin track (once the CDM sends a FrameDefinition list, see VIEWER.md's
     // escalation) is driven correctly without another wiring pass.
     this.frameGraph.update(t, SCALE);
+    this._updatePrimaryCamera(t);
 
+    // bodies
+    const h0 = this._referenceCanvasHeight();
+    const pxPerUnitAt = (d) => h0 / (2 * d * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)));
+    for (const b of this.bodies.values()) {
+      b.interp.position(t, this._tmpAbs).multiplyScalar(SCALE);
+      this._toLocal(this._tmpAbs, b.mesh.position);
+      b.interp.orientation(t, b.mesh.quaternion);
+      if (b.data.name === 'Sun') this._sunDir.copy(b.mesh.position);
+      // sub-pixel disc -> draw a 3 px dot instead
+      const d = b.mesh.position.distanceTo(cam.position);
+      const discPx = b.data.radius * SCALE * pxPerUnitAt(d);
+      const useDot = b.visible && discPx < 1.5;
+      b.dot.visible = useDot;
+      if (useDot) {
+        b.dot.position.copy(b.mesh.position);
+        b.dot.scale.setScalar(Math.max(1.5 / pxPerUnitAt(d), 1e-6));
+      }
+    }
+    // M15.4/M16.4 + heavy cleanup round 1: globe tiles, 3D Tiles overlay and entity
+    // markers/trails all plan into the ONE `layerManager.update()` this tick makes
+    // (`_updateLayerManager`, see its doc comment). The body-fixed frame sync must run
+    // after the bodies loop above (it copies b.mesh's just-updated local transform) and
+    // before the overlay's own camera read (through that same frame's world matrix).
+    if (this._tilesOverlayBodyName) this._syncBodyFixedFrame(this._tilesOverlayBodyName);
+    this._updateLayerManager(cam);
+    // lighting from the Sun (direction only; the small origin shift folded into
+    // b.mesh.position above is negligible next to interplanetary distance, so the
+    // normalized direction is unaffected)
+    if (this._sunDir.lengthSq() > 0) {
+      this.sun.position.copy(this._sunDir).normalize().multiplyScalar(this.fitRadius * 10);
+      this.sun.target.position.set(0, 0, 0);
+    }
+    // spacecraft markers, constant pixel size
+    const h = this._referenceCanvasHeight();
+    const pxScale = 2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) / h;
+    for (const s of this.spacecraft.values()) {
+      s.interp.at(t, this._tmpAbs).multiplyScalar(SCALE);
+      s.abs.copy(this._tmpAbs); // f64, absolute: every view's placement reads it (_placeSharedEntities)
+      this._toLocal(this._tmpAbs, s.marker.position);
+      const d = this._markerReferenceDistance(s.marker.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
+      s.marker.scale.setScalar(Math.max(d * pxScale * MARKER_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
+      if (this.options.trail === 'past' && s.poly.times.length > 1) {
+        const k = findSegment(t, s.poly.times);
+        s.line.geometry.instanceCount = t >= s.poly.times[s.poly.times.length - 1] ? s.segCount : Math.max(0, k);
+      }
+      const inSpan = t >= s.interp.t0 - 1e-9 && t <= s.interp.t1 + 1e-9;
+      s.marker.material.opacity = inSpan ? 1 : 0.35;
+      s.marker.material.transparent = !inSpan;
+    }
+    // sensor footprints: jump to the nearest recorded sample (no interpolation
+    // contract between rings -- see the Footprint docstring and setScenario() above)
+    for (const f of this.footprints.values()) {
+      this._updateFootprint(f, t);
+    }
+    for (const e of this.events) {
+      const d = this._markerReferenceDistance(e.mesh.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
+      e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
+    }
+    // Heavy round 7 (H6 wiring): entity per-tick update, AFTER the spacecraft loop
+    // above (it wrote this tick's `s.abs`) and BEFORE render() -- see each method's own
+    // doc comment. Cheap, unconditional no-ops before the first scenario loads
+    // (`this._entityGroups` null) or when a class has nothing resident/qualifying.
+    if (this._entityGroups) this._updateEntities(t);
+    this.renderer.render(this.scene, cam);
+    if (this.options.labels) this._updateLabels();
+    // M26.3: every extra viewport, driven by this SAME tick's `t` -- see _updateViewport's
+    // own docstring for why this is the "one clock ... many cameras" mechanism made
+    // concrete (there is no per-viewport clock to get out of sync with this one).
+    for (const vp of this.viewports.values()) this._updateViewport(vp, t);
+    // Each viewport's draw placed the shared entity objects for ITS camera
+    // (`_installPlacementHook`); put the primary's placement back, so between ticks the scene
+    // graph holds exactly the values it always has (picking, labels and Focus read them).
+    if (this.viewports.size) this._placeSharedEntities(null);
+  }
+
+  /** The entity classes' per-tick update: the view-independent parts (trail slices,
+   * covariance shapes, model attitude), then the shared objects placed for the primary
+   * camera (`_placeSharedEntities`; the extra viewports' draws place them for themselves). */
+  _updateEntities(t) {
+    this._updateEntityTrails(t);
+    this._updateEntityCovariance(t);
+    this._updateEntityModels(t);
+    this._placeSharedEntities(null);
+  }
+
+  /** The primary camera's per-tick part of `update(t)`: rebase the floating origin near the
+   * focus target and follow the focus (`controls.target` / `camera.position`). Extracted from
+   * `update` unchanged so a headless caller can drive it (web/js/entities_viewport_precision_check.mjs). */
+  _updatePrimaryCamera(t) {
+    const cam = this.camera;
     // Entities-frame precision, regardless of which frame the *camera* is parented
     // in: keep the floating origin rebased near the focus target's absolute position,
     // so trajectory vertex buffers (always rendered under this._originFrameId) stay
@@ -2378,81 +2613,6 @@ export class Viewer {
       // every tick, not only on the initial setViewFrame() call.
       this.camera.lookAt(worldPos);
     }
-
-    // bodies
-    const h0 = this._referenceCanvasHeight();
-    const pxPerUnitAt = (d) => h0 / (2 * d * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)));
-    for (const b of this.bodies.values()) {
-      b.interp.position(t, this._tmpAbs).multiplyScalar(SCALE);
-      this._toLocal(this._tmpAbs, b.mesh.position);
-      b.interp.orientation(t, b.mesh.quaternion);
-      if (b.data.name === 'Sun') this._sunDir.copy(b.mesh.position);
-      // sub-pixel disc -> draw a 3 px dot instead
-      const d = b.mesh.position.distanceTo(cam.position);
-      const discPx = b.data.radius * SCALE * pxPerUnitAt(d);
-      const useDot = b.visible && discPx < 1.5;
-      b.dot.visible = useDot;
-      if (useDot) {
-        b.dot.position.copy(b.mesh.position);
-        b.dot.scale.setScalar(Math.max(1.5 / pxPerUnitAt(d), 1e-6));
-      }
-    }
-    // M15.4/M16.4 + heavy cleanup round 1: globe tiles, 3D Tiles overlay and entity
-    // markers/trails all plan into the ONE `layerManager.update()` this tick makes
-    // (`_updateLayerManager`, see its doc comment). The body-fixed frame sync must run
-    // after the bodies loop above (it copies b.mesh's just-updated local transform) and
-    // before the overlay's own camera read (through that same frame's world matrix).
-    if (this._tilesOverlayBodyName) this._syncBodyFixedFrame(this._tilesOverlayBodyName);
-    this._updateLayerManager(cam);
-    // lighting from the Sun (direction only; the small origin shift folded into
-    // b.mesh.position above is negligible next to interplanetary distance, so the
-    // normalized direction is unaffected)
-    if (this._sunDir.lengthSq() > 0) {
-      this.sun.position.copy(this._sunDir).normalize().multiplyScalar(this.fitRadius * 10);
-      this.sun.target.position.set(0, 0, 0);
-    }
-    // spacecraft markers, constant pixel size
-    const h = this._referenceCanvasHeight();
-    const pxScale = 2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) / h;
-    for (const s of this.spacecraft.values()) {
-      s.interp.at(t, this._tmpAbs).multiplyScalar(SCALE);
-      this._toLocal(this._tmpAbs, s.marker.position);
-      const d = this._markerReferenceDistance(s.marker.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      s.marker.scale.setScalar(Math.max(d * pxScale * MARKER_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
-      if (this.options.trail === 'past' && s.poly.times.length > 1) {
-        const k = findSegment(t, s.poly.times);
-        s.line.geometry.instanceCount = t >= s.poly.times[s.poly.times.length - 1] ? s.segCount : Math.max(0, k);
-      }
-      const inSpan = t >= s.interp.t0 - 1e-9 && t <= s.interp.t1 + 1e-9;
-      s.marker.material.opacity = inSpan ? 1 : 0.35;
-      s.marker.material.transparent = !inSpan;
-    }
-    // sensor footprints: jump to the nearest recorded sample (no interpolation
-    // contract between rings -- see the Footprint docstring and setScenario() above)
-    for (const f of this.footprints.values()) {
-      this._updateFootprint(f, t);
-    }
-    for (const e of this.events) {
-      const d = this._markerReferenceDistance(e.mesh.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
-    }
-    // Heavy round 7 (H6 wiring): entity per-tick update, AFTER the spacecraft loop
-    // above (every _updateEntity*() method below reads `s.marker.position`, which that
-    // loop just wrote fresh this tick) and BEFORE render() -- see each method's own
-    // doc comment. Cheap, unconditional no-ops before the first scenario loads
-    // (`this._entityGroups` null) or when a class has nothing resident/qualifying.
-    if (this._entityGroups) {
-      this._updateEntityMarkers();
-      this._updateEntityTrails(t);
-      this._updateEntityCovariance(t);
-      this._updateEntityModels(t);
-    }
-    this.renderer.render(this.scene, cam);
-    if (this.options.labels) this._updateLabels();
-    // M26.3: every extra viewport, driven by this SAME tick's `t` -- see _updateViewport's
-    // own docstring for why this is the "one clock ... many cameras" mechanism made
-    // concrete (there is no per-viewport clock to get out of sync with this one).
-    for (const vp of this.viewports.values()) this._updateViewport(vp, t);
   }
 
   _updateLabels() {

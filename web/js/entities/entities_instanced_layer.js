@@ -341,13 +341,14 @@ export function bindMarkerViewport(material, renderer, target = new THREE.Vector
  * with capacity for every entity (the number of entities is fixed for a scenario), and
  * `mesh.count` is set to the number of resident markers with their colours rewritten in
  * resident order. That keeps `markerNames[i]` <-> instance `i` a plain parallel pair,
- * which is what `Viewer._updateEntityMarkers` and the browser proofs index by, and a
+ * which is what `Viewer._placeEntityMarkers` and the browser proofs index by, and a
  * hidden-in-place instance (scale 0) would still be a drawn instance. A trail's
  * `THREE.Line` is created when its payload becomes resident and disposed when it stops
  * being, so GPU memory follows residency too. Positions are NOT taken from the payloads
- * (they bake raw absolute km, see `web/js/scene.js`'s `_updateEntityMarkers`); the
- * viewer overwrites each resident instance/line every tick through the floating-origin
- * pipeline, reading `markerNames`/`trailLines` back from here.
+ * (they bake raw absolute km, see `web/js/scene.js`'s `_placeEntityMarkers`); the
+ * viewer overwrites each resident instance/line for each view that draws them (the primary
+ * and every extra viewport, `Viewer._placeSharedEntities`) through that view's own
+ * floating-origin pipeline, reading `markerNames`/`trailLines` back from here.
  *
  * @param {object} opts
  * @param {import('../layers/layer.js').LayerManager} opts.manager the shared manager; the

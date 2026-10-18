@@ -175,6 +175,67 @@ treatment: they're recomputed fresh from absolute f64 interpolated data every
 `floatingOrigin.toRenderSpace`), so they never go stale between rebases. Only geometry
 built once from static data (trajectory line vertex buffers, event marker positions
 set at scenario-load time) needs an explicit refresh, which the rebase helper performs.
+`_toLocal` is the PRIMARY camera's origin; the entity objects the extra viewports also
+draw are therefore written per drawing viewport, see "Shared entity objects" below.
+
+### Shared entity objects are written per drawing viewport (question 240)
+
+The entity objects (spacecraft marker spheres, the instanced entity markers, trails,
+covariance ellipsoids, keep-out volumes, glTF model groups, event meshes) are one set of
+Object3Ds drawn by the primary renderer and by every extra viewport's renderer. Their
+rendered position is **not** independent of the floating origin: it goes through
+`Math.fround` (`_toLocal`) and, for the instanced markers and the trails, a Float32Array.
+Written once per tick against the primary's origin, a model framed ~10 m from a second
+viewport's camera was drawn 0.26 m off at LEO, 1.9 m at GEO and 15 m at lunar distance
+whenever the primary's origin was elsewhere (after `fit()` it is at the Earth), and hopped
+between ticks (twice that), against question 46's centimetre bound.
+
+`Viewer._placeSharedEntities(vp)` (`vp` null = the primary) now writes all of them relative to
+the drawing view's own origin `O_v` and render shift `S_v`: an object under `_entitiesGroup`
+(shift `S_p`) is put at `(S_v - S_p) + fround(abs - O_v)`, an f64 add of the shift difference
+to the float32-rounded remainder, so its world position is `S_v + fround(abs - O_v)`, the
+construction the viewport's own trajectory lines have. For the primary `S_v - S_p` is exactly
+zero and the values are bit-identical to what `_toLocal` gave (asserted). In a Float32Array
+(the instance matrices, the trail buffers) only `fround(abs - O_v)` is stored and the f64
+difference rides on the owning mesh's / line's `position`; adding it to the buffered value
+would round it away again (found by the measurement: the first design wrote it into the
+buffers). The hook is `scene.onBeforeRender`, keyed by the drawing camera (primary camera or
+any unknown camera -> primary, `vp.camera` -> that viewport), so every
+`renderer.render(scene, camera)` is placed for the camera that draws; three runs
+`scene.updateMatrixWorld()` before it, so the moved objects' world matrices are updated in
+the placement. `update(t)` places the primary first, and restores it after the viewport loop,
+so between ticks the scene graph holds exactly the values it always has (picking, labels and
+Focus read them). A view already placed in the current epoch (a tick or a rebase of any view
+bumps it) is not written again. The per-tick absolute positions (`s.abs`, `e.abs`, the trail
+slices) are cached by the existing loops, so a placement interpolates nothing.
+
+Measured (real headless Chrome, `tests/test_viewer_viewport_precision_browser.py`, and the
+node twin `web/js/entities_viewport_precision_check.mjs`): the final float32 vertex position in
+each viewport's own eye frame against the f64 truth, three viewports, LEO / GEO / lunar:
+before the fix the two extra viewports were 0.26 / 1.9 / 15 m off (hop 0.5 / 3.8 / 29 m) after
+`fit()`; after it every class in every viewport is under 5 mm (hop under 7 mm) at all three.
+The primary's numbers are unchanged. With its origin at the frame origin (after `fit()`, no
+focus) the primary itself is still 0.65-1.8 m / 5-11 m / 36-42 m off for these objects: that is
+the question-46 "sub-metre in the general scene" regime of an unframed whole-scenario camera
+and is deliberately not changed here.
+
+Cost: the placement is ~0.005-0.011 ms per view per tick (0.019 ms for three views, measured),
+against ~0.011 ms for the per-tick entity update it replaces; no extra GL upload (three's
+`WebGLAttributes` keeps the uploaded `version` per renderer, so each context re-uploads a
+rewritten buffer once per frame it draws, as before: 3 `bufferSubData` per context per tick
+before and after).
+
+The alternative, a per-viewport copy of every entity object on that viewport's layer (an
+`InstancedMesh`, the trail lines, the ellipsoid / keep-out meshes and the glTF clones per
+viewport), was not built: it does the same per-tick position writes per viewport (so no CPU
+saved) plus N copies of the buffers on the JS heap, N more scene-graph subtrees for every
+render's `updateMatrixWorld` / `projectObject` traversal to visit, and a lifecycle to keep in
+step: build / dispose on `addViewport` / `removeViewport` and on every scenario reload,
+`ResidentEntityScene`'s residency (`markerNames`, the resident trail lines) mirrored into N
+groups, the class toggles applied to N groups, the layer manager's declared byte costs (one
+entry per entity, a copy per viewport is outside its model), the asynchronous model load
+attaching N clones under the reload token guard, and picking choosing the right copy. Each
+viewport already has its own GL context, so GPU memory is not what separates the designs.
 
 ### Jitter test: real path, not a parallel one
 
