@@ -125,6 +125,7 @@ import pytest
 
 from altavista.docker_test_lock import lock_docker_tests
 from altavista.test_env import missing_spoore_reason, spoore_dir
+import container_readiness  # question 252 item 4: connect-based readiness, not a substring of a shared stream
 import heavy_stack  # question 232's shared verify_image_commit_provenance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -191,6 +192,8 @@ MODEL_NODE_ID = "av-proposer.station-keeping"
 MODEL_VERSION = "1.0.0"
 
 COMMAND_GRPC_ADDR = "127.0.0.1:50070"  # matches av-gateway's own AV_GATEWAY_COMMAND_AUTHORITY_ENDPOINT default (http://127.0.0.1:50070, crates/av-gateway/src/bin/av-gateway.rs's own R3.6 comment) -- no override needed. This file previously named 50110 here, stale since R3.6 retargeted the default from a since-superseded 50170; the mismatch was never caught because this test has never actually run (this task's own repair) -- with the wrong port, Container G's own av-gateway would eagerly try to dial 50070, find nothing (av-command was told to bind elsewhere), fall back to a lazily-connecting channel, and every real ProposeCommand call in Part 5 below would then fail to reach av-command at all.
+COMMAND_GRPC_HOST, _command_grpc_port = COMMAND_GRPC_ADDR.rsplit(":", 1)
+COMMAND_GRPC_PORT = int(_command_grpc_port)
 COMMAND_ADMIN_ADDR = "127.0.0.1:50111"  # explicit: av-command's OWN default admin port (50170) would collide with av-gateway's gRPC bind on this same container.
 GATEWAY_INTERNAL_BIND = "0.0.0.0:50170"
 GATEWAY_PORT = 50170
@@ -521,23 +524,37 @@ def _write_minimal_execution_profile(dest_dir: Path) -> Path:
     return path
 
 
-def _wait_for_container_log_lines(name: str, needles: tuple[str, ...], timeout_s: float) -> str:
-    """Polls `docker logs` (both its stdout AND stderr -- see this module's own doc for why:
-    `av-command`/`av-gateway`'s own readiness lines are `eprintln!`, unlike `av-ingest-server`'s
-    `println!` convention `tests/test_edge_plugin_container.py::_wait_for_container_stdout_lines`
-    was written for) until every one of `needles` has appeared as a SUBSTRING somewhere in the
-    combined text -- bounded, never a bare `sleep N` guess. Returns the combined text actually
-    observed, for `docker inspect`-independent evidence (question 148)."""
-    deadline = time.monotonic() + timeout_s
-    while True:
-        logs = _docker("logs", name, check=False)
-        combined = (logs.stdout or "") + (logs.stderr or "")
-        if all(needle in combined for needle in needles):
-            return combined
-        if time.monotonic() > deadline:
-            still_running = _docker("inspect", name, "--format", "{{.State.Status}} (exit {{.State.ExitCode}})", check=False).stdout.strip()
-            pytest.fail(f"container {name} (state: {still_running}) never printed all of {needles} within {timeout_s}s -- logs so far:\n{combined}")
-        time.sleep(0.1)
+def _container_logs_text(name: str) -> str:
+    logs = _docker("logs", name, check=False)
+    return (logs.stdout or "") + (logs.stderr or "")
+
+
+def _wait_for_container_ready(
+    name: str,
+    listeners: "tuple[container_readiness.Listener, ...]",
+    timeout_s: float,
+    probe: "container_readiness.Probe | None" = None,
+) -> str:
+    """Waits until every one of `listeners` accepts a TCP connect made from INSIDE container
+    `name` (`docker exec`, bash's `/dev/tcp`; see `tests/container_readiness.py` for why it has
+    to be inside) -- bounded, never a bare `sleep N` guess. Question 252 item 4 / question 249:
+    this replaces a wait that looked for each process's readiness line as a SUBSTRING of
+    `docker logs`; `av-command` and `av-gateway` share one stderr, their writes interleave
+    inside a line, and the gateway's line arrived split (`REPLAYED_INTERLEAVED_STDERR`), so
+    that wait timed out on a container that was up. Nothing here reads the logs to decide
+    readiness; on failure the message shows what the probe saw plus the log tail as context.
+    Returns the probe summary, for evidence that does not depend on `docker inspect`
+    (question 148). `probe` is injectable so the wait can be driven without Docker."""
+    try:
+        return container_readiness.wait_for_listeners(
+            probe if probe is not None else container_readiness.exec_probe(name),
+            listeners,
+            timeout_s,
+            state=lambda: container_readiness.container_state(name),
+            logs=lambda: _container_logs_text(name),
+        )
+    except container_readiness.ReadinessTimeout as e:
+        pytest.fail(f"container {name}: {e}")
 
 
 # =================================================================================================
@@ -754,12 +771,18 @@ def _run_test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_auth
             IMAGE_TAG,  # reuses the proposer's own already-built, already-pulled runtime base (libssl3 + debian bookworm-slim) -- never a second image pull at test time (question 154).
             "-c", command_line,
         )
-        gateway_logs = _wait_for_container_log_lines(
+        gateway_ready = _wait_for_container_ready(
             gateway_container,
-            (f"av-command: listening on {COMMAND_GRPC_ADDR}", f"av-gateway: DataGatewayService + ModelProposeService on {GATEWAY_INTERNAL_BIND}"),
+            (
+                container_readiness.Listener("av-command", COMMAND_GRPC_HOST, COMMAND_GRPC_PORT),
+                container_readiness.Listener("av-gateway", container_readiness.SELF, GATEWAY_PORT),
+            ),
             timeout_s=30.0,
         )
-        print(f"\n--- Container G readiness, observed ---\n{gateway_logs.strip()[-800:]}")
+        # The logs are printed as context only (two processes share this stream and may
+        # interleave inside a line); no assertion reads them.
+        print(f"\n--- Container G readiness (connects from inside the container), observed ---\n{gateway_ready}")
+        print(f"--- Container G logs, context only ---\n{_container_logs_text(gateway_container).strip()[-800:]}")
 
         # -----------------------------------------------------------------------------------
         # Part 5 -- the allowed-endpoint proof. Container P: the REAL, unmodified
@@ -928,3 +951,195 @@ _RAW_CONNECT_PROBE_SCRIPT = (
     "        out.append((host, port, {'failed': True, 'elapsed_s': time.monotonic() - t0, 'message': str(e), 'errno': e.errno}))\n"
     "print(json.dumps(out))\n"
 )
+
+
+# =================================================================================================
+# Question 252 item 4 / question 249: the readiness wait, and the reproduction of the flake that
+# the old wait had. `av-command` and `av-gateway` share one stderr; the old wait looked for each
+# readiness line as a substring of `docker logs`. Both directions are kept: the old wait FAILS on
+# the interleaved stream, the new one (`_wait_for_container_ready`, the very function the
+# container test above calls) does not depend on the stream at all.
+# =================================================================================================
+
+_GATEWAY_READY_NEEDLE = f"av-gateway: DataGatewayService + ModelProposeService on {GATEWAY_INTERNAL_BIND}"
+_COMMAND_READY_NEEDLE = f"av-command: listening on {COMMAND_GRPC_ADDR}"
+
+# The `docker logs` text of Container G exactly as last round's gate captured it when the wait
+# timed out (`rounds/heavy-ct/gate/phase-pytest.log`, test_proposer_container.py, 2026-10-17;
+# the `E   ` pytest prefix removed, nothing else touched). `av-gateway`'s line "... on
+# 0.0.0.0:50170, admin (evidence bundle) on 0.0.0.0:50171, MCP server on stdio" is cut into
+# pieces by `av-command`'s "ledger at ... partition(s)); policy bundle ... (hash ...)" line,
+# which is itself cut by the gateway's pieces; `av-command: listening on ...` arrived whole.
+REPLAYED_INTERLEAVED_STDERR = "\n".join(
+    [
+        'av-gateway: no --catalog-host given -- GATEWAY_SELECTOR_CATALOG will be refused CatalogNotConfigured for every caller',
+        'av-gateway: OIDC issuer "https://sso.test.example/", audience "av-gateway-container-it" (RS256)',
+        'av-gateway: 2 human role(s), 1 service role(s), 3 group_clearance entr(y/ies)',
+        'av-gateway: cannot dial CommandAuthorityService at "http://127.0.0.1:50070": transport error -- propose_command will be unavailable',
+        'av-command: ledger at av-gateway: DataGatewayService + ModelProposeService on 0.0.0.0/data/command-ledger: (50170, admin (evidence bundle) on 0127 partition(s)); policy bundle ."0.0/etc/av/policy."1 (hash :501711ceb5f0ecf15402d75c9dd7e2e9fd3867f02a5088a9036ee10ce3ea7da06b800, MCP server on stdio',
+        ')',
+        'av-command: OIDC issuer "https://sso.test.example/", audience "av-proposer-container-it" (RS256)',
+        'av-command: 0 role(s), 0 service role(s), 0 delegation(s), audit sink Disabled',
+        'av-command: admin API on 127.0.0.1:50111 (GET /admin/api/evidence, /admin/api/evidence/verify)',
+        'av-command: listening on 127.0.0.1:50070 (run_id=84d971be367a8e692d03ead78b9177e7)',
+        '',
+    ]
+)
+
+
+def _both_up(_listeners) -> "dict[str, str | None]":
+    return {"av-command": None, "av-gateway": None}
+
+
+def test_the_substring_wait_fails_on_last_rounds_interleaved_gate_log_and_the_connect_wait_does_not():
+    """The flake, reproduced at the level of the wait, with no Docker: the gateway's line is not
+    a substring of the replayed stream (the old wait can never match, whatever the timeout),
+    yet both listeners are up, which is all the new wait asks about."""
+    assert _COMMAND_READY_NEEDLE in REPLAYED_INTERLEAVED_STDERR
+    assert _GATEWAY_READY_NEEDLE not in REPLAYED_INTERLEAVED_STDERR, "the replayed stream must be the interleaved one"
+
+    # Old wait: bounded, and it gives up on a stream that really does have both lines in it.
+    with pytest.raises(container_readiness.ReadinessTimeout, match="never saw all of"):
+        container_readiness.wait_for_log_substrings(
+            lambda: ("", REPLAYED_INTERLEAVED_STDERR), (_COMMAND_READY_NEEDLE, _GATEWAY_READY_NEEDLE), timeout_s=0.3, poll_s=0.05
+        )
+
+    # New wait (the production function): ready, and it never touched the stream (no Docker
+    # here: the success path calls neither `docker logs` nor `docker inspect`).
+    listeners = (
+        container_readiness.Listener("av-command", COMMAND_GRPC_HOST, COMMAND_GRPC_PORT),
+        container_readiness.Listener("av-gateway", container_readiness.SELF, GATEWAY_PORT),
+    )
+    summary = _wait_for_container_ready("no-such-container", listeners, timeout_s=1.0, probe=_both_up)
+    assert "av-command: accepting connections" in summary and "av-gateway: accepting connections" in summary, summary
+
+
+def test_the_connect_wait_is_bounded_and_names_what_it_observed():
+    clock_now = [0.0]
+    listeners = (
+        container_readiness.Listener("av-command", COMMAND_GRPC_HOST, COMMAND_GRPC_PORT),
+        container_readiness.Listener("av-gateway", container_readiness.SELF, GATEWAY_PORT),
+    )
+    calls = []
+
+    def probe(_listeners):
+        calls.append(clock_now[0])
+        return {"av-command": None, "av-gateway": "bash: connect: Connection refused"}
+
+    with pytest.raises(container_readiness.ReadinessTimeout) as excinfo:
+        container_readiness.wait_for_listeners(
+            probe, listeners, timeout_s=2.0, poll_s=0.5,
+            state=lambda: "running (exit 0)", logs=lambda: REPLAYED_INTERLEAVED_STDERR,
+            clock=lambda: clock_now[0], sleep=lambda d: clock_now.__setitem__(0, clock_now[0] + d),
+        )
+    message = str(excinfo.value)
+    assert f"av-gateway {container_readiness.SELF}:{GATEWAY_PORT}: NOT accepting -- bash: connect: Connection refused" in message, message
+    assert f"av-command {COMMAND_GRPC_HOST}:{COMMAND_GRPC_PORT}: accepting" in message, message
+    assert "ModelProposeService" in message, "the log tail must be shown as context"
+    assert 3 <= len(calls) <= 6, calls  # bounded: ~2.0s at 0.5s steps, not unbounded
+
+    # A container that has already exited is reported at once, not after the timeout.
+    clock_now[0] = 0.0
+    with pytest.raises(container_readiness.ReadinessTimeout, match=r"no longer running \(exited \(exit 1\)\)"):
+        container_readiness.wait_for_listeners(
+            probe, listeners, timeout_s=60.0, poll_s=0.5,
+            state=lambda: "exited (exit 1)",
+            clock=lambda: clock_now[0], sleep=lambda d: clock_now.__setitem__(0, clock_now[0] + d),
+        )
+    assert clock_now[0] == 0.0
+
+
+def test_the_probe_script_is_built_only_from_safe_listeners_and_its_output_parses():
+    with pytest.raises(ValueError):
+        container_readiness.Listener("x", "127.0.0.1; rm -rf /", 1)
+    with pytest.raises(ValueError):
+        container_readiness.Listener("x y", "127.0.0.1", 1)
+    listeners = (container_readiness.Listener("a", "127.0.0.1", 50070), container_readiness.Listener("b", container_readiness.SELF, 50170), container_readiness.Listener("c", "127.0.0.1", 1))
+    script = container_readiness.probe_script(listeners)
+    assert "/dev/tcp/127.0.0.1/50070" in script and '/dev/tcp/"$self"/50170' in script
+    parsed = container_readiness.parse_probe_output(listeners, "UP a\nDOWN b /bin/bash: connect: Connection refused\n")
+    assert parsed == {"a": None, "b": "/bin/bash: connect: Connection refused", "c": "no answer from the probe (docker exec failed?)"}
+
+
+def _repro_skip_reason() -> "str | None":
+    reason = _docker_unavailable_reason()
+    if reason is not None:
+        return f"Docker not available: {reason}"
+    if not _image_present(PROBE_IMAGE):
+        return f"{PROBE_IMAGE!r} is not present locally and this test never pulls an image (question 154)"
+    return None
+
+
+_REPRO_SKIP_REASON = _repro_skip_reason()
+
+# Two writers to ONE stderr with the split forced by sleeps -- the shape the gate saw, made
+# deterministic -- and, 1.5 s AFTER those lines are written, the two listeners the lines claim
+# exist (so a wait that returns on the lines is also shown to return early). Nothing here is
+# Rust; the point is the wait, not the binaries.
+_REPRO_CONTAINER_SCRIPT = (
+    "( sleep 1.5; exec python3 -c '\n"
+    "import socket, time\n"
+    "held = []\n"
+    f"for host, port in ((\"{COMMAND_GRPC_HOST}\", {COMMAND_GRPC_PORT}), (\"0.0.0.0\", {GATEWAY_PORT})):\n"
+    "    s = socket.socket()\n"
+    "    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+    "    s.bind((host, port))\n"
+    "    s.listen(8)\n"
+    "    held.append(s)\n"
+    "time.sleep(600)\n"
+    "' ) &\n"
+    f"( printf '{_GATEWAY_READY_NEEDLE.rsplit(' on ', 1)[0]} on ' >&2; sleep 0.6; printf '{GATEWAY_INTERNAL_BIND}, MCP server on stdio\\n' >&2 ) &\n"
+    f"( sleep 0.3; printf '{_COMMAND_READY_NEEDLE} (run_id=repro)\\n' >&2 ) &\n"
+    "wait\n"
+)
+
+
+@pytest.mark.skipif(_REPRO_SKIP_REASON is not None, reason=_REPRO_SKIP_REASON or "")
+def test_a_real_container_with_a_split_readiness_line_defeats_the_substring_wait_but_not_the_connect_wait():
+    """The same flake in a REAL container (the python slim image already on the host, run by its
+    resolved image id, never pulled): two bash writers share the container's stderr and the
+    gateway's line is cut around the command's. The old wait must fail on it; the production wait
+    must succeed, and not before the listeners really exist."""
+    with lock_docker_tests():
+        run_id = uuid.uuid4().hex[:12]
+        guard = ResourceGuard(run_id)
+        try:
+            image_id = _docker("image", "inspect", PROBE_IMAGE, "--format", "{{.Id}}").stdout.strip()
+            assert image_id.startswith("sha256:"), image_id
+            name = _labelled_id(run_id, "split-line")
+            guard.track_container(name)
+            started = time.monotonic()
+            _docker("run", "-d", "--name", name, *guard.label_args(), "--entrypoint", "/bin/bash", image_id, "-c", _REPRO_CONTAINER_SCRIPT)
+
+            # The connect-based wait, FIRST: the log lines are all written by ~0.6 s but the
+            # listeners only exist after 1.5 s, so a wait that is satisfied by the lines would
+            # return early. It must not.
+            listeners = (
+                container_readiness.Listener("av-command", COMMAND_GRPC_HOST, COMMAND_GRPC_PORT),
+                container_readiness.Listener("av-gateway", container_readiness.SELF, GATEWAY_PORT),
+            )
+            summary = _wait_for_container_ready(name, listeners, timeout_s=30.0)
+            ready_after_s = time.monotonic() - started
+            assert ready_after_s >= 1.5, f"the wait returned after {ready_after_s:.2f}s, before the listeners existed (they start 1.5s into the container's life)"
+            assert "av-command: accepting" in summary and "av-gateway: accepting" in summary, summary
+
+            # Every line has been written by now; the stream is the interleaved one.
+            text = _container_logs_text(name)
+            assert "MCP server on stdio" in text, text
+            assert _COMMAND_READY_NEEDLE in text and _GATEWAY_READY_NEEDLE not in text, f"the forced interleaving did not happen, logs:\n{text}"
+
+            # The old wait, against the same live container: it can never match.
+            with pytest.raises(container_readiness.ReadinessTimeout, match="never saw all of"):
+                container_readiness.wait_for_log_substrings(
+                    lambda: (lambda r: (r.stdout, r.stderr))(_docker("logs", name, check=False)),
+                    (_COMMAND_READY_NEEDLE, _GATEWAY_READY_NEEDLE),
+                    timeout_s=3.0,
+                )
+
+            # And the connect wait is not trivially true: a port nobody listens on fails, bounded.
+            with pytest.raises(pytest.fail.Exception, match=r"NOT accepting -- .*[Rr]efused"):
+                _wait_for_container_ready(name, (container_readiness.Listener("nothing", "127.0.0.1", 50999),), timeout_s=1.0)
+            print(f"\n--- split-line reproduction, observed ---\nconnect wait ready after {ready_after_s:.2f}s:\n{summary}\nstream the old wait saw:\n{text}")
+        finally:
+            guard.cleanup()
+        guard.assert_nothing_left()
