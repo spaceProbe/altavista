@@ -701,3 +701,75 @@ fn an_existing_study_is_idempotent_for_identical_content_and_refused_for_differe
     }
     assert!(!fake.requests().iter().any(|r| r.sql().starts_with("INSERT INTO")), "a refused put writes nothing");
 }
+
+/// What a `put_study` answered, in terms both backends share: the outcome class and, for a
+/// refusal, the two content hashes it names.
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    Ok,
+    RefusedDifferent { sweep_id: String, existing_sha256: String, new_sha256: String },
+}
+
+fn outcome_of(result: Result<String, StoreError>) -> Outcome {
+    match result {
+        Ok(_) => Outcome::Ok,
+        Err(StoreError::RefusedWrite { sweep_id, reason: WriteRefusal::DifferentContent { existing_sha256, new_sha256, .. } }) => Outcome::RefusedDifferent { sweep_id, existing_sha256, new_sha256 },
+        Err(other) => panic!("expected Ok or RefusedWrite/DifferentContent, got {other:?}"),
+    }
+}
+
+/// A fake server that remembers headers: a header `INSERT` is stored under its sweep id (first one
+/// wins, as the smallest `(created_at, write_id)` would for the real server) and a header lookup
+/// answers from what was stored. Everything else is [`healthy`].
+fn stateful_fake() -> FakeCh {
+    let headers: Arc<Mutex<std::collections::BTreeMap<String, (String, String)>>> = Arc::default();
+    fake_ch(move |req| {
+        let sql = req.sql();
+        if sql.starts_with("INSERT INTO `av_sweep_studies`") {
+            let mut d = av_sweep::clickhouse::Decoder::new(&req.body);
+            let (sweep_id, write_id) = (d.string().unwrap(), d.string().unwrap());
+            let (_sweep_hash, _drm_hash, _samples, _aggregates) = (d.string().unwrap(), d.string().unwrap(), d.u64().unwrap(), d.u64().unwrap());
+            let sha = d.string().unwrap();
+            headers.lock().unwrap().entry(sweep_id).or_insert((write_id, sha));
+            ok(b"")
+        } else if sql.contains("FROM `av_sweep_studies` WHERE sweep_id") {
+            match headers.lock().unwrap().get(&req.param("sid").unwrap()) {
+                None => ok(b""),
+                Some((write_id, sha)) => ok(&header_body(write_id, sha, 1, 1)),
+            }
+        } else {
+            healthy(req)
+        }
+    })
+}
+
+/// Question 252: the file store and the ClickHouse store answer the same sequence of puts with the
+/// same outcomes, refusals naming the same two hashes. (The real-ClickHouse counterpart of the
+/// ClickHouse half is `tests/clickhouse_store.rs`; the file half is `store.rs`'s unit tests.)
+#[test]
+fn the_file_store_and_the_clickhouse_store_answer_the_same_puts_the_same_way() {
+    let a1 = one_sample_study("a");
+    let mut a2 = a1.clone();
+    a2.samples[0].products_uri = "/another/out-dir/sample_p1_d2".to_string();
+    let b1 = one_sample_study("b");
+    let mut b2 = b1.clone();
+    b2.samples[0].draw_index = 99;
+    let sequence = [&a1, &a1, &a2, &b1, &b2, &a1, &a2, &b1];
+
+    let fake = stateful_fake();
+    let mut clickhouse = ClickHouseStudyStore::connect(&fake.config()).unwrap();
+    let root = std::env::temp_dir().join(format!("av-sweep-parity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut file = av_sweep::store::FileStudyStore::new(&root);
+
+    let from_clickhouse: Vec<Outcome> = sequence.iter().map(|s| outcome_of(clickhouse.put_study(s))).collect();
+    let from_file: Vec<Outcome> = sequence.iter().map(|s| outcome_of(file.put_study(s))).collect();
+    assert_eq!(from_file, from_clickhouse, "same puts, same outcomes, same hashes in the refusals");
+    let refused = |id: &str, existing: &pb::SweepResults, new: &pb::SweepResults| Outcome::RefusedDifferent { sweep_id: id.to_string(), existing_sha256: content_sha256(existing), new_sha256: content_sha256(new) };
+    assert_eq!(
+        from_file,
+        vec![Outcome::Ok, Outcome::Ok, refused("a", &a1, &a2), Outcome::Ok, refused("b", &b1, &b2), Outcome::Ok, refused("a", &a1, &a2), Outcome::Ok],
+        "and they are the expected ones"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -16,9 +16,11 @@
 //!    server refuses a later insert) leaves orphan rows nobody can see; `tests/clickhouse_store.rs`
 //!    proves it by inserting a write's rows without its header. Orphans are never read; reclaiming
 //!    them is an operator job (`ALTER TABLE ... DELETE WHERE write_id = ...`), not done here.
-//! 2. **Studies are immutable. This differs from [`crate::store::FileStudyStore`], which
-//!    overwrites.** `put_study` of a `sweep_id` that exists with byte-identical content (equal
-//!    SHA-256 of the canonical encoding, so NaN payloads and `-0.0` count) is an idempotent `Ok`;
+//! 2. **Studies are immutable, as in [`crate::store::FileStudyStore`] (question 252; the file
+//!    store used to overwrite).** `put_study` of a `sweep_id` that exists with byte-identical content (equal
+//!    SHA-256 of the canonical encoding, so NaN payloads and an optional field's `-0.0` count; a
+//!    plain proto3 `double` of `-0.0` is not encoded, exactly like `0.0`, so there it does not)
+//!    is an idempotent `Ok`;
 //!    with different content it is [`StoreError::RefusedWrite`]. A sweep id names one hashed
 //!    sweep's results; silently replacing them under readers would break the "reproducible from
 //!    the hash" promise. Two writers racing on one id are not serialized (there is nothing to
@@ -70,7 +72,10 @@ fn new_write_id() -> String {
 
 /// The SHA-256 of the study's canonical protobuf encoding: the identity two copies of a study are
 /// compared by. `SweepResults` encodes its maps from `BTreeMap`s (sorted), so this is
-/// deterministic, and it is bit-sensitive: `-0.0`, NaN payloads and sample order all change it.
+/// deterministic, and it is bit-sensitive where a value is encoded: NaN payloads, sample order and
+/// an optional field's `-0.0` all change it. A plain proto3 `double` equal to `0.0` -- `-0.0`
+/// included, since `-0.0 == 0.0` -- is not encoded at all, so there `-0.0` and `0.0` hash the same
+/// (question 252; pinned by `store.rs`'s `identity_is_the_canonical_encodings_bits_like_clickhouses`).
 pub fn content_sha256(results: &pb::SweepResults) -> String {
     sha256_hex(&results.encode_to_vec())
 }

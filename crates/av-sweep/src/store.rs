@@ -13,10 +13,18 @@
 //! through [`StudyStore`] alone. [`open_store`] with [`StoreBackend::ClickHouse`] connects,
 //! verifies the live schema (migrating a store that has no tables yet) and returns the store.
 //!
-//! **The two backends differ in one deliberate way.** [`FileStudyStore::put_study`] overwrites a
-//! study of the same `sweep_id`; the ClickHouse store treats a study as immutable: the same id
-//! with identical content is an idempotent `Ok`, with different content a typed
-//! [`StoreError::RefusedWrite`] (see the `clickhouse` module doc, decision 2).
+//! **Both backends treat a study as immutable** (question 252; before it the file store
+//! overwrote). `put_study` of a `sweep_id` that already holds a study is an idempotent `Ok` when
+//! the content is identical (equal [`crate::clickhouse::content_sha256`], the SHA-256 of the
+//! canonical protobuf encoding, so NaN payloads and `-0.0` count) and writes nothing; with
+//! different content it is a typed [`StoreError::RefusedWrite`] with
+//! [`WriteRefusal::DifferentContent`], and the stored study is left byte for byte as it was (see
+//! the `clickhouse` module doc, decision 2). A sweep id names one hashed sweep's results.
+//!
+//! The consequence for a caller that re-runs a study into the same store: the study record carries
+//! each sample's `products_uri` (the canonical path of its `--out-dir` sample directory), so the
+//! same sweep run again with a *different* `--out-dir` is different content and is refused; the
+//! same `--out-dir` reproduces the record byte for byte and is an idempotent `Ok`.
 //!
 //! ## On-disk layout ([`FileStudyStore`])
 //!
@@ -32,6 +40,34 @@
 //! `samples.jsonl` is not a new encoding, it is [`crate::json::sweep_sample_json`] called once
 //! per sample and joined with newlines.
 //!
+//! ## How `put_study` writes, and what it guarantees
+//!
+//! A study directory is **published whole by one `rename`**: the three files are written and
+//! `fsync`ed into a staging directory `<root>/.incoming-<pid>-<n>-<nanos>/`, which is then renamed
+//! to `<root>/<sweep_id>/`. `rename(2)` of a directory onto a non-empty directory fails, so it can
+//! never replace a study.
+//!
+//! - **No half-written study is visible.** A reader sees no directory or the complete one.
+//! - **A crash leaves the old state.** A crash before the rename leaves only a stray
+//!   `.incoming-*` directory, which `list_studies` skips (an operator may delete it; a sweep id
+//!   that itself begins `.incoming-` would be hidden from the listing). A crash cannot leave a different study in place, because nothing is ever replaced.
+//! - **Two writers racing on one id: the first rename wins.** The loser's rename fails, it reads
+//!   the winner and answers as for any existing study: `Ok` if identical, `RefusedWrite` if not.
+//!   (Unlike ClickHouse, whose racing writers are not serialized, the file store serializes them
+//!   on the directory rename; both outcomes are the same typed results.) This holds across
+//!   processes on one local filesystem; it is not claimed for NFS or other network filesystems,
+//!   where `rename` atomicity varies.
+//! - **An existing study that does not decode** (`sweep_results.pb` truncated or foreign) is
+//!   [`StoreError::Decode`], never overwritten: the operator decides what to do with it.
+//! - **A directory under the id that holds no `sweep_results.pb` but is not empty** (a torn
+//!   directory from the pre-question-252 writer, or a foreign one) is an [`StoreError::Io`]
+//!   naming it, not silently written into.
+//! - **Healing.** An identical re-put of a study whose `sweep_results.json` or `samples.jsonl`
+//!   is *missing* (the old writer wrote `sweep_results.pb` first and could be killed before the
+//!   others) writes only the missing file. Files that exist are never rewritten.
+//! - **An empty `sweep_id`** is refused with [`StoreError::Io`]: its directory would be `<root>`
+//!   itself.
+//!
 //! This directory tree is deliberately separate from `--out-dir` (`src/bin/av-sweep/study.rs`'s
 //! own per-sample workspace: `drm.pb`/`sos.pb`/`sys_*.pb`/`stderr.txt`/`run_products.pb` per
 //! sample, which F1b's own tests and this task's per-sample replay both depend on unchanged) --
@@ -40,12 +76,19 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use av_cdm::pb;
 use prost::Message;
 
+use crate::clickhouse::content_sha256;
 use crate::json;
+
+/// Name prefix of the staging directories `put_study` builds a study in before renaming it into
+/// place; `list_studies` skips them.
+const STAGING_PREFIX: &str = ".incoming-";
 
 /// Every way a study-store operation can be refused -- mirrors `crate::error::SweepError`'s own
 /// shape (one variant per refusal, named fields, a message naming the offending path/value).
@@ -63,8 +106,8 @@ pub enum StoreError {
     #[error("{}: does not decode as altavista.v1.SweepResults: {source}", path.display())]
     Decode { path: PathBuf, #[source] source: prost::DecodeError },
 
-    /// The ClickHouse store refused to write study `sweep_id`; `reason` says whether the study
-    /// already exists with different content, or the server refused the insert.
+    /// A store refused to write study `sweep_id`; `reason` says whether the study already exists
+    /// with different content (either backend), or the ClickHouse server refused the insert.
     #[error("study {sweep_id:?}: write refused: {reason}")]
     RefusedWrite { sweep_id: String, reason: WriteRefusal },
 
@@ -120,7 +163,9 @@ pub enum StoreError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteRefusal {
     /// A study with this `sweep_id` already exists with different content; studies are immutable
-    /// in the ClickHouse store (the file store overwrites).
+    /// in both stores. `existing_write_id` names the existing copy: ClickHouse's write id, or the
+    /// file store's study directory (it has no write ids); `existing_sha256` and `new_sha256` are
+    /// [`crate::clickhouse::content_sha256`] of each, the same identity in both backends.
     DifferentContent { existing_write_id: String, existing_sha256: String, new_sha256: String },
     /// The server refused one of the inserts (a read-only user, missing privileges, a full disk).
     Server { code: Option<i64>, name: Option<String>, http_status: u16, message: String },
@@ -131,7 +176,7 @@ impl std::fmt::Display for WriteRefusal {
         match self {
             WriteRefusal::DifferentContent { existing_write_id, existing_sha256, new_sha256 } => write!(
                 f,
-                "a study with this id already exists (write {existing_write_id}, content sha256 {existing_sha256}) and the new content (sha256 {new_sha256}) differs; studies are immutable"
+                "a study with this id already exists (existing copy {existing_write_id}, content sha256 {existing_sha256}) and the new content (sha256 {new_sha256}) differs; studies are immutable"
             ),
             WriteRefusal::Server { code, name, http_status, message } => {
                 write!(f, "the server refused the insert (HTTP {http_status}")?;
@@ -171,6 +216,11 @@ pub trait StudyStore {
     /// store) -- a plain `String` rather than a backend-specific type, since the only thing a
     /// caller does with it today is log/display it (`src/bin/av-sweep/study.rs`'s own
     /// `--store-dir` wiring).
+    ///
+    /// Studies are immutable (question 252, both backends): a `sweep_id` that already holds a
+    /// study with identical content is an idempotent `Ok` (the existing copy's location, nothing
+    /// rewritten); with different content it is [`StoreError::RefusedWrite`] and the stored study
+    /// is untouched.
     fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError>;
 
     /// Reads back the study named `sweep_id`, or `Ok(None)` if this store holds no such study --
@@ -222,21 +272,95 @@ fn samples_jsonl(samples: &[pb::SweepSample]) -> String {
     out
 }
 
+/// The three files of a study directory, name and bytes (see the module doc's layout).
+fn study_files(results: &pb::SweepResults) -> [(&'static str, Vec<u8>); 3] {
+    [
+        ("sweep_results.pb", results.encode_to_vec()),
+        ("sweep_results.json", json::sweep_results_to_json(results).into_bytes()),
+        ("samples.jsonl", samples_jsonl(&results.samples).into_bytes()),
+    ]
+}
+
+/// Creates `path` (which must not exist), writes `bytes` and `fsync`s it, so that a rename of its
+/// directory cannot publish a file whose data is still only in the page cache.
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| io_err(path, e))?;
+    f.write_all(bytes).map_err(|e| io_err(path, e))?;
+    f.sync_all().map_err(|e| io_err(path, e))
+}
+
+/// A staging-directory name no other writer (process or thread, now or after a pid is reused) shares.
+fn staging_dir(root: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    root.join(format!("{STAGING_PREFIX}{}-{}-{nanos}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
+/// The answer for a `sweep_id` that already holds `existing`: identical content is `Ok` with
+/// nothing rewritten (apart from a derived file that is missing, see the module doc's "Healing");
+/// different content is [`WriteRefusal::DifferentContent`].
+fn settle_existing(dir: &Path, existing: &pb::SweepResults, new: &pb::SweepResults) -> Result<String, StoreError> {
+    let (existing_sha256, new_sha256) = (content_sha256(existing), content_sha256(new));
+    if existing_sha256 != new_sha256 {
+        return Err(StoreError::RefusedWrite {
+            sweep_id: new.sweep_id.clone(),
+            reason: WriteRefusal::DifferentContent { existing_write_id: dir.display().to_string(), existing_sha256, new_sha256 },
+        });
+    }
+    for (name, bytes) in study_files(new).into_iter().skip(1) {
+        let path = dir.join(name);
+        if path.exists() {
+            continue;
+        }
+        let tmp = dir.join(format!(".{name}.heal-{}", std::process::id()));
+        let _ = fs::remove_file(&tmp);
+        write_synced(&tmp, &bytes)?;
+        fs::rename(&tmp, &path).map_err(|e| io_err(&path, e))?;
+    }
+    Ok(dir.display().to_string())
+}
+
 impl StudyStore for FileStudyStore {
     fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
         let dir = self.study_dir(&results.sweep_id);
-        fs::create_dir_all(&dir).map_err(|e| io_err(&dir, e))?;
+        if results.sweep_id.is_empty() {
+            let e = std::io::Error::new(std::io::ErrorKind::InvalidInput, "the sweep_id is empty, so the study directory would be the store root itself");
+            return Err(io_err(&dir, e));
+        }
+        if let Some(existing) = self.get_study(&results.sweep_id)? {
+            return settle_existing(&dir, &existing, results);
+        }
 
-        let pb_path = dir.join("sweep_results.pb");
-        fs::write(&pb_path, results.encode_to_vec()).map_err(|e| io_err(&pb_path, e))?;
-
-        let json_path = dir.join("sweep_results.json");
-        fs::write(&json_path, json::sweep_results_to_json(results)).map_err(|e| io_err(&json_path, e))?;
-
-        let jsonl_path = dir.join("samples.jsonl");
-        fs::write(&jsonl_path, samples_jsonl(&results.samples)).map_err(|e| io_err(&jsonl_path, e))?;
-
-        Ok(dir.display().to_string())
+        // No study under this id: build it whole in a staging directory, then publish it with one
+        // rename (module doc, "How put_study writes").
+        let parent = dir.parent().unwrap_or(&self.root).to_path_buf();
+        fs::create_dir_all(&parent).map_err(|e| io_err(&parent, e))?;
+        let stage = staging_dir(&self.root);
+        fs::create_dir(&stage).map_err(|e| io_err(&stage, e))?;
+        let staged = study_files(results).into_iter().try_for_each(|(name, bytes)| write_synced(&stage.join(name), &bytes));
+        if let Err(e) = staged {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(e);
+        }
+        match fs::rename(&stage, &dir) {
+            Ok(()) => {
+                // Best effort: make the new directory entry durable.
+                if let Ok(d) = fs::File::open(&parent) {
+                    let _ = d.sync_all();
+                }
+                Ok(dir.display().to_string())
+            }
+            Err(rename_error) => {
+                // Either another writer published this id between the check and the rename (its
+                // study now answers as any existing one), or `dir` is a non-empty directory that
+                // holds no study.
+                let _ = fs::remove_dir_all(&stage);
+                match self.get_study(&results.sweep_id)? {
+                    Some(existing) => settle_existing(&dir, &existing, results),
+                    None => Err(io_err(&dir, rename_error)),
+                }
+            }
+        }
     }
 
     fn get_study(&self, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
@@ -262,6 +386,9 @@ impl StudyStore for FileStudyStore {
                 continue; // a study store directory holds only per-sweep-id subdirectories
             }
             let sweep_id = entry.file_name().to_string_lossy().into_owned();
+            if sweep_id.starts_with(STAGING_PREFIX) {
+                continue; // a writer's staging directory (or one a crashed writer left), not a study
+            }
             if let Some(results) = self.get_study(&sweep_id)? {
                 summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
             }
@@ -386,6 +513,251 @@ mod tests {
         assert_eq!(summaries[1].sweep_id, "study_b");
         assert_eq!(summaries[1].sample_count, 1);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every regular file under `dir/<id>` with its bytes, modification time and inode, so a test
+    /// can prove a put left the study untouched (not rewritten, not replaced by an equal copy).
+    fn snapshot(dir: &Path) -> BTreeMap<String, (Vec<u8>, std::time::SystemTime, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let mut out = BTreeMap::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            out.insert(entry.file_name().to_string_lossy().into_owned(), (std::fs::read(entry.path()).unwrap(), meta.modified().unwrap(), meta.ino()));
+        }
+        out
+    }
+
+    fn changed(mut s: pb::SweepResults) -> pb::SweepResults {
+        s.samples[0].products_uri = "/elsewhere/sample_p0_d0".to_string();
+        s
+    }
+
+    fn assert_refused_different(err: &StoreError, id: &str, existing: &pb::SweepResults, new: &pb::SweepResults) {
+        match err {
+            StoreError::RefusedWrite { sweep_id, reason: WriteRefusal::DifferentContent { existing_write_id, existing_sha256, new_sha256 } } => {
+                assert_eq!(sweep_id, id);
+                assert!(existing_write_id.ends_with(id), "names the existing copy: {existing_write_id}");
+                assert_eq!(*existing_sha256, content_sha256(existing));
+                assert_eq!(*new_sha256, content_sha256(new));
+                assert_ne!(existing_sha256, new_sha256);
+            }
+            other => panic!("expected RefusedWrite/DifferentContent, got {other:?}"),
+        }
+    }
+
+    /// Question 252: an identical re-put is an idempotent `Ok` returning the same location, and
+    /// rewrites nothing: every file keeps its bytes, mtime and inode.
+    #[test]
+    fn an_identical_re_put_is_ok_and_rewrites_nothing() {
+        let root = temp_dir("idempotent");
+        let mut store = FileStudyStore::new(&root);
+        let results = study("s1", vec![sample(0, 0), sample(0, 1)]);
+        let first = store.put_study(&results).unwrap();
+        let before = snapshot(&root.join("s1"));
+        assert_eq!(before.len(), 3);
+        std::thread::sleep(std::time::Duration::from_millis(30)); // so a rewrite could not share an mtime
+
+        let second = store.put_study(&results.clone()).expect("identical content is idempotent");
+        assert_eq!(second, first, "the same location");
+        assert_eq!(snapshot(&root.join("s1")), before, "bytes, mtime and inode of all three files unchanged");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no staging directory left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Question 252: different content under an existing id is a typed `RefusedWrite` and the
+    /// stored study is unchanged byte for byte (and still reads back as the first one).
+    #[test]
+    fn different_content_under_an_existing_id_is_refused_and_the_stored_study_is_unchanged() {
+        let root = temp_dir("refused");
+        let mut store = FileStudyStore::new(&root);
+        let first = study("s1", vec![sample(0, 0), sample(0, 1)]);
+        store.put_study(&first).unwrap();
+        let before = snapshot(&root.join("s1"));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let second = changed(first.clone());
+        let err = store.put_study(&second).unwrap_err();
+        assert_refused_different(&err, "s1", &first, &second);
+        let msg = store.put_study(&second).unwrap_err().to_string();
+        assert!(msg.contains("\"s1\"") && msg.contains("write refused") && msg.contains("immutable"), "{msg}");
+        assert_eq!(snapshot(&root.join("s1")), before, "the stored study is untouched, mtime and inode included");
+        assert_eq!(store.get_study("s1").unwrap().unwrap(), first);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no staging directory left behind");
+
+        // A different id is not affected by the refusal.
+        store.put_study(&study("s2", vec![sample(0, 0)])).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The identity is the SHA-256 of the canonical encoding, the same function ClickHouse uses
+    /// ([`content_sha256`]), so the two backends agree on what "identical" means, bit for bit
+    /// where the encoding is: an optional `-0.0` and a NaN payload are different content. A plain
+    /// proto3 `double` equal to zero is *not encoded at all* (prost skips `== 0.0`, which is true
+    /// of `-0.0`), so there `-0.0` and `0.0` are the same content in both backends -- measured
+    /// here, and recorded in the report for question 252.
+    #[test]
+    fn identity_is_the_canonical_encodings_bits_like_clickhouses() {
+        let root = temp_dir("bits");
+        let mut store = FileStudyStore::new(&root);
+        let with_aggregate = |pass_fraction: f64, mean: f64| {
+            let mut s = study("s1", vec![sample(0, 0)]);
+            s.aggregates = vec![pb::ScoreAggregate { name: "m".to_string(), point_index: 0, draws: 1, mean, std_dev: 0.0, min: 0.0, max: 0.0, pass_fraction: Some(pass_fraction) }];
+            s
+        };
+        let base = with_aggregate(0.0, 0.0);
+        store.put_study(&base).unwrap();
+        // Optional field: presence is encoded, so the sign bit of zero is part of the identity.
+        let negative = with_aggregate(-0.0, 0.0);
+        assert_ne!(content_sha256(&base), content_sha256(&negative));
+        assert!(matches!(store.put_study(&negative), Err(StoreError::RefusedWrite { .. })));
+        // A NaN payload is part of the identity.
+        let quiet = with_aggregate(f64::NAN, 0.0);
+        let other_nan = with_aggregate(f64::from_bits(f64::NAN.to_bits() ^ 1), 0.0);
+        let nan_root = temp_dir("bits-nan");
+        let mut nan_store = FileStudyStore::new(&nan_root);
+        nan_store.put_study(&quiet).unwrap();
+        assert!(matches!(nan_store.put_study(&other_nan), Err(StoreError::RefusedWrite { .. })));
+        // A plain zero double is not on the wire, so -0.0 there is the same content.
+        assert_eq!(content_sha256(&with_aggregate(0.0, 0.0)), content_sha256(&with_aggregate(0.0, -0.0)));
+        store.put_study(&with_aggregate(0.0, -0.0)).expect("-0.0 in a plain double is not distinguishable in the canonical encoding");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&nan_root);
+    }
+
+    /// Two writers racing on one id (threads here, each with its own store handle, as two
+    /// processes would have): the first directory rename wins, every loser is told the truth.
+    #[test]
+    fn racing_writers_of_different_content_yield_exactly_one_winner() {
+        for round in 0..20 {
+            let root = temp_dir(&format!("race-diff-{round}"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8u32)
+                .map(|n| {
+                    let (root, barrier) = (root.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        let results = study("race", vec![sample(0, 0), sample(0, n + 1)]);
+                        barrier.wait();
+                        (n, results.clone(), FileStudyStore::new(&root).put_study(&results))
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let winners: Vec<_> = outcomes.iter().filter(|(_, _, r)| r.is_ok()).collect();
+            assert_eq!(winners.len(), 1, "round {round}: exactly one writer wins");
+            let stored = FileStudyStore::new(&root).get_study("race").unwrap().unwrap();
+            assert_eq!(stored, winners[0].1, "the stored study is the winner's");
+            for (_, results, outcome) in &outcomes {
+                if let Err(e) = outcome {
+                    assert_refused_different(e, "race", &stored, results);
+                }
+            }
+            let names: Vec<String> = std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            assert_eq!(names, vec!["race".to_string()], "round {round}: no staging directory left behind");
+            // The three files are all there and agree with each other.
+            assert_eq!(std::fs::read_to_string(root.join("race/sweep_results.json")).unwrap(), json::sweep_results_to_json(&stored));
+            assert_eq!(std::fs::read_to_string(root.join("race/samples.jsonl")).unwrap(), samples_jsonl(&stored.samples));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Racing writers of *identical* content all get `Ok` and the study is written once.
+    #[test]
+    fn racing_writers_of_identical_content_all_succeed() {
+        for round in 0..20 {
+            let root = temp_dir(&format!("race-same-{round}"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let results = study("race", vec![sample(0, 0), sample(1, 1)]);
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (root, barrier, results) = (root.clone(), barrier.clone(), results.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        FileStudyStore::new(&root).put_study(&results)
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().expect("identical content is Ok whoever wins");
+            }
+            assert_eq!(FileStudyStore::new(&root).get_study("race").unwrap().unwrap(), results);
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "round {round}: no staging directory left behind");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// An existing `sweep_results.pb` that does not decode is a typed `Decode` error: never
+    /// overwritten, never mistaken for "no study".
+    #[test]
+    fn an_existing_study_that_does_not_decode_is_a_decode_error_and_is_left_alone() {
+        let root = temp_dir("corrupt");
+        let mut store = FileStudyStore::new(&root);
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/sweep_results.pb"), b"\xff\xff not a protobuf").unwrap();
+        let before = snapshot(&root.join("s1"));
+        let err = store.put_study(&study("s1", vec![sample(0, 0)])).unwrap_err();
+        assert!(matches!(&err, StoreError::Decode { path, .. } if path.ends_with("s1/sweep_results.pb")), "{err:?}");
+        assert_eq!(snapshot(&root.join("s1")), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The old writer wrote `sweep_results.pb` first and could die before the other two files. An
+    /// identical re-put writes exactly the missing ones and touches nothing that exists.
+    #[test]
+    fn an_identical_re_put_heals_missing_derived_files_and_only_those() {
+        let root = temp_dir("heal");
+        let mut store = FileStudyStore::new(&root);
+        let results = study("s1", vec![sample(0, 0), sample(0, 1)]);
+        store.put_study(&results).unwrap();
+        let full = snapshot(&root.join("s1"));
+        std::fs::remove_file(root.join("s1/samples.jsonl")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        store.put_study(&results).unwrap();
+        let healed = snapshot(&root.join("s1"));
+        assert_eq!(healed.len(), 3, "no stray temp file");
+        assert_eq!(healed["samples.jsonl"].0, full["samples.jsonl"].0, "recreated byte for byte");
+        assert_eq!(healed["sweep_results.pb"], full["sweep_results.pb"], "an existing file is not rewritten");
+        assert_eq!(healed["sweep_results.json"], full["sweep_results.json"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A non-empty directory under the id that holds no study is not written into or replaced: a
+    /// typed `Io` error naming it. An empty one is just filled. An empty `sweep_id` is refused.
+    #[test]
+    fn a_directory_that_is_not_a_study_and_an_empty_id_are_typed_io_errors() {
+        let root = temp_dir("foreign");
+        let mut store = FileStudyStore::new(&root);
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/notes.txt"), b"mine").unwrap();
+        let err = store.put_study(&study("s1", vec![sample(0, 0)])).unwrap_err();
+        assert!(matches!(&err, StoreError::Io { path, .. } if path.ends_with("s1")), "{err:?}");
+        assert_eq!(std::fs::read(root.join("s1/notes.txt")).unwrap(), b"mine");
+        assert!(!root.join("s1/sweep_results.pb").exists());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "the staging directory was removed");
+
+        std::fs::create_dir_all(root.join("s2")).unwrap();
+        store.put_study(&study("s2", vec![sample(0, 0)])).expect("an empty directory is just filled");
+
+        let err = store.put_study(&study("", vec![sample(0, 0)])).unwrap_err();
+        assert!(matches!(err, StoreError::Io { .. }), "{err:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A staging directory (in flight, or left by a crashed writer) is not a study.
+    #[test]
+    fn list_studies_skips_staging_directories() {
+        let root = temp_dir("staging");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("s1", vec![sample(0, 0)])).unwrap();
+        let stray = root.join(".incoming-1-2-3");
+        std::fs::create_dir_all(&stray).unwrap();
+        for (name, bytes) in study_files(&study("ghost", vec![sample(0, 0)])) {
+            std::fs::write(stray.join(name), bytes).unwrap();
+        }
+        let listed = store.list_studies().unwrap();
+        assert_eq!(listed.iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["s1"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
