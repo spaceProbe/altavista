@@ -652,6 +652,19 @@ def state_space_for(state_space_id: str) -> core_pb2.StateSpace:
 
 
 # --------------------------------------------------------------------------- trajectories
+def _visual_model_uri_for(traj: Trajectory) -> str:
+    """``traj.model`` as the ``Trajectory.visual_model_uri`` string: ``""`` (the proto3 "none")
+    when no model is declared, otherwise the reference, validated by
+    :func:`~altavista.model.check_model_ref` exactly as :func:`cdm_trajectory_to_viewer_json`
+    validates it in the other direction. A non-``str`` or an empty/whitespace-only value raises
+    :class:`CdmAdapterError` naming the trajectory and the field; the URL is never fetched."""
+    try:
+        model = check_model_ref(traj.model, f"Trajectory {traj.name!r} visual_model_uri")
+    except (TypeError, ValueError) as exc:
+        raise CdmAdapterError(str(exc)) from exc
+    return model or ""
+
+
 def trajectory_to_cdm(traj: Trajectory, *, entity_id: str, frame_id: str,
                       state_space_id: str = DEFAULT_STATE_SPACE_ID, trajectory_id: Optional[str] = None,
                       segment_name: Optional[str] = None, dynamics_model: str = "", dynamics_hash: str = "",
@@ -683,7 +696,16 @@ def trajectory_to_cdm(traj: Trajectory, *, entity_id: str, frame_id: str,
     and ``traj.attitude`` is populated, it is upgraded to
     :data:`DEFAULT_STATE_SPACE_ID_WITH_ATTITUDE` so the id keeps naming the actual
     shape on the wire.
+
+    **Visual model (heavy precision round, question 252; the opposite direction of question
+    239).** A set ``traj.model`` is written to ``Trajectory.visual_model_uri``
+    (``proto/altavista/v1/trajectory.proto`` field 12), validated by
+    :func:`~altavista.model.check_model_ref` (an empty or whitespace-only value raises
+    :class:`CdmAdapterError`, as in :func:`cdm_trajectory_to_viewer_json`). An unset model writes
+    nothing, so a model-less trajectory serialises byte-identically to what it was before this
+    field had a producer.
     """
+    model_uri = _visual_model_uri_for(traj)
     has_attitude = bool(traj.attitude) and len(traj.attitude) == len(traj.t)
     if traj.attitude and not has_attitude:
         raise CdmAdapterError(
@@ -700,6 +722,8 @@ def trajectory_to_cdm(traj: Trajectory, *, entity_id: str, frame_id: str,
         interpolation=trajectory_pb2.INTERPOLATION_HERMITE_VELOCITY,
         config_hash=config_hash,
     )
+    if model_uri:
+        cdm.visual_model_uri = model_uri
     attitude_rows = traj.attitude if has_attitude else [None] * len(traj.t)
     rows = sorted(zip(traj.t, traj.pos, traj.vel, attitude_rows), key=lambda row: row[0])
     for t, pos, vel, quat in rows:
@@ -1000,7 +1024,7 @@ def _sha256_hex(data: bytes) -> str:
 
 
 def _config_hash(frame_def: core_pb2.FrameDefinition, entities: Sequence[entity_pb2.Entity],
-                 state_space_id: str, tool: str) -> str:
+                 state_space_id: str, tool: str, visual_models: Optional[Dict[str, str]] = None) -> str:
     """A stable SHA-256 over the GMAT-adapter configuration that produced a CDM bundle.
 
     proto/altavista/v1 has no dedicated "adapter config" message (adding one is out of
@@ -1011,10 +1035,21 @@ def _config_hash(frame_def: core_pb2.FrameDefinition, entities: Sequence[entity_
     entity list -- length-prefixed and concatenated (so two different splits can never
     collide), plus the state-space id and tool name as plain UTF-8. Entities are sorted by
     id first, so the hash never depends on list/dict ordering (per the "determinism" rule).
+
+    **Visual models (question 252).** ``visual_models`` maps an entity id to its declared glTF
+    reference. Following the kernel's precedent (question 239 decision 2: a model enters the
+    SoS hash only when set), a declared model is configuration and enters the hash, and an empty
+    map adds nothing -- so every model-less bundle keeps its pre-existing ``config_hash`` byte for
+    byte. Each declared model appends three length-prefixed parts after the entities, in entity-id
+    order: the tag ``visual_model_uri``, the entity id, the reference. The tag's first byte
+    (``0x76``) is wire type 6 as a protobuf key, which no serialized ``Entity`` can start with, so
+    these parts cannot be confused with an entity.
     """
     parts = [frame_def.SerializeToString(deterministic=True), state_space_id.encode("utf-8"), tool.encode("utf-8")]
     for e in sorted(entities, key=lambda ent: ent.id):
         parts.append(e.SerializeToString(deterministic=True))
+    for entity_id, model in sorted((visual_models or {}).items()):
+        parts += [b"visual_model_uri", entity_id.encode("utf-8"), model.encode("utf-8")]
     buf = b"".join(len(p).to_bytes(8, "big") + p for p in parts)
     return _sha256_hex(buf)
 
@@ -1049,12 +1084,21 @@ def scenario_to_cdm(scenario_data: ScenarioData, *, state_space_id: str = DEFAUL
     respectively) before conversion, so the bundle -- including ``config_hash`` -- does
     not depend on ``ScenarioData.spacecraft`` / ``.events`` list order. Building the same
     ``ScenarioData`` twice (independently) yields the same ``config_hash``.
+
+    **Visual model (heavy precision round, question 252).** A spacecraft's
+    :attr:`~altavista.model.Trajectory.model` is written to its CDM trajectory's
+    ``visual_model_uri`` (see :func:`trajectory_to_cdm`), so a Python-built scenario's model
+    survives scenario -> CDM -> scenario and reaches ``POST /api/cdm/run``. A declared model also
+    enters ``config_hash`` (see :func:`_config_hash`); with no model set, nothing is written and
+    ``config_hash`` and every other hash are unchanged. An invalid model raises
+    :class:`CdmAdapterError` before anything is built.
     """
     frame_def = frame_definition_for(scenario_data.frame)
     trajs = sorted(scenario_data.spacecraft, key=lambda tr: tr.name)
     entities = [entity_for(tr.name) for tr in trajs]
+    visual_models = {tr.name: uri for tr in trajs if (uri := _visual_model_uri_for(tr))}
 
-    config_hash = _config_hash(frame_def, entities, state_space_id, tool)
+    config_hash = _config_hash(frame_def, entities, state_space_id, tool, visual_models)
 
     for e in entities:
         e.provenance.CopyFrom(_provenance(tool=tool, config_hash=config_hash, principal=principal,

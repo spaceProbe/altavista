@@ -774,6 +774,184 @@ def test_scenario_to_cdm_output_order_is_independent_of_input_order():
     assert names == sorted(names)
 
 
+# --------------------------------------------------------------------------- visual model (question 252)
+# Every canonical hash `scenario_to_cdm` produced for three fixed, model-less scenarios, captured
+# by running the same builders (`_hash_scenarios`) and digest function (`_bundle_digests`)
+# against commit c6c463a, the tree BEFORE `scenario_to_cdm` could write `visual_model_uri`
+# (each value is the SHA-256 of the message's `SerializeToString(deterministic=True)`, except
+# `config_hash`, which is the bundle's own). With no model set, nothing may move.
+PRE_CHANGE_BUNDLE_DIGESTS = {
+    "plain": {
+        "config_hash": "f09cbd66db42c4a65a2ccc33d75c20dd31acbdfd3722953f9a483ff88d0c6f5e",
+        "frame": "0f4e31315dda097aa2fd301ca7597f13c28765ed076a31af748f5ebee1c6b8a5",
+        "entities": [
+            "c6c49dde176d37ec222df8f2ffca59de279eb9b2df311b4a5b4c40d0542033ec",
+            "6258b3f3812331c32cc777f9cd1044aa8629229baa32ee585714071394dd193e"
+        ],
+        "trajectories": [
+            "db780d72be865304ab02b13328e85bb81d225a9978998cdd2032b4909b6f3a28",
+            "d9dd9a7b9b73c97721e79e5b82ee8f7a54d5678d7efa1db4ed998b03a78c7baf"
+        ],
+        "events": [
+            "1e3b9499b3dbb9bb62803bace9d9c3e35a73a617bb9d3d14cbb119f9c2b7200d"
+        ],
+        "state_spaces": [
+            "c5346e7a0b9451d130decce3e51e16a11cb1ad05ab33e9d83a61941c5d2c876e"
+        ]
+    },
+    "mixed_attitude_provenance": {
+        "config_hash": "dd769440bcf0dec962545e70189785b64c9a70a55b0641a554285660bd32371c",
+        "frame": "0f4e31315dda097aa2fd301ca7597f13c28765ed076a31af748f5ebee1c6b8a5",
+        "entities": [
+            "f4d27e6969bb681079e32fe72861ee8679fa4427c68633b1dcf81ae7e629ea53",
+            "bd8fcd2e1d55dc7d79c4673b019a9449f567f776081b14fd1c425240d86bb3a7"
+        ],
+        "trajectories": [
+            "ff4598dda363116a8e6ee6a1eb5595235e176275ca2c1795a28b2d3cb972cdc8",
+            "fd0e901815caa4473dbf35a216535b6284a79ef388f39a0e18b05e2fcee11473"
+        ],
+        "events": [
+            "d991a68aa4a0cf085ef65eb4a519a98972a9ab133867ff70f3b6ab171963e70b"
+        ],
+        "state_spaces": [
+            "c5346e7a0b9451d130decce3e51e16a11cb1ad05ab33e9d83a61941c5d2c876e",
+            "31e6e371f042399069b4a848436c579e8b6bbda4c768dc2ec4372968107d37d9"
+        ]
+    },
+    "icrf_explicit_state_space": {
+        "config_hash": "482e33419446185e8e979e989f25a4e42ffd340d52aa276c559afccfd0ae373f",
+        "frame": "9f45ed87e698725ff269d563f2d54203390c7d3bacf801f2732dc7446b5008d6",
+        "entities": [
+            "06e9b8f43e3e37481aa8466b8df6f16b2d14b6a49a55b584fb9af85574b6e224"
+        ],
+        "trajectories": [
+            "0165d3ed1b2965c27cf62a1f273411c9c83fcffd8a1bd7b6c05030fb37cb2ceb"
+        ],
+        "events": [],
+        "state_spaces": [
+            "e3f78dc1d07ebb3e84e09d5d7a1ff83ebe03fb2f2d586a66fd9dcaefb346c989"
+        ]
+    }
+}
+
+
+def _hash_scenarios():
+    ev = Event(name="Reboost", t=21545.0, type="maneuver", spacecraft="Sat", detail="dv = 20.00 m/s (VNB)")
+    return {
+        "plain": (_build_scenario_data(), {}),
+        "mixed_attitude_provenance": (
+            ScenarioData(name="mixed", frame=Frame("EarthMJ2000Eq", "Earth", "MJ2000Eq"),
+                         spacecraft=[_traj_with_attitude("WithAttitude"), _traj("Plain")], events=[ev]),
+            dict(principal="tester", created_tai_ns=1_700_000_000_000_000_000, run_id="run-1")),
+        "icrf_explicit_state_space": (
+            ScenarioData(name="icrf", frame=Frame("EarthICRF", "Earth", "ICRF"), spacecraft=[_traj("Solo")]),
+            dict(state_space_id="gmat.orbital.cartesian6", tool="altavista-test")),
+    }
+
+
+def _bundle_digests(bundle):
+    import hashlib
+
+    def sha(msg):
+        return hashlib.sha256(msg.SerializeToString(deterministic=True)).hexdigest()
+
+    return {
+        "config_hash": bundle.config_hash,
+        "frame": sha(bundle.frame),
+        "entities": [sha(e) for e in bundle.entities],
+        "trajectories": [sha(x) for x in bundle.trajectories],
+        "events": [sha(e) for e in bundle.events],
+        "state_spaces": [sha(x) for x in bundle.state_spaces],
+    }
+
+
+MODEL_URL = "/js/fixtures/entity_model_fixture.gltf"
+OTHER_MODEL_URL = "/js/fixtures/other_model.glb"
+
+
+def _modelled_scenario_data(model_on_sat=MODEL_URL, model_on_other=None):
+    data = _build_scenario_data()
+    for tr in data.spacecraft:
+        tr.model = model_on_sat if tr.name == "Sat" else model_on_other
+    return data
+
+
+@pytest.mark.parametrize("scenario_name", sorted(PRE_CHANGE_BUNDLE_DIGESTS))
+def test_a_model_less_scenario_keeps_every_pre_change_hash(scenario_name):
+    data, kwargs = _hash_scenarios()[scenario_name]
+    assert all(tr.model is None for tr in data.spacecraft)
+    bundle = cdm.scenario_to_cdm(data, **kwargs)
+    assert _bundle_digests(bundle) == PRE_CHANGE_BUNDLE_DIGESTS[scenario_name]
+    assert all(tr.visual_model_uri == "" for tr in bundle.trajectories)
+
+
+def test_scenario_to_cdm_writes_the_model_onto_that_spacecrafts_trajectory_only():
+    bundle = cdm.scenario_to_cdm(_modelled_scenario_data())
+    assert {tr.entity_id: tr.visual_model_uri for tr in bundle.trajectories} == {"Other": "", "Sat": MODEL_URL}
+
+
+def test_trajectory_to_cdm_writes_the_model_and_nothing_else_changes():
+    plain = cdm.trajectory_to_cdm(_traj(), entity_id="Sat", frame_id="EarthMJ2000Eq")
+    modelled_traj = _traj()
+    modelled_traj.model = MODEL_URL
+    modelled = cdm.trajectory_to_cdm(modelled_traj, entity_id="Sat", frame_id="EarthMJ2000Eq")
+    assert plain.visual_model_uri == "" and modelled.visual_model_uri == MODEL_URL
+    modelled.visual_model_uri = ""  # the model is the only difference
+    assert modelled.SerializeToString(deterministic=True) == plain.SerializeToString(deterministic=True)
+
+
+def test_a_declared_model_enters_config_hash_and_a_model_less_bundle_does_not_move():
+    plain = cdm.scenario_to_cdm(_build_scenario_data())
+    modelled = cdm.scenario_to_cdm(_modelled_scenario_data())
+    other_model = cdm.scenario_to_cdm(_modelled_scenario_data(model_on_sat=OTHER_MODEL_URL))
+    on_other_entity = cdm.scenario_to_cdm(_modelled_scenario_data(model_on_sat=None, model_on_other=MODEL_URL))
+    assert len({plain.config_hash, modelled.config_hash, other_model.config_hash, on_other_entity.config_hash}) == 4
+    # ... and it is the bundle's single hash, stamped everywhere, as before.
+    for tr in modelled.trajectories:
+        assert tr.config_hash == modelled.config_hash == tr.provenance.config_hash
+    for e in modelled.entities:
+        assert e.provenance.config_hash == modelled.config_hash
+    # stable across independent builds and independent of spacecraft order
+    again = _modelled_scenario_data()
+    again.spacecraft.reverse()
+    assert cdm.scenario_to_cdm(again).config_hash == modelled.config_hash
+
+
+def test_a_model_survives_scenario_to_cdm_to_scenario_including_the_wire():
+    bundle = cdm.scenario_to_cdm(_modelled_scenario_data(model_on_other=OTHER_MODEL_URL))
+    back = {}
+    for tr in bundle.trajectories:
+        parsed = trajectory_pb2.Trajectory()
+        parsed.ParseFromString(tr.SerializeToString())  # through the wire bytes, not the in-memory message
+        viewer_tr = cdm.cdm_trajectory_to_viewer_json(parsed)
+        back[viewer_tr.name] = viewer_tr.to_dict().get("model")
+    assert back == {"Sat": MODEL_URL, "Other": OTHER_MODEL_URL}
+    # a model-less spacecraft in the same bundle comes back with no `model` key at all
+    bundle = cdm.scenario_to_cdm(_modelled_scenario_data())
+    by_entity = {tr.entity_id: cdm.cdm_trajectory_to_viewer_json(tr).to_dict() for tr in bundle.trajectories}
+    assert by_entity["Sat"]["model"] == MODEL_URL
+    assert "model" not in by_entity["Other"]
+
+
+@pytest.mark.parametrize("bad", ["", " ", "\t\n", 7])
+def test_an_invalid_model_is_refused_in_both_directions_the_same_way(bad):
+    # `Trajectory` validates `model` on construction, so an invalid one reaches the adapter only if
+    # it was assigned afterwards -- exactly the case the adapter's own check exists for.
+    data = _build_scenario_data()
+    data.spacecraft[0].model = bad
+    with pytest.raises(cdm.CdmAdapterError, match="visual_model_uri") as forward:
+        cdm.scenario_to_cdm(data)
+    with pytest.raises(cdm.CdmAdapterError, match="visual_model_uri"):
+        cdm.trajectory_to_cdm(data.spacecraft[0], entity_id="x", frame_id="EarthMJ2000Eq")
+    if isinstance(bad, str) and bad:  # proto3 cannot tell "" from unset: only a non-empty whitespace string reaches the reverse check
+        reverse_cdm = cdm.trajectory_to_cdm(_traj(), entity_id="Sat", frame_id="EarthMJ2000Eq")
+        reverse_cdm.visual_model_uri = bad
+        with pytest.raises(cdm.CdmAdapterError, match="visual_model_uri") as reverse:
+            cdm.cdm_trajectory_to_viewer_json(reverse_cdm)
+        tail = "must be a non-empty str (a URL the viewer can fetch)"
+        assert tail in str(forward.value) and tail in str(reverse.value)
+
+
 # --------------------------------------------------------------------------- endpoint
 @pytest.fixture()
 def client(tmp_path):

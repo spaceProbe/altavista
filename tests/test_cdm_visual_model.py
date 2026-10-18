@@ -26,6 +26,13 @@ Run it holding a cargo slot, like every test that launches workspace binaries::
     scripts/dev/cargo-slot --hold -- .venv/bin/python -m pytest -q -rs tests/test_cdm_visual_model.py
 
 The browser half skips (visibly, under ``-rs``) only when no Chrome is installed.
+
+The opposite direction (question 252, ``scenario_to_cdm`` writes ``Trajectory.visual_model_uri``
+from ``altavista.model.Trajectory.model``) is proven at the end of this file, with no ``av-run``:
+a scenario built in Python with a model on one spacecraft goes through ``scenario_to_cdm``, is
+wrapped in a ``RunProducts``, published to a live ``python -m altavista serve`` at
+``POST /api/cdm/run``, and drawn in real headless Chrome, where the pixels differ between the
+viewer's ``models`` class on and off (and do not, for the same scenario built without a model).
 """
 from __future__ import annotations
 
@@ -46,6 +53,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from altavista import cdm as cdm_adapter
+from altavista.model import Frame, ScenarioData, Trajectory
 from altavista.pb import trajectory_pb2
 from altavista.pb.altavista.v1 import run_pb2
 from altavista.server import create_app
@@ -141,6 +149,60 @@ def test_cdm_trajectory_route_passes_the_model_through_and_refuses_an_invalid_on
                        headers={"content-type": "application/x-protobuf"})
     assert resp.status_code == 400, resp.text
     assert "visual_model_uri" in resp.text
+
+
+# --------------------------------------------------------------------------- scenario_to_cdm (question 252)
+PY_MODEL_URL = MODEL_FIXTURE_URL
+# A circular LEO, radius 6878.137 km (a 500 km altitude), counter-clockwise in the equatorial plane.
+_LEO_RADIUS_KM = 6878.137
+_LEO_SPEED_KM_S = 7.6126  # sqrt(mu / r); the Hermite interpolation uses it as the sample velocity
+_LEO_EPOCH_A1MJD = 31041.5
+
+
+def _leo_trajectory(name: str, phase_rad: float, model) -> Trajectory:
+    tr = Trajectory(name=name, model=model)
+    step_s = 120.0
+    rate = _LEO_SPEED_KM_S / _LEO_RADIUS_KM
+    for i in range(61):  # two hours
+        theta = phase_rad + rate * step_s * i
+        tr.append(_LEO_EPOCH_A1MJD + step_s * i / 86400.0,
+                  [_LEO_RADIUS_KM * math.cos(theta), _LEO_RADIUS_KM * math.sin(theta), 0.0,
+                   -_LEO_SPEED_KM_S * math.sin(theta), _LEO_SPEED_KM_S * math.cos(theta), 0.0])
+    return tr
+
+
+def _python_scenario(*, with_model: bool) -> ScenarioData:
+    """Built in Python, no GMAT run and no av-run: two spacecraft, the model (when asked for) on
+    ``leo`` only, so the other spacecraft proves a model attaches to one entity and not its neighbour."""
+    return ScenarioData(
+        name="py-model", frame=Frame("EarthMJ2000Eq", "Earth", "MJ2000Eq"),
+        spacecraft=[_leo_trajectory("leo", 0.0, PY_MODEL_URL if with_model else None),
+                    _leo_trajectory("wing", 0.002, None)])
+
+
+def _scenario_run_bytes(data: ScenarioData, run_id: str) -> bytes:
+    """``scenario_to_cdm`` -> the ``RunProducts`` ``POST /api/cdm/run`` takes (one trajectory per
+    instance id, keyed by the entity name, plus the bundle's frame)."""
+    bundle = cdm_adapter.scenario_to_cdm(data, run_id=run_id)
+    products = run_pb2.RunProducts(run_id=run_id)
+    for traj in bundle.trajectories:
+        products.trajectories[traj.entity_id].CopyFrom(traj)
+    products.frames.append(bundle.frame)
+    return products.SerializeToString()
+
+
+def test_a_python_built_scenarios_model_reaches_the_published_scenario(tmp_path):
+    client = TestClient(create_app(texture_dir=tmp_path, web_dir=tmp_path))
+    published = {}
+    for with_model in (True, False):
+        data = _python_scenario(with_model=with_model)
+        resp = client.post("/api/cdm/run", content=_scenario_run_bytes(data, f"py-{with_model}"),
+                           headers={"content-type": "application/x-protobuf"})
+        assert resp.status_code == 200, resp.text
+        scenario = client.get(f"/api/scenario/{urllib.parse.quote(resp.json()['name'])}").json()
+        published[with_model] = {s["name"]: s.get("model") for s in scenario["spacecraft"]}
+    assert published[True] == {"leo": PY_MODEL_URL, "wing": None}
+    assert published[False] == {"leo": None, "wing": None}
 
 
 # --------------------------------------------------------------------------- av-run (real binary)
@@ -261,8 +323,8 @@ def _post_run(base_url: str, data: bytes) -> str:
         return json.loads(r.read())["name"]
 
 
-@pytest.fixture()
-def live_server(model_run_bytes, plain_run_bytes):
+def _start_server() -> _LiveServer:
+    """A live ``python -m altavista serve`` on a free loopback port, ready (``/api/health``)."""
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "altavista", "serve", "--host", "127.0.0.1", "--port", str(port)],
@@ -281,6 +343,12 @@ def live_server(model_run_bytes, plain_run_bytes):
     if not ready:
         server.stop()
         pytest.fail("altavista server did not become ready within 30s")
+    return server
+
+
+@pytest.fixture()
+def live_server(model_run_bytes, plain_run_bytes):
+    server = _start_server()
     try:
         server.names["model"] = _post_run(server.url, model_run_bytes)
         server.names["plain"] = _post_run(server.url, plain_run_bytes)
@@ -478,4 +546,123 @@ def test_a_published_av_run_with_no_declared_model_draws_none(live_server):
     assert value["declaredModel"] is None
     assert value["modelLoaded"] is False
     assert value["hasModelEntity"] is False, f"a model entity exists for a run that declared no model: {value!r}"
+    assert errors == [], "expected zero console warnings/errors/page exceptions, got:\n" + "\n".join(errors)
+
+
+# --------------------------------------------------------------------------- scenario_to_cdm, drawn
+@pytest.fixture()
+def python_scenario_server():
+    """A live server with the Python-built scenario published twice through ``POST /api/cdm/run``:
+    once with a model on ``leo``, once with none."""
+    server = _start_server()
+    try:
+        server.names["model"] = _post_run(server.url, _scenario_run_bytes(_python_scenario(with_model=True), "py-model"))
+        server.names["plain"] = _post_run(server.url, _scenario_run_bytes(_python_scenario(with_model=False), "py-plain"))
+    except Exception as exc:  # surfaced as a failure, never hidden
+        server.stop()
+        pytest.fail(f"could not publish the Python-built scenarios to POST /api/cdm/run: {exc}")
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+# The page script. Load a PUBLISHED scenario, switch the `models` class on, wait for `leo`'s glTF
+# (when it declares one), Focus on `leo` (which frames its model), and then -- synchronously, in
+# one task, because the canvas is not preserveDrawingBuffer and app.js's own frame loop would
+# otherwise run between an update and a read -- render the same camera with the `models` class on
+# and off through the viewer's own `setEntityClassEnabled` and diff the two frames.
+_PIXEL_PROBE_JS_TEMPLATE = r"""
+(async () => {
+  const out = { step: 'start' };
+  try {
+    const viewer = window.altavistaViewer;
+    if (!viewer) { out.error = 'no viewer on window'; return out; }
+    const sc = await (await fetch('/api/scenario/' + encodeURIComponent(__NAME__))).json();
+    out.models = Object.fromEntries(sc.spacecraft.map((s) => [s.name, s.model === undefined ? null : s.model]));
+    viewer.setScenario(sc);
+    viewer.setEntityClassEnabled('models', true);
+    const t = sc.t0;
+    let loaded = false;
+    const deadline = performance.now() + __WAIT_MS__;
+    while (performance.now() < deadline && !loaded) {
+      viewer.update(t);
+      await new Promise((r) => requestAnimationFrame(r));
+      const e = viewer._entityModelEntities.get('leo');
+      loaded = !!(e && e.modelLoaded);
+    }
+    out.modelLoaded = loaded;
+    out.entityNames = Array.from(viewer._entityModelEntities.keys()).sort();
+
+    // ---- synchronous from here: no await between an update and the reads that depend on it
+    viewer.update(t);
+    viewer.setFocus('leo');
+    viewer.update(t);
+    out.extent = viewer.entityExtent('leo');
+    const canvas = viewer.canvas;
+    const grab = () => {
+      viewer.renderer.render(viewer.scene, viewer.camera);
+      const c2 = document.createElement('canvas');
+      c2.width = canvas.width; c2.height = canvas.height;
+      const ctx = c2.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(canvas, 0, 0);
+      return ctx.getImageData(0, 0, c2.width, c2.height);
+    };
+    viewer.setEntityClassEnabled('models', true);
+    const on = grab();
+    viewer.setEntityClassEnabled('models', false);
+    const off = grab();
+    viewer.setEntityClassEnabled('models', true);
+    let n = 0, r = 0, g = 0, b = 0;
+    for (let i = 0; i < on.data.length; i += 4) {
+      const d = Math.abs(on.data[i] - off.data[i]) + Math.abs(on.data[i + 1] - off.data[i + 1]) + Math.abs(on.data[i + 2] - off.data[i + 2]);
+      if (d > 24) { n += 1; r += on.data[i]; g += on.data[i + 1]; b += on.data[i + 2]; }
+    }
+    out.canvas = [canvas.width, canvas.height];
+    out.diffPixels = n;
+    out.diffMeanRGB = n ? [r / n, g / n, b / n] : null;
+    out.step = 'done';
+  } catch (e) {
+    out.error = String((e && e.stack) || e);
+  }
+  return out;
+})()
+"""
+
+
+def _pixel_probe(server: _LiveServer, name: str, wait_ms: int):
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        pytest.skip("no Chrome/Chromium binary found on this host; cannot drive a headless browser")
+    js = _PIXEL_PROBE_JS_TEMPLATE.replace("__NAME__", json.dumps(name)).replace("__WAIT_MS__", str(wait_ms))
+    errors, value = asyncio.run(_drive(server.url, chrome_path, js, wait_s=6.0))
+    print("\nscenario_to_cdm pixel probe:", json.dumps(value, indent=2, sort_keys=True))
+    print("console/exception messages:", errors)
+    assert value is not None, f"the page probe returned nothing; console errors were: {errors}"
+    assert not value.get("error"), f"probe reported an error: {value.get('error')}\nconsole: {errors}"
+    assert value.get("step") == "done", value
+    return errors, value
+
+
+def test_a_python_built_scenarios_model_is_drawn_after_scenario_to_cdm_and_post_cdm_run(python_scenario_server):
+    errors, value = _pixel_probe(python_scenario_server, python_scenario_server.names["model"], wait_ms=20000)
+    # the model rode scenario -> CDM -> RunProducts -> POST /api/cdm/run -> the published scenario, on `leo` only
+    assert value["models"] == {"leo": PY_MODEL_URL, "wing": None}, value
+    assert value["modelLoaded"] is True, f"the viewer never finished loading the glTF: {value!r}"
+    assert value["entityNames"] == ["leo"], f"a model entity exists for a spacecraft that declared none: {value!r}"
+    assert value["extent"]["source"] == "model", value["extent"]
+    # drawn, not merely loaded: the models class on vs off changes the frame (the same camera, the
+    # same scene, only the class toggled), by a real patch of non-background pixels
+    assert value["diffPixels"] >= 200, f"toggling the models class changed only {value['diffPixels']} pixels: {value!r}"
+    assert max(value["diffMeanRGB"]) > 20, f"the model's pixels are black on black: {value!r}"
+    assert errors == [], "expected zero console warnings/errors/page exceptions, got:\n" + "\n".join(errors)
+
+
+def test_the_same_python_built_scenario_without_a_model_changes_no_pixels(python_scenario_server):
+    errors, value = _pixel_probe(python_scenario_server, python_scenario_server.names["plain"], wait_ms=3000)
+    assert value["models"] == {"leo": None, "wing": None}, value
+    assert value["modelLoaded"] is False
+    assert value["entityNames"] == []
+    assert value["extent"]["source"] == "marker", value["extent"]
+    assert value["diffPixels"] == 0, f"toggling the models class changed pixels with no model declared: {value!r}"
     assert errors == [], "expected zero console warnings/errors/page exceptions, got:\n" + "\n".join(errors)

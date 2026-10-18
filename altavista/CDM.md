@@ -125,8 +125,24 @@ producing `SystemInstance.visual_model_uri`) is a URL of a glTF/GLB model the vi
 entity. `cdm_trajectory_to_viewer_json` turns a non-empty one into the viewer trajectory's `model`
 (validated by `altavista.model.check_model_ref`; a whitespace-only value raises `CdmAdapterError`,
 a 400 on both publishing routes) and leaves `model` unset when it is empty, so a model-less run's
-viewer JSON has no `model` key. The reverse direction (`scenario_to_cdm`) does not write the field
-yet.
+viewer JSON has no `model` key.
+
+The opposite direction is closed (question 252). `trajectory_to_cdm` and `scenario_to_cdm` write a
+spacecraft's `altavista.model.Trajectory.model` into `visual_model_uri`, validated by the same
+`check_model_ref` (an empty or whitespace-only value, or a non-string assigned after construction,
+raises `CdmAdapterError` naming `visual_model_uri`), and write nothing when `model` is `None`. So a
+Python-built scenario's model survives scenario → CDM → scenario and reaches `POST /api/cdm/run`
+(`tests/test_cdm_visual_model.py` draws one in headless Chrome).
+
+* **Hashes.** With no model set, every hash `scenario_to_cdm` produces (`config_hash`, and the
+  serialisation of every trajectory, entity, event, frame and state space) is byte-identical to
+  what it was before (`tests/test_cdm_adapter.py::PRE_CHANGE_BUNDLE_DIGESTS`, literals captured at
+  `c6c463a`).
+* **A declared model enters `config_hash`**, as in the kernel (question 239 decision 2: a model
+  enters the SoS hash only when set): it is configuration, and a bundle that draws a model must not
+  share an identity with one that does not. For each model, in entity-id order, three
+  length-prefixed parts follow the entity parts: the tag `visual_model_uri`, the entity id and the
+  reference. The URL is never fetched, resolved or probed from Python.
 
 ## `POST /api/cdm/trajectory`
 
