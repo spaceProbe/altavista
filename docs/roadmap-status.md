@@ -1,7 +1,7 @@
 # Roadmap status
 
-As of 2026-10-17, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–252); each track's plan records its rounds and its `## Delivered` section.
+As of 2026-10-18, against the phase table in `architecture.md`. Decisions are numbered in
+`open-questions.md` (1–253); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -25,7 +25,7 @@ recipe is in `README.md`.
 - **Reproducibility across platforms (question 248):** run bytes reproduce on the same build target and libm, not across macOS and Linux; a portable libm in `av-orbital` would change that and re-pin every golden it moves. The user's call whether it is wanted.
 - **The kit (question 251):** a Linux GMAT pin is not recorded yet (only macOS arm64).
 - **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates (`av-yaml` over `serde-saphyr`); the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user applies `docs/spoore-upstream.md`'s sixth proposal. MSRV is now 1.89, declared but not measured.
-- **Heavy (question 240):** shared entity objects are float32-quantized against the primary camera's origin, 4–25 cm off in secondary viewports, breaking question 46's centimetre bound; `scenario_to_cdm` does not write `visual_model_uri`. From question 249: `FileStudyStore` overwrites where the ClickHouse store refuses different content; the proposer container test's readiness wait reads interleaved stderr; `ContainerExecutor` returns no job log.
+- **Heavy (question 253):** question 240's secondary-viewport defect is closed (every viewport under 1 cm at LEO, GEO and lunar distance). Open: `FileStudyStore` joins a `sweep_id` such as `../x` onto its root (validate it as a path component); study mode refuses only after a whole study has run; picking in an extra viewport, and bodies and the globe, still use the primary's placement.
 - **Native (question 249):** `GroundStationModel` keeps only the last frame on its port per step; one framed-out port per system; a Docker-free replay cannot reproduce a container's `dynamics_hash` (the Bind version is not in the log); the Linux `av-edge-board` build is not byte-reproducible; the other `docker rmi` calls are not audited against the containerd behaviour `ImageTagGuard` was fixed for; duplicated test helpers in `drm_container.rs` and `drm_shared_run.rs`.
 - **Mechanitis (question 240):** scoped read-only; AltaVista changes nothing until Mechanitis settles encoding and shared types (its ADR-003).
 - **Jacchia-Roberts drag:** the shipped binary's half of the provenance question is the lead's before an instrumented build.
@@ -34,6 +34,6 @@ recipe is in `README.md`.
 
 ## Next, in the order the lead would take it
 
-1. The secondary-viewport precision defect (question 240) and the heavy items above, for the heavy team (question 252, running).
+1. The open heavy and native items above (the `sweep_id` path check first), as one round per team when the user charters them.
 2. Cross-platform reproducibility (question 248), if the user wants it.
 3. Hardware in the loop, when the user resumes it.
