@@ -85,6 +85,38 @@ def test_a_kit_builds_and_verifies(tmp_path):
     )
 
 
+def test_a_kit_carries_the_operator_supplied_document_byte_for_byte_and_hashed(tmp_path):
+    """Question 250(a), task 6: `docs/kit-operator-supplied.md` sits at the kit root beside KIT_MANIFEST,
+    listed with its own role and hashed like every file."""
+    kit_root, manifest_path, _digest = _build_kit(tmp_path)
+    committed = (REPO_ROOT / "docs" / "kit-operator-supplied.md").read_bytes()
+    carried = kit_root / "kit-operator-supplied.md"
+    assert carried.parent == manifest_path.parent and carried.is_file() and not carried.is_symlink()
+    assert carried.read_bytes() == committed
+
+    doc = json.loads(manifest_path.read_text())
+    entries = [f for f in doc["files"] if f["path"] == "kit-operator-supplied.md"]
+    assert entries == [{
+        "path": "kit-operator-supplied.md", "role": "operator-doc",
+        "sha256": hashlib.sha256(committed).hexdigest(), "size": len(committed),
+    }]
+    assert kmanifest.operator_doc_entry(doc) == entries[0]
+    assert kmanifest.OPERATOR_DOC_SOURCE == "docs/kit-operator-supplied.md"
+
+    # hashed like every file: a changed byte is a hash_mismatch, a removed file a missing_file
+    carried.write_bytes(committed + b"x")
+    kinds = {(f.kind, f.path) for f in kmanifest.verify_manifest(kit_root)}
+    assert ("hash_mismatch", "kit-operator-supplied.md") in kinds and ("size_mismatch", "kit-operator-supplied.md") in kinds
+    carried.unlink()
+    assert [(f.kind, f.path) for f in kmanifest.verify_manifest(kit_root)] == [("missing_file", "kit-operator-supplied.md")]
+
+
+def test_the_operator_supplied_document_does_not_change_the_manifest_hash_between_two_builds(tmp_path):
+    _a, _ma, digest_a = _build_kit(tmp_path, name="a")
+    _b, _mb, digest_b = _build_kit(tmp_path, name="b")
+    assert digest_a == digest_b
+
+
 # =================================================================================================
 # 2. A tampered file fails verification
 # =================================================================================================

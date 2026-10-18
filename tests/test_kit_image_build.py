@@ -138,6 +138,9 @@ def make_kit(tmp_path: Path, *, name: str = "kit") -> Path:
             "dockerfile": {"kit_path": f"images/{component}/Dockerfile"}, "files": files, "packages": packages,
             "network_used": False,
         }
+    # every kit carries the document of what the operator brings (question 250(a), task 6); the installer's
+    # files step refuses a kit that does not, so the synthetic kits used with it carry it too
+    (kit / kmanifest.OPERATOR_DOC_PATH).write_bytes((REPO_ROOT / kmanifest.OPERATOR_DOC_SOURCE).read_bytes())
     doc = kmanifest.build_manifest(
         kit_root=kit, git_commit="0" * 40, git_dirty=False, git_status=[], images=images, sboms={}, packs={},
         vendor={}, wheels={}, binaries={}, runs={}, gaps=[],

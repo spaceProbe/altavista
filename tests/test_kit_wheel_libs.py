@@ -406,6 +406,7 @@ class World:
         monkeypatch.setattr(kmanifest, "PINS_FILE", self.pins_path)
         self.kit = tmp_path / "kit"
         make_wheel(self.kit / "wheels" / "altavista-1-py3-none-any.whl", {"altavista/__init__.py": b""})
+        (self.kit / kmanifest.OPERATOR_DOC_PATH).write_bytes((REPO_ROOT / kmanifest.OPERATOR_DOC_SOURCE).read_bytes())
         self.operator_entry = {
             "name": "numpy", "version": "1.0", "filename": self.numpy.name, "sha256": sha(self.numpy.read_bytes()),
             "bundled_libraries": [], "extension_modules": [], "component": "wheel-demo", "gpl_family_libraries": ["libquadmath"],

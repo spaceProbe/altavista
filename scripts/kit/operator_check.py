@@ -3,8 +3,8 @@ component the kit needs, and prints what it found.
 
 # What this is
 
-`docs/kit-operator-supplied.md` lists the components an operator downloads themselves (six, plus the
-numpy wheel, pin item 7, until task 6 adds its row), and
+`docs/kit-operator-supplied.md` lists the components an operator brings themselves (items 1 to 7 are
+pinned; item 8, the Python floor, is checked by `install.sh`), and
 `scripts/kit/operator_supplied.json` pins each one (the pins file, carried in every kit as
 `installer/operator_supplied.json`). This module is the one place that decides, for a kit,
 

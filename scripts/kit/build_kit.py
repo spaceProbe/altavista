@@ -17,7 +17,9 @@ why "source state" is the commit AND the working tree on top of it, never the co
 # What this half assembles (round 2)
 
 IN, always: the merged suite/site files, the ten committed SBOMs + `SHA256SUMS`, the two
-`IMAGE_DIGEST.md` records, the recorded kernel runs (`tests/fixtures/*.runproducts.bin`), the
+`IMAGE_DIGEST.md` records, `docs/kit-operator-supplied.md` (question 250(a), task 6: copied byte for
+byte to `<kit>/kit-operator-supplied.md`, role `operator-doc`; the installer refuses a kit without it),
+the recorded kernel runs (`tests/fixtures/*.runproducts.bin`), the
 Decision-K pack descriptors (`data/time` by default), the git commit/dirty state, and
 `KIT_MANIFEST` itself. **Task 3c added, round 3 (question 217(b)) removed**: real BYTES for the
 `web` and `profiles` packs (the viewer's own static assets and profile/policy store), copied
@@ -224,6 +226,14 @@ def assemble_installer(repo_root: Path, kit_root: Path) -> None:
         src = source_dir / name
         dest = installer_dir / name
         shutil.copy2(src, dest)
+
+
+def assemble_operator_doc(repo_root: Path, kit_root: Path) -> None:
+    """Question 250(a), task 6: copies `docs/kit-operator-supplied.md` byte for byte to
+    `<kit_root>/kit-operator-supplied.md`, beside `KIT_MANIFEST`, unconditionally, every kit. It falls out
+    of the `files` walk with role `operator-doc` (`manifest._ROLE_RULES`); the installer refuses a kit
+    that does not list it (`install._check_operator_doc`)."""
+    shutil.copy2(repo_root / kit_manifest.OPERATOR_DOC_SOURCE, kit_root / kit_manifest.OPERATOR_DOC_PATH)
 
 
 def assemble_image_digest_docs(repo_root: Path, kit_root: Path) -> None:
@@ -1119,6 +1129,7 @@ def build(
     assemble_suite_and_site(repo_root, kit_root, site)
     sboms = assemble_sboms(repo_root, kit_root)
     assemble_installer(repo_root, kit_root)
+    assemble_operator_doc(repo_root, kit_root)
     assemble_image_digest_docs(repo_root, kit_root)
     runs = assemble_runs(repo_root, kit_root)
 

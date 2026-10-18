@@ -384,6 +384,8 @@ def _proof_kit_missing_sections(doc: dict, kit_dir: Path) -> list[str]:
     pack = doc.get("packs", {}).get("data-time")
     if not pack or not pack.get("copied"):
         missing.append("packs.data-time (copied)")
+    if kit_manifest.operator_doc_entry(doc) is None:
+        missing.append(f"{kit_manifest.OPERATOR_DOC_PATH} (role {kit_manifest.OPERATOR_DOC_ROLE}: a kit built before question 250(a), task 6)")
     # Round 3 (question 217(b)): task 3c's `web`/`profiles` packs are gone (see this module's own
     # top doc) -- the equivalent check is now on the `altavista` WHEEL itself, the same one
     # `scripts/kit/install.py::_check_viewer_assets_in_wheel` runs at install time, restated here

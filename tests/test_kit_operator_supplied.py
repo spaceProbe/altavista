@@ -81,8 +81,22 @@ def _doc_table_rows() -> dict[int, str]:
     return rows
 
 
-def test_the_docs_table_has_the_six_items():
-    assert sorted(_doc_table_rows()) == [1, 2, 3, 4, 5, 6]
+def test_the_docs_table_has_the_eight_items():
+    """The seven pinned components, and the Python version floor (item 8), which `install.sh` checks itself."""
+    assert sorted(_doc_table_rows()) == [1, 2, 3, 4, 5, 6, 7, 8]
+
+
+def test_the_docs_item_7_names_the_pinned_numpy_wheel_by_filename_and_sha256():
+    pin = PINS["numpy-wheel-linux-aarch64"]
+    cell = _doc_table_rows()[7]
+    assert pin["filename"] in cell and pin["sha256"] in cell
+
+
+def test_the_docs_item_8_is_the_python_floor_the_install_script_enforces():
+    cell = _doc_table_rows()[8]
+    assert "Python >= 3.11" in cell
+    script = (KIT_DIR / "install.sh").read_text(encoding="utf-8")
+    assert "sys.version_info >= (3, 11)" in script, "install.sh no longer enforces the floor the document states"
 
 
 @pytest.mark.parametrize("item", [1, 2, 4, 5, 6])
@@ -96,18 +110,24 @@ def test_the_pins_file_and_the_docs_table_agree_on_every_image_digest(item):
     assert pin["reference"] in cell, f"item {item} ({cid}): the doc's pin cell does not contain the reference {pin['reference']}"
 
 
-@pytest.mark.xfail(
-    reason="docs/kit-operator-supplied.md 'Item 3: the GMAT pin' still records the whole-tree descriptor of the audit "
-           "(sha256:47095a23..., 2,072 files); the pin is scoped (output/, __pycache__, bin/api_startup_file.txt left "
-           "out) and measured by measure_tree: sha256:d21cddbb..., 2,060 files. Task 6 rewrites that section; this test "
-           "then passes and the marker comes off.",
-    strict=False,
-)
 def test_the_pins_file_and_the_docs_item_3_agree_on_the_gmat_hash():
-    section = DOC.read_text(encoding="utf-8").split("### Item 3: the GMAT pin", 1)[1].split("\n## ", 1)[0]
+    after = DOC.read_text(encoding="utf-8").split("### Item 3: the GMAT pin", 1)[1]
+    section = re.split(r"\n##+ ", after, maxsplit=1)[0]   # this heading's own section, up to the next heading
     pin = PINS["gmat-r2026a"]["platforms"]["macos-arm64"]
     assert pin["content_hash"] in section
     assert f"{pin['file_count']:,} files" in section
+    # every field of the pin, not the hash alone, and the scope the pin was measured under
+    assert f"{pin['total_bytes']:,} bytes" in section
+    assert f"{pin['symlink_count']} symlinks" in section and pin["symlink_listing_hash"] in section
+    scope = PINS["gmat-r2026a"]["scope"]
+    for name in (*scope["exclude_paths"], *scope["exclude_dir_names"]):
+        assert name in section, f"the document's GMAT section does not name the scope entry {name!r}"
+    # the platforms without a pin are said to have none
+    for key, value in PINS["gmat-r2026a"]["platforms"].items():
+        if value is None:
+            assert key in section, f"{key} has no pin and the document does not say so"
+    # the whole-tree value of the first audit is explained as superseded, not left standing as the pin
+    assert "47095a23" in section and "No pin yet" in section
 
 
 @pytest.mark.parametrize("cid", SERVICES)

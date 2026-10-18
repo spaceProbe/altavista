@@ -94,7 +94,8 @@ part (the kit's own verification, then the list) and installs nothing.
 
 The wheel step inventories the native libraries every wheel bundles (`wheel_libs.py`; the inventory is in
 `KIT_MANIFEST.wheels.fetched[*].bundled_libraries`). A wheel that bundles a library under a GPL-family licence
-(numpy's x86_64 wheels bundle `libquadmath`; its linux/aarch64 wheel does not) is not carried: it is listed
+(numpy's linux/aarch64 wheel bundles `libgfortran`, GPL-3.0-or-later WITH GCC-exception-3.1; a wheel
+that bundles `libquadmath`, LGPL, is handled the same way) is not carried: it is listed
 in `KIT_MANIFEST.wheels.operator_supplied` with its filename and sha256, and the pins file has a
 `python-wheel` component for it. Such a kit needs the operator's copy:
 
@@ -178,6 +179,12 @@ it").
    for why the packs are gone and `kit_format` moved to 3) -- never simply dropped: an installed
    viewer with no `web/` static root or no `profiles/` store to read from still cannot serve a
    single request, so this is exactly as load-bearing as it always was.
+
+6a. **(question 250(a), task 6)** the kit does not list `kit-operator-supplied.md` (role `operator-doc`) in
+   its `files`: `operator-doc-missing`, before the target directory is created. The document is the
+   operator's account of what to bring (`docs/kit-operator-supplied.md`); its path is the first line the
+   install (and `--check-operator-supplied`) prints, and `INSTALL_RECORD.installed.operator_supplied_document`
+   names it.
 
 7. **(question 250(a), task 2)** `packs.gmat` is in the kit and the operator's GMAT is not what its
    pin says, each with a `gmat-*` code (`OperatorSuppliedRefused.code`): `gmat-root-missing`
@@ -343,6 +350,25 @@ def _check_required_sections(doc: dict) -> None:
             f"understands kit_format {kit_manifest.KIT_FORMAT} -- refusing to guess at a shape "
             f"it was not written against"
         )
+
+
+def _check_operator_doc(kit_dir: Path, doc: dict) -> Path:
+    """Question 250(a), task 6: a kit that tells the operator nothing about what to bring is incomplete.
+    The kit must list `kit-operator-supplied.md` (role `operator-doc`); `_load_manifest_or_refuse` has
+    already re-hashed it against `KIT_MANIFEST`. Returns its path in the kit; raises
+    `OperatorSuppliedRefused` (`operator-doc-missing`) otherwise."""
+    if kit_manifest.operator_doc_entry(doc) is None:
+        raise OperatorSuppliedRefused(
+            "operator-doc-missing",
+            f"{kit_dir} does not carry {kit_manifest.OPERATOR_DOC_PATH} (role {kit_manifest.OPERATOR_DOC_ROLE}) in its "
+            f"KIT_MANIFEST files: a kit that does not say what the operator must bring (the base images, GMAT, ...) is "
+            f"incomplete. Rebuild it with scripts/kit/build_kit.py, which copies {kit_manifest.OPERATOR_DOC_SOURCE}.",
+        )
+    return kit_dir / kit_manifest.OPERATOR_DOC_PATH
+
+
+def _operator_doc_line(path: Path) -> str:
+    return f"operator-supplied components document: {path}"
 
 
 def _check_required_wheels(doc: dict) -> None:
@@ -701,6 +727,9 @@ def check_operator_supplied(
     kit_dir = kit_dir.resolve()
     doc = _load_manifest_or_refuse(kit_dir)
     _check_required_sections(doc)
+    operator_doc = _check_operator_doc(kit_dir, doc)
+    if out is not None:
+        out(_operator_doc_line(operator_doc))
     return verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
         operator_wheels=operator_wheels,
@@ -725,8 +754,12 @@ def install(
     doc = _load_manifest_or_refuse(kit_dir)
     kit_manifest_sha256 = kit_manifest.sbom.sha256_file(kit_dir / "KIT_MANIFEST")
     _check_required_sections(doc)
+    operator_doc = _check_operator_doc(kit_dir, doc)  # question 250(a), task 6: a kit without it is incomplete
     _check_required_wheels(doc)
     _check_viewer_assets_in_wheel(kit_dir, doc)
+    # The kit's own document of what the operator brings: its path is the first line printed, before the list.
+    if out is not None:
+        out(_operator_doc_line(operator_doc))
     # Question 250(a), tasks 2 and 3: before the target directory exists, so a refusal leaves nothing behind.
     operator_results = verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
@@ -771,6 +804,13 @@ def install(
             "sboms": sorted(doc["sboms"].keys()),
             "runs": sorted(doc["runs"].keys()),
             "suite_site_files": ["suite.merged.toml", "secsite.merged.toml"],
+            # The kit's document of what the operator brings (question 250(a), task 6): where it was read
+            # and where this install keeps its copy.
+            "operator_supplied_document": {
+                "kit_path": kit_manifest.OPERATOR_DOC_PATH,
+                "installed_path": f"kit/{kit_manifest.OPERATOR_DOC_PATH}",
+                "sha256": kit_manifest.operator_doc_entry(doc)["sha256"],
+            },
         },
         "gaps": doc["gaps"],
     }

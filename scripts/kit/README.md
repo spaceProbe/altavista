@@ -4,16 +4,22 @@ A "kit" is a directory that collects, in one place, everything a deployment need
 repository already builds, records, or commits elsewhere -- the merged secdeploy suite/site
 files, the ten CycloneDX SBOMs, the two recorded container-image digests, the recorded kernel
 runs, a set of Decision-K "pack" descriptors (environment data such as `data/time`, and, as of
-round 2, real pack BYTES when asked for) -- plus a `KIT_MANIFEST` that lists every file (and,
+round 2, real pack BYTES when asked for), and `docs/kit-operator-supplied.md` (the operator's
+account of what the kit does not carry) -- plus a `KIT_MANIFEST` that lists every file (and,
 round 2, every pack symlink) the kit carries with its SHA-256, and that can be independently
 re-verified later to detect a missing, tampered, or undeclared file.
+
+The kit does not redistribute GPL- or LGPL-licensed code (question 250(a)): the two base images,
+GMAT, and any wheel that bundles a GPL-family library are supplied by the operator and pinned
+(`docs/kit-operator-supplied.md`, the kit's own `kit-operator-supplied.md`). The kit carries each
+image's application layer and a Dockerfile `FROM` the pinned base digest, and the installer builds the
+images offline on the operator's base.
 
 P5 track round 1 (task D3's first half) covered assembling and self-verifying a kit with
 DESCRIPTORS only -- no pack bytes, no vendor tree, no wheels, no binaries. **Round 2 (task 3a,
 lead ruling 214(b)) is this file's own second half**: the kit now carries real bytes for what a
 zero-egress install actually needs -- `cargo vendor`'s crate sources, the viewer's wheels, and
-cross-built Linux service binaries (and, in round 2, a copied GMAT data pack: GMAT is operator-supplied
-since question 250(a), see "GMAT is operator-supplied" below) -- each behind its own opt-in flag,
+cross-built Linux service binaries -- each behind its own opt-in flag,
 off by default so the default test gate stays fast. It still does NOT cover installing one: the
 zero-egress install proof itself -- unpacking a kit with the network disabled, running
 `install.sh`, and confirming the result is actually usable -- is P5 track round 2 task 3b, a
@@ -36,14 +42,22 @@ A minimal, always-fast kit:
 
     .venv/bin/python scripts/kit/build_kit.py --out out/kit/minimal
 
-A full kit -- every gated step, real bytes for everything this round can collect:
+A full kit -- every gated step, real bytes for everything the kit may carry:
 
     .venv/bin/python scripts/kit/build_kit.py --out out/kit/full \
-        --with-images --with-vendor --with-wheels --with-binaries \
-        --copy-pack data-time --with-pack gmat --max-pack-bytes 900000000
+        --with-images --with-vendor --with-wheels --with-binaries --copy-pack data-time
+
+It carries no GMAT, no base image and no numpy wheel (operator-supplied; `--with-wheels` lists the
+wheel in `KIT_MANIFEST.wheels.operator_supplied`). A kit for a site that runs GMAT also records
+GMAT's descriptor, which makes the installer require the operator's own GMAT tree
+(`--gmat-root`, `--gmat-platform`):
+
+    ... --with-pack gmat --max-pack-bytes 900000000
 
 (`--max-pack-bytes` must exceed the GMAT tree's own ~770 MB, or that step refuses rather than
-silently skipping it; `--with-pack gmat` records GMAT's descriptor and carries none of its bytes.) `--with-wheels`, `--with-binaries` and (only if `cargo vendor --offline`
+silently skipping it. The descriptor hashes the tree; none of its bytes land in the kit.) A site that
+deploys MinIO or PostGIS adds `--declare-operator-supplied minio` / `postgis`. `--with-wheels`,
+`--with-binaries` and (only if `cargo vendor --offline`
 genuinely fails) `--with-vendor` are the steps that touch the network, and only at kit-build time
 (question 154) -- see "Where this uses the network" below.
 
@@ -85,8 +99,8 @@ Flags:
   failure at the point where it matters.
 - `--max-pack-bytes <n>` -- refuse (never silently skip) any `--with-pack`/`--copy-pack` pack
   whose total size exceeds this. Default 50,000,000 bytes -- comfortably above the small in-tree
-  `data-time` pack, well below the ~738 MB `gmat` pack, so a big pack needs an explicit larger
-  value to actually be hashed or copied.
+  `data-time` pack, well below the ~770 MB `gmat` tree, so recording GMAT's descriptor (which hashes
+  the tree; no byte of it is copied) needs an explicit larger value.
 - `--with-vendor` -- **round 2**, gated. `cargo vendor --offline` into `<kit>/vendor/`, falling
   back to the network exactly once if that genuinely fails (question 154). Also writes the exact
   `.cargo/config.toml` fragment `cargo vendor` prints, to `<kit>/vendor/.cargo-config.toml`, so
@@ -169,7 +183,8 @@ JSON (`json.dump(..., indent=2, sort_keys=True, ensure_ascii=False)` plus a trai
   (question 217(c)) -- every file under `installer/` (including `operator_supplied.json`, the pins
   of what the operator supplies), always present, unconditional. Question 250(a) adds
   `image-dockerfile`, `image-rootfs`, `image-package` and `image-package-licence` (all under
-  `images/`, `--with-images` only) and retires `image-tarball`.
+  `images/`, `--with-images` only) and retires `image-tarball`. Question 250(a), task 6, adds
+  `operator-doc`: the one file `kit-operator-supplied.md` at the kit root, always present (below).
 - `pack_symlinks` -- **new in round 2**: every symlink inside a COPIED pack (`packs/<name>/...`),
   `{path, pack, link_target}`, sorted by path -- see "Pack symlinks", below. A kit may contain
   ZERO symlinks anywhere else (round 1's original rule, unchanged).
@@ -278,6 +293,27 @@ kit by whoever built or received it (this task's own report, and this test's own
 hash, are exactly that) -- comparing that independently-held hash before ever running the kit's
 installer is what a real deployment still needs to add on its own side.
 
+## The kit carries the document of what the operator brings (question 250(a), task 6)
+
+`docs/kit-operator-supplied.md` is copied byte for byte to `<kit>/kit-operator-supplied.md`, beside
+`KIT_MANIFEST` (`build_kit.py::assemble_operator_doc`), unconditionally, every kit. It is listed in
+`KIT_MANIFEST.files` with the role `operator-doc` and hashed like every file, so `verify_manifest` catches
+a changed or missing copy. A kit that tells the operator nothing about what to bring (the base images,
+GMAT, the numpy wheel, ...) is incomplete, so the installer refuses a kit whose `files` do not list it
+(`operator-doc-missing`, exit 2, before the target directory exists), checks that before the wheels,
+prints its path as the first line of both `install.sh <kit> <target>` and `install.sh
+--check-operator-supplied <kit>`, and records it in `INSTALL_RECORD.installed.operator_supplied_document`
+(kit path, installed path, sha256). The image step does not read it.
+
+`kit_format` stays 5. The top-level shape of `KIT_MANIFEST` is unchanged (one more entry in `files`), format
+5 is still the unmerged question-250(a) round (`develop` is at 4), and the refusal names the missing document,
+so a format-5 kit built a commit earlier fails with a message that says what to rebuild. A proof kit built
+before this change fails the zero-egress proof's staleness check by name
+(`tests/test_kit_zero_egress_install.py::_proof_kit_missing_sections`) and has to be rebuilt.
+Tests: `tests/test_kit_manifest.py` (present, listed with the role, hashed, byte-identical to the committed
+document, tamper findings), `tests/test_kit_install.py` (the printed first line, the record, the refusal for a
+consistent kit without it, the tamper refusals).
+
 ## GMAT is operator-supplied (question 250(a), task 2)
 
 GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL), so the kit never carries it
@@ -355,16 +391,20 @@ been run (the scope covers what a run writes, not everything an operator might c
 
 ## Every operator-supplied component is verified and listed (question 250(a), task 3)
 
-`scripts/kit/operator_supplied.json` pins all six components of `docs/kit-operator-supplied.md`: the two
-base images (items 1 and 2, `container-base-image`), GMAT (item 3, `data-tree`, per platform) and the
-three service images (items 4 to 6, `container-image`: ClickHouse, MinIO, PostGIS). Each entry records
+`scripts/kit/operator_supplied.json` pins all seven components of `docs/kit-operator-supplied.md` that
+have a pin: the two base images (items 1 and 2, `container-base-image`), GMAT (item 3, `data-tree`, per
+platform), the three service images (items 4 to 6, `container-image`: ClickHouse, MinIO, PostGIS) and the
+numpy wheel (item 7, `python-wheel`). Item 8, Python >= 3.11 on the installing host, is a version floor
+that `install.sh` enforces before anything else; it has no pin and is not in the list. Each entry records
 its doc item, kind, the licences that make it operator-supplied, and `verification` (which step checks it
 and how). `tests/test_kit_operator_supplied.py` fails if the pins file and the doc's table disagree on
-any digest, or if a service pin differs from the digest in `services/<store|catalog|clickhouse>/IMAGE_DIGEST.md`.
+any digest, on the GMAT pin's fields and scope, or on item 7's file and sha256, or if a service pin differs
+from the digest in `services/<store|catalog|clickhouse>/IMAGE_DIGEST.md`.
 
 **What the kit needs** is derived from `KIT_MANIFEST` in one place, `operator_check.requirement_for`: a
-base image for each image the kit carries (`images.<c>.collected`), GMAT when `packs.gmat` is present, a
-service image only when `KIT_MANIFEST.operator_supplied_declared` names it. That list is filled by
+base image for each image the kit carries (`images.<c>.collected`), GMAT when `packs.gmat` is present, the
+wheel when `wheels.operator_supplied` names it, a service image only when
+`KIT_MANIFEST.operator_supplied_declared` names it. That list is filled by
 
     .venv/bin/python scripts/kit/build_kit.py --out DIR --declare-operator-supplied minio --declare-operator-supplied postgis
 
@@ -375,7 +415,7 @@ manifest that declares any of them.
 
 **Two steps, one list.** The files install never holds the Docker socket, so it cannot look at an image,
 and the host-side image step reads no tree. Each prints the whole list, one line per component, always
-all six, in item order:
+all seven, in item order (the examples are a selection):
 
     operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  verified sha256:2edbbc5dc405… via Id
     operator-supplied: gmat-r2026a  required (packs.gmat)  verified macos-arm64 sha256:d21cddbbffbd… 2060 files
@@ -383,8 +423,11 @@ all six, in item order:
     operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)
     operator-supplied: postgis  outside the kit, not verified (not declared; a site that deploys it builds the kit with --declare-operator-supplied postgis)
     operator-supplied: debian-bookworm-slim-base-image  not required (the kit carries no application layer for edge-plugin-image), not verified
+    operator-supplied: numpy-wheel-linux-aarch64  not required (no wheel of the kit bundles a GPL-family library), not verified
 
-(digests shortened to 12 hex digits in the line, whole in the records). To read the two outputs together:
+(a kit that lists numpy in `wheels.operator_supplied` has `required (wheels.operator_supplied: <filename>)`
+on that line, and `verified <filename> sha256:c76d5dde9f44…` in the files install; the files install also
+prints `operator-supplied components document: <kit>/kit-operator-supplied.md` before the list; digests shortened to 12 hex digits in the line, whole in the records). To read the two outputs together:
 every line that says `required` must say `verified ...` in exactly one of the two outputs and
 `verified by the ... , not here` in the other. `NOT VERIFIED [code]` is a refusal: that step printed the
 lines up to and including it and exited 2, so the operator sees what was found before the refusal. The
@@ -439,8 +482,9 @@ path next to `--find-links <kit>/wheels`, so no other file in the operator's dir
 `--check-operator-supplied` takes the same option. In today's linux/aarch64/cp313 closure one wheel is
 affected: numpy 2.5.3's, which bundles `libgfortran` (and OpenBLAS, BSD). The pins file has its
 `python-wheel` component `numpy-wheel-linux-aarch64` (item 7), a `--with-wheels` kit lists the wheel in
-`wheels.operator_supplied` and carries none, and the installer needs `--operator-wheels DIR`. An x86_64 numpy
-wheel also bundles `libquadmath` (LGPL-2.1-or-later), which is in the table for that case.
+`wheels.operator_supplied` and carries none, and the installer needs `--operator-wheels DIR`. numpy's licence
+text also names a `libquadmath` stanza (LGPL-2.1-or-later), which a wheel for another platform may bundle;
+it is in the table for that case, and no such wheel was fetched or inspected.
 
 The connected-machine helper that makes DIR is `scripts/kit/save_operator_wheels.py --out DIR`: for every
 `python-wheel` pin it runs `pip download` of exactly that distribution, version and platform tags (a network

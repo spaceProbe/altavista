@@ -411,6 +411,73 @@ def test_a_kit_without_gmat_installs_without_the_options(tmp_path, monkeypatch):
     assert gmat["required"] is False and gmat["verified"] is False
 
 
+def _stub_the_wheel_steps(monkeypatch):
+    monkeypatch.setattr(install, "_check_required_wheels", lambda doc: None)
+    monkeypatch.setattr(install, "_check_viewer_assets_in_wheel", lambda kit_dir, doc: None)
+    monkeypatch.setattr(install, "_install_wheels_into_venv", lambda kit_dir, target_dir: {"venv": "venv", "installed_packages": []})
+
+
+def test_the_install_prints_the_path_of_the_operator_supplied_document_first_and_records_it(tmp_path, monkeypatch, capsys):
+    """Question 250(a), task 6: the kit's account of what the operator brings is named in the install output
+    (before the list it explains) and in INSTALL_RECORD; the installed tree keeps a copy."""
+    manifest_path, _ = _build(tmp_path)
+    kit = manifest_path.parent.resolve()
+    _stub_the_wheel_steps(monkeypatch)
+    target = tmp_path / "target"
+    assert install.main([str(kit), str(target)]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"operator-supplied components document: {kit / 'kit-operator-supplied.md'}"
+    assert [l for l in lines[1:] if l.startswith("operator-supplied: ")], "the list follows the document line"
+    record = json.loads((target / "INSTALL_RECORD").read_text())["installed"]["operator_supplied_document"]
+    entry = kmanifest.operator_doc_entry(json.loads((kit / "KIT_MANIFEST").read_text()))
+    assert record == {"kit_path": "kit-operator-supplied.md", "installed_path": "kit/kit-operator-supplied.md", "sha256": entry["sha256"]}
+    assert (target / record["installed_path"]).read_bytes() == (REPO_ROOT / "docs" / "kit-operator-supplied.md").read_bytes()
+
+    # --check-operator-supplied names it too
+    assert install.main(["--check-operator-supplied", str(kit)]) == 0
+    assert capsys.readouterr().out.splitlines()[0] == f"operator-supplied components document: {kit / 'kit-operator-supplied.md'}"
+
+
+def _kit_without_the_document(tmp_path) -> Path:
+    """A kit whose manifest is consistent with its content and simply does not carry the document: what a
+    format-5 kit built before this task looks like."""
+    manifest_path, _ = _build(tmp_path)
+    kit = manifest_path.parent
+    doc = json.loads(manifest_path.read_text())
+    doc["files"] = [f for f in doc["files"] if f["path"] != "kit-operator-supplied.md"]
+    (kit / "kit-operator-supplied.md").unlink()
+    manifest_path.write_text(json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert kmanifest.verify_manifest(kit) == []
+    return kit
+
+
+def test_the_installer_refuses_a_kit_that_does_not_carry_the_operator_supplied_document(tmp_path, monkeypatch, capsys):
+    kit = _kit_without_the_document(tmp_path)
+    _stub_the_wheel_steps(monkeypatch)
+    target = tmp_path / "target"
+    with pytest.raises(install.OperatorSuppliedRefused) as exc:
+        install.install(kit, target)
+    assert exc.value.code == "operator-doc-missing" and "kit-operator-supplied.md" in str(exc.value) and not target.exists()
+    assert install.main([str(kit), str(target)]) == 2
+    captured = capsys.readouterr()
+    assert "operator-doc-missing" in captured.err and captured.out == "" and not target.exists()
+    assert install.main(["--check-operator-supplied", str(kit)]) == 2
+    assert "operator-doc-missing" in capsys.readouterr().err
+
+
+def test_a_listed_operator_supplied_document_that_was_removed_or_changed_is_refused_as_a_tampered_kit(tmp_path, monkeypatch):
+    manifest_path, _ = _build(tmp_path)
+    kit = manifest_path.parent
+    _stub_the_wheel_steps(monkeypatch)
+    (kit / "kit-operator-supplied.md").write_bytes(b"not the document")
+    with pytest.raises(install.InstallRefused, match="hash_mismatch: kit-operator-supplied.md"):
+        install.install(kit, tmp_path / "target")
+    (kit / "kit-operator-supplied.md").unlink()
+    with pytest.raises(install.InstallRefused, match="missing_file: kit-operator-supplied.md"):
+        install.install(kit, tmp_path / "target")
+    assert not (tmp_path / "target").exists()
+
+
 # =================================================================================================
 # 6. The real tree (opt-in: reads ~770 MB, read-only)
 # =================================================================================================

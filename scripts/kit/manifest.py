@@ -133,6 +133,15 @@ changed and why:
   one function both sides use. The shape of `packs` did not change (one added key on one pack), so
   `kit_format` stays 5: format 5 has not left the question-250(a) round, and an installer refuses a
   `packs.gmat` without the marker (a kit built before this task) rather than skipping the check.
+- **Question 250(a), task 6: the kit carries `docs/kit-operator-supplied.md`** at its root, beside
+  `KIT_MANIFEST`, as `kit-operator-supplied.md` (role `operator-doc`, copied byte for byte by
+  `build_kit.assemble_operator_doc`, unconditionally, every kit). A kit that tells the operator nothing about
+  what to bring is incomplete, so the installer refuses a kit whose `files` do not list it
+  (`operator-doc-missing`) and prints its path before the list of operator-supplied components. `kit_format`
+  stays 5, for the reason the two entries above give: format 5 has not left the question-250(a) round (it
+  is not on `develop`), the top-level shape of `KIT_MANIFEST` is unchanged (one added entry in
+  `files`), and the installer's refusal names the missing document instead of guessing, so a format-5 kit
+  built a commit earlier fails with a message that says what to rebuild.
 
 # Decision I -- why the builder only ever collects and hashes (round 1, unchanged in round 2)
 
@@ -172,8 +181,9 @@ over already-committed TOML, copies already-committed SBOM/digest files byte-for
 already understood to be non-reproducible in the sense that matters here -- their OUTPUT is a set
 of already-published, content-addressed wheel/crate files, not a freshly compiled binary; a wheel
 downloaded twice is the same bytes, unlike a freshly linked binary), and -- gated, opt-in, off by
-default -- runs `docker save` on an already-built image only AFTER confirming that image still
-matches its OWN already-recorded digest (never building, tagging, or retagging one), or copies an
+default -- reads the runtime-content files out of an already-built image (`docker create`, never started,
+and `docker cp`) only AFTER confirming that image still matches its OWN already-recorded digest and
+runtime-content hash (never building, tagging, or retagging one; question 250(a) retired `docker save`), or copies an
 already-cross-built binary out of the per-commit cache. This module's own `build_manifest`/
 `pack_descriptor`/`copy_pack_bytes` follow the same rule: they hash or copy what is already on
 disk, they never write build output of their own.
@@ -206,7 +216,8 @@ ensure_ascii=False)` plus one trailing newline. It contains:
   `build_manifest` runs, EXCLUDING `KIT_MANIFEST` itself. Each entry is `{"path", "sha256",
   "size", "role"}`, sorted by path. Round 2 adds five new roles (`pack-file`, `vendor`,
   `vendor-config`, `wheel`, `binary`, `run-fixture`); round 3 (question 217(c)) adds a sixth,
-  `installer`, for every file under `installer/`. An unrecognised path shape still raises rather
+  `installer`, for every file under `installer/`; question 250(a) adds `operator-doc` (the one file
+  `kit-operator-supplied.md` at the kit root). An unrecognised path shape still raises rather
   than silently guessing.
 - `pack_symlinks` -- NEW in round 2: every symlink that lives inside a COPIED pack
   (`packs/<name>/...`), `{"path", "pack", "link_target"}`, sorted by path, `link_target` the raw,
@@ -273,6 +284,24 @@ import sbom  # noqa: E402  (see comment above -- caller is responsible for sys.p
 #: the kit carries its own installer (`installer/`). Both are REQUIRED shape changes, not additive
 #: ones -- see this module's own top doc.
 KIT_FORMAT = 5
+
+#: Question 250(a), task 6: the kit carries `docs/kit-operator-supplied.md` byte for byte at its root,
+#: beside `KIT_MANIFEST`, under this name and role. The builder copies it (`build_kit.assemble_operator_doc`),
+#: the installer refuses a kit whose `files` do not list it (`install._check_operator_doc`) and prints
+#: its path before the list of operator-supplied components.
+OPERATOR_DOC_SOURCE = "docs/kit-operator-supplied.md"
+OPERATOR_DOC_PATH = "kit-operator-supplied.md"
+OPERATOR_DOC_ROLE = "operator-doc"
+
+
+def operator_doc_entry(doc: dict) -> Optional[dict]:
+    """The `KIT_MANIFEST.files` entry of the operator-supplied document (path `OPERATOR_DOC_PATH`, role
+    `OPERATOR_DOC_ROLE`), or `None` when the manifest does not list it with that role."""
+    for entry in doc.get("files", []):
+        if entry.get("path") == OPERATOR_DOC_PATH and entry.get("role") == OPERATOR_DOC_ROLE:
+            return entry
+    return None
+
 
 # --- Round-1 fixed gap reasons, unchanged. Round-2 gaps that can be genuinely collected
 # (cargo-vendor, python-wheels) move to `build_gaps` below, which decides per-build whether they
@@ -837,6 +866,7 @@ _ROLE_RULES: tuple[tuple[str, str], ...] = (
     ("secsite.merged.toml", "site-merged"),
     ("sbom/SHA256SUMS", "sbom-sums"),
     ("vendor/.cargo-config.toml", "vendor-config"),
+    (OPERATOR_DOC_PATH, OPERATOR_DOC_ROLE),
 )
 
 
