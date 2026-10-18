@@ -3437,3 +3437,336 @@ not moved.
   library in `av-orbital`, which was not to be changed this round.
 - A multi-host job runner: it needs the object store as the data plane instead of `hostPath`.
 - The secondary-viewport precision defect (question 240), outside this round by question 245.
+
+## Status (heavy manager, 2026-10-17) — precision round (question 252)
+
+This round does not reopen the plan. It delivers question 252's five heavy items: question 240's
+secondary-viewport precision defect and four small items carried by questions 240 and 249. Nothing
+here needs Docker beyond the existing pinned images, and no image, proto or compliance file moved.
+`## Delivered` stands. The lead's browser drive of task 1 closes the round.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `68ba8ba` | Task 4: the proposer container test waits on connects made inside the container, not on substrings of a shared stderr |
+| `3590ddf` | Task 2: `scenario_to_cdm` writes `visual_model_uri` |
+| `3092589` | Task 3: `FileStudyStore` refuses different content under an existing `sweep_id` |
+| `2234d79` | Task 5: `ContainerExecutor` returns the job's log; `stderr.txt` is no longer empty in container mode |
+| `74e7648` | Task 1: shared entity objects drawn relative to each viewport's own origin |
+| this commit | this status section |
+
+### Task 1: shared entity objects are written per drawing viewport (question 240)
+
+**The defect, reproduced.** Every spacecraft marker, instanced entity marker, trail,
+covariance and keep-out mesh, glTF model and event mesh was written once per tick against the
+primary camera's floating origin. That covers `_toLocal`'s `Math.fround` and the Float32
+instance and trail buffers. Every extra viewport then drew those values. `viewport.js`'s
+docstring said these objects were origin-independent, and that was false.
+
+**The measurement.** The final float32 eye-space vertex positions of each view are compared with
+an f64 truth (the interpolator × `SCALE`, the model's node chain, attitude and scale, into the same
+camera's f64 inverse):
+
+- three's `modelViewMatrix` is taken right after that view's renderer drew, every element
+  `Math.fround`ed;
+- it is applied to the float32 vertex data with a `fround` after every multiply and add.
+
+The run had three views: the primary, viewport A (portrait 300×500, Focus on the Chaser, which
+frames the 1.5 m model at 10.3 m) and viewport B (landscape 400×300, Focus on the Target). It
+covered every entity class, 24 one-second ticks, and LEO 7,000 km, GEO 42,164 km and lunar
+384,400 km. The primary was measured after `fit()` (origin at the Earth, the worst case for the
+extras) and framed on the Chaser.
+
+| Viewport A (B is the same), max error / max tick-to-tick hop, m | LEO | GEO | lunar |
+| --- | --- | --- | --- |
+| BEFORE: marker sphere, ellipsoid, keep-out, model | 0.26 / 0.51 | 1.9 / 3.8 | 14.8 / 28.9 |
+| BEFORE: instanced marker | 0.61 / 0.98 | 4.7 / 7.7 | 35 / 62 |
+| BEFORE: trail (newest vertex) | 0.74 / 1.3 | 5.1 / 8.7 | 54 / 39 |
+| AFTER: every class | ≤ 4.1e-3 / ≤ 6.8e-3 | ≤ 2.2e-3 / ≤ 2.7e-3 | ≤ 2.4e-3 / ≤ 3.3e-3 |
+| Primary framed on the Chaser, AFTER (unchanged) | ≤ 3.8e-3 / ≤ 3.3e-3 | ≤ 3.7e-3 / ≤ 3.6e-3 | ≤ 2.4e-3 / ≤ 2.7e-3 |
+| Primary after `fit()`, before and after (bit-identical) | 0.42–3.9 / ≤ 3.4 | 1.4–11 / ≤ 11 | 19–42 / ≤ 62 |
+
+Real headless Chrome gave these numbers. The node check gives the same shape; its tables are in
+the round folder. Every extra viewport, and the framed primary, is now under question 46's
+centimetre bound at all three distances. The primary's placement is bit-identical to `_toLocal`'s
+before and after: asserted in node over all 42 entries, and in Chrome against the scene graph.
+
+**The fix.** `Viewer._placeSharedEntities(view)` writes the shared objects for the drawing view's
+own origin.
+
+- `scene.onBeforeRender` calls it, keyed by the camera about to draw: the primary camera or any
+  unknown camera gets the primary; `vp.camera` gets that viewport. So every render is placed for
+  its own view, a direct `vp.renderer.render(scene, cam)` included.
+- It is cached per (view, epoch). The epoch moves with each tick, each rebase of any view and each
+  scenario load.
+- It reads per-tick f64 positions cached by `update(t)`.
+- three r185 runs `updateMatrixWorld` before `onBeforeRender`, so the method updates the world
+  matrices of what it moved.
+- `update(t)` restores the primary's placement after the viewport loop, so between ticks the scene
+  graph holds exactly what it held before the fix.
+
+**Per-view write versus per-viewport copies (decision 3).**
+
+- **Built: the per-view write.** Measured at 0.015 ms for the primary and 0.004–0.005 ms per extra
+  view per tick. GL uploads per context per tick are unchanged (3 `bufferSubData` on each context
+  before and after). three's `WebGLAttributes` keeps an uploaded version per renderer, and each
+  viewport already has its own GL context, so every context already re-uploaded each dynamic
+  buffer once per frame.
+- **Not built: per-viewport copies.** One `InstancedMesh`, trail lines, ellipsoid and keep-out
+  meshes and glTF clones per viewport, on that viewport's layer.
+  - The same per-tick writes, so no CPU saving.
+  - N object sets on the heap, and N subtrees in every render's matrix and culling walks.
+  - A lifecycle: build and dispose on add and remove viewport and on scenario reload;
+    `ResidentEntityScene` residency mirrored into N groups; class toggles applied to N groups;
+    the layer manager's per-entity byte costs, which copies fall outside of; async model loads
+    attaching N clones; picking choosing the right copy.
+  - No GPU-memory difference: each viewport already has its own GL context.
+  - These costs come from reading the code, not from a build.
+
+**Frame time, three viewports, LEO, 300 ticks** (headless Chrome, SwiftShader, host load average
+5.7–10 during the manager's rerun):
+- `update(t)` with real renders (GL commands queued): median 0.2 ms, p95 0.3 ms;
+- with GL replaced by three's world-matrix prologue plus the hook: median 0.1 ms, p95 0.2 ms;
+- the worker's before/after pair: identical medians and p95s.
+
+The test asserts placement for three views under 10 % of the 16.7 ms budget, the no-GL p95 under
+16.7 ms, and at most 3 `bufferSubData` per context per tick. With `gl.finish()` after every tick
+the median is 0.5 ms but the p95 is 230–307 ms, the same before (307) and after (230, 252 in the
+manager's rerun). That is SwiftShader's software rasteriser on a loaded host, not this change. It
+was not root-caused further: there is no path on this host without a hardware GL context, and the
+lead's drive in a real Chrome reads it.
+
+**Perturbations.**
+- The worker placed every view for the primary's origin, in a clone. The node check failed 83 of
+  389 checks, with viewport A back at the BEFORE magnitudes and the primary unchanged. The Chrome
+  test failed at its first assertion (A's sphere 0.2593 m off).
+- The manager put the view's shift difference into the Float32 instance matrix instead of the
+  mesh's f64 position, in a clone. The node check failed 14 of 389 (A's marker 0.59 m error, 1.01 m
+  hop; B's 0.86 m).
+
+**Re-run by the manager:** the node check exits 0 (389 checks). 71 passed across the new Chrome
+test, the node-check driver, the framing, viewport and both jitter suites.
+
+### Task 2: `scenario_to_cdm` writes `visual_model_uri`
+
+`trajectory_to_cdm` and `scenario_to_cdm` write `Trajectory.model` into `visual_model_uri` when it
+is set. It is validated by the same `check_model_ref` as the reverse direction, so an empty,
+whitespace-only or non-string value is a `CdmAdapterError` naming the field. Nothing is written
+when it is unset.
+
+Hashes:
+- With no model, every digest of three fixed bundles equals its value at `c6c463a`, asserted as
+  literals: `config_hash`, frame, entities, trajectories, events and state spaces.
+- A declared model enters `config_hash` (decision 8).
+
+A Python-built scenario's model is drawn in headless Chrome after `POST /api/cdm/run` (11,529
+pixels change). Its model-less control changes none. Carry-over round decision 9 is superseded.
+
+Perturbations:
+- Dropping the field fails 5 of the 9 new tests.
+- Skipping validation (the manager) fails the 4 invalid-model cases.
+- Writing an empty string unconditionally is caught by nothing. It cannot be: proto3 `string` has
+  no presence, so `""` and unset serialise identically.
+
+Re-run by the manager: 142 passed (adapter, visual-model, v1 and run suites).
+
+### Task 3: `FileStudyStore` refuses different content under an existing `sweep_id`
+
+**First, who relies on overwriting.** Every call site was checked:
+- `--store-dir` in study mode and `--import-study`;
+- the real-ClickHouse sweep test, which uses fresh directories;
+- Python's `runner.run_study(store_dir=)`, used only by the manual
+  `study_drag_sail_vs_burn.py`;
+- `tests/test_clickhouse_sweep_panel.py`, which uses a fresh store;
+- the feasibility panel and `POST /api/cdm/sweep`, which never touch a store.
+
+None relies on overwriting. A pre-change binary run three times into one store showed something
+else: the same `--out-dir` was byte-identical, but a different `--out-dir` silently replaced the
+study, because `products_uri` records the sample directory (defect 6).
+
+**The change.**
+- Identity is `content_sha256`, the ClickHouse store's own function. Identical content is an
+  idempotent `Ok` that rewrites nothing; different content is the same
+  `RefusedWrite { DifferentContent }`.
+- A new study is written and fsynced into a staging directory, then published with one rename.
+  A reader sees no study or a whole one. A crash leaves only a `.incoming-*` directory, which
+  `list_studies` skips. Of two racing writers, the first rename wins.
+- A parity test gives both backends the same eight puts and gets the same outcomes and hashes.
+
+**Perturbations.**
+- Restoring the overwrite fails 10 new tests: 7 unit tests, the parity test and both CLI tests.
+- The manager accepted different content in `settle_existing`, in a clone: 3 tests failed.
+
+Re-run by the manager: `av-sweep` lib 96, fake-server 13, CLI 2 and `k8s_sweep` 4 passed. The
+full crate passes in the gate.
+
+### Task 4: the proposer container test's readiness wait (question 249)
+
+**Root cause.**
+- `av-command` and `av-gateway` both `eprintln!` to one stderr. Rust's stderr is unbuffered, so
+  one line reaches the pipe as several writes, and the two processes interleave inside a line.
+- The gateway's readiness line in last round's failing gate is cut around `av-command`'s.
+- Both binaries print "listening" before they serve, so the line was never a readiness signal.
+
+**The new wait.** It connects from inside the container's network namespace, with `docker exec`
+and bash's `/dev/tcp` under `timeout`: to `av-command` on 127.0.0.1:50070 and to `av-gateway` on
+the container's own address. Docker's port publisher, which accepts before the process listens
+(question 233), is not in the path. The wait is bounded, fails at once if the container exits, and
+names what it observed.
+
+**Kept as tests, both directions:**
+- last round's gate log replayed with no Docker: the old wait times out, the new one is ready;
+- a real container whose readiness line is split by a second writer: the old wait fails, and the
+  new one is ready only after the listeners exist (1.7 s, not before 1.5 s).
+
+**Perturbations.**
+- Restoring the substring wait, in a clone, fails the real reproduction.
+- The manager read a DOWN probe as up: the probe-parsing test fails.
+
+Re-run by the manager: 5 passed. The worker passed it 4 times in a row.
+
+### Task 5: `ContainerExecutor` returns the job's log
+
+**The API.** `ContainerExecutor::run` returns a `ContainerReport` (result, container name, and
+the log or the reason there is none), as `K8sJobExecutor::run` does. `Executor::execute` is
+`run(..).result`, so the trait and its other implementors are unchanged.
+
+**The capture.** After `docker run` returns, on every path and before the container is removed,
+the log is read with `docker logs --timestamps` through bounded readers.
+- The two streams are merged by the daemon's per-line timestamp. That is exact within a stream; across
+  streams it is the daemon's read order (decision 14).
+- It is capped by the k8s executor's own `shape_log`: 64 KiB, 1000 lines, the same markers.
+- A failure's detail ends with the k8s-style log tail.
+- A container gone before its log is read gives a recorded reason, never an empty log.
+
+**`stderr.txt`.** `av-sweep --executor container` writes the log to `stderr.txt`. In the
+three-way sweep the container log equals the k8s pod log, 12 of 12. `stderr.txt` is outside the
+14-hash byte-identity comparison; that is now asserted.
+
+**Perturbations.**
+- Dropping the capture, in a clone, fails 4 of 5 container tests.
+- The manager dropped the tail from the failure detail, in a clone: 1 unit test failed.
+
+**Re-run by the manager.** The first rerun failed 2 of the new Docker tests (defect 5). After the
+manager's test fixes: 5 of 5 runs passed, 5 tests each, plus lib 131 and `k8s_sweep` 4.
+
+### Defects found, and their root causes
+
+1. **Question 240's defect.** Root cause: one float32 placement against the primary's origin was
+   drawn by every viewport. Fixed (task 1). **Definitively root-caused.**
+2. **The manager's design, as briefed, was wrong for Float32-backed objects.** Adding the f64
+   shift difference into an instance matrix or trail buffer rounds it away again (about 0.24 m
+   at LEO). The worker carries it on the mesh's or line's f64 `position` instead, and the manager's
+   perturbation shows the briefed form fails. **Definitively root-caused.**
+3. **The proposer readiness flake.** Root cause: unbuffered stderr from two processes on one pipe
+   interleaves inside a line, and a printed line is not a readiness signal. Fixed (task 4).
+   **Definitively root-caused,** and reproduced deterministically.
+4. **The ClickHouse docs said `-0.0` changes a study's identity.** For a plain proto3 `double` it
+   does not: prost skips any value `== 0.0`, `-0.0` included. Only optional fields and NaN
+   payloads are bit-sensitive. Both docs are corrected (the manager fixed `content_sha256`'s), and
+   a unit test pins it. A ClickHouse re-put of `0.0` over a stored `-0.0` therefore counts as
+   identical, which is recorded below.
+5. **Two timing assumptions in task 5's new Docker tests,** found by the manager's rerun:
+   - lines written microseconds apart on stdout and stderr were stamped in either order;
+   - a container being removed answers `docker logs` with "dead or marked for removal" before it
+     answers "No such container".
+   The tests are fixed, and 5 of 5 reruns passed. The production behaviour was right both times.
+6. **`FileStudyStore` silently replaced a study when a sweep was rerun with a different
+   `--out-dir`.** Root cause: `products_uri` is the sample directory. It is now a refusal
+   (decision 11).
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. The lead had already reset `target/debug/deps` (0 entries at the start). The gate began at
+   22,636 entries and ended at 66,303.
+2. All five tasks ran at once: their files were disjoint. Tasks 3 and 5 both touch `av-sweep`, in
+   different files.
+3. Task 1 uses the render-time per-view write, not per-viewport copies (the costs are above).
+4. Float32-backed objects keep only `fround(abs − O_view)` in their buffers and carry the view's
+   shift difference on their f64 `position` (defect 2).
+5. Task 1's test scenarios sample every 5 s with the event mid-window. A float32 vertex 200 km
+   from any view's origin cannot beat about 7 mm, primary or not, so with 60 s samples the trail's
+   newest vertex and the start-of-window event could not meet a centimetre bound in any view.
+   Question 46's bound is a bound near the view's origin; this is the floating origin's ordinary
+   behaviour.
+6. The primary after `fit()` is held to "bit-identical to `_toLocal`", not to 1 cm. With its
+   origin at the Earth it is inherently 0.4–42 m off for these objects, and question 252 requires it
+   unchanged. The framed primary is held to 1 cm.
+7. Frame time: the budget is asserted on what the change adds (placement, no-GL tick, uploads),
+   because SwiftShader's `finish()` p95 exceeds 16.7 ms before and after. The real-GPU number is
+   the lead's drive.
+8. Task 2: a declared model enters `config_hash`, after the entity parts, in entity-id order.
+   This follows question 239 decision 2, under which a model enters the SoS hash only when set.
+9. Task 2: an unconditional empty-string write is an equivalent mutant (proto3 `string` has no
+   presence), so no test is contrived for it.
+10. Task 3:
+    - identity is the decoded study's `content_sha256`, not the raw file bytes;
+    - studies are published by rename;
+    - `existing_write_id` carries the study directory for the file store;
+    - an undecodable existing study is a `Decode` error;
+    - an empty `sweep_id` is refused;
+    - only missing derived files are healed.
+11. Task 3: rerunning a sweep into one `--store-dir` with a different `--out-dir` is now refused,
+    after the whole study has run. The study is still in `--out-dir`. Only the manual authoring
+    script can meet it.
+12. Task 4: the probe is `docker exec` with bash's `/dev/tcp`, which needs no new image. The old
+    substring wait is kept as `wait_for_log_substrings`, only as the reproduction's reference.
+13. Task 5: `ContainerExecutor::run` sits beside `execute`, the trait is unchanged, and the k8s
+    capping is shared through `pub(crate)`.
+14. Task 5: cross-stream order is the daemon's per-line timestamp, which is faithful only for lines
+    more than microseconds apart. Stdout comes first on a tie.
+15. The manager made two edits beyond the workers' diffs:
+    - corrected the `content_sha256` doc (defect 4), in task 3's commit;
+    - fixed task 5's two test timing assumptions (defect 5), in task 5's commit.
+16. Workers could not read the round rules at first. The session's read-dedup layer returned
+    stubs for files the manager had written. Task 3's first worker stopped instead of working
+    around it, and was re-dispatched with the rules inline. No refused command was wrapped by
+    anyone. The refusals met (`cat`, `sed`, `head` and `tail` on some paths, `python -` heredocs)
+    were left out.
+17. The review clones were built with clone-only spoore path rewrites, and were deleted.
+
+### Found, not fixed
+
+- `FileStudyStore` does not validate `sweep_id` as a path: `../x` and `a/b` are joined onto the
+  root. This predates the round.
+- Study mode writes `--store-dir` before `--store-clickhouse`, so a file-store refusal skips the
+  ClickHouse write.
+- A store refusal arrives only after the whole study has run.
+- ClickHouse identity treats a plain `double`'s `-0.0` and `0.0` as the same content (defect 4).
+- `pick()` in an extra viewport raycasts the primary's placement (at most a few tenths of a metre,
+  as before).
+- Bodies and the globe are still placed against the primary's origin. They are body-scale, and
+  out of question 252's scope.
+- `web/js/entities_jitter_check.mjs` prints a measurement with no pass/fail, so it exits 0 by
+  construction. Its pytest driver asserts the bound.
+- `av-gateway` logs "cannot dial CommandAuthorityService" when it starts before `av-command`. It
+  falls back to a lazy channel and proposals work.
+- SwiftShader's `finish()` p95 frame time (decision 7).
+
+### Gates
+
+The gate ran at `74e7648`, the last code commit, by
+`/Users/probe/code/altavista-lead/rounds/heavy-prec/gate/run_gate.sh`. Its phases ran in sequence,
+and each phase's whole output was captured before it was read.
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | **clean, exit 0** (no proto change this round) |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **181 binaries, 1856 passed, 0 failed, 4 ignored, exit 0**, 1749 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| the same clippy for `av-kernel`, `av-run` and `av-sweep` with `--no-default-features` | **clean, exit 0** each |
+| required-features lint (steps inline through `cargo-slot`) | **clean**: 5 groups (`av-cdm` `full`, `av-kernel`/`av-run`/`av-sweep` `gmat`, `av-jobs` `store-fixture`) |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok**, exit 0 |
+| `cargo test -p av-kernel --no-fail-fast` | **57 binaries, 1004 passed, 0 failed, 1 ignored, exit 0**, 559 s |
+| every `web/js/**/*_check.mjs` | **26 of 30 exit 0**; the four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` exit 1) and pass under pytest |
+| the real-Chrome viewer tests (precision, framing, entities, CDM visual model) | **19 passed**, 209 s |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1435 passed, 0 failed, 26 skipped**, 735 s; every skip is a visible opt-in gate (`AV_SBOM_REBUILD`, `AV_KIT_*`, the unbuilt proof kit, `AV_CFS_RUN_REPRO_BUILD`, two cFS build artefacts absent from this checkout) |
+
+No compliance test failed. No SBOM or manifest moved this round.
+
+### What remains, each with its reason
+
+- The lead's browser drive of task 1, which closes the round. It includes a real-GPU frame time.
+- The "Found, not fixed" items above, each for the lead to schedule.
