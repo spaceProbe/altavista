@@ -767,6 +767,16 @@ fn k8s_container_and_native_studies_are_byte_identical_and_several_pods_run_at_o
     assert!(b.failed().is_empty(), "(b) failures: {:?}", b.failed().iter().map(|s| (&s.run_id, &s.error)).collect::<Vec<_>>());
     assert!(docker_containers_with(&format!("av.test.run_id={}", env.run_id)).iter().all(|n| n.starts_with("k8s_")), "a (b) container was left behind: {:?}", docker_containers_with(&format!("av.test.run_id={}", env.run_id)));
     describe(&mut report, &b);
+    // The container executor returns the job's log (question 252, heavy-prec-5): a successful
+    // container sample's stderr.txt is the container's own output, never empty. `stderr.txt` is not
+    // one of the study's hashes (`move_aside` hashes sweep_results.pb/.json and the run_products.pb of
+    // each sample: 14 for this fixture), so the byte-for-byte claim below does not depend on it.
+    assert_eq!(b.stderr_txt.len(), FIXTURE_SAMPLES);
+    for (name, text) in &b.stderr_txt {
+        assert!(text.ends_with('\n') && text.contains("av-sweep"), "(b) {name}/stderr.txt is not the container's log: {text:?}");
+    }
+    let _ = writeln!(report, "(b) every container sample's stderr.txt holds the container's log; e.g. {}: {:?}", b.stderr_txt.keys().next().unwrap(), b.stderr_txt.values().next().unwrap());
+    assert_eq!(b.hashes.len(), FIXTURE_SAMPLES + 2, "the compared hashes are the two result files and one run_products.pb per sample; no stderr.txt");
 
     // (c) this host's native av-sweep, built --no-default-features, as child processes.
     let mut args = fixture_args(&out, 4);
@@ -806,6 +816,10 @@ fn k8s_container_and_native_studies_are_byte_identical_and_several_pods_run_at_o
     // stderr.txt of a sample: the k8s pod's log versus the child's stderr (informational).
     let log_equal = a.stderr_txt.iter().filter(|(k, v)| c.stderr_txt.get(*k) == Some(v)).count();
     let _ = writeln!(report, "stderr.txt: {log_equal} of {} sample logs (k8s pod log) equal the native child's stderr byte for byte", a.stderr_txt.len());
+    let container_equal = b.stderr_txt.iter().filter(|(k, v)| c.stderr_txt.get(*k) == Some(v)).count();
+    let _ = writeln!(report, "stderr.txt: {container_equal} of {} sample logs (container log) equal the native child's stderr byte for byte", b.stderr_txt.len());
+    let k8s_equal = b.stderr_txt.iter().filter(|(k, v)| a.stderr_txt.get(*k) == Some(v)).count();
+    let _ = writeln!(report, "stderr.txt: {k8s_equal} of {} sample logs (container log) equal the k8s pod log byte for byte", b.stderr_txt.len());
     write_proof("three_way_byte_identity", &report);
     assert!(ab, "the k8s study and the container study differ: {:?}", differences(&a, &b));
     if std::env::var("AV_SWEEP_REQUIRE_NATIVE_EQUAL").as_deref() == Ok("1") {

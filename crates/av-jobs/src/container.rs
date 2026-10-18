@@ -142,15 +142,52 @@
 //! - Any OTHER non-zero `docker run` exit is `docker run` (run in the foreground, never `-d`)
 //!   faithfully propagating the CONTAINED command's own real exit status -- `NONZERO_EXIT`,
 //!   with that real code, exactly parallel to `ProcessExecutor`'s own non-zero-exit handling.
+//!
+//! # The job's log (question 252, heavy-prec-5)
+//!
+//! [`ContainerExecutor::run`] returns a [`ContainerReport`] -- the [`Executor`] result plus the
+//! container's log -- the way [`crate::k8s::K8sJobExecutor::run`] returns a `RunReport`;
+//! [`Executor::execute`] is `run(..).result`, so no other `Executor` implementation and no
+//! `Executor` caller changes (the trait stays as it was; a trait change would have touched
+//! `ProcessExecutor`, `TilerExecutor`, `K8sJobExecutor` and every test double for one executor's
+//! benefit).
+//!
+//! - **When.** The container is not `--rm`; `docker run` (foreground) returns once the command has
+//!   exited and its streams are drained, and [`Cleanup`] removes the container only when
+//!   `run` returns. The log is read in between, with `docker logs --timestamps --tail <max
+//!   lines + 1>`, on every path where `docker run` ran -- success, nonzero exit, start failure --
+//!   before the container is removed. `docker run`'s own stdout is discarded (the log, not the
+//!   run's pipe, is the record) and its stderr is read through a bounded tail
+//!   ([`RUN_STDERR_KEEP`]), so a chatty job cannot exhaust this process's memory.
+//! - **No silent empty log.** If there is no container (the image gate or scratch setup failed
+//!   before `docker run`), or `docker logs` fails (the container is gone: `No such container`; the
+//!   daemon's log driver cannot be read; docker could not be launched), `log` is `None` and
+//!   `log_error` says why.
+//! - **Caps.** Exactly the k8s executor's: [`crate::k8s`]'s `shape_log` (the same code, shared as
+//!   `pub(crate)`; the same 64 KiB / 1000-line defaults and the same two marker lines) applied to
+//!   the merged text; the failure detail's tail is the k8s `log_tail` (last 15 lines, at most 1500
+//!   bytes). The bytes read from each `docker logs` stream are themselves bounded
+//!   (cap + 31 bytes per line kept), so an unbounded single line cannot exhaust memory either.
+//! - **Interleaving.** The daemon's log has two streams (stdout, stderr) and `docker logs` prints
+//!   them to two pipes. The per-line timestamp the daemon stamps (fixed-width RFC 3339, 1 ns
+//!   resolution) is the only cross-stream order available, so the two are merged by it (a tie keeps
+//!   stdout first) and the timestamp is then dropped, giving one text like a pod log. Order within
+//!   a stream is exact; across streams it is the order the daemon read the two pipes in, which
+//!   measurably differs from the order the job wrote in by microseconds in a tight loop (the
+//!   daemon reads each pipe on its own goroutine), faithful at the granularity of anything a human
+//!   reads. A final line the job printed without a newline gets one. Stream identity is not
+//!   marked (a pod log has none either).
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use av_cdm::pb;
 
+use crate::k8s::{log_tail, shape_log, LogCapture, DEFAULT_LOG_CAP_BYTES, DEFAULT_LOG_MAX_LINES};
 use crate::runner::{Executor, JobInput, JobOutput};
 
 /// Question 156's label convention, for containers THIS EXECUTOR creates -- distinct from
@@ -231,8 +268,62 @@ impl Drop for Cleanup {
     }
 }
 
+/// How much of `docker run`'s own stderr is kept (its tail): it matters only when the container
+/// never started (the daemon's error text); a started container's output is read from its log.
+const RUN_STDERR_KEEP: usize = 16 * 1024;
+
+/// What one job run produced, beyond the [`Executor`] result -- the container executor's
+/// counterpart of [`crate::k8s::RunReport`].
+#[derive(Debug)]
+pub struct ContainerReport {
+    pub job_id: String,
+    /// The container's name, once a `docker run` was attempted (`None`: the job never got that far).
+    pub container: Option<String>,
+    /// What [`Executor::execute`] returns. A failure's `detail` ends with the log tail (or why
+    /// there is no log).
+    pub result: Result<Vec<JobOutput>, pb::JobFailure>,
+    /// The container's stdout and stderr, merged and capped (see this module's doc).
+    pub log: Option<LogCapture>,
+    /// Why there is no `log`; set exactly when `log` is `None`.
+    pub log_error: Option<String>,
+}
+
+/// What `run_job` learned about the log, written as it goes so a failure can quote it.
+#[derive(Default)]
+struct LogSlot {
+    container: Option<String>,
+    log: Option<LogCapture>,
+    log_error: Option<String>,
+}
+
+impl LogSlot {
+    /// The text a failure's detail ends with: the log tail, or why there is no log.
+    fn suffix(&self) -> String {
+        failure_log_suffix(self.log.as_ref().map(|l| l.text.as_str()), self.log_error.as_deref())
+    }
+}
+
 impl Executor for ContainerExecutor {
     fn execute(&self, spec: &pb::JobSpec, inputs: &[JobInput]) -> Result<Vec<JobOutput>, pb::JobFailure> {
+        self.run(spec, inputs).result
+    }
+}
+
+impl ContainerExecutor {
+    /// Runs one job like [`Executor::execute`] and also returns the container's log, captured
+    /// (capped, truncation marked) before the container is removed -- on success and on failure.
+    pub fn run(&self, spec: &pb::JobSpec, inputs: &[JobInput]) -> ContainerReport {
+        let mut slot = LogSlot::default();
+        let result = self.run_job(spec, inputs, &mut slot);
+        let log_error = match (&slot.log, slot.log_error) {
+            (Some(_), _) => None,
+            (None, Some(e)) => Some(e),
+            (None, None) => Some("no container was created for this job (it failed before `docker run`)".to_string()),
+        };
+        ContainerReport { job_id: spec.job_id.clone(), container: slot.container, result, log: slot.log, log_error }
+    }
+
+    fn run_job(&self, spec: &pb::JobSpec, inputs: &[JobInput], slot: &mut LogSlot) -> Result<Vec<JobOutput>, pb::JobFailure> {
         let image_ref = digest_gate(&spec.container_image, &spec.container_image_digest)?;
 
         let run_id = format!("{}-{}", sanitize_for_container_name(&spec.job_id), unique_suffix());
@@ -278,11 +369,32 @@ impl Executor for ContainerExecutor {
         args.push(image_ref);
         args.extend(spec.command.iter().cloned());
 
-        let output = Command::new("docker").args(&args).output().map_err(|e| start_failed(format!("could not launch `docker run`: {e}")))?;
+        // stdout is discarded and stderr kept only as a bounded tail: the record of what the job
+        // printed is `docker logs`, below, capped (this module's doc, "The job's log").
+        let mut child = Command::new("docker")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| start_failed(format!("could not launch `docker run`: {e}")))?;
+        let run_stderr = match child.stderr.take() {
+            Some(pipe) => read_tail(pipe, RUN_STDERR_KEEP),
+            None => Vec::new(),
+        };
+        let status = child.wait().map_err(|e| start_failed(format!("waiting for `docker run`: {e}")))?;
 
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Whatever happened, read the log now: the container still exists (Cleanup removes it only
+        // when this function returns).
+        slot.container = Some(container_name.clone());
+        match capture_log(&container_name, DEFAULT_LOG_CAP_BYTES, DEFAULT_LOG_MAX_LINES) {
+            Ok(log) => slot.log = Some(log),
+            Err(e) => slot.log_error = Some(e),
+        }
+
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&run_stderr).trim().to_string();
             // See this module's own doc, "Failure-kind reuse": 125/126/127 are Docker's own
             // reserved exit codes for "the container never really started" (daemon-level
             // failure / command not executable / command not found) -- a genuinely new failure
@@ -293,19 +405,27 @@ impl Executor for ContainerExecutor {
             if matches!(code, 125..=127) {
                 return Err(pb::JobFailure {
                     kind: pb::JobFailureKind::ExecutorStartFailed as i32,
-                    detail: format!("container for job {:?} could not start (docker run exit {code}): {stderr}", spec.job_id),
+                    detail: format!("container for job {:?} could not start (docker run exit {code}): {stderr}{}", spec.job_id, slot.suffix()),
                     exit_code: code,
                 });
             }
+            // `docker run`'s stderr here is the job's own stderr; it is quoted only when the log
+            // could not be read (otherwise the log tail, stdout and stderr both, says it).
+            let own = if slot.log.is_none() && !stderr.is_empty() { format!(": {stderr}") } else { String::new() };
             return Err(pb::JobFailure {
                 kind: pb::JobFailureKind::NonzeroExit as i32,
-                detail: format!("container for job {:?} exited with status {code}: {stderr}", spec.job_id),
+                detail: format!("container for job {:?} exited with status {code}{own}{}", spec.job_id, slot.suffix()),
                 exit_code: code,
             });
         }
 
+        let rejected = |detail: String| {
+            let mut f = output_rejected(detail);
+            f.detail.push_str(&slot.suffix());
+            f
+        };
         let mut out_paths: Vec<PathBuf> = fs::read_dir(&out_dir)
-            .map_err(|e| output_rejected(format!("reading output scratch dir {out_dir:?}: {e}")))?
+            .map_err(|e| rejected(format!("reading output scratch dir {out_dir:?}: {e}")))?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|p| p.is_file())
@@ -314,7 +434,7 @@ impl Executor for ContainerExecutor {
 
         let mut outputs = Vec::with_capacity(out_paths.len());
         for path in out_paths {
-            let bytes = fs::read(&path).map_err(|e| output_rejected(format!("reading output file {path:?}: {e}")))?;
+            let bytes = fs::read(&path).map_err(|e| rejected(format!("reading output file {path:?}: {e}")))?;
             outputs.push(JobOutput { bytes, media_type: "application/octet-stream".to_string(), manifest: false });
         }
 
@@ -323,6 +443,114 @@ impl Executor for ContainerExecutor {
         // already been read into memory, as part of returning it below.
         Ok(outputs)
     }
+}
+
+/// The end of a failure's `detail`: the k8s executor's `; log tail: "..."` (an empty log adds
+/// nothing), or `; no log: <why>` so a missing log is never mistaken for an empty one.
+fn failure_log_suffix(log: Option<&str>, log_error: Option<&str>) -> String {
+    match (log, log_error) {
+        (Some(text), _) if !text.is_empty() => format!("; log tail: {:?}", log_tail(text)),
+        (Some(_), _) => "; the job printed nothing".to_string(),
+        (None, Some(why)) => format!("; no log: {why}"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Reads `r` to its end, keeping only the last `keep` bytes.
+fn read_tail(mut r: impl Read, keep: usize) -> Vec<u8> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                kept.extend_from_slice(&buf[..n]);
+                if kept.len() > 2 * keep {
+                    kept.drain(..kept.len() - keep);
+                }
+            }
+        }
+    }
+    if kept.len() > keep {
+        kept.drain(..kept.len() - keep);
+    }
+    kept
+}
+
+/// Reads `r` to its end (so the writer never blocks), keeping only the first `keep` bytes.
+fn read_head(mut r: impl Read, keep: usize) -> Vec<u8> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = keep.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+            }
+        }
+    }
+    kept
+}
+
+/// Width of the fixed-format RFC 3339 timestamp `docker logs --timestamps` prefixes each line with
+/// (`2026-10-18T02:18:48.310935567Z`), then one space.
+const DOCKER_TS_LEN: usize = 30;
+
+/// Reads the container's log (`docker logs --timestamps --tail <max_lines + 1>`) and shapes it with
+/// the k8s executor's own capping. `Err` says why there is no log.
+fn capture_log(container: &str, cap_bytes: usize, max_lines: usize) -> Result<LogCapture, String> {
+    let mut child = Command::new("docker")
+        .args(["logs", "--timestamps", "--tail", &(max_lines + 1).to_string(), container])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not launch `docker logs {container}`: {e}"))?;
+    // Per stream, enough for cap + 1 bytes of text plus the timestamp on each of the lines kept.
+    let keep = cap_bytes + 1 + (max_lines + 1) * (DOCKER_TS_LEN + 1);
+    let (out_pipe, err_pipe) = (child.stdout.take(), child.stderr.take());
+    // The two pipes are read at once: one full pipe would stall docker while this waits on the other.
+    let (stdout, stderr) = std::thread::scope(|s| {
+        let out = s.spawn(|| out_pipe.map(|p| read_head(p, keep)).unwrap_or_default());
+        let err = s.spawn(|| err_pipe.map(|p| read_head(p, keep)).unwrap_or_default());
+        (out.join().unwrap_or_default(), err.join().unwrap_or_default())
+    });
+    let status = child.wait().map_err(|e| format!("waiting for `docker logs {container}`: {e}"))?;
+    if !status.success() {
+        // On failure the daemon's error is on stderr (a success puts the container's own stderr there).
+        return Err(format!("`docker logs {container}` failed ({status}): {}", String::from_utf8_lossy(&stderr).trim()));
+    }
+    Ok(shape_log(container, &merge_streams(&stdout, &stderr), cap_bytes, max_lines))
+}
+
+/// Merges `docker logs --timestamps` output of the two streams into one text: stably ordered by the
+/// daemon's timestamp (stdout first on a tie), the timestamp dropped, every line newline-terminated.
+fn merge_streams(stdout: &[u8], stderr: &[u8]) -> Vec<u8> {
+    let mut lines: Vec<(&[u8], &[u8])> = Vec::new();
+    for stream in [stdout, stderr] {
+        let mut last_ts: &[u8] = &[];
+        let mut chunks: Vec<&[u8]> = stream.split(|b| *b == b'\n').collect();
+        if chunks.last().is_some_and(|c| c.is_empty()) {
+            chunks.pop();
+        }
+        for chunk in chunks {
+            if chunk.len() > DOCKER_TS_LEN && chunk[DOCKER_TS_LEN] == b' ' && chunk[4] == b'-' && chunk[DOCKER_TS_LEN - 1] == b'Z' {
+                last_ts = &chunk[..DOCKER_TS_LEN];
+                lines.push((last_ts, &chunk[DOCKER_TS_LEN + 1..]));
+            } else {
+                // Only a line cut short by the read bound has no timestamp: it follows its stream's last.
+                lines.push((last_ts, chunk));
+            }
+        }
+    }
+    lines.sort_by(|a, b| a.0.cmp(b.0));
+    let mut merged = Vec::with_capacity(lines.iter().map(|(_, t)| t.len() + 1).sum());
+    for (_, text) in lines {
+        merged.extend_from_slice(text);
+        merged.push(b'\n');
+    }
+    merged
 }
 
 fn start_failed(detail: String) -> pb::JobFailure {
@@ -441,6 +669,69 @@ mod tests {
              twice only because no mechanism imports the Python list into this crate's production code (see this module's \
              own doc comment)"
         );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The log: merging, capping and the failure text. No Docker needed.
+    // ---------------------------------------------------------------------------------------
+
+    fn ts(n: u32) -> String {
+        format!("2026-10-18T02:18:48.{n:09}Z")
+    }
+
+    #[test]
+    fn the_two_streams_merge_by_timestamp_with_stdout_first_on_a_tie() {
+        let out = format!("{} o1\n{} o2\n{} o3 no newline", ts(1), ts(3), ts(3));
+        let err = format!("{} e1\n{} e2\n", ts(2), ts(3));
+        let merged = String::from_utf8(merge_streams(out.as_bytes(), err.as_bytes())).unwrap();
+        // o2 and o3 and e2 share a stamp: stdout's two first, in their own order, then stderr's.
+        assert_eq!(merged, "o1\ne1\no2\no3 no newline\ne2\n");
+    }
+
+    #[test]
+    fn merging_keeps_empty_lines_and_a_line_cut_short_follows_its_own_stream() {
+        let out = format!("{} \n{} a\n{}", ts(1), ts(2), "2026-10-18T0");
+        let merged = String::from_utf8(merge_streams(out.as_bytes(), b"")).unwrap();
+        assert_eq!(merged, "\na\n2026-10-18T0\n");
+        assert_eq!(merge_streams(b"", b""), b"");
+    }
+
+    #[test]
+    fn the_container_log_is_capped_exactly_as_the_k8s_log_is() {
+        // The same function, so the same marker lines; here the container's name is the source.
+        let long = vec![b'x'; DEFAULT_LOG_CAP_BYTES + 100];
+        let big = shape_log("c", &long, DEFAULT_LOG_CAP_BYTES, DEFAULT_LOG_MAX_LINES);
+        assert!(big.truncated && big.text.contains(&format!("[av: log truncated at {DEFAULT_LOG_CAP_BYTES} bytes")), "{}", &big.text[big.text.len() - 80..]);
+        let many: String = (0..DEFAULT_LOG_MAX_LINES + 5).map(|i| format!("{i}\n")).collect();
+        let kept = shape_log("c", many.as_bytes(), DEFAULT_LOG_CAP_BYTES, DEFAULT_LOG_MAX_LINES);
+        assert!(kept.truncated && kept.text.starts_with(&format!("[av: log truncated: only the last {DEFAULT_LOG_MAX_LINES} lines kept]\n5\n")), "{}", &kept.text[..80]);
+    }
+
+    #[test]
+    fn a_failures_detail_carries_the_log_tail_or_says_why_there_is_none() {
+        let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let with_log = failure_log_suffix(Some(&text), None);
+        assert!(with_log.starts_with("; log tail: \"line 25\\n") && with_log.ends_with("line 39\""), "{with_log}");
+        assert_eq!(failure_log_suffix(Some(""), None), "; the job printed nothing");
+        assert_eq!(failure_log_suffix(None, Some("No such container")), "; no log: No such container");
+        assert_eq!(failure_log_suffix(None, None), "");
+    }
+
+    #[test]
+    fn a_job_that_never_reached_docker_run_reports_no_log_with_a_reason() {
+        let exec = ContainerExecutor::new(std::env::temp_dir(), BTreeMap::new());
+        // Empty image: refused by digest_gate before any docker call.
+        let report = exec.run(&pb::JobSpec { job_id: "j".into(), ..Default::default() }, &[]);
+        assert!(report.result.is_err() && report.container.is_none() && report.log.is_none(), "{report:?}");
+        assert!(report.log_error.as_deref().is_some_and(|e| e.contains("no container was created")), "{report:?}");
+    }
+
+    #[test]
+    fn the_bounded_readers_keep_the_tail_and_the_head() {
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        assert_eq!(read_tail(&data[..], 1000), data[data.len() - 1000..]);
+        assert_eq!(read_head(&data[..], 1000), data[..1000]);
+        assert_eq!(read_tail(&data[..10], 1000), data[..10]);
     }
 
     #[test]

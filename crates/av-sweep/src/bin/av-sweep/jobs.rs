@@ -33,7 +33,10 @@
 //!
 //! A failed job is a failed sample ([`crate::study`]'s `failed_sample`, error text from
 //! [`describe_failure`]: the failure kind, exit code and detail, which for k8s carries the
-//! Kubernetes reason, the pod names and the log tail). Nothing here retries; the k8s executor
+//! Kubernetes reason, the pod names and the log tail, and for a container the exit status and the
+//! log tail, or why there is no log). The job's log -- the pod's, or the container's stdout and
+//! stderr, capped the same way -- is each sample's `stderr.txt`; a log that could not be read is
+//! written as `<no ... log: reason>`, never left empty. Nothing here retries; the k8s executor
 //! additionally refuses a second pod for a job (`K8sError::Retried`).
 //!
 //! # Concurrency
@@ -51,7 +54,7 @@ use std::time::{Duration, Instant};
 use av_cdm::pb;
 use av_jobs::container::{ContainerExecutor, CONTAINER_INPUT_DIR, CONTAINER_OUTPUT_DIR};
 use av_jobs::k8s::{K8sConfig, K8sJobExecutor, Kubeconfig, NetworkGate, Resources};
-use av_jobs::runner::{Executor, JobInput, JobOutput};
+use av_jobs::runner::{JobInput, JobOutput};
 use av_kernel::drm::ExecutionErrorMode;
 use av_sweep::{sha256_hex, SampleConfig};
 
@@ -112,14 +115,17 @@ impl JobBackend for K8sBackend {
     }
 }
 
-/// `--executor container`: [`ContainerExecutor::execute`]. The executor returns no log of a
-/// successful container, so there is none to write (a failure's `docker run` stderr is in its
-/// detail).
+/// `--executor container`: [`ContainerExecutor::run`], keeping the report's log (the container's
+/// stdout and stderr, capped like the k8s pod log) for `stderr.txt`; a log that could not be read is
+/// said so in `stderr.txt`, never left empty.
 pub struct ContainerBackend(pub ContainerExecutor);
 
 impl JobBackend for ContainerBackend {
     fn run(&self, spec: &pb::JobSpec, inputs: &[JobInput]) -> JobOutcome {
-        JobOutcome { result: self.0.execute(spec, inputs), log: None, placement: None, warning: None }
+        let report = self.0.run(spec, inputs);
+        let log = report.log.as_ref().map(|l| l.text.clone()).or_else(|| report.log_error.as_ref().map(|e| format!("<no container log: {e}>\n")));
+        let placement = report.container.as_ref().map(|c| format!("container {c}"));
+        JobOutcome { result: report.result, log, placement, warning: None }
     }
 }
 
@@ -584,5 +590,18 @@ mod tests {
     fn describe_failure_names_an_unknown_kind_rather_than_hiding_it() {
         let text = describe_failure(&pb::JobFailure { kind: 999, detail: "d".into(), exit_code: 3 });
         assert!(text.contains("unknown kind 999") && text.contains("exit code 3") && text.ends_with(": d"), "{text}");
+    }
+
+    /// No Docker: a job refused before any container exists has no log, and `stderr.txt` says why
+    /// instead of being left empty (the container log itself is proved against Docker in
+    /// `tests/k8s_sweep.rs` and `av-jobs`' `tests/container.rs`).
+    #[test]
+    fn a_container_job_with_no_log_says_why_in_stderr_txt() {
+        let backend = ContainerBackend(ContainerExecutor::new(std::env::temp_dir(), BTreeMap::new()));
+        let outcome = backend.run(&pb::JobSpec { job_id: "j".into(), ..Default::default() }, &[]);
+        assert!(outcome.result.is_err());
+        let log = outcome.log.expect("a reason, never None");
+        assert!(log.starts_with("<no container log: no container was created") && log.ends_with(">\n"), "{log}");
+        assert_eq!(outcome.placement, None);
     }
 }

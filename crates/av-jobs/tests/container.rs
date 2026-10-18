@@ -470,3 +470,150 @@ fn container_executor_runs_a_real_job_inside_a_real_container() {
     let remaining_volumes = docker(&["volume", "ls", "--filter", &label_filter, "-q"]);
     assert_eq!(remaining_volumes, "", "volume(s) labelled {label_filter} still exist (this executor never creates one): {remaining_volumes:?}");
 }
+
+// -----------------------------------------------------------------------------------------
+// The job's log (question 252, heavy-prec-5): `ContainerExecutor::run` returns it, capped and
+// marked like the k8s pod log, and a failure's detail carries its tail. Each test takes the docker
+// lock itself (never wrap these in with_docker_lock.py) and uses only the pinned alpine digest.
+// -----------------------------------------------------------------------------------------
+
+/// Runs `command` as one job through `ContainerExecutor::run` and returns the report; asserts no
+/// container labelled for the job outlives the call.
+fn run_logged_job(test_name: &str, job_id_prefix: &str, command: &[&str], inputs: &[av_jobs::runner::JobInput]) -> av_jobs::container::ContainerReport {
+    let (_image_ref, recorded_id) = parse_image_digest_md();
+    let run_id = test_run_id();
+    let executor = ContainerExecutor::new(container_scratch_root(), labels_from_test_label_args(&run_id));
+    let job_id = format!("{job_id_prefix}-{run_id}");
+    let spec = base_spec(&job_id, command.iter().map(|s| (*s).to_string()).collect(), &recorded_id);
+    let report = executor.run(&spec, inputs);
+    let remaining = docker(&["ps", "-a", "--filter", &format!("label=av.job.id={job_id}"), "-q"]);
+    assert_eq!(remaining, "", "{test_name}: container for job {job_id:?} still exists after the run");
+    report
+}
+
+#[test]
+fn container_executor_returns_the_log_of_a_successful_job_stdout_and_stderr_in_order() {
+    const TEST_NAME: &str = "container_executor_returns_the_log_of_a_successful_job_stdout_and_stderr_in_order";
+    gate_or_skip!(TEST_NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+
+    // The sleeps put 200 ms between lines of different streams, far above the daemon's
+    // microsecond-scale read-order jitter, so the merged order is exactly the write order.
+    let script = format!("echo A-stdout-1; sleep 0.2; echo B-stderr-1 >&2; sleep 0.2; echo C-stdout-2; sleep 0.2; echo D-stderr-2 >&2; printf done > {CONTAINER_OUTPUT_DIR}/000");
+    let report = run_logged_job(TEST_NAME, "job-log-ok", &["/bin/sh", "-c", &script], &[]);
+
+    let outputs = report.result.as_ref().unwrap_or_else(|f| panic!("{TEST_NAME}: {f:?}"));
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].bytes, b"done");
+    let log = report.log.as_ref().unwrap_or_else(|| panic!("{TEST_NAME}: no log, log_error={:?}", report.log_error));
+    assert_eq!(report.log_error, None);
+    assert!(!log.truncated, "{log:?}");
+    assert_eq!(log.text, "A-stdout-1\nB-stderr-1\nC-stdout-2\nD-stderr-2\n", "stdout and stderr, merged in the order the job wrote them");
+    assert_eq!(report.container.as_deref(), Some(log.pod.as_str()), "the log names the container it came from");
+    println!("\n--- {TEST_NAME}: log of container {}:\n{}---", log.pod, log.text);
+}
+
+#[test]
+fn container_executor_caps_a_log_longer_than_the_cap_by_bytes_and_by_lines_and_marks_it() {
+    const TEST_NAME: &str = "container_executor_caps_a_log_longer_than_the_cap_by_bytes_and_by_lines_and_marks_it";
+    gate_or_skip!(TEST_NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+
+    // 150 000 bytes (over the 64 KiB cap) in 1500 lines of 99 characters plus the newline.
+    let bytes = run_logged_job(TEST_NAME, "job-log-bytes", &["/bin/sh", "-c", "i=0; while [ $i -lt 1500 ]; do printf '%099d\\n' $i; i=$((i+1)); done"], &[]);
+    assert!(bytes.result.is_ok(), "{TEST_NAME}: {:?}", bytes.result);
+    let log = bytes.log.as_ref().unwrap_or_else(|| panic!("{TEST_NAME}: no log, log_error={:?}", bytes.log_error));
+    assert!(log.truncated, "{TEST_NAME}: a 150 kB log must be truncated");
+    let marker = "\n[av: log truncated at 65536 bytes (of the last 1000 lines)]\n";
+    assert!(log.text.ends_with(marker), "{TEST_NAME}: marker missing: ...{:?}", &log.text[log.text.len().saturating_sub(120)..]);
+    assert_eq!(log.text.len(), 64 * 1024 + marker.len(), "the text is cut at exactly the byte cap, then the marker");
+    // The tail window is 1001 lines of 100 bytes (lines 499..1499, as the k8s executor asks for lines + 1);
+    // the byte cap bites first and keeps the window's first 64 KiB.
+    assert!(log.text.starts_with(&format!("{:099}\n", 499)), "{TEST_NAME}: {:?}", &log.text[..120]);
+
+    // Short lines, so only the line cap bites: 1500 lines, the last 1000 kept.
+    let lines = run_logged_job(TEST_NAME, "job-log-lines", &["/bin/sh", "-c", "seq 1 1500"], &[]);
+    let log = lines.log.as_ref().unwrap_or_else(|| panic!("{TEST_NAME}: no log, log_error={:?}", lines.log_error));
+    assert!(log.truncated);
+    assert!(log.text.starts_with("[av: log truncated: only the last 1000 lines kept]\n501\n502\n"), "{TEST_NAME}: {:?}", &log.text[..80]);
+    assert!(log.text.ends_with("1499\n1500\n"), "{TEST_NAME}: {:?}", &log.text[log.text.len() - 40..]);
+    assert_eq!(log.text.lines().count(), 1001, "the marker line plus the last 1000 lines");
+
+    // One line larger than the cap: the read is bounded, the cut and the marker are the same.
+    let single = run_logged_job(TEST_NAME, "job-log-oneline", &["/bin/sh", "-c", "head -c 300000 /dev/zero | tr '\\0' q; echo"], &[]);
+    let log = single.log.as_ref().unwrap_or_else(|| panic!("{TEST_NAME}: no log, log_error={:?}", single.log_error));
+    assert!(log.truncated && log.text.ends_with(marker), "{TEST_NAME}: {:?}", &log.text[log.text.len().saturating_sub(120)..]);
+    assert_eq!(log.text.len(), 64 * 1024 + marker.len());
+    assert!(log.text.starts_with("qqqq"));
+}
+
+#[test]
+fn container_executor_failure_detail_carries_the_log_tail() {
+    const TEST_NAME: &str = "container_executor_failure_detail_carries_the_log_tail";
+    gate_or_skip!(TEST_NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+
+    // A nonzero exit: what the job printed on both streams is in the detail. The sleep keeps the
+    // two streams' lines 200 ms apart: the merged order is the daemon's per-line read timestamp,
+    // and two lines written microseconds apart on the two pipes can be stamped in either order
+    // (the manager's rerun saw "the-reason-on-stderr" first without it).
+    let failed = run_logged_job(TEST_NAME, "job-log-fail", &["/bin/sh", "-c", "echo progress-on-stdout; sleep 0.2; echo the-reason-on-stderr >&2; exit 7"], &[]);
+    let f = failed.result.as_ref().err().unwrap_or_else(|| panic!("{TEST_NAME}: expected a failure"));
+    assert_eq!((f.kind, f.exit_code), (pb::JobFailureKind::NonzeroExit as i32, 7), "{f:?}");
+    assert!(f.detail.contains("exited with status 7; log tail: \"progress-on-stdout\\nthe-reason-on-stderr\""), "{}", f.detail);
+    assert_eq!(failed.log.as_ref().map(|l| l.text.as_str()), Some("progress-on-stdout\nthe-reason-on-stderr\n"));
+    println!("\n--- {TEST_NAME}: detail: {}\n---", f.detail);
+
+    // Only the last 15 lines (at most 1500 bytes) are quoted.
+    let long = run_logged_job(TEST_NAME, "job-log-fail-long", &["/bin/sh", "-c", "seq 1 100; exit 3"], &[]);
+    let f = long.result.as_ref().err().unwrap_or_else(|| panic!("{TEST_NAME}: expected a failure"));
+    assert!(f.detail.contains("log tail: \"86\\n87\\n") && f.detail.ends_with("99\\n100\""), "{}", f.detail);
+    assert!(!f.detail.contains("\\n85\\n"), "{}", f.detail);
+
+    // A command that does not exist: the container is created but never starts. Whichever the
+    // daemon says, the report either carries a log or says why it has none, never a silent empty.
+    let start = run_logged_job(TEST_NAME, "job-log-nostart", &["/no/such/binary-av-jobs-container-test"], &[]);
+    let f = start.result.as_ref().err().unwrap_or_else(|| panic!("{TEST_NAME}: expected a failure"));
+    assert_eq!(f.kind, pb::JobFailureKind::ExecutorStartFailed as i32, "{f:?}");
+    assert!(start.log.is_some() != start.log_error.is_some(), "exactly one of log / log_error: {start:?}");
+    println!("\n--- {TEST_NAME}: start failure: log={:?} log_error={:?}\n    detail: {}\n---", start.log, start.log_error, f.detail);
+}
+
+#[test]
+fn container_executor_records_a_reason_when_the_container_is_gone_before_its_log_is_read() {
+    const TEST_NAME: &str = "container_executor_records_a_reason_when_the_container_is_gone_before_its_log_is_read";
+    gate_or_skip!(TEST_NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+
+    // Something else removes the container while the job runs; `docker run` then returns and
+    // `docker logs` finds nothing. Nothing may report that as an empty log.
+    let (_image_ref, recorded_id) = parse_image_digest_md();
+    let run_id = test_run_id();
+    let executor = ContainerExecutor::new(container_scratch_root(), labels_from_test_label_args(&run_id));
+    let job_id = format!("job-log-gone-{run_id}");
+    let spec = base_spec(&job_id, vec!["/bin/sh".to_string(), "-c".to_string(), "echo before-it-was-removed; sleep 30".to_string()], &recorded_id);
+    let job_for_thread = job_id.clone();
+    let remover = std::thread::spawn(move || {
+        let name = wait_for_container_running(&job_for_thread, Instant::now() + Duration::from_secs(30));
+        // Let the first line reach the daemon, then remove the container out from under the executor.
+        std::thread::sleep(Duration::from_millis(500));
+        docker(&["rm", "-f", &name]);
+    });
+    let report = executor.run(&spec, &[]);
+    remover.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+
+    let f = report.result.as_ref().err().unwrap_or_else(|| panic!("{TEST_NAME}: expected a failure, got {:?}", report.result));
+    assert!(report.log.is_none(), "{TEST_NAME}: {:?}", report.log);
+    let why = report.log_error.as_deref().unwrap_or_else(|| panic!("{TEST_NAME}: no log and no reason: {report:?}"));
+    // The daemon answers either way depending on how far the removal has got when `docker logs`
+    // runs: "No such container" once it is gone, "can not get logs from container which is dead
+    // or marked for removal" while it is being removed (both seen on this host).
+    let lower = why.to_lowercase();
+    assert!(why.contains("docker logs") && why.contains("failed") && (lower.contains("no such container") || lower.contains("marked for removal")), "{why}");
+    assert!(f.detail.contains("; no log: "), "{}", f.detail);
+    println!("\n--- {TEST_NAME}: kind={} exit={} log_error={why}\n    detail: {}\n---", f.kind, f.exit_code, f.detail);
+}

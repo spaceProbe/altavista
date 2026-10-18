@@ -224,8 +224,8 @@ impl K8sConfig {
             poll_interval: Duration::from_millis(250),
             termination_grace: Duration::from_secs(5),
             ttl_after_finished: Duration::from_secs(600),
-            log_cap_bytes: 64 * 1024,
-            log_max_lines: 1000,
+            log_cap_bytes: DEFAULT_LOG_CAP_BYTES,
+            log_max_lines: DEFAULT_LOG_MAX_LINES,
             timeouts: Timeouts::default(),
             poll_error_budget: 5,
             network_gate: None,
@@ -234,9 +234,18 @@ impl K8sConfig {
     }
 }
 
-/// The captured pod log.
+/// The byte cap on a captured job log, for both executors: [`K8sConfig::new`]'s default and the
+/// one [`crate::container::ContainerExecutor`] applies (question 252, heavy-prec-5: one cap, one
+/// marker, whichever executor ran the job).
+pub(crate) const DEFAULT_LOG_CAP_BYTES: usize = 64 * 1024;
+/// The line cap (the trailing lines kept) on a captured job log; see [`DEFAULT_LOG_CAP_BYTES`].
+pub(crate) const DEFAULT_LOG_MAX_LINES: usize = 1000;
+
+/// The captured job log. Shared with [`crate::container::ContainerExecutor`], which fills `pod`
+/// with the container's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogCapture {
+    /// The pod (k8s) or container (docker) the log came from.
     pub pod: String,
     /// The log text; when `truncated`, it carries a marker line saying how.
     pub text: String,
@@ -327,7 +336,7 @@ impl K8sError {
 }
 
 /// The last 15 lines, at most 1500 bytes, of a captured log (for `JobFailure.detail`).
-fn log_tail(text: &str) -> String {
+pub(crate) fn log_tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let joined = lines[lines.len().saturating_sub(15)..].join("\n");
     if joined.len() <= 1500 {
@@ -648,8 +657,9 @@ impl K8sJobExecutor {
 
 /// Applies the caps: more than `max_lines` lines keeps the last `max_lines`; more than `cap_bytes`
 /// bytes keeps the first `cap_bytes` (the API's `limitBytes` keeps the start of the tail window).
-/// A marker line says which happened.
-fn shape_log(pod: &str, raw: &[u8], cap_bytes: usize, max_lines: usize) -> LogCapture {
+/// A marker line says which happened. `pod` names the source (a pod, or for the container executor
+/// a container).
+pub(crate) fn shape_log(pod: &str, raw: &[u8], cap_bytes: usize, max_lines: usize) -> LogCapture {
     if raw.len() > cap_bytes {
         let mut cut = cap_bytes;
         while cut > 0 && (raw[cut] & 0xC0) == 0x80 {
