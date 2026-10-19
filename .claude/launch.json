@@ -4,7 +4,7 @@
     {
       "name": "altavista",
       "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["-m", "altavista", "serve", "--host", "127.0.0.1", "--port", "8765"],
+      "runtimeArgs": ["-m", "altavista", "serve", "--host", "127.0.0.1", "--port", "8765", "--study-root", "out"],
       "port": 8765
     }
   ]
