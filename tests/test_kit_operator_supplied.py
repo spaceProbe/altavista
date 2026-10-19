@@ -45,9 +45,9 @@ CFS, PLUGIN = kib.CFS, kib.PLUGIN
 
 #: Pin id by doc item number, and the order every list is printed in.
 ID_BY_ITEM = {1: "ubuntu-22.04-base-image", 2: "debian-bookworm-slim-base-image", 3: "gmat-r2026a",
-              4: "clickhouse", 5: "minio", 6: "postgis", 7: "numpy-wheel-linux-aarch64"}
+              4: "clickhouse", 5: "versitygw", 6: "postgis", 7: "numpy-wheel-linux-aarch64"}
 ORDER = [ID_BY_ITEM[i] for i in range(1, 8)]
-SERVICES = ("clickhouse", "minio", "postgis")
+SERVICES = ("clickhouse", "versitygw", "postgis")
 
 
 # =================================================================================================
@@ -67,7 +67,7 @@ def test_the_pins_file_covers_the_six_components_of_the_doc_and_numpys_wheel_and
     # only ClickHouse is held, and why (question 247)
     assert {c for c, p in PINS.items() if p.get("held")} == {"clickhouse"}
     assert PINS["clickhouse"]["held"]["question"] == 247
-    assert operator_check.declarable(PINS) == ["minio", "postgis"]
+    assert operator_check.declarable(PINS) == ["postgis", "versitygw"]
 
 
 def _doc_table_rows() -> dict[int, str]:
@@ -140,17 +140,57 @@ def test_the_pins_file_and_the_docs_item_3_agree_on_the_gmat_hash():
     assert archives["linux-aarch64"]["published"] is False
 
 
+def _current_registry_reference(record: str) -> str:
+    """The record's current registry reference: the first fenced block after its `Registry reference`
+    bullet. A record can quote older digests further down (`services/store/IMAGE_DIGEST.md` keeps
+    MinIO's under History, and a launch record follows the reference), so a digest that merely appears
+    somewhere in the record proves nothing."""
+    after = record.split("Registry reference", 1)[1]
+    return re.search(r"```\n([^\n`]+)\n```", after).group(1).strip()
+
+
+def _pin_vs_record_problems(cid: str, pin: dict, record: str) -> list[str]:
+    problems = []
+    current = _current_registry_reference(record)
+    if pin["reference"] != current:
+        problems.append(f"{cid}: the pin names {pin['reference']}, the record's current Registry reference is {current}")
+    digests = set(re.findall(r"sha256:[0-9a-f]{64}", record))
+    if pin["digest"] not in digests:
+        problems.append(f"{cid}: the record does not contain the pinned digest {pin['digest']}")
+    if "arm64_manifest_digest" in pin and pin["arm64_manifest_digest"] not in digests:
+        problems.append(f"{cid}: the record does not contain the arm64 manifest digest {pin['arm64_manifest_digest']}")
+    # the digest in the reference is the digest field
+    if not pin["reference"].endswith("@" + pin["digest"]):
+        problems.append(f"{cid}: the pin's reference does not end with its digest field")
+    return problems
+
+
 @pytest.mark.parametrize("cid", SERVICES)
 def test_each_service_pin_equals_the_digest_in_the_services_own_record(cid):
     pin = PINS[cid]
     record = (REPO_ROOT / pin["source_record"]).read_text(encoding="utf-8")
     assert pin["reference"] in record, f"{pin['source_record']} does not contain the pinned reference {pin['reference']}"
-    digests = set(re.findall(r"sha256:[0-9a-f]{64}", record))
-    assert pin["digest"] in digests
-    if "arm64_manifest_digest" in pin:
-        assert pin["arm64_manifest_digest"] in digests
-    # the digest in the reference is the digest field
-    assert pin["reference"].endswith("@" + pin["digest"])
+    assert _pin_vs_record_problems(cid, pin, record) == []
+
+
+def test_the_pin_vs_record_check_fails_when_one_hex_digit_of_the_versitygw_digest_differs():
+    """Perturbation, on copies: neither the committed pins file nor the committed record is touched."""
+    pin = dict(PINS["versitygw"])
+    record = (REPO_ROOT / pin["source_record"]).read_text(encoding="utf-8")
+    assert _pin_vs_record_problems("versitygw", pin, record) == []
+    flipped = pin["digest"][:-1] + ("0" if pin["digest"][-1] != "0" else "1")
+    bad = dict(pin, digest=flipped, reference=pin["reference"].replace(pin["digest"], flipped))
+    problems = _pin_vs_record_problems("versitygw", bad, record)
+    assert any("current Registry reference" in p for p in problems) and any("does not contain the pinned digest" in p for p in problems)
+
+
+def test_the_pin_vs_record_check_rejects_a_digest_that_appears_only_in_the_records_history():
+    """`services/store/IMAGE_DIGEST.md` quotes MinIO's old digest under History: pinning it must fail."""
+    record = (REPO_ROOT / PINS["versitygw"]["source_record"]).read_text(encoding="utf-8")
+    old = "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
+    assert old in record, "the record no longer quotes MinIO's digest in its History section"
+    stale = dict(PINS["versitygw"], digest=old, reference="versity/versitygw@" + old)
+    assert any("current Registry reference" in p for p in _pin_vs_record_problems("versitygw", stale, record))
 
 
 @pytest.mark.parametrize("cid", ["ubuntu-22.04-base-image", "debian-bookworm-slim-base-image"])
@@ -163,11 +203,11 @@ def test_each_base_pin_equals_the_docs_reference_and_the_from_line_of_its_kit_do
 
 def test_the_pins_file_validator_names_what_is_wrong():
     bad = json.loads(json.dumps(PINS))
-    bad["minio"]["digest"] = "sha256:short"
+    bad["versitygw"]["digest"] = "sha256:short"
     bad["postgis"]["verification"]["step"] = "files"
     bad["gmat-r2026a"]["item"] = 5
     problems = operator_check.pins_problems(bad)
-    assert any("minio.digest" in p for p in problems) and any("postgis.verification" in p for p in problems)
+    assert any("versitygw.digest" in p for p in problems) and any("postgis.verification" in p for p in problems)
     assert any("also the item" in p for p in problems)
     assert operator_check.pins_problems({}) and operator_check.pins_problems(None)
 
@@ -209,14 +249,14 @@ def test_gmat_is_required_when_the_kit_has_packs_gmat():
 
 
 def test_a_service_image_is_required_only_when_the_kit_declares_it():
-    for cid in ("minio", "postgis"):
+    for cid in ("versitygw", "postgis"):
         none = _req(cid, _doc())
         assert not none.required and none.outside_kit and "--declare-operator-supplied" in none.why_not
         declared = _req(cid, _doc(declared=[cid]))
         assert declared.required and not declared.outside_kit
     held = _req("clickhouse", _doc())
     assert held.outside_kit and held.why_not == "not declared; held pending licence review, q247"
-    assert _req("minio", _doc(declared=["postgis"])).required is False
+    assert _req("versitygw", _doc(declared=["postgis"])).required is False
 
 
 def test_the_kit_manifest_records_the_declaration_and_defaults_to_empty(tmp_path):
@@ -229,19 +269,19 @@ def test_the_kit_manifest_records_the_declaration_and_defaults_to_empty(tmp_path
     kit_root2 = tmp_path / "kit2"
     kmanifest.write_manifest(kmanifest.build_manifest(
         kit_root=kit_root2, git_commit="0" * 40, git_dirty=False, git_status=[], images={}, sboms={}, packs={},
-        vendor={}, wheels={}, binaries={}, runs={}, gaps=[], operator_supplied_declared=["postgis", "minio", "minio"],
+        vendor={}, wheels={}, binaries={}, runs={}, gaps=[], operator_supplied_declared=["postgis", "versitygw", "versitygw"],
     ), kit_root2)
-    assert json.loads((kit_root2 / "KIT_MANIFEST").read_text())["operator_supplied_declared"] == ["minio", "postgis"]
+    assert json.loads((kit_root2 / "KIT_MANIFEST").read_text())["operator_supplied_declared"] == ["postgis", "versitygw"]
 
 
 def _build(tmp_path: Path, **kwargs):
     return build_kit.build(repo_root=REPO_ROOT, out=tmp_path / "kit", site=REPO_ROOT / build_kit.DEFAULT_SITE, **kwargs)
 
 
-def test_build_kit_declares_minio_and_postgis_and_a_default_kit_declares_nothing(tmp_path):
-    manifest_path, _ = _build(tmp_path, declare_operator_supplied=["postgis", "minio"])
+def test_build_kit_declares_versitygw_and_postgis_and_a_default_kit_declares_nothing(tmp_path):
+    manifest_path, _ = _build(tmp_path, declare_operator_supplied=["postgis", "versitygw"])
     doc = json.loads(manifest_path.read_text())
-    assert doc["operator_supplied_declared"] == ["minio", "postgis"]
+    assert doc["operator_supplied_declared"] == ["postgis", "versitygw"]
     assert kmanifest.verify_manifest(manifest_path.parent) == []
     assert "operator_check.py" in {Path(f["path"]).name for f in doc["files"] if f["role"] == "installer"}
     other = tmp_path / "other"
@@ -290,7 +330,7 @@ def _image_req(cid):
     return operator_check.Requirement(True, "required (test)")
 
 
-@pytest.mark.parametrize("cid", ["ubuntu-22.04-base-image", "minio", "postgis", "clickhouse"])
+@pytest.mark.parametrize("cid", ["ubuntu-22.04-base-image", "versitygw", "postgis", "clickhouse"])
 def test_an_image_whose_id_is_the_pinned_digest_is_verified(cid):
     pin = PINS[cid]
     v = operator_check.verify_image(_docker_with({pin["reference"]: (pin["digest"], [])}), cid, pin, _image_req(cid))
@@ -300,13 +340,13 @@ def test_an_image_whose_id_is_the_pinned_digest_is_verified(cid):
 
 
 def test_an_image_found_by_repo_digests_the_classic_store_is_verified():
-    pin = PINS["minio"]
+    pin = PINS["versitygw"]
     docker = _docker_with({pin["reference"]: ("sha256:" + "7" * 64, ["x/y@sha256:" + "1" * 64, pin["reference"]])})
-    v = operator_check.verify_image(docker, "minio", pin, _image_req("minio"))
+    v = operator_check.verify_image(docker, "versitygw", pin, _image_req("versitygw"))
     assert v.verified and v.detail["verified_by"] == "RepoDigests" and v.found == "sha256:" + "7" * 64
 
 
-@pytest.mark.parametrize("cid, code", [("ubuntu-22.04-base-image", "base-image-missing"), ("minio", "image-missing")])
+@pytest.mark.parametrize("cid, code", [("ubuntu-22.04-base-image", "base-image-missing"), ("versitygw", "image-missing")])
 def test_an_image_the_host_does_not_hold_is_a_refused_result_naming_reference_and_digest(cid, code):
     pin = PINS[cid]
     v = operator_check.verify_image(_docker_with({}), cid, pin, _image_req(cid))
@@ -377,7 +417,7 @@ def test_the_files_step_prints_every_line_when_nothing_is_needed():
     assert lines["ubuntu-22.04-base-image"].endswith("not required (the kit carries no application layer for cfs-image), not verified")
     assert lines["gmat-r2026a"] == "operator-supplied: gmat-r2026a  not required (the kit has no packs.gmat), not verified"
     assert lines["clickhouse"] == "operator-supplied: clickhouse  outside the kit, not verified (not declared; held pending licence review, q247)"
-    assert lines["minio"].startswith("operator-supplied: minio  outside the kit, not verified (not declared;")
+    assert lines["versitygw"].startswith("operator-supplied: versitygw  outside the kit, not verified (not declared;")
     assert not any(r.verified for r in results)
 
 
@@ -385,19 +425,19 @@ def test_the_files_step_lists_images_as_the_image_steps_and_verifies_gmat(gmat_w
     tree, _ = gmat_world
     out: list[str] = []
     results = install.verify_operator_supplied(
-        _kit_doc(images=[CFS, PLUGIN], gmat=True, declared=["minio"]), gmat_root=str(tree), gmat_platform=tki.PLATFORM, out=out.append)
+        _kit_doc(images=[CFS, PLUGIN], gmat=True, declared=["versitygw"]), gmat_root=str(tree), gmat_platform=tki.PLATFORM, out=out.append)
     lines = _lines(out)
     assert list(lines) == ORDER
     other = "verified by the image step, not here (record: IMAGE_BUILD_RECORD operator_supplied; this step does not read it)"
     assert lines["ubuntu-22.04-base-image"] == f"operator-supplied: ubuntu-22.04-base-image  required (base of cfs-image)  {other}"
     assert lines["debian-bookworm-slim-base-image"].endswith(other) and "base of edge-plugin-image" in lines["debian-bookworm-slim-base-image"]
-    assert lines["minio"].endswith(other) and "required (declared at build time: --declare-operator-supplied minio)" in lines["minio"]
+    assert lines["versitygw"].endswith(other) and "required (declared at build time: --declare-operator-supplied versitygw)" in lines["versitygw"]
     assert re.fullmatch(r"operator-supplied: gmat-r2026a  required \(packs\.gmat\)  verified testos-x1 sha256:[0-9a-f]{12}… \d+ files", lines["gmat-r2026a"])
     assert lines["postgis"].startswith("operator-supplied: postgis  outside the kit, not verified")
     verified = [r.component for r in results if r.verified]
     assert verified == ["gmat-r2026a"]
     assert [r.component for r in results if r.outcome == "other-step"] == [
-        "ubuntu-22.04-base-image", "debian-bookworm-slim-base-image", "minio"]
+        "ubuntu-22.04-base-image", "debian-bookworm-slim-base-image", "versitygw"]
 
 
 def test_a_required_gmat_that_is_missing_is_refused_after_the_lines_up_to_it(gmat_world):
@@ -432,7 +472,7 @@ def test_a_kit_that_needs_gmat_with_a_pins_file_that_has_none_is_refused(tmp_pat
 
 def test_a_malformed_pins_file_is_refused_not_listed(tmp_path):
     path = tmp_path / "pins.json"
-    path.write_text(json.dumps({"components": {"minio": {"item": 5}}}))
+    path.write_text(json.dumps({"components": {"versitygw": {"item": 5}}}))
     with pytest.raises(install.OperatorSuppliedRefused) as exc:
         install.verify_operator_supplied(_kit_doc(), pins_file=path)
     assert exc.value.code == "pins-malformed"
@@ -469,7 +509,7 @@ def _install_kit(tmp_path, monkeypatch, *, gmat=False, declared=()):
 
 def test_install_prints_the_list_and_records_it_structured(tmp_path, monkeypatch, gmat_world, capsys):
     tree, _ = gmat_world
-    kit = _install_kit(tmp_path, monkeypatch, gmat=True, declared=["minio"])
+    kit = _install_kit(tmp_path, monkeypatch, gmat=True, declared=["versitygw"])
     target = tmp_path / "target"
     assert install.main([str(kit), str(target), "--gmat-root", str(tree), "--gmat-platform", tki.PLATFORM]) == 0
     out = capsys.readouterr().out
@@ -477,15 +517,15 @@ def test_install_prints_the_list_and_records_it_structured(tmp_path, monkeypatch
     assert f"GMAT at {tree} verified against the {tki.PLATFORM} pin (not copied)" in out
     record = json.loads((target / "INSTALL_RECORD").read_text())
     os_rec = record["installed"]["operator_supplied"]
-    assert os_rec["step"] == "files install" and os_rec["declared"] == ["minio"]
+    assert os_rec["step"] == "files install" and os_rec["declared"] == ["versitygw"]
     comps = {c["component"]: c for c in os_rec["components"]}
     assert list(comps) == ORDER
     assert {c: comps[c]["outcome"] for c in ORDER} == {
         "ubuntu-22.04-base-image": "other-step", "debian-bookworm-slim-base-image": "other-step", "gmat-r2026a": "verified",
-        "clickhouse": "outside-kit", "minio": "other-step", "postgis": "outside-kit",
+        "clickhouse": "outside-kit", "versitygw": "other-step", "postgis": "outside-kit",
         "numpy-wheel-linux-aarch64": "not-required"}
     assert comps["gmat-r2026a"]["verified"] and comps["gmat-r2026a"]["found"] == comps["gmat-r2026a"]["expected"]
-    assert comps["minio"]["verifies_in"] == "image step" and comps["gmat-r2026a"]["verifies_in"] == "files install"
+    assert comps["versitygw"]["verifies_in"] == "image step" and comps["gmat-r2026a"]["verifies_in"] == "files install"
     assert os_rec["gmat"]["verified"] and os_rec["gmat"]["platform"] == tki.PLATFORM   # the earlier, detailed form is kept
 
 
@@ -525,7 +565,7 @@ def test_an_installer_refuses_a_kit_without_the_declaration_list(tmp_path, monke
 class ServiceDocker(kib.FakeDocker):
     """`FakeDocker` that also holds the service images in `services` (`{pin id: (Id, RepoDigests)}`)."""
 
-    def __init__(self, kit, *, hold=("clickhouse", "minio", "postgis")):
+    def __init__(self, kit, *, hold=("clickhouse", "versitygw", "postgis")):
         super().__init__(kit)
         for cid in hold:
             self.bases[PINS[cid]["reference"]] = (PINS[cid]["digest"], [PINS[cid]["reference"]])
@@ -576,51 +616,51 @@ def test_the_image_step_lists_gmat_as_the_files_installs_when_the_kit_needs_it(t
 
 
 def test_a_declared_service_image_that_the_host_holds_is_verified_by_digest(tmp_path):
-    kit = _declared_kit(tmp_path, ["minio"])
+    kit = _declared_kit(tmp_path, ["versitygw"])
     docker = ServiceDocker(kit)
     record, lines = kib.run_step(kit, docker, tmp_path)
     out = _lines(lines)
-    assert out["minio"] == (
-        "operator-supplied: minio  required (declared at build time: --declare-operator-supplied minio)  verified sha256:a1ea29fa2835… via Id")
-    assert PINS["minio"]["reference"] in docker.inspected()
+    assert out["versitygw"] == (
+        "operator-supplied: versitygw  required (declared at build time: --declare-operator-supplied versitygw)  verified sha256:eb7f786fcd91… via Id")
+    assert PINS["versitygw"]["reference"] in docker.inspected()
     assert PINS["postgis"]["reference"] not in docker.inspected() and PINS["clickhouse"]["reference"] not in docker.inspected()
-    minio = next(c for c in record["operator_supplied"]["components"] if c["component"] == "minio")
-    assert minio["verified"] and minio["expected"] == PINS["minio"]["digest"] and minio["found"] == PINS["minio"]["digest"]
-    assert record["operator_supplied"]["declared"] == ["minio"]
+    versitygw = next(c for c in record["operator_supplied"]["components"] if c["component"] == "versitygw")
+    assert versitygw["verified"] and versitygw["expected"] == PINS["versitygw"]["digest"] and versitygw["found"] == PINS["versitygw"]["digest"]
+    assert record["operator_supplied"]["declared"] == ["versitygw"]
     # a verified declared image is not built, tagged or removed by this step
     assert [a for a, _i in docker.calls if a[0] in ("rmi", "tag", "pull", "load", "run", "start")] == []
 
 
 def test_a_declared_service_image_the_host_does_not_hold_is_refused_before_any_build(tmp_path):
-    kit = _declared_kit(tmp_path, ["minio"])
+    kit = _declared_kit(tmp_path, ["versitygw"])
     docker = ServiceDocker(kit, hold=("postgis",))
     lines: list[str] = []
     with pytest.raises(image_build.OperatorImageMissing) as exc:
         image_build.build_images(docker, kit, out=lines.append, record_path=tmp_path / "rec")
-    assert PINS["minio"]["reference"] in str(exc.value) and PINS["minio"]["digest"] in str(exc.value)
+    assert PINS["versitygw"]["reference"] in str(exc.value) and PINS["versitygw"]["digest"] in str(exc.value)
     assert "docker load" in str(exc.value) and exc.value.kind == "operator-image-missing"
     assert docker.called("build") == [] and docker.called("create") == [] and not (tmp_path / "rec").exists()
     # the two bases, GMAT and ClickHouse were printed, then the refused line, and nothing after it
-    assert list(_lines(lines)) == ["ubuntu-22.04-base-image", "debian-bookworm-slim-base-image", "gmat-r2026a", "clickhouse", "minio"]
-    assert lines[-1] == "operator-supplied: minio  required (declared at build time: --declare-operator-supplied minio)  NOT VERIFIED [image-missing]"
+    assert list(_lines(lines)) == ["ubuntu-22.04-base-image", "debian-bookworm-slim-base-image", "gmat-r2026a", "clickhouse", "versitygw"]
+    assert lines[-1] == "operator-supplied: versitygw  required (declared at build time: --declare-operator-supplied versitygw)  NOT VERIFIED [image-missing]"
 
 
 def test_a_declared_service_image_with_another_digest_is_refused(tmp_path):
-    kit = _declared_kit(tmp_path, ["minio"])
+    kit = _declared_kit(tmp_path, ["versitygw"])
     docker = ServiceDocker(kit)
-    docker.bases[PINS["minio"]["reference"]] = ("sha256:" + "5" * 64, ["quay.io/minio/minio@sha256:" + "4" * 64])
+    docker.bases[PINS["versitygw"]["reference"]] = ("sha256:" + "5" * 64, ["versity/versitygw@sha256:" + "4" * 64])
     with pytest.raises(image_build.OperatorImageDigestDiffers) as exc:
         kib.run_step(kit, docker, tmp_path)
-    assert PINS["minio"]["digest"] in str(exc.value) and "5" * 64 in str(exc.value)
+    assert PINS["versitygw"]["digest"] in str(exc.value) and "5" * 64 in str(exc.value)
     assert docker.called("build") == []
 
 
 def test_the_run_exit_code_and_stderr_for_a_declared_image_that_is_missing(tmp_path, capsys):
-    kit = _declared_kit(tmp_path, ["minio"])
+    kit = _declared_kit(tmp_path, ["versitygw"])
     docker = ServiceDocker(kit, hold=())
     assert image_build.main(["--build-images", str(kit), "--record", str(tmp_path / "rec")], docker=docker) == 2
     captured = capsys.readouterr()
-    assert "REFUSED [operator-image-missing]" in captured.err and PINS["minio"]["digest"] in captured.err
+    assert "REFUSED [operator-image-missing]" in captured.err and PINS["versitygw"]["digest"] in captured.err
     assert "NOT VERIFIED [image-missing]" in captured.out
 
 

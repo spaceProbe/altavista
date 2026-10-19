@@ -112,20 +112,6 @@
       },
       "why": "GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL); the kit records GMAT's pack descriptor and never carries its bytes (docs/kit-operator-supplied.md item 3). The installer measures the operator's unpacked release and compares it with the pin for the target platform"
     },
-    "minio": {
-      "digest": "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
-      "item": 5,
-      "kind": "container-image",
-      "licences": "AGPL-3.0, run unmodified and reached over S3 HTTP (question 39)",
-      "reference": "quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
-      "source_record": "services/store/IMAGE_DIGEST.md",
-      "verification": {
-        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
-        "step": "images"
-      },
-      "version": "RELEASE.2025-04-22T22-12-26Z",
-      "why": "Network service (the heavy track's object store); outside the kit unless a site that deploys it builds the kit with --declare-operator-supplied minio"
-    },
     "numpy-wheel-linux-aarch64": {
       "dist": "numpy",
       "filename": "numpy-2.5.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
@@ -168,6 +154,20 @@
         "step": "images"
       },
       "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
+    },
+    "versitygw": {
+      "digest": "sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7",
+      "item": 5,
+      "kind": "container-image",
+      "licences": "Versity Gateway is Apache-2.0; the image's Alpine 3.24.2 base layers are GPL-2.0-only (busybox, busybox-binsh, ssl_client, apk-tools, libapk, alpine-baselayout, alpine-baselayout-data, scanelf), MIT AND BSD-2-Clause AND GPL-2.0-or-later (musl-utils), MPL-2.0 AND MIT (ca-certificates-bundle), and MIT, Apache-2.0 or Zlib for the rest (alpine-keys, alpine-release, musl, libcrypto3, libssl3, zlib)",
+      "reference": "versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7",
+      "source_record": "services/store/IMAGE_DIGEST.md",
+      "verification": {
+        "method": "docker image inspect of the digest-qualified reference: the image Id (containerd store) or a RepoDigests entry equals digest; nothing is pulled",
+        "step": "images"
+      },
+      "version": "v1.9.0",
+      "why": "Network service (the heavy track's object store). Operator-supplied because the upstream image's Alpine base layers carry GPL-2.0-only packages and the kit redistributes no GPL or LGPL code (question 251); outside the kit unless a site that deploys the object store builds the kit with --declare-operator-supplied versitygw. Replaces MinIO (question 256)"
     }
   }
 }

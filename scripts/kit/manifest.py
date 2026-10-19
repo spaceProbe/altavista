@@ -251,7 +251,7 @@ ensure_ascii=False)` plus one trailing newline. It contains:
   what the caller actually collected, rather than a fixed constant -- always present, but its
   membership varies with which flags a given kit build used.
 - `operator_supplied_declared` -- NEW in question 250(a), task 3: a sorted list of ids from
-  `operator_supplied.json` (MinIO, PostGIS; never a held one such as ClickHouse) of the service images
+  `operator_supplied.json` (Versity Gateway, PostGIS; never a held one such as ClickHouse) of the service images
   the site that deploys this kit supplies itself, set by `build_kit.py --declare-operator-supplied`;
   always present, `[]` by default. It is what makes the installer's two steps (`operator_check.py`)
   verify such an image by digest; nothing else about the kit changes, so `kit_format` stays 5 and an
