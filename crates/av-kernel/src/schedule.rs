@@ -30,12 +30,28 @@ use av_dynamics::{BoxedModel, DynamicsModel, ModelError};
 
 use crate::ports::AppliedPortCommand;
 
+/// Every named output series one system produced: name -> (native step epochs TAI ns, values),
+/// the two vectors of one name always the same length and parallel -- question 254 item 14: an
+/// output a model emits only on some steps carries exactly the epochs it was emitted at, not the
+/// steps' shared epochs. Factored into a named alias (clippy::type_complexity) rather than
+/// written out at every call site.
+pub type NamedOutputSeries = BTreeMap<String, (Vec<i64>, Vec<f64>)>;
+
 /// Named output series for one system, as [`Scheduler::outputs`]/[`HeteroScheduler::outputs`]
-/// return them: `.0` is the native step epochs (TAI ns) every entry in `.1` is parallel to,
-/// `.1` is every output name's own value series -- see [`Scheduler::outputs`]'s own doc comment
-/// for exactly what epochs this covers. Factored into a named alias (clippy::type_complexity)
-/// rather than written out at every call site.
-pub type OutputSeries<'a> = (&'a [i64], &'a BTreeMap<String, Vec<f64>>);
+/// return them -- see [`Scheduler::outputs`]'s own doc comment for exactly what epochs this covers.
+pub type OutputSeries<'a> = &'a NamedOutputSeries;
+
+/// Append one native step's `StepResult.outputs` to a system's series: each produced name gets
+/// the step's epoch and its value together (question 254 item 14; before it the epoch was pushed
+/// once per step for every name, so a name the model skipped on some step ended with more epochs
+/// than values).
+fn record_outputs(series: &mut NamedOutputSeries, t_tai_ns: i64, produced: &BTreeMap<String, f64>) {
+    for (name, value) in produced {
+        let (epochs, values) = series.entry(name.clone()).or_default();
+        epochs.push(t_tai_ns);
+        values.push(*value);
+    }
+}
 
 /// What answering `sample(id, t_tai_ns)` would require -- [`Scheduler::sample_kind`]/
 /// [`HeteroScheduler::sample_kind`] report this directly (borrowed, un-blended) rather than
@@ -107,11 +123,10 @@ struct SystemEntry<M: DynamicsModel> {
     history: History,
     /// Every native step's `StepResult.outputs` this system has produced so far, accumulated
     /// across every `advance_to` call (question 95's second half: `av_dynamics::StepResult
-    /// .outputs`, populated today only by `gmat_sys::model::GmatModel::step`). `epochs_tai_ns`
-    /// is the native step time of each entry, parallel across every name in `values` -- see
+    /// .outputs`, populated today only by `gmat_sys::model::GmatModel::step`). Each name carries
+    /// its own epochs (the native step times it was produced at) beside its values -- see
     /// [`Scheduler::outputs`].
-    output_epochs_tai_ns: Vec<i64>,
-    outputs: BTreeMap<String, Vec<f64>>,
+    outputs: NamedOutputSeries,
 }
 
 /// Error advancing or sampling the scheduler.
@@ -175,7 +190,6 @@ impl<M: DynamicsModel> Scheduler<M> {
                 period_ns,
                 model,
                 history: History { prev: None, curr: (t0_tai_ns, initial_state) },
-                output_epochs_tai_ns: Vec::new(),
                 outputs: BTreeMap::new(),
             },
         );
@@ -211,12 +225,7 @@ impl<M: DynamicsModel> Scheduler<M> {
                 let (t_ns, state) = sys.history.curr.clone();
                 let result = sys.model.step(&state, t_ns, &[], sys.period_ns).map_err(ScheduleError::Model)?;
                 debug_assert_eq!(result.t_tai_ns, t_ns + sys.period_ns);
-                if !result.outputs.is_empty() {
-                    sys.output_epochs_tai_ns.push(result.t_tai_ns);
-                    for (name, value) in &result.outputs {
-                        sys.outputs.entry(name.clone()).or_default().push(*value);
-                    }
-                }
+                record_outputs(&mut sys.outputs, result.t_tai_ns, &result.outputs);
                 sys.history.prev = Some(sys.history.curr.clone());
                 sys.history.curr = (result.t_tai_ns, result.state);
             }
@@ -225,15 +234,18 @@ impl<M: DynamicsModel> Scheduler<M> {
     }
 
     /// Every named output series system `id`'s model has produced so far via `StepResult
-    /// .outputs` (question 95's second half) -- `None` if `id` was never registered. Epochs are
-    /// exactly the native step times the model actually produced an output at (every name's
-    /// series parallel to `.0`), **not** resampled onto any output-tick grid -- a caller wanting
-    /// a value at an arbitrary time still needs its own interpolation (`crate::expr::runproducts
+    /// .outputs` (question 95's second half) -- `None` if `id` was never registered. **Each name
+    /// carries its own epochs** (question 254 item 14): exactly the native step times the model
+    /// actually produced *that name* at, `(epochs, values)` of equal length, so an output a model
+    /// emits only on some steps (`GroundStationModel`'s `elevation_rad`, on a step that decoded a
+    /// frame) is a sparse series of its real samples, not a series of the steps' shared epochs
+    /// with holes. Epochs are **not** resampled onto any output-tick grid -- a caller wanting a
+    /// value at an arbitrary time still needs its own interpolation (`crate::expr::runproducts
     /// ::ExprRunProducts::output_at` already does exactly that, linearly, over whatever epochs a
     /// series carries). Empty for a model that never populates `StepResult.outputs` -- every
     /// model in this crate today except a GMAT-bound `gmat_sys::model::GmatModel`.
     pub fn outputs(&self, id: &str) -> Option<OutputSeries<'_>> {
-        self.systems.get(id).map(|s| (s.output_epochs_tai_ns.as_slice(), &s.outputs))
+        self.systems.get(id).map(|s| &s.outputs)
     }
 
     /// What answering [`Scheduler::sample`] at `t_tai_ns` would require -- see
@@ -313,10 +325,9 @@ struct HeteroSystemEntry {
     model: BoxedModel,
     next_due_ns: i64,
     history: HeteroHistory,
-    /// See [`SystemEntry::output_epochs_tai_ns`]/`.outputs` -- identical purpose, duplicated for
-    /// the same reason [`HeteroHistory`] duplicates [`History`].
-    output_epochs_tai_ns: Vec<i64>,
-    outputs: BTreeMap<String, Vec<f64>>,
+    /// See [`SystemEntry::outputs`] -- identical purpose, duplicated for the same reason
+    /// [`HeteroHistory`] duplicates [`History`].
+    outputs: NamedOutputSeries,
     /// Every command this system's own `step_with_ports` calls have actually applied so far
     /// (`docs/open-questions.md` question 130) -- only ever populated by
     /// [`HeteroScheduler::advance_to_with_ports`] (plain [`HeteroScheduler::advance_to`] never
@@ -437,7 +448,6 @@ impl HeteroScheduler {
                 model,
                 next_due_ns: t0_tai_ns + period_ns,
                 history: HeteroHistory { prev: None, curr: (t0_tai_ns, initial_state) },
-                output_epochs_tai_ns: Vec::new(),
                 outputs: BTreeMap::new(),
                 applied_commands: Vec::new(),
                 measurements: Vec::new(),
@@ -465,12 +475,7 @@ impl HeteroScheduler {
                 let (t_ns, state) = sys.history.curr.clone();
                 let result = sys.model.step(&state, t_ns, &[], sys.period_ns).map_err(HeteroScheduleError::Model)?;
                 debug_assert_eq!(result.t_tai_ns, t_ns + sys.period_ns);
-                if !result.outputs.is_empty() {
-                    sys.output_epochs_tai_ns.push(result.t_tai_ns);
-                    for (name, value) in &result.outputs {
-                        sys.outputs.entry(name.clone()).or_default().push(*value);
-                    }
-                }
+                record_outputs(&mut sys.outputs, result.t_tai_ns, &result.outputs);
                 sys.history.prev = Some(sys.history.curr.clone());
                 sys.history.curr = (result.t_tai_ns, result.state);
                 sys.next_due_ns += sys.period_ns;
@@ -593,12 +598,7 @@ impl HeteroScheduler {
                 let inbox = router.take_inbox(id, t);
                 let (result, outbox, applied) = sys.model.step_with_ports(&state, t_ns, &[], sys.period_ns, &inbox).map_err(HeteroScheduleError::Model)?;
                 debug_assert_eq!(result.t_tai_ns, t_ns + sys.period_ns);
-                if !result.outputs.is_empty() {
-                    sys.output_epochs_tai_ns.push(result.t_tai_ns);
-                    for (name, value) in &result.outputs {
-                        sys.outputs.entry(name.clone()).or_default().push(*value);
-                    }
-                }
+                record_outputs(&mut sys.outputs, result.t_tai_ns, &result.outputs);
                 // Question 130: enrich each applied command with this receiving instance's own
                 // id and (when known) its sender -- resolved from the SAME `inbox` the model was
                 // just handed, via the identical "last message on this port" selection the model
@@ -704,7 +704,7 @@ impl HeteroScheduler {
 
     /// See [`Scheduler::outputs`] -- identical contract.
     pub fn outputs(&self, id: &str) -> Option<OutputSeries<'_>> {
-        self.systems.get(id).map(|s| (s.output_epochs_tai_ns.as_slice(), &s.outputs))
+        self.systems.get(id).map(|s| &s.outputs)
     }
 
     /// Every command [`HeteroScheduler::advance_to_with_ports`] has recorded `id` actually

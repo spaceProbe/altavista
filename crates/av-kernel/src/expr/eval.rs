@@ -20,6 +20,19 @@
 //!   fixes); its unit is the referenced quantity's unit composed with seconds
 //!   (`crate::expr::units::mul_div_unit`).
 //!
+//! **A sparse output series (question 254 item 14).** An output a model emits only on some steps
+//! (`GroundStationModel`'s `elevation_rad`, only on a step that decoded a telemetry frame) is a
+//! series of the samples it was really produced at, each with its own epoch; every operator here
+//! uses those samples and nothing else. `@t` reads an exact sample, interpolates linearly between
+//! the two samples around `t` however far apart they are, and is `TimeOutOfRange` before the first
+//! or after the last (never extrapolated); `min`/`max`/`mean`/`final` reduce over the samples
+//! (`mean` is not time-weighted, so a cluster of samples weighs more than a long gap);
+//! `integral` is the trapezoid between consecutive samples, so a hole is one trapezoid across it;
+//! `duration` holds a sample's verdict until the next sample, so a hole counts for the verdict of
+//! the sample before it. An empty series is a typed error (`UnknownOutput` for `@t`,
+//! `EmptyTrajectory` for an aggregate or `duration`); a series whose epochs and values differ in
+//! length is `SeriesLengthMismatch`.
+//!
 //! ## `range(<a>, <b>)` and `duration(<condition>)`: the amendment's worked example
 //!
 //! The amendment's own worked example, `duration(range(a, b) < 100 m)`, needs numerical
@@ -329,6 +342,51 @@ mod tests {
         let v = evaluate(&parse("entity.veh.pos_x@2.5 s").unwrap(), &run).unwrap();
         assert!((v.number - 2.5).abs() < 1e-9, "{v:?}");
         assert_eq!(v.unit, Unit::Meter);
+    }
+
+    fn sparse_output_run<'a>(map: &'a BTreeMap<String, Trajectory>, epochs_s: &[i64], values: &[f64], unit: Unit) -> ExprRunProducts<'a> {
+        let series = Series { epochs_tai_ns: epochs_s.iter().map(|s| s * 1_000_000_000).collect(), values: values.to_vec(), unit };
+        ExprRunProducts::new(0, 10_000_000_000, map, &[]).with_output("g", "e", series)
+    }
+
+    /// Question 254 item 14: every operator over a sparse output uses the series' own samples.
+    /// Samples (2 s, 1), (3 s, 3), (10 s, 8) -- a 7 s hole after the second -- hand-computed:
+    /// `@end` 8; `@6.5 s` = 3 + 5 * 3.5 / 7 = 5.5; `mean` (1+3+8)/3 = 4 (unweighted); `min` 1;
+    /// `max` 8; `final` 8; `integral` = 0.5 (1+3) 1 + 0.5 (3+8) 7 = 2 + 38.5 = 40.5;
+    /// `duration(e > 2 rad)` holds each sample's verdict to the next: 1 > 2 no (2 s -> 3 s), 3 > 2
+    /// yes (3 s -> 10 s, 7 s) = 7.
+    #[test]
+    fn every_operator_over_a_sparse_output_uses_its_own_samples() {
+        let map: BTreeMap<String, Trajectory> = BTreeMap::new();
+        let run = sparse_output_run(&map, &[2, 3, 10], &[1.0, 3.0, 8.0], Unit::Radian);
+        let ev = |src: &str| evaluate(&parse(src).unwrap(), &run).unwrap();
+        assert_eq!(ev("output.g.e@end"), Value { number: 8.0, unit: Unit::Radian });
+        assert_eq!(ev("output.g.e@3 s"), Value { number: 3.0, unit: Unit::Radian });
+        assert_eq!(ev("output.g.e@6.5 s"), Value { number: 5.5, unit: Unit::Radian });
+        assert_eq!(ev("mean(output.g.e)"), Value { number: 4.0, unit: Unit::Radian });
+        assert_eq!(ev("min(output.g.e)"), Value { number: 1.0, unit: Unit::Radian });
+        assert_eq!(ev("max(output.g.e)"), Value { number: 8.0, unit: Unit::Radian });
+        assert_eq!(ev("final(output.g.e)"), Value { number: 8.0, unit: Unit::Radian });
+        assert_eq!(ev("duration(output.g.e > 2 rad)"), Value { number: 7.0, unit: Unit::Second });
+        let dimensionless = sparse_output_run(&map, &[2, 3, 10], &[1.0, 3.0, 8.0], Unit::Dimensionless);
+        assert_eq!(evaluate(&parse("integral(output.g.e)").unwrap(), &dimensionless).unwrap(), Value { number: 40.5, unit: Unit::Second });
+        // Outside the series' span (the first sample is at 2 s) and on an empty series: typed errors.
+        assert!(matches!(evaluate(&parse("output.g.e@1 s").unwrap(), &run), Err(ExprError::TimeOutOfRange { .. })));
+        let empty = sparse_output_run(&map, &[], &[], Unit::Radian);
+        assert!(matches!(evaluate(&parse("output.g.e@end").unwrap(), &empty), Err(ExprError::UnknownOutput { .. })));
+        assert!(matches!(evaluate(&parse("mean(output.g.e)").unwrap(), &empty), Err(ExprError::EmptyTrajectory { .. })));
+    }
+
+    /// A malformed series (three epochs, two values) is `SeriesLengthMismatch` from `@end`, every
+    /// aggregate and `duration` -- the old `@end` panic and the silently misaligned `integral`.
+    #[test]
+    fn a_misaligned_output_series_is_a_typed_error_from_every_operator() {
+        let map: BTreeMap<String, Trajectory> = BTreeMap::new();
+        let run = sparse_output_run(&map, &[2, 3, 10], &[1.0, 3.0], Unit::Radian);
+        for src in ["output.g.e@end", "output.g.e@3 s", "mean(output.g.e)", "min(output.g.e)", "max(output.g.e)", "final(output.g.e)", "integral(output.g.e)", "duration(output.g.e > 2 rad)"] {
+            let err = evaluate(&parse(src).unwrap(), &run).unwrap_err();
+            assert!(matches!(err, ExprError::SeriesLengthMismatch { epochs: 3, values: 2, .. }), "{src}: {err:?}");
+        }
     }
 
     #[test]

@@ -59,6 +59,12 @@ pub enum ExprError {
     /// `output.<instance>.<name>` named an (instance, name) pair this run's products do not
     /// contain.
     UnknownOutput { instance: String, name: String, pos: usize },
+    /// `output.<instance>.<name>` resolved a series whose epochs and values differ in length
+    /// (question 254 item 14) -- a series is `(epoch, value)` samples, so this is a malformed
+    /// product, refused rather than indexed past its end or paired with the wrong epochs. The
+    /// executor can no longer produce one (`crate::schedule::record_outputs` pushes a name's epoch
+    /// and value together); this guards a caller-built [`crate::expr::Series`].
+    SeriesLengthMismatch { instance: String, name: String, epochs: usize, values: usize, pos: usize },
     /// `event.<name>.t` named no event in this run's products (by `Event.name`).
     UnknownEventName { name: String, pos: usize },
     /// `event.<name>.t` (or the `@<ident>` time form) matched more than one event by name --
@@ -134,6 +140,9 @@ impl fmt::Display for ExprError {
             ExprError::UnknownEntity { id, pos } => write!(f, "position {pos}: no entity {id:?} in this run's products"),
             ExprError::UnknownComponent { entity, component, pos } => write!(f, "position {pos}: entity {entity:?} has no component {component:?} in its declared StateSpace"),
             ExprError::UnknownOutput { instance, name, pos } => write!(f, "position {pos}: no output {name:?} for instance {instance:?} in this run's products"),
+            ExprError::SeriesLengthMismatch { instance, name, epochs, values, pos } => {
+                write!(f, "position {pos}: output {name:?} of instance {instance:?} has {epochs} epochs but {values} values; a series must be parallel (epoch, value) samples")
+            }
             ExprError::UnknownEventName { name, pos } => write!(f, "position {pos}: no event named {name:?} in this run's products"),
             ExprError::AmbiguousEventName { name, pos } => write!(f, "position {pos}: more than one event is named {name:?}; refusing to pick one"),
             ExprError::UnknownEventKind { kind, pos } => write!(f, "position {pos}: {kind:?} is not a recognized EventKind"),

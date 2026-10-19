@@ -215,14 +215,28 @@ impl<'a> ExprRunProducts<'a> {
         self.outputs.get(&(instance.to_string(), name.to_string())).map(|s| s.unit).ok_or_else(|| ExprError::UnknownOutput { instance: instance.to_string(), name: name.to_string(), pos })
     }
 
+    /// The whole series of `output.<instance>.<name>` -- the one door every read of an output's
+    /// samples (`@time`, the aggregates, `duration`) goes through, so the parallel-vectors
+    /// invariant is checked here once: a length mismatch is [`ExprError::SeriesLengthMismatch`],
+    /// never an out-of-bounds index or a value paired with another sample's epoch (question 254
+    /// item 14).
     pub fn output_series(&self, instance: &str, name: &str, pos: usize) -> Result<&Series, ExprError> {
-        self.outputs.get(&(instance.to_string(), name.to_string())).ok_or_else(|| ExprError::UnknownOutput { instance: instance.to_string(), name: name.to_string(), pos })
+        let series = self.outputs.get(&(instance.to_string(), name.to_string())).ok_or_else(|| ExprError::UnknownOutput { instance: instance.to_string(), name: name.to_string(), pos })?;
+        if series.epochs_tai_ns.len() != series.values.len() {
+            return Err(ExprError::SeriesLengthMismatch { instance: instance.to_string(), name: name.to_string(), epochs: series.epochs_tai_ns.len(), values: series.values.len(), pos });
+        }
+        Ok(series)
     }
 
     /// `output.<instance>.<name>` at a specific time: linear interpolation between bracketing
     /// samples (no declared interpolation contract for a generic named output -- ADR-005 sec 3
     /// is about `StateSpace` components; a scalar output series has none, so linear is this
-    /// evaluator's own, disclosed choice, not a claim of a declared contract).
+    /// evaluator's own, disclosed choice, not a claim of a declared contract). **A sparse series
+    /// (an output the model emitted on only some steps) is read at its own samples** (question 254
+    /// item 14): an exact epoch returns that sample, a time between two samples interpolates
+    /// between them however far apart they are, and a time before the first or after the last
+    /// sample is [`ExprError::TimeOutOfRange`] (the series' own span, not extrapolated); an empty
+    /// series is [`ExprError::UnknownOutput`].
     pub fn output_at(&self, instance: &str, name: &str, tai_ns: i64, pos: usize) -> Result<(f64, Unit), ExprError> {
         let series = self.output_series(instance, name, pos)?;
         if series.epochs_tai_ns.is_empty() {
@@ -363,6 +377,43 @@ mod tests {
         map2.insert("veh".to_string(), traj(vec![(0, [0.0; 6]), (10, [0.0; 6])]));
         let run2 = ExprRunProducts::new(0, 10, &map2, &[]);
         assert!(matches!(run2.entity_component_at("veh", "no_such", 0, 7), Err(ExprError::UnknownComponent { pos: 7, .. })));
+    }
+
+    fn output_series_of(epochs_s: &[i64], values: &[f64]) -> Series {
+        Series { epochs_tai_ns: epochs_s.iter().map(|s| s * 1_000_000_000).collect(), values: values.to_vec(), unit: Unit::Radian }
+    }
+
+    /// Question 254 item 14: a sparse series (samples at 2 s, 3 s and 10 s of a 0..=10 s run) is
+    /// read at its own samples -- an exact epoch, a linear interpolation across the 7 s hole, and a
+    /// typed `TimeOutOfRange` outside its span (before the first sample, however inside the run).
+    #[test]
+    fn a_sparse_output_series_is_read_at_its_own_samples() {
+        let map: BTreeMap<String, Trajectory> = BTreeMap::new();
+        let run = ExprRunProducts::new(0, 10_000_000_000, &map, &[]).with_output("g", "e", output_series_of(&[2, 3, 10], &[1.0, 2.0, 9.0]));
+        assert_eq!(run.output_at("g", "e", 3_000_000_000, 0), Ok((2.0, Unit::Radian)));
+        assert_eq!(run.output_at("g", "e", 10_000_000_000, 0), Ok((9.0, Unit::Radian)));
+        // 6.5 s is 3.5 s into the 3 s -> 10 s hole: 2 + (9 - 2) * 3.5 / 7 = 5.5.
+        assert_eq!(run.output_at("g", "e", 6_500_000_000, 0), Ok((5.5, Unit::Radian)));
+        assert!(matches!(run.output_at("g", "e", 1_000_000_000, 4), Err(ExprError::TimeOutOfRange { pos: 4, .. })), "before the first sample");
+        let empty = ExprRunProducts::new(0, 10_000_000_000, &map, &[]).with_output("g", "e", output_series_of(&[], &[]));
+        assert!(matches!(empty.output_at("g", "e", 1_000_000_000, 5), Err(ExprError::UnknownOutput { pos: 5, .. })), "an empty series has no sample to read");
+    }
+
+    /// Question 254 item 14: epochs and values of different lengths -- what the executor produced
+    /// before the fix, and what a caller-built `Series` can still be -- is a typed error from every
+    /// way of reading the series, never an out-of-bounds index (the old `@end` panic) or a value
+    /// paired with the wrong epoch.
+    #[test]
+    fn an_output_series_whose_epochs_and_values_differ_in_length_is_a_typed_error() {
+        let map: BTreeMap<String, Trajectory> = BTreeMap::new();
+        // Three epochs, two values: `@end` (10 s) used to index `values[2]`.
+        let run = ExprRunProducts::new(0, 10_000_000_000, &map, &[]).with_output("g", "e", output_series_of(&[2, 3, 10], &[1.0, 2.0]));
+        let want = ExprError::SeriesLengthMismatch { instance: "g".to_string(), name: "e".to_string(), epochs: 3, values: 2, pos: 7 };
+        assert_eq!(run.output_at("g", "e", 10_000_000_000, 7), Err(want.clone()));
+        assert_eq!(run.output_at("g", "e", 4_000_000_000, 7), Err(want.clone()));
+        assert_eq!(run.output_series("g", "e", 7).map(|_| ()), Err(want));
+        // The declared unit is metadata only and is still answerable.
+        assert_eq!(run.output_unit("g", "e", 0), Ok(Unit::Radian));
     }
 
     #[test]

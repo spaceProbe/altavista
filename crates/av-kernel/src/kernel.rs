@@ -1089,14 +1089,14 @@ mod tests {
         let mut kernel: Kernel<OutputtingAccel> = Kernel::new(100_000_000); // 10 Hz output
         kernel.register_system("s", 100_000_000, OutputtingAccel { a: [0.0; 3] }, t0, x0.clone());
 
-        assert!(kernel.outputs("s").expect("registered").0.is_empty(), "no output before any run");
+        assert!(kernel.outputs("s").expect("registered").is_empty(), "no output before any run");
 
         let end = t0 + 300_000_000; // 3 native steps
         let _ = kernel.run(t0, end).unwrap();
 
-        let (epochs, outputs) = kernel.outputs("s").expect("registered");
+        let outputs = kernel.outputs("s").expect("registered");
+        let (epochs, rmag) = outputs.get("rmag").expect("rmag populated");
         assert_eq!(epochs, &[100_000_000, 200_000_000, 300_000_000]);
-        let rmag = outputs.get("rmag").expect("rmag populated");
         assert_eq!(rmag.len(), 3);
         // Stationary at x = 10 with zero acceleration and zero velocity: rmag stays 10.0 at
         // every native step.
@@ -1507,19 +1507,76 @@ mod tests {
         let end = t0 + 200_000_000; // 2 native steps
         let _ = kernel.run(t0, end).unwrap();
 
-        let (epochs, outputs) = kernel.outputs("s").expect("registered");
+        let outputs = kernel.outputs("s").expect("registered");
+        let (epochs, rmag) = outputs.get("rmag").expect("rmag populated");
         assert_eq!(epochs, &[100_000_000, 200_000_000]);
-        let rmag = outputs.get("rmag").expect("rmag populated");
         assert_eq!(rmag.len(), 2);
         for v in rmag {
             assert!((v - 10.0).abs() < 1e-9, "{v}");
         }
 
-        let (plain_epochs, plain_outputs) = kernel.outputs("plain").expect("registered");
-        assert!(plain_epochs.is_empty(), "erased ConstantAccel never populates StepResult.outputs");
-        assert!(plain_outputs.is_empty());
+        let plain_outputs = kernel.outputs("plain").expect("registered");
+        assert!(plain_outputs.is_empty(), "erased ConstantAccel never populates StepResult.outputs");
 
         assert!(kernel.outputs("nope").is_none());
+    }
+
+    /// Question 254 item 14: `OutputtingAccel` but emitting `odd` only on every other step.
+    struct SparselyOutputtingAccel(OutputtingAccel);
+    impl DynamicsModel for SparselyOutputtingAccel {
+        type Error = av_dynamics::ModelError;
+        fn state_dim(&self) -> usize {
+            6
+        }
+        fn derivatives(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], out: &mut [f64]) -> Result<(), Self::Error> {
+            self.0.derivatives(state, t_tai_ns, controls, out)
+        }
+        fn describe(&self) -> ModelInfo {
+            self.0.describe()
+        }
+        fn step(&self, state: &[f64], t_tai_ns: i64, controls: &[f64], dt_ns: i64) -> Result<av_dynamics::StepResult, Self::Error> {
+            let mut result = self.0.step(state, t_tai_ns, controls, dt_ns)?;
+            if (result.t_tai_ns / dt_ns) % 2 == 1 {
+                result.outputs.insert("odd".to_string(), (result.t_tai_ns / dt_ns) as f64);
+            }
+            Ok(result)
+        }
+        fn last_measurements(&self) -> Vec<av_cdm::pb::Measurement> {
+            Vec::new()
+        }
+        fn drain_sensor_fault_effect(&self) -> Option<av_dynamics::SensorFaultEffectDrain> {
+            None
+        }
+        fn drain_decode_errors(&self) -> Vec<av_dynamics::DecodeErrorOccurrence> {
+            Vec::new()
+        }
+    }
+
+    /// An output produced on only some steps keeps exactly the epochs it was produced at, parallel
+    /// to its own values, while a dense one beside it is unchanged -- through both kernel flavours
+    /// (`Kernel` over `Scheduler::advance_to`, `HeteroKernel` over `HeteroScheduler::advance_to`).
+    #[test]
+    fn a_sparsely_emitted_output_keeps_its_own_epochs_beside_a_dense_one() {
+        let x0 = vec![10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let end = 500_000_000; // 5 native steps of 100 ms: `odd` is produced at steps 1, 3, 5
+        let want_odd_epochs = vec![100_000_000, 300_000_000, 500_000_000];
+        let want_dense_epochs = vec![100_000_000, 200_000_000, 300_000_000, 400_000_000, 500_000_000];
+
+        let mut kernel: Kernel<SparselyOutputtingAccel> = Kernel::new(100_000_000);
+        kernel.register_system("s", 100_000_000, SparselyOutputtingAccel(OutputtingAccel { a: [0.0; 3] }), 0, x0.clone());
+        let _ = kernel.run(0, end).unwrap();
+        let outputs = kernel.outputs("s").expect("registered");
+        assert_eq!(outputs["odd"], (want_odd_epochs.clone(), vec![1.0, 3.0, 5.0]));
+        assert_eq!(outputs["rmag"].0, want_dense_epochs);
+        assert!(outputs.values().all(|(epochs, values)| epochs.len() == values.len()), "every name's epochs and values are parallel: {outputs:?}");
+
+        let mut hetero = HeteroKernel::new(100_000_000);
+        hetero.register_system("s", 100_000_000, Box::new(SparselyOutputtingAccel(OutputtingAccel { a: [0.0; 3] })), 0, x0);
+        let _ = hetero.run(0, end).unwrap();
+        let outputs = hetero.outputs("s").expect("registered");
+        assert_eq!(outputs["odd"], (want_odd_epochs, vec![1.0, 3.0, 5.0]));
+        assert_eq!(outputs["rmag"].0, want_dense_epochs);
+        assert!(outputs.values().all(|(epochs, values)| epochs.len() == values.len()), "every name's epochs and values are parallel: {outputs:?}");
     }
 
     #[test]

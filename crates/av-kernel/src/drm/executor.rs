@@ -349,12 +349,13 @@ use super::command;
 use super::command_source;
 use crate::registry::{ModelHandle, ModelRegistry};
 
-/// Every named `StepResult.outputs` series one instance's run produced (question 95's second
-/// half, task M10.2): name -> (native step epochs TAI ns, values), parallel per name. Factored
-/// into a named alias (clippy::type_complexity) rather than written out at every call site --
-/// epochs are the model's own native step times (`crate::schedule::HeteroScheduler::outputs`'s
-/// own doc comment), not resampled onto the trajectory's own output grid.
-type NamedOutputSeries = BTreeMap<String, (Vec<i64>, Vec<f64>)>;
+// Every named `StepResult.outputs` series one instance's run produced (question 95's second
+// half, task M10.2): name -> (native step epochs TAI ns, values), parallel per name, each name
+// carrying the epochs it was itself produced at (question 254 item 14) -- the scheduler's own
+// alias, see `crate::schedule::NamedOutputSeries`. Epochs are the model's own native step times
+// (`crate::schedule::HeteroScheduler::outputs`'s own doc comment), not resampled onto the
+// trajectory's own output grid.
+use crate::schedule::NamedOutputSeries;
 use super::events;
 use super::fault;
 use super::hash;
@@ -1548,6 +1549,22 @@ fn erase_container(name: &str, model: Rc<binding::ContainerModel>, error_slot: R
     })
 }
 
+/// Append one span's own per-name output series (`HeteroKernel::outputs`) onto an instance's
+/// accumulator, each name's epochs beside its own values (question 254 item 14: a name a model
+/// emits on only some steps keeps only the epochs it was emitted at). No debug assertion that the
+/// two vectors are parallel: `schedule::record_outputs` is their one producer (pinned by
+/// `kernel::tests::a_sparsely_emitted_output_keeps_its_own_epochs_beside_a_dense_one`), and a
+/// mismatch that ever got through must surface as `ExprError::SeriesLengthMismatch` when scored
+/// (`ExprRunProducts::output_series`), a typed `DrmError::InvalidExpression`, in a debug build as
+/// in a release one.
+fn extend_outputs(into: &mut NamedOutputSeries, produced: &NamedOutputSeries) {
+    for (name, (epochs, values)) in produced {
+        let entry = into.entry(name.clone()).or_default();
+        entry.0.extend_from_slice(epochs);
+        entry.1.extend_from_slice(values);
+    }
+}
+
 /// [`hetero_err_to_drm`]'s counterpart for the shared multi-instance run: identical for every
 /// error shape except one -- a container instance's own `step_with_ports` failure, which
 /// [`erase_container`]'s wrap closure already stashed (as the original, typed
@@ -1616,12 +1633,8 @@ fn run_one_span(
 
     for (name, span) in model_spans.iter_mut() {
         let sub = result.remove(name).expect("registered above");
-        if let Some((epochs, values)) = kernel.outputs(name) {
-            for (oname, vals) in values {
-                let entry = span.all_outputs.entry(oname.clone()).or_default();
-                entry.0.extend_from_slice(epochs);
-                entry.1.extend_from_slice(vals);
-            }
+        if let Some(produced) = kernel.outputs(name) {
+            extend_outputs(&mut span.all_outputs, produced);
         }
         // Question 130: drain whatever this span's own kernel run recorded this instance
         // applying -- see `ModelSpanState::applied_commands`'s own doc comment.
@@ -1658,12 +1671,8 @@ fn run_one_span(
     }
     for (name, span) in container_spans.iter_mut() {
         let sub = result.remove(name).expect("registered above");
-        if let Some((epochs, values)) = kernel.outputs(name) {
-            for (oname, vals) in values {
-                let entry = span.all_outputs.entry(oname.clone()).or_default();
-                entry.0.extend_from_slice(epochs);
-                entry.1.extend_from_slice(vals);
-            }
+        if let Some(produced) = kernel.outputs(name) {
+            extend_outputs(&mut span.all_outputs, produced);
         }
         // A container instance is never a maneuver's own target (refused before this function
         // is ever reached), so its two samples at any boundary are always numerically
@@ -2985,12 +2994,8 @@ fn run_covariance_span(
     // `OUTPUT_RMAG`/`OUTPUT_CD`), so `kernel.outputs` carries real named outputs here exactly
     // the way `run_one_span`'s identical block does for the plain path -- see this module's own
     // doc comment's "Events (question 95, M9.3) and outputs" section.
-    if let Some((epochs, values)) = kernel.outputs(instance_name) {
-        for (name, vals) in values {
-            let entry = all_outputs.entry(name.clone()).or_default();
-            entry.0.extend_from_slice(epochs);
-            entry.1.extend_from_slice(vals);
-        }
+    if let Some(produced) = kernel.outputs(instance_name) {
+        extend_outputs(all_outputs, produced);
     }
     let sub = result.remove(instance_name).expect("registered exactly one system");
     if shell.is_none() {

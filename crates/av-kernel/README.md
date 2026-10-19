@@ -1998,7 +1998,20 @@ Two kinds of `output.*`, kept deliberately distinguishable (never merged into on
     native step's non-empty `StepResult.outputs` per system (`Scheduler::outputs`/
     `HeteroScheduler::outputs`, epochs = native step times, not resampled onto the output-tick
     grid), and `crate::kernel::Kernel::outputs`/`HeteroKernel::outputs` expose the accumulated
-    series after a `run`/`run_with_covariance` call. Through M11.1 the covariance path never
+    series after a `run`/`run_with_covariance` call. **Each name carries its own epochs
+    (question 254 item 14):** the series is `name -> (epochs, values)`, parallel, with exactly
+    the epochs the model produced that name at, so an output emitted on only some steps
+    (`GroundStationModel`'s `elevation_rad`, only on a step that decoded a telemetry frame) is a
+    sparse series of its real samples; before this it shared one epoch list with every other
+    name and ended with more epochs than values (`@end` indexed out of bounds, `@time`,
+    `integral` and `duration` paired values with the wrong epochs; `min`/`max`/`mean`/`final`
+    ignore epochs and were unaffected). Operators over a sparse series use its own samples:
+    `@t` interpolates linearly between the two samples around `t` however far apart, and is
+    `TimeOutOfRange` outside the series' span; `mean` is unweighted over the samples; `integral`
+    is the trapezoid between consecutive samples (a hole is one trapezoid); `duration` holds a
+    sample's verdict to the next sample. An epochs/values length mismatch is
+    `ExprError::SeriesLengthMismatch`, never a panic
+    (`tests/drm_sparse_output.rs`, `expr::eval`/`expr::runproducts` unit tests). Through M11.1 the covariance path never
     carried outputs at all: `av_dynamics::StmStepResult` had no `outputs` field, and
     `av_dynamics::StmAugmented::step` (what the covariance path actually steps) inherited the
     trait's default -- a continuous augmented-state integration over `derivatives` that never
