@@ -149,8 +149,18 @@ sha256:56d7bd000b215f8153e7be6e889eb85fea548db5f6fd616e1eaf5b12c4d66199
 
 - Built from commit (question 232, extending question 212(a) -- the paths this covers are `services/cfs/IMAGE_COPIED_PATHS.txt`):
 ```
-d7a212bf86e43c8ba0e4f499af13fbf21eac4c10
+0629f144fef8bab7a6554ed10b422eea8022a61d
 ```
+
+## Re-recorded 2026-10-19 (question 254's native-open round): same image, the build commit moved
+
+Question 254 item 13 (`70861ba`) rewrote a comment in the root `Cargo.toml` (the MSRV measurement), a
+copied path, so the record named a stale commit. `services/cfs/build-shim.sh` at `0629f14` produced
+the same stripped shim (`b103a90e…`) and relay (`3b72b96c…`) byte for byte (the unstripped binaries
+are `e649fe1f…` and `973432b5…`; the comment moves no code), and `services/cfs/build-image.sh`
+(0 dirty files under the copied paths; every layer from the cache) returned the same image id
+`sha256:e51b896d…` and runtime-content hash `sha256:56d7bd00…`; `IMAGE_CONTEXT_MANIFEST.txt` is
+byte-identical. Only the recorded build commit moved (`d7a212b` to `0629f14`).
 
 ## Re-recorded 2026-10-17 (question 250's native round): same image, the build commit moved
 
