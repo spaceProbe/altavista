@@ -1,7 +1,7 @@
 # Roadmap status
 
-As of 2026-10-18, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–253); each track's plan records its rounds and its `## Delivered` section.
+As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
+`open-questions.md` (1–255); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -23,17 +23,19 @@ recipe is in `README.md`.
 
 - **Hardware in the loop:** deferred by the user (question 245). When resumed: the 2024.2 ZCU104 BSP from the user for the real `BOOT.BIN` (question 243), then the board day (question 244).
 - **Reproducibility across platforms (question 248):** run bytes reproduce on the same build target and libm, not across macOS and Linux; a portable libm in `av-orbital` would change that and re-pin every golden it moves. The user's call whether it is wanted.
-- **The kit (question 251):** a Linux GMAT pin is not recorded yet (only macOS arm64).
-- **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates (`av-yaml` over `serde-saphyr`); the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user applies `docs/spoore-upstream.md`'s sixth proposal. MSRV is now 1.89, declared but not measured.
-- **Heavy (question 253):** question 240's secondary-viewport defect is closed (every viewport under 1 cm at LEO, GEO and lunar distance). Open: `FileStudyStore` joins a `sweep_id` such as `../x` onto its root (validate it as a path component); study mode refuses only after a whole study has run; picking in an extra viewport, and bodies and the globe, still use the primary's placement.
-- **Native (question 249):** `GroundStationModel` keeps only the last frame on its port per step; one framed-out port per system; a Docker-free replay cannot reproduce a container's `dynamics_hash` (the Bind version is not in the log); the Linux `av-edge-board` build is not byte-reproducible; the other `docker rmi` calls are not audited against the containerd behaviour `ImageTagGuard` was fixed for; duplicated test helpers in `drm_container.rs` and `drm_shared_run.rs`.
+- **MinIO (question 255):** its pinned image can no longer be fetched (quay.io refuses the digest, Docker Hub has no repository); 24 store tests skip and the kit's MinIO item cannot be obtained by an operator. A replacement S3-compatible server is the user's call (question 39 chose MinIO).
+- **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is measured, not pinned.
+- **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user applies `docs/spoore-upstream.md`'s sixth proposal. MSRV 1.89, measured.
+- **Heavy (question 255):** globe tile selection plans for the primary only; `enableGlobe` builds WGS84 for any body; `layers_stream_check.mjs` exits 0 by construction (it needs a live gateway); two writers racing on case variants of one id on a case-sensitive filesystem can both publish; two typed store-write windows remain (an unreadable ClickHouse outcome, a rename failing after ClickHouse committed), each printing its repair.
+- **Native (question 255):** a mis-named but well-shaped emit port is not caught; `integral` over radians is `UnitCompositionUndefined`; classic-builder image ids drift across cache chains (content hashes hold).
 - **Mechanitis (question 240):** scoped read-only; AltaVista changes nothing until Mechanitis settles encoding and shared types (its ADR-003).
 - **Jacchia-Roberts drag:** the shipped binary's half of the provenance question is the lead's before an instrumented build.
-- **With the user:** the ClickHouse licence review (question 247), the Redpanda licence review (question 6), whether this Colima switches to the grpc port forwarder (it carries no UDP today; switching restarts the shared VM), about 520 dangling Docker volumes from earlier registries, the spoore `publish = false` merge and upstream PRs (questions 75, 207), the GMAT covariance report (question 150), the secdeploy upstream proposals.
-- **Host:** the docker-test lock and two cargo slots serialise both teams (questions 207, 229, 235); a large `target/debug/deps` is moved aside at the start of a round (question 236); Colima mounts only `$HOME` into containers; the Colima VM's image GC deletes unused images above 85% disk; on this host's containerd image store `docker rmi` of an image's last name deletes the image; the local shell policy refuses some commands, which are never run through a wrapper; lead tools live in `/Users/probe/code/altavista-lead/` (the session scratchpad does not survive OS updates); the `docker events` logger writes `/Users/probe/code/altavista-docker-events.log`.
+- **With the user:** the ClickHouse licence review (question 247), the Redpanda licence review (question 6), the MinIO replacement (question 255), whether this Colima switches to the grpc port forwarder (it carries no UDP today; switching restarts the shared VM), the spoore `publish = false` merge and upstream PRs (questions 75, 207), the GMAT covariance report (question 150), the secdeploy upstream proposals.
+- **Host:** the docker-test lock and two cargo slots serialise both teams (questions 207, 229, 235); a large `target/debug/deps` is moved aside at the start of a round (question 236); Colima mounts only `$HOME` into containers; k3s's kubelet image GC deletes every unused image above 85% of the Colima VM's image disk (it took the pinned MinIO and base images on 2026-10-18; check the disk with `colima ssh -- df -h /var/lib/docker` and prune dangling anonymous volumes with the user's approval); no process is ever killed by pattern; on this host's containerd image store `docker rmi` of an image's last name deletes the image; the local shell policy refuses some commands, which are never run through a wrapper; lead tools live in `/Users/probe/code/altavista-lead/` (the session scratchpad does not survive OS updates); the `docker events` logger writes `/Users/probe/code/altavista-docker-events.log`.
 
 ## Next, in the order the lead would take it
 
-1. The open heavy and native items above (the `sweep_id` path check first), as one round per team when the user charters them.
-2. Cross-platform reproducibility (question 248), if the user wants it.
-3. Hardware in the loop, when the user resumes it.
+1. The MinIO replacement, once the user chooses (question 255).
+2. The open heavy and native items above, as one round per team when the user charters them.
+3. Cross-platform reproducibility (question 248), if the user wants it.
+4. Hardware in the loop, when the user resumes it.
