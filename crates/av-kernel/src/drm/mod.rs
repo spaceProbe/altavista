@@ -646,6 +646,10 @@ pub enum DrmError {
     /// whenever `RunConfig.replay` is `Some`). Never loosened, never a warning: a replay run
     /// refuses to even start against a log it cannot verify came from the run it claims to.
     ReplayLogHashMismatch { path: std::path::PathBuf, expected: String, computed: String },
+    /// Question 254 item 8: `RunConfig.replay` would replay container instance `instance` from a log whose
+    /// `provenance` has no `container_bind_version.<instance>` attribute (`crate::drm::replay::
+    /// CONTAINER_BIND_VERSION_KEY_PREFIX`), so its `ModelInfo`, and the segment's `dynamics_hash`, cannot be rebuilt.
+    ReplayLogLacksBindVersion { instance: String },
     /// M25.4b: `RunConfig.replay.instances` named an instance absent from `SosConfiguration.
     /// instances` -- a typed load refusal, checked before any binding, mirroring every other
     /// "named instance does not exist" refusal in this executor (`DrmError::
@@ -850,6 +854,7 @@ impl std::fmt::Display for DrmError {
             DrmError::ReplayLogHashMismatch { path, expected, computed } => {
                 write!(f, "replay log {}: declared hash {expected:?} does not match its own computed hash {computed:?}; refusing to replay from a log that cannot be verified", path.display())
             }
+            DrmError::ReplayLogLacksBindVersion { instance } => write!(f, "replay log has no Bind version for container instance {instance:?} (provenance attribute \"container_bind_version.{instance}\"), so its dynamics_hash cannot be rebuilt without a live Bind; refusing to replay it from a log recorded before the version was kept (question 254 item 8)"),
             DrmError::UnknownReplayInstance { instance } => write!(f, "RunConfig.replay.instances names instance {instance:?}, which is not in this SosConfiguration"),
             DrmError::ReplayInstanceHasSensorFault { instance, fault_id } => write!(
                 f,

@@ -441,19 +441,19 @@ impl ModelRegistry {
     /// real [`ModelHandle`] to wrap AT ALL (a container's own `ModelInfo`/`binding_hash` come
     /// only from a live `Bind` RPC -- `crate::drm::binding::materialize_container` -- and the
     /// entire point of replaying a container instance is running it Docker-free, so this
-    /// function never makes that call). `info` is therefore SYNTHETIC, built directly from the
-    /// instance's own declared `SystemDefinition.dynamics_model`/`.state_space_id` rather than
-    /// read off a real model -- a disclosed, unavoidable difference from the original recorded
-    /// run's own container segment (`.settings_hash`/`.dynamics_hash` cannot be reconstructed
-    /// without contacting the real process); see `crate::drm::executor::run_shared_group`'s own
-    /// "replay" section for exactly where this is called and how a caller is expected to compare
-    /// the resulting `Trajectory` (excluding that one segment field, explicitly). `state_dim` is
+    /// function never makes that call). `live_info` is `binding::container_model_info` rebuilt
+    /// from the Bind version the log records (question 254 item 8), so the replayed segment's
+    /// `dynamics_model`/`dynamics_hash`/`dynamics_depth` equal the live run's; with `None` (a board
+    /// named in `ReplayConfig.instances` without an edge log) `info` is SYNTHETIC, built from the
+    /// instance's declared `SystemDefinition.dynamics_model`/`.state_space_id`, a disclosed
+    /// difference from the recorded run's own segment. See `crate::drm::executor::
+    /// run_shared_group`'s own "replay" section for the call site. `state_dim` is
     /// always `0`: `BINDING_KIND_CONTAINER`'s own `ContainerModel::state_dim()` is always `0`
     /// too (this module's own doc comment's "Container (lockstep) binding" section), so this is
     /// not a replay-specific approximation, just the same fact every container instance already
     /// has.
-    pub fn construct_replay_container(instance: &str, dynamics_model_id: &str, state_space_id: &str, epoch_tai_ns: i64, log: &PortTrafficLog) -> ModelHandle {
-        let info = ModelInfo { id: dynamics_model_id.to_string(), version: "1".to_string(), state_space_id: state_space_id.to_string(), frame_id: String::new(), settings_hash: String::new(), depth: "container_replay".to_string(), ..Default::default() };
+    pub fn construct_replay_container(instance: &str, dynamics_model_id: &str, state_space_id: &str, epoch_tai_ns: i64, log: &PortTrafficLog, live_info: Option<ModelInfo>) -> ModelHandle {
+        let info = live_info.unwrap_or_else(|| ModelInfo { id: dynamics_model_id.to_string(), version: "1".to_string(), state_space_id: state_space_id.to_string(), frame_id: String::new(), settings_hash: String::new(), depth: "container_replay".to_string(), ..Default::default() });
         let model = AnyModel::Replay(ReplayModel::new(instance, info, 0, log));
         ModelHandle { model, t0_tai_ns: epoch_tai_ns, x0_si: Vec::new(), settings: BTreeMap::new() }
     }

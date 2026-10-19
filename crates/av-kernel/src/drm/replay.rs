@@ -99,12 +99,13 @@
 //! `crate::registry::ModelRegistry::wrap_replay` constructs the real model exactly as a
 //! non-replayed run would, reads its `describe()`/`state_dim()` once, and only THEN discards its
 //! real behaviour in favour of a [`ReplayModel`] built from those captured values. A
-//! `BINDING_KIND_CONTAINER` instance has no such option (its own `ModelInfo`/`binding_hash` come
-//! from a live `Bind` RPC this replay path deliberately never makes -- the entire point of
-//! replaying a container instance is running Docker-free); `crate::drm::executor::
-//! run_shared_group`'s own "replay" section documents the synthetic `ModelInfo` used there
-//! instead, and the resulting, disclosed difference from the original run's own container
-//! segment.
+//! `BINDING_KIND_CONTAINER` instance cannot ask a live `Bind` RPC (the entire point of replaying
+//! one is running Docker-free), but the one value only that RPC supplies, the Bind `version`, is
+//! recorded in the log's `provenance` ([`CONTAINER_BIND_VERSION_KEY_PREFIX`], question 254 item
+//! 8), so `binding::container_model_info` rebuilds the live `ModelInfo` exactly; a log without it
+//! is refused ([`DrmError::ReplayLogLacksBindVersion`]). A container's `binding_hash` is still
+//! not recorded (a disclosed exclusion). Only a board named in `ReplayConfig.instances` without
+//! an edge log still gets the synthetic `ModelInfo` of `ModelRegistry::construct_replay_container`.
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -163,6 +164,20 @@ pub(crate) fn verify_and_load(cfg: &ReplayConfig) -> Result<PortTrafficLog, DrmE
         return Err(DrmError::ReplayLogHashMismatch { path: cfg.log_path.clone(), expected: cfg.expected_hash.clone(), computed });
     }
     PortTrafficLog::decode(bytes.as_slice()).map_err(|e| DrmError::ReplayLogIo { path: cfg.log_path.clone(), detail: format!("decoding {} verified byte(s) as PortTrafficLog: {e}", bytes.len()) })
+}
+
+/// `PortTrafficLog.provenance.attributes` key prefix under which a run records each live
+/// `BINDING_KIND_CONTAINER` instance's `LockstepBindResponse.version`: `container_bind_version.
+/// <instance>` (question 254 item 8). The version is the one input of `binding::
+/// container_model_info` that only a live `Bind` supplies, so recording it is what lets a
+/// Docker-free replay rebuild the instance's `ModelInfo` (and so `dynamics_model`/`dynamics_hash`/
+/// `dynamics_depth`) exactly. Written only for container instances (a board's version is in its
+/// signed edge log's BIND record), so no board, Renode or native-only sidecar changes.
+pub(crate) const CONTAINER_BIND_VERSION_KEY_PREFIX: &str = "container_bind_version.";
+
+/// The Bind version `log` records for container instance `instance`, if any.
+pub(crate) fn container_bind_version<'a>(log: &'a PortTrafficLog, instance: &str) -> Option<&'a str> {
+    log.provenance.as_ref()?.attributes.get(&format!("{CONTAINER_BIND_VERSION_KEY_PREFIX}{instance}")).map(String::as_str)
 }
 
 /// Every way [`ReplayModel::step_with_ports`] can fail -- one shape today. See this module's
@@ -547,5 +562,18 @@ mod tests {
         let loaded = verify_and_load(&cfg).expect("matching hash must load");
         assert_eq!(loaded.records.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Question 254 item 8: the Bind version is read per instance from the log's provenance; no provenance,
+    /// or no attribute for that instance, is `None` (the executor turns it into `ReplayLogLacksBindVersion`).
+    #[test]
+    fn container_bind_version_is_read_per_instance_from_the_log_provenance() {
+        let with = |attrs: &[(&str, &str)]| PortTrafficLog { provenance: Some(av_cdm::pb::Provenance { attributes: attrs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(), ..Default::default() }), ..Default::default() };
+        let log = with(&[("container_bind_version.ctrl", "io_lockstep/0.1"), ("container_bind_version.other", "v2")]);
+        assert_eq!(container_bind_version(&log, "ctrl"), Some("io_lockstep/0.1"));
+        assert_eq!(container_bind_version(&log, "other"), Some("v2"));
+        assert_eq!(container_bind_version(&log, "missing"), None);
+        assert_eq!(container_bind_version(&with(&[("ctrl", "x")]), "ctrl"), None, "the key is prefixed");
+        assert_eq!(container_bind_version(&PortTrafficLog::default(), "ctrl"), None, "no provenance at all");
     }
 }

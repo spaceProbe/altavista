@@ -1222,10 +1222,11 @@ fn replaying_both_containers_from_the_recorded_traffic_reproduces_the_products_d
         assert_eq!(tr.segments.len(), tp.segments.len(), "{name}: segment count");
         for (sr, sp) in tr.segments.iter().zip(tp.segments.iter()) {
             assert_eq!((sr.start_tai_ns, sr.end_tai_ns), (sp.start_tai_ns, sp.end_tai_ns), "{name}");
-            if !is_container {
-                // The same exclusion as the single-container test: a replayed container's
-                // dynamics_model/hash/depth come from a live Bind response only.
-                assert_eq!((&sr.dynamics_model, &sr.dynamics_hash, &sr.dynamics_depth), (&sp.dynamics_model, &sp.dynamics_hash, &sp.dynamics_depth), "{name}");
+            // Nothing excluded (question 254 item 8): the sidecar records each container's Bind version, so the
+            // replayed container segments carry the live dynamics_model/hash/depth.
+            assert_eq!((&sr.dynamics_model, &sr.dynamics_hash, &sr.dynamics_depth), (&sp.dynamics_model, &sp.dynamics_hash, &sp.dynamics_depth), "{name}");
+            if is_container {
+                assert!(!sr.dynamics_hash.is_empty(), "{name}: a container segment carries a dynamics_hash");
             }
         }
         let (pr, pp) = (tr.provenance.as_ref().expect("provenance"), tp.provenance.as_ref().expect("provenance"));
@@ -1618,6 +1619,58 @@ fn a_replay_of_a_log_with_the_two_containers_torques_swapped_changes_both_plants
     println!("swapped replay: chaser theta {chaser:.6} rad (real {:.6}), target theta {target:.6} rad (real {:.6})", truth_theta_at_end(real, "chaser"), truth_theta_at_end(real, "target"));
     assert_ne!(swapped.trajectories["chaser_attitude"].samples, real.trajectories["chaser_attitude"].samples);
     assert_ne!(swapped.trajectories["target_attitude"].samples, real.trajectories["target_attitude"].samples);
+}
+
+/// Question 254 item 8: the sidecar records each container's Bind version
+/// (`container_bind_version.<instance>`), and the Docker-free replay rebuilds `dynamics_hash` from it.
+/// A log that lacks the attribute for a container the replay must rebuild is refused with a typed error
+/// (no fallback to a synthetic hash); a log that carries a WRONG version replays, to a different
+/// `dynamics_hash` for that container only. Both doctored copies are re-hashed so the hash check passes.
+#[test]
+fn a_replay_log_without_a_bind_version_is_refused_and_a_wrong_one_changes_that_containers_dynamics_hash() {
+    if skip_if_cfs_image_unavailable("a_replay_log_without_a_bind_version_is_refused_and_a_wrong_one_changes_that_containers_dynamics_hash") {
+        return;
+    }
+    let p = pair_runs();
+    let real = &p.run_a.products;
+    let key = |who: &str| format!("container_bind_version.{who}");
+    let recorded = decode_log(&p.run_a.sidecar);
+    let attrs = &recorded.provenance.as_ref().expect("the sidecar has provenance").attributes;
+    for who in CONTAINER_PARTS {
+        println!("recorded {} = {:?}", key(who), attrs.get(&key(who)));
+        assert!(attrs.get(&key(who)).is_some_and(|v| !v.is_empty()), "{who}: the sidecar records the Bind version");
+    }
+    assert_eq!(attrs.keys().filter(|k| k.starts_with("container_bind_version.")).count(), CONTAINER_PARTS.len(), "container instances only");
+    let replay_of = |label: &str, doctor: &dyn Fn(&mut BTreeMap<String, String>)| {
+        let mut log = recorded.clone();
+        doctor(&mut log.provenance.as_mut().unwrap().attributes);
+        let bytes = log.encode_to_vec();
+        let dir = scratch_dir(label);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(dir.join("port_traffic.pb"), &bytes).expect("write the doctored log");
+        let _engine = gmat_sys::engine_lock();
+        let replay = ReplayConfig { log_path: dir.join("port_traffic.pb"), expected_hash: sha256_hex(&bytes), instances: vec![] };
+        let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+        let result = execute(RunConfig { replay: Some(replay), ..run_config(&gmat, &p.drm, &p.sos, &p.systems, &p.kernel_run_id, None) });
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    };
+    // Missing: typed refusal naming the instance.
+    let refused = replay_of("replay-no-version", &|a| {
+        a.remove(&key("chaser_controller"));
+    });
+    println!("log without the chaser's version: {:?}", refused.as_ref().err());
+    assert!(matches!(refused, Err(DrmError::ReplayLogLacksBindVersion { ref instance }) if instance == "chaser_controller"), "got {:?}", refused.as_ref().err());
+    // Wrong: replays, and only the chaser container's dynamics_hash moves.
+    let wrong = replay_of("replay-wrong-version", &|a| {
+        a.insert(key("chaser_controller"), "io_lockstep/not-the-live-version".to_string());
+    })
+    .expect("a log with a wrong Bind version still replays");
+    let hash_of = |products: &RunProducts, who: &str| products.trajectories[who].segments.iter().map(|s| s.dynamics_hash.clone()).collect::<Vec<_>>();
+    println!("chaser_controller dynamics_hash: live {:?} wrong-version replay {:?}", hash_of(real, "chaser_controller"), hash_of(&wrong, "chaser_controller"));
+    assert_ne!(hash_of(real, "chaser_controller"), hash_of(&wrong, "chaser_controller"), "a wrong Bind version must change the replayed dynamics_hash");
+    assert_eq!(hash_of(real, "target_controller"), hash_of(&wrong, "target_controller"), "the other container is untouched");
+    assert_eq!(real.trajectories["chaser_attitude"].samples, wrong.trajectories["chaser_attitude"].samples, "the version is identity only; the physics is the recorded traffic");
 }
 
 /// The telecommand's destination is the topology: connect the dispatch instance to the TARGET's

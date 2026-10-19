@@ -1798,7 +1798,10 @@ fn run_one_span(
 /// own "A3.3" comment further down), and `Router::take_port_traffic` is a genuine drain (a
 /// second call returns nothing) -- so the ONE drain happens here and is threaded back out
 /// through this tuple, rather than `execute()` draining it again itself and getting nothing.
-type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, Vec<(String, String)>>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>);
+///
+/// Question 254 item 8: a seventh member, every container (not board) instance's Bind version, live or replayed,
+/// for `write_port_traffic_sidecar` to record so a Docker-free replay can rebuild `ModelInfo`.
+type SharedGroupResult = (BTreeMap<String, Trajectory>, Vec<Event>, BTreeMap<String, NamedOutputSeries>, BTreeMap<String, Vec<(String, String)>>, Vec<av_cdm::pb::Measurement>, Vec<pb::PortTrafficRecord>, BTreeMap<String, String>);
 
 /// Question 178 (R5.1a): drain `handle`'s own accumulated SENSOR fault effect (if any) and fold
 /// it into `sensor_fault_totals`, attributed to whichever fault id `active_sensor_fault` says is
@@ -2040,13 +2043,24 @@ fn run_shared_group(
     // start of the run and again at every boundary (a model span is re-materialized at each one):
     // a board with an edge-log script plays that script under the `ModelInfo` the live board
     // reported; anything else plays `port_traffic.pb` under the synthetic container-replay info.
+    // Question 254 item 8: a replayed container (not a board) rebuilds its live `ModelInfo` from the Bind
+    // version the log recorded; a log without it is refused before anything is built.
+    let mut replay_bind_versions: BTreeMap<String, String> = BTreeMap::new();
+    for (name, (spec, _)) in container_plans {
+        if replay_targets.contains(name) && spec.board.is_none() {
+            let version = replay::container_bind_version(replay_log.expect("checked by the debug_assert! above"), name).ok_or_else(|| DrmError::ReplayLogLacksBindVersion { instance: name.clone() })?;
+            replay_bind_versions.insert(name.clone(), version.to_string());
+        }
+    }
+    // Every container instance's Bind version, live or replayed, for the sidecar (`write_port_traffic_sidecar`).
+    let mut container_bind_versions: BTreeMap<String, String> = replay_bind_versions.clone();
     let replay_container_handle = |name: &str| -> ModelHandle {
         let (spec, _) = &container_plans[name];
         let instance = instances_by_name[name];
         let sys = systems.get(&instance.system_id).expect("validated in pass 1");
         match (board_scripts.get(name), spec.board.as_ref()) {
             (Some(script), Some(board)) => ModelRegistry::construct_replay_board(name, binding::board_model_info(spec, board, sys, name, &script.bind_version), scenario.start_tai_ns, script.clone()),
-            _ => ModelRegistry::construct_replay_container(name, &sys.dynamics_model, &sys.state_space_id, scenario.start_tai_ns, replay_log.expect("checked by the debug_assert! above")),
+            _ => ModelRegistry::construct_replay_container(name, &sys.dynamics_model, &sys.state_space_id, scenario.start_tai_ns, replay_log.expect("checked by the debug_assert! above"), replay_bind_versions.get(name).map(|version| binding::container_model_info(spec, sys, name, version))),
         }
     };
     for (name, (spec, period_ns)) in container_plans {
@@ -2131,6 +2145,9 @@ fn run_shared_group(
         // silently returns a different epoch than the one it was asked for.
         debug_assert_eq!(materialized.t0_tai_ns, scenario.start_tai_ns);
         container_binding_hashes.insert(name.clone(), materialized.model.provenance_attributes());
+        if spec.board.is_none() {
+            container_bind_versions.insert(name.clone(), av_dynamics::DynamicsModel::describe(&materialized.model).version);
+        }
         container_spans.insert(
             name.clone(),
             ContainerSpanState {
@@ -2870,7 +2887,7 @@ fn run_shared_group(
         outputs_by_instance.insert(name.clone(), span.all_outputs);
     }
 
-    Ok((trajectories, all_events, outputs_by_instance, container_binding_hashes, all_measurements, port_traffic_records))
+    Ok((trajectories, all_events, outputs_by_instance, container_binding_hashes, all_measurements, port_traffic_records, container_bind_versions))
 }
 
 /// Read `instance.initial_covariance` (question 89) and SPD-check it at load, before any
@@ -3446,7 +3463,7 @@ fn sort_port_traffic(records: &mut [pb::PortTrafficRecord]) {
 /// carries (a snapshot from *before* either `"port_traffic_uri"` or `"port_traffic"` is added --
 /// the sidecar's own provenance describes the run, not itself), never mutated in place; the
 /// returned `Provenance` is what `RunProducts.provenance` becomes.
-fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &str, mut records: Vec<pb::PortTrafficRecord>, undeclared_port_emissions: u64, base_provenance: &Provenance) -> Result<(String, Provenance), DrmError> {
+fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &str, mut records: Vec<pb::PortTrafficRecord>, undeclared_port_emissions: u64, container_bind_versions: &BTreeMap<String, String>, base_provenance: &Provenance) -> Result<(String, Provenance), DrmError> {
     let mut provenance = base_provenance.clone();
     let Some(dir) = products_dir else {
         // Absence is explicit, never both attributes at once (see this function's own doc
@@ -3464,6 +3481,12 @@ fn write_port_traffic_sidecar(products_dir: Option<&std::path::Path>, run_id: &s
     let mut log_provenance = base_provenance.clone();
     if undeclared_port_emissions > 0 {
         log_provenance.attributes.insert("undeclared_port_emissions".to_string(), undeclared_port_emissions.to_string());
+    }
+    // Question 254 item 8: each container instance's Bind version, the one `ModelInfo` input a Docker-free
+    // replay cannot get from a live `Bind` (`replay::CONTAINER_BIND_VERSION_KEY_PREFIX`). Sidecar only:
+    // `RunProducts.provenance` and the records are untouched, so only a container run's whole-file hash moves.
+    for (instance, version) in container_bind_versions {
+        log_provenance.attributes.insert(format!("{}{instance}", replay::CONTAINER_BIND_VERSION_KEY_PREFIX), version.clone());
     }
     let log = pb::PortTrafficLog { run_id: run_id.to_string(), records, provenance: Some(log_provenance) };
     // Same encoding path `RunProducts::to_proto`'s own callers already use for the main
@@ -4191,6 +4214,7 @@ pub fn execute_with_board_replay(cfg: RunConfig<'_>, board_logs: &[BoardLogRepla
     // `router` at all, so it leaves this `None`, and this run's own port traffic (always empty
     // for a covariance run) is still correctly read the old way, below.
     let mut shared_port_traffic: Option<Vec<pb::PortTrafficRecord>> = None;
+    let mut container_bind_versions: BTreeMap<String, String> = BTreeMap::new();
 
     if options.covariance {
         for instance in &cfg.sos.instances {
@@ -4235,7 +4259,7 @@ pub fn execute_with_board_replay(cfg: RunConfig<'_>, board_logs: &[BoardLogRepla
         }
     } else {
         let instances_by_name: BTreeMap<String, &SystemInstance> = cfg.sos.instances.iter().map(|i| (i.name.clone(), i)).collect();
-        let (shared_trajectories, shared_events, shared_outputs, container_binding_hashes, shared_measurements, shared_group_port_traffic) = run_shared_group(
+        let (shared_trajectories, shared_events, shared_outputs, container_binding_hashes, shared_measurements, shared_group_port_traffic, shared_bind_versions) = run_shared_group(
             gmat,
             &plans,
             &container_plans,
@@ -4266,6 +4290,7 @@ pub fn execute_with_board_replay(cfg: RunConfig<'_>, board_logs: &[BoardLogRepla
         all_events.extend(shared_events);
         all_measurements.extend(shared_measurements);
         shared_port_traffic = Some(shared_group_port_traffic);
+        container_bind_versions = shared_bind_versions;
         for instance in &cfg.sos.instances {
             let sys = cfg.systems.get(&instance.system_id).expect("validated in pass 1");
             let sys_hash = system_hashes.get(&instance.system_id).expect("verified above").clone();
@@ -4449,7 +4474,7 @@ pub fn execute_with_board_replay(cfg: RunConfig<'_>, board_logs: &[BoardLogRepla
     // Question 175 (M25.4a): writes the sidecar (or not) and folds "port_traffic_uri"/
     // "port_traffic" into a fresh copy of `provenance` -- see `write_port_traffic_sidecar`'s
     // own doc comment and this module's own "Port traffic sidecar" doc section.
-    let (port_traffic_hash, provenance) = write_port_traffic_sidecar(cfg.products_dir.as_deref(), &cfg.run_id, port_traffic_records, undeclared_port_emissions, &provenance)?;
+    let (port_traffic_hash, provenance) = write_port_traffic_sidecar(cfg.products_dir.as_deref(), &cfg.run_id, port_traffic_records, undeclared_port_emissions, &container_bind_versions, &provenance)?;
     // Question 121/122 (M17.2): frames every Trajectory.frame_id in this run resolves against
     // -- see collect_frames's own doc comment. Computed from the real, final `trajectories` map
     // (after every instance has run), not the load-time `declared_trajectories` shell, so a

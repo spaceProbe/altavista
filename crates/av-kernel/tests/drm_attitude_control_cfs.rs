@@ -421,12 +421,11 @@ fn byte_identical_products_when_the_container_bound_controller_is_replayed_docke
 /// `PortTrafficLog`, produces a second `RunProducts` matching the first -- with one
 /// exclusion, disclosed here rather than silently dropped:
 ///
-/// `"controller"`'s own `segments[].dynamics_hash`/`.dynamics_model`/`.dynamics_depth`, and its
-/// `Trajectory.provenance.attributes["container_binding_hash"]`: `crate::registry::ModelRegistry::
-/// construct_replay_container` builds a synthetic `ModelInfo` because a Docker-free replay never
-/// makes the `Bind` call, and the port-traffic log does not record the Bind `version` (or the
-/// binding hash) that the live `ModelInfo` carries. (The live hash itself is now stable across
-/// runs, see the sibling test above; it is the replay that cannot reproduce it.)
+/// `"controller"`'s `Trajectory.provenance.attributes["container_binding_hash"]`: a Docker-free
+/// replay never makes the `Bind` call, and the port-traffic log records the Bind `version`
+/// (`container_bind_version.<instance>`, question 254 item 8) but not the binding hash. The
+/// segment's `dynamics_hash`/`.dynamics_model`/`.dynamics_depth` are NOT excluded any more: they
+/// are rebuilt from that version and compared.
 ///
 /// **Nothing else is excluded.** `"attitude"` and `"imu"` are real, unreplayed, deterministic
 /// native instances in both runs (identical seeds, identical wheel-torque commands received --
@@ -482,14 +481,12 @@ fn run_byte_identical_products_when_the_container_bound_controller_is_replayed_d
         for (seg_real, seg_replayed) in traj_real.segments.iter().zip(traj_replayed.segments.iter()) {
             assert_eq!(seg_real.start_tai_ns, seg_replayed.start_tai_ns);
             assert_eq!(seg_real.end_tai_ns, seg_replayed.end_tai_ns);
+            // Nothing excluded (question 254 item 8): the sidecar records the container's Bind version.
+            assert_eq!(seg_real.dynamics_model, seg_replayed.dynamics_model, "instance {name:?}");
+            assert_eq!(seg_real.dynamics_hash, seg_replayed.dynamics_hash, "instance {name:?}");
+            assert_eq!(seg_real.dynamics_depth, seg_replayed.dynamics_depth, "instance {name:?}");
             if name == "controller" {
-                // seg_real.dynamics_hash/.dynamics_model/.dynamics_depth deliberately not
-                // compared for the replayed container instance -- see this test's own doc
-                // comment above.
-            } else {
-                assert_eq!(seg_real.dynamics_model, seg_replayed.dynamics_model, "instance {name:?}");
-                assert_eq!(seg_real.dynamics_hash, seg_replayed.dynamics_hash, "instance {name:?}");
-                assert_eq!(seg_real.dynamics_depth, seg_replayed.dynamics_depth, "instance {name:?}");
+                assert!(!seg_real.dynamics_hash.is_empty(), "the container segment carries a dynamics_hash");
             }
         }
         if name == "controller" {
