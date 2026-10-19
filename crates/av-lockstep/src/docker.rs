@@ -207,7 +207,7 @@ pub fn image_gate_status(default_image_ref: &str, build_hint: &str) -> Result<()
 }
 
 // ------------------------------------------------------------------------------------------
-// Question 154 / 212(a) (H1b, the av-store MinIO integration proof): a test must never pull an
+// Question 154 / 212(a) (H1b, the av-store S3 integration proof): a test must never pull an
 // image at test time -- the manager pulls once at setup and records the digest beside the
 // image's run/build script (e.g. `services/store/IMAGE_DIGEST.md`). [`local_image_id`] and
 // [`recorded_digest_gate`] are the two additive pieces that let a gated test compare the LOCAL

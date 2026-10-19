@@ -48,7 +48,7 @@ pub enum StoreError {
     // -- src/metadata.rs -----------------------------------------------------------------
     /// A `Label.marking` contains a byte outside printable ASCII (`crate::metadata`'s module
     /// doc: `x-amz-meta-av-marking` is read by a human running `mc stat`, so it is refused at
-    /// encode time rather than mangled into an HTTP header MinIO would itself reject or
+    /// encode time rather than mangled into an HTTP header an S3 server would itself reject or
     /// silently re-encode).
     #[error("marking {marking:?} contains a non-ASCII or non-printable byte, refused before it reaches x-amz-meta-av-marking")]
     InvalidMarking { marking: String },
@@ -128,14 +128,14 @@ pub enum StoreError {
     #[error("reading the HTTP response body: {0}")]
     Body(String),
     /// [`crate::client::StoreClient::get`]/[`crate::client::StoreClient::head`] found no object
-    /// at `uri`: S3/MinIO answered 404, or its `<Code>` was `NoSuchKey`/`NoSuchBucket` (H1b's
+    /// at `uri`: the S3 server answered 404, or its `<Code>` was `NoSuchKey`/`NoSuchBucket` (H1b's
     /// review finding -- H1a's own brief already asked for this typed variant and it was
     /// missed; every 404 became an untyped [`StoreError::S3`] instead, indistinguishable by
     /// type from any other server error). Every OTHER non-2xx response is still `StoreError::
     /// S3`, unchanged.
     #[error("no object at {uri:?}: S3 {status} {code}")]
     NotFound { uri: String, status: u16, code: String },
-    /// A non-2xx S3/MinIO response, with its status and the `<Code>`/`<Message>`/
+    /// A non-2xx S3 response, with its status and the `<Code>`/`<Message>`/
     /// `<RequestId>` [`crate::client::parse_s3_error_xml`] extracted from the body (or the
     /// placeholders that function documents when the body did not parse as S3's error XML
     /// shape at all).

@@ -96,8 +96,9 @@
 # `av-edge-plugin` is a CLIENT that dials exactly one outbound endpoint and accepts no inbound
 # connection at all -- its own Dockerfile's expected run posture is `--network none` plus that
 # one endpoint. `av-tiles` is the opposite shape: a SERVER that accepts inbound HTTP on `--bind`
-# and dials out to whatever `--store-endpoint` names (a real S3-API backend -- MinIO in every
-# test this workspace has, a real S3-compatible endpoint in production). This image therefore
+# and dials out to whatever `--store-endpoint` names (a real S3-API backend -- the S3-compatible server
+# recorded in services/store/IMAGE_DIGEST.md in every test this workspace has, a real
+# S3-compatible endpoint in production). This image therefore
 # needs BOTH a route to its configured store endpoint AND a reachable listening port -- there is
 # no `--network none` posture for it, and this Dockerfile does not claim one.
 #

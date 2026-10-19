@@ -18,7 +18,7 @@
 //! hash-chained file-backed queue (the pattern of the ingest log; a broker later, ADR-003)".
 //! ADR-003 draws this substrate's boundary explicitly: nothing on this platform's hot path
 //! depends on an orchestrator, and this track's own substrate decision names Postgres and
-//! MinIO but no message broker. [`crate::log::JobLog`] is therefore the same pattern
+//! an S3-compatible object store but no message broker. [`crate::log::JobLog`] is therefore the same pattern
 //! `crates/av-ingest/src/log.rs::PartitionLog` already established for the edge ingest
 //! ledger -- an append-only, hash-chained file, durable by `fsync` rather than by a
 //! separately-operated service -- applied here to jobs instead of measurement batches. A

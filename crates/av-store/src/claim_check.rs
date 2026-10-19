@@ -31,7 +31,7 @@ pub struct StoredObject {
 /// `"s3://<bucket>/<key>"`.
 ///
 /// Does not set `spatial_extent`/`temporal_extent`: this round's callers (the next task's
-/// MinIO integration test, and any future H2 catalog caller) do not yet have a payload's
+/// S3 integration test, and any future H2 catalog caller) do not yet have a payload's
 /// geospatial/temporal extent to hand at store time -- `AssetRef.spatial_extent`/
 /// `temporal_extent` are additive-only proto fields (this task's binding rule 10), so a
 /// future caller that does have an extent sets it on the returned value itself; this

@@ -2,7 +2,7 @@
 //! REAL job through the REAL `av-jobs` queue ([`av_jobs::queue::JobQueue`]) + `Runner`
 //! ([`av_jobs::runner::Runner`]) + `TilerExecutor` ([`av_jobs::tiler::TilerExecutor`]),
 //! storing every output -- the source raster, every tile, and the manifest -- in a REAL
-//! `av-store`/MinIO object store by content hash. Prints exactly ONE JSON object to stdout
+//! `av-store` S3-compatible object store by content hash. Prints exactly ONE JSON object to stdout
 //! naming the resulting tile set's own identity; stdout carries nothing else, ever (a caller
 //! pipes this straight into `jq`/`json.loads`, never scrapes progress text out of it first).
 //! Every other line of output goes to stderr.
@@ -86,7 +86,7 @@
 //!
 //! `total_stored_bytes` in this binary's own JSON output ([`FixtureResult::total_stored_bytes`]) is the sum of
 //! `JobCompletion.outputs[].size_bytes` -- the REAL sizes the configured `ObjectSink` (a real
-//! `av-store`/MinIO `put`, or this crate's own `MemoryObjectSink`) reports for what it actually
+//! `av-store` S3 `put`, or this crate's own `MemoryObjectSink`) reports for what it actually
 //! stored, never a value this binary computes independently and could get out of sync with
 //! what was written. `--min-level`/`--max-level`/`--tile-size` are ordinary, uncapped (beyond
 //! `TilerExecutor`'s own documented ceilings) command-line arguments specifically so an

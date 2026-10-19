@@ -58,7 +58,7 @@
 // `fetch()` call `GatewayImageryLayerAdapter.load()` makes, and everything that
 // happens while it is in flight (the httpx-shaped proxy hop through
 // `altavista/server.py`, the real network round trip to the real `av-tiles`
-// gateway, the real MinIO read behind it). `LayerManager.update()` only ever
+// gateway, the real S3-compatible store read behind it). `LayerManager.update()` only ever
 // *starts* a load and returns synchronously (see layer.js's own module docstring:
 // "Never awaits a `load()` promise") -- exactly why this is a fair model of a real
 // browser's main thread, where `fetch()` genuinely does hand control back to the
