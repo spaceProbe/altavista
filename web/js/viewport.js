@@ -214,9 +214,15 @@ export class Viewport {
  * from that viewport's own eye/frame, so two viewports looking at the same screen
  * coordinate from different cameras correctly resolve to different world objects (or the
  * same one, when that is geometrically correct) without either needing to know about
- * `THREE.Layers` at all -- every pick target (body mesh, spacecraft marker, event mesh)
- * is a single object shared by every viewport (see module docstring), so no per-viewport
- * layer filtering is needed for picking to be correct, only the right camera.
+ * `THREE.Layers` at all -- every pick target (body mesh, spacecraft marker, event mesh,
+ * glTF model mesh) is a single object shared by every viewport (see module docstring), so no
+ * per-viewport layer filtering is needed for picking to be correct, only the right camera
+ * AND the targets standing where that viewport draws them: the shared entity objects are
+ * written per drawing viewport (`Viewer._placeSharedEntities`), so `Viewer.pick()` places
+ * them for the clicked viewport before it calls this function and restores the previous
+ * placement afterwards. This function itself raycasts whatever the targets' world matrices
+ * hold, so a caller that does not place them first gets the placement of whichever view
+ * wrote them last.
  *
  * @param {THREE.Camera} camera
  * @param {number} ndcX

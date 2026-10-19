@@ -1481,25 +1481,57 @@ export class Viewer {
    * for the primary pane, or `viewer.viewports.get(id).camera` for any other pane), and
    * this method casts the ray from THAT camera, never a hardcoded one -- see
    * viewport.js's exported `pickAlongCamera` (the actual raycast, testable headlessly
-   * with no Viewer at all) for the mechanism and its own docstring for why no
-   * `THREE.Layers` filtering is needed here (every pick target is a single object shared
-   * by every viewport).
+   * with no Viewer at all) for the mechanism. No `THREE.Layers` filtering is needed: every
+   * pick target is ONE object drawn by every viewport.
+   *
+   * Because those objects are one shared set, WHERE they sit depends on which view they were
+   * last written for (`_placeSharedEntities`, question 252: float32 rounding against that
+   * view's floating origin, metres off at GEO, tens of metres at lunar distance). So the
+   * ray is cast against the placement of the view `camera` belongs to -- the same mapping the
+   * draw hook uses (the primary camera or any unknown camera -> the primary, a viewport's
+   * camera -> that viewport) -- i.e. against what that view draws, not what the primary
+   * drew; the primary's (or whichever placement was current) is written back before this
+   * returns, so the scene graph between ticks is unchanged. Anything `_placeSharedEntities`
+   * places (today the entity objects: spacecraft markers, events, glTF models; the bodies
+   * once they are placed there) is covered with no second mechanism, provided it updates
+   * the world matrices of what it moves, as that method does. A picking cost: one
+   * placement per view switch, and the write-back, per click -- never per tick.
+   *
+   * Targets: body meshes, spacecraft markers, event meshes, and the glTF model of a
+   * spacecraft (when the models class is on and the model is loaded), which resolves to its
+   * spacecraft. The marker alone is far too small a target for a 1.5 m model framed from
+   * ~10 m (a 7 px dot at its centre, sized by the CLOSEST camera, see
+   * `_markerReferenceDistance`); the model is what is drawn there.
    * @param {THREE.Camera} camera
    * @param {number} ndcX
    * @param {number} ndcY
    * @returns {{kind: 'body'|'spacecraft'|'event', name: string}|null}
    */
   pick(camera, ndcX, ndcY) {
-    const targets = [];
-    for (const b of this.bodies.values()) if (b.visible && b.mesh.visible) targets.push(b.mesh);
-    for (const s of this.spacecraft.values()) if (s.visible && s.marker.visible) targets.push(s.marker);
-    for (const e of this.events) if (e.mesh.visible) targets.push(e.mesh);
-    const hit = pickAlongCamera(camera, ndcX, ndcY, targets);
-    if (!hit) return null;
-    for (const [name, b] of this.bodies) if (b.mesh === hit) return { kind: 'body', name };
-    for (const [name, s] of this.spacecraft) if (s.marker === hit) return { kind: 'spacecraft', name };
-    for (const e of this.events) if (e.mesh === hit) return { kind: 'event', name: e.data.name };
-    return null;
+    const vp = this._viewportForCamera(camera);
+    const before = this._placedView; // undefined until something has been placed
+    this._placeSharedEntities(vp);
+    try {
+      const targets = [];
+      for (const b of this.bodies.values()) if (b.visible && b.mesh.visible) targets.push(b.mesh);
+      for (const s of this.spacecraft.values()) if (s.visible && s.marker.visible) targets.push(s.marker);
+      for (const e of this.events) if (e.mesh.visible) targets.push(e.mesh);
+      const modelOf = new Map(); // model mesh -> spacecraft name
+      for (const [name, entity] of this._entityModelEntities) {
+        const s = this.spacecraft.get(name);
+        if (!s || !s.visible || !entity.modelLoaded || !isVisibleInScene(entity.group)) continue;
+        entity.group.traverseVisible((o) => { if (o.isMesh) { targets.push(o); modelOf.set(o, name); } });
+      }
+      const hit = pickAlongCamera(camera, ndcX, ndcY, targets);
+      if (!hit) return null;
+      if (modelOf.has(hit)) return { kind: 'spacecraft', name: modelOf.get(hit) };
+      for (const [name, b] of this.bodies) if (b.mesh === hit) return { kind: 'body', name };
+      for (const [name, s] of this.spacecraft) if (s.marker === hit) return { kind: 'spacecraft', name };
+      for (const e of this.events) if (e.mesh === hit) return { kind: 'event', name: e.data.name };
+      return null;
+    } finally {
+      if (before !== vp) this._placeSharedEntities(before === undefined ? null : before);
+    }
   }
 
   // ------------------------------------------------------------------ M15.4: globe
@@ -2259,12 +2291,17 @@ export class Viewer {
     this.scene.onBeforeRender = (renderer, scene, camera) => this._onSceneBeforeRender(camera);
   }
 
-  _onSceneBeforeRender(camera) {
-    let vp = null;
+  /** The view `camera` draws (and is picked) for: the `Viewport` whose camera it is, or `null`
+   * for the primary (the primary camera, and any camera that is none of the viewports'). */
+  _viewportForCamera(camera) {
     if (camera !== this.camera) {
-      for (const v of this.viewports.values()) if (v.camera === camera) { vp = v; break; }
+      for (const v of this.viewports.values()) if (v.camera === camera) return v;
     }
-    this._placeSharedEntities(vp);
+    return null;
+  }
+
+  _onSceneBeforeRender(camera) {
+    this._placeSharedEntities(this._viewportForCamera(camera));
   }
 
   /**
@@ -2721,6 +2758,13 @@ export function computeFitRadius(bodies, spacecraft) {
  */
 export function defaultFrameViewRadius(bodyRadiusKm) {
   return typeof bodyRadiusKm === 'number' ? bodyRadiusKm * SCALE * 3 : 1e-4;
+}
+
+/** True when `obj` and every ancestor are `visible` (three's `traverseVisible` checks only the
+ * subtree below the object it starts from; a hidden entity-class group above it must count). */
+export function isVisibleInScene(obj) {
+  for (let o = obj; o; o = o.parent) if (!o.visible) return false;
+  return true;
 }
 
 /**
