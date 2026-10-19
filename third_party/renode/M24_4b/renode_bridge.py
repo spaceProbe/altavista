@@ -440,6 +440,25 @@ class MonitorClient:
         return b"".join(chunks)
 
 
+def write_renode_config(scratch_dir):
+    """Question 254 defect D1: a private Renode config for one run, returned as the path to pass
+    as `renode --config <path>`. Left alone, Renode reads and writes `~/Library/Application
+    Support/renode/{config,history}` -- shared by every Renode of this user, unbounded (349,211
+    lines / 9.2 MB by the time `drm_attitude_control_renode` died of `System.IO.IOException:
+    Input/output error` rewriting it) -- and AntShell's `HandleCommand` rewrites that WHOLE history
+    file (`File.WriteAllLines`) on every monitor command, i.e. on every injected UART byte
+    (`WriteChar`): measured 0.62 ms per command against an empty history and 10.8 ms against the
+    9.2 MB one. `$HOME`/`XDG_*` do not move it (the real config carries an absolute
+    `history-path`, and a fresh config defaults to the real directory), so the file has to name
+    `history-path` itself; Renode fills every other key with its default. What is sent to Renode
+    is unchanged, so the port traffic cannot move."""
+    d = os.path.abspath(scratch_dir)
+    cfg = os.path.join(d, "renode_config")
+    with open(cfg, "w") as f:
+        f.write(f"[general]\nhistory-path = {os.path.join(d, 'renode_history')}\n")
+    return cfg
+
+
 def wait_for_port(host, port, deadline):
     while time.monotonic() < deadline:
         try:
@@ -582,7 +601,8 @@ class RenodeBridge:
         self.frame_log_path = os.path.join(self.scratch_dir, "frames.jsonl")
         logf = open(log_path, "wb")
         self.proc = subprocess.Popen(
-            [self.renode_bin, "--disable-gui", "--hide-log", "-P", str(self.monitor_port)],
+            [self.renode_bin, "--disable-gui", "--hide-log", "-P", str(self.monitor_port),
+             "--config", write_renode_config(self.scratch_dir)],  # question 254 D1
             stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
         )
         t0 = time.monotonic()

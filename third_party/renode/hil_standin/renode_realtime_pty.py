@@ -317,7 +317,8 @@ runMacro $reset
 
     import subprocess
     logf = open(renode_log, "wb")
-    proc = subprocess.Popen([args.renode_bin, "--disable-gui", "--hide-log", "-P", str(args.monitor_port)], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT)
+    # Question 254 D1: a private config/history under --workdir, never the user's global ones.
+    proc = subprocess.Popen([args.renode_bin, "--disable-gui", "--hide-log", "-P", str(args.monitor_port), "--config", rb.write_renode_config(args.workdir)], stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT)
     mon = None
     relay = None
     stats = {
