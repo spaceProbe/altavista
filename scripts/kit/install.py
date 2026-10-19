@@ -59,7 +59,7 @@ GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL), so a kit records GMAT's
 (`docs/kit-operator-supplied.md` item 3). When the kit has `packs.gmat`, the operator brings an
 unpacked GMAT R2026a for the target platform and says where it is and which platform it is:
 
-    <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform KEY
+    <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform KEY [--gmat-variant NAME]
 
 `verify_operator_gmat` measures the tree (`manifest.measure_tree`, under the pin's `scope`) and
 compares it with the pin recorded for KEY in the installer's own `operator_supplied.json`: content
@@ -67,7 +67,16 @@ hash, file count, total bytes, and the count and hash of the symlink listing. A 
 `INSTALL_RECORD.installed.operator_supplied.gmat` (platform, root exactly as given, what was found,
 the pin) and the tree is not touched or copied. The platform is never guessed from the installing
 host: this installer also runs in a Linux container over a macOS tree (question 217), where the
-host says nothing about the tree. KEY is `<os>-<uname -m>`, e.g. `macos-arm64`. When the kit has no
+host says nothing about the tree. KEY is `<os>-<uname -m>`, e.g. `macos-arm64`.
+
+A platform may have more than one pinned release (question 257): `linux-x86_64` has NASA's Ubuntu
+archive (`ubuntu`, the default) and its RHEL 7 archive (`rhel7`, pinned under the key
+`linux-x86_64-rhel7`). `--gmat-variant NAME` chooses one; the tree is compared with that variant's pin
+only, and the record names the variant and whether it was the default or the option. A tree that
+matches the other variant's pin is still refused (`gmat-matches-other-variant`, naming the variant it
+matches and the option to pass); `--gmat-variant` on a platform with one pin is refused
+(`gmat-variant-not-applicable`), and a variant's pin key given as the platform
+(`--gmat-platform linux-x86_64-rhel7`) is refused naming the two options to pass instead. When the kit has no
 `packs.gmat` the install does not need GMAT and says so in the record. The measurement is a check at
 install time over what the pin covers (`not_covered` in the pin component, repeated in the record);
 it does not prove the tree is unchanged afterwards.
@@ -87,7 +96,7 @@ prints the same six lines with the roles reversed. Together the two outputs cove
 `required` line says `verified` in one and `not here` in the other. The structured list is
 `INSTALL_RECORD.installed.operator_supplied.components`. A required component that is missing or
 different is a typed refusal (exit 2), after the lines up to and including it were printed.
-`install.sh --check-operator-supplied <kit> [--gmat-root PATH --gmat-platform KEY]` runs just this
+`install.sh --check-operator-supplied <kit> [--gmat-root PATH --gmat-platform KEY [--gmat-variant NAME]]` runs just this
 part (the kit's own verification, then the list) and installs nothing.
 
 # An operator-supplied wheel (question 250(a), wheel libraries)
@@ -191,7 +200,8 @@ it").
    (no `--gmat-root`; names every pinned platform with hash, files, bytes),
    `gmat-root-not-a-directory`, `gmat-platform-missing`, `gmat-no-pin-for-platform` (lists the
    platforms that have pins), `gmat-root-unreadable`, `gmat-descriptor-differs` (expected and found
-   hash, file count, bytes, symlinks), and, for a broken kit or pins file,
+   hash, file count, bytes, symlinks), (question 257) `gmat-matches-other-variant`,
+   `gmat-variant-not-applicable`, `gmat-variant-unknown`, `gmat-platform-is-a-variant`, and, for a broken kit or pins file,
    `gmat-kit-not-operator-supplied` and `gmat-pin-malformed`. All of them happen before the target
    directory is created. (Task 3) The pins file itself (`pins-malformed`), a kit that needs a pin the
    file lacks (`gmat-pin-malformed`, `base-pin-missing`) or declares a component that cannot be declared
@@ -244,6 +254,13 @@ import operator_check  # noqa: E402  (question 250(a), task 3: what the kit need
 
 #: The kit pack the operator supplies (question 250(a), task 2); `manifest.OPERATOR_SUPPLIED_PACKS` names its pin.
 GMAT_PACK = "gmat"
+
+#: `--gmat-variant` (question 257): which of a platform's pinned GMAT releases the operator brings.
+GMAT_VARIANT_HELP = (
+    "which pinned release of GMAT R2026a --gmat-root is, on a platform that has more than one: linux-x86_64 has "
+    "ubuntu (NASA's gmat-ubuntu-x64-R2026a.tar.gz, the default) and rhel7 (gmat-rhel7-x64-R2026a.tar.gz). The tree is "
+    "verified against that variant's pin only. Refused on a platform with one pin (macos-arm64)"
+)
 
 #: The two flags `main` hands to `image_build.main` instead of running the files install.
 IMAGE_STEP_FLAGS = ("--build-images", "--probe-offline-build")
@@ -554,21 +571,24 @@ def _install_wheels_into_venv(kit_dir: Path, target_dir: Path, extra_wheels: "li
     }
 
 
-def _gmat_not_needed_record(gmat_root: "str | None") -> dict:
+def _gmat_not_needed_record(gmat_root: "str | None", gmat_variant: "str | None" = None) -> dict:
     record = {
         "required": False, "verified": False,
         "reason": "the kit has no packs.gmat, so its contents do not need GMAT; nothing was checked",
     }
     if gmat_root is not None:
         record["root_given_but_unused"] = gmat_root
+    if gmat_variant is not None:
+        record["variant_given_but_unused"] = gmat_variant
     return record
 
 
-def _tree_verifier(doc: dict, gmat_root: "str | None", gmat_platform: "str | None"):
+def _tree_verifier(doc: dict, gmat_root: "str | None", gmat_platform: "str | None", gmat_variant: "str | None" = None):
     """The `data-tree` verifier `operator_check.verify_all` takes: GMAT, from the operator's own tree."""
     def verify(pin_id: str, pin: dict, requirement: "operator_check.Requirement") -> "operator_check.Verification":
         return operator_check.verify_gmat_tree(
             pin_id, pin, requirement, entry=doc["packs"].get(pin["pack"]), root=gmat_root, platform=gmat_platform,
+            variant=gmat_variant,
         )
     return verify
 
@@ -583,6 +603,7 @@ def _wheel_verifier(doc: dict, operator_wheels: "str | None"):
 
 def verify_operator_gmat(
     doc: dict, *, gmat_root: "str | None", gmat_platform: "str | None", pins_file: "Path | None" = None,
+    gmat_variant: "str | None" = None,
 ) -> dict:
     """GMAT's operator-supplied check (module doc, "GMAT is operator-supplied"): returns what was
     found and verified, for `INSTALL_RECORD.installed.operator_supplied.gmat`, or raises
@@ -592,10 +613,12 @@ def verify_operator_gmat(
     runs for all six components.
 
     Refusal order, cheapest first, the hash last: the kit's marker, the pin, no root, root not a
-    directory, no platform, no pin for the platform, then the measurement."""
+    directory, no platform, a variant's pin key given as the platform, no pin for the platform, a
+    variant that does not apply or is unknown, then the measurement (question 257: on Linux x86_64 the
+    tree is compared with the chosen variant's pin only, `ubuntu` unless `gmat_variant` says otherwise)."""
     entry = doc["packs"].get(GMAT_PACK)
     if entry is None:
-        return _gmat_not_needed_record(gmat_root)
+        return _gmat_not_needed_record(gmat_root, gmat_variant)
     component_id = kit_manifest.OPERATOR_SUPPLIED_PACKS[GMAT_PACK]
     pins_path = pins_file or kit_manifest.PINS_FILE
     try:
@@ -609,7 +632,7 @@ def verify_operator_gmat(
         ) from e
     result = operator_check.verify_gmat_tree(
         component_id, pin, operator_check.Requirement(True, f"required (packs.{GMAT_PACK})"),
-        entry=entry, root=gmat_root, platform=gmat_platform,
+        entry=entry, root=gmat_root, platform=gmat_platform, variant=gmat_variant,
     )
     if not result.verified:
         raise OperatorSuppliedRefused(result.code, result.reason)
@@ -619,7 +642,7 @@ def verify_operator_gmat(
 def verify_operator_supplied(
     doc: dict, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
-    operator_wheels: "str | None" = None,
+    operator_wheels: "str | None" = None, gmat_variant: "str | None" = None,
 ) -> "list[operator_check.Verification]":
     """The files install's half of question 250(a), task 3: every component of the pins file, in item
     order, printed through `out` one line each; the trees (GMAT) and the operator-supplied wheels this step can
@@ -640,7 +663,7 @@ def verify_operator_supplied(
         return operator_check.verify_all(
             operator_check.STEP_FILES, doc, pins,
             verifiers={
-                operator_check.KIND_TREE: _tree_verifier(doc, gmat_root, gmat_platform),
+                operator_check.KIND_TREE: _tree_verifier(doc, gmat_root, gmat_platform, gmat_variant),
                 operator_check.KIND_WHEEL: _wheel_verifier(doc, operator_wheels),
             },
             out=out,
@@ -649,12 +672,14 @@ def verify_operator_supplied(
         raise OperatorSuppliedRefused(e.result.code, e.result.reason) from e
 
 
-def _operator_supplied_record(results: "list[operator_check.Verification]", doc: dict, gmat_root: "str | None") -> dict:
+def _operator_supplied_record(
+    results: "list[operator_check.Verification]", doc: dict, gmat_root: "str | None", gmat_variant: "str | None" = None,
+) -> dict:
     """`INSTALL_RECORD.installed.operator_supplied`: `gmat` (this step's detailed record of the one tree
     it verifies, as before) and `components`, the structured form of the printed list."""
     gmat = next((r for r in results if r.kind == operator_check.KIND_TREE and r.verified), None)
     return {
-        "gmat": gmat.detail["record"] if gmat is not None else _gmat_not_needed_record(gmat_root),
+        "gmat": gmat.detail["record"] if gmat is not None else _gmat_not_needed_record(gmat_root, gmat_variant),
         "step": "files install",
         "declared": list(doc["operator_supplied_declared"]),
         "components": [r.to_record() for r in results],
@@ -719,7 +744,7 @@ def _images_record(doc: dict, kit_manifest_sha256: str) -> dict:
 def check_operator_supplied(
     kit_dir: Path, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
-    operator_wheels: "str | None" = None,
+    operator_wheels: "str | None" = None, gmat_variant: "str | None" = None,
 ) -> "list[operator_check.Verification]":
     """`install.sh --check-operator-supplied`: verifies the kit, then the operator-supplied components
     it needs (this step's share of them), printing the list through `out`, and installs nothing. Raises
@@ -732,14 +757,14 @@ def check_operator_supplied(
         out(_operator_doc_line(operator_doc))
     return verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
-        operator_wheels=operator_wheels,
+        operator_wheels=operator_wheels, gmat_variant=gmat_variant,
     )
 
 
 def install(
     kit_dir: Path, target_dir: Path, *, gmat_root: "str | None" = None, gmat_platform: "str | None" = None,
     pins_file: "Path | None" = None, out: "Callable[[str], None] | None" = None,
-    operator_wheels: "str | None" = None,
+    operator_wheels: "str | None" = None, gmat_variant: "str | None" = None,
 ) -> dict:
     """Runs the whole install: verify, refuse-checks (every operator-supplied component the kit needs
     that this step can reach, GMAT today), copy, chmod, pip install, INSTALL_RECORD.
@@ -763,7 +788,7 @@ def install(
     # Question 250(a), tasks 2 and 3: before the target directory exists, so a refusal leaves nothing behind.
     operator_results = verify_operator_supplied(
         doc, gmat_root=gmat_root, gmat_platform=gmat_platform, pins_file=pins_file, out=out,
-        operator_wheels=operator_wheels,
+        operator_wheels=operator_wheels, gmat_variant=gmat_variant,
     )
     _check_target_dir(target_dir)
 
@@ -816,7 +841,7 @@ def install(
     }
     record["installed"]["images"] = _images_record(doc, kit_manifest_sha256)
     # One entry per component of the pins file, each the result of its own verification function.
-    record["installed"]["operator_supplied"] = _operator_supplied_record(operator_results, doc, gmat_root)
+    record["installed"]["operator_supplied"] = _operator_supplied_record(operator_results, doc, gmat_root, gmat_variant)
     record_path = target_dir / "INSTALL_RECORD"
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
     return record
@@ -836,6 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="the platform of that GMAT, <os>-<uname -m> (e.g. macos-arm64); required with --gmat-root and never "
              "guessed from this host, which may be a Linux container over a macOS tree",
     )
+    p.add_argument("--gmat-variant", metavar="NAME", default=None, help=GMAT_VARIANT_HELP)
     p.add_argument("--operator-wheels", metavar="DIR", default=None, help=OPERATOR_WHEELS_HELP)
     return p
 
@@ -853,6 +879,7 @@ def build_check_parser() -> argparse.ArgumentParser:
     p.add_argument("kit_dir", type=Path, help="an existing kit directory (KIT_MANIFEST + content)")
     p.add_argument("--gmat-root", metavar="PATH", default=None, help="the operator's unpacked GMAT R2026a")
     p.add_argument("--gmat-platform", metavar="KEY", default=None, help="the platform of that GMAT, <os>-<uname -m>")
+    p.add_argument("--gmat-variant", metavar="NAME", default=None, help=GMAT_VARIANT_HELP)
     p.add_argument("--operator-wheels", metavar="DIR", default=None, help=OPERATOR_WHEELS_HELP)
     return p
 
@@ -866,7 +893,7 @@ def main(argv: "list[str] | None" = None) -> int:
         try:
             check_operator_supplied(
                 args.kit_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform, out=_print_line,
-                operator_wheels=args.operator_wheels,
+                operator_wheels=args.operator_wheels, gmat_variant=args.gmat_variant,
             )
         except InstallRefused as e:
             print(f"scripts/kit/install.py {CHECK_FLAG}: REFUSED -- {e}", file=sys.stderr)
@@ -876,7 +903,7 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         record = install(
             args.kit_dir, args.target_dir, gmat_root=args.gmat_root, gmat_platform=args.gmat_platform, out=_print_line,
-            operator_wheels=args.operator_wheels,
+            operator_wheels=args.operator_wheels, gmat_variant=args.gmat_variant,
         )
     except InstallRefused as e:
         print(f"scripts/kit/install.py: REFUSED -- {e}", file=sys.stderr)
@@ -885,7 +912,8 @@ def main(argv: "list[str] | None" = None) -> int:
     print(f"kit manifest sha256: {record['kit_manifest_sha256']}")
     gmat = record["installed"]["operator_supplied"]["gmat"]
     if gmat["verified"]:
-        print(f"GMAT at {gmat['root']} verified against the {gmat['platform']} pin (not copied)")
+        variant = "" if gmat.get("variant") is None else f", variant {gmat['variant']} ({gmat['variant_chosen_by']})"
+        print(f"GMAT at {gmat['root']} verified against the {gmat['platform']} pin{variant} (not copied)")
     else:
         print("GMAT not needed by this kit")
     for w in record["installed"]["operator_wheels"]:

@@ -138,6 +138,17 @@ def test_the_pins_file_and_the_docs_item_3_agree_on_the_gmat_hash():
     assert linux["pinned"] is True and linux["file"] in section and linux["sha256"].removeprefix("sha256:") in section
     assert f"{linux['bytes']:,}" in section
     assert archives["linux-aarch64"]["published"] is False
+    # question 257: every pinned archive's row in the Linux release table names its pin key in the Pin column,
+    # and every variant table is described with its default, its variants and the option that chooses one
+    rows = {r.split("|")[1].strip(): r.split("|")[-2].strip() for r in section.splitlines() if r.startswith("| `gmat-")}
+    for key, archive in archives.items():
+        if archive.get("pinned"):
+            row = next(pin for name, pin in rows.items() if f"`{archive['file']}`" in name)
+            assert row.startswith(f"`{key}`"), (key, row)
+    for platform, table in (PINS["gmat-r2026a"].get("variants") or {}).items():
+        assert "--gmat-variant" in section and f"`{table['default']}`" in section
+        for name, key in table["pins"].items():
+            assert f"`{name}`" in section and f"`{key}`" in section, (platform, name, key)
 
 
 def _current_registry_reference(record: str) -> str:

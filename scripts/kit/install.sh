@@ -14,11 +14,14 @@
 # GMAT R2026a and its platform, and the installer verifies it against the pin, never copying it
 # (question 250(a); install.py's module doc, "GMAT is operator-supplied"):
 #   <kit-dir>/installer/install.sh <kit-dir> <target-dir> --gmat-root PATH --gmat-platform macos-arm64
+# Linux x86_64 has two pinned releases (question 257): NASA's Ubuntu archive, the default, and its
+# RHEL 7 archive, chosen explicitly (the tree is verified against the chosen variant's pin only):
+#   <kit-dir>/installer/install.sh <kit-dir> <target-dir> --gmat-root PATH --gmat-platform linux-x86_64 [--gmat-variant ubuntu|rhel7]
 #
 # Every operator-supplied component the kit needs is listed, one line each, by both steps (question
 # 250(a), task 3; operator_check.py's module doc says how to read the two lists together). To verify
 # what this step can reach (GMAT) and print the list without installing anything:
-#   <kit-dir>/installer/install.sh --check-operator-supplied <kit-dir> [--gmat-root PATH --gmat-platform KEY]
+#   <kit-dir>/installer/install.sh --check-operator-supplied <kit-dir> [--gmat-root PATH --gmat-platform KEY [--gmat-variant NAME]]
 #
 # Images are built by a separate, host-side step of this same installer (question 250(a)): the
 # files install above runs inside the enclave and never gets the Docker socket. On the Docker host:

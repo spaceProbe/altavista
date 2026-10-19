@@ -514,3 +514,250 @@ def test_the_real_linux_gmat_tree_matches_the_recorded_linux_x86_64_pin():
     component = kmanifest.load_operator_pins()["gmat-r2026a"]
     found = kmanifest.measure_tree(Path(_LINUX_GMAT), component["scope"])
     assert kmanifest.compare_to_pin(found, component["platforms"]["linux-x86_64"]) == [], found
+
+
+# =================================================================================================
+# 7. Variants: GMAT's RHEL 7 build as a second Linux x86_64 pin (question 257)
+# =================================================================================================
+
+REAL_LINUX, REAL_RHEL7 = "linux-x86_64", "linux-x86_64-rhel7"
+
+
+def _make_rhel7_like_tree(root: Path) -> Path:
+    """A second release of the same shape for the other variant: one more file, a changed one, one link less."""
+    _make_tree(root)
+    (root / "bin" / "GmatConsole.bin").write_bytes(b"\x00\x01\x02binary built on RHEL 7")
+    _write(root / "lib64" / "libstdc++.so.6", b"rhel7 runtime")
+    (root / "data" / "alias").unlink()
+    return root
+
+
+def _variant_pins_doc(ubuntu: Path, rhel7: Path, mac: Path) -> dict:
+    """The real pins file, GMAT's real `variants` table and keys kept, with each pinned platform's values
+    replaced by a small synthetic tree's measurement: the code under test sees the real names
+    (`linux-x86_64`, `ubuntu` the default, `rhel7` -> `linux-x86_64-rhel7`) and never a GMAT byte."""
+    doc = json.loads((KIT_DIR / "operator_supplied.json").read_text(encoding="utf-8"))
+    component = doc["components"]["gmat-r2026a"]
+    component["scope"] = SCOPE
+    component["platforms"].update({
+        REAL_LINUX: kmanifest.measure_tree(ubuntu, SCOPE),
+        REAL_RHEL7: kmanifest.measure_tree(rhel7, SCOPE),
+        "macos-arm64": kmanifest.measure_tree(mac, SCOPE),
+    })
+    return doc
+
+
+@pytest.fixture()
+def variants(tmp_path, monkeypatch):
+    """(ubuntu tree, rhel7 tree, macOS tree, pins path), with `manifest.PINS_FILE` pointed at the pins."""
+    ubuntu = _make_tree(tmp_path / "ubuntu" / "GMAT" / "R2026a")
+    rhel7 = _make_rhel7_like_tree(tmp_path / "rhel7" / "GMAT" / "R2026a")
+    mac = _make_tree(tmp_path / "mac" / "GMAT R2026a")
+    _write(mac / "bin" / "libmac.dylib", b"mach-o")
+    pins_path = tmp_path / "pins.json"
+    pins_path.write_text(json.dumps(_variant_pins_doc(ubuntu, rhel7, mac)), encoding="utf-8")
+    monkeypatch.setattr(kmanifest, "PINS_FILE", pins_path)
+    measured = {k: kmanifest.measure_tree(t, SCOPE) for k, t in ((REAL_LINUX, ubuntu), (REAL_RHEL7, rhel7), ("macos-arm64", mac))}
+    assert len({m["content_hash"] for m in measured.values()}) == 3, "the three synthetic releases must differ"
+    return ubuntu, rhel7, mac, pins_path
+
+
+def _verify(**kwargs) -> dict:
+    return install.verify_operator_gmat(_doc_with_gmat(), **kwargs)
+
+
+def test_the_real_pins_file_pins_rhel7_as_the_second_linux_x86_64_variant_ubuntu_the_default():
+    component = json.loads((KIT_DIR / "operator_supplied.json").read_text(encoding="utf-8"))["components"]["gmat-r2026a"]
+    assert component["variants"] == {REAL_LINUX: {"default": "ubuntu", "pins": {"ubuntu": REAL_LINUX, "rhel7": REAL_RHEL7}}}
+    assert kmanifest.variant_problems(component["variants"], component["platforms"]) == []
+    # question 254's measurement of the unpacked RHEL 7 archive, now the pin (question 257)
+    assert component["platforms"][REAL_RHEL7] == {
+        "content_hash": "sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c",
+        "file_count": 2043, "symlink_count": 100, "total_bytes": 774131578,
+        "symlink_listing_hash": "sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e",
+    }
+    assert component["platforms"][REAL_LINUX]["content_hash"].startswith("sha256:e15babfc")  # Ubuntu, unchanged
+    archives = component["archives"]
+    assert "linux-x86_64-rhel7-measured-not-pinned" not in archives
+    rhel7 = archives[REAL_RHEL7]
+    assert rhel7["pinned"] is True and rhel7["file"] == "gmat-rhel7-x64-R2026a.tar.gz" and "measured" not in rhel7
+    assert rhel7["sha256"] == "sha256:3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd"
+    assert archives[REAL_LINUX]["pinned"] is True and archives[REAL_LINUX]["file"] == "gmat-ubuntu-x64-R2026a.tar.gz"
+
+
+def test_variant_problems_names_every_malformed_variant_table():
+    good = {"content_hash": "sha256:" + "a" * 64, "file_count": 1, "total_bytes": 2,
+            "symlink_count": 0, "symlink_listing_hash": "sha256:" + "b" * 64}
+    platforms = {"p": good, "p-x": good, "q": good, "n": None}
+    ok = {"p": {"default": "a", "pins": {"a": "p", "x": "p-x"}}}
+    assert kmanifest.variant_problems(None, platforms) == [] and kmanifest.variant_problems(ok, platforms) == []
+    cases = {
+        "not an object": [],
+        "a pin that is not pinned": {"p": {"default": "a", "pins": {"a": "p", "x": "n"}}},
+        "an unknown pin key": {"p": {"default": "a", "pins": {"a": "p", "x": "nonesuch"}}},
+        "a default that is not a variant": {"p": {"default": "z", "pins": {"a": "p", "x": "p-x"}}},
+        "a default whose pin is not the platform's key": {"p": {"default": "x", "pins": {"a": "p", "x": "p-x"}}},
+        "one variant only": {"p": {"default": "a", "pins": {"a": "p"}}},
+        "an upper-case name": {"p": {"default": "a", "pins": {"a": "p", "RHEL": "p-x"}}},
+        "two names for one pin": {"p": {"default": "a", "pins": {"a": "p", "x": "p-x", "y": "p-x"}}},
+        "an unpinned platform": {"n": {"default": "a", "pins": {"a": "n", "x": "p-x"}}},
+        "a variant that is a platform with variants": {
+            "p": {"default": "a", "pins": {"a": "p", "x": "q"}}, "q": {"default": "b", "pins": {"b": "q", "y": "p-x"}}},
+    }
+    for what, table in cases.items():
+        assert kmanifest.variant_problems(table, platforms), what
+
+
+def test_the_default_on_linux_x86_64_is_ubuntu_and_the_record_says_it_was_the_default(variants):
+    ubuntu, *_ = variants
+    record = _verify(gmat_root=str(ubuntu), gmat_platform=REAL_LINUX)
+    assert record["verified"] and record["platform"] == REAL_LINUX and record["pin_key"] == REAL_LINUX
+    assert record["variant"] == "ubuntu" and record["variant_chosen_by"] == "default"
+    assert record["found"] == record["pin"] == kmanifest.measure_tree(ubuntu, SCOPE)
+
+
+def test_each_variant_is_accepted_with_its_own_choice(variants):
+    ubuntu, rhel7, *_ = variants
+    record = _verify(gmat_root=str(ubuntu), gmat_platform=REAL_LINUX, gmat_variant="ubuntu")
+    assert record["variant"] == "ubuntu" and record["variant_chosen_by"] == "option" and record["pin_key"] == REAL_LINUX
+    record = _verify(gmat_root=str(rhel7), gmat_platform=REAL_LINUX, gmat_variant="rhel7")
+    assert record["verified"] and record["platform"] == REAL_LINUX and record["pin_key"] == REAL_RHEL7
+    assert record["variant"] == "rhel7" and record["variant_chosen_by"] == "option"
+    assert record["found"] == record["pin"] == kmanifest.measure_tree(rhel7, SCOPE)
+
+
+def test_each_variant_is_refused_under_the_other_choice_naming_the_variant_it_matches_and_the_option(variants):
+    ubuntu, rhel7, *_ = variants
+    for tree, choice, matches, how in (
+        (rhel7, None, "rhel7", "the default"),        # the RHEL 7 tree, no option: Ubuntu is the default
+        (rhel7, "ubuntu", "rhel7", "--gmat-variant ubuntu"),
+        (ubuntu, "rhel7", "ubuntu", "--gmat-variant rhel7"),
+    ):
+        err = _refusal(gmat_root=str(tree), gmat_platform=REAL_LINUX, gmat_variant=choice)
+        text = str(err)
+        assert err.code == "gmat-matches-other-variant", (choice, text)
+        assert f"is the {matches} variant of {REAL_LINUX}" in text and how in text, text
+        assert f"pass --gmat-platform {REAL_LINUX} --gmat-variant {matches}" in text, text
+        assert kmanifest.measure_tree(tree, SCOPE)["content_hash"] in text  # what was found, and what it equals
+
+
+def test_a_tampered_tree_matches_neither_variant_and_keeps_descriptor_differs(variants):
+    ubuntu, rhel7, *_ = variants
+    for tree, choice, pin_key in ((ubuntu, None, REAL_LINUX), (rhel7, "rhel7", REAL_RHEL7)):
+        expected = kmanifest.measure_tree(tree, SCOPE)
+        (tree / "README.txt").write_bytes(b"readmf\n")  # one byte
+        found = kmanifest.measure_tree(tree, SCOPE)
+        err = _refusal(gmat_root=str(tree), gmat_platform=REAL_LINUX, gmat_variant=choice)
+        text = str(err)
+        assert err.code == "gmat-descriptor-differs", text
+        assert "differs in content_hash" in text and expected["content_hash"] in text and found["content_hash"] in text
+        assert pin_key in text and "expected:" in text and "found:" in text
+
+
+def test_a_variant_on_a_platform_with_one_pin_is_refused_before_anything_is_read(variants, monkeypatch):
+    *_, mac, _ = variants
+
+    def must_not_read(root, scope=None):
+        raise AssertionError("measured a tree the options already refuse")
+
+    assert _verify(gmat_root=str(mac), gmat_platform="macos-arm64")["variant"] is None  # unchanged without the option
+    monkeypatch.setattr(kmanifest, "measure_tree", must_not_read)
+    for name in ("ubuntu", "rhel7"):
+        err = _refusal(gmat_root=str(mac), gmat_platform="macos-arm64", gmat_variant=name)
+        assert err.code == "gmat-variant-not-applicable", str(err)
+        assert "'macos-arm64' has one GMAT pin and no variants" in str(err) and f"['{REAL_LINUX}']" in str(err)
+        assert "Drop --gmat-variant" in str(err)
+
+
+def test_an_unknown_variant_and_a_variant_key_given_as_the_platform_are_refused(variants, monkeypatch):
+    ubuntu, rhel7, *_ = variants
+    monkeypatch.setattr(kmanifest, "measure_tree", lambda root, scope=None: pytest.fail("measured"))
+    err = _refusal(gmat_root=str(ubuntu), gmat_platform=REAL_LINUX, gmat_variant="centos")
+    assert err.code == "gmat-variant-unknown" and "['rhel7', 'ubuntu']" in str(err) and "default 'ubuntu'" in str(err)
+    err = _refusal(gmat_root=str(rhel7), gmat_platform=REAL_RHEL7)
+    assert err.code == "gmat-platform-is-a-variant", str(err)
+    assert f"pass --gmat-platform {REAL_LINUX} --gmat-variant rhel7" in str(err)
+
+
+def test_the_root_missing_refusal_names_the_variants_and_the_option(variants):
+    err = _refusal(gmat_root=None, gmat_platform=None)
+    text = str(err)
+    assert err.code == "gmat-root-missing" and "--gmat-variant NAME" in text
+    assert f"{REAL_LINUX} (the ubuntu variant, the default)" in text
+    assert f"{REAL_RHEL7} (the rhel7 variant of {REAL_LINUX}: --gmat-platform {REAL_LINUX} --gmat-variant rhel7)" in text
+
+
+def test_a_malformed_variant_table_is_a_malformed_pin(variants):
+    ubuntu, _, _, pins_path = variants
+    doc = json.loads(pins_path.read_text())
+    doc["components"]["gmat-r2026a"]["variants"][REAL_LINUX]["default"] = "rhel7"  # the default must be the platform's own key
+    pins_path.write_text(json.dumps(doc))
+    assert _refusal(gmat_root=str(ubuntu), gmat_platform=REAL_LINUX).code == "gmat-pin-malformed"
+    with pytest.raises(install.OperatorSuppliedRefused) as exc:
+        install.verify_operator_supplied(_doc_with_gmat(), gmat_root=str(ubuntu), gmat_platform=REAL_LINUX, pins_file=pins_path)
+    assert exc.value.code == "pins-malformed" and "variants.linux-x86_64" in str(exc.value)
+
+
+def test_a_kit_without_gmat_records_a_variant_given_but_unused():
+    record = install.verify_operator_gmat({"packs": {}}, gmat_root=None, gmat_platform=None, gmat_variant="rhel7")
+    assert record["required"] is False and record["variant_given_but_unused"] == "rhel7"
+
+
+@pytest.fixture()
+def variant_kit(tmp_path, variants, monkeypatch):
+    ubuntu, rhel7, *_ = variants
+    monkeypatch.setitem(kmanifest.PACKS, "gmat", str(ubuntu))
+    manifest_path, _ = _build(tmp_path, with_pack_names=["gmat"])
+    _stub_the_wheel_steps(monkeypatch)
+    return manifest_path.parent, ubuntu, rhel7
+
+
+def test_the_install_record_carries_the_variant_and_the_command_line_takes_the_option(variant_kit, tmp_path, capsys):
+    kit, ubuntu, rhel7 = variant_kit
+    record = install.install(kit, tmp_path / "t1", gmat_root=str(rhel7), gmat_platform=REAL_LINUX, gmat_variant="rhel7")
+    gmat = record["installed"]["operator_supplied"]["gmat"]
+    assert (gmat["variant"], gmat["variant_chosen_by"], gmat["pin_key"]) == ("rhel7", "option", REAL_RHEL7)
+    assert json.loads((tmp_path / "t1" / "INSTALL_RECORD").read_text())["installed"]["operator_supplied"]["gmat"] == gmat
+    component = next(c for c in record["installed"]["operator_supplied"]["components"] if c["component"] == "gmat-r2026a")
+    assert component["detail"]["variant"] == "rhel7" and component["detail"]["pin_key"] == REAL_RHEL7
+
+    # the command line: the default is Ubuntu, the RHEL 7 tree needs the option, the refusal says which to pass
+    assert install.main([str(kit), str(tmp_path / "t2"), "--gmat-root", str(ubuntu), "--gmat-platform", REAL_LINUX]) == 0
+    out = capsys.readouterr().out
+    assert f"verified against the {REAL_LINUX} pin, variant ubuntu (default) (not copied)" in out
+    assert "operator-supplied: gmat-r2026a  required (packs.gmat)  verified linux-x86_64 (ubuntu) sha256:" in out
+    assert install.main([str(kit), str(tmp_path / "t3"), "--gmat-root", str(rhel7), "--gmat-platform", REAL_LINUX]) == 2
+    captured = capsys.readouterr()
+    assert "gmat-matches-other-variant" in captured.err and "--gmat-variant rhel7" in captured.err
+    assert "NOT VERIFIED [gmat-matches-other-variant]" in captured.out and not (tmp_path / "t3").exists()
+    assert install.main([str(kit), str(tmp_path / "t3"), "--gmat-root", str(rhel7), "--gmat-platform", REAL_LINUX,
+                         "--gmat-variant", "rhel7"]) == 0
+    assert f"verified against the {REAL_LINUX} pin, variant rhel7 (option) (not copied)" in capsys.readouterr().out
+    assert json.loads((tmp_path / "t3" / "INSTALL_RECORD").read_text())["installed"]["operator_supplied"]["gmat"]["variant"] == "rhel7"
+    # --check-operator-supplied takes the option too
+    assert install.main(["--check-operator-supplied", str(kit), "--gmat-root", str(rhel7), "--gmat-platform", REAL_LINUX,
+                         "--gmat-variant", "rhel7"]) == 0
+    assert "verified linux-x86_64 (rhel7) sha256:" in capsys.readouterr().out
+
+
+def test_the_usage_text_names_the_variant_option():
+    assert "--gmat-variant" in install.build_parser().format_help() and "--gmat-variant" in install.build_check_parser().format_help()
+    assert "ubuntu" in install.GMAT_VARIANT_HELP and "rhel7" in install.GMAT_VARIANT_HELP and "default" in install.GMAT_VARIANT_HELP
+    assert "--gmat-variant ubuntu|rhel7" in (KIT_DIR / "install.sh").read_text(encoding="utf-8")
+
+
+# The RHEL 7 pin re-measured from NASA's gmat-rhel7-x64-R2026a.tar.gz, opt-in like the two above (question 257;
+# GMAT_RHEL7_ROOT is the archive's GMAT/R2026a directory, unpacked and never run).
+_RHEL7_GMAT = os.environ.get("GMAT_RHEL7_ROOT")
+_RHEL7_SKIP = (
+    None if os.environ.get("AV_KIT_MEASURE_GMAT_RHEL7") == "1" and _RHEL7_GMAT and Path(_RHEL7_GMAT).is_dir()
+    else "set AV_KIT_MEASURE_GMAT_RHEL7=1 and GMAT_RHEL7_ROOT to GMAT/R2026a of the unpacked gmat-rhel7-x64-R2026a.tar.gz "
+         "to re-measure the linux-x86_64-rhel7 pin (reads ~775 MB)"
+)
+
+
+@pytest.mark.skipif(_RHEL7_SKIP is not None, reason=_RHEL7_SKIP or "")
+def test_the_real_rhel7_gmat_tree_matches_the_recorded_linux_x86_64_rhel7_pin():
+    component = kmanifest.load_operator_pins()["gmat-r2026a"]
+    found = kmanifest.measure_tree(Path(_RHEL7_GMAT), component["scope"])
+    assert kmanifest.compare_to_pin(found, component["platforms"][REAL_RHEL7]) == [], found
