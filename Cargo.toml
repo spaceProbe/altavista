@@ -22,11 +22,20 @@ edition = "2021"
 # `serde-saphyr` 2.0.0 declares `rust-version = "1.89"` (and its `encoding_rs` 0.8.42, via
 # `encoding_rs_io`, 1.88). Measured on this host, 2026-10-17: `cargo +1.87.0 check -p av-yaml`
 # refuses ("serde-saphyr@2.0.0 requires rustc 1.89"), and with `--ignore-rust-version` it does not
-# compile (`encoding_rs-0.8.42/src/lib.rs`: `let` chains are unstable in 1.87). 1.89 itself is
-# the dependency's declaration, NOT a build made here: this host has stable (1.97), 1.86 and
-# 1.87 installed, and a 1.89 toolchain would be a download; the pinned builder image is
-# `rust:1.90` (services/cfs/build-shim.sh). Re-measure on 1.89 when a 1.89 toolchain is
-# installed, then update `crates/av-command/tests/msrv.rs` together with this.
+# compile (`encoding_rs-0.8.42/src/lib.rs`: `let` chains are unstable in 1.87).
+# Question 254 item 13 MEASURED 1.89 (2026-10-18, rustc 1.89.0 (29483883e 2025-08-04), cargo 1.89.0
+# (c24e10642 2025-06-23), `--profile minimal`, a plain clone at edge d2dddba, cold target dir):
+# `cargo +1.89 check --workspace --all-targets` PASSES (110 crates checked, no warning or error), and
+# so do the gate's `--no-default-features --all-targets` checks of av-kernel, av-run, av-sweep and
+# av-orbital and the `required-features` groups (av-cdm `full`, av-kernel/av-run/av-sweep `gmat`,
+# av-jobs `store-fixture`) as `check --features <f> --all-targets`. 1.89 is therefore a build, not
+# only the dependency's declaration. It is the floor, not merely a passing version: cargo refuses
+# `serde-saphyr@2.0.0` on any rustc below its declared 1.89 without `--ignore-rust-version`, and
+# 1.87 fails even with it (above). 1.88 was NOT measured (not installed, and not to be): it is
+# excluded by the declaration alone. The only toolchains ever measured here are 1.86.0, 1.87.0,
+# 1.89.0 and stable (1.97); the pinned builder image is `rust:1.90` (services/cfs/build-shim.sh).
+# Re-measure with `cargo +1.89 check --workspace --all-targets` (and the groups above) whenever a
+# dependency is bumped, then update `crates/av-command/tests/msrv.rs` together with this.
 rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/altavista"

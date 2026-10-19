@@ -28,8 +28,11 @@ fn declared_rust_version_matches_the_last_measured_floor() {
     // and only after re-running the `cargo +<version> check -p av-command` binary search.
     //
     // Question 246: 1.89, the floor `serde-saphyr` 2.0.0 declares (1.87 was measured not to
-    // compile it; 1.89 itself is the dependency's declaration, not yet a build on 1.89 here --
-    // see the root Cargo.toml's comment). Before that it was "1.87", the regorus floor above.
+    // compile it). Question 254 item 13 (2026-10-18) measured it: `cargo +1.89 check --workspace
+    // --all-targets` (rustc 1.89.0 29483883e) plus the gate's no-default-features and
+    // required-features checks all pass -- see the root Cargo.toml's comment for the commands and
+    // why nothing below 1.89 is acceptable (1.88 was not measured). Before that it was "1.87",
+    // the regorus floor above.
     const MEASURED_FLOOR: &str = "1.89";
 
     let declared = env!("CARGO_PKG_RUST_VERSION");
