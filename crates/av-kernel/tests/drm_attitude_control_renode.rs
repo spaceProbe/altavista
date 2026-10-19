@@ -613,6 +613,15 @@ fn byte_identical_port_traffic_between_posix_container_and_renode() {
     run_byte_identical_port_traffic_between_posix_container_and_renode();
 }
 
+/// Question 254 defect D1: (size, SHA-256) of one file of the user's REAL Renode directory
+/// (`~/Library/Application Support/renode/<name>`), `None` if it does not exist. The launcher gives
+/// every Renode of this test a private `--config`/history (`renode_bridge.write_renode_config`),
+/// so `history` must come out of the run byte-identical.
+fn renode_user_file_state(name: &str) -> Option<(u64, String)> {
+    let bytes = std::fs::read(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/renode").join(name)).ok()?;
+    Some((bytes.len() as u64, sha256_hex(&bytes)))
+}
+
 fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     let _engine = gmat_sys::engine_lock();
     let (truth, star, imu, base_sos) = load_native_fixtures_and_base_sos();
@@ -666,7 +675,8 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
 
     // --- Renode half (container.address-only, already-running-process path). ---
     // No Docker, and no docker-test lock: both were released at the end of the block above.
-    println!("Renode half starting (docker-test lock not held)");
+    let real_history_before = renode_user_file_state("history");
+    println!("Renode half starting (docker-test lock not held); the user's real Renode history before: {real_history_before:?}");
     let t1 = Instant::now();
     let renode = spawn_renode_bridge(&scratch_dir);
     let renode_ready_elapsed = t1.elapsed();
@@ -753,6 +763,18 @@ fn run_byte_identical_port_traffic_between_posix_container_and_renode() {
     assert_eq!(products_posix.scores, products_renode.scores, "products.scores must be byte-identical (both empty -- no measures declared)");
     assert_eq!(products_posix.dropped_in_flight_messages, products_renode.dropped_in_flight_messages, "dropped_in_flight_messages must match (both runs end cleanly at the same scenario length)");
     assert_eq!(products_posix.frames, products_renode.frames, "frames (registry defaults + declared Scenario.frames) must be byte-identical -- neither depends on the controller's own binding kind");
+
+    // Question 254 defect D1: the bridge's Renode is gone, and the user's real history (size and
+    // SHA-256) is exactly what it was. If this fails, either the launcher lost its private
+    // `--config`, or ANOTHER Renode on this host outside these launchers (another worker's run, a
+    // manual session) appended to the file meanwhile -- check `ps` before blaming the launcher.
+    drop(renode);
+    let real_history_after = renode_user_file_state("history");
+    assert_eq!(
+        real_history_after, real_history_before,
+        "question 254 defect D1: the user's real Renode history (~/Library/Application Support/renode/history) changed during the Renode half: either the bridge's Renode ran without its private --config, or another Renode on this host outside these launchers wrote it meanwhile"
+    );
+    println!("the user's real Renode history is unchanged by this run: {real_history_after:?}");
 
     println!("PASS: RunProducts port traffic is byte-identical between the posix-container and Renode-bound \"controller\" over {COMPARISON_DURATION_S}s @ 10Hz ({} steps)", COMPARISON_DURATION_S * 10);
 

@@ -670,6 +670,15 @@ fn check_elf() {
     assert_eq!(sha, expected, "the guest must be the reproducible ELF built from this tree (set AV_RENODE_CORE_CPU1_EXE to a copy of it)");
 }
 
+/// Question 254 defect D1: (size, SHA-256) of one file of the user's REAL Renode directory
+/// (`~/Library/Application Support/renode/<name>`), `None` if it does not exist. The helper gives
+/// its Renode a private `--config`/history (`renode_bridge.write_renode_config`), so `history`
+/// must come out of the run byte-identical.
+fn renode_user_file_state(name: &str) -> Option<(u64, String)> {
+    let bytes = std::fs::read(PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/renode").join(name)).ok()?;
+    Some((bytes.len() as u64, sha256_hex(&bytes)))
+}
+
 #[test]
 fn a_board_bound_run_against_the_real_elf_in_renode_in_real_time_replays_from_its_signed_log() {
     let reasons = gate_reasons();
@@ -686,6 +695,8 @@ fn a_board_bound_run_against_the_real_elf_in_renode_in_real_time_replays_from_it
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     println!("SCRATCH {}", root.display());
+    let real_history_before = renode_user_file_state("history");
+    println!("the user's real Renode history before the Renode half: {real_history_before:?}");
 
     // ---- The wrong device, a startup refusal: no such tty.
     {
@@ -769,6 +780,16 @@ fn a_board_bound_run_against_the_real_elf_in_renode_in_real_time_replays_from_it
     compare_replay(&b, "replay of (b) from its edge log");
     assert_eq!(b.channel_calls.len(), 1);
 
+    // Question 254 defect D1: both live runs' Renodes are gone; the user's real history (size and
+    // SHA-256) is exactly what it was. If this fails, either the helper lost its private
+    // `--config`, or ANOTHER Renode on this host outside these launchers (another worker's run, a
+    // manual session) appended to the file meanwhile -- check `ps` before blaming the helper.
+    let real_history_after = renode_user_file_state("history");
+    assert_eq!(
+        real_history_after, real_history_before,
+        "question 254 defect D1: the user's real Renode history (~/Library/Application Support/renode/history) changed during the stand-in run: either the helper's Renode ran without its private --config, or another Renode on this host outside these launchers wrote it meanwhile"
+    );
+    println!("the user's real Renode history is unchanged by this run: {real_history_after:?}");
     println!("TOTAL wall time {:.1} s", total.elapsed().as_secs_f64());
     println!("PASS: the stand-in HIL run (Renode, not the ZCU104): real ELF, real time, pty, board binding, pacing, signed log, replay");
     if std::env::var(KEEP_ENV).as_deref() == Ok("1") {

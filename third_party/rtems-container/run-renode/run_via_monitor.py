@@ -16,6 +16,7 @@ script -- this script's only job is driving Renode to completion or reporting ex
 failed to.
 """
 import argparse
+import os
 import socket
 import subprocess
 import sys
@@ -42,9 +43,15 @@ def main():
     ap.add_argument("--run-timeout", type=float, default=120.0)
     args = ap.parse_args()
 
+    # Question 254 defect D1: a private Renode config/history beside the log, never the user's
+    # global ~/Library/Application Support/renode ones (the shared, unbounded history file is
+    # rewritten whole on every monitor command; see renode_bridge.write_renode_config).
+    renode_config = os.path.abspath(args.renode_log) + ".config"
+    with open(renode_config, "w") as f:
+        f.write(f"[general]\nhistory-path = {os.path.abspath(args.renode_log)}.history\n")
     with open(args.renode_log, "wb") as logf:
         proc = subprocess.Popen(
-            [args.renode, "--disable-gui", "--hide-log", "-P", str(args.port)],
+            [args.renode, "--disable-gui", "--hide-log", "-P", str(args.port), "--config", renode_config],
             stdin=subprocess.DEVNULL,
             stdout=logf,
             stderr=subprocess.STDOUT,

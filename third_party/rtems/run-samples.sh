@@ -29,7 +29,10 @@ done
 for sample in hello ticker; do
     echo "== running $sample on Renode (headless) =="
     rm -f "$rundir/${sample}_uart.log" "$rundir/${sample}_uart.log.1"
-    "$renode" --disable-gui --hide-log "$rundir/$sample.resc" > "$rundir/${sample}_renode_console.log" 2>&1
+    # Question 254 defect D1: a private Renode config/history per sample, never the user's global
+    # ~/Library/Application Support/renode ones.
+    printf '[general]\nhistory-path = %s\n' "$rundir/${sample}_renode_history" > "$rundir/${sample}_renode_config"
+    "$renode" --disable-gui --hide-log --config "$rundir/${sample}_renode_config" "$rundir/$sample.resc" > "$rundir/${sample}_renode_console.log" 2>&1
     echo "== $sample: Renode process exited; captured UART log: $rundir/${sample}_uart.log =="
 done
 
