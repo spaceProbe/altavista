@@ -325,8 +325,12 @@ GMAT R2026a bundles OpenSceneGraph and wxWidgets (LGPL), so the kit never carrie
 kit as `installer/operator_supplied.json`): `platforms` maps a platform key to a pin or to `null`
 ("no pin recorded for this platform yet"), and `scope` says what the measurement leaves out. A pin
 holds `content_hash`, `file_count`, `total_bytes` (the fields `pack_descriptor` computes) and
-`symlink_count`, `symlink_listing_hash` (below). The key is `<os>-<uname -m>`: `macos-arm64` is
-pinned; `linux-aarch64` and `linux-x86_64` are `null`.
+`symlink_count`, `symlink_listing_hash` (below). The key is `<os>-<uname -m>`: `macos-arm64` and
+`linux-x86_64` are pinned; `linux-aarch64` is `null` because NASA publishes no Linux aarch64 build of
+R2026a (question 254, task 12). `linux-x86_64` is NASA's `gmat-ubuntu-x64-R2026a.tar.gz` from SourceForge,
+unpacked, and `--gmat-root` is its `GMAT/R2026a` directory; the component's `archives` object records
+each Linux archive's URL, mirror, size, sha256 and SourceForge's checksums, and the RHEL 7 archive's
+measurement (recorded, not pinned: one pin per key).
 
 **What is measured** (`manifest.measure_tree(root, scope)`, the one function the builder and the
 installer both call): `pack_descriptor`'s walk and hash over regular files, minus the scope.
@@ -388,6 +392,12 @@ on a host where `GMAT R2026a` at the repository root resolves to that tree (or, 
 installer against that tree with `--gmat-platform <key>` before relying on the pin; the pin is only
 as good as the release it was measured from, so measure the unpacked release, not an install that has
 been run (the scope covers what a run writes, not everything an operator might change).
+
+Re-measuring a recorded pin needs only the unpacked tree: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<macOS tree>`
+and `AV_KIT_MEASURE_GMAT_LINUX=1 GMAT_LINUX_ROOT=<GMAT/R2026a of the Ubuntu archive>` run the two opt-in
+tests in `tests/test_kit_install.py`. The Linux check runs in a Linux container as well
+(`--check-operator-supplied <kit> --gmat-root /gmat --gmat-platform linux-x86_64`, `--network none`, the kit
+and the tree mounted read-only); Colima's VM is aarch64, so the x86_64 tree is measured and never run.
 
 ## Every operator-supplied component is verified and listed (question 250(a), task 3)
 

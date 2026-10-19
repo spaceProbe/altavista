@@ -101,7 +101,8 @@ the one function the builder and the installer both call):
 | Platform key | Pin |
 |---|---|
 | `macos-arm64` | `content_hash` `sha256:d21cddbbffbd3c44982bd98a7fb3a221b79ae6e26f2696eff4046f745d1eca39`; 2,060 files, 764,662,632 bytes; 183 symlinks, listing hash `sha256:f788ebf2fa73ef4d22e8ca2f4c1d51bb92a6a30dda34d0366ef19c3a719b5420` |
-| `linux-aarch64`, `linux-x86_64` | **No pin yet.** The installer refuses (`gmat-no-pin-for-platform`) for a kit that needs GMAT, naming the platforms that have one. A pin is added by measuring the unpacked Linux release (`scripts/kit/README.md`, "Adding a pin for another platform") |
+| `linux-x86_64` | `content_hash` `sha256:e15babfc251e14fdd5d306970d9698d634e41c6ed5957118c31af71d28f466f3`; 2,103 files, 689,762,981 bytes; 114 symlinks, listing hash `sha256:fe5ab4958e93ae79ade6b18dde99572e63f47c880bc51590efd66e0452401948`. Measured from `gmat-ubuntu-x64-R2026a.tar.gz` (below) |
+| `linux-aarch64` | **No pin yet, and none can be made yet:** NASA publishes no Linux aarch64 build of R2026a (below). The installer refuses (`gmat-no-pin-for-platform`) for a kit that needs GMAT on this key, naming the platforms that have a pin |
 
 The key is `<os>-<uname -m>`. The operator gives it with `--gmat-platform`; the installer does not
 guess it, because it also runs in a Linux container over a macOS tree.
@@ -125,6 +126,35 @@ check. A match is recorded in `INSTALL_RECORD`; nothing is copied.
 
 The operator downloads GMAT R2026a for the target platform from NASA's GMAT release on SourceForge
 and unpacks it.
+
+**The Linux release (question 254, task 12).** NASA's R2026a folder on SourceForge
+(`https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/`, read 2026-10-18) lists two Linux
+archives, both x86_64, and none for aarch64:
+
+| Archive | Bytes | sha256 (measured) | SourceForge's SHA-1 / MD5 (both matched) | Pin |
+|---|---|---|---|---|
+| `gmat-ubuntu-x64-R2026a.tar.gz` (SourceForge's default Linux download) | 401,664,992 | `fe124b4a606b2e3b704a6fbb1c37b87598d5df0d18cb661c304b5f60074a7754` | `15bb6057a25853ea68f2c0c781e030d4beae3348` / `ec496a0319657fa2c079d7e996b9b1ed` | `linux-x86_64` |
+| `gmat-rhel7-x64-R2026a.tar.gz` | 438,017,278 | `3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd` | `e6f4ca0ffefa3cb5a443cd24417b8778e709c74f` / `f4e5e3668f447833d29bac40e33d99c9` | none (measured only, below) |
+
+Each was fetched once (question 154) with `curl -fL --proto '=https' --proto-redir '=https'` from
+`<archive URL>/download` under `https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/`, which
+redirects to a mirror (`cytranet-dal.dl.sourceforge.net` for the Ubuntu archive,
+`master.dl.sourceforge.net` for the RHEL 7 one) under
+`/project/gmat/GMAT/GMAT-R2026a/`; TLS was verified and the request carried no header of ours. The
+pins file records both under `archives` (URL, final mirror URL without its per-request query, size,
+sha256, SourceForge's checksums). The archive unpacks to `GMAT/R2026a/`, and that directory is the tree
+the pin measures (`--gmat-root`). The archive's own `output/` is an empty directory, so the scoped and
+the whole-tree measurements are equal for a freshly unpacked release. The archive was extracted
+with `tar -xzf` on macOS; its 2,103 files and 114 symlinks (Ubuntu) all arrived, and no two
+names differ only by case.
+
+The RHEL 7 archive is a different tree (2,043 files, 774,131,578 bytes, 100 symlinks; content hash
+`sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c`, listing hash
+`sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e`). A platform key holds one pin,
+so `linux-x86_64` pins the Ubuntu archive and the RHEL 7 measurement is recorded, not pinned; an
+operator on the RHEL 7 build is refused with `gmat-descriptor-differs`, and a second key (for example
+`linux-x86_64-rhel7`) would pin it if a site needs it. A pin for Linux was measured, not run: Colima's VM is
+aarch64, so the x86_64 binaries were never started; the installer's check reads bytes only.
 
 ### Items 4 to 6: service images and ClickHouse
 
@@ -277,8 +307,10 @@ proof runs the files install in a `python:3.13-slim` container.
   operator-supplied. A GPL-family library inside a carried wheel fails the same test.
 - The wheel inventory: `KIT_MANIFEST.wheels.fetched[*].bundled_libraries`, and the
   `wheels.operator_supplied` list.
-- Re-measuring the GMAT pin: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<unpacked macOS release> pytest
-  tests/test_kit_install.py` (the test `test_the_real_gmat_tree_matches_the_recorded_macos_pin`).
+- Re-measuring the GMAT pins: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<unpacked macOS release> pytest
+  tests/test_kit_install.py` (the test `test_the_real_gmat_tree_matches_the_recorded_macos_pin`), and
+  `AV_KIT_MEASURE_GMAT_LINUX=1 GMAT_LINUX_ROOT=<GMAT/R2026a of the unpacked Ubuntu archive> pytest
+  tests/test_kit_install.py` (`test_the_real_linux_gmat_tree_matches_the_recorded_linux_x86_64_pin`).
 - The zero-egress proof, `tests/test_kit_zero_egress_install.py`, with the bases from
   `out/kit/proof-bases/` and numpy from `out/kit/proof-operator-wheels/` supplied separately and a kit
   carrying only application layers: 5 passed.
@@ -294,9 +326,11 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
 - The committed `docs/compliance/` SBOMs (the image SBOMs, and `av-viewer` and `gmat-service`
   after the `httpx` and `pyyaml` declarations) are regenerated by the lead after the merge; until then
   they show the earlier component lists.
-- GMAT has a pin for macOS arm64 only. No Linux pin exists, so a kit that records GMAT cannot be
-  installed on Linux until the unpacked Linux release is measured. The pin does not cover what its
-  scope leaves out, nor anything after the install-time check.
+- GMAT has pins for macOS arm64 and Linux x86_64 (the Ubuntu archive; question 254, task 12). There is
+  no Linux aarch64 pin, because NASA publishes no such build, and the RHEL 7 archive is measured and
+  recorded, not pinned. The macOS pin is for the `macos-arm64` key; SourceForge's R2026a folder lists a
+  macOS x64 `.dmg` only, and this document does not record where the arm64 tree came from. The pins do
+  not cover what their scope leaves out, nor anything after the install-time check.
 - The wheel pin is for numpy 2.5.3 on linux/aarch64/cp313. A closure for another platform, or another
   numpy version, needs its own `python-wheel` pin before the builder will produce the kit.
 - The two helpers that make the operator's files (`save_base_images.py`, `save_operator_wheels.py`) are
@@ -314,7 +348,8 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
    builds on the operator's base and compares the runtime-content hash, modes and `.Config`;
    `dc8eb1d` re-records the cFS build commit.
 2. **GMAT as an operator download.** Done: `b53ec76` makes `--copy-pack gmat` an error and the
-   installer measures the operator's tree against a per-platform pin. Open: a Linux pin.
+   installer measures the operator's tree against a per-platform pin. Linux x86_64 pinned in task 12
+   of question 254; Linux aarch64 has no NASA build.
 3. **The installer verifies every item above** by digest or hash before use, refusing a mismatch,
    and prints the list. Done: `bec6611` for items 1 to 6 (and `--declare-operator-supplied`,
    `--check-operator-supplied`), extended to item 7 by `03f0504`. Item 8 is checked by `install.sh`
@@ -328,5 +363,4 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
 7. **Prove it.** Done: `b08e869` (the kit carries no base-image content, and the markers are
    true), `3594bf5` (the viewer's undeclared dependencies, found by the zero-egress proof) and the
    zero-egress proof passing.
-8. **Open: Linux GMAT pin; ClickHouse review (question 247); regeneration of the committed
-   SBOMs.**
+8. **Open: ClickHouse review (question 247); regeneration of the committed SBOMs.**

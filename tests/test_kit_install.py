@@ -4,8 +4,8 @@ records a descriptor and never copies; `--copy-pack gmat` is refused) and the in
 (`install.verify_operator_gmat`, `--gmat-root` / `--gmat-platform`).
 
 Everything here runs over a small synthetic tree and a synthetic pin written under `tmp_path`; nothing
-reads the real GMAT tree except the one opt-in test at the end (`AV_KIT_MEASURE_GMAT=1`, ~770 MB read,
-read-only). The wheel steps of `install.install` need a kit built with network access, so the
+reads the real GMAT tree except the two opt-in tests at the end (`AV_KIT_MEASURE_GMAT=1` for macOS, ~770 MB read,
+and `AV_KIT_MEASURE_GMAT_LINUX=1` for Linux x86_64, ~690 MB, question 254 task 12; both read-only). The wheel steps of `install.install` need a kit built with network access, so the
 end-to-end tests replace exactly those three functions and run everything else for real.
 """
 from __future__ import annotations
@@ -102,7 +102,10 @@ def test_the_real_pins_file_records_gmat_per_platform_with_unpinned_platforms_re
     assert set(mac) == set(kmanifest.PIN_FIELDS)
     assert mac["file_count"] > 0 and mac["total_bytes"] > 0
     # "no pin for this platform" is a platform mapped to null
-    assert component["platforms"]["linux-x86_64"] is None and component["platforms"]["linux-aarch64"] is None
+    # (question 254, task 12: linux-x86_64 is pinned now; linux-aarch64 stays null, NASA publishes no build for it)
+    linux = component["platforms"]["linux-x86_64"]
+    assert set(linux) == set(kmanifest.PIN_FIELDS) and linux["file_count"] > 0 and linux["total_bytes"] > 0
+    assert component["platforms"]["linux-aarch64"] is None
 
 
 def test_pin_problems_names_every_malformed_pin():
@@ -494,3 +497,20 @@ def test_the_real_gmat_tree_matches_the_recorded_macos_pin():
     component = kmanifest.load_operator_pins()["gmat-r2026a"]
     found = kmanifest.measure_tree(Path(_REAL_GMAT), component["scope"])
     assert kmanifest.compare_to_pin(found, component["platforms"]["macos-arm64"]) == [], found
+
+
+# Question 254, task 12: the Linux x86_64 pin, measured from NASA's gmat-ubuntu-x64-R2026a.tar.gz (docs/kit-operator-supplied.md,
+# item 3). Opt-in the same way; GMAT_LINUX_ROOT is the archive's GMAT/R2026a directory, unpacked and never run.
+_LINUX_GMAT = os.environ.get("GMAT_LINUX_ROOT")
+_LINUX_SKIP = (
+    None if os.environ.get("AV_KIT_MEASURE_GMAT_LINUX") == "1" and _LINUX_GMAT and Path(_LINUX_GMAT).is_dir()
+    else "set AV_KIT_MEASURE_GMAT_LINUX=1 and GMAT_LINUX_ROOT to GMAT/R2026a of the unpacked gmat-ubuntu-x64-R2026a.tar.gz "
+         "to re-measure the Linux x86_64 pin (reads ~690 MB)"
+)
+
+
+@pytest.mark.skipif(_LINUX_SKIP is not None, reason=_LINUX_SKIP or "")
+def test_the_real_linux_gmat_tree_matches_the_recorded_linux_x86_64_pin():
+    component = kmanifest.load_operator_pins()["gmat-r2026a"]
+    found = kmanifest.measure_tree(Path(_LINUX_GMAT), component["scope"])
+    assert kmanifest.compare_to_pin(found, component["platforms"]["linux-x86_64"]) == [], found

@@ -35,6 +35,45 @@
       "why": "OS userland in the image's base layers; the kit carries only the application layer and a Dockerfile that starts FROM this digest"
     },
     "gmat-r2026a": {
+      "archives": {
+        "linux-aarch64": {
+          "published": false,
+          "reason": "NASA's GMAT R2026a folder on SourceForge (https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/, read 2026-10-18) lists no Linux aarch64 build: its Linux archives are gmat-ubuntu-x64-R2026a.tar.gz and gmat-rhel7-x64-R2026a.tar.gz, both x86_64. The key stays null until NASA publishes one (question 254, task 12)"
+        },
+        "linux-x86_64": {
+          "bytes": 401664992,
+          "final_url": "https://cytranet-dal.dl.sourceforge.net/project/gmat/GMAT/GMAT-R2026a/gmat-ubuntu-x64-R2026a.tar.gz",
+          "final_url_note": "SourceForge's mirror answers with a per-request query (viasf, fid, e, st); it is omitted here because it expires",
+          "fetched": "2026-10-18, once (question 154), curl -fL --proto =https, TLS verified",
+          "file": "gmat-ubuntu-x64-R2026a.tar.gz",
+          "pinned": true,
+          "root_in_archive": "GMAT/R2026a",
+          "sha256": "sha256:fe124b4a606b2e3b704a6fbb1c37b87598d5df0d18cb661c304b5f60074a7754",
+          "sourceforge_md5": "ec496a0319657fa2c079d7e996b9b1ed",
+          "sourceforge_sha1": "15bb6057a25853ea68f2c0c781e030d4beae3348",
+          "url": "https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/gmat-ubuntu-x64-R2026a.tar.gz/download"
+        },
+        "linux-x86_64-rhel7-measured-not-pinned": {
+          "bytes": 438017278,
+          "final_url": "https://master.dl.sourceforge.net/project/gmat/GMAT/GMAT-R2026a/gmat-rhel7-x64-R2026a.tar.gz",
+          "fetched": "2026-10-18, once (question 154), curl -fL --proto =https, TLS verified",
+          "file": "gmat-rhel7-x64-R2026a.tar.gz",
+          "measured": {
+            "content_hash": "sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c",
+            "file_count": 2043,
+            "symlink_count": 100,
+            "symlink_listing_hash": "sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e",
+            "total_bytes": 774131578
+          },
+          "note": "the second Linux archive NASA publishes, a different tree from the Ubuntu one; a platform key holds one pin, and SourceForge's own default Linux download is the Ubuntu archive, so this one is recorded and not pinned",
+          "pinned": false,
+          "root_in_archive": "GMAT/R2026a",
+          "sha256": "sha256:3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd",
+          "sourceforge_md5": "f4e5e3668f447833d29bac40e33d99c9",
+          "sourceforge_sha1": "e6f4ca0ffefa3cb5a443cd24417b8778e709c74f",
+          "url": "https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/gmat-rhel7-x64-R2026a.tar.gz/download"
+        }
+      },
       "how_to_add_a_pin": "see scripts/kit/README.md, 'GMAT is operator-supplied': measure the unpacked release with manifest.measure_tree(root, scope) on the target platform and replace that platform's null with the five fields",
       "item": 3,
       "kind": "data-tree",
@@ -47,7 +86,13 @@
       "pack": "gmat",
       "platforms": {
         "linux-aarch64": null,
-        "linux-x86_64": null,
+        "linux-x86_64": {
+          "content_hash": "sha256:e15babfc251e14fdd5d306970d9698d634e41c6ed5957118c31af71d28f466f3",
+          "file_count": 2103,
+          "symlink_count": 114,
+          "symlink_listing_hash": "sha256:fe5ab4958e93ae79ade6b18dde99572e63f47c880bc51590efd66e0452401948",
+          "total_bytes": 689762981
+        },
         "macos-arm64": {
           "content_hash": "sha256:d21cddbbffbd3c44982bd98a7fb3a221b79ae6e26f2696eff4046f745d1eca39",
           "file_count": 2060,

@@ -113,12 +113,16 @@ def test_the_pins_file_and_the_docs_table_agree_on_every_image_digest(item):
 def test_the_pins_file_and_the_docs_item_3_agree_on_the_gmat_hash():
     after = DOC.read_text(encoding="utf-8").split("### Item 3: the GMAT pin", 1)[1]
     section = re.split(r"\n##+ ", after, maxsplit=1)[0]   # this heading's own section, up to the next heading
-    pin = PINS["gmat-r2026a"]["platforms"]["macos-arm64"]
-    assert pin["content_hash"] in section
-    assert f"{pin['file_count']:,} files" in section
-    # every field of the pin, not the hash alone, and the scope the pin was measured under
-    assert f"{pin['total_bytes']:,} bytes" in section
-    assert f"{pin['symlink_count']} symlinks" in section and pin["symlink_listing_hash"] in section
+    # every pinned platform (question 254, task 12: macos-arm64 and linux-x86_64), every field of its pin,
+    # not the hash alone, and the scope the pins were measured under
+    pinned = {k: v for k, v in PINS["gmat-r2026a"]["platforms"].items() if v is not None}
+    assert {"macos-arm64", "linux-x86_64"} <= set(pinned)
+    for key, pin in pinned.items():
+        assert f"`{key}`" in section, f"the document's GMAT section does not name the pinned platform {key}"
+        assert pin["content_hash"] in section, key
+        assert f"{pin['file_count']:,} files" in section, key
+        assert f"{pin['total_bytes']:,} bytes" in section, key
+        assert f"{pin['symlink_count']} symlinks" in section and pin["symlink_listing_hash"] in section, key
     scope = PINS["gmat-r2026a"]["scope"]
     for name in (*scope["exclude_paths"], *scope["exclude_dir_names"]):
         assert name in section, f"the document's GMAT section does not name the scope entry {name!r}"
@@ -128,6 +132,12 @@ def test_the_pins_file_and_the_docs_item_3_agree_on_the_gmat_hash():
             assert key in section, f"{key} has no pin and the document does not say so"
     # the whole-tree value of the first audit is explained as superseded, not left standing as the pin
     assert "47095a23" in section and "No pin yet" in section
+    # the Linux archive each pin was measured from (question 254, task 12): the pins file records it, the document names it
+    archives = PINS["gmat-r2026a"]["archives"]
+    linux = archives["linux-x86_64"]
+    assert linux["pinned"] is True and linux["file"] in section and linux["sha256"].removeprefix("sha256:") in section
+    assert f"{linux['bytes']:,}" in section
+    assert archives["linux-aarch64"]["published"] is False
 
 
 @pytest.mark.parametrize("cid", SERVICES)
