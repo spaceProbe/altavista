@@ -2285,8 +2285,8 @@ ssh` carries TCP only (`~/.colima/default/colima.yaml`; the Lima host agent logs
 for TCP ports and nothing for UDP), so the macOS host cannot reach a published UDP port; the kernel
 stays on the host and dials the service's gRPC over Lima's TCP forwarding (`board.edge_address` is the
 host-forwarded `127.0.0.1:<port>`; the service has `--port-device udp://127.0.0.1:<published port>`).
-The Linux build is `services/cfs/build-edge-board.sh`. It takes the docker lock itself (never wrap
-it) and needs `AV_CFS_TEST_IMAGE` to name an image with the relay. Three tests: the restart run (the
+The Linux build is `services/cfs/build-edge-board.sh` (which does not take the docker lock: run it
+under `with_docker_lock.py`). The test takes the docker lock itself (never wrap it) and needs `AV_CFS_TEST_IMAGE` to name an image with the relay. Three tests: the restart run (the
 controller's outputs resume 1 step after the RESET, declared at most 3; 50 of 50 later steps have one;
 the signed log holds `BIND, 30 STEP, POWER_CYCLE, LINK_REHANDSHAKE, BIND, RESET, 50 STEP, SHUTDOWN`;
 the run replays from the signed log and equals the live run after the named exclusions); a peer that

@@ -143,9 +143,22 @@ edge node the board hangs off, and keeps the kernel (the test's `BlockingLockste
 - `services/cfs/build-edge-board.sh` builds `av-edge-board` and `av-edge-board-log` for linux/aarch64
   in the digest-pinned Rust builder `build-shim.sh` uses (`rust:1.90-bookworm@sha256:3914072c...`; a
   test pins that the two scripts name the same digest). Output: `target-docker-linux/edge-board/`
-  (git-ignored). It is not the byte-reproducible build the shim is: libssl-dev and pkg-config are
-  installed unpinned (their versions are printed; the run recorded libssl-dev 3.0.22-1~deb12u1) and the
-  binary runs against the VM's own `libssl.so.3`.
+  (git-ignored). **The build is byte-reproducible** (question 254 item 9; it was not before, question
+  249): the protobuf packages are pinned by version and installed from `snapshot.debian.org` at one
+  timestamp (`20260711T103542Z`, the first snapshot whose bookworm index lists them), signatures still
+  verified, the fetched `.deb` set (`6c2aadcc...`) and the installed package set (`e1d35298...`) checked
+  against pins before the build; nothing is installed from the live mirror (libssl-dev 3.0.17 and
+  pkg-config come with the digest-pinned image; the old unpinned `libssl-dev pkg-config` install only
+  upgraded OpenSSL and changed no byte); `--locked`; and `--remap-path-prefix` erases the repo, spoore,
+  cargo-home and target-dir paths. Two builds of one source tree from different host stage dirs, repo
+  mount paths, cargo target dirs and output dirs gave byte-identical binaries: `av-edge-board`
+  `d241d6db36b51461a87d7c69d6e373a13ce45349e1e62f78da6de3efddf38f35`, `av-edge-board-log`
+  `654925ce4f1cb3a4ccdcd221556098630344d4ce1f31cac8c3c7b4cb1b721338` (the script's header records the
+  controls). These differ from the earlier recorded `071fcf20...` (`av-edge-board`) only by the path
+  remap: the same recipe with `EDGE_BOARD_NO_REMAP=1` at the old default paths reproduces `071fcf20...`
+  exactly, and without the remap a different mount path gives different bytes (so the earlier build was
+  reproducible only for one fixed path). A different source commit gives different hashes by definition;
+  the build prints its inputs. The binary runs against the VM's own `libssl.so.3`.
 - The test starts it with `colima ssh -- <launch script>`, the I/O log, the signing identity, the
   power-cycle fixture and the service's stderr under `$HOME/av-edge-board-cfs-restart-stage-<pid>/` (the
   VM mounts `$HOME` at the same path). The launch script records its pid and `exec`s the service under
