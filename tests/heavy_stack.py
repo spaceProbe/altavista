@@ -975,7 +975,7 @@ def tiles_gateway_container(rust_bins, s3_store, key_prefix, tile_set_label):
                     issuer=issuer,
                 )
             finally:
-                subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, timeout=30)
+                subprocess.run(["docker", "rm", "-f", "-v", container_id], capture_output=True, timeout=30)
         finally:
             subprocess.run(["docker", "network", "rm", network_name], capture_output=True, timeout=30)
             shutil.rmtree(scratch, ignore_errors=True)

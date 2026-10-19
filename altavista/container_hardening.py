@@ -80,11 +80,15 @@ def prune_stale_labelled_resources() -> None:
     on the Rust side. Safe to call unconditionally here because both callers hold
     `altavista.docker_test_lock.lock_docker_tests()` for their entire test body before calling
     this, so no concurrent docker-gated test on this host can be creating resources of its own
-    at the same moment (question 207: that lock is exactly what makes this safe)."""
+    at the same moment (question 207: that lock is exactly what makes this safe).
+
+    Containers are removed with `rm -f -v` because a container's anonymous volumes (those a
+    VOLUME instruction or a bare `-v /path` creates) carry no label, so the label-filtered
+    volume sweep below never sees them (question 255)."""
     label_filter = f"label={TEST_LABEL_KEY}"
     stale_containers = _run("ps", "-a", "--filter", label_filter, "-q").stdout.split()
     for cid in stale_containers:
-        _run("rm", "-f", cid)
+        _run("rm", "-f", "-v", cid)
     stale_networks = _run("network", "ls", "--filter", label_filter, "-q").stdout.split()
     for net in stale_networks:
         _run("network", "rm", net)
