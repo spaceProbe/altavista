@@ -15,16 +15,20 @@
 #     reused unchanged: two instances of every system is the point.
 #   - `<sc>_flight` is drms/demo_ground_segment_flight.system.yaml, unchanged: the spacecraft's
 #     native telemetry source, broadcasting its Earth-fixed position as FRAMED telemetry (apid 500).
-#   - `<sc>_thruster` is drms/demo_command_flight.system.yaml, unchanged: the spacecraft's native,
+#   - `<sc>_thruster` is drms/demo_two_spacecraft_thruster.system.yaml: the spacecraft's native,
 #     telecommandable propulsion channel. It integrates a constant thrust acceleration (0.05 m/s^2
 #     along its z axis here; an instance override of the system's 1.0) whose throttle (`accel_scale`)
-#     a FRAMED telecommand sets, and acknowledges the command with a FRAMED ack.
+#     a FRAMED telecommand sets, acknowledges the command with a FRAMED ack on `ack_out`, and
+#     reports its own position and the throttle in force on a second FRAMED OUT port, `tm_out`
+#     (apid 702; question 254 item 7). `tm_out` is connected to nothing; the test reads its OUT
+#     records in the port-traffic log. (Through task 6 this was drms/demo_command_flight.system.yaml,
+#     which has one FRAMED OUT port; that file is unchanged and the one-station SoS still binds it.)
 #
 # **Why two native models per spacecraft carry telemetry and telecommand, and why not the cFS
-# controller.** `ConstantAccelModel` resolves its telemetry-out codec with `binding::
-# resolve_sensor_output`, which requires exactly one packet codec and exactly one FRAMED OUT port on
-# the whole system, so one instance cannot both broadcast telemetry and consume/ack a telecommand
-# (a binding.rs generalisation would couple them; not made here). The cFS controller cannot take the
+# controller.** The flight computer (`<sc>_flight`) keeps the Earth-fixed position telemetry the
+# ground station decodes (apid 500, drms/demo_ground_segment_flight.system.yaml, unchanged); the
+# thruster's own telemetry is a different packet (apid 702) that the station's `tm_in` codec does
+# not decode, so it is not wired to a station. The cFS controller cannot take the
 # telecommand either: the cFS image accepts no input port but `imu_in` and `startracker_in`
 # (services/cfs/apps/io_lockstep/fsw/src/io_lockstep_port_table.c; `handle_step` skips any other
 # port) and services/cfs/apps/adcs has no command handler, so commanding it needs a change under
@@ -101,11 +105,11 @@ instances:
       - name: state.pz
         value: 3263896.1976225306
   - name: chaser_thruster
-    system_id: command_demo_flight_sys
+    system_id: two_spacecraft_thruster_sys
     binding:
       kind: BINDING_KIND_MODEL
       model:
-        model_id: command_demo_flight_sys
+        model_id: two_spacecraft_thruster_sys
     step_rate_hz: 1.0
     parameter_overrides:
       - name: accel.z
@@ -160,11 +164,11 @@ instances:
       - name: state.pz
         value: 3263896.1976225306
   - name: target_thruster
-    system_id: command_demo_flight_sys
+    system_id: two_spacecraft_thruster_sys
     binding:
       kind: BINDING_KIND_MODEL
       model:
-        model_id: command_demo_flight_sys
+        model_id: two_spacecraft_thruster_sys
     step_rate_hz: 1.0
     parameter_overrides:
       - name: accel.z
@@ -353,4 +357,4 @@ provenance:
 # SHA-256 of this message's own canonical protobuf encoding with this field cleared
 # (crates/av-kernel/src/drm/hash.rs::canonical_sos_hash). Computed with:
 #   cargo run -p av-kernel --example drm_hash -- sos drms/demo_two_spacecraft.sos.yaml
-hash: "393daa346063249ad03ba155127785c946bd8f82402b2ca7d6e7fee6e1bb1ce6"
+hash: "3d9e25542e5f3d398b92a0f8bc878a035eebb9ffb124b14d008778d63dabfc36"

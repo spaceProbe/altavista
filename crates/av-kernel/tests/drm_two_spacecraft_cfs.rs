@@ -7,7 +7,8 @@
 //! controller; the system definitions are reused unchanged, two instances of each), a native flight
 //! computer that broadcasts its Earth-fixed position as FRAMED telemetry
 //! (`drms/demo_ground_segment_flight.system.yaml`, unchanged) and a native thruster that consumes a
-//! FRAMED telecommand and acknowledges it (`drms/demo_command_flight.system.yaml`, unchanged). A
+//! FRAMED telecommand, acknowledges it and reports its own position and the throttle in force on a
+//! second FRAMED OUT port (`drms/demo_two_spacecraft_thruster.system.yaml`; question 254 item 7). A
 //! ground segment of two station instances (one tracking channel per spacecraft; kept as recorded,
 //! although a station now handles several senders: question 254, the test
 //! `both_spacecraft_on_one_ground_station_are_each_handled_in_full` over
@@ -22,10 +23,13 @@
 //! The cFS image accepts no input port but `startracker_in` and `imu_in`
 //! (`services/cfs/apps/io_lockstep/fsw/src/io_lockstep_port_table.c`; `handle_step` skips any other
 //! port) and `services/cfs/apps/adcs` has no command handler, so the cFS side is not changed and
-//! not commanded. `ConstantAccelModel` cannot both broadcast telemetry and consume a telecommand on
-//! one instance (`binding::resolve_sensor_output` requires exactly one packet codec and one FRAMED
-//! OUT port on the system; measured, see the SoS header), hence the telemetry source and the
-//! commanded thruster are two instances of the spacecraft.
+//! not commanded. The position telemetry the ground stations decode comes from the flight computer
+//! instance; the commanded thruster is a second instance whose own telemetry (apid 702) is a
+//! different packet. Through task 6 a system could declare only one FRAMED OUT port
+//! (`binding::resolve_sensor_output`), so the thruster could not report anything beside its ack;
+//! `binding::resolve_constant_accel_emit_port` now binds a named port among several, and the
+//! thruster's `tm_out` carries the throttle it is commanded to
+//! ([`the_chaser_thruster_reports_the_throttle_change_on_a_second_framed_port`]).
 //!
 //! **Expected behaviour, stated before running** (derivations in the DRM header): the critically
 //! damped closed form `theta(t) = theta0 (1 + t/tau) exp(-t/tau)`, `tau = 20 s`, gives
@@ -109,7 +113,9 @@ const LABEL_TEST: &str = "av.test";
 
 fn load_systems(controller_stem: &str) -> BTreeMap<String, SystemDefinition> {
     let mut systems = BTreeMap::new();
-    for stem in ["demo_attitude_control_truth", "demo_attitude_control_startracker", "demo_attitude_control_imu", controller_stem, "demo_ground_segment_flight", "demo_command_flight", "demo_ground_segment_ground", "demo_command_ground"] {
+    // `demo_command_flight` is the one-station SoS's thruster (unchanged, task 6); `demo_two_spacecraft_
+    // thruster` is this SoS's (question 254 item 7: a second FRAMED OUT port).
+    for stem in ["demo_attitude_control_truth", "demo_attitude_control_startracker", "demo_attitude_control_imu", controller_stem, "demo_ground_segment_flight", "demo_command_flight", "demo_two_spacecraft_thruster", "demo_ground_segment_ground", "demo_command_ground"] {
         let sys = load_system(stem);
         systems.insert(sys.id.clone(), sys);
     }
@@ -732,6 +738,103 @@ fn the_native_two_spacecraft_run_follows_the_closed_form() {
 }
 
 // ------------------------------------------------------------------------------------------
+// The thruster's second FRAMED OUT port (question 254, native open items, task 7).
+// ------------------------------------------------------------------------------------------
+
+/// What each spacecraft's thruster reports on `tm_out` (apid 702, a second FRAMED OUT port beside
+/// `ack_out`; connected to nothing, so it is read from the port-traffic log's OUT records):
+/// one packet per 1 Hz step, carrying the thruster's own position (the closed form from the REAL
+/// applied epoch, as its trajectory does) and the throttle (`accel_scale`) in force. The chaser's
+/// reads 1.0 up to the applied epoch and [`COMMANDED_ACCEL_SCALE`] after it (exactly one change); the
+/// target's, never commanded, reads 1.0 throughout. Nothing is received on any `tm_out`.
+fn check_thruster_throttle_telemetry(products: &RunProducts, log: &PortTrafficLog, systems: &BTreeMap<String, SystemDefinition>, sos: &SosConfiguration) {
+    let map = apid_map(systems);
+    let applied: Vec<_> = products.events.iter().filter(|e| e.kind == EventKind::PortCommand as i32 && e.name == "accel_scale").collect();
+    assert_eq!(applied.len(), 1, "exactly one applied accel_scale command");
+    let t_apply_ns = applied[0].tai_ns;
+    let t_apply_s = (t_apply_ns - START_TAI_NS) as f64 / 1e9;
+    for sc in SPACECRAFT {
+        let thruster = format!("{sc}_thruster");
+        let out = records(log, &thruster, "tm_out", PortDirection::Out);
+        assert_eq!(out.len(), DURATION_S as usize, "{thruster}: one throttle packet per 1 Hz step");
+        assert!(records(log, &thruster, "tm_out", PortDirection::In).is_empty(), "{thruster}: tm_out is connected to nothing");
+        let kin = FlightKinematics::of(systems, sos, &thruster);
+        let command = if sc == "chaser" { Some((t_apply_s, COMMANDED_ACCEL_SCALE)) } else { None };
+        let (mut before, mut after, mut worst) = (Vec::new(), Vec::new(), 0.0_f64);
+        for r in &out {
+            let pkt = decode(&map, r);
+            assert_eq!(pkt.apid, 702, "{thruster}: the throttle telemetry packet");
+            // A packet stamped after the applied epoch comes from a step that applied the command.
+            (if r.tai_ns > t_apply_ns { &mut after } else { &mut before }).push(num(&pkt, "accel_scale"));
+            let want = kin.position((r.tai_ns - START_TAI_NS) as f64 / 1e9, command);
+            for (k, f) in ["x", "y", "z"].iter().enumerate() {
+                worst = worst.max((num(&pkt, f) - want[k]).abs());
+            }
+        }
+        println!("{thruster}: tm_out throttle {} packets at {:?}, {} at {:?} (applied at t={t_apply_s} s); worst |position - closed form| = {worst:.3e} m", before.len(), before.first(), after.len(), after.first());
+        assert!(worst < 1e-6, "{thruster}: the telemetry position follows the closed form (worst {worst} m)");
+        assert!(before.iter().all(|v| *v == 1.0), "{thruster}: the throttle before the command is the old value 1.0: {before:?}");
+        if sc == "chaser" {
+            assert!(!before.is_empty() && !after.is_empty(), "the chaser has packets on both sides of the command");
+            assert!(after.iter().all(|v| *v == COMMANDED_ACCEL_SCALE), "the chaser's throttle after the command is {COMMANDED_ACCEL_SCALE}: {after:?}");
+        } else {
+            assert!(after.iter().all(|v| *v == 1.0), "the target's throttle never changes: {after:?}");
+        }
+    }
+}
+
+/// [`run_native_pair`] with the port-traffic log read back.
+fn run_native_pair_logged(label: &str, sos: &SosConfiguration) -> (RunProducts, PortTrafficLog) {
+    let _engine = gmat_sys::engine_lock();
+    let systems = native_systems();
+    let drm = two_sc_drm(&format!("two_spacecraft_native_{label}_drm"), &sos.id, DURATION_S);
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let dir = scratch_dir(label);
+    let products = execute(run_config(&gmat, &drm, sos, &systems, &format!("test-run-two-sc-native-{label}"), Some(dir.clone()))).unwrap_or_else(|e| panic!("the native two-spacecraft run {label} must execute: {e:?}"));
+    let sidecar = std::fs::read(dir.join("port_traffic.pb")).expect("port_traffic.pb");
+    let _ = std::fs::remove_dir_all(&dir);
+    (products, decode_log(&sidecar))
+}
+
+/// The thruster's second FRAMED OUT port, Docker-free: the chaser's throttle telemetry shows the
+/// telecommand's change (old value before, new value after), the target's does not move, and the
+/// ack on the first FRAMED OUT port is unaffected. Perturbation (a clone whose model writes a
+/// constant into the field): the before/after assertions fail.
+#[test]
+fn the_chaser_thruster_reports_the_throttle_change_on_a_second_framed_port() {
+    let sos = native_sos("two_spacecraft_native_throttle_sos");
+    let (products, log) = run_native_pair_logged("throttle", &sos);
+    check_thruster_throttle_telemetry(&products, &log, &native_systems(), &sos);
+    assert_eq!(records(&log, "chaser_thruster", "ack_out", PortDirection::Out).len(), 1, "the ack still goes out on its own port");
+    assert_eq!(records(&log, "target_thruster", "ack_out", PortDirection::Out).len(), 0);
+}
+
+/// A declaration that cannot be resolved stays a typed, load-time refusal naming the instance:
+/// the thruster system with a second telemetry-shaped codec (two codecs fit `tm_out`, nothing says
+/// which) is refused by `execute` before any step, as `DrmError::SensorPortConfiguration`.
+#[test]
+fn an_ambiguous_second_framed_out_port_declaration_is_refused_with_a_typed_error() {
+    let sos = native_sos("two_spacecraft_native_ambiguous_sos");
+    let mut systems = native_systems();
+    let thruster = systems.get_mut("two_spacecraft_thruster_sys").expect("the thruster system");
+    let mut second = thruster.packet_codecs.iter().find(|c| c.apid == 702).expect("the telemetry codec").clone();
+    (second.id, second.apid) = ("thruster_tm_out_codec_2".to_string(), 703);
+    thruster.packet_codecs.push(second);
+    thruster.hash = hash::canonical_system_hash(thruster);
+    let _engine = gmat_sys::engine_lock();
+    let drm = two_sc_drm("two_spacecraft_native_ambiguous_drm", &sos.id, DURATION_S);
+    let gmat = Gmat::setup(&Gmat::default_startup_file()).expect("GMAT setup");
+    let err = execute(run_config(&gmat, &drm, &sos, &systems, "test-run-two-sc-native-ambiguous", None)).expect_err("two codecs fitting tm_out must be refused");
+    match err {
+        DrmError::SensorPortConfiguration { instance, reason } => {
+            assert!(instance.ends_with("_thruster"), "the refusal names a thruster instance: {instance}");
+            assert!(reason.contains("found 2"), "{reason}");
+        }
+        other => panic!("expected DrmError::SensorPortConfiguration, got {other:?}"),
+    }
+}
+
+// ------------------------------------------------------------------------------------------
 // Both spacecraft on ONE ground station (question 254, native open items, task 6).
 // ------------------------------------------------------------------------------------------
 
@@ -1011,6 +1114,9 @@ fn the_ground_receives_both_spacecraft_and_the_telecommand_reaches_only_the_chas
     assert_eq!((cmd_in.apid, cmd_in.is_command, num(&cmd_in, "value")), (700, true, COMMANDED_ACCEL_SCALE));
     let ack = decode(&map, records(&log, "chaser_thruster", "ack_out", PortDirection::Out)[0]);
     assert_eq!((ack.apid, num(&ack, "cmd_seq") as u16), (701, cmd_in.sequence_count), "the ack names the command it acknowledges");
+
+    // --- The thruster's second FRAMED OUT port reports the throttle change (task 7), here too.
+    check_thruster_throttle_telemetry(products, &log, &p.systems, &p.sos);
 
     // --- The physical effect, per spacecraft, against the closed form from the REAL applied epoch:
     //     the chaser's thruster integrates 4x the thrust after it; the target's never changes.

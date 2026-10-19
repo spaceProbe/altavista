@@ -664,6 +664,13 @@ impl DynamicsModel for ConstantAccelModel {
                 values.insert("x".to_string(), crate::codec::FieldValue::Numeric(result.state[0]));
                 values.insert("y".to_string(), crate::codec::FieldValue::Numeric(result.state[1]));
                 values.insert("z".to_string(), crate::codec::FieldValue::Numeric(result.state[2]));
+                // Question 254 item 7: a codec that declares an `accel_scale` field carries the
+                // commanded throttle in force for THIS step (`commanded_accel_scale` already holds
+                // a command decoded above, before `self.step`), so a commanded model's own
+                // telemetry reflects its own commanded state. Absent from every earlier codec.
+                if codec.fields.iter().any(|f| f.name == "accel_scale") {
+                    values.insert("accel_scale".to_string(), crate::codec::FieldValue::Numeric(self.commanded_accel_scale.get()));
+                }
                 let seq = self.framed_seq.get();
                 self.framed_seq.set(seq.wrapping_add(1) & 0x3FFF);
                 let payload = crate::codec::encode_packet(codec, seq, &[], &values).expect(
@@ -2210,9 +2217,9 @@ pub struct ConstantAccelSpec {
     /// [`ConstantAccelSpec::emit`]/`.consume_port` above.
     pub emit_framed_port: Option<String>,
     /// The declared `PacketCodec` [`super::binding::classify_binding`]'s own `ModelKind::Native`
-    /// arm resolved for [`ConstantAccelSpec::emit_framed_port`] (via [`resolve_sensor_output`],
-    /// the same declared-`packet_codecs`/`.ports` resolution every FRAMED-emitting native model
-    /// in this crate already uses) -- `None` exactly when `emit_framed_port` is `None`; `Some`
+    /// arm resolved for [`ConstantAccelSpec::emit_framed_port`] (via [`resolve_constant_accel_emit_port`]:
+    /// [`resolve_sensor_output`]'s one-port, one-codec resolution, or by name and shape when the
+    /// system declares several FRAMED OUT ports -- question 254 item 7) -- `None` exactly when `emit_framed_port` is `None`; `Some`
     /// only after that resolution has actually run and validated the codec's required `x`/`y`/`z`
     /// fields. Not itself parsed from a `"port.*"` parameter (a `PacketCodec` cannot round-trip
     /// through a single `Parameter`); kept as a spec field (rather than a separate constructor
@@ -3419,13 +3426,7 @@ pub fn classify_binding(instance: &SystemInstance, sys: &SystemDefinition, optio
             // discovered only once this instance is first stepped), mirroring `ModelKind::
             // StarTracker`'s own codec resolution below.
             if let Some(port_name) = spec.emit_framed_port.clone() {
-                let (codec, resolved_port) = resolve_sensor_output(sys, &instance.name)?;
-                if resolved_port != port_name {
-                    return Err(DrmError::SensorPortConfiguration {
-                        instance: instance.name.clone(),
-                        reason: format!("port.emit_framed names port {port_name:?}, but the declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port is named {resolved_port:?}"),
-                    });
-                }
+                let codec = resolve_constant_accel_emit_port(sys, &instance.name, &port_name)?;
                 for name in ["x", "y", "z"] {
                     if !codec.fields.iter().any(|f| f.name == name) {
                         return Err(DrmError::SensorPortConfiguration { instance: instance.name.clone(), reason: format!("declared FRAMED-emit PacketCodec {:?} is missing required field {name:?}", codec.id) });
@@ -4169,6 +4170,46 @@ pub(crate) fn resolve_sensor_output(sys: &SystemDefinition, instance: &str) -> R
         return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("expected exactly one declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port, found {}", framed_out.len()) });
     };
     Ok((sys.packet_codecs[0].clone(), port.name.clone()))
+}
+
+/// Question 254 item 7: resolve [`ConstantAccelSpec::emit_framed_port`]'s own declared
+/// `PacketCodec` when the system may declare **several** FRAMED OUT ports (a commanded model's
+/// telemetry port beside its ack port). The one-port, one-codec declaration every fixture before
+/// this resolves exactly as it did, through [`resolve_sensor_output`] (same errors, same texts,
+/// including its zero-count refusals); only a declaration with more than one codec or more than
+/// one FRAMED OUT port takes the by-name path: the port `port.emit_framed` names must be declared
+/// exactly once, `PORT_KIND_FRAMED`/`PORT_DIRECTION_OUT`, and the codec is matched by shape (not a
+/// command, declaring `x`/`y`/`z`), exactly one of them -- the same by-name-then-by-shape
+/// convention [`resolve_constant_accel_command_port`]/[`resolve_constant_accel_ack_port`] use. A
+/// codec that additionally declares `accel_scale` carries the commanded throttle
+/// ([`ConstantAccelModel::step_with_ports`]). Never "the first one found": an unresolvable
+/// declaration is a typed [`DrmError::SensorPortConfiguration`]. The star tracker and IMU keep
+/// [`resolve_sensor_output`] unchanged (they name no port, so a second FRAMED OUT port on their
+/// system stays ambiguous and refused).
+pub(crate) fn resolve_constant_accel_emit_port(sys: &SystemDefinition, instance: &str, port_name: &str) -> Result<PacketCodec, DrmError> {
+    let framed_out_count = sys.ports.iter().filter(|p| p.kind == PortKind::Framed as i32 && p.direction == PortDirection::Out as i32).count();
+    if sys.packet_codecs.len() <= 1 && framed_out_count <= 1 {
+        let (codec, resolved_port) = resolve_sensor_output(sys, instance)?;
+        if resolved_port != port_name {
+            return Err(DrmError::SensorPortConfiguration {
+                instance: instance.to_string(),
+                reason: format!("port.emit_framed names port {port_name:?}, but the declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port is named {resolved_port:?}"),
+            });
+        }
+        return Ok(codec);
+    }
+    let matching: Vec<&Port> = sys.ports.iter().filter(|p| p.name == port_name).collect();
+    let [port] = matching.as_slice() else {
+        return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("port.emit_framed names port {port_name:?}, but this instance declares {} port(s) with that name (expected exactly 1)", matching.len()) });
+    };
+    if port.kind != PortKind::Framed as i32 || port.direction != PortDirection::Out as i32 {
+        return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("port.emit_framed names port {port_name:?}, which is not declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT") });
+    }
+    let candidates: Vec<&PacketCodec> = sys.packet_codecs.iter().filter(|c| !c.is_command && ["x", "y", "z"].iter().all(|n| c.fields.iter().any(|f| f.name == *n))).collect();
+    let [codec] = candidates.as_slice() else {
+        return Err(DrmError::SensorPortConfiguration { instance: instance.to_string(), reason: format!("expected exactly one declared packet_codecs entry with is_command=false and x/y/z fields (the port.emit_framed codec), found {}", candidates.len()) });
+    };
+    Ok((*codec).clone())
 }
 
 /// M25.2 (`docs/sil-plan.md`'s M25 milestone, "Job 1"): resolve [`ConstantAccelSpec::
@@ -6206,6 +6247,137 @@ mod tests {
         assert_eq!(decoded.fields.get("x"), Some(&crate::codec::FieldValue::Numeric(1010.0)));
         assert_eq!(decoded.fields.get("y"), Some(&crate::codec::FieldValue::Numeric(2000.0)));
         assert_eq!(decoded.fields.get("z"), Some(&crate::codec::FieldValue::Numeric(3000.0)));
+    }
+
+    // =========================================================================================
+    // Question 254 item 7: more than one FRAMED OUT port per system.
+    // =========================================================================================
+
+    /// The thruster-shaped telemetry codec: `ground_tm_packet_codec`'s x/y/z plus `accel_scale`.
+    fn throttle_tm_codec(id: &str, apid: u32) -> PacketCodec {
+        let mut codec = ground::ground_tm_packet_codec(id, apid);
+        codec.user_data_bytes = 32;
+        codec.fields.push(PacketField { name: "accel_scale".to_string(), bit_offset: 192, bit_width: 64, r#type: av_cdm::pb::PacketFieldType::Float64 as i32, unit: av_cdm::pb::Unit::Dimensionless as i32, scale: 1.0, offset: 0.0, target: String::new() });
+        codec
+    }
+    fn emit_system(ports: Vec<Port>, codecs: Vec<PacketCodec>) -> SystemDefinition {
+        SystemDefinition { id: "thruster_sys".to_string(), ports, packet_codecs: codecs, ..Default::default() }
+    }
+    fn framed_in(name: &str) -> Port {
+        Port { name: name.to_string(), kind: PortKind::Framed as i32, direction: PortDirection::In as i32, schema: "ccsds.spp".to_string(), ..Default::default() }
+    }
+    fn framed_out(name: &str) -> Port {
+        Port { name: name.to_string(), kind: PortKind::Framed as i32, direction: PortDirection::Out as i32, schema: "ccsds.spp".to_string(), ..Default::default() }
+    }
+    /// A commanded model's declaration: command in, ack out, telemetry out.
+    fn thruster_system() -> SystemDefinition {
+        emit_system(vec![framed_in("cmd_in"), framed_out("ack_out"), framed_out("tm_out")], vec![command_in_codec(), ack_out_codec(), throttle_tm_codec("tm_codec", 702)])
+    }
+
+    /// The one-port, one-codec declaration resolves exactly as `resolve_sensor_output` does, with
+    /// the same errors (a wrong name, a zero count): the generalisation adds nothing for it.
+    #[test]
+    fn the_emit_port_resolver_keeps_the_one_port_one_codec_resolution_and_its_errors() {
+        let codec = ground::ground_tm_packet_codec("flight_tm", 500);
+        let sys = emit_system(vec![framed_out("tm_out")], vec![codec.clone()]);
+        assert_eq!(resolve_constant_accel_emit_port(&sys, "i", "tm_out").unwrap(), codec);
+        assert_eq!(resolve_sensor_output(&sys, "i").unwrap(), (codec, "tm_out".to_string()));
+        let err = resolve_constant_accel_emit_port(&sys, "i", "other").unwrap_err();
+        assert!(matches!(&err, DrmError::SensorPortConfiguration { reason, .. } if reason.contains("names port \"other\", but the declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT port is named \"tm_out\"")), "{err:?}");
+        for empty in [emit_system(vec![], vec![]), emit_system(vec![framed_out("tm_out")], vec![])] {
+            let (ours, theirs) = (resolve_constant_accel_emit_port(&empty, "i", "tm_out").unwrap_err(), resolve_sensor_output(&empty, "i").unwrap_err());
+            assert_eq!(format!("{ours}"), format!("{theirs}"), "a zero count keeps resolve_sensor_output's own refusal");
+        }
+    }
+
+    /// Several FRAMED OUT ports: the named port binds, by name, to the one telemetry-shaped codec
+    /// (the ack's and the command's codecs are not it). Fails against `resolve_sensor_output`.
+    #[test]
+    fn the_emit_port_resolver_binds_one_of_several_framed_out_ports_by_name_and_shape() {
+        let sys = thruster_system();
+        assert!(resolve_sensor_output(&sys, "i").is_err(), "the sensor convention cannot resolve this declaration");
+        let codec = resolve_constant_accel_emit_port(&sys, "i", "tm_out").expect("tm_out resolves by name and shape");
+        assert_eq!((codec.id.as_str(), codec.apid), ("tm_codec", 702));
+    }
+
+    /// An unresolvable declaration is a typed `SensorPortConfiguration`, never a first-found
+    /// default: an unknown name, a FRAMED IN port, a SIGNAL port, a duplicated name, and two
+    /// telemetry-shaped codecs with nothing to tell them apart.
+    #[test]
+    fn the_emit_port_resolver_refuses_what_it_cannot_resolve_with_a_typed_error() {
+        let refused = |sys: &SystemDefinition, name: &str, needle: &str| {
+            let err = resolve_constant_accel_emit_port(sys, "i", name).unwrap_err();
+            assert!(matches!(&err, DrmError::SensorPortConfiguration { instance, reason } if instance == "i" && reason.contains(needle)), "{name}: {err:?}");
+        };
+        let sys = thruster_system();
+        refused(&sys, "nope", "declares 0 port(s) with that name");
+        refused(&sys, "cmd_in", "not declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT");
+        let mut signal = thruster_system();
+        signal.ports.push(Port { name: "sig_out".to_string(), kind: PortKind::Signal as i32, direction: PortDirection::Out as i32, ..Default::default() });
+        refused(&signal, "sig_out", "not declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT");
+        let mut dup = thruster_system();
+        dup.ports.push(framed_out("tm_out"));
+        refused(&dup, "tm_out", "declares 2 port(s) with that name");
+        let mut two = thruster_system();
+        two.packet_codecs.push(throttle_tm_codec("tm_codec_2", 703));
+        refused(&two, "tm_out", "is_command=false and x/y/z fields (the port.emit_framed codec), found 2");
+        let mut none = thruster_system();
+        none.packet_codecs.retain(|c| c.id != "tm_codec");
+        refused(&none, "tm_out", "found 0");
+    }
+
+    /// Through the real `classify_binding` entry point: a native instance with a command port,
+    /// an ack port and a telemetry port classifies, its spec carrying the telemetry codec; the
+    /// same instance naming a port that is not a FRAMED OUT port is refused.
+    #[test]
+    fn classify_binding_accepts_a_native_instance_with_several_framed_out_ports_and_refuses_a_bad_one() {
+        let (instance, mut sys) = native_instance("thruster", vec![sparam("port.consume_framed", "cmd_in"), sparam("port.consume_framed_field", "accel_scale"), sparam("port.ack_framed", "ack_out"), sparam("port.emit_framed", "tm_out")]);
+        let declared = thruster_system();
+        sys.ports = declared.ports;
+        sys.packet_codecs = declared.packet_codecs;
+        match classify_binding(&instance, &sys, &DrmOptions::default()).expect("the several-FRAMED-OUT declaration classifies") {
+            Classification::Model(BindingPlan::ConstantAccel(spec)) => {
+                assert_eq!(spec.emit_framed_port.as_deref(), Some("tm_out"));
+                assert_eq!(spec.emit_framed_codec.as_deref().map(|c| c.apid), Some(702));
+                assert_eq!(spec.ack_framed_codec.as_deref().map(|c| c.apid), Some(601));
+            }
+            _ => panic!("expected BindingPlan::ConstantAccel"),
+        }
+        let (bad_instance, mut bad_sys) = native_instance("thruster", vec![sparam("port.emit_framed", "cmd_in")]);
+        bad_sys.ports = thruster_system().ports;
+        bad_sys.packet_codecs = thruster_system().packet_codecs;
+        let err = classify_binding(&bad_instance, &bad_sys, &DrmOptions::default()).unwrap_err();
+        assert!(matches!(&err, DrmError::SensorPortConfiguration { instance, reason } if instance == "thruster" && reason.contains("not declared PORT_KIND_FRAMED/PORT_DIRECTION_OUT")), "{err:?}");
+    }
+
+    /// A telemetry codec declaring `accel_scale` carries the throttle in force: 1.0 until a
+    /// telecommand is applied, the commanded value in the very step it is applied and after; a
+    /// codec without the field is encoded exactly as before. Fails against a model that never
+    /// writes the field (the encode errors) or writes a constant.
+    #[test]
+    fn emit_framed_telemetry_carries_the_commanded_throttle_when_its_codec_declares_it() {
+        let mut model = command_consuming_model([0.0, 0.0, 1.0]);
+        let tm = throttle_tm_codec("tm_codec", 702);
+        model.emit_framed = Some(("tm_out".to_string(), tm.clone()));
+        let mut apid_map = crate::codec::ApidMap::new();
+        apid_map.insert(tm.apid, tm.clone());
+        apid_map.insert(ack_out_codec().apid, ack_out_codec());
+        let throttle_of = |outbox: &Outbox| {
+            let msg = outbox.messages().iter().find(|m| m.port == "tm_out").expect("one telemetry packet per step");
+            crate::codec::decode_packet(&apid_map, &msg.payload).unwrap().fields.get("accel_scale").cloned()
+        };
+        let (_, before, _) = model.step_with_ports(&[0.0; 6], 0, &[], 1_000_000_000, &Inbox::empty()).unwrap();
+        assert_eq!(throttle_of(&before), Some(crate::codec::FieldValue::Numeric(1.0)));
+        let command = Inbox::new(vec![command_packet(&command_in_codec(), 3, 4.0)]);
+        let (_, at, _) = model.step_with_ports(&[0.0; 6], 1_000_000_000, &[], 1_000_000_000, &command).unwrap();
+        assert_eq!(throttle_of(&at), Some(crate::codec::FieldValue::Numeric(4.0)), "the step that applies the command already reports it");
+        let (_, after, _) = model.step_with_ports(&[0.0; 6], 2_000_000_000, &[], 1_000_000_000, &Inbox::empty()).unwrap();
+        assert_eq!(throttle_of(&after), Some(crate::codec::FieldValue::Numeric(4.0)));
+        // A codec without the field: the packet has x/y/z only, as every earlier fixture's.
+        model.emit_framed = Some(("tm_out".to_string(), ground::ground_tm_packet_codec("flight_tm", 500)));
+        let (_, plain, _) = model.step_with_ports(&[0.0; 6], 3_000_000_000, &[], 1_000_000_000, &Inbox::empty()).unwrap();
+        let msg = plain.messages().iter().find(|m| m.port == "tm_out").unwrap();
+        assert_eq!(msg.payload.len(), 6 + 24, "a CCSDS primary header and 24 user-data bytes");
     }
 
     // =========================================================================================

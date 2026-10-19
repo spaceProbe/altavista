@@ -1,0 +1,163 @@
+# SystemDefinition (proto/altavista/v1/system.proto), YAML transcoding -- native open items,
+# task 7 (docs/open-questions.md question 254 item 7: more than one framed-out port per system).
+#
+# drms/demo_command_flight.system.yaml (the telecommandable thruster channel: `cmd_in` consumed,
+# `ack_out` acknowledged; M25.2) with ONE addition: a second FRAMED OUT port, `tm_out`, on which the
+# thruster broadcasts its own propagated position (x, y, z; `port.emit_framed`) together with the
+# throttle (`accel_scale`) it is currently commanded to, one packet per 1 Hz step (apid 702). The
+# system therefore declares three packet codecs and two FRAMED OUT ports, which
+# `binding::resolve_sensor_output` (exactly one of each) cannot resolve; `binding::
+# resolve_constant_accel_emit_port` binds `tm_out` to its codec by name and shape (not a command,
+# x/y/z), as `resolve_constant_accel_command_port`/`_ack_port` do for `cmd_in`/`ack_out`. The
+# throttle field is what a commanded model could not report before: telemetry that reflects its own
+# commanded state (1.0 until the telecommand is applied, the commanded value after).
+#
+# demo_command_flight.system.yaml itself is unchanged (its hash, and the hashes of every DRM that
+# binds it, stay as recorded); only drms/demo_two_spacecraft.sos.yaml binds this one. `tm_out` is
+# connected to nothing: the router records every emission on a FRAMED OUT port as an OUT
+# PortTrafficRecord whether or not a connection exists, and that is what the test reads.
+id: two_spacecraft_thruster_sys
+version: "1"
+name: Native thruster for the two-spacecraft demo, telecommand in, ack and throttle telemetry out (question 254 item 7)
+dynamics_model: native.two_spacecraft_thruster
+state_space_id: native.two_spacecraft_thruster.space
+state_space:
+  id: native.two_spacecraft_thruster.space
+  components:
+    - label: pos_x
+      unit: UNIT_METER
+    - label: pos_y
+      unit: UNIT_METER
+    - label: pos_z
+      unit: UNIT_METER
+    - label: vel_x
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_y
+      unit: UNIT_METER_PER_SECOND
+    - label: vel_z
+      unit: UNIT_METER_PER_SECOND
+ports:
+  - name: cmd_in
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_IN
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+  - name: ack_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 1500000000
+  - name: tm_out
+    kind: PORT_KIND_FRAMED
+    direction: PORT_DIRECTION_OUT
+    schema: ccsds.spp
+    timing:
+      latency_ns: 50000000
+packet_codecs:
+  - id: flight_cmd_in_codec
+    apid: 700
+    is_command: true
+    secondary_header_bytes: 0
+    user_data_bytes: 8
+    description: "ground-issued command telecommand: commanded accel_scale value (M25.2)"
+    fields:
+      - name: value
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: flight_ack_out_codec
+    apid: 701
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 2
+    description: "flight-software command ack: acknowledged packet's own CCSDS sequence_count (M25.2)"
+    fields:
+      - name: cmd_seq
+        bit_offset: 0
+        bit_width: 16
+        type: PACKET_FIELD_TYPE_UINT
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+  - id: thruster_tm_out_codec
+    apid: 702
+    is_command: false
+    secondary_header_bytes: 0
+    user_data_bytes: 32
+    description: "own Earth-fixed position and the throttle (accel_scale) currently commanded (question 254 item 7)"
+    fields:
+      - name: x
+        bit_offset: 0
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: y
+        bit_offset: 64
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: z
+        bit_offset: 128
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_METER
+        scale: 1.0
+        offset: 0.0
+      - name: accel_scale
+        bit_offset: 192
+        bit_width: 64
+        type: PACKET_FIELD_TYPE_FLOAT64
+        unit: UNIT_DIMENSIONLESS
+        scale: 1.0
+        offset: 0.0
+parameters:
+  - name: frame_id
+    string_value: command_demo_frame
+  - name: accel.x
+    value: 0.0
+  - name: accel.y
+    value: 0.0
+  - name: accel.z
+    value: 1.0
+  - name: state.px
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.py
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.pz
+    value: 0.0
+    unit: UNIT_METER
+  - name: state.vx
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: state.vy
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: state.vz
+    value: 0.0
+    unit: UNIT_METER_PER_SECOND
+  - name: port.consume_framed
+    string_value: cmd_in
+  - name: port.consume_framed_field
+    string_value: accel_scale
+  - name: port.ack_framed
+    string_value: ack_out
+  - name: port.emit_framed
+    string_value: tm_out
+provenance:
+  author_kind: AUTHOR_KIND_AGENT
+  tool: "av-kernel drm executor authoring (question 254 item 7)"
+# SHA-256 of this message's own canonical protobuf encoding with this field cleared
+# (crates/av-kernel/src/drm/hash.rs::canonical_system_hash). Computed with:
+#   cargo run -p av-kernel --example drm_hash -- system drms/demo_two_spacecraft_thruster.system.yaml
+hash: "241c54c3daa7e8652184cf8dc3c4ab2a12d403f851feafab417274e4d16fc2aa"
