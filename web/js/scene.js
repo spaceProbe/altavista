@@ -90,8 +90,8 @@ export const FIT_DISTANCE_FACTOR = 2.4;
 // orbit controls to swing the object without it leaving the frame, and is large enough
 // that a ~3 km covariance ellipsoid reads as an ellipsoid, not a dot.
 export const ENTITY_FRAMING_FRACTION = 0.6;
-const MARKER_PX = 7;                // spacecraft marker diameter on screen
-const EVENT_PX = 9;
+const MARKER_PX = 7;                // spacecraft marker diameter on screen, in every drawing view
+const EVENT_PX = 9;                 // event octahedron's, likewise (`Viewer._sizeMarkers`)
 // Floor of the pixel-constant spacecraft/event marker scale, scene units (1e-10 = 0.1 mm).
 // It only keeps the scale from reaching zero. It used to be 1e-6 = 1 m, which is a lower
 // bound far above what a 7 px marker needs once the camera is a few metres away (a framed
@@ -339,8 +339,10 @@ export class Viewer {
   }
 
   /**
-   * M26.3 fix: the canvas height used for "constant N-pixel apparent size" math (marker/
-   * event scale, body sub-pixel dot threshold, globe LOD screen-space error) --
+   * M26.3 fix: the canvas height used for "constant N-pixel apparent size" math for the
+   * PRIMARY view and as the fallback of a viewport whose own canvas has no height (marker/
+   * event scale, body sub-pixel dot threshold: a viewport uses its own canvas's, see
+   * `_sizeMarkers`, `_placeBodies`; the globe LOD screen-space error) --
    * previously always `this.canvas.clientHeight || 1`, i.e. the LEGACY primary
    * canvas. That is wrong the instant the primary's own pane is not part of the
    * CURRENT layout at all (the RPO default layout, web/js/layout/default_layouts.js's
@@ -360,48 +362,6 @@ export class Viewer {
    * OWN canvas is currently attached and sized; a fixed, reasonable default (matches
    * this method's own docstring reasoning -- never 1).
    */
-  /**
-   * M26.3 fix (found by the same manual-browser verification as `_referenceCanvasHeight`
-   * above): the distance a marker's "constant N-pixel apparent size" scale is computed
-   * from used to be unconditionally `marker.position.distanceTo(this.camera.position)`
-   * -- the LEGACY primary camera's own distance, however irrelevant that is to any other
-   * viewport. For the RPO default layout specifically this is not merely cosmetic: the
-   * "Target"/"Chaser" markers' scale, sized for the whole-scenario ICRF distance
-   * (tens of scene units), ends up hundreds of kilometres in radius -- and the RIC
-   * viewport's own camera sits only tens of metres from that same marker (an RPO
-   * close-up, by design). The RIC camera therefore ends up INSIDE the oversized marker
-   * sphere; `THREE.Mesh.raycast()` (web/vendor/three/three.core.js) tests only
-   * front-facing triangles by default, and a camera inside a sphere only ever sees its
-   * own back faces -- so `viewer.pick()` silently found nothing in the RIC pane no
-   * matter where the user double-clicked, even dead-centre on "Target" itself. Found
-   * live: projecting Target's own world position back through the RIC camera and
-   * picking at that exact NDC point still returned `null`, traced to
-   * `marker.scale.x` being ~0.5 SCENE UNITS (~520 km) against a camera only ~5.8e-5
-   * units (~58 m) away.
-   *
-   * Fix: use the SMALLEST distance from this marker's world position to ANY currently
-   * active camera (the legacy primary's, and every registered viewport's own) --
-   * `getWorldPosition()` on both sides, since a viewport's camera may be parented in a
-   * completely different frame (e.g. RIC) than the marker (always under the entities
-   * frame), so a plain `.position`-to-`.position` comparison (valid only within one
-   * shared parent) is not enough. This does not give every viewport a "correct" N-pixel
-   * marker size simultaneously -- a single shared Object3D fundamentally cannot, when
-   * viewports differ in scale by orders of magnitude (see viewport.js's own module
-   * docstring on why only trajectory LINES got a per-viewport copy, not markers) -- but
-   * it guarantees the marker is never larger than a small fraction of the CLOSEST
-   * camera's own distance to it, so no camera can end up trapped inside it. A farther
-   * viewport then sees a smaller-than-ideal (possibly sub-pixel) marker instead of a
-   * broken one -- a strictly safer failure mode.
-   */
-  _markerReferenceDistance(markerWorldPos) {
-    let min = markerWorldPos.distanceTo(this.camera.getWorldPosition(this._tmpCamWorld || (this._tmpCamWorld = new THREE.Vector3())));
-    for (const vp of this.viewports.values()) {
-      const d = markerWorldPos.distanceTo(vp.camera.getWorldPosition(this._tmpCamWorld));
-      if (d < min) min = d;
-    }
-    return min;
-  }
-
   _referenceCanvasHeight() {
     if (this.canvas.clientHeight) return this.canvas.clientHeight;
     for (const vp of this.viewports.values()) {
@@ -1507,8 +1467,8 @@ export class Viewer {
    * Targets: body meshes, spacecraft markers, event meshes, and the glTF model of a
    * spacecraft (when the models class is on and the model is loaded), which resolves to its
    * spacecraft. The marker alone is far too small a target for a 1.5 m model framed from
-   * ~10 m (a 7 px dot at its centre, sized by the CLOSEST camera, see
-   * `_markerReferenceDistance`); the model is what is drawn there.
+   * ~10 m (a 7 px dot at its centre, sized for that view, `_sizeMarkers`); the model is what is
+   * drawn there.
    * @param {THREE.Camera} camera
    * @param {number} ndcX
    * @param {number} ndcY
@@ -2309,6 +2269,8 @@ export class Viewer {
     this._bodiesPlacedEpoch = -1;
     this._placeBodyOffset = new THREE.Vector3();
     this._placeCamWorld = new THREE.Vector3();
+    this._sizeCamWorld = new THREE.Vector3();
+    this._sizeObjWorld = new THREE.Vector3();
   }
 
   /** `out = off + toRenderSpace_view(abs)`; `off` null means zero, in which case the result
@@ -2352,7 +2314,13 @@ export class Viewer {
    * frame, as before.
    */
   _placeSharedEntities(vp) {
-    if (this._placedView === vp && this._placedEpoch === this._placeEpoch) return;
+    if (this._placedView === vp && this._placedEpoch === this._placeEpoch) {
+      // Placed already, but the view's camera or canvas may have moved since (a viewport's camera
+      // is moved by `_updateViewport` after the primary was placed, a resize can come at any time):
+      // the fixed-pixel sizes are re-evaluated on every call, and rewritten only if they changed.
+      this._sizeMarkers(vp);
+      return;
+    }
     this._placedView = vp;
     this._placedEpoch = this._placeEpoch;
     const fo = vp ? vp.floatingOrigin : this.floatingOrigin;
@@ -2372,6 +2340,7 @@ export class Viewer {
       this._toViewLocal(fo, e.abs, offAdd, e.mesh.position);
       e.mesh.updateWorldMatrix(false, false);
     }
+    this._sizeMarkers(vp); // after the positions: the primary's distance is the placed one
     if (!this._entityGroups) return;
     this._placeEntityMarkers(fo, off);
     this._placeEntityTrails(fo, off);
@@ -2390,6 +2359,59 @@ export class Viewer {
       this._toViewLocal(fo, s.abs, offAdd, entity.group.position);
       entity.group.updateMatrixWorld(true);
     }
+  }
+
+  /**
+   * Size the fixed-pixel markers for the view `vp` (a `Viewport`, or `null` for the primary camera):
+   * the spacecraft marker spheres (`MARKER_PX` across on screen) and the event octahedra
+   * (`EVENT_PX`), question 239's markers. Each is ONE object drawn by every view, so its scale is
+   * written for the view that is about to draw it, from THAT view's own camera, canvas height and
+   * fov: `scale = max(d * (2 tan(fov/2) / H) * PX / 2, MARKER_MIN_SCALE_SCENE_UNITS)`, `d` the
+   * camera-to-entity distance. Called from `_placeSharedEntities`, so it runs when the view's
+   * camera is where it will draw from (an extra viewport's camera moves in `_updateViewport`, after
+   * the primary was placed; sizing once per tick from the closest of all cameras, before they moved,
+   * drew a close-up viewport's marker thousands of pixels wide while the clock ran, and a viewport
+   * farther than the closest camera sub-pixel), and on EVERY call, including the ones the
+   * (view, epoch) memo skips, so a camera or canvas that changed within an epoch is never missed.
+   * The cost is one distance and one comparison per marker and event; a scale that did not change
+   * is not rewritten, one that did gets its world matrix updated (three updates them before
+   * `scene.onBeforeRender`, where an extra viewport is sized).
+   *
+   * `d` for an extra viewport is the f64 distance between the entity's cached `abs` and the view
+   * camera's world position, not the float32-placed position (up to 0.3 m off against a camera
+   * ~10 m away at GEO/lunar distance, question 252). For the primary it is the placed marker's
+   * world position, exactly the expression the primary always used, so a scene without an extra
+   * viewport has bit-identical scales; the placed and the f64 distances differ by the
+   * placement's rounding only (about 1e-4 relative at worst, measured in
+   * marker_pixel_size_check.mjs). With extra viewports the primary's size is now its own
+   * camera's (it used to be the closest camera's of all views, so a 10 m viewport made the
+   * primary's markers sub-pixel).
+   *
+   * Because every view sizes by its own distance, no camera can be trapped inside a marker: the
+   * M26.3 defect, where a marker sized for the far primary swallowed a viewport camera tens of
+   * metres from it, so the back faces `THREE.Mesh.raycast` skips were all that camera saw and
+   * `viewer.pick()` found nothing in the RIC pane. Picking sizes (places) for the view it picks
+   * in, like a draw.
+   */
+  _sizeMarkers(vp) {
+    if (!this.spacecraft.size && !this.events.length) return;
+    const cam = vp ? vp.camera : this.camera;
+    const camWorld = cam.getWorldPosition(this._sizeCamWorld);
+    const H = (vp && vp.canvas && vp.canvas.clientHeight) || this._referenceCanvasHeight();
+    const pxScale = 2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) / H;
+    for (const s of this.spacecraft.values()) this._sizeFixedPixel(vp, s.marker, s.abs, MARKER_PX, pxScale, camWorld);
+    // (an event without an instance is never drawn and has no `abs` to measure)
+    for (const e of this.events) if (e.interp) this._sizeFixedPixel(vp, e.mesh, e.abs, EVENT_PX, pxScale, camWorld);
+  }
+
+  /** One object of `_sizeMarkers`: `px` pixels across at distance `d` for the view's `pxScale`
+   * (scene units per pixel per unit distance). */
+  _sizeFixedPixel(vp, obj, abs, px, pxScale, camWorld) {
+    const d = vp ? abs.distanceTo(camWorld) : obj.getWorldPosition(this._sizeObjWorld).distanceTo(camWorld);
+    const scale = Math.max(d * pxScale * px * 0.5, MARKER_MIN_SCALE_SCENE_UNITS);
+    if (obj.scale.x === scale) return;
+    obj.scale.setScalar(scale);
+    obj.updateWorldMatrix(false, false);
   }
 
   /**
@@ -2656,15 +2678,12 @@ export class Viewer {
       this.sun.position.copy(this._sunDir).normalize().multiplyScalar(this.fitRadius * 10);
       this.sun.target.position.set(0, 0, 0);
     }
-    // spacecraft markers, constant pixel size
-    const h = this._referenceCanvasHeight();
-    const pxScale = 2 * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)) / h;
+    // spacecraft markers: this tick's f64 position. Their constant PIXEL size is each drawing
+    // view's own (`_sizeMarkers`, at its placement), not written here.
     for (const s of this.spacecraft.values()) {
       s.interp.at(t, this._tmpAbs).multiplyScalar(SCALE);
       s.abs.copy(this._tmpAbs); // f64, absolute: every view's placement reads it (_placeSharedEntities)
       this._toLocal(this._tmpAbs, s.marker.position);
-      const d = this._markerReferenceDistance(s.marker.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      s.marker.scale.setScalar(Math.max(d * pxScale * MARKER_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
       if (this.options.trail === 'past' && s.poly.times.length > 1) {
         const k = findSegment(t, s.poly.times);
         s.line.geometry.instanceCount = t >= s.poly.times[s.poly.times.length - 1] ? s.segCount : Math.max(0, k);
@@ -2677,10 +2696,6 @@ export class Viewer {
     // contract between rings -- see the Footprint docstring and setScenario() above)
     for (const f of this.footprints.values()) {
       this._updateFootprint(f, t);
-    }
-    for (const e of this.events) {
-      const d = this._markerReferenceDistance(e.mesh.getWorldPosition(this._tmpMarkerWorld || (this._tmpMarkerWorld = new THREE.Vector3())));
-      e.mesh.scale.setScalar(Math.max(d * pxScale * EVENT_PX * 0.5, MARKER_MIN_SCALE_SCENE_UNITS));
     }
     // Heavy round 7 (H6 wiring): entity per-tick update, AFTER the spacecraft loop
     // above (it wrote this tick's `s.abs`) and BEFORE render() -- see each method's own

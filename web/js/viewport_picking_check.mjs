@@ -174,14 +174,21 @@ export function modelPickProof(viewer, view, name = 'Chaser') {
   };
 }
 
-/** Radius, in pixels, at which the spacecraft's marker is drawn in `view` (float64 distance). */
+/** Radius, in pixels, at which the spacecraft's marker is drawn in `view` (float64 distance). The
+ * marker is ONE object sized for the view it is placed for (`Viewer._sizeMarkers`, written by
+ * `_placeSharedEntities(view)`, as a pick or a draw does), so it is read with the shared objects
+ * placed for `view`, and the placement current on entry is written back. */
 export function markerRadiusPx(viewer, view, name) {
   const camera = view ? view.camera : viewer.camera;
   const s = viewer.spacecraft.get(name);
+  const before = viewer._placedView;
+  viewer._placeSharedEntities(view);
+  const scale = s.marker.scale.x;
+  if (before !== view) viewer._placeSharedEntities(before === undefined ? null : before);
   const abs = s.interp.at(viewer._lastT, new THREE.Vector3()).multiplyScalar(SCALE);
   const dist = abs.distanceTo(camera.getWorldPosition(new THREE.Vector3()));
   const H = (view && view.canvas && view.canvas.clientHeight) || (viewer.canvas && viewer.canvas.clientHeight) || 600;
-  return (s.marker.scale.x / dist) * (H / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  return (scale / dist) * (H / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
 }
 
 /** Pick through `view.camera` at the true projected position of `name`'s marker and at four
@@ -268,9 +275,9 @@ export function timePicks(viewer, camera, ndc, n = 60, batch = 50) {
 export function pickingRun(viewer, A, B, mode) {
   const out = {
     mode,
-    // marker radius as drawn right after the moving ticks (the marker is sized from the cameras'
-    // positions of the previous frame: `update` sizes it before `_updateViewport` moves the
-    // cameras, so while the clock runs fast it is far larger than its 3.5 px; reported, not asserted)
+    // marker radius as the view draws it right after the moving ticks, the clock running (before
+    // question 254 item 3b the marker was sized once per tick from the cameras' positions of the
+    // previous frame, far larger than 3.5 px in a close-up viewport; asserted in `judge`)
     markerRadiusPxWhileRunning: { A_Chaser: markerRadiusPx(viewer, A, 'Chaser'), B_Target: markerRadiusPx(viewer, B, 'Target') },
   };
   // the steady state: one more tick at the same clock value (a paused clock, or any slow playback),
@@ -308,6 +315,8 @@ export function judge(key, r, check) {
     check(`${key}: ${view}: ${p.off.total} points ${p.off.widths} model-widths off the true silhouette do not resolve to the Chaser (${p.off.ok}/${p.off.total})`,
       p.off.total >= 4 && p.off.ok === p.off.total, p.off.failed.slice(0, 3));
   }
+  check(`${key}: while the clock runs the markers are drawn at their declared 3.5 px radius in the view that draws them (A's Chaser ${r.markerRadiusPxWhileRunning.A_Chaser.toFixed(4)}, B's Target ${r.markerRadiusPxWhileRunning.B_Target.toFixed(4)})`,
+    [r.markerRadiusPxWhileRunning.A_Chaser, r.markerRadiusPxWhileRunning.B_Target].every((px) => Math.abs(px / 3.5 - 1) < 0.01), r.markerRadiusPxWhileRunning);
   check(`${key}: B: the Target's marker, picked at its true projected position and inside its disc as drawn (${r.B.radiusPx.toExponential(2)} px radius), resolves to the Target (${r.B.ok}/${r.B.total})`,
     r.B.total >= 3 && r.B.ok === r.B.total, r.B.failed.slice(0, 3));
   check(`${key}: EACH of ${r.perPick.picks} single picks (viewport A, B, primary), snapshot taken immediately before and after it, leaves every position, quaternion, scale, world matrix, instance matrix and trail buffer bit for bit as it was and _placedView unchanged (${r.perPick.changedCount} changed)`,

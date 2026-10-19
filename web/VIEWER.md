@@ -281,6 +281,35 @@ exact placement through the float32 pipeline): before, the placement error in a 
 to 9.2 m (Moon) and 17 m (a small body) after `fit()` at lunar distance, 0.26 m at LEO and 1.9 m
 at GEO; after, it is 0 in every viewport.
 
+### Fixed-pixel markers are sized per drawing viewport (question 254 item 3b)
+
+The spacecraft marker spheres (7 px across) and the event octahedra (9 px) are one object each,
+drawn by every view. `update(t)` used to scale them once per tick from the closest camera of all
+views (`_markerReferenceDistance`), measured from the primary-placed position, before
+`_updateViewport` moved the extra viewports' cameras. With the clock running a close-up viewport
+(cameras follow focus) drew the marker sized for where its camera had been a tick earlier (tens to
+thousands of pixels in the 10 m viewport at LEO, GEO and lunar distance, against 3.5 px declared),
+and a viewport farther than the closest camera drew it sub-pixel (0.06 px at 1.3 km).
+
+`Viewer._sizeMarkers(vp)` (`vp` null = the primary) now writes the scale for the view about to
+draw, from that view's own camera (after it moved), canvas height and fov, at the render-time
+placement (`_placeSharedEntities`), and on every call, including the ones the (view, epoch) memo
+skips, so a camera moved or a canvas resized within an epoch is never missed (an unchanged scale
+is not rewritten). An extra viewport uses the f64 distance between the entity's cached `abs` and
+its camera's world position; the primary keeps the expression it always had (the placed marker's
+world position), so a scene without an extra viewport has bit-identical scales (asserted against a
+digest of every scale recorded on the previous code). What changes for the primary when viewports
+exist: it is sized for its own camera, no longer the closest one (a 10 m viewport made its markers
+sub-pixel). No camera can be inside a marker (the M26.3 defect), since each view's marker is a
+fixed fraction of that view's own distance. The instanced entity markers were already per draw
+(`createScreenSpaceMarkerMaterial`); the body dots are per view (`_placeBodies`).
+
+Measured (`web/js/marker_pixel_size_check.mjs`, node; `tests/test_viewer_marker_pixel_size_browser.py`,
+real Chrome, also with the page's own clock playing): the drawn radius of every marker and event
+in the primary and two viewports of different canvas heights, on every tick, is within 0.1% of
+3.5 px / 4.5 px (largest seen 0.005%, the float32 placement against the f64 distance). Sizing one
+view costs about 0.0005-0.0015 ms per tick.
+
 ### Jitter test: real path, not a parallel one
 
 `web/js/scene_jitter_harness.mjs` (new in M3.1) drives the pipeline one level above
