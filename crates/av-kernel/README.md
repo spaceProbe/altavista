@@ -1364,9 +1364,13 @@ resulting hashes differ.
 `tls`, the Bind response's `version`, and either `image` + `image_digest` (Docker path) or the
 declared `container.address` (already-running path). The Docker path's `127.0.0.1:<host port>` is
 Docker's choice on each run and is not hashed, so two separately started containers of the same
-image report the same `dynamics_hash`. A Docker-free replay (`construct_replay_container`) still
-reports a synthetic `ModelInfo`, since the port-traffic log carries neither the Bind `version`
-nor the image, so its container segment's `dynamics_hash` is not reproduced.
+image report the same `dynamics_hash`. A Docker-free replay (`construct_replay_container`)
+reproduces it (question 254 item 8): the executor writes each non-board container's Bind `version`
+into the sidecar's own `PortTrafficLog.provenance` as `container_bind_version.<instance>`, and
+replay rebuilds the instance's `ModelInfo` with `container_model_info` from that version and the
+declared image and digest; a log without the attribute is refused
+(`DrmError::ReplayLogLacksBindVersion`). The attribute moves a container run's whole-file
+`port_traffic_hash`, not its records.
 
 **Labels on the containers the kernel starts (question 245 (5)).** `binding::container_labels` gives
 every container `materialize_container` starts two labels, `av.run_id` (`RunConfig.run_id`) and
