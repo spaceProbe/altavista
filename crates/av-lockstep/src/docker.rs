@@ -39,7 +39,7 @@
 //! under test" rule. A real cross-host container binding is out of this task's scope (as it
 //! already was for the M13.2 `container.address` path).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::process::Command;
 
@@ -406,6 +406,13 @@ pub fn test_label_args(run_id: &str) -> Vec<String> {
 /// separately-investigated vanished images (question 194's own record: that cause was a
 /// bulk host-level image prune, unrelated to this function).
 ///
+/// **Question 254 item 10 (audited, unchanged).** The `-f` removals here are safe because the
+/// label is the ownership proof: only an image carrying `av.test` is ever a target, a label that no
+/// pinned image carries (every `IMAGE_DIGEST.md` image is built from a Dockerfile with no `av.test`
+/// label, and the label is part of the image config, so a labelled image never shares an id with
+/// a pinned one). The names removed are the ones such an image has, by reference. The name-adding
+/// test guards are the other half, and they now go through [`remove_image_name`].
+///
 /// **Question 207: this daemon-wide sweep now requires proof, at compile time, that the caller
 /// already holds [`DockerTestLock`].** The pre-207 shape had no lock parameter at all -- the
 /// only guard was `crates/av-lockstep/tests/docker_lifecycle.rs`'s own process-local
@@ -466,6 +473,213 @@ fn image_removal_targets(images_tsv: &str) -> Vec<String> {
         }
     }
     targets
+}
+
+// ------------------------------------------------------------------------------------------
+// Question 254 item 10 (t10): removing an image NAME a test added -- never the image behind it
+// unless this run made that image.
+//
+// On this host's containerd image store `docker rmi <repo:tag>` is not "untag only": the image
+// itself is deleted unless some OTHER reference survives. A nameless placeholder (an image known
+// only by its id) is bundled into the removal, and so is a digest reference of the SAME
+// repository (`R@sha256:...` beside `R:t`); any other tag, and a digest reference of another
+// repository, survive (measured and recorded in `scripts/kit/docker_image_tags.py`'s doc comment
+// and re-measured for this item in `tests/test_docker_image_tags.py`). The test guards used to
+// run `docker rmi -f <name>` unconditionally, so a name added to a pinned image whose only other
+// reference was one of those two shapes (a pinned image known by id, or only by a digest
+// reference of the same repository) took the pinned image with it. The rule, one function:
+// [`remove_image_name`].
+// ------------------------------------------------------------------------------------------
+
+/// `image id (sha256:...) -> [(repository, tag)]`: one entry per reference `docker image ls`
+/// prints. `(Some(repo), Some(tag))` is a tag, `(Some(repo), None)` a digest reference, `(None,
+/// None)` a nameless placeholder.
+pub type ImageTable = BTreeMap<String, Vec<(Option<String>, Option<String>)>>;
+
+fn parse_image_rows(tsv: &str, table: &mut ImageTable) {
+    for line in tsv.lines() {
+        let mut parts = line.split('\t');
+        let (Some(repo), Some(tag), Some(id)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let id = if id.starts_with("sha256:") { id.to_string() } else { format!("sha256:{id}") };
+        let name_or_none = |s: &str| if s.is_empty() || s == "<none>" { None } else { Some(s.to_string()) };
+        let row = (name_or_none(repo.trim()), name_or_none(tag.trim()));
+        let rows = table.entry(id).or_default();
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+}
+
+/// Every image on the host with every reference it has, nameless ones included. A plain `docker
+/// image ls` hides the nameless placeholders on the containerd store, so they are listed with a
+/// second `--filter dangling=true` call (`scripts/kit/docker_image_tags.py::docker_image_table`
+/// is the Python twin). `-a` is not used: it adds manifests and children of every image.
+pub fn image_table() -> Result<ImageTable, String> {
+    let mut table = ImageTable::new();
+    for extra in [&[][..], &["--filter", "dangling=true"][..]] {
+        let mut args: Vec<&str> = vec!["image", "ls", "--no-trunc"];
+        args.extend(extra.iter().copied());
+        args.extend(["--format", "{{.Repository}}\t{{.Tag}}\t{{.ID}}"]);
+        parse_image_rows(&run_docker(&args)?, &mut table);
+    }
+    Ok(table)
+}
+
+/// The ids of every image on the host right now: take it BEFORE the build or `docker tag` that
+/// creates the name an [`ImageNameGuard`] will remove, so the guard can tell an image this run
+/// made from one that was already there.
+pub fn image_ids_present() -> Result<BTreeSet<String>, String> {
+    Ok(image_table()?.into_keys().collect())
+}
+
+/// `(repository, tag)` of an image name; a digest reference has no tag, and an unqualified name is
+/// `:latest`.
+fn split_image_name(name: &str) -> (String, Option<String>) {
+    if let Some((repo, _digest)) = name.split_once('@') {
+        return (repo.to_string(), None);
+    }
+    match name.rsplit_once(':') {
+        Some((head, tail)) if !tail.contains('/') => (head.to_string(), Some(tail.to_string())),
+        _ => (name.to_string(), Some("latest".to_string())),
+    }
+}
+
+/// `true` for a bare image id (`sha256:<hex>` or 12+ hex characters): never a name this code may
+/// remove, because an id names every reference the image has.
+fn looks_like_image_id(name: &str) -> bool {
+    let hex = name.strip_prefix("sha256:").unwrap_or(name);
+    hex.len() >= 12 && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Would the image survive `docker rmi <name>`, given the references it has OTHER than that one
+/// (`others`)? The containerd rule, measured: a tag in any repository survives, and so does a
+/// digest reference of another repository; a nameless placeholder and a digest reference of
+/// `name`'s own repository are removed together with it.
+fn survives_untag(others: &[(Option<String>, Option<String>)], name: &str) -> bool {
+    let (repo, _) = split_image_name(name);
+    others.iter().any(|(r, t)| match r {
+        None => false,
+        Some(r) => t.is_some() || *r != repo,
+    })
+}
+
+/// The references of `rows` other than `name` itself.
+fn rows_other_than(rows: &[(Option<String>, Option<String>)], name: &str) -> Vec<(Option<String>, Option<String>)> {
+    let (repo, tag) = split_image_name(name);
+    rows.iter().filter(|(r, t)| !(r.as_deref() == Some(repo.as_str()) && *t == tag)).cloned().collect()
+}
+
+/// What [`remove_image_name`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageNameRemoval {
+    /// The name no longer existed.
+    Absent,
+    /// The name was removed (the image went with it only if this run made it).
+    Removed,
+    /// Removing the name would have deleted an image that was on the host before this run; the
+    /// name was left in place.
+    Refused { name: String, image_id: String, remaining: String },
+    /// `docker rmi` itself failed (an image a container still uses, a daemon error).
+    Failed { name: String, detail: String },
+}
+
+impl ImageNameRemoval {
+    pub fn message(&self) -> String {
+        match self {
+            ImageNameRemoval::Absent => "image name already absent".to_string(),
+            ImageNameRemoval::Removed => "image name removed".to_string(),
+            ImageNameRemoval::Refused { name, image_id, remaining } => format!(
+                "REFUSED to remove the image name {name:?}: it names image {image_id}, which was on this host before this run, and no other reference of it would outlive the removal \
+                 (references other than this name: {remaining}), so `docker rmi` would delete the image (containerd store). The name is left in place; remove it by hand if wanted (question 254 item 10)."
+            ),
+            ImageNameRemoval::Failed { name, detail } => format!("could not remove the image name {name:?}: {detail}"),
+        }
+    }
+}
+
+/// Removes the image NAME `name` (never an id) that this code added, and never deletes an image
+/// it did not make. `created_here`: the image behind `name` did not exist before this code built
+/// or tagged it (see [`image_ids_present`]). When it did exist, the name is removed only while
+/// another reference keeps the image alive ([`survives_untag`]); otherwise the removal is
+/// [`ImageNameRemoval::Refused`] and nothing is run. `force` adds `-f` to `docker rmi`, which for
+/// a NAME untags only (measured) and lets the removal of an image this code made go through
+/// although a stopped container still names it.
+pub fn remove_image_name(name: &str, created_here: bool, force: bool) -> ImageNameRemoval {
+    if looks_like_image_id(name) {
+        return ImageNameRemoval::Refused { name: name.to_string(), image_id: name.to_string(), remaining: "a bare image id names every reference of the image; this function removes names only".to_string() };
+    }
+    let Ok(raw_id) = run_docker(&["image", "inspect", name, "--format", "{{.Id}}"]) else { return ImageNameRemoval::Absent };
+    let image_id = if raw_id.starts_with("sha256:") { raw_id } else { format!("sha256:{raw_id}") };
+    if !created_here {
+        let table = match image_table() {
+            Ok(t) => t,
+            Err(detail) => return ImageNameRemoval::Failed { name: name.to_string(), detail: format!("could not read the image table: {detail}") },
+        };
+        let others = rows_other_than(table.get(&image_id).map(Vec::as_slice).unwrap_or(&[]), name);
+        if !survives_untag(&others, name) {
+            return ImageNameRemoval::Refused { name: name.to_string(), image_id, remaining: format!("{others:?}") };
+        }
+    }
+    let mut args = vec!["rmi"];
+    if force {
+        args.push("-f");
+    }
+    args.push(name);
+    match run_docker(&args) {
+        Ok(_) => ImageNameRemoval::Removed,
+        Err(detail) => ImageNameRemoval::Failed { name: name.to_string(), detail },
+    }
+}
+
+/// Removes one image name on drop through [`remove_image_name`]. Build it AFTER the build or
+/// `docker tag` that creates the name, passing the [`image_ids_present`] snapshot taken BEFORE
+/// it: the image counts as made here only when its id is not in that snapshot. A name added to an
+/// image that was already there (the pinned `altavista-cfs-lockstep:local` pushed under a
+/// throwaway registry name) is removed only while the image keeps another reference; if not, the
+/// drop writes the refusal to the real stderr and panics (unless already unwinding), so the test
+/// fails naming the image instead of deleting it. A failed `docker rmi` is reported to stderr
+/// only, as it always was (best effort).
+pub struct ImageNameGuard {
+    name: String,
+    created_here: bool,
+}
+
+impl ImageNameGuard {
+    pub fn new(name: impl Into<String>, ids_before: &BTreeSet<String>) -> Self {
+        let name = name.into();
+        // A name that cannot be inspected is treated as not made here: the conservative reading.
+        let created_here = match run_docker(&["image", "inspect", &name, "--format", "{{.Id}}"]) {
+            Ok(id) => !ids_before.contains(&if id.starts_with("sha256:") { id } else { format!("sha256:{id}") }),
+            Err(_) => false,
+        };
+        Self { name, created_here }
+    }
+
+    /// Whether the guard will treat the image as made by this run (for tests of the guard).
+    pub fn created_here(&self) -> bool {
+        self.created_here
+    }
+}
+
+impl Drop for ImageNameGuard {
+    fn drop(&mut self) {
+        let outcome = remove_image_name(&self.name, self.created_here, true);
+        match &outcome {
+            ImageNameRemoval::Absent | ImageNameRemoval::Removed => {}
+            ImageNameRemoval::Failed { .. } => write_real_stderr(&format!("{}\n", outcome.message())),
+            ImageNameRemoval::Refused { .. } => {
+                let message = outcome.message();
+                write_real_stderr(&format!("{message}\n"));
+                if !std::thread::panicking() {
+                    panic!("{message}");
+                }
+            }
+        }
+    }
 }
 
 /// Builds the `docker run` argv for [`ManagedContainer::pull_and_run`] -- a pure function
@@ -706,6 +920,65 @@ mod tests {
     fn image_removal_targets_ignores_blank_lines() {
         assert_eq!(image_removal_targets(""), Vec::<String>::new());
         assert_eq!(image_removal_targets("\n\n"), Vec::<String>::new());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Question 254 item 10: the pure half of remove_image_name / ImageNameGuard. The real-docker
+    // half is `tests/docker_image_names.rs`. Docker-free, unconditional.
+    // ---------------------------------------------------------------------------------------
+
+    fn row(repo: Option<&str>, tag: Option<&str>) -> (Option<String>, Option<String>) {
+        (repo.map(str::to_string), tag.map(str::to_string))
+    }
+
+    /// The containerd rules `survives_untag` encodes (measured; see the module comment above and
+    /// `tests/test_docker_image_tags.py::test_survives_untag_encodes_the_measured_containerd_rules`,
+    /// the Python twin). **What a wrong implementation fails this against:** counting a nameless
+    /// placeholder or a same-repository digest reference as a survivor (the pre-fix guards
+    /// effectively did, by removing without asking) makes the first two assertions fail.
+    #[test]
+    fn survives_untag_encodes_the_measured_containerd_rules() {
+        assert!(!survives_untag(&[row(None, None)], "a/b:t"), "a nameless placeholder goes with the name");
+        assert!(!survives_untag(&[row(Some("a/b"), None)], "a/b:t"), "a digest reference of the SAME repository goes with the tag");
+        assert!(survives_untag(&[row(Some("c/d"), None)], "a/b:t"), "a digest reference of another repository survives");
+        assert!(survives_untag(&[row(Some("a/b"), Some("other"))], "a/b:t"), "another tag survives, even in the same repository");
+        assert!(survives_untag(&[row(None, None), row(Some("x/y"), Some("1"))], "a/b:t"));
+        assert!(!survives_untag(&[], "a/b:t"), "the last name");
+        // A registry-qualified repository keeps its port: `127.0.0.1:19031/x` is not `x`.
+        assert!(survives_untag(&[row(Some("altavista-cfs-lockstep"), Some("local"))], "127.0.0.1:19031/altavista-cfs-lockstep:test"));
+        assert!(!survives_untag(&[row(Some("127.0.0.1:19031/altavista-cfs-lockstep"), None)], "127.0.0.1:19031/altavista-cfs-lockstep:test"));
+    }
+
+    #[test]
+    fn image_names_split_into_repository_and_tag() {
+        assert_eq!(split_image_name("a/b:t"), ("a/b".to_string(), Some("t".to_string())));
+        assert_eq!(split_image_name("127.0.0.1:19031/a/b:test"), ("127.0.0.1:19031/a/b".to_string(), Some("test".to_string())));
+        assert_eq!(split_image_name("127.0.0.1:19031/a/b"), ("127.0.0.1:19031/a/b".to_string(), Some("latest".to_string())));
+        assert_eq!(split_image_name("a/b@sha256:ab"), ("a/b".to_string(), None));
+        assert!(looks_like_image_id("sha256:0123456789abcdef"));
+        assert!(looks_like_image_id("0123456789ab"));
+        assert!(!looks_like_image_id("lockstep-ref:av-test"));
+        assert!(!looks_like_image_id("abc:def"));
+    }
+
+    /// The table parser keeps nameless and digest-only rows (a plain tag snapshot drops them,
+    /// which is how the hazard went unnoticed) and normalises ids to `sha256:...`.
+    #[test]
+    fn the_image_table_keeps_nameless_and_digest_only_references() {
+        let mut table = ImageTable::new();
+        parse_image_rows("a/b\tt\taaaaaaaaaaaa\nr\t<none>\tbbbbbbbbbbbb\n", &mut table);
+        parse_image_rows("<none>\t<none>\tsha256:cccccccccccc\n<none>\t<none>\taaaaaaaaaaaa\na/b\tt\taaaaaaaaaaaa\n", &mut table);
+        assert_eq!(table["sha256:aaaaaaaaaaaa"], vec![row(Some("a/b"), Some("t")), row(None, None)]);
+        assert_eq!(table["sha256:bbbbbbbbbbbb"], vec![row(Some("r"), None)]);
+        assert_eq!(table["sha256:cccccccccccc"], vec![row(None, None)]);
+        assert_eq!(rows_other_than(&table["sha256:aaaaaaaaaaaa"], "a/b:t"), vec![row(None, None)]);
+    }
+
+    #[test]
+    fn a_bare_image_id_is_never_a_removable_name() {
+        let r = remove_image_name("sha256:0123456789abcdef0123", false, true);
+        assert!(matches!(r, ImageNameRemoval::Refused { .. }), "{r:?}");
+        assert!(r.message().contains("REFUSED") && r.message().contains("sha256:0123456789abcdef0123"), "{}", r.message());
     }
 
     // ---------------------------------------------------------------------------------------

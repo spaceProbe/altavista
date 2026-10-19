@@ -83,6 +83,16 @@ closing assertion passed). Guarantees now:
    id (a valid image reference for `docker run`), which is never removed.
 4. `assert_host_tags_unchanged` also fails when any image id present when the guard was built is
    missing at the end.
+
+# Removing a name a test added (question 254 item 10)
+
+The same rule for the callers that build or tag an image themselves and remove their own name
+afterwards (`tests/test_lockstep_ref.py`, `services/cfs/tests/test_image_reproducibility.py`,
+`remove_test_only_tags`): `image_ids_present()` before the build or tag, `remove_owned_name(name,
+ids_before=...)` after. A name on an image that was already there is removed only while another
+reference keeps the image alive; otherwise the call raises, naming the image and the name, and
+removes nothing. An image the caller made goes with its last name. Never a bare id. The Rust twin
+is `av_lockstep::docker::{image_ids_present, remove_image_name, ImageNameGuard}`.
 """
 from __future__ import annotations
 
@@ -180,6 +190,57 @@ def _survives_untag(rows: list, added_names) -> bool:
         if tag is not None or repo not in added_repositories:
             return True
     return False
+
+
+def _name_row(name: str) -> tuple:
+    """`(repository, tag)` of an image name as `docker image ls` prints it: a digest reference has
+    no tag, an unqualified name is `:latest`."""
+    if "@" in name:
+        return (name.split("@", 1)[0], None)
+    head, _, tail = name.rpartition(":")
+    return (name, "latest") if (not head or "/" in tail) else (head, tail)
+
+
+def _looks_like_image_id(name: str) -> bool:
+    hexpart = name[len("sha256:"):] if name.startswith("sha256:") else name
+    return len(hexpart) >= 12 and all(c in "0123456789abcdefABCDEF" for c in hexpart)
+
+
+def image_ids_present() -> set:
+    """The ids of every image on the host right now (nameless ones included). Take it BEFORE the
+    build or `docker tag` that creates a name `remove_owned_name` will later remove."""
+    return set(docker_image_table())
+
+
+def remove_owned_name(name: str, *, ids_before, force: bool = False, timeout: float = 60.0) -> str:
+    """Question 254 item 10: removes the one image NAME `name` that this code built or tagged, and
+    never deletes an image it did not make. `ids_before` is `image_ids_present()` as taken before
+    the build or tag: an image whose id is in it was already on the host, and its name is removed
+    only while another reference keeps the image alive (`_survives_untag`, on the references other
+    than `name` read now); otherwise this raises `ImageHygieneError` naming the image and the name,
+    runs nothing, and leaves the name in place. An image this code made (id not in `ids_before`)
+    goes with its last name, as before. Never a bare id (refused). `force` adds `-f`, which for a
+    NAME untags only (measured). Returns `"absent"`, `"removed"` or `"failed: <docker's words>"`
+    (a failed `docker rmi` was always best-effort in the callers)."""
+    if _looks_like_image_id(name):
+        raise ImageHygieneError(f"{name}: REFUSED -- a bare image id names every reference of the image; remove_owned_name removes names only")
+    inspect = subprocess.run(["docker", "image", "inspect", name, "--format", "{{.Id}}"], capture_output=True, text=True, timeout=30)
+    if inspect.returncode != 0:
+        return "absent"
+    image_id = inspect.stdout.strip()
+    if not image_id.startswith("sha256:"):
+        image_id = f"sha256:{image_id}"
+    if image_id in ids_before:
+        own = _name_row(name)
+        others = [row for row in docker_image_table().get(image_id, []) if row != own]
+        if not _survives_untag(others, {name}):
+            raise ImageHygieneError(
+                f"{name}: REFUSED to remove this image name -- it names image {image_id}, which was on this host before this run, "
+                f"and no other reference of it would outlive the removal (references other than this name: {others!r}), so "
+                f"`docker rmi` would delete the image (containerd store). The name is left in place; remove it by hand if wanted."
+            )
+    done = subprocess.run(["docker", "rmi", *(["-f"] if force else []), name], capture_output=True, text=True, timeout=timeout)
+    return "removed" if done.returncode == 0 else f"failed: {done.stderr.strip()}"
 
 
 def _tarball_identity(tarball: Path) -> tuple:
@@ -473,10 +534,20 @@ class ImageTagGuard:
         return problems
 
     def remove_test_only_tags(self) -> None:
-        """Removes every test-only tag this guard created, by name (untag only). For a caller that
-        does not register `on_test_tag` and clean up itself."""
+        """Removes every test-only tag this guard created, by name. For a caller that does not
+        register `on_test_tag` and clean up itself. Question 254 item 10: through
+        `remove_owned_name`, with the images present when this guard was built as `ids_before`, so
+        a tag on an image that was already there is removed only while that image keeps another
+        reference (the guard's own rule for creating one makes that the normal case); a refusal is
+        raised after every other tag has been tried."""
+        refused = []
         for tag in self.test_only_tags:
-            subprocess.run(["docker", "rmi", tag], capture_output=True, timeout=30)
+            try:
+                remove_owned_name(tag, ids_before=set(self.initial_images), timeout=30)
+            except ImageHygieneError as e:
+                refused.append(str(e))
+        if refused:
+            raise ImageHygieneError("test-only tag(s) not removed --\n" + "\n".join(refused))
 
     def assert_host_tags_unchanged(self) -> None:
         """The closing proof, checked directly against the host's real state, never assumed from

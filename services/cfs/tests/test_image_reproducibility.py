@@ -37,7 +37,8 @@ re-executing anything, proving nothing about reproducibility -- `--no-cache` for
 stage, and therefore cFE's `generate_build_env.cmake`, to genuinely re-execute on both builds.
 Both builds use disposable, timestamped tags (never `altavista-cfs-lockstep:local`), so this
 test can never clobber the officially recorded image or `services/cfs/IMAGE_CONTEXT_MANIFEST.
-txt`; both disposable images are removed (`docker rmi -f`) in a `finally` block regardless of
+txt`; both disposable tags are removed (`docker rmi -f <tag>`, through `remove_owned_name`, which
+never deletes an image that was on the host before the builds) in a `finally` block regardless of
 outcome. Each build uses the network (apt-get, `third_party/fetch-cfs.sh`'s pinned clone), the
 same as `services/cfs/build-image.sh` -- acceptable here only because this test is opt-in and
 never runs by default, so it is not an additional standing network window in the test suite;
@@ -87,6 +88,7 @@ import hashlib
 import importlib.util
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -95,6 +97,11 @@ import pytest
 from altavista.docker_test_lock import lock_docker_tests
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+# Question 254 item 10: the image-name removal rule shared with the kit tests (appended, not
+# inserted first, so no module under scripts/kit shadows an installed one).
+if str(REPO_ROOT / "scripts" / "kit") not in sys.path:
+    sys.path.append(str(REPO_ROOT / "scripts" / "kit"))
+from docker_image_tags import ImageHygieneError, image_ids_present, remove_owned_name  # noqa: E402
 DOCKERFILE = REPO_ROOT / "services" / "cfs" / "Dockerfile"
 OPT_IN_VAR = "AV_CFS_RUN_REPRO_BUILD"
 BUILD_SCRIPT = "services/cfs/build-image.sh"
@@ -159,8 +166,14 @@ def _image_id(tag: str) -> str:
     return result.stdout.strip()
 
 
-def _docker_rmi(tag: str) -> None:
-    subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, text=True, timeout=60)
+def _docker_rmi(tag: str, ids_before: set) -> None:
+    """Question 254 item 10: removes the disposable NAME this test added, and never an image that was
+    on the host before the builds. A reproducible build can produce exactly the image id of the
+    pinned `altavista-cfs-lockstep:local`, in which case the disposable tag is a second name for the
+    pinned image; the old `docker rmi -f <tag>` deleted it whenever `:local` was not still there to
+    keep it alive. `remove_owned_name` removes the tag only while the image keeps another reference
+    and otherwise raises, naming the image."""
+    remove_owned_name(tag, ids_before=ids_before, force=True)
 
 
 # --- Runtime-content hash (question 185): see this module's own docstring amendment and
@@ -264,6 +277,7 @@ def _run_two_independent_builds_produce_the_same_image_id() -> None:
     run_id = str(int(time.time()))
     tag_1 = f"altavista-cfs-repro-test-1-{run_id}:local"
     tag_2 = f"altavista-cfs-repro-test-2-{run_id}:local"
+    ids_before = image_ids_present()  # question 254 item 10: before either build adds a name
     try:
         _docker_build_no_cache(tag_1)
         digest_1 = _image_id(tag_1)
@@ -322,5 +336,11 @@ def _run_two_independent_builds_produce_the_same_image_id() -> None:
         else:
             print(f"whole-image digest MATCHED: sha256:{digest_1}")
     finally:
-        _docker_rmi(tag_1)
-        _docker_rmi(tag_2)
+        refused = []
+        for tag in (tag_1, tag_2):
+            try:
+                _docker_rmi(tag, ids_before)
+            except ImageHygieneError as e:
+                refused.append(str(e))
+        if refused:
+            raise ImageHygieneError("\n".join(refused))

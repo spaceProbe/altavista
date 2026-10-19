@@ -368,3 +368,70 @@ def test_the_closing_assertion_refuses_an_image_that_disappeared(scratch):
     _run("rmi", ref)
     with pytest.raises(ImageHygieneError, match="no longer exists"):
         guard.assert_host_tags_unchanged()
+
+
+# -------------------------------------------------------------------------------------------------
+# Question 254 item 10: `remove_owned_name`, the rule the test guards use to remove a name they added
+# -------------------------------------------------------------------------------------------------
+
+def test_remove_owned_name_helpers_without_docker():
+    assert docker_image_tags._name_row("a/b:t") == ("a/b", "t")
+    assert docker_image_tags._name_row("127.0.0.1:19031/a/b:test") == ("127.0.0.1:19031/a/b", "test")
+    assert docker_image_tags._name_row("127.0.0.1:19031/a/b") == ("127.0.0.1:19031/a/b", "latest")
+    assert docker_image_tags._name_row("a/b@sha256:ab") == ("a/b", None)
+    assert docker_image_tags._looks_like_image_id("sha256:0123456789abcdef")
+    assert docker_image_tags._looks_like_image_id("0123456789ab")
+    assert not docker_image_tags._looks_like_image_id("lockstep-ref:pytest-docker-lifecycle")
+    with pytest.raises(ImageHygieneError, match="bare image id"):
+        docker_image_tags.remove_owned_name("sha256:0123456789abcdef0123", ids_before=set())
+
+
+@requires_docker
+def test_remove_owned_name_untags_a_name_on_an_image_that_keeps_another_tag(scratch):
+    pin, pin_id = scratch.make("pin")
+    ids_before = docker_image_tags.image_ids_present()
+    alias = f"{scratch.repo}/alias:test"
+    _run("tag", pin_id, alias)
+    assert docker_image_tags.remove_owned_name(alias, ids_before=ids_before, force=True) == "removed"
+    assert scratch.exists(pin) and not scratch.exists(alias)
+    assert docker_image_tags.remove_owned_name(alias, ids_before=ids_before) == "absent"
+
+
+@requires_docker
+@pytest.mark.parametrize("force", [False, True])
+def test_remove_owned_name_refuses_the_last_name_of_an_image_known_only_by_its_id(scratch, force):
+    """The pinned-by-id stand-in: its only other reference is a nameless placeholder, which goes
+    with the name (measured), so removing the name would delete the image. Refused, loudly, with
+    and without `-f`; the image and the name stay."""
+    t, a_id, _tarball = scratch.make_dangling("idonly-rm")
+    ids_before = docker_image_tags.image_ids_present()
+    assert a_id in ids_before
+    alias = f"{scratch.repo}/alias-of-idonly:test"
+    _run("tag", a_id, alias)
+    with pytest.raises(ImageHygieneError, match="REFUSED") as refused:
+        docker_image_tags.remove_owned_name(alias, ids_before=ids_before, force=force)
+    assert alias in str(refused.value) and a_id in str(refused.value)
+    assert scratch.exists(a_id) and scratch.exists(alias)
+
+
+@requires_docker
+@requires_registry
+def test_remove_owned_name_refuses_a_tag_in_the_same_repository_as_the_only_digest_reference(scratch):
+    """The other measured shape (`cfs_common`'s: a tag pushed under a registry name beside the same
+    repository's digest reference): the digest reference goes with the tag."""
+    t, image_id, _tarball = scratch.make_digest_only("digonly-rm")
+    ids_before = docker_image_tags.image_ids_present()
+    alias = f"{t.rsplit(':', 1)[0]}:test"
+    _run("tag", image_id, alias)
+    with pytest.raises(ImageHygieneError, match="REFUSED"):
+        docker_image_tags.remove_owned_name(alias, ids_before=ids_before, force=True)
+    assert scratch.exists(image_id) and scratch.exists(alias)
+
+
+@requires_docker
+def test_remove_owned_name_removes_the_last_name_of_an_image_this_run_made(scratch):
+    ids_before = docker_image_tags.image_ids_present()
+    ref, image_id = scratch.make("made-here")
+    assert image_id not in ids_before
+    assert docker_image_tags.remove_owned_name(ref, ids_before=ids_before, force=True) == "removed"
+    assert not scratch.exists(image_id)

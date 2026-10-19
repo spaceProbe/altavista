@@ -223,12 +223,24 @@ SPOORE_ROOT="$(cd "${SPOORE_ROOT}" 2>/dev/null && pwd)" || die "SPOORE_ROOT (${S
 start_events_capture
 
 # --- 1. Prune by label before creating (question 156). ------------------------------------
-log "pruning any dangling image labelled ${LABEL_FILTER} before building"
-STALE_IDS="$(docker images --filter "${LABEL_FILTER}" -q | sort -u || true)"
+# Question 254 item 10: nameless images only, and only those no name still points at. On this
+# host's containerd store `docker images --filter dangling=true` also lists an image that HAS a
+# name but carries a nameless placeholder (a `docker load` of its own tarball adds one), and
+# `docker rmi <id>` of that image deletes it WITH its name (measured). So an id that also appears
+# in the plain listing (every image with at least one name, digest-only references included) is
+# never removed, and `-f` is never used (it strips every name on an id). The previous image of
+# this component loses its name when the build below re-points the tag, and is swept on the next run.
+log "pruning nameless image(s) labelled ${LABEL_FILTER} that no name points at, before building"
+STALE_IDS="$(docker images --filter "${LABEL_FILTER}" --filter dangling=true -q | sort -u || true)"
+NAMED_IDS="$(docker images -q | sort -u || true)"
 if [ -n "${STALE_IDS}" ]; then
     while IFS= read -r id; do
         [ -n "${id}" ] || continue
-        docker rmi -f "${id}" >/dev/null 2>&1 || warn "could not remove stale image ${id} (label ${LABEL_FILTER}) -- it may still be referenced by a running container; continuing."
+        if grep -qxF "${id}" <<< "${NAMED_IDS}"; then
+            log "keeping image ${id} (label ${LABEL_FILTER}): it carries a nameless placeholder but also has a name, and \`docker rmi\` would delete it (question 254 item 10)"
+            continue
+        fi
+        docker rmi "${id}" >/dev/null 2>&1 || warn "could not remove stale image ${id} (label ${LABEL_FILTER}) -- it may still be referenced by a running container; continuing."
     done <<< "${STALE_IDS}"
 else
     log "no stale ${LABEL_FILTER} images found"

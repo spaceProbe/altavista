@@ -149,11 +149,21 @@ SPOORE_ROOT="$(cd "${SPOORE_ROOT}" 2>/dev/null && pwd)" || die "SPOORE_ROOT (${S
 start_events_capture
 
 # --- 1. Prune only dangling (untagged) images of this component. --------------------------
-log "pruning dangling images labelled ${LABEL_FILTER} (a tagged image is never removed)"
+# Question 254 item 10: "a tagged image is never removed" was not true on this host's containerd
+# store: `--filter dangling=true` also lists an image that HAS a name but carries a nameless
+# placeholder (a `docker load` of its own tarball adds one), and `docker rmi <id>` of that image
+# deletes it WITH its name (measured). An id that also appears in the plain listing (every image
+# with at least one name, digest-only references included) is now skipped.
+log "pruning dangling images labelled ${LABEL_FILTER} (an image that has a name is never removed)"
 STALE_IDS="$(docker images --filter "${LABEL_FILTER}" --filter dangling=true -q | sort -u || true)"
+NAMED_IDS="$(docker images -q | sort -u || true)"
 if [ -n "${STALE_IDS}" ]; then
     while IFS= read -r id; do
         [ -n "${id}" ] || continue
+        if grep -qxF "${id}" <<< "${NAMED_IDS}"; then
+            log "keeping image ${id} (label ${LABEL_FILTER}): it carries a nameless placeholder but also has a name, and \`docker rmi\` would delete it (question 254 item 10)"
+            continue
+        fi
         docker rmi "${id}" >/dev/null 2>&1 || warn "could not remove dangling image ${id} (label ${LABEL_FILTER}) -- it may still be referenced; continuing."
     done <<< "${STALE_IDS}"
 else

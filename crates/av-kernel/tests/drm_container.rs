@@ -791,12 +791,9 @@ impl Drop for DockerContainerGuard {
         let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
     }
 }
-struct DockerImageGuard(String);
-impl Drop for DockerImageGuard {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("docker").args(["rmi", "-f", &self.0]).output();
-    }
-}
+// Question 254 item 10: removes one image NAME and never an image this run did not make (a name
+// whose image has no other reference is refused, loudly), instead of `docker rmi -f <name>`.
+type DockerImageGuard = av_lockstep::docker::ImageNameGuard;
 
 /// A `BINDING_KIND_CONTAINER` `SystemDefinition` for the Docker image-lifecycle path: no
 /// `container.address` at all (mutually exclusive with `ContainerBinding.image` --
@@ -870,11 +867,12 @@ fn docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
     let local_tag = "lockstep-ref:av-kernel-docker-lifecycle-test";
+    let ids_before = av_lockstep::docker::image_ids_present().expect("the host's image ids before the build");
     let mut build_args = vec!["build", "-f", "services/lockstep-ref/Dockerfile", "-t", local_tag];
     build_args.extend(label_refs.iter().copied());
     build_args.push(".");
     docker_cmd(&build_args);
-    let _local_image_guard = DockerImageGuard(local_tag.to_string());
+    let _local_image_guard = DockerImageGuard::new(local_tag, &ids_before);
 
     let mut registry_args = vec!["run", "-d", "-p", "127.0.0.1::5000"];
     registry_args.extend(label_refs.iter().copied());
@@ -885,7 +883,7 @@ fn docker_image_lifecycle_through_execute_pulls_by_digest_runs_binds_and_removes
     let registry_port: u16 = registry_port_line.lines().next().and_then(|l| l.rsplit(':').next()).and_then(|p| p.parse().ok()).expect("a numeric host port from `docker port`");
     let pushed_ref = format!("127.0.0.1:{registry_port}/lockstep-ref:test");
     docker_cmd(&["tag", local_tag, &pushed_ref]);
-    let _pushed_image_guard = DockerImageGuard(pushed_ref.clone());
+    let _pushed_image_guard = DockerImageGuard::new(pushed_ref.clone(), &ids_before);
     docker_cmd(&["push", &pushed_ref]);
     let repo_digests = docker_cmd(&["inspect", "--format={{index .RepoDigests 0}}", &pushed_ref]);
     let real_digest = repo_digests.rsplit('@').next().filter(|d| d.starts_with("sha256:")).expect("a @sha256:... RepoDigests entry").to_string();

@@ -37,6 +37,13 @@ if str(SERVICE_DIR) not in sys.path:
 from altavista.pb.altavista.v1 import lockstep_pb2, lockstep_pb2_grpc, system_pb2  # noqa: E402
 from altavista.docker_test_lock import lock_docker_tests  # noqa: E402
 
+# Question 254 item 10: the image-name removal rule shared with the kit tests (appended, not
+# inserted first, so no module under scripts/kit shadows an installed one).
+_KIT_DIR = REPO_ROOT / "scripts" / "kit"
+if str(_KIT_DIR) not in sys.path:
+    sys.path.append(str(_KIT_DIR))
+from docker_image_tags import ImageHygieneError, image_ids_present, remove_owned_name  # noqa: E402
+
 READY_TIMEOUT_S = 30.0
 
 
@@ -338,6 +345,7 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
     registry_id = None
     pushed_ref = None
     container_id = None
+    ids_before = image_ids_present()  # question 254 item 10: what was on the host before this test built or tagged anything
     try:
         # 1. Build the image exactly as a human operator would (this package's own Dockerfile
         #    doc comment: "Build from the REPOSITORY ROOT").
@@ -399,6 +407,16 @@ def _run_docker_image_lifecycle_pull_by_digest_run_bind_and_remove():
             # `-v`: registry:2 declares VOLUME /var/lib/registry; without it each run left an
             # anonymous volume behind.
             subprocess.run(["docker", "rm", "-f", "-v", registry_id], capture_output=True)
-        if pushed_ref is not None:
-            subprocess.run(["docker", "rmi", "-f", pushed_ref], capture_output=True)
-        subprocess.run(["docker", "rmi", "-f", local_tag], capture_output=True)
+        # Question 254 item 10: remove the two NAMES this test added, never an image it did not
+        # make (`remove_owned_name` refuses, naming the image, rather than `docker rmi -f <name>`
+        # deleting a pre-existing image whose only other reference was a nameless placeholder).
+        refused = []
+        for name in (pushed_ref, local_tag):
+            if name is None:
+                continue
+            try:
+                remove_owned_name(name, ids_before=ids_before, force=True)
+            except ImageHygieneError as e:
+                refused.append(str(e))
+        if refused:
+            raise ImageHygieneError("\n".join(refused))

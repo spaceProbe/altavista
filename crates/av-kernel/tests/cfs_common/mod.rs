@@ -127,12 +127,13 @@ impl Drop for DockerContainerGuard {
         let _ = Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
     }
 }
-pub struct DockerImageGuard(pub String);
-impl Drop for DockerImageGuard {
-    fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rmi", "-f", &self.0]).output();
-    }
-}
+/// Question 254 item 10: removes the one image NAME this run added, and never the image behind it
+/// unless this run made that image. The name here is always a second name for the already-built
+/// (pinned) cFS image, so the guard removes it only while the image keeps another reference and
+/// otherwise refuses, loudly (`av_lockstep::docker::ImageNameGuard`). It used to run `docker rmi
+/// -f <name>`, which deleted the pinned image when its only other reference was a nameless
+/// placeholder (`AV_CFS_TEST_IMAGE=<image id>`).
+pub type DockerImageGuard = av_lockstep::docker::ImageNameGuard;
 
 /// Tags and pushes the already-built `altavista-cfs-lockstep:local` (or the [`cfs_image`]
 /// override) to a throwaway local registry (loopback-only -- `docker run -p
@@ -192,8 +193,12 @@ pub fn push_cfs_image_to_local_registry(run_id: &str) -> (String, String, (Docke
     // new one) -- see this function's own doc comment above for the proof that this tag and
     // CFS_LOCAL_IMAGE resolve to the same id, and why that makes labeling it dangerous rather
     // than merely impossible.
+    // Question 254 item 10: the host's image ids BEFORE the tag, so the guard knows the image
+    // behind `tagged` was already there (it is the pinned build artifact) and removes the name only
+    // while the image keeps another reference.
+    let ids_before = av_lockstep::docker::image_ids_present().unwrap_or_else(|e| panic!("could not list the host's images before tagging: {e}"));
     docker_cmd(&["tag", &cfs_image(), &tagged]);
-    let image_guard = DockerImageGuard(tagged.clone());
+    let image_guard = DockerImageGuard::new(tagged.clone(), &ids_before);
     // The registry container has only just been started: retry the push briefly until the
     // registry process inside it accepts connections.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

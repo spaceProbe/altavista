@@ -75,14 +75,10 @@ impl Drop for ContainerGuard {
     }
 }
 
-/// Removes an image reference on drop -- best-effort (an image still referenced by a container
-/// this same test already tore down; ignored either way).
-struct ImageGuard(String);
-impl Drop for ImageGuard {
-    fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rmi", "-f", &self.0]).output();
-    }
-}
+/// Removes an image NAME on drop and never an image this run did not make (question 254 item 10:
+/// a name whose image has no other reference is refused, loudly, instead of the old unconditional
+/// `docker rmi -f <name>`); a failed removal is reported and ignored, as before.
+type ImageGuard = av_lockstep::docker::ImageNameGuard;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -195,8 +191,9 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
     let mut build_args = vec!["build", "-f", "services/lockstep-ref/Dockerfile", "-t", local_tag];
     build_args.extend(label_refs.iter().copied());
     build_args.push(".");
+    let ids_before = av_lockstep::docker::image_ids_present().expect("the host's image ids before the build");
     docker(&build_args);
-    let _local_image_guard = ImageGuard(local_tag.to_string());
+    let _local_image_guard = ImageGuard::new(local_tag, &ids_before);
 
     // 2. A throwaway, loopback-only local registry -- question 118's own "no real/external
     //    registry" rule; this container (and everything pushed to it) is removed at the end of
@@ -219,7 +216,7 @@ fn docker_image_lifecycle_pull_by_digest_run_bind_reset_shutdown_stop_remove() {
     //    below resolves this exact `<repo>@<digest>` reference against the registry this test
     //    just stood up, proving the pull is genuine.
     docker(&["tag", local_tag, &pushed_ref]);
-    let _pushed_image_guard = ImageGuard(pushed_ref.clone());
+    let _pushed_image_guard = ImageGuard::new(pushed_ref.clone(), &ids_before);
     // The registry was only just started. Retry the push briefly, as the cFS tests' registry
     // helper does (crates/av-kernel/tests/cfs_common), and print every failed attempt: the
     // 2026-10-17 merge gate saw one push reset mid-transfer ("connection reset by peer" on a
