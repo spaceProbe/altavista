@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–258); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–259); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -25,7 +25,7 @@ recipe is in `README.md`.
 - **Reproducibility across platforms (questions 248, 258):** run bytes reproduce on the same build target and libm, not across macOS and Linux; the user chose a portable maths implementation for native runs, measured first (question 258, native round after question 257). GMAT-backed runs stay per-platform.
 - **MinIO (questions 255, 256):** its pinned image can no longer be fetched; the heavy team is trialling SeaweedFS and Versity Gateway (Apache-2.0) to replace it.
 - **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is being pinned as a second variant (question 257).
-- **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user applies `docs/spoore-upstream.md`'s sixth proposal. MSRV 1.89, measured.
+- **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user merges the lead's spoore branch (question 259). MSRV 1.89, measured.
 - **Heavy (question 255):** globe tile selection plans for the primary only; `enableGlobe` builds WGS84 for any body; `layers_stream_check.mjs` exits 0 by construction (it needs a live gateway); two writers racing on case variants of one id on a case-sensitive filesystem can both publish; two typed store-write windows remain (an unreadable ClickHouse outcome, a rename failing after ClickHouse committed), each printing its repair.
 - **Native (question 255):** a mis-named but well-shaped emit port is not caught; `integral` over radians is `UnitCompositionUndefined`; classic-builder image ids drift across cache chains (content hashes hold).
 - **Mechanitis (question 240):** scoped read-only; AltaVista changes nothing until Mechanitis settles encoding and shared types (its ADR-003).
