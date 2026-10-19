@@ -87,7 +87,7 @@ IMAGE_DIR = REPO_ROOT / "services" / "cfs"
 # heavy_stack.py's own logic. Importing heavy_stack.py only evaluates its OWN module-level
 # skip-reason computations (a handful of `docker info`/`docker image inspect`/`git` subprocess
 # calls) -- every fixture that actually builds a Rust binary or starts a container
-# (rust_bins/minio/tile_set/av_tiles_service/...) is a pytest fixture, instantiated lazily only
+# (rust_bins/s3_store/tile_set/av_tiles_service/...) is a pytest fixture, instantiated lazily only
 # when a test that requests it runs, never at import time -- so this import carries none of that
 # weight in here.
 sys.path.insert(0, str(REPO_ROOT / "tests"))

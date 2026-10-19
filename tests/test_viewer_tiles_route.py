@@ -1,13 +1,13 @@
 """H5b-1 (`docs/heavy-plan.md` H5, round 3, "the served through the viewer server with the
 gateway's authentication" half): the viewer server's `/api/tiles/*` routes really proxy a
-REAL `av-tiles` gateway backed by a REAL MinIO object store, with the gateway's own OIDC
+REAL `av-tiles` gateway backed by a REAL S3 object store, with the gateway's own OIDC
 authentication and per-layer label enforcement intact end to end -- not a mock, not the
 `InMemoryObjectSource` `crates/av-tiles/src/server.rs`'s own unit tests use.
 
 # What this stands up, for real
 
 Round 3 (H5b-2, deliverable 4): the ENTIRE stack-up this file needs -- the digest gate, the
-host-wide-locked labelled MinIO container, the `cargo build`s, `av-tile-fixture`, the
+host-wide-locked labelled S3-store container, the `cargo build`s, `av-tile-fixture`, the
 `LocalTestIssuer` and its two tokens, and the real `av-tiles` subprocess -- was extracted into
 `tests/heavy_stack.py`, a shared module now also used by `tests/test_viewer_layers_stream.py`
 (question 218's "no second, independently-maintained copy" reasoning, applied to test
@@ -84,14 +84,14 @@ from fastapi.testclient import TestClient
 
 from altavista.pb.altavista.v1 import heavy_pb2
 from altavista.server import create_app
-from heavy_stack import (  # noqa: F401 -- rust_bins/minio/issuer are transitive fixture deps
+from heavy_stack import (  # noqa: F401 -- rust_bins/s3_store/issuer are transitive fixture deps
     SKIP_REASON,
     admin_counter,
     av_tiles_service,
     issuer,
     key_prefix,
-    minio,
-    minio_bucket,
+    s3_store,
+    store_bucket,
     rust_bins,
     tile_set,
     tile_set_label,
