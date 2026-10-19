@@ -1797,3 +1797,28 @@ The cFS image's record is current (`dc8eb1d`), so no cFS re-pin is owed.
    - one dangling debian base reference from a `docker load` (not removable safely on this store).
 
    `/Users/probe/av-boot-stage` predates this round (2026-10-08) and is not this round's.
+
+## Cross-reference (2026-10-19) — the kit items of question 254's native open-items round
+
+Question 254's native round is recorded in `docs/sil-plan.md`'s status section headed "the
+open-items round (question 254)". Its kit items close or narrow three of the "Not delivered" items
+above:
+- **Item 12, a Linux GMAT pin** (`0c9a6a0`; "Not delivered" 2 above).
+  - `linux-x86_64` is pinned from NASA's `gmat-ubuntu-x64-R2026a.tar.gz` (sha256 `fe124b4a…7754`;
+    scoped descriptor `e15babfc…66f3`, 2,103 files).
+  - The RHEL 7 archive is measured and recorded, not pinned.
+  - NASA publishes no Linux aarch64 build, so `linux-aarch64` stays `null`.
+  - The installer's check accepts the Ubuntu tree and refuses a changed copy inside a
+    `--network none` Linux container.
+  - The `macos-arm64` pin's tree came from this host's install, not a NASA archive; SourceForge
+    lists only a macOS x64 `.dmg`.
+- **Item 13, MSRV 1.89** (`70861ba`; "Not delivered" 5 above): measured with rustc 1.89.0. The
+  workspace, the no-default-features builds and the required-features groups all build.
+- **Item 10, the `docker rmi` audit** (`8b99b26`):
+  - `scripts/kit/docker_image_tags.py` gains `remove_owned_name`, which the kit installer ships.
+  - `image_build.remove_created_tags` and `ImageTagGuard._undo` were audited safe.
+- **Defect D2** (`3c550df`): `scripts/kit/live_evidence.py`'s probe now runs with
+  `--pull never`.
+- **The zero-egress proof kit (`out/kit/proof`) is stale:** it records the edge-plugin image at
+  `34d4e440…`, which was re-pinned to `a0af6681…` with an unchanged runtime-content hash. The
+  three gated zero-egress tests skip until it is rebuilt.

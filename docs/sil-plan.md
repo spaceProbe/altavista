@@ -1036,3 +1036,477 @@ The 14 skips are opt-in gates (`AV_KIT_WITH_*`, `AV_SBOM_REBUILD`, `AV_CFS_RUN_R
 5. **The container's Docker-free replay cannot reproduce its `dynamics_hash`** (decision 10).
 6. **About 520 dangling anonymous volumes** remain on the host from registries before `bfe22d7`.
 7. **Duplicated test helpers** in `drm_container.rs` and `drm_shared_run.rs` (decision 14).
+
+## Status (native manager, 2026-10-19) — the open-items round (question 254)
+
+The native team's round chartered by question 254, items 6–13, and item 14, which the lead added
+during the round (the sparse-output defect item 6's worker found). **All nine items are
+delivered.** The round also found and fixed four defects: D1, the Renode history file; D2, a
+floating base tag pulled after k3s's image GC; the manager's own review miss on item 7; and the
+unsafe image removals that item 10 is about. D1's EIO itself did not reproduce. The kit items (10, 12, 13) are cross-referenced from
+`docs/p5-plan.md`. No board is involved. Commits on `edge`, none pushed, none merged:
+
+| Commit | What |
+|---|---|
+| `70861ba` | 13: MSRV 1.89 measured |
+| `0c9a6a0` | 12: a Linux x86_64 GMAT pin; NASA publishes no aarch64 build |
+| `18277a3` | 9: the Linux `av-edge-board` build byte-reproducible |
+| `8b99b26` | 10: every remaining image removal audited and made safe |
+| `65275c2` | 6: a ground station handles every frame on its port, per sender |
+| `5d39a22` | 11: `drm_container`/`drm_shared_run` share their helpers through `cfs_common` |
+| `98d12ce` | 7: a commanded thruster may carry several framed-out ports |
+| `57ab817` | defect: item 7's test helper broke the no-default-features clippy |
+| `f431b7f`, `0629f14` | 8: the Bind version in the port-traffic log; the av-kernel README |
+| `2925c85` | cFS, edge-plugin, proposer and tiles re-recorded at `0629f14` |
+| `88b6f64`, `f7e4efe` | defect D1: a private Renode config and history per run; every runnable launcher; the tests assert the user's file unchanged |
+| `5bba471` | 14: each output keeps its own epochs; no panic path in expression reads |
+| `2314433` | the sweep image re-pinned at `5bba471` |
+| `3c550df` | defect D2: no floating base tag can be pulled implicitly |
+| `7d11f7d` | the sweep image re-recorded at `3c550df` (the code head) |
+| this commit | this status section; the `p5-plan.md` cross-reference |
+
+### 6. One ground station, every frame (`65275c2`)
+
+**Root cause:** `GroundStationModel::step_with_ports` read only `Inbox::last_on_port`. With two
+spacecraft on one `tm_in`, every frame but the last in each step was dropped. The chaser sorts
+first in the router's order (question 108), so it lost every step.
+
+**The fix:**
+- The station handles every frame on `tm_port` in inbox order, through a new
+  `Inbox::for_port_with_senders`.
+- Contact state is kept per sender, keyed by the router's sender id; an unknown sender is its own
+  key.
+- `in_contact` means "any sender in contact".
+- Every undecodable frame is recorded (question 188).
+- A new cumulative output, `frames_handled`, reaches products only where a system declares it.
+- A contact event names its sender (in the id, detail and provenance) only once the station has
+  seen more than one sender. Every one-sender station's events, products and hashes are therefore
+  unchanged: `demo_ground_segment`'s products are equal, and its committed `port_traffic.pb`
+  (`5497083d…`) is byte-identical.
+
+**Proof:** `drms/demo_two_spacecraft_one_station.*`, the two-spacecraft DRM with one station.
+It runs 31 s: with the declared 100 ms link latency, the frame sent at 30 s arrives after the last
+step of a 30 s window, for one sender as for two.
+
+| Station handling | Run | From chaser | From target |
+|---|---|---|---|
+| before (`last_on_port`, in a clone) | native and containers | **0 of 30** | 30 of 30 (30 of 60 in all) |
+| after | native | **30 of 30** | **30 of 30** |
+| after | each controller through its own cFS container | **30 of 30** | **30 of 30** |
+
+- One attributed CONTACT_START per sender, and AOS acks with sequence `[0, 1]`.
+- Before the fix, only the target got a CONTACT_START.
+- The two-station DRM is kept as ratified.
+
+### 7. Several framed-out ports (`98d12ce`, `57ab817`)
+
+- **The change:**
+  - The thruster model's `port.emit_framed` went through `resolve_sensor_output`, which allows
+    one codec and one framed-out port per system.
+  - The new `resolve_constant_accel_emit_port` binds the port by name and the codec by shape
+    (not a command, with x/y/z fields), like the command and ack resolvers.
+  - With at most one codec and one framed-out port it delegates to `resolve_sensor_output`. Every
+    existing DRM therefore resolves exactly as before, with the same error texts.
+  - A telemetry codec that declares `accel_scale` carries the commanded throttle.
+- **Proof:**
+  - The two-spacecraft thrusters bind the new `demo_two_spacecraft_thruster` system
+    (`demo_command_flight` plus `tm_out`, apid 702).
+  - The chaser's `tm_out` reads 1.0 for 17 packets, then 4.0 for 13 after the telecommand
+    applied at 17 s. The target's stays at 1.0.
+  - An ambiguous declaration gets a typed `SensorPortConfiguration` error.
+- **What moved:**
+  - Only the two-spacecraft (two-station) DRM: its SoS hash went from `393daa34…` to
+    `3d9e2554…`.
+  - Its records gained the thrusters' telemetry. Records-only hash is `5ddd566e…8614` (6,182
+    records), replacing question 249's `16ffd975…`. Whole-file hash: see item 8.
+- **Not caught:** a mis-named but well-shaped port. The proto has no link from a port to its
+  codec.
+
+### 8. The Bind version in the port-traffic log (`f431b7f`)
+
+- **What is recorded:** the executor writes each non-board container's Bind version into the
+  sidecar's own `PortTrafficLog.provenance` as `container_bind_version.<instance>`.
+  - There is no proto change.
+  - `RunProducts.provenance` and the records are untouched.
+- **What replay does:**
+  - It rebuilds the container's `ModelInfo` with `container_model_info`, from that version and
+    the declared image and digest.
+  - It refuses a log that lacks the attribute, with `DrmError::ReplayLogLacksBindVersion`.
+- **Both replay tests lose their exclusion** of `dynamics_model`, `dynamics_hash` and
+  `dynamics_depth`. The Docker-free replay now equals the live run with nothing excluded for
+  container segments.
+  - A new test refuses a stripped log.
+  - It also shows that a wrong version moves only that container's `dynamics_hash`
+    (`4e438e27…` → `3c8914e4…`).
+- **What moves:** only container runs' whole-file `port_traffic_hash`.
+  - Two-spacecraft: `cfd13d1d…` → `772e6b72…`, 122 bytes larger.
+  - Records-only hashes do not move. Native and board sidecars are byte-identical.
+- **No committed artifact records one.** I checked:
+  - `git grep` for the old and new values;
+  - every `port_traffic_hash` mention outside the source;
+  - every committed `.pb`. The only committed sidecar is the native ground-segment one, which is
+    unchanged.
+- **Board and Renode logs are unaffected.** The attribute is written only for non-board
+  containers. The board replay tests, the Renode test and the stand-in pass.
+- **Still excluded:** the `container_binding_hash` provenance attribute, which is also a
+  live-Bind value.
+
+### 9. The Linux `av-edge-board` build byte-reproducible (`18277a3`)
+
+- **Packages:** `services/cfs/build-edge-board.sh` installs the five protobuf packages pinned by
+  version from snapshot.debian.org at `20260711T103542Z`.
+  - That timestamp was bisected: the `first_seen` lower bound `20260704T145040Z` fails at apt.
+  - Signatures are still verified. `Check-Valid-Until=false` is the only relaxation, and any
+    other apt source is refused (exit 5).
+  - The `.deb` set (`6c2aadcc…`) and the dpkg set (`e1d35298…`) are checked before install and
+    before build (exits 4 and 3).
+  - The unpinned `libssl-dev pkg-config` install is gone. The digest-pinned builder carries both
+    (3.0.17, 1.8.1), and the install only upgraded OpenSSL without moving a byte.
+- **Path independence:** `--locked`, plus `--remap-path-prefix` for the repository, spoore, the
+  target dir, cargo home and rustup home.
+- **The manager's proof:** two plain clones at `5d39a22`, one with the default mount and one with
+  `EDGE_BOARD_MOUNT=/Users/probe/code/av-eb-other-mount` and
+  `EDGE_BOARD_CARGO_TARGET=/elsewhere/target-b`, give identical bytes:
+  - **`av-edge-board`
+    `d241d6db36b51461a87d7c69d6e373a13ce45349e1e62f78da6de3efddf38f35`**;
+  - **`av-edge-board-log`
+    `654925ce4f1cb3a4ccdcd221556098630344d4ce1f31cac8c3c7b4cb1b721338`**;
+  - no input of `av-edge-board` moved between `5d39a22` and the head.
+- **Without the remap,** a different mount gives different bytes. The old `071fcf20…` was
+  therefore reproducible only for its one default path; the same recipe without the remap at
+  those paths gives `071fcf20…` again.
+- **Tests:** `services/cfs/tests/test_build_edge_board_script.py` (13 tests) pins the recipe and
+  fails under five perturbations. Both board tests pass with the new binary.
+
+### 10. The `docker rmi` audit (`8b99b26`)
+
+The rule on this host's containerd store: `rmi` of an image's last name deletes the image. A
+nameless placeholder, or a same-repository digest reference, does not keep it alive (measured on
+throwaways).
+
+| Call | What it removed | Could hit a pinned image | Now |
+|---|---|---|---|
+| `cfs_common` `DockerImageGuard` | `rmi -f` of the pushed `127.0.0.1:19031/altavista-cfs-lockstep:test` | yes: the pinned cFS image when it is known by id only | `av_lockstep::docker::ImageNameGuard` |
+| `drm_container.rs`, `docker_lifecycle.rs` (two guards each) | `rmi -f` of a built or pushed name | yes, when this run's name was the last one | `ImageNameGuard` |
+| `tests/test_lockstep_ref.py` | `rmi -f` of the pushed and the built name | yes | `docker_image_tags.remove_owned_name` |
+| `services/cfs/tests/test_image_reproducibility.py` | `rmi -f` of 2 disposable tags | yes: a reproducible build can be the pinned id | `remove_owned_name`, with a snapshot taken before the build |
+| `ImageTagGuard.remove_test_only_tags` | `rmi <tag>`, unchecked | no, by construction | `remove_owned_name`, raising on refusal |
+| proposer, tiles, av-ingest, edge-plugin `build-image.sh` | `rmi -f <bare id>` of **every** labelled image | yes: strips the pinned `:local` | only nameless labelled images that no name points at, no `-f` |
+| sweep `build-image.sh` | `rmi <id>` of `dangling=true`, which also lists named images | yes | the same rule |
+| `prune_stale_test_resources` | images labelled `av.test` | no: no pinned image carries the label (measured) | unchanged, documented |
+| `image_build.remove_created_tags`, `ImageTagGuard._undo` | guarded already (questions 249, 250) | no | unchanged |
+| test-only throwaway helpers (`test_docker_image_tags.py`, `test_live_evidence.py`, zero-egress `ResourceGuard`) | run-scoped names | no | unchanged |
+
+- **The rule now:** a name is removed only when this run created its image, or when another
+  reference survives the untag. Otherwise the removal is refused, naming the image.
+- **Proof:** on `FROM scratch` throwaways, the old code deleted a pinned stand-in, and it survives
+  every helper after the fix.
+- The host's image list is identical before and after the proof (29 images).
+
+### 11. The shared test helpers (`5d39a22`)
+
+- **What moved:** `repo_root`, `docker_cmd`, `DockerContainerGuard` and `DockerImageGuard` in
+  `drm_container.rs` were line-for-line copies of `cfs_common`'s, and `drm_shared_run.rs`'s
+  `repo_root` was too. The two files also had an identical `ChildGuard`; it moves into
+  `cfs_common`.
+- **No test behaviour changed:** the `--list` output is identical (13 + 3 tests). Before and
+  after runs agree once timings, ports and ids are normalised.
+- **Left duplicated,** outside the brief: `spawn_lockstep_ref`, whose signatures differ, and
+  four small locals.
+
+### 12. A Linux GMAT pin (`0c9a6a0`)
+
+NASA's GMAT R2026a folder on SourceForge
+(`https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/`) has two Linux archives, both
+x86_64, and **none for aarch64**. Each was fetched once (question 154) with TLS verified and no
+header of ours; SourceForge's SHA-1 and MD5 matched for both.
+
+| Archive | Bytes | sha256 | Pin |
+|---|---|---|---|
+| `gmat-ubuntu-x64-R2026a.tar.gz` | 401,664,992 | `fe124b4a606b2e3b704a6fbb1c37b87598d5df0d18cb661c304b5f60074a7754` | **`linux-x86_64`**: `sha256:e15babfc…66f3`, 2,103 files, 689,762,981 bytes, 114 symlinks, listing `fe5ab495…1948` |
+| `gmat-rhel7-x64-R2026a.tar.gz` | 438,017,278 | `3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd` | measured (`3db3afed…975c`, 2,043 files), recorded, not pinned |
+
+- `linux-aarch64` stays `null`, with the reason recorded.
+- The `macos-arm64` pin's tree came from this host's install (`/Users/probe/code/AltaVista/GMAT
+  R2026a`), not from a NASA archive measured here. SourceForge lists only a macOS x64 `.dmg`
+  (the lead's ruling, recorded).
+- **The installer's check on Linux:** I ran it in a `--network none` python:3.13-slim container
+  (aarch64; the x86_64 tree is measured, not run) over the read-only tree.
+  - It accepts the Ubuntu tree.
+  - It refuses a copy with one byte changed, the RHEL 7 tree under the same key, and
+    `linux-aarch64` (`gmat-no-pin-for-platform`).
+- An opt-in test (`AV_KIT_MEASURE_GMAT_LINUX`) re-measures the tree.
+
+### 13. MSRV 1.89 measured (`70861ba`)
+
+- **Toolchain:** `rustup toolchain install 1.89` was run once, as the lead authorized:
+  rustc 1.89.0 (29483883e 2025-08-04), cargo 1.89.0 (c24e10642 2025-06-23).
+- **At `d2dddba` with a cold target,** all of these pass:
+  - `cargo +1.89 check --workspace --all-targets` (110 crates, 0 warnings);
+  - the no-default-features checks of av-kernel, av-run, av-sweep and av-orbital;
+  - the five required-features groups.
+- **At the code head `2314433`,** the workspace check passes again: 0 warnings, 38 s.
+- **1.89 is the floor:** cargo refuses serde-saphyr 2.0.0 below its declared 1.89, and 1.87
+  fails even with `--ignore-rust-version`. 1.88 was not measured.
+- `rust-version` and `MEASURED_FLOOR` stay "1.89"; only the comments record the measurement.
+
+### 14. A sparse output keeps its own epochs (`5bba471`; the lead's addition)
+
+**Root cause:** both schedulers pushed one shared epoch per step that had any output, but
+appended a name's value only when the model produced it. A sparse output therefore ended with
+more epochs than values. The ground station's `elevation_rad`, emitted only on decoded steps, had
+900 epochs and 899 values.
+
+**What was wrong before:**
+- `@end` panicked.
+- The silently wrong reads were the epoch-aware ones:
+  - `@t` was shifted by a step;
+  - `integral` was 270.95 against 367.02 by hand;
+  - `duration` was also wrong.
+- `mean`, `min` and `max` never read epochs and were right.
+
+**The choice: carry each output's own epochs,** rather than refuse a sparse output. The data is
+correct: an elevation is known only when a frame arrived. A refusal would make a legitimate
+measure unscorable.
+- **Scheduler:** `schedule.rs` records each name's epoch with its value (`NamedOutputSeries`,
+  `record_outputs`).
+- **Executor:** its three extend blocks become one, `extend_outputs`.
+- **No panic path:** `output_series` refuses a length mismatch with a typed
+  `ExprError::SeriesLengthMismatch`, so no operator can index past a series.
+- **Operator semantics on a sparse series,** documented in the crate README:
+  - operators use the series' own samples;
+  - `@t` interpolates between the samples around it;
+  - `@t` outside the span is a typed error;
+  - `integral` is the trapezoid;
+  - `duration` holds a sample's verdict to the next.
+
+**Proof:** `tests/drm_sparse_output.rs` uses in-memory variants of `demo_ground_segment`, one of
+them with a 100 s telemetry drop at the elevation peak.
+- `@t`, `@end`, `final`, `mean`, `min`, `max`, `duration` and `integral` match a hand model
+  written in the test (the WGS84 normal; the flight's `p0 + v0·k`) within 1e-9. Examples:
+  `mean` 0.43170143358466856, `max` 1.5657963684609364, `integral` 367.0210003346266.
+- A time outside the series is a typed error.
+- The perturbation (the old recording) gives typed errors and no panic.
+- Every expression, kernel and DRM golden is unmoved, and dense outputs are byte-identical.
+
+### Defect D1: the Renode history file (`88b6f64`, `f7e4efe`)
+
+- **What happened:** during item 8, the Renode test died with `System.IO.IOException:
+  Input/output error`.
+  - The failing write was in AntShell's `HandleCommand`, rewriting the user's global
+    `~/Library/Application Support/renode/history`.
+  - That file is shared by every Renode process of the user, is unbounded (349,211 lines,
+    9.2 MB), and is rewritten whole on every monitor command, including each injected UART
+    byte.
+  - Measured cost: 10.8 ms per command against that file, against 0.62 ms against an empty
+    history.
+- **What redirects it:** `$HOME` and `XDG_*` do not. Only a `--config` file whose `[general]
+  history-path` names another file does.
+- **The fix:** every runnable Renode launcher passes a per-run `--config`:
+  - the Renode test's bridge;
+  - the stand-in HIL launcher;
+  - `run_via_monitor.py`;
+  - `third_party/rtems/run-samples.sh`.
+- **The guard:** both opt-in tests assert the user's file unchanged by size and sha256 (it held
+  at 9,262,112 bytes, `cf5c10d8…`, before and after).
+- **Effects on the tests:** what is sent to Renode does not change, so the records are still 998
+  each side with records-only hash `8e518964…8fd2`. The Renode phase took about 280 s, against
+  530–740 s before the fix.
+- **Not established:** the EIO itself. It did not reproduce with three concurrent Renodes
+  rewriting one 9 MB copy, or with raw racing rewriters. The unified log shows no kernel or disk
+  error, and the crash report shows no second Renode of that worker overlapping. No path further
+  on this host; the shared, ever-rewritten file is gone from every test run either way.
+- **Residue:** the worker appended two lines (40 bytes) to the user's file before the redirect
+  was understood: one accidental probe and one perturbation. Disclosed; nothing was deleted.
+- **Not redirected:** about 45 historical probe scripts that nothing runs.
+
+### Image re-pins
+
+Each image was re-pinned with its own script, under the docker lock, with 0 dirty files under its
+copied paths.
+
+| Image | Touched by | Result |
+|---|---|---|
+| cFS | `Cargo.toml` comment (13) | same shim `b103a90e…`, relay, image `e51b896d…`, runtime-content `56d7bd00…`; build commit `0629f14` |
+| edge-plugin | `av-dynamics` (6) | plugin binary `91d0e584…` and runtime-content `c860fcd4…` unchanged; **image id `34d4e440…` → `a0af6681…`** |
+| proposer | `av-command` test comment (13) | `13443baa…` unchanged |
+| tiles | the same | `da48a96d…` unchanged |
+| sweep | av-kernel, av-lockstep, av-dynamics (6–8, 10, 14) | image `714188…` → **`eed9f0fd…`**, av-sweep `f51b4203…` → `050dd2f5…`; recorded at `5bba471`; its k3s record test passes (4) |
+
+**Why the edge-plugin image id moved:** the classic builder's cache lookup for the shared step-2
+LABEL picked another component's image. The later layers then differ only in timestamps and
+apt/dpkg logs; I compared them layer by layer.
+
+### Defect D2: a floating base tag was pulled after k3s's image GC (`3c550df`, `7d11f7d`)
+
+**Found from** the gate's MinIO skips and a diff of the host's image list against the round's
+start.
+
+**What happened** (the Docker events log and the Colima VM's journal):
+- At 2026-10-18 23:56:48 CDT, k3s's kubelet image GC (`image_gc_manager`: usage 85 % ≥ high
+  threshold 85 on the VM's 59 GB `/var/lib/docker`) deleted every image no container was using,
+  oldest first. Among them:
+  - `python:3.13-slim` (`9d2e5553…`);
+  - the cFS base `ubuntu:22.04@2edbbc5d…`, which the cFS build later re-pulled by digest;
+  - the pinned MinIO `a1ea29fa…`, still gone, so its tests skip;
+  - two of the user's supabase images.
+- At 23:57:56, a lockstep-ref test's `docker build` of `services/lockstep-ref/Dockerfile`
+  (`FROM python:3.13-slim`, a floating tag) found its base absent and pulled the tag from Docker
+  Hub, getting `70729b46…`.
+
+**The fix:**
+- That base is now pinned by the digest it pulled, which is present on the host.
+- Every run of a tag-only image with no presence gate gets `--pull never`: the throwaway
+  `registry:2` in four places, and `live_evidence.py`'s probe.
+- Audited and left: every digest-pinned `FROM` and builder, and the sites that check presence
+  and skip.
+
+**Proofs:**
+- The lockstep-ref tests pass: 3, 13 and 13.
+- The events log shows no non-loopback pull while they run.
+- With an absent tag, the run fails with "No such image" and nothing is pulled.
+
+**The sweep image was re-recorded at `3c550df`** (`7d11f7d`): the same image and binary.
+
+**The GC itself, which will recur while the VM's Docker volume sits at 82 %, and restoring MinIO
+by digest are the lead's or the user's.**
+
+### Gate
+
+- **Where it ran:** captured whole under `rounds/native-open/gate/`, with `run_gate.py`.
+  - The Rust and web phases ran at `2314433`, the code head before D2.
+  - D2 then changed only test files, a test-only Dockerfile and `live_evidence.py`. Every phase
+    those files reach was re-run at `3c550df`.
+  - The Python phase was re-run at `7d11f7d`, the code head.
+  - `target/debug/deps` (123,593 entries) was moved aside first.
+
+| Phase | Result |
+|---|---|
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto`; `buf lint proto` | rc 0, rc 0 (the shell policy allowed `buf`) |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | 183 binaries, **1,866 passed**, 0 failed, 4 ignored |
+| `cargo clippy --workspace --all-targets -- -D warnings`; the same for `av-kernel`, `av-run`, `av-sweep` with `--no-default-features` | clean ×4 (workspace and `av-kernel` again at `3c550df`: clean) |
+| required-features lint, 5 groups (`av-cdm full`, `av-kernel gmat`, `av-run gmat`, `av-sweep gmat`, `av-jobs store-fixture`) | clean |
+| `cargo deny check` | advisories, bans, licenses, sources ok |
+| `cargo test -p av-orbital --no-default-features` | 142 passed |
+| `cargo-slot build -p av-edge-board --bins` | ok |
+| `cargo test -p av-kernel --no-default-features` | 769 passed, 0 failed |
+| `cargo test -p av-kernel` (after `build -p av-run`) | **1,032 passed**, 0 failed, 1 ignored (again at `3c550df`: 1,032 passed) |
+| `cargo test -p av-lockstep` at `3c550df` | 43 passed |
+| the Renode test, ELF `de96907f…` | passed at `2314433` and again at `3c550df`: 998 records each side, records-only `8e518964…8fd2` on both; the user's history unchanged by the run |
+| the stand-in HIL test | passed, 50 s |
+| `cargo +1.89 check --workspace --all-targets` at `2314433`, in a clone | rc 0, 0 warnings |
+| standalone `web/js/**/*_check.mjs`, each with its own exit code | **26 exit 0**. The four argument-driven ones (`command_panel`, `layers_stream`, `panels`, `timeline`) print their usage and are run with inputs by pytest |
+| the real-Chrome viewer tests (precision, framing, entities, CDM visual model) | 19 passed, 202 s |
+| `pytest -q -rs` under `cargo-slot --hold`, `CFS_MIRROR_DIR` set, at `7d11f7d` | **1,426 passed, 11 failed, 48 skipped** (717 s) |
+
+**The 11 pytest failures are all `tests/test_sbom.py` and are the lead's** (`docs/compliance/`):
+- `cfs-image` and `edge-plugin-image` regeneration (2). The re-records moved the image epoch to
+  2026-10-19T06:36:27Z, and the edge-plugin image id moved.
+- The image epoch for the same two (2).
+- The six Rust components' epoch and their shared epoch (7). Their epoch is now
+  2026-10-19T07:43:59Z, from `5bba471`'s `Cargo.toml` change; it started moving with `70861ba`.
+
+**Skips (48):**
+- 21 are opt-in gates (`AV_KIT_*`, `AV_SBOM_REBUILD`, `AV_CFS_RUN_REPRO_BUILD`, the two GMAT
+  re-measures).
+- 24 need the pinned MinIO image that k3s's GC deleted (D2). They skip visibly and never pull.
+- 3 are new and caused by the round: `test_kit_zero_egress_install`'s three gated tests skip
+  because the proof kit (`out/kit/proof`, git-ignored) records the edge-plugin image at its old
+  id `34d4e440…`. A rebuild of the proof kit (`build_kit.py`, with network for its wheels) is
+  needed before it runs again. That is not this round's network window.
+
+### Decisions (numbered, for the lead to ratify)
+
+1. `target/debug/deps` had 67,917 entries at the start, and cargo-slot did not warn. It reached
+   123,593 during the round and was moved aside before the gate, to
+   `target/deps-aside-q254-20261019`.
+2. Order of work:
+   - In parallel, on disjoint files: 6, 9, 10, 12, 13.
+   - Then 7 after 6, 8 after 7, and 11 after 10.
+   - Then the re-pins, D1, 14, the sweep re-pin, and the gate.
+3. Workers never committed. The manager reviewed each diff, re-ran its proof and committed by
+   explicit path. Perturbations were made only in throwaway clones beside spoore, all deleted. A
+   fresh clone needs `GMAT_SRC` and `CSPICE_INCLUDE` pointed at the lead tree's `third_party`.
+4. Item 13 was measured in a clone at the committed head. The manager re-checked at the code head.
+5. Re-pins are record commits after the change, not inside it. The provenance check requires the
+   build at a commit that already contains the change, with 0 dirty copied paths.
+6. Item 6:
+   - The proof uses a variant DRM, so the ratified two-station records stay valid.
+   - The window is 31 s, so that "30 of 30" is exact.
+   - The manager's first review sent it back for that and for a container-bound run.
+7. Item 6: the sender rides in `AppliedCommand.field` on the reserved contact port, and is named
+   only once a station has seen more than one sender. A sender that first appears after another's
+   transition leaves that earlier event unattributed.
+8. Item 7: only the thruster names its emit port, so only it is generalised. The sensors keep
+   the one-port rule, since naming them a port would be a new parameter.
+9. Item 7 moves the two-spacecraft (two-station) DRM by design, together with its question-249
+   records hashes.
+10. Item 8:
+    - The version rides in the sidecar's provenance; there is no proto change, so no image's
+      proto path moved.
+    - A missing attribute is refused, with no synthetic fallback.
+    - `container_binding_hash` stays excluded.
+11. Item 9: the worker's builds were of a working-tree snapshot, so they named no commit. The
+    manager re-measured from two clones at `5d39a22`. libssl-dev and pkg-config come from the
+    pinned builder and are no longer installed.
+12. Item 10: `prune_stale_test_resources` is left unchanged (safe by label). The build scripts
+    no longer delete a component's previous image by name; it goes nameless when its tag moves,
+    and is swept on a later run.
+13. Item 12: `linux-x86_64` pins the Ubuntu archive, SourceForge's default Linux download. The
+    RHEL 7 tree is recorded, not pinned; a second key is the lead's call.
+14. Item 14: the series carries its own epochs rather than refusing (reason above). There is no
+    executor `debug_assert`, because it would panic before the typed error.
+15. D1: the private config sets only `history-path`, and Renode fills the rest with defaults.
+    The historical probe scripts are not redirected, and the M24_4g snapshot must stay frozen.
+16. The re-pin worker put a pass-through `docker` on PATH that refuses only
+    `rmi`/`image rm|prune`/`system prune`, because the brief said never to rmi. The scripts'
+    prune was therefore skipped, and their nameless images stayed as build cache. This is not a
+    shell-policy workaround; nothing the policy refuses was run.
+17. The sweep image was built twice, at `88b6f64` and then at `5bba471` after item 14. Only the
+    second is recorded.
+18. The read cache handed two workers a stub for the common brief. Both stopped and asked, and
+    the manager sent the content inline; later briefs carried it in the prompt.
+19. `docs/compliance/` is not edited (the lead regenerates). `docs/roadmap-status.md` is left to
+    the lead.
+20. D2:
+    - The lockstep-ref base is pinned to the digest the floating pull brought in (`70729b46…`),
+      which is present on the host and needs no network.
+    - An absent digest-pinned `FROM` would still be pulled by digest; `docker build` has no
+      `--pull never`.
+    - A test that every `services/**/Dockerfile*` `FROM` is digest-pinned is proposed, not
+      added.
+21. The gate's Rust and web phases ran at `2314433`. After D2, only the phases its files reach
+    were re-run, at `3c550df`; the Python phase was re-run at the code head.
+22. The user's real Renode history grew from 9,262,112 to 10,103,089 bytes during the round,
+    while every run in this tree asserted it unchanged. Another tree's Renode, without D1's fix,
+    wrote it; the fix reaches other trees at the merge.
+23. The manager ran one command the shell policy refuses (`python` with heredoc stdin, while
+    assembling this section). It was refused, not retried and not wrapped.
+
+### Found, not fixed this round
+
+1. **Classic-builder image ids drift across cache chains** (the edge-plugin re-pin). The
+   runtime-content hash is the kit's invariant (question 185) and held.
+2. **A mis-named but well-shaped emit port is not caught** (item 7); the proto has no
+   port-to-codec link.
+3. **`integral` over a radian series is `UnitCompositionUndefined`.** This is pre-existing: no
+   `radian·second` unit is declared.
+4. **D1's EIO itself:** no path further on this host.
+5. **Incident:** item 14's worker ran a host-wide `pkill -f "cargo-slot test -p av-kernel"` to
+   stop its own redundant run. The D1 Renode job survived and passed. Whether another team's
+   process was hit is unknown.
+6. **k3s's kubelet image GC deletes unused images from the shared Docker store** whenever the
+   VM's `/var/lib/docker` reaches 85 % (82 % now). It deleted the pinned MinIO image and the
+   bases that tests use by tag (D2). Raising the threshold, or freeing the volume (nameless images,
+   about 520 dangling volumes), is the user's or the lead's. MinIO is restored with a pull by
+   digest (`services/store/IMAGE_DIGEST.md`).
+7. **The zero-egress proof kit is stale** after the edge-plugin re-pin (its three gated tests
+   skip). It needs a `build_kit.py` rebuild with network for the wheels.
+8. **Left on the host:**
+   - nameless images, never removed:
+     - sweep `714188…`, `8e2fceda…` and four older;
+     - edge-plugin `34d4e440…` and three older;
+     - proposer: six;
+     - tiles: three;
+   - `target/deps-aside-q250-20261017` and `target/deps-aside-q254-20261019`, for the lead to
+     delete.
