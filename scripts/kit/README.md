@@ -50,7 +50,7 @@ A full kit -- every gated step, real bytes for everything the kit may carry:
 It carries no GMAT, no base image and no numpy wheel (operator-supplied; `--with-wheels` lists the
 wheel in `KIT_MANIFEST.wheels.operator_supplied`). A kit for a site that runs GMAT also records
 GMAT's descriptor, which makes the installer require the operator's own GMAT tree
-(`--gmat-root`, `--gmat-platform`):
+(`--gmat-root`, `--gmat-platform`, and on Linux x86_64 optionally `--gmat-variant ubuntu|rhel7`):
 
     ... --with-pack gmat --max-pack-bytes 900000000
 
@@ -329,8 +329,15 @@ holds `content_hash`, `file_count`, `total_bytes` (the fields `pack_descriptor` 
 `linux-x86_64` are pinned; `linux-aarch64` is `null` because NASA publishes no Linux aarch64 build of
 R2026a (question 254, task 12). `linux-x86_64` is NASA's `gmat-ubuntu-x64-R2026a.tar.gz` from SourceForge,
 unpacked, and `--gmat-root` is its `GMAT/R2026a` directory; the component's `archives` object records
-each Linux archive's URL, mirror, size, sha256 and SourceForge's checksums, and the RHEL 7 archive's
-measurement (recorded, not pinned: one pin per key).
+each Linux archive's URL, mirror, size, sha256 and SourceForge's checksums.
+
+*Variants* (question 257). `variants` maps a platform with more than one pinned release to
+`{default, pins}`: `linux-x86_64` has `ubuntu` (pin key `linux-x86_64`, the default) and `rhel7` (pin
+key `linux-x86_64-rhel7`, NASA's `gmat-rhel7-x64-R2026a.tar.gz`, pinned from question 254's
+measurement). The default variant's pin is always the platform's own key, so `platforms` read alone
+gives the default; a non-default variant's key is a pin, not a platform (`manifest.variant_problems`
+checks the table, and the pins file is refused as `gmat-pin-malformed` / `pins-malformed` when it is
+wrong).
 
 **What is measured** (`manifest.measure_tree(root, scope)`, the one function the builder and the
 installer both call): `pack_descriptor`'s walk and hash over regular files, minus the scope.
@@ -365,6 +372,7 @@ host's GMAT matches none, which does not fail the build).
 **The installer.** When the kit has `packs.gmat`:
 
     <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform macos-arm64
+    <kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform linux-x86_64 --gmat-variant rhel7
 
 `--gmat-root` is the operator's unpacked GMAT R2026a, `--gmat-platform` is its platform key; neither
 has a default and the platform is not guessed from the installing host, because the installer also
@@ -374,8 +382,15 @@ tree. Refusals (exit 2, before the target directory is created; `OperatorSupplie
 `gmat-platform-missing`, `gmat-no-pin-for-platform` (lists the platforms that have a pin),
 `gmat-root-unreadable`, `gmat-descriptor-differs` (expected and found hash, files, bytes, symlinks and
 which fields differ), `gmat-kit-not-operator-supplied` (a `packs.gmat` without the marker, i.e. a kit
-built before this change) and `gmat-pin-malformed`. A match is recorded in
-`INSTALL_RECORD.installed.operator_supplied.gmat` (platform, root exactly as given, `found`, `pin`,
+built before this change) and `gmat-pin-malformed`. On a platform with variants (question 257),
+`--gmat-variant NAME` chooses the pin (`ubuntu` when it is not given on `linux-x86_64`) and the tree is
+compared with that pin only: a tree that matches another variant's pin is `gmat-matches-other-variant`
+(naming the variant it matches and the option to pass), one that matches none stays
+`gmat-descriptor-differs`. `--gmat-variant` on a platform with one pin is `gmat-variant-not-applicable`,
+an unknown name `gmat-variant-unknown`, and a variant's pin key given as `--gmat-platform`
+(`linux-x86_64-rhel7`) `gmat-platform-is-a-variant`; none of these reads the tree. A match is recorded in
+`INSTALL_RECORD.installed.operator_supplied.gmat` (platform, `variant`, `variant_chosen_by`
+(`default`, `option`, or null without variants), `pin_key`, root exactly as given, `found`, `pin`,
 `scope`, `not_covered`) and nothing is copied; the operator points `GMAT_ROOT` at that directory.
 A kit without `packs.gmat` does not need GMAT and the record says `required: false`.
 `INSTALL_RECORD.installed.packs` lists packs whose bytes were copied; `packs_descriptor_only` the rest.
@@ -393,8 +408,9 @@ installer against that tree with `--gmat-platform <key>` before relying on the p
 as good as the release it was measured from, so measure the unpacked release, not an install that has
 been run (the scope covers what a run writes, not everything an operator might change).
 
-Re-measuring a recorded pin needs only the unpacked tree: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<macOS tree>`
-and `AV_KIT_MEASURE_GMAT_LINUX=1 GMAT_LINUX_ROOT=<GMAT/R2026a of the Ubuntu archive>` run the two opt-in
+Re-measuring a recorded pin needs only the unpacked tree: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<macOS tree>`,
+`AV_KIT_MEASURE_GMAT_LINUX=1 GMAT_LINUX_ROOT=<GMAT/R2026a of the Ubuntu archive>` and
+`AV_KIT_MEASURE_GMAT_RHEL7=1 GMAT_RHEL7_ROOT=<GMAT/R2026a of the RHEL 7 archive>` run the three opt-in
 tests in `tests/test_kit_install.py`. The Linux check runs in a Linux container as well
 (`--check-operator-supplied <kit> --gmat-root /gmat --gmat-platform linux-x86_64`, `--network none`, the kit
 and the tree mounted read-only); Colima's VM is aarch64, so the x86_64 tree is measured and never run.
@@ -445,8 +461,8 @@ structured form of each step's list is `INSTALL_RECORD.installed.operator_suppli
 earlier `.gmat` entry is kept) and `IMAGE_BUILD_RECORD.operator_supplied.components`; neither step reads
 the other's record, because the two run at different times and, usually, on different machines.
 
-Where each is checked: trees (GMAT) by `install.sh <kit> <target> --gmat-root ... --gmat-platform ...`, or
-without installing by `install.sh --check-operator-supplied <kit> [--gmat-root ... --gmat-platform ...]`;
+Where each is checked: trees (GMAT) by `install.sh <kit> <target> --gmat-root ... --gmat-platform ... [--gmat-variant ...]`, or
+without installing by `install.sh --check-operator-supplied <kit> [--gmat-root ... --gmat-platform ... [--gmat-variant ...]]`;
 container images by `install.sh --build-images <kit>` (the printed list comes before any build) or
 `install.sh --probe-offline-build <kit>`. An image is accepted only if `docker image inspect <reference>`
 reports the pinned digest as its `Id` or in `RepoDigests`; absent or different is `base-image-missing` /

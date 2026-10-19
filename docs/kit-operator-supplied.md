@@ -35,8 +35,9 @@ component in the table below comes from the operator.
    operator holding only the kit needs to fetch the same files by hand.
 2. **The operator carries those files across the air gap** beside the kit.
 3. **The files install**, run inside the enclave, verifies the trees and wheels it can reach:
-   `<kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform KEY --operator-wheels DIR`.
-   GMAT is measured and compared with the pin for `KEY` (`macos-arm64`, say), never copied; the
+   `<kit>/installer/install.sh <kit> <target> --gmat-root PATH --gmat-platform KEY [--gmat-variant NAME] --operator-wheels DIR`.
+   GMAT is measured and compared with the pin for `KEY` (`macos-arm64`, say; on `linux-x86_64`, the
+   pin of the chosen variant, `ubuntu` by default or `rhel7`), never copied; the
    operator's wheel must have the pinned sha256, and pip installs a copy of exactly that file by
    path. It never holds the Docker socket, `DOCKER_HOST` or any other path to a daemon, because a
    container that controls the daemon could start a networked container and defeat the isolation
@@ -101,11 +102,28 @@ the one function the builder and the installer both call):
 | Platform key | Pin |
 |---|---|
 | `macos-arm64` | `content_hash` `sha256:d21cddbbffbd3c44982bd98a7fb3a221b79ae6e26f2696eff4046f745d1eca39`; 2,060 files, 764,662,632 bytes; 183 symlinks, listing hash `sha256:f788ebf2fa73ef4d22e8ca2f4c1d51bb92a6a30dda34d0366ef19c3a719b5420` |
-| `linux-x86_64` | `content_hash` `sha256:e15babfc251e14fdd5d306970d9698d634e41c6ed5957118c31af71d28f466f3`; 2,103 files, 689,762,981 bytes; 114 symlinks, listing hash `sha256:fe5ab4958e93ae79ade6b18dde99572e63f47c880bc51590efd66e0452401948`. Measured from `gmat-ubuntu-x64-R2026a.tar.gz` (below) |
+| `linux-x86_64` | `content_hash` `sha256:e15babfc251e14fdd5d306970d9698d634e41c6ed5957118c31af71d28f466f3`; 2,103 files, 689,762,981 bytes; 114 symlinks, listing hash `sha256:fe5ab4958e93ae79ade6b18dde99572e63f47c880bc51590efd66e0452401948`. Measured from `gmat-ubuntu-x64-R2026a.tar.gz` (below): the `ubuntu` variant, the default |
+| `linux-x86_64-rhel7` | `content_hash` `sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c`; 2,043 files, 774,131,578 bytes; 100 symlinks, listing hash `sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e`. Measured from `gmat-rhel7-x64-R2026a.tar.gz` (below): the `rhel7` variant of `linux-x86_64`, chosen with `--gmat-platform linux-x86_64 --gmat-variant rhel7` (question 257) |
 | `linux-aarch64` | **No pin yet, and none can be made yet:** NASA publishes no Linux aarch64 build of R2026a (below). The installer refuses (`gmat-no-pin-for-platform`) for a kit that needs GMAT on this key, naming the platforms that have a pin |
 
 The key is `<os>-<uname -m>`. The operator gives it with `--gmat-platform`; the installer does not
 guess it, because it also runs in a Linux container over a macOS tree.
+
+**Variants (question 257).** `linux-x86_64` has two pinned releases, NASA's Ubuntu and RHEL 7
+archives, recorded in the component's `variants` table: `ubuntu` (pin key `linux-x86_64`, the
+default) and `rhel7` (pin key `linux-x86_64-rhel7`). The operator chooses with `--gmat-variant`;
+without it the choice is `ubuntu`. The tree is compared with the chosen variant's pin only, and
+`INSTALL_RECORD` records `variant`, `variant_chosen_by` (`default` or `option`) and `pin_key`. The
+installer refuses (exit 2, before the target directory is created):
+
+- a tree that matches the other variant's pin: `gmat-matches-other-variant`, naming the variant it
+  matches and the option to pass (an RHEL 7 tree without the option is told to pass
+  `--gmat-platform linux-x86_64 --gmat-variant rhel7`);
+- a tree that matches neither: `gmat-descriptor-differs`, with the expected and found values;
+- `--gmat-variant` on a platform with one pin (`macos-arm64`): `gmat-variant-not-applicable`;
+- a name that is not a variant of the platform: `gmat-variant-unknown`;
+- a variant's pin key given as the platform (`--gmat-platform linux-x86_64-rhel7`):
+  `gmat-platform-is-a-variant`, naming the two options to pass instead.
 
 **What the pin leaves out, and why.** The scope excludes `output/`, `bin/api_startup_file.txt`, and
 every `__pycache__/` directory. This host's whole-tree measurement is not stable, because GMAT
@@ -133,8 +151,8 @@ archives, both x86_64, and none for aarch64:
 
 | Archive | Bytes | sha256 (measured) | SourceForge's SHA-1 / MD5 (both matched) | Pin |
 |---|---|---|---|---|
-| `gmat-ubuntu-x64-R2026a.tar.gz` (SourceForge's default Linux download) | 401,664,992 | `fe124b4a606b2e3b704a6fbb1c37b87598d5df0d18cb661c304b5f60074a7754` | `15bb6057a25853ea68f2c0c781e030d4beae3348` / `ec496a0319657fa2c079d7e996b9b1ed` | `linux-x86_64` |
-| `gmat-rhel7-x64-R2026a.tar.gz` | 438,017,278 | `3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd` | `e6f4ca0ffefa3cb5a443cd24417b8778e709c74f` / `f4e5e3668f447833d29bac40e33d99c9` | none (measured only, below) |
+| `gmat-ubuntu-x64-R2026a.tar.gz` (SourceForge's default Linux download) | 401,664,992 | `fe124b4a606b2e3b704a6fbb1c37b87598d5df0d18cb661c304b5f60074a7754` | `15bb6057a25853ea68f2c0c781e030d4beae3348` / `ec496a0319657fa2c079d7e996b9b1ed` | `linux-x86_64` (variant `ubuntu`, the default) |
+| `gmat-rhel7-x64-R2026a.tar.gz` | 438,017,278 | `3262cf77c3932855180f346705605a89306ffd6cff15d70ad8bdafdfc0b614cd` | `e6f4ca0ffefa3cb5a443cd24417b8778e709c74f` / `f4e5e3668f447833d29bac40e33d99c9` | `linux-x86_64-rhel7` (variant `rhel7`: `--gmat-variant rhel7`) |
 
 Each was fetched once (question 154) with `curl -fL --proto '=https' --proto-redir '=https'` from
 `<archive URL>/download` under `https://sourceforge.net/projects/gmat/files/GMAT/GMAT-R2026a/`, which
@@ -150,11 +168,15 @@ names differ only by case.
 
 The RHEL 7 archive is a different tree (2,043 files, 774,131,578 bytes, 100 symlinks; content hash
 `sha256:3db3afed6d28291932f8ed4d06f20b2df09298b3e02f8a50e156c22b82b3975c`, listing hash
-`sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e`). A platform key holds one pin,
-so `linux-x86_64` pins the Ubuntu archive and the RHEL 7 measurement is recorded, not pinned; an
-operator on the RHEL 7 build is refused with `gmat-descriptor-differs`, and a second key (for example
-`linux-x86_64-rhel7`) would pin it if a site needs it. A pin for Linux was measured, not run: Colima's VM is
-aarch64, so the x86_64 binaries were never started; the installer's check reads bytes only.
+`sha256:041a4fffcbd08b17664951fa02eff53627cff2e256cccafc6299348641bd0a8e`). It is pinned under
+`linux-x86_64-rhel7` as the `rhel7` variant of `linux-x86_64` (question 257, "Variants" above); the
+Ubuntu archive stays `linux-x86_64` and the default. The pin is question 254's measurement of the
+unpacked `GMAT/R2026a` with `manifest.measure_tree(root, scope)`, the same call and scope as the Ubuntu
+pin. The archive was no longer on this host when it was pinned, so it was not re-measured, and it was
+not fetched again (question 154). An operator on the RHEL 7 build passes
+`--gmat-platform linux-x86_64 --gmat-variant rhel7`; without the option the tree is refused with
+`gmat-matches-other-variant`. Neither Linux pin was run: Colima's VM is aarch64, so the x86_64
+binaries were never started; the installer's check reads bytes only.
 
 ### Items 4 to 6: service images and ClickHouse
 
@@ -310,7 +332,9 @@ proof runs the files install in a `python:3.13-slim` container.
 - Re-measuring the GMAT pins: `AV_KIT_MEASURE_GMAT=1 GMAT_ROOT=<unpacked macOS release> pytest
   tests/test_kit_install.py` (the test `test_the_real_gmat_tree_matches_the_recorded_macos_pin`), and
   `AV_KIT_MEASURE_GMAT_LINUX=1 GMAT_LINUX_ROOT=<GMAT/R2026a of the unpacked Ubuntu archive> pytest
-  tests/test_kit_install.py` (`test_the_real_linux_gmat_tree_matches_the_recorded_linux_x86_64_pin`).
+  tests/test_kit_install.py` (`test_the_real_linux_gmat_tree_matches_the_recorded_linux_x86_64_pin`), and
+  `AV_KIT_MEASURE_GMAT_RHEL7=1 GMAT_RHEL7_ROOT=<GMAT/R2026a of the unpacked RHEL 7 archive> pytest
+  tests/test_kit_install.py` (`test_the_real_rhel7_gmat_tree_matches_the_recorded_linux_x86_64_rhel7_pin`).
 - The zero-egress proof, `tests/test_kit_zero_egress_install.py`, with the bases from
   `out/kit/proof-bases/` and numpy from `out/kit/proof-operator-wheels/` supplied separately and a kit
   carrying only application layers: 5 passed.
@@ -326,9 +350,10 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
 - The committed `docs/compliance/` SBOMs (the image SBOMs, and `av-viewer` and `gmat-service`
   after the `httpx` and `pyyaml` declarations) are regenerated by the lead after the merge; until then
   they show the earlier component lists.
-- GMAT has pins for macOS arm64 and Linux x86_64 (the Ubuntu archive; question 254, task 12). There is
-  no Linux aarch64 pin, because NASA publishes no such build, and the RHEL 7 archive is measured and
-  recorded, not pinned. The macOS pin is for the `macos-arm64` key; SourceForge's R2026a folder lists a
+- GMAT has pins for macOS arm64 and Linux x86_64, where both of NASA's archives are pinned: Ubuntu
+  (`linux-x86_64`, the default variant; question 254, task 12) and RHEL 7 (`linux-x86_64-rhel7`, the
+  `rhel7` variant; question 257, pinned from question 254's measurement, not re-measured from the
+  archive). There is no Linux aarch64 pin, because NASA publishes no such build. The macOS pin is for the `macos-arm64` key; SourceForge's R2026a folder lists a
   macOS x64 `.dmg` only, and this document does not record where the arm64 tree came from. The pins do
   not cover what their scope leaves out, nor anything after the install-time check.
 - The wheel pin is for numpy 2.5.3 on linux/aarch64/cp313. A closure for another platform, or another
@@ -349,7 +374,8 @@ and every wheel's bundled libraries are inventoried (task 5, `03f0504`).
    `dc8eb1d` re-records the cFS build commit.
 2. **GMAT as an operator download.** Done: `b53ec76` makes `--copy-pack gmat` an error and the
    installer measures the operator's tree against a per-platform pin. Linux x86_64 pinned in task 12
-   of question 254; Linux aarch64 has no NASA build.
+   of question 254, its RHEL 7 build added as a second variant by question 257 (`--gmat-variant`);
+   Linux aarch64 has no NASA build.
 3. **The installer verifies every item above** by digest or hash before use, refusing a mismatch,
    and prints the list. Done: `bec6611` for items 1 to 6 (and `--declare-operator-supplied`,
    `--check-operator-supplied`), extended to item 7 by `03f0504`. Item 8 is checked by `install.sh`
