@@ -6257,7 +6257,7 @@ mod tests {
     fn throttle_tm_codec(id: &str, apid: u32) -> PacketCodec {
         let mut codec = ground::ground_tm_packet_codec(id, apid);
         codec.user_data_bytes = 32;
-        codec.fields.push(PacketField { name: "accel_scale".to_string(), bit_offset: 192, bit_width: 64, r#type: av_cdm::pb::PacketFieldType::Float64 as i32, unit: av_cdm::pb::Unit::Dimensionless as i32, scale: 1.0, offset: 0.0, target: String::new() });
+        codec.fields.push(av_cdm::pb::PacketField { name: "accel_scale".to_string(), bit_offset: 192, bit_width: 64, r#type: av_cdm::pb::PacketFieldType::Float64 as i32, unit: av_cdm::pb::Unit::Dimensionless as i32, scale: 1.0, offset: 0.0, target: String::new() });
         codec
     }
     fn emit_system(ports: Vec<Port>, codecs: Vec<PacketCodec>) -> SystemDefinition {
