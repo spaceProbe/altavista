@@ -25,12 +25,14 @@
 //! Tests 1/2 spawn `services/lockstep-ref` as a local subprocess exactly like
 //! `tests/drm_container.rs` does -- see that file's own module doc comment for the subprocess
 //! plumbing convention (`ChildGuard`, a real readiness poll, killed on drop) this file repeats
-//! rather than shares (each integration test binary is its own compilation unit).
+//! (the readiness poll) or shares (`ChildGuard`, `repo_root`, from `tests/cfs_common/mod.rs`;
+//! each integration test binary is its own compilation unit, so a shared module is `mod`-included
+//! in each).
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use av_cdm::pb::{
@@ -44,9 +46,11 @@ use gmat_sys::Gmat;
 // Subprocess plumbing (mirrors tests/drm_container.rs -- see that file's own doc comment).
 // ------------------------------------------------------------------------------------------
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
+// Question 254 item 11: `repo_root` and `ChildGuard` come from `tests/cfs_common/mod.rs` (they
+// were identical copies of `tests/drm_container.rs`'s, which uses the same module).
+mod cfs_common;
+use cfs_common::{repo_root, ChildGuard};
+
 fn lockstep_ref_dir() -> PathBuf {
     repo_root().join("services").join("lockstep-ref")
 }
@@ -56,14 +60,6 @@ fn python() -> PathBuf {
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     listener.local_addr().unwrap().port()
-}
-
-struct ChildGuard(Child);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);

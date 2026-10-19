@@ -48,7 +48,7 @@
 use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use av_cdm::pb::{
@@ -60,13 +60,16 @@ use av_kernel::drm::{execute, hash, DrmError, RunConfig};
 use av_lockstep::docker::{prune_stale_test_resources, test_label_args, test_run_id};
 use gmat_sys::Gmat;
 
+// Question 254 item 11: `repo_root`, `ChildGuard`, `docker_cmd`, `DockerContainerGuard` and
+// `DockerImageGuard` (the last two were one line each beside `docker_cmd`) used to be copied here
+// and in `tests/drm_shared_run.rs`; they live in `tests/cfs_common/mod.rs` now (identical bodies,
+// compared line by line when they moved: `docs/open-questions.md` question 254 item 11).
+mod cfs_common;
+use cfs_common::{docker_cmd, repo_root, ChildGuard, DockerContainerGuard, DockerImageGuard};
+
 // ------------------------------------------------------------------------------------------
 // Subprocess plumbing
 // ------------------------------------------------------------------------------------------
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
 
 fn lockstep_ref_dir() -> PathBuf {
     repo_root().join("services").join("lockstep-ref")
@@ -84,16 +87,9 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Kills the spawned `lockstep_ref` subprocess on drop, so any test failure (an early `?`
-/// propagation or a panicking assertion) can never leak a listening server -- this repository's
-/// own environment note: "Kill any subprocess you spawn before reporting."
-struct ChildGuard(Child);
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
+// `ChildGuard` (`cfs_common`) kills the spawned `lockstep_ref` subprocess on drop, so any test
+// failure (an early `?` propagation or a panicking assertion) can never leak a listening server --
+// this repository's own environment note: "Kill any subprocess you spawn before reporting."
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -776,24 +772,8 @@ fn a_hardware_fault_with_an_unsupported_kind_on_a_container_instance_is_refused(
 //    shares, and `tests/test_lockstep_ref.py` for the verified-visible pytest-side equivalent).
 // ------------------------------------------------------------------------------------------
 
-fn docker_cmd(args: &[&str]) -> String {
-    let output = std::process::Command::new("docker").args(args).current_dir(repo_root()).output().unwrap_or_else(|e| panic!("could not launch `docker {args:?}`: {e}"));
-    if !output.status.success() {
-        panic!("`docker {args:?}` failed: {}", String::from_utf8_lossy(&output.stderr));
-    }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-struct DockerContainerGuard(String);
-impl Drop for DockerContainerGuard {
-    fn drop(&mut self) {
-        // `-v`: the throwaway `registry:2` declares `VOLUME /var/lib/registry`; without it every
-        // registry left an anonymous volume behind.
-        let _ = std::process::Command::new("docker").args(["rm", "-f", "-v", &self.0]).output();
-    }
-}
-// Question 254 item 10: removes one image NAME and never an image this run did not make (a name
-// whose image has no other reference is refused, loudly), instead of `docker rmi -f <name>`.
-type DockerImageGuard = av_lockstep::docker::ImageNameGuard;
+// `docker_cmd`, `DockerContainerGuard` (`rm -f -v`) and `DockerImageGuard` (question 254 item 10:
+// `av_lockstep::docker::ImageNameGuard`) come from `cfs_common`; see the import at the top.
 
 /// A `BINDING_KIND_CONTAINER` `SystemDefinition` for the Docker image-lifecycle path: no
 /// `container.address` at all (mutually exclusive with `ContainerBinding.image` --

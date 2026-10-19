@@ -118,6 +118,20 @@ pub fn docker_cmd(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Kills (then reaps) the spawned subprocess on drop, so any test failure (an early `?`
+/// propagation or a panicking assertion) can never leak a listening server -- this repository's
+/// own environment note: "Kill any subprocess you spawn before reporting." Question 254 item 11:
+/// moved here unchanged from `tests/drm_container.rs` and `tests/drm_shared_run.rs`, which each
+/// carried an identical copy (the `lockstep_ref` subprocess guard; not cFS-specific, kept in this
+/// module because it is the one shared test-support module those two files can reuse).
+pub struct ChildGuard(pub std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Removes the container on drop, **with its anonymous volumes** (`-v`): `registry:2` declares
 /// `VOLUME /var/lib/registry`, so every throwaway registry made one, and `rm -f` alone left it
 /// dangling (measured: +1 volume per registry, question 245's round).
