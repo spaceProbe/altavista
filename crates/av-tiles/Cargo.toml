@@ -98,3 +98,15 @@ av-command = { path = "../av-command", features = ["test-support"] }
 # this file's own "Deliberately NOT a dependency" block above.
 serde_json.workspace = true
 
+
+# `tests/store_backend_error.rs` (question 256) runs the S3 server `services/store/IMAGE_DIGEST.md`
+# records and drives this crate's real `StoreObjectSource` against it. The container lifecycle and
+# the docker gate/lock/label/prune discipline have ONE home, `crates/av-lockstep/src/docker.rs`
+# (mirroring `crates/av-store/Cargo.toml`'s identical dev-dependency): a path dependency onto an
+# in-workspace crate, DEV only -- `src/**` has no reason to know Docker exists.
+av-lockstep = { path = "../av-lockstep" }
+# `bytes::Bytes` (the body type `StoreClient::put` takes) and `http::Uri` (`StoreConfig.endpoint`):
+# both already resolved in this workspace's Cargo.lock through av-store, dev-only here, so no new
+# registry crate.
+bytes = "1"
+http = "1"

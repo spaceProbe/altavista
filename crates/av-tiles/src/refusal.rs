@@ -82,6 +82,13 @@ pub enum TileRefusal {
     /// No object is stored under this `manifest_sha256`'s derived key at all.
     #[error("no manifest object stored for manifest_sha256 {manifest_sha256:?}")]
     ManifestNotFound { manifest_sha256: String },
+    /// The store answered or failed in a way that is not "absent": a connect error, a
+    /// non-404 S3 error, an object whose `av-*` metadata is missing or unreadable, a
+    /// failed read. Never [`Self::ManifestNotFound`] / [`Self::TileObjectNotFound`] (question
+    /// 256: a store failure must not be masked as "no such object"), and never the
+    /// caller's fault: `502`. Raised at both fetch sites (the manifest and a tile object).
+    #[error("object store backend error fetching key {key:?}: {detail}")]
+    StoreBackend { key: String, detail: String },
     /// The store returned bytes for this key, but they do not hash to the requested
     /// `manifest_sha256` -- "the store returned something that is not what was asked for".
     #[error("manifest object's actual sha256 {actual:?} does not match the requested manifest_sha256 {requested:?}")]
@@ -143,6 +150,7 @@ impl Counted for TileRefusal {
             TileRefusal::AuthNoClearanceForSubject { .. } => "tiles_auth_no_clearance_for_subject",
             TileRefusal::AuthClearanceMarkingNotOnLadder { .. } => "tiles_auth_clearance_marking_not_on_ladder",
             TileRefusal::ManifestNotFound { .. } => "tiles_manifest_not_found",
+            TileRefusal::StoreBackend { .. } => "tiles_store_backend_error",
             TileRefusal::ManifestHashMismatch { .. } => "tiles_manifest_hash_mismatch",
             TileRefusal::ManifestDecodeInvalid { .. } => "tiles_manifest_decode_invalid",
             TileRefusal::LayerLabel(inner) => layer_label_code(inner),
@@ -167,6 +175,7 @@ pub const ALL_CODES: &[&str] = &[
     "tiles_auth_no_clearance_for_subject",
     "tiles_auth_clearance_marking_not_on_ladder",
     "tiles_manifest_not_found",
+    "tiles_store_backend_error",
     "tiles_manifest_hash_mismatch",
     "tiles_manifest_decode_invalid",
     "tiles_layer_label_caller_marking_not_on_ladder",
@@ -181,16 +190,17 @@ pub const ALL_CODES: &[&str] = &[
 /// The HTTP status [`TileRefusal`] maps to. "Who/what are you" (no/bad token) is `401`;
 /// "you may not" (a real clearance decision refusing) is `403`; "that address does not
 /// exist" (client-visible: a bad path, an unknown manifest, an unknown tile address) is
-/// `400`/`404`; "the store gave us something inconsistent with what was asked/promised"
-/// (a hash mismatch, a decode failure, a manifest-listed object gone missing) is `502` --
-/// never the client's fault, always the upstream store's.
+/// `400`/`404`; "the store gave us something inconsistent with what was asked/promised, or
+/// failed to answer" (a hash mismatch, a decode failure, a manifest-listed object gone
+/// missing, a store backend error) is `502` -- never the client's fault, always the upstream
+/// store's.
 pub fn status(refusal: &TileRefusal) -> u16 {
     match refusal {
         TileRefusal::Route(_) => 400,
         TileRefusal::AuthMissingToken | TileRefusal::AuthTokenInvalid { .. } => 401,
         TileRefusal::AuthNoClearanceForSubject { .. } | TileRefusal::AuthClearanceMarkingNotOnLadder { .. } | TileRefusal::LayerLabel(_) => 403,
         TileRefusal::ManifestNotFound { .. } | TileRefusal::TileNotFound { .. } => 404,
-        TileRefusal::ManifestHashMismatch { .. } | TileRefusal::ManifestDecodeInvalid { .. } | TileRefusal::TileObjectNotFound { .. } | TileRefusal::TileHashMismatch { .. } => 502,
+        TileRefusal::StoreBackend { .. } | TileRefusal::ManifestHashMismatch { .. } | TileRefusal::ManifestDecodeInvalid { .. } | TileRefusal::TileObjectNotFound { .. } | TileRefusal::TileHashMismatch { .. } => 502,
         TileRefusal::RangeUnsatisfiable { .. } => 416,
     }
 }
@@ -210,6 +220,7 @@ mod tests {
             TileRefusal::AuthNoClearanceForSubject { groups: vec![] },
             TileRefusal::AuthClearanceMarkingNotOnLadder { groups: vec![], marking: "x".to_string() },
             TileRefusal::ManifestNotFound { manifest_sha256: "x".to_string() },
+            TileRefusal::StoreBackend { key: "x".to_string(), detail: "d".to_string() },
             TileRefusal::ManifestHashMismatch { requested: "a".to_string(), actual: "b".to_string() },
             TileRefusal::ManifestDecodeInvalid { manifest_sha256: "x".to_string(), detail: "d".to_string() },
             TileRefusal::LayerLabel(LabelRefusal::MarkingNotOnLadder { side: av_label::Side::Caller, marking: "x".to_string() }),
@@ -262,6 +273,7 @@ mod tests {
         assert_eq!(status(&TileRefusal::LayerLabel(LabelRefusal::OverClearance { subject_marking: "SECRET".to_string(), caller_clearance: "CUI".to_string() })), 403);
         assert_eq!(status(&TileRefusal::ManifestNotFound { manifest_sha256: "x".to_string() }), 404);
         assert_eq!(status(&TileRefusal::TileNotFound { level: 0, x: 0, y: 0 }), 404);
+        assert_eq!(status(&TileRefusal::StoreBackend { key: "x".to_string(), detail: "d".to_string() }), 502);
         assert_eq!(status(&TileRefusal::ManifestHashMismatch { requested: "a".to_string(), actual: "b".to_string() }), 502);
         assert_eq!(status(&TileRefusal::TileHashMismatch { expected: "a".to_string(), actual: "b".to_string() }), 502);
         assert_eq!(status(&TileRefusal::RangeUnsatisfiable { len: 100 }), 416);

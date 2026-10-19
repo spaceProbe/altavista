@@ -581,3 +581,39 @@ async fn ensure_bucket_twice_is_idempotent() {
     first.unwrap_or_else(|e| panic!("{TEST_NAME}: first ensure_bucket: {e}"));
     second.unwrap_or_else(|e| panic!("{TEST_NAME}: second ensure_bucket: {e}"));
 }
+
+/// 9. The default `Provenance` and a `Label` with no caveats round trip (question 256). A default
+///    `Provenance` encodes to zero bytes, so `x-amz-meta-av-provenance` is sent with an EMPTY
+///    value (base64 of nothing). The first trial server (SeaweedFS 4.48) dropped an `x-amz-meta-*` header whose value is
+///    empty, so `head` came back without it and failed with `StoreError::MetadataMissing`. This
+///    test pins the case against the server the record names: `head` returns exactly the label
+///    that was put and `Some(Provenance::default())`, and `get` returns the bytes.
+#[tokio::test]
+async fn a_default_provenance_and_no_caveats_round_trip() {
+    const TEST_NAME: &str = "a_default_provenance_and_no_caveats_round_trip";
+    let launch = gate_or_skip!(TEST_NAME);
+    let _lock = lock_docker_tests();
+    prune_stale_test_resources(&_lock);
+    let fixture = start_fixture(&launch, TEST_NAME);
+    fixture.client.ensure_bucket(now()).await.unwrap_or_else(|e| panic!("{TEST_NAME}: ensure_bucket: {e}"));
+
+    let payload = b"a payload whose provenance and caveats are both empty".to_vec();
+    let label = Label { marking: "UNCLASSIFIED".to_string(), caveats: vec![] };
+
+    let asset = fixture
+        .client
+        .put(Bytes::from(payload.clone()), "application/octet-stream", label.clone(), Provenance::default(), now())
+        .await
+        .unwrap_or_else(|e| panic!("{TEST_NAME}: put: {e}"));
+
+    let head = fixture.client.head(&asset, now()).await.unwrap_or_else(|e| panic!("{TEST_NAME}: head (an empty av-provenance header must survive the server): {e}"));
+    assert_eq!(head.label, Some(label), "head must return exactly the Label that was put, with no caveats");
+    assert_eq!(head.provenance, Some(Provenance::default()), "head must return the default Provenance that was put");
+    assert_eq!(head.sha256, asset.sha256);
+
+    let ladder = ClearanceLadder::new(vec!["UNCLASSIFIED".to_string()]);
+    let fetched = fixture.client.get(&asset, "UNCLASSIFIED", &ladder, now()).await.unwrap_or_else(|e| panic!("{TEST_NAME}: get: {e}"));
+    assert_eq!(fetched.as_ref(), payload.as_slice(), "get must return the bytes that were put");
+
+    println!("{TEST_NAME}: put/head/get agreed on sha256={}; head returned label {:?} and provenance {:?}", asset.sha256, head.label, head.provenance);
+}
