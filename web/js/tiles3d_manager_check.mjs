@@ -1,4 +1,6 @@
-// CLI harness for tests/test_viewer_tiles3d_manager.py: `node web/js/tiles3d_manager_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_tiles3d_manager.py drives:
+// `node web/js/tiles3d_manager_check.mjs`. It asserts its own proofs and exits 1 on any
+// failure (question 254 item 5); see "ASSERTS AND EXITS" near the bottom.
 //
 // Round 5 (docs/open-questions.md question 228/decision 9, round 4's own deferral,
 // ratified question 229): proves the 3D Tiles overlay's real per-tile content fetch is
@@ -529,7 +531,98 @@ async function main() {
     crossContaminationFixed: await runCrossContamination(false),
     crossContaminationCounterfactual: await runCrossContamination(true),
   };
-  process.stdout.write(JSON.stringify(result));
+  assertAndExit(result);
+}
+
+// ASSERTS AND EXITS: every assertion tests/test_viewer_tiles3d_manager.py makes on the
+// printed result (except cross-process byte-identity, which needs two processes and
+// stays in the driver; the live headless-Chrome tests stay there too) is made here too,
+// same values, so the standalone gate fails on a regression by itself. Each failure
+// prints to stderr as `FAIL <name>: measured X, bound Y`, then a summary line, then exit
+// 1; success exits 0. A thrown error in a proof (a rejected `main()`) also exits
+// non-zero, via node's unhandled-rejection exit code.
+function assertAndExit(result) {
+  const failures = [];
+  let assertionCount = 0;
+  const assertBound = (name, ok, measured, bound) => {
+    assertionCount += 1;
+    if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+  };
+  const show = (v) => JSON.stringify(v);
+  const eq = (name, got, want) => assertBound(name, show(got) === show(want), show(got), `== ${show(want)}`);
+  const gt = (name, got, min) => assertBound(name, got > min, show(got), `> ${show(min)}`);
+
+  // 1. no duplicate fetch (and dedup is per tile, not per URL)
+  {
+    const d = result.noDuplicateFetch;
+    const w = 'noDuplicateFetch';
+    eq(`${w}.fetchDataFallbackCount`, d.fetchDataFallbackCount, 0);
+    eq(`${w}.fetchCallCount`, d.fetchCallCount, 1);
+    eq(`${w}.loaderInvocationCount`, d.loaderInvocationCount, 1);
+    eq(`${w}.loaderInvocationCountForRootUrl`, d.loaderInvocationCountForRootUrl, 1);
+    eq(`${w}.askedAfterSettleIsOk`, d.askedAfterSettleIsOk, true);
+    const m = d.manyKeysSharedOneUrl;
+    eq(`${w}.manyKeysSharedOneUrl.distinctUrlsAmongThem`, m.distinctUrlsAmongThem, 1);
+    gt(`${w}.manyKeysSharedOneUrl.distinctTileKeysWanted`, m.distinctTileKeysWanted, 1);
+    eq(`${w}.manyKeysSharedOneUrl.admittedKeyCount == distinctTileKeysWanted`, m.admittedKeyCount, m.distinctTileKeysWanted);
+    eq(`${w}.manyKeysSharedOneUrl.dedupIsPerKeyNotPerUrl`, m.dedupIsPerKeyNotPerUrl, true);
+  }
+  // 2. the budget genuinely gates admission
+  {
+    const d = result.budgetGates;
+    eq('budgetGates.wantedExceedsBudget', d.wantedExceedsBudget, true);
+    eq('budgetGates.everyStepWithinBudget', d.everyStepWithinBudget, true);
+    eq('budgetGates.residentBytesRecomputedMatches', d.residentBytesRecomputedMatches, true);
+    gt('budgetGates.finalDeferredCount', d.finalDeferredCount, 0);
+    eq('budgetGates.softViolationCount', d.softViolationCount, 0);
+  }
+  // 3. cancellation is real
+  {
+    const d = result.cancellationReal;
+    eq('cancellationReal.watchedKeyDroppedFromWanted', d.watchedKeyDroppedFromWanted, true);
+    eq('cancellationReal.signalAborted', d.signalAborted, true);
+    eq('cancellationReal.cancelledCountMoved', d.cancelledCountMoved, true);
+    gt('cancellationReal.cancelledCountDelta', d.cancelledCountDelta, 0);
+    eq('cancellationReal.loadPromiseRejectedWithAbortError', d.loadPromiseRejectedWithAbortError, true);
+  }
+  // 4. release() frees the adapter's resource; a re-want re-fetches
+  {
+    const d = result.releaseRefetches;
+    eq('releaseRefetches.residentAfterFirstLoad', d.residentAfterFirstLoad, true);
+    eq('releaseRefetches.invocationsAfterFirstLoad', d.invocationsAfterFirstLoad, 1);
+    eq('releaseRefetches.evictedAfterElsewhereWanted', d.evictedAfterElsewhereWanted, true);
+    gt('releaseRefetches.evictedCount', d.evictedCount, 0);
+    eq('releaseRefetches.refetchedAfterRelease', d.refetchedAfterRelease, true);
+  }
+  // 5. the bytes the manager accounts are the bytes actually transferred
+  {
+    const d = result.realByteReconciliation;
+    eq('realByteReconciliation.byteCostSourceBeforeLoad', d.byteCostSourceBeforeLoad, 'fallback-estimate');
+    eq('realByteReconciliation.byteCostBeforeLoad == defaultEstimate', d.byteCostBeforeLoad, d.defaultEstimate);
+    assertBound('realByteReconciliation.declaredContentLength != defaultEstimate', d.declaredContentLength !== d.defaultEstimate, d.declaredContentLength, `!= ${d.defaultEstimate}`);
+    eq('realByteReconciliation.freshPlanNowReportsRealBytes', d.freshPlanNowReportsRealBytes, true);
+    eq('realByteReconciliation.byteCostRevisionCountMoved', d.byteCostRevisionCountMoved, true);
+    eq('realByteReconciliation.residentBytesNowReflectsReal', d.residentBytesNowReflectsReal, true);
+  }
+  // 6. no cross-layer contamination, and the counterfactual proves the hazard was real
+  {
+    const f = result.crossContaminationFixed;
+    eq('crossContaminationFixed.imageryResidentAfterTick1', f.imageryResidentAfterTick1, true);
+    eq('crossContaminationFixed.imageryStillResidentAtEnd', f.imageryStillResidentAtEnd, true);
+    eq('crossContaminationFixed.imageryReleaseCount', f.imageryReleaseCount, 0);
+    eq('crossContaminationFixed.imageryLoadCount', f.imageryLoadCount, 2);
+    eq('crossContaminationFixed.managerCancelledCount', f.managerCancelledCount, 0);
+    eq('crossContaminationFixed.managerEvictedCount', f.managerEvictedCount, 0);
+    const c = result.crossContaminationCounterfactual;
+    eq('crossContaminationCounterfactual.imageryStillResidentAtEnd', c.imageryStillResidentAtEnd, false);
+    gt('crossContaminationCounterfactual.managerCancelledCount', c.managerCancelledCount, 0);
+    gt('crossContaminationCounterfactual.imageryLoadCount', c.imageryLoadCount, 2);
+  }
+
+  for (const line of failures) process.stderr.write(`${line}\n`);
+  process.stderr.write(`tiles3d_manager_check: ${assertionCount - failures.length} passed, ${failures.length} failed\n`);
+  // stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+  process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));
 }
 
 main();

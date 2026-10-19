@@ -127,7 +127,8 @@
 //! over a `std::sync::mpsc` channel. Unlike that test's own sink, this one is handed an
 //! already-connected, already-`Announce`d `Client` -- `--buffer-dir` never changes how
 //! this binary connects or announces, only how it submits), rooted at
-//! `<--buffer-dir>/<producer_id>.buflog` -- so a disconnection mid-run is survived exactly
+//! `<--buffer-dir>/<producer_id>.buflog` (the `producer_id`, which comes from `--plugin-config`,
+//! must be a path-component id, `av_cdm::path_id`, checked before any connection) -- so a disconnection mid-run is survived exactly
 //! as E6 specifies (buffered while down, replayed in order once the link returns) instead
 //! of this binary simply failing outright. A run with nothing ever disconnecting produces
 //! an **empty** buffer file (`EdgeBuffer::append` is only ever called from inside
@@ -540,6 +541,15 @@ fn sleep_until_due(due_ns: i64, start: Instant) {
     }
 }
 
+/// `<buffer_dir>/<producer_id>.buflog`, the `--buffer-dir` buffer's file. `producer_id` comes from
+/// the `--plugin-config` file (untrusted input), so it must be a path-component id
+/// (`av_cdm::path_id`, question 254 item 1) before it is joined onto the directory; checked in
+/// `run` before any connection is made.
+fn buffer_file_path(buffer_dir: &std::path::Path, producer_id: &str) -> Result<std::path::PathBuf, String> {
+    av_cdm::path_id::validate_path_component_id(producer_id).map_err(|e| format!("--plugin-config producer_id {producer_id:?} cannot name the --buffer-dir buffer file (<producer_id>.buflog): {e}"))?;
+    Ok(buffer_dir.join(format!("{producer_id}.buflog")))
+}
+
 async fn run(args: Args) -> Result<serde_json::Value, String> {
     let run_products = load_run_products(&args.run_products)?;
     let log = load_verified_port_traffic_log(&args.port_traffic, &run_products.port_traffic_hash)?;
@@ -549,6 +559,8 @@ async fn run(args: Args) -> Result<serde_json::Value, String> {
     // Step 3 ("What it does"): verify this process's own identity, if asked to, BEFORE a
     // single batch is built/signed below -- see `verify_own_identity`'s own doc comment.
     let identity = verify_own_identity(&args, &mut cfg)?;
+    // Question 254 item 1: the buffer file's name comes from `producer_id`; refuse a bad one now.
+    let buffer_path = args.buffer_dir.as_deref().map(|dir| buffer_file_path(dir, &cfg.producer_id)).transpose()?;
 
     let source = PortTrafficSource::from_log(&log, &cfg).map_err(|e| format!("decoding the port traffic log against --plugin-config: {e}"))?;
     let builder = BatchBuilder::new(cfg.batching).map_err(|e| format!("{e}"))?;
@@ -579,7 +591,7 @@ async fn run(args: Args) -> Result<serde_json::Value, String> {
     let start = Instant::now();
     let mut verdicts: Vec<pb::BatchVerdict> = Vec::with_capacity(batches.len());
 
-    match &args.buffer_dir {
+    match &buffer_path {
         None => {
             for (index, batch) in batches.into_iter().enumerate() {
                 sleep_until_due(cfg.pacing.due_at(index, first_epoch, batch.batch_tai_ns), start);
@@ -587,9 +599,8 @@ async fn run(args: Args) -> Result<serde_json::Value, String> {
                 verdicts.append(&mut one);
             }
         }
-        Some(buffer_dir) => {
-            let buffer_path = buffer_dir.join(format!("{}.buflog", cfg.producer_id));
-            let (edge_buffer, _recovery) = EdgeBuffer::open(&buffer_path).map_err(|e| format!("opening --buffer-dir buffer at {buffer_path:?}: {e}"))?;
+        Some(buffer_path) => {
+            let (edge_buffer, _recovery) = EdgeBuffer::open(buffer_path).map_err(|e| format!("opening --buffer-dir buffer at {buffer_path:?}: {e}"))?;
             let sink = PluginBatchSink::new(client);
             let mut driver = UplinkDriver::new(sink, edge_buffer);
             for (index, batch) in batches.into_iter().enumerate() {
@@ -661,5 +672,24 @@ async fn main() -> ExitCode {
             eprintln!("av-edge-plugin: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Question 254 item 1: the buffer file name is built only from a path-component
+    /// `producer_id`; a traversal one is refused with a message naming the flag and the id, and
+    /// nothing is created.
+    #[test]
+    fn the_buffer_file_is_named_only_from_a_path_component_producer_id() {
+        let dir = std::path::Path::new("/nonexistent-buffer-dir");
+        assert_eq!(buffer_file_path(dir, "producer-1").unwrap(), dir.join("producer-1.buflog"));
+        for bad in ["../x", "..", "/etc/x", "a/b", "a\\b", "a\0b", "", "%2e%2e%2fx", "..%2fx", ".hidden"] {
+            let e = buffer_file_path(dir, bad).unwrap_err();
+            assert!(e.contains("--plugin-config producer_id") && e.contains("<producer_id>.buflog"), "{bad:?}: {e}");
+        }
+        assert!(!dir.exists());
     }
 }

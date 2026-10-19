@@ -1,4 +1,6 @@
-// CLI harness for tests/test_viewer_globe.py: `node web/js/globe_imagery_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_globe.py drives:
+// `node web/js/globe_imagery_check.mjs`. It asserts its own checks and exits 1 on any
+// failure (question 254 item 5); see "ASSERTS AND EXITS" at the bottom.
 //
 // M19.5 (docs/open-questions.md question 132, decided by the lead: "the imagery source
 // is a profile setting ... an XYZ/WMTS URL template and an attribution string; no
@@ -133,4 +135,47 @@ const result = {
   noRealNetworkIoAttempted: true,
 };
 
-process.stdout.write(JSON.stringify(result));
+// ASSERTS AND EXITS: every assertion tests/test_viewer_globe.py makes on `result` is made
+// here too (same thresholds), so the standalone gate (`node web/js/globe_imagery_check.mjs`,
+// exit code) fails on a regression by itself. Each failure prints to stderr as
+// `FAIL <name>: measured X, bound Y`, then a summary line, then exit 1; success exits 0.
+const failures = [];
+let assertionCount = 0;
+function assertBound(name, ok, measured, bound) {
+  assertionCount += 1;
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const DEFAULT_TEMPLATE = './fixtures/tiles/{z}/{x}/{y}.png';
+assertBound('configuredTileCount > 0', result.configuredTileCount > 0, result.configuredTileCount, '> 0');
+assertBound(
+  'configuredRecordedUrls == configuredExpectedUrls',
+  JSON.stringify(result.configuredRecordedUrls) === JSON.stringify(result.configuredExpectedUrls),
+  JSON.stringify(result.configuredRecordedUrls.slice(0, 1)),
+  JSON.stringify(result.configuredExpectedUrls.slice(0, 1)),
+);
+assertBound(
+  'no configured URL falls back to ./fixtures/tiles/',
+  result.configuredRecordedUrls.every((u) => !u.includes('./fixtures/tiles/')),
+  JSON.stringify(result.configuredRecordedUrls.filter((u) => u.includes('./fixtures/tiles/')).slice(0, 1)),
+  'none containing ./fixtures/tiles/',
+);
+assertBound('verbatimTemplateUsed === true', result.verbatimTemplateUsed === true, result.verbatimTemplateUsed, 'true');
+assertBound('noRealNetworkIoAttempted === true', result.noRealNetworkIoAttempted === true, result.noRealNetworkIoAttempted, 'true');
+assertBound('defaultTileCount > 0', result.defaultTileCount > 0, result.defaultTileCount, '> 0');
+assertBound('defaultImageryUrlUsed == default fixture template', result.defaultImageryUrlUsed === DEFAULT_TEMPLATE, result.defaultImageryUrlUsed, DEFAULT_TEMPLATE);
+assertBound(
+  'every default URL is a ./fixtures/tiles/ .png',
+  result.defaultRecordedUrls.every((u) => u.startsWith('./fixtures/tiles/') && u.endsWith('.png')),
+  JSON.stringify(result.defaultRecordedUrls.filter((u) => !(u.startsWith('./fixtures/tiles/') && u.endsWith('.png'))).slice(0, 1)),
+  'all start with ./fixtures/tiles/ and end with .png',
+);
+assertBound('defaultProfileUsesTheOfflineFixture === true', result.defaultProfileUsesTheOfflineFixture === true, result.defaultProfileUsesTheOfflineFixture, 'true');
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(
+  `globe_imagery_check: ${assertionCount - failures.length} passed, ${failures.length} failed `
+  + `(configuredTileCount=${result.configuredTileCount}, defaultTileCount=${result.defaultTileCount})\n`,
+);
+
+// stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));

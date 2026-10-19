@@ -47,10 +47,31 @@
 //! to `<root>/<sweep_id>/`. `rename(2)` of a directory onto a non-empty directory fails, so it can
 //! never replace a study.
 //!
+//! **Two phases (question 254 item 2).** `put_study` is [`StudyStore::prepare`] then
+//! [`StudyStore::commit`] on this one store: `prepare` is everything up to and including the
+//! `fsync`ed staging directory (invisible to every reader), `commit` is the rename, `abort`
+//! removes the stage. Writing a study to several stores at once goes through
+//! [`crate::study_write`], which prepares every store, aborts all if any refuses, and only then
+//! commits; its module doc has the order (ClickHouse before the file store) and the table of every
+//! partial-failure outcome. [`StudyStore::check_plan`] is the up-front question "would you accept
+//! the study about to run?" ([`crate::plan`]); both backends answer it from the study they hold,
+//! and the file store also applies the id rules below to it.
+//!
+//! - **A `sweep_id` is a path component, validated before any path is built** (question 254 item
+//!   1). The id comes from a sweep YAML's `id`, a decoded `sweep_results.pb` (`--import-study`) or
+//!   `--read-study <id>`: untrusted input. [`av_cdm::path_id::validate_path_component_id`] accepts
+//!   1 to 128 bytes of ASCII `[A-Za-z0-9._-]` whose first byte is `[A-Za-z0-9]`; anything else
+//!   (`..`, `a/b`, a backslash, an absolute path, NUL, any control character, the empty id) is a
+//!   typed [`StoreError::InvalidSweepId`] from `put_study` and `get_study` alike, with no `join`,
+//!   `exists` or `create_dir` having run, so nothing is read or written outside the root. (The
+//!   rule applies to the file store only: ClickHouse takes the id as a SQL value, never a path,
+//!   and has no such restriction.)
 //! - **No half-written study is visible.** A reader sees no directory or the complete one.
 //! - **A crash leaves the old state.** A crash before the rename leaves only a stray
-//!   `.incoming-*` directory, which `list_studies` skips (an operator may delete it; a sweep id
-//!   that itself begins `.incoming-` would be hidden from the listing). A crash cannot leave a different study in place, because nothing is ever replaced.
+//!   `.incoming-*` directory, which `list_studies` skips (an operator may delete it). A sweep id
+//!   can never begin `.incoming-` -- no valid id begins with a dot -- so a staging directory can
+//!   never be mistaken for a study, and a study never hidden from the listing by that prefix. A
+//!   crash cannot leave a different study in place, because nothing is ever replaced.
 //! - **Two writers racing on one id: the first rename wins.** The loser's rename fails, it reads
 //!   the winner and answers as for any existing study: `Ok` if identical, `RefusedWrite` if not.
 //!   (Unlike ClickHouse, whose racing writers are not serialized, the file store serializes them
@@ -61,12 +82,30 @@
 //!   [`StoreError::Decode`], never overwritten: the operator decides what to do with it.
 //! - **A directory under the id that holds no `sweep_results.pb` but is not empty** (a torn
 //!   directory from the pre-question-252 writer, or a foreign one) is an [`StoreError::Io`]
-//!   naming it, not silently written into.
+//!   naming it, not silently written into. It is refused by `check_plan` and `prepare` (question
+//!   254 item 2), before a stage is built and, with several stores, before any store commits.
 //! - **Healing.** An identical re-put of a study whose `sweep_results.json` or `samples.jsonl`
 //!   is *missing* (the old writer wrote `sweep_results.pb` first and could be killed before the
 //!   others) writes only the missing file. Files that exist are never rewritten.
-//! - **An empty `sweep_id`** is refused with [`StoreError::Io`]: its directory would be `<root>`
-//!   itself.
+//! - **Case-insensitive filesystems** (question 254 item 1; macOS's default APFS is one):
+//!   `<root>/Study` and `<root>/study` are one directory there, so ids that differ only in ASCII
+//!   case (exact, since ids are ASCII) would otherwise read each other's study. The store has one
+//!   rule on every filesystem: **an id that ASCII-case-folds equal to a differently spelled
+//!   directory already in the root is refused** with [`StoreError::SweepIdCollision`].
+//!   `put_study` checks before it stages anything, and again when its rename fails (the racing
+//!   writer path), with one `read_dir` of the root (cost: one directory listing per `put_study`,
+//!   plus one per `get_study` that finds nothing or finds another id's study; a `get_study` hit
+//!   reads none). `get_study` also requires the decoded `sweep_id` to equal the requested id
+//!   exactly: a case-folded hit or a foreign file is that same typed error, never another id's
+//!   study and never `None` (`None` would say "no such study" about a directory that holds one).
+//!   `list_studies` skips a directory whose stored `sweep_id` differs from its name (it is not a
+//!   study `get_study` can open under that name; listing it under the stored id would hand out an
+//!   id that resolves to another directory or none). Limit: on a case-sensitive filesystem two
+//!   writers racing on case variants of one id in the same instant can both pass the check and
+//!   both publish; each study is whole and correct under its own id, and `list_studies` shows both.
+//! - **`list_studies` skips a directory whose name is not a valid id**: the store cannot have
+//!   written it (a staging directory, an operator's own folder, a name that is not UTF-8), and
+//!   `get_study` would refuse the name anyway.
 //!
 //! This directory tree is deliberately separate from `--out-dir` (`src/bin/av-sweep/study.rs`'s
 //! own per-sample workspace: `drm.pb`/`sos.pb`/`sys_*.pb`/`stderr.txt`/`run_products.pb` per
@@ -85,9 +124,11 @@ use prost::Message;
 
 use crate::clickhouse::content_sha256;
 use crate::json;
+use crate::plan::{PlanDifference, StudyPlan};
 
 /// Name prefix of the staging directories `put_study` builds a study in before renaming it into
-/// place; `list_studies` skips them.
+/// place. It begins with a dot, which no valid `sweep_id` can, so a staging directory can never be
+/// a study directory.
 const STAGING_PREFIX: &str = ".incoming-";
 
 /// Every way a study-store operation can be refused -- mirrors `crate::error::SweepError`'s own
@@ -105,6 +146,20 @@ pub enum StoreError {
     /// (truncated write, foreign file, corrupted bytes).
     #[error("{}: does not decode as altavista.v1.SweepResults: {source}", path.display())]
     Decode { path: PathBuf, #[source] source: prost::DecodeError },
+
+    /// `sweep_id` is not usable as a directory name (question 254 item 1): see
+    /// [`av_cdm::path_id`] for the rule. Returned before any path is built, so nothing was read
+    /// or written; the `reason` is the typed [`PathIdError`](av_cdm::path_id::PathIdError).
+    #[error("study id {sweep_id:?} is not a valid sweep_id: {reason}")]
+    InvalidSweepId { sweep_id: String, reason: av_cdm::path_id::PathIdError },
+
+    /// The id `sweep_id` names, in this store's directory tree, a directory that is another id's:
+    /// `dir` is a directory in the root holding (or named for) `existing`, which is not `sweep_id`
+    /// but case-folds equal to it (`Study` against `study`: one directory on a case-insensitive
+    /// filesystem), or whose decoded `sweep_id` is `existing` (a foreign or renamed directory).
+    /// Nothing was written and no other id's study was returned. See the module doc.
+    #[error("study id {sweep_id:?} collides with {existing:?} at {}: ids that differ only in ASCII case name one directory on a case-insensitive filesystem, and a directory must hold the study of the id it is named for", dir.display())]
+    SweepIdCollision { sweep_id: String, existing: String, dir: PathBuf },
 
     /// A store refused to write study `sweep_id`; `reason` says whether the study already exists
     /// with different content (either backend), or the ClickHouse server refused the insert.
@@ -157,6 +212,14 @@ pub enum StoreError {
     /// data (`SweepError::MixedPassCriterion`).
     #[error("aggregation: {0}")]
     Aggregation(#[from] crate::error::SweepError),
+
+    /// ClickHouse's header insert (the commit point of a write, decision 1 of the `clickhouse`
+    /// module doc) did not succeed *and* the read that would have shown whether it landed also failed (or
+    /// the insert was acknowledged but the read-back failed): study `sweep_id` under write
+    /// `write_id` may or may not be committed. `insert` says how the insert ended, `reread` why the
+    /// check failed. Re-running the same write converges (an identical study is idempotent).
+    #[error("ClickHouse at {endpoint}: whether study {sweep_id:?} (write {write_id}) was committed is unknown: the header insert {insert}; reading the study back then failed: {reread}")]
+    CommitOutcomeUnknown { endpoint: String, sweep_id: String, write_id: String, insert: String, reread: String },
 }
 
 /// Why [`StoreError::RefusedWrite`] was returned.
@@ -167,6 +230,12 @@ pub enum WriteRefusal {
     /// file store's study directory (it has no write ids); `existing_sha256` and `new_sha256` are
     /// [`crate::clickhouse::content_sha256`] of each, the same identity in both backends.
     DifferentContent { existing_write_id: String, existing_sha256: String, new_sha256: String },
+    /// A study with this `sweep_id` already exists and the study about to run cannot reproduce it
+    /// (question 254 item 2; returned by [`StudyStore::check_plan`], before the first sample runs):
+    /// `difference` is the first field of the [`StudyPlan`] that differs with its two values
+    /// (boxed, so a [`StoreError`] stays small). `existing_write_id` and `existing_sha256` name
+    /// the existing copy as in [`WriteRefusal::DifferentContent`].
+    DifferentPlan { existing_write_id: String, existing_sha256: String, difference: Box<PlanDifference> },
     /// The server refused one of the inserts (a read-only user, missing privileges, a full disk).
     Server { code: Option<i64>, name: Option<String>, http_status: u16, message: String },
 }
@@ -177,6 +246,11 @@ impl std::fmt::Display for WriteRefusal {
             WriteRefusal::DifferentContent { existing_write_id, existing_sha256, new_sha256 } => write!(
                 f,
                 "a study with this id already exists (existing copy {existing_write_id}, content sha256 {existing_sha256}) and the new content (sha256 {new_sha256}) differs; studies are immutable"
+            ),
+            WriteRefusal::DifferentPlan { existing_write_id, existing_sha256, difference } => write!(
+                f,
+                "a study with this id already exists (existing copy {existing_write_id}, content sha256 {existing_sha256}) and the study about to run would not reproduce it: {} is {} there and {} in this run; studies are immutable",
+                difference.field, difference.existing, difference.planned
             ),
             WriteRefusal::Server { code, name, http_status, message } => {
                 write!(f, "the server refused the insert (HTTP {http_status}")?;
@@ -206,22 +280,124 @@ pub struct StudySummary {
     pub sample_count: usize,
 }
 
+/// The kind of a [`StudyStore`]. The order is the commit order of
+/// [`crate::study_write::write_study`]: the network store first, because it is the one that fails
+/// in practice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StoreKind {
+    ClickHouse,
+    File,
+}
+
+/// What [`StudyStore::prepare`] decided.
+pub enum PreparedState {
+    /// The store already holds an identical study at `location`: nothing was staged and committing
+    /// it writes nothing.
+    Existing { location: String },
+    /// A backend-private token for the staged write (a staging directory, a write id): only the
+    /// backend that made it can use it.
+    Staged(Box<dyn std::any::Any + Send>),
+}
+
+/// A write staged by [`StudyStore::prepare`], to be passed to [`StudyStore::commit`] or
+/// [`StudyStore::abort`] on the store that made it. Dropping it commits nothing (a staged file
+/// store directory is left for an operator, as after a crash; use `abort`).
+pub struct PreparedWrite {
+    pub sweep_id: String,
+    pub state: PreparedState,
+}
+
+impl PreparedWrite {
+    pub fn existing(sweep_id: impl Into<String>, location: impl Into<String>) -> Self {
+        Self { sweep_id: sweep_id.into(), state: PreparedState::Existing { location: location.into() } }
+    }
+
+    pub fn staged<T: std::any::Any + Send>(sweep_id: impl Into<String>, token: T) -> Self {
+        Self { sweep_id: sweep_id.into(), state: PreparedState::Staged(Box::new(token)) }
+    }
+
+    /// The token of a staged write, or the write itself back when it is not staged (or its token
+    /// is another backend's).
+    pub fn into_token<T: std::any::Any>(self) -> Result<T, PreparedWrite> {
+        let Self { sweep_id, state } = self;
+        match state {
+            PreparedState::Staged(token) => match token.downcast::<T>() {
+                Ok(token) => Ok(*token),
+                Err(token) => Err(Self { sweep_id, state: PreparedState::Staged(token) }),
+            },
+            existing => Err(Self { sweep_id, state: existing }),
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.state {
+            PreparedState::Existing { location } => write!(f, "PreparedWrite({:?}: existing at {location})", self.sweep_id),
+            PreparedState::Staged(_) => write!(f, "PreparedWrite({:?}: staged)", self.sweep_id),
+        }
+    }
+}
+
+/// The refusal for a plan that cannot reproduce `existing` (stored at `existing_write_id`); the
+/// backends share it so the message is the same.
+pub(crate) fn plan_refusal(plan: &StudyPlan, existing_write_id: String, existing: &pb::SweepResults, difference: PlanDifference) -> StoreError {
+    StoreError::RefusedWrite {
+        sweep_id: plan.sweep_id.clone(),
+        reason: WriteRefusal::DifferentPlan { existing_write_id, existing_sha256: content_sha256(existing), difference: Box::new(difference) },
+    }
+}
+
 /// The seam every study-store backend implements -- see this module's own doc comment for why
 /// this exists at all (ClickHouse later, file-backed now, no caller-visible difference). Object
 /// -safe deliberately (`&mut self`/`&self`, no generics), so [`open_store`] can return `Box<dyn
 /// StudyStore>` and a caller need not know at compile time which backend it holds.
 pub trait StudyStore {
+    /// Which backend this is; [`crate::study_write::write_study`] commits the network store
+    /// before the local one.
+    fn kind(&self) -> StoreKind;
+
+    /// Would this store accept the study `plan` describes, judged before its first sample runs
+    /// (question 254 item 2)? `Ok` when it holds no study under the id, or holds one the plan can
+    /// reproduce ([`StudyPlan::first_difference`] is `None`); otherwise a typed
+    /// [`StoreError::RefusedWrite`] with [`WriteRefusal::DifferentPlan`], or the id refusals of
+    /// the backend ([`StoreError::InvalidSweepId`], [`StoreError::SweepIdCollision`]). Writes
+    /// nothing. An `Ok` is provisional: [`StudyStore::prepare`] checks the final content.
+    fn check_plan(&self, plan: &StudyPlan) -> Result<(), StoreError>;
+
+    /// Phase 1 of a two-phase write: re-checks the final content and stages it, **making nothing
+    /// visible to a reader**. An identical study already stored is not staged
+    /// ([`PreparedState::Existing`]); a different one is [`WriteRefusal::DifferentContent`]; the id
+    /// refusals are as in [`StudyStore::check_plan`]. What staging is, per backend, is in
+    /// [`FileStudyStore`]'s and `ClickHouseStudyStore`'s docs.
+    fn prepare(&mut self, results: &pb::SweepResults) -> Result<PreparedWrite, StoreError>;
+
+    /// Phase 2: makes a prepared write visible and returns its location. For a staged write this
+    /// is the commit point of the backend; it can lose a race (a different study published first:
+    /// [`WriteRefusal::DifferentContent`]) or fail. For [`PreparedState::Existing`] it does
+    /// nothing and returns the existing copy's location.
+    fn commit(&mut self, prepared: PreparedWrite) -> Result<String, StoreError>;
+
+    /// Discards a prepared write that will not be committed. Never makes anything visible; `Err`
+    /// says something staged could not be removed (a stray staging directory), not that anything
+    /// is wrong with the stored studies.
+    fn abort(&mut self, prepared: PreparedWrite) -> Result<(), StoreError>;
+
     /// Writes `results` to this store, returning the location it wrote to (a path for
-    /// [`FileStudyStore`]; a connection-qualified location string for a future ClickHouse-backed
-    /// store) -- a plain `String` rather than a backend-specific type, since the only thing a
-    /// caller does with it today is log/display it (`src/bin/av-sweep/study.rs`'s own
-    /// `--store-dir` wiring).
+    /// [`FileStudyStore`]; a connection-qualified location string for the ClickHouse store) -- a
+    /// plain `String` rather than a backend-specific type, since the only thing a caller does with
+    /// it is log/display it.
     ///
     /// Studies are immutable (question 252, both backends): a `sweep_id` that already holds a
     /// study with identical content is an idempotent `Ok` (the existing copy's location, nothing
     /// rewritten); with different content it is [`StoreError::RefusedWrite`] and the stored study
-    /// is untouched.
-    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError>;
+    /// is untouched. This is [`StudyStore::prepare`] then [`StudyStore::commit`] on this one store;
+    /// a caller writing to several stores uses [`crate::study_write::write_study`] instead, so the
+    /// stores cannot be left disagreeing by one store's refusal.
+    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
+        let prepared = self.prepare(results)?;
+        self.commit(prepared)
+    }
 
     /// Reads back the study named `sweep_id`, or `Ok(None)` if this store holds no such study --
     /// "not found" is not itself an error condition here (a caller asking about a study that
@@ -251,8 +427,80 @@ impl FileStudyStore {
         Self { root: root.as_ref().to_path_buf() }
     }
 
-    fn study_dir(&self, sweep_id: &str) -> PathBuf {
-        self.root.join(sweep_id)
+    /// `<root>/<sweep_id>`, but only for a valid path-component id: the one place an id becomes
+    /// a path, and the validation runs before the `join`.
+    fn study_dir(&self, sweep_id: &str) -> Result<PathBuf, StoreError> {
+        av_cdm::path_id::validate_path_component_id(sweep_id).map_err(|reason| StoreError::InvalidSweepId { sweep_id: sweep_id.to_string(), reason })?;
+        Ok(self.root.join(sweep_id))
+    }
+
+    /// Refuses `sweep_id` when the root holds an entry spelled differently that ASCII-case-folds
+    /// equal to it (one `read_dir` of the root; a root that does not exist yet holds none). The
+    /// entry's own spelling is what the error names, so it is the on-disk one even where the
+    /// filesystem would have resolved `sweep_id` to it.
+    fn reject_case_variant(&self, sweep_id: &str) -> Result<(), StoreError> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_err(&self.root, e)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err(&self.root, e))?;
+            let name = entry.file_name();
+            if let Some(name) = name.to_str().filter(|n| *n != sweep_id && n.eq_ignore_ascii_case(sweep_id)) {
+                return Err(StoreError::SweepIdCollision { sweep_id: sweep_id.to_string(), existing: name.to_string(), dir: entry.path() });
+            }
+        }
+        Ok(())
+    }
+
+    /// The study in `dir` (which must be `study_dir(sweep_id)`), `None` if it holds no
+    /// `sweep_results.pb`. The decoded `sweep_id` must equal `sweep_id` exactly: otherwise the
+    /// filesystem resolved the name to another id's directory (a case-folded hit) or the directory
+    /// holds a foreign file, and that is [`StoreError::SweepIdCollision`].
+    fn read_study(&self, dir: &Path, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
+        let pb_path = dir.join("sweep_results.pb");
+        if !pb_path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&pb_path).map_err(|e| io_err(&pb_path, e))?;
+        let results = pb::SweepResults::decode(bytes.as_slice()).map_err(|e| StoreError::Decode { path: pb_path.clone(), source: e })?;
+        if results.sweep_id != sweep_id {
+            self.reject_case_variant(sweep_id)?; // a case variant names its real on-disk spelling
+            return Err(StoreError::SweepIdCollision { sweep_id: sweep_id.to_string(), existing: results.sweep_id, dir: dir.to_path_buf() });
+        }
+        Ok(Some(results))
+    }
+
+    /// Refuses a `dir` (which holds no study, see [`Self::read_study`]) that the rename publishing a
+    /// study there would fail on: a directory that is not empty (a torn directory from the
+    /// pre-question-252 writer, or a foreign one), or an entry that is not a directory. It is a
+    /// typed [`StoreError::Io`] naming `dir`, returned by `check_plan` and `prepare` so that, with
+    /// several stores, the refusal arrives while nothing anywhere is committed (question 254 item
+    /// 2) instead of as a failed rename after ClickHouse committed. An absent or empty directory is
+    /// fine (renaming onto an empty directory replaces it). A target that appears or changes
+    /// between `prepare` and `commit`, or a rename that fails for permissions or disk, is still
+    /// only discovered by the rename: `study_write`'s `PartialCommit` row.
+    fn refuse_occupied_target(&self, dir: &Path) -> Result<(), StoreError> {
+        match fs::read_dir(dir) {
+            Ok(mut entries) => match entries.next() {
+                None => Ok(()),
+                Some(_) => Err(io_err(dir, std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, "a directory that holds no sweep_results.pb is already here and is not empty; a study is never published over it"))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_err(dir, e)),
+        }
+    }
+
+    /// What `put_study` answers when its rename failed: either another writer published this id
+    /// (or a case variant of it) in the meantime, or `dir` is a non-empty directory that holds no
+    /// study.
+    fn settle_failed_rename(&self, dir: &Path, results: &pb::SweepResults, rename_error: std::io::Error) -> Result<String, StoreError> {
+        self.reject_case_variant(&results.sweep_id)?;
+        match self.read_study(dir, &results.sweep_id)? {
+            Some(existing) => settle_existing(dir, &existing, results),
+            None => Err(io_err(dir, rename_error)),
+        }
     }
 }
 
@@ -320,19 +568,49 @@ fn settle_existing(dir: &Path, existing: &pb::SweepResults, new: &pb::SweepResul
     Ok(dir.display().to_string())
 }
 
+/// The private token of a study staged by [`FileStudyStore`]'s `prepare`: the fsynced staging
+/// directory and what the rename that publishes it needs.
+struct FileStage {
+    stage: PathBuf,
+    dir: PathBuf,
+    parent: PathBuf,
+    results: pb::SweepResults,
+}
+
 impl StudyStore for FileStudyStore {
-    fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
-        let dir = self.study_dir(&results.sweep_id);
-        if results.sweep_id.is_empty() {
-            let e = std::io::Error::new(std::io::ErrorKind::InvalidInput, "the sweep_id is empty, so the study directory would be the store root itself");
-            return Err(io_err(&dir, e));
+    fn kind(&self) -> StoreKind {
+        StoreKind::File
+    }
+
+    fn check_plan(&self, plan: &StudyPlan) -> Result<(), StoreError> {
+        let dir = self.study_dir(&plan.sweep_id)?;
+        self.reject_case_variant(&plan.sweep_id)?;
+        match self.read_study(&dir, &plan.sweep_id)? {
+            None => self.refuse_occupied_target(&dir),
+            Some(existing) => match plan.first_difference(&existing) {
+                None => Ok(()),
+                Some(difference) => Err(plan_refusal(plan, dir.display().to_string(), &existing, difference)),
+            },
         }
-        if let Some(existing) = self.get_study(&results.sweep_id)? {
-            return settle_existing(&dir, &existing, results);
+    }
+
+    /// Stages the study: the three files are written and `fsync`ed into `<root>/.incoming-*/`
+    /// (module doc, "How `put_study` writes"), which no reader lists or opens. Nothing is visible
+    /// until [`StudyStore::commit`] renames it. An identical study already stored is
+    /// [`PreparedState::Existing`] (after the "Healing" of a missing derived file, which restores
+    /// a file the stored study should have and changes no content).
+    fn prepare(&mut self, results: &pb::SweepResults) -> Result<PreparedWrite, StoreError> {
+        let dir = self.study_dir(&results.sweep_id)?;
+        self.reject_case_variant(&results.sweep_id)?;
+        if let Some(existing) = self.read_study(&dir, &results.sweep_id)? {
+            return settle_existing(&dir, &existing, results).map(|location| PreparedWrite::existing(&results.sweep_id, location));
         }
 
-        // No study under this id: build it whole in a staging directory, then publish it with one
-        // rename (module doc, "How put_study writes").
+        // No study under this id. Refuse now, while nothing anywhere is committed, a target the
+        // rename in `commit` would fail on.
+        self.refuse_occupied_target(&dir)?;
+
+        // Build it whole in a staging directory, to be published with one rename by `commit`.
         let parent = dir.parent().unwrap_or(&self.root).to_path_buf();
         fs::create_dir_all(&parent).map_err(|e| io_err(&parent, e))?;
         let stage = staging_dir(&self.root);
@@ -342,6 +620,19 @@ impl StudyStore for FileStudyStore {
             let _ = fs::remove_dir_all(&stage);
             return Err(e);
         }
+        Ok(PreparedWrite::staged(&results.sweep_id, FileStage { stage, dir, parent, results: results.clone() }))
+    }
+
+    /// The commit point: one `rename` of the staging directory onto `<root>/<sweep_id>`. When it
+    /// fails the stage is removed and the failure is settled as for a racing writer
+    /// ([`FileStudyStore::settle_failed_rename`]: a case variant, an identical or different study
+    /// that got there first, or the rename's own `Io` error).
+    fn commit(&mut self, prepared: PreparedWrite) -> Result<String, StoreError> {
+        let FileStage { stage, dir, parent, results } = match prepared.into_token::<FileStage>() {
+            Ok(stage) => stage,
+            Err(PreparedWrite { state: PreparedState::Existing { location }, .. }) => return Ok(location),
+            Err(other) => panic!("FileStudyStore::commit was given a write another store prepared: {other:?}"),
+        };
         match fs::rename(&stage, &dir) {
             Ok(()) => {
                 // Best effort: make the new directory entry durable.
@@ -351,26 +642,31 @@ impl StudyStore for FileStudyStore {
                 Ok(dir.display().to_string())
             }
             Err(rename_error) => {
-                // Either another writer published this id between the check and the rename (its
-                // study now answers as any existing one), or `dir` is a non-empty directory that
-                // holds no study.
                 let _ = fs::remove_dir_all(&stage);
-                match self.get_study(&results.sweep_id)? {
-                    Some(existing) => settle_existing(&dir, &existing, results),
-                    None => Err(io_err(&dir, rename_error)),
-                }
+                self.settle_failed_rename(&dir, &results, rename_error)
             }
         }
     }
 
-    fn get_study(&self, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
-        let pb_path = self.study_dir(sweep_id).join("sweep_results.pb");
-        if !pb_path.exists() {
-            return Ok(None);
+    fn abort(&mut self, prepared: PreparedWrite) -> Result<(), StoreError> {
+        match prepared.into_token::<FileStage>() {
+            Ok(FileStage { stage, .. }) => match fs::remove_dir_all(&stage) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io_err(&stage, e)),
+            },
+            Err(PreparedWrite { state: PreparedState::Existing { .. }, .. }) => Ok(()),
+            Err(other) => panic!("FileStudyStore::abort was given a write another store prepared: {other:?}"),
         }
-        let bytes = fs::read(&pb_path).map_err(|e| io_err(&pb_path, e))?;
-        let results = pb::SweepResults::decode(bytes.as_slice()).map_err(|e| StoreError::Decode { path: pb_path.clone(), source: e })?;
-        Ok(Some(results))
+    }
+
+    fn get_study(&self, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
+        let dir = self.study_dir(sweep_id)?;
+        let found = self.read_study(&dir, sweep_id)?;
+        if found.is_none() {
+            self.reject_case_variant(sweep_id)?; // "not found" must not hide a study under a case variant
+        }
+        Ok(found)
     }
 
     fn list_studies(&self) -> Result<Vec<StudySummary>, StoreError> {
@@ -385,12 +681,16 @@ impl StudyStore for FileStudyStore {
             if !entry.file_type().map_err(|e| io_err(&entry.path(), e))?.is_dir() {
                 continue; // a study store directory holds only per-sweep-id subdirectories
             }
-            let sweep_id = entry.file_name().to_string_lossy().into_owned();
-            if sweep_id.starts_with(STAGING_PREFIX) {
-                continue; // a writer's staging directory (or one a crashed writer left), not a study
+            let Ok(sweep_id) = entry.file_name().into_string() else { continue }; // not UTF-8: not a valid id
+            if av_cdm::path_id::validate_path_component_id(&sweep_id).is_err() {
+                continue; // not a name this store can have written: a staging directory (`.incoming-*`), an operator's folder, ...
             }
-            if let Some(results) = self.get_study(&sweep_id)? {
-                summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
+            match self.read_study(&entry.path(), &sweep_id) {
+                Ok(Some(results)) => {
+                    summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
+                }
+                Ok(None) | Err(StoreError::SweepIdCollision { .. }) => {} // no study, or one stored under another id: not listed under this name
+                Err(e) => return Err(e),
             }
         }
         Ok(summaries.into_values().collect())
@@ -724,9 +1024,9 @@ mod tests {
     }
 
     /// A non-empty directory under the id that holds no study is not written into or replaced: a
-    /// typed `Io` error naming it. An empty one is just filled. An empty `sweep_id` is refused.
+    /// typed `Io` error naming it. An empty one is just filled.
     #[test]
-    fn a_directory_that_is_not_a_study_and_an_empty_id_are_typed_io_errors() {
+    fn a_directory_that_is_not_a_study_is_a_typed_io_error() {
         let root = temp_dir("foreign");
         let mut store = FileStudyStore::new(&root);
         std::fs::create_dir_all(root.join("s1")).unwrap();
@@ -739,9 +1039,153 @@ mod tests {
 
         std::fs::create_dir_all(root.join("s2")).unwrap();
         store.put_study(&study("s2", vec![sample(0, 0)])).expect("an empty directory is just filled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
-        let err = store.put_study(&study("", vec![sample(0, 0)])).unwrap_err();
-        assert!(matches!(err, StoreError::Io { .. }), "{err:?}");
+    /// Question 254 item 2: a target the publishing rename would fail on (a non-empty directory
+    /// that holds no study, or a regular file) is a typed `Io` error from `check_plan` and from
+    /// `prepare`, before any stage is built; an empty directory is fine.
+    #[test]
+    fn an_occupied_target_is_refused_by_check_plan_and_prepare_before_any_stage_is_built() {
+        let root = temp_dir("occupied");
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/notes.txt"), b"mine").unwrap();
+        std::fs::write(root.join("s2"), b"a file").unwrap();
+        std::fs::create_dir_all(root.join("s3")).unwrap();
+        let mut store = FileStudyStore::new(&root);
+        for id in ["s1", "s2"] {
+            let results = study(id, vec![sample(0, 0)]);
+            let err = store.check_plan(&StudyPlan::exact(&results)).unwrap_err();
+            assert!(matches!(&err, StoreError::Io { path, .. } if path.ends_with(id)), "{id}: {err:?}");
+            let err = store.prepare(&results).unwrap_err();
+            assert!(matches!(&err, StoreError::Io { path, .. } if path.ends_with(id)), "{id}: {err:?}");
+        }
+        assert_eq!(dir_names(&root), ["s1", "s2", "s3"], "no stage was built");
+        assert_eq!(std::fs::read(root.join("s1/notes.txt")).unwrap(), b"mine");
+        let empty = study("s3", vec![sample(0, 0)]);
+        store.check_plan(&StudyPlan::exact(&empty)).expect("an empty directory is not in the way");
+        store.put_study(&empty).expect("and is replaced by the study");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every file and directory under `dir` (relative path, kind and size), so a test can prove a
+    /// refused call changed nothing anywhere in a whole tree, outside the store root included.
+    fn tree(dir: &Path) -> BTreeMap<String, String> {
+        fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+                if meta.is_dir() {
+                    out.insert(rel, "dir".to_string());
+                    walk(base, &entry.path(), out);
+                } else {
+                    out.insert(rel, format!("{} bytes", meta.len()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    /// The ids a traversal attempt would use against the store under `<parent>/store`, whose
+    /// intended victim is `<parent>/x`. The encoded variants are the literal strings a decoder
+    /// has not run over; the decoded ones (`../x`) are what a YAML or protobuf decoder delivers.
+    fn traversal_ids(parent: &Path) -> Vec<String> {
+        vec![
+            "../x".into(),
+            "..".into(),
+            ".".into(),
+            parent.join("x").display().to_string(), // absolute: `Path::join` would replace the root with it
+            "/x".into(),
+            "a/b".into(),
+            "a\\b".into(),
+            "..\\x".into(),
+            "a\0b".into(),
+            "\0".into(),
+            "".into(),
+            "%2e%2e%2fx".into(),
+            "..%2fx".into(),
+            "a%2Fb".into(),
+            ".incoming-1-2-3".into(),
+            "x/../x".into(),
+        ]
+    }
+
+    /// Question 254 item 1: a `sweep_id` that is not a path component is a typed
+    /// `InvalidSweepId` from `put_study` and from `get_study`, and nothing is written outside the
+    /// store root (or inside it): the whole parent tree is identical before and after, and the
+    /// traversal's target `x` does not exist.
+    #[test]
+    fn a_sweep_id_that_is_not_a_path_component_is_refused_and_nothing_is_written() {
+        let parent = temp_dir("traversal");
+        let root = parent.join("store");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("s1", vec![sample(0, 0)])).unwrap();
+        let before = tree(&parent);
+        assert!(before.contains_key("store/s1/sweep_results.pb"));
+
+        for id in traversal_ids(&parent) {
+            let put = store.put_study(&study(&id, vec![sample(0, 0)])).unwrap_err();
+            assert!(matches!(&put, StoreError::InvalidSweepId { sweep_id, .. } if *sweep_id == id), "put_study({id:?}): {put:?}");
+            let got = match store.get_study(&id) {
+                Err(e) => e,
+                Ok(r) => panic!("get_study({id:?}) must be refused, got {r:?}"),
+            };
+            assert!(matches!(&got, StoreError::InvalidSweepId { sweep_id, .. } if *sweep_id == id), "get_study({id:?}): {got:?}");
+            assert!(put.to_string().contains("not a valid sweep_id"), "{put}");
+            assert_eq!(tree(&parent), before, "{id:?}: the tree around the store changed");
+            assert!(!parent.join("x").exists(), "{id:?}: wrote the traversal target");
+        }
+        // The valid study is untouched and still the only one listed.
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["s1"]);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// Every refused id in the shared vectors (`data/path_component_id_vectors.json`, the file the
+    /// rule's own tests read) is refused by the store with the rule's typed reason, and every
+    /// accepted one is a usable study id.
+    #[test]
+    fn the_shared_vectors_decide_what_the_store_accepts() {
+        let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/path_component_id_vectors.json")).unwrap()).unwrap();
+        let parent = temp_dir("vectors");
+        let root = parent.join("store");
+        let mut store = FileStudyStore::new(&root);
+        let before = tree(&parent);
+        for entry in vectors["refused"].as_array().unwrap() {
+            let id = entry["id"].as_str().unwrap();
+            match store.put_study(&study(id, vec![sample(0, 0)])) {
+                Err(StoreError::InvalidSweepId { reason, .. }) => assert_eq!(reason.reason(), entry["reason"].as_str().unwrap(), "{id:?}"),
+                other => panic!("{id:?} must be refused as an invalid sweep_id, got {other:?}"),
+            }
+        }
+        assert_eq!(tree(&parent), before, "no refusal created the store root or anything else");
+        // One store per accepted id: `a` and `A` are different ids that name one directory on a
+        // case-insensitive filesystem (macOS's default); in one store the second would be a typed
+        // `SweepIdCollision`, never an overwrite (`case_variant_ids_are_refused_*` below).
+        for (n, id) in vectors["accepted"].as_array().unwrap().iter().enumerate() {
+            let id = id.as_str().unwrap();
+            let mut own = FileStudyStore::new(parent.join(format!("accepted-{n}")));
+            own.put_study(&study(id, vec![sample(0, 0)])).unwrap_or_else(|e| panic!("{id:?} must be accepted: {e}"));
+            assert!(own.get_study(id).unwrap().is_some(), "{id:?}");
+        }
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `list_studies` skips a directory whose name the store could not have written, even when it
+    /// holds a decodable `sweep_results.pb`; a valid one beside it is listed.
+    #[test]
+    fn list_studies_skips_directories_whose_names_are_not_valid_ids() {
+        let root = temp_dir("list-invalid");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("good", vec![sample(0, 0)])).unwrap();
+        for name in [".hidden", "has space", "a%b", "-dash", "caf\u{e9}"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("sweep_results.pb"), study("ghost", vec![sample(0, 0)]).encode_to_vec()).unwrap();
+        }
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["good"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -759,6 +1203,200 @@ mod tests {
         let listed = store.list_studies().unwrap();
         assert_eq!(listed.iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["s1"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Whether `dir` is on a case-insensitive filesystem, measured: write `case-probe-a` and ask
+    /// whether `CASE-PROBE-A` exists. The case tests assert their premise with this rather than
+    /// assume it, so they cannot pass on one kind of filesystem for the other's reason.
+    fn is_case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("case-probe-a");
+        std::fs::write(&probe, b"").unwrap();
+        let insensitive = dir.join("CASE-PROBE-A").exists();
+        std::fs::remove_file(&probe).unwrap();
+        insensitive
+    }
+
+    fn dir_names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    fn assert_collision(err: &StoreError, requested: &str, existing: &str, dir_name: &str) {
+        match err {
+            StoreError::SweepIdCollision { sweep_id, existing: found, dir } => {
+                assert_eq!(sweep_id, requested);
+                assert_eq!(found, existing);
+                assert_eq!(dir.file_name().unwrap().to_str().unwrap(), dir_name, "names the on-disk directory: {dir:?}");
+                let msg = err.to_string();
+                assert!(msg.contains(&format!("{requested:?}")) && msg.contains(&format!("{existing:?}")) && msg.contains(dir_name), "{msg}");
+            }
+            other => panic!("expected SweepIdCollision, got {other:?}"),
+        }
+    }
+
+    /// The one rule, run on a store under `root`: `study` is stored; `Study` (and `STUDY`) is
+    /// refused by `put_study` and `get_study` whatever the filesystem; the stored study is untouched
+    /// and nothing is left staged; `study` itself still reads and re-puts. `insensitive` is the
+    /// measured kind of `root`'s filesystem.
+    fn assert_case_variants_are_refused(root: &Path, insensitive: bool) {
+        let mut store = FileStudyStore::new(root);
+        let first = study("study", vec![sample(0, 0), sample(0, 1)]);
+        store.put_study(&first).unwrap();
+        // The premise: on a case-insensitive filesystem `Study` resolves to the stored directory
+        // (the defect's cause); on a case-sensitive one it does not exist.
+        assert_eq!(root.join("Study/sweep_results.pb").exists(), insensitive, "the measured filesystem kind");
+        let before = snapshot(&root.join("study"));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        for variant in ["Study", "STUDY", "sTuDy"] {
+            let err = store.put_study(&study(variant, vec![sample(0, 0), sample(0, 1)])).unwrap_err();
+            assert_collision(&err, variant, "study", "study");
+            let err = store.get_study(variant).unwrap_err();
+            assert_collision(&err, variant, "study", "study");
+        }
+        assert_eq!(snapshot(&root.join("study")), before, "the stored study is untouched, bytes, mtime and inode");
+        assert_eq!(dir_names(root), vec!["study".to_string()], "nothing staged left, no second directory");
+
+        assert_eq!(store.get_study("study").unwrap().unwrap(), first);
+        let second = store.put_study(&first.clone()).expect("an identical re-put of study is still Ok");
+        assert!(second.ends_with("study"), "{second}");
+        assert_eq!(snapshot(&root.join("study")), before, "the identical re-put rewrote nothing");
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["study"]);
+
+        // An unrelated id is unaffected, and refuses its own variants.
+        store.put_study(&study("other", vec![sample(0, 0)])).unwrap();
+        assert_collision(&store.put_study(&study("OTHER", vec![sample(0, 0)])).unwrap_err(), "OTHER", "other", "other");
+        assert_eq!(dir_names(root), vec!["other".to_string(), "study".to_string()]);
+    }
+
+    /// Question 254 item 1 on this host's filesystem (macOS's default APFS is case-insensitive, and
+    /// `is_case_insensitive` measures it rather than assuming it; the kind is printed). On a
+    /// case-sensitive filesystem the same assertions hold, for the other reason: `Study` is a
+    /// different, absent directory and the explicit check is what refuses it.
+    #[test]
+    fn case_variant_ids_are_refused_on_this_filesystem() {
+        let root = temp_dir("case-variants");
+        let insensitive = is_case_insensitive(&root);
+        eprintln!("case_variant_ids_are_refused_on_this_filesystem: {} is on a case-{} filesystem", root.display(), if insensitive { "insensitive" } else { "sensitive" });
+        assert_case_variants_are_refused(&root, insensitive);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same rule on a case-sensitive volume, where `study` and `Study` could be two
+    /// directories: the store refuses the pair there too. Point `AV_SWEEP_CASE_SENSITIVE_DIR` at a
+    /// directory on a case-sensitive volume (e.g. `hdiutil create -fs "Case-sensitive APFS" ...`);
+    /// without it the test says it was skipped. With both directories already present (written by
+    /// an older store or by hand) each still reads under its exact id and both are listed.
+    #[test]
+    fn case_variant_ids_are_refused_on_a_case_sensitive_volume() {
+        let Some(base) = std::env::var_os("AV_SWEEP_CASE_SENSITIVE_DIR").map(PathBuf::from) else {
+            eprintln!("SKIPPED case_variant_ids_are_refused_on_a_case_sensitive_volume: AV_SWEEP_CASE_SENSITIVE_DIR is not set (no case-sensitive volume given)");
+            return;
+        };
+        let root = base.join(format!("av-sweep-store-test-cs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!is_case_insensitive(&root), "AV_SWEEP_CASE_SENSITIVE_DIR ({}) is not on a case-sensitive volume", base.display());
+        assert_case_variants_are_refused(&root, false);
+
+        // Both spellings already on disk: each is its own whole study.
+        let pair = root.join("pair");
+        let mut store = FileStudyStore::new(&pair);
+        let (lower, upper) = (study("pair", vec![sample(0, 0)]), study("PAIR", vec![sample(0, 1)]));
+        for (name, results) in [("pair", &lower), ("PAIR", &upper)] {
+            std::fs::create_dir_all(pair.join(name)).unwrap();
+            for (file, bytes) in study_files(results) {
+                std::fs::write(pair.join(name).join(file), bytes).unwrap();
+            }
+        }
+        assert_eq!(store.get_study("pair").unwrap().unwrap(), lower);
+        assert_eq!(store.get_study("PAIR").unwrap().unwrap(), upper);
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["PAIR", "pair"]);
+        assert_collision(&store.put_study(&study("Pair", vec![sample(0, 0)])).unwrap_err(), "Pair", "PAIR", "PAIR");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory that holds another id's study is not that id's study, on any filesystem:
+    /// `get_study` and `put_study` give the typed collision (naming the stored id and the
+    /// directory), `list_studies` skips it, and nothing is written.
+    #[test]
+    fn a_directory_holding_another_ids_study_is_a_collision_not_a_study() {
+        let root = temp_dir("foreign-id");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("good", vec![sample(0, 0)])).unwrap();
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/sweep_results.pb"), study("other", vec![sample(0, 0)]).encode_to_vec()).unwrap();
+        let before = tree(&root);
+
+        assert_collision(&store.get_study("s1").unwrap_err(), "s1", "other", "s1");
+        assert_collision(&store.put_study(&study("s1", vec![sample(0, 0)])).unwrap_err(), "s1", "other", "s1");
+        assert_eq!(tree(&root), before, "nothing written");
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["good"], "skipped, not listed under its stored id");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The racing-writer path (the rename failed) checks case variants too, and still answers as
+    /// before for an exact existing study and for a directory that holds none. Called directly,
+    /// because the window between `put_study`'s check and its rename is not one a test can hold open.
+    #[test]
+    fn the_failed_rename_path_checks_case_variants_too() {
+        let root = temp_dir("failed-rename");
+        let mut store = FileStudyStore::new(&root);
+        let first = study("study", vec![sample(0, 0)]);
+        store.put_study(&first).unwrap();
+        let failure = || std::io::Error::other("rename failed");
+
+        let err = store.settle_failed_rename(&root.join("Study"), &study("Study", vec![sample(0, 0)]), failure()).unwrap_err();
+        assert_collision(&err, "Study", "study", "study");
+        let same = store.settle_failed_rename(&root.join("study"), &first, failure()).expect("identical content is Ok");
+        assert!(same.ends_with("study"), "{same}");
+        let different = store.settle_failed_rename(&root.join("study"), &changed(first.clone()), failure()).unwrap_err();
+        assert_refused_different(&different, "study", &first, &changed(first.clone()));
+        let no_study = store.settle_failed_rename(&root.join("nothere"), &study("nothere", vec![sample(0, 0)]), failure()).unwrap_err();
+        assert!(matches!(&no_study, StoreError::Io { path, .. } if path.ends_with("nothere")), "{no_study:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Writers racing on `study` and `Study` (identical content per spelling): on a
+    /// case-insensitive filesystem exactly one spelling wins, every writer of the other gets the
+    /// typed collision (at the check, or at the failed rename), and one directory is left. On a
+    /// case-sensitive one the window between check and rename is open (module doc), so only the
+    /// per-writer outcomes are asserted.
+    #[test]
+    fn racing_case_variants_leave_one_spelling_on_a_case_insensitive_filesystem() {
+        for round in 0..20 {
+            let root = temp_dir(&format!("race-case-{round}"));
+            let insensitive = is_case_insensitive(&root);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8usize)
+                .map(|n| {
+                    let (root, barrier) = (root.clone(), barrier.clone());
+                    let id = if n % 2 == 0 { "study" } else { "Study" };
+                    std::thread::spawn(move || {
+                        let results = study(id, vec![sample(0, 0)]);
+                        barrier.wait();
+                        (id, FileStudyStore::new(&root).put_study(&results))
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let mut winning: Vec<&str> = outcomes.iter().filter(|(_, r)| r.is_ok()).map(|(id, _)| *id).collect();
+            winning.dedup();
+            for (id, outcome) in &outcomes {
+                if let Err(e) = outcome {
+                    let other = if *id == "study" { "Study" } else { "study" };
+                    assert_collision(e, id, other, other);
+                }
+            }
+            if insensitive {
+                assert!(winning.windows(2).all(|w| w[0] == w[1]) && !winning.is_empty(), "round {round}: one spelling wins: {winning:?}");
+                let names = dir_names(&root);
+                assert_eq!(names.len(), 1, "round {round}: one directory, no staging: {names:?}");
+                assert_eq!(names[0], winning[0]);
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// The deferred refusal is gone (question 245): `open_store(StoreBackend::ClickHouse)` now

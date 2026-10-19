@@ -25,6 +25,11 @@
 //!   `spoore_cdm::GaussianState`'s constructor enforces, applied to a propagated covariance
 //!   *before* it crosses into a spoore type (`docs/open-questions.md` question 80): a typed,
 //!   counted error on failure, and an opt-in nearest-SPD projection.
+//! - [`path_id`] -- the one rule for an externally supplied id that becomes a path component
+//!   (question 254 item 1): 1 to 128 bytes of `[A-Za-z0-9._-]` starting with `[A-Za-z0-9]`,
+//!   refused with a typed error before any path is built. It lives here because this is the one
+//!   crate every crate that writes such a path already depends on; its Python twin is
+//!   `altavista/path_id.py`, and both are tested against `data/path_component_id_vectors.json`.
 //!
 //! ## Features
 //!
@@ -34,7 +39,7 @@
 //! - none (`default-features = false`): the narrow build for the cFS lockstep shim
 //!   (question 245 (7)). `pb` holds only `lockstep.proto` and its import closure
 //!   (`system.proto`, `core.proto`, `envelope.proto`, `packet.proto`); the `time`, `units`,
-//!   `spoore_v0` and `covariance` modules above do not exist (so the links to them in this
+//!   `spoore_v0`, `covariance` and `path_id` modules above do not exist (so the links to them in this
 //!   comment only resolve under `full`). See `build.rs` and `Cargo.toml`.
 
 pub mod pb {
@@ -50,6 +55,8 @@ pub mod pb {
 
 #[cfg(feature = "full")]
 pub mod covariance;
+#[cfg(feature = "full")]
+pub mod path_id;
 #[cfg(feature = "full")]
 pub mod spoore_v0;
 #[cfg(feature = "full")]

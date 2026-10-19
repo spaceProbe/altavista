@@ -54,3 +54,34 @@ fn a_valid_shard_key_sanitizes_to_a_plain_file_name_confined_to_the_log_director
     assert_eq!(sanitized, "shard-a.avlog");
     assert!(!sanitized.contains('/') && !sanitized.contains('\\'), "a sanitized name must never itself contain a separator");
 }
+
+/// Question 254 item 1: the shard-key check is the shared path-component rule, so it refuses
+/// every id in the shared vectors (`data/path_component_id_vectors.json`, the same file the rule's
+/// own Rust and Python tests read) with the rule's recorded reason, and accepts every accepted one.
+#[test]
+fn sanitize_shard_key_follows_the_shared_path_component_vectors() {
+    let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/path_component_id_vectors.json")).unwrap()).unwrap();
+    for id in vectors["accepted"].as_array().unwrap() {
+        let id = id.as_str().unwrap();
+        assert_eq!(sanitize_shard_key(id).unwrap(), format!("{id}.avlog"), "{id:?}");
+    }
+    for entry in vectors["refused"].as_array().unwrap() {
+        let id = entry["id"].as_str().unwrap();
+        match sanitize_shard_key(id) {
+            Err(LogError::InvalidShardKey { reason, .. }) => assert_eq!(reason.reason(), entry["reason"].as_str().unwrap(), "{id:?}"),
+            other => panic!("{id:?} must be refused as InvalidShardKey, got {other:?}"),
+        }
+    }
+}
+
+/// The stricter cases the pre-254 check let through (a control character, a leading dot, a space,
+/// `%`, non-ASCII) are refused by `PartitionLog::open` too, with nothing created on disk.
+#[test]
+fn partition_log_open_refuses_the_newly_refused_keys_and_creates_nothing() {
+    for key in [".hidden", "a\nb", "a b", "a%2fb", "caf\u{e9}", "-x"] {
+        let dir = tmp_dir("newly-refused");
+        let result = PartitionLog::open(&dir, key);
+        assert!(matches!(result, Err(LogError::InvalidShardKey { .. })), "{key:?}: {result:?}");
+        assert!(!dir.exists(), "{key:?}: the log directory must not be created for a rejected key");
+    }
+}

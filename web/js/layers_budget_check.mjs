@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// CLI harness for tests/test_viewer_layers_budget.py: `node web/js/layers_budget_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_layers_budget.py drives:
+// `node web/js/layers_budget_check.mjs`. It asserts its own checks and exits 1 on any
+// failure (question 254 item 5); see "ASSERTS AND EXITS" at the bottom.
 //
 // Round 4 (docs/open-questions.md question 228, the lead's own browser drive,
 // "Finding 1, the memory budget is crossed"): with `memoryBudgetBytes` = 40 MB and a
@@ -847,4 +849,176 @@ const result = {
   },
 };
 
-process.stdout.write(JSON.stringify(result));
+// ASSERTS AND EXITS: every assertion tests/test_viewer_layers_budget.py makes on `result`
+// (except cross-process byte-identity, which needs two processes and stays in the
+// driver) is made here too, with the same literal numbers (restated, not read back from
+// the constants above, so a drifting scenario fails), so the standalone gate fails on a
+// regression by itself. Each failure prints to stderr as `FAIL <name>: measured X,
+// bound Y`, then a summary line, then exit 1; success exits 0.
+const failures = [];
+let assertionCount = 0;
+function assertBound(name, ok, measured, bound) {
+  assertionCount += 1;
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const show = (v) => JSON.stringify(v);
+const eq = (name, got, want) => assertBound(name, show(got) === show(want), show(got), `== ${show(want)}`);
+const le = (name, got, max) => assertBound(name, got <= max, show(got), `<= ${show(max)}`);
+const gt = (name, got, min) => assertBound(name, got > min, show(got), `> ${show(min)}`);
+const ge = (name, got, min) => assertBound(name, got >= min, show(got), `>= ${show(min)}`);
+
+const LIT_TILE_BYTES = 3_147_060;
+const LIT_BUDGET = 41_943_040; // 40 MiB, the lead's own measured budget
+const LIT_ESTIMATE_BYTES = 262_144;
+
+// -- the lead's own scenario (question 228)
+eq('scenario.tileBytes', result.scenario.tileBytes, LIT_TILE_BYTES);
+eq('scenario.memoryBudgetBytes', result.scenario.memoryBudgetBytes, LIT_BUDGET);
+eq('scenario.totalTileCount', result.scenario.totalTileCount, 32);
+eq('scenario.levelShape', result.scenario.levelShape, [
+  { level: 0, count: 1 }, { level: 1, count: 4 }, { level: 2, count: 11 }, { level: 3, count: 16 },
+]);
+eq('scenario.totalWantedBytes', result.scenario.totalWantedBytes, 100_705_920);
+assertBound(
+  'scenario.wantedOverBudgetRatio ~ 2.40 (abs 0.005)',
+  Math.abs(result.scenario.wantedOverBudgetRatio - 2.4) <= 0.005,
+  result.scenario.wantedOverBudgetRatio, '2.40 +/- 0.005',
+);
+
+// -- the hard admission invariant
+le('maxResidentBytes <= budget', result.maxResidentBytes, LIT_BUDGET);
+le('phase1.maxResidentBytes <= budget', result.phase1.maxResidentBytes, LIT_BUDGET);
+le('phase2CameraMove.maxResidentBytes <= budget', result.phase2CameraMove.maxResidentBytes, LIT_BUDGET);
+le('maxResidentPlusPendingBytes <= budget', result.maxResidentPlusPendingBytes, LIT_BUDGET);
+le('phase1.maxResidentPlusPendingBytes <= budget', result.phase1.maxResidentPlusPendingBytes, LIT_BUDGET);
+le('phase2CameraMove.maxResidentPlusPendingBytes <= budget', result.phase2CameraMove.maxResidentPlusPendingBytes, LIT_BUDGET);
+eq('softViolationCount', result.softViolationCount, 0);
+eq('phase1.softViolationCount', result.phase1.softViolationCount, 0);
+eq('phase2CameraMove.softViolationCount', result.phase2CameraMove.softViolationCount, 0);
+
+// -- the harness really drove the manager over budget (a check that cannot fail proves nothing)
+gt('deferredCount', result.deferredCount, 0);
+gt('phase1.deferredCount', result.phase1.deferredCount, 0);
+gt('phase2CameraMove.deferredCount', result.phase2CameraMove.deferredCount, 0);
+ge('lastStepDeferred', result.lastStepDeferred, 0);
+
+// -- coarse tiles before fine ones, in both phases
+for (const phaseKey of ['phase1', 'phase2CameraMove']) {
+  const phase = result[phaseKey];
+  eq(`${phaseKey}.coarseBeforeFineOk`, phase.coarseBeforeFineOk, true);
+  const byLevel = Object.fromEntries(phase.levelHistogram.map((row) => [row.level, row]));
+  eq(`${phaseKey} level 0 resident/wanted`, [byLevel[0].resident, byLevel[0].wanted], [1, 1]);
+  eq(`${phaseKey} level 1 resident/wanted`, [byLevel[1].resident, byLevel[1].wanted], [4, 4]);
+  eq(`${phaseKey} level 3 resident (no finest tile may displace a coarse one)`, byLevel[3].resident, 0);
+  assertBound(
+    `${phaseKey} level 2 partially resident (the budget runs out here)`,
+    byLevel[2].resident > 0 && byLevel[2].resident < byLevel[2].wanted,
+    `${byLevel[2].resident} of ${byLevel[2].wanted}`, '0 < resident < wanted',
+  );
+  const residentTotal = phase.levelHistogram.reduce((s, row) => s + row.resident, 0);
+  eq(`${phaseKey} resident tile total == floor(budget / tileBytes)`, residentTotal, Math.floor(LIT_BUDGET / LIT_TILE_BYTES));
+  eq(`${phaseKey} resident tile total`, residentTotal, 13);
+}
+
+// -- a camera move does not deadlock
+eq('phase2CameraMove.settled', result.phase2CameraMove.settled, true);
+gt('phase2CameraMove.evictedCount', result.phase2CameraMove.evictedCount, 0);
+eq('phase2CameraMove.phase1TilesStillResidentAfterPhase2', result.phase2CameraMove.phase1TilesStillResidentAfterPhase2, 0);
+
+// -- counts, reported unconditionally
+eq('loadedCount', result.loadedCount, 26);
+eq('invocationCount', result.invocationCount, 26);
+eq('cancelledCount', result.cancelledCount, 0);
+eq('evictedCount', result.evictedCount, 13);
+eq('failedCount', result.failedCount, 0);
+eq('failureNames', result.failureNames, []);
+
+// -- byteCost reconciliation (manager review): the independent invariant everywhere
+eq('invariantHeldEveryStep', result.invariantHeldEveryStep, true);
+eq('phase1.invariantHeldEveryStep', result.phase1.invariantHeldEveryStep, true);
+eq('phase2CameraMove.invariantHeldEveryStep', result.phase2CameraMove.invariantHeldEveryStep, true);
+for (const phaseKey of ['recoverable', 'irreconcilable']) {
+  for (const snapshotKey of ['before', 'afterOneUpdate', 'after']) {
+    const inv = result.phase3Reconcile[phaseKey][snapshotKey].invariant;
+    const where = `phase3Reconcile.${phaseKey}.${snapshotKey}`;
+    eq(`${where}.residentMatches`, inv.residentMatches, true);
+    eq(`${where}.residentDiscrepancyBytes`, inv.residentDiscrepancyBytes, 0);
+    eq(`${where}.pendingMatches`, inv.pendingMatches, true);
+    eq(`${where}.pendingDiscrepancyBytes`, inv.pendingDiscrepancyBytes, 0);
+  }
+}
+
+// -- phase 3a: recoverable (10 tiles, the revised total fits the budget)
+{
+  const p = result.phase3Reconcile.recoverable;
+  const w = 'phase3Reconcile.recoverable';
+  eq(`${w}.tileCount`, p.tileCount, 10);
+  eq(`${w}.estimateBytes`, p.estimateBytes, LIT_ESTIMATE_BYTES);
+  eq(`${w}.trueBytes`, p.trueBytes, LIT_TILE_BYTES);
+  eq(`${w}.settledBefore/settledAfter`, [p.settledBefore, p.settledAfter], [true, true]);
+  eq(`${w}.before.residentCount`, p.before.residentCount, 10);
+  eq(`${w}.before.accountedResidentBytes`, p.before.accountedResidentBytes, 2_621_440);
+  eq(`${w}.afterOneUpdate.accountedResidentBytes`, p.afterOneUpdate.accountedResidentBytes, 31_470_600);
+  eq(`${w}.after.accountedResidentBytes`, p.after.accountedResidentBytes, 31_470_600);
+  eq(`${w}.after.residentCount`, p.after.residentCount, 10);
+  eq(`${w}.byteCostRevisionCount`, p.byteCostRevisionCount, 10);
+  eq(`${w}.byteCostRevisionCountDelta`, p.byteCostRevisionCountDelta, 10);
+  eq(`${w}.byteCostRevisionBytes`, p.byteCostRevisionBytes, 28_849_160);
+  eq(`${w}.softViolationCountDelta`, p.softViolationCountDelta, 0);
+  eq(`${w}.evictedCount`, p.evictedCount, 0);
+}
+
+// -- phase 3b: irreconcilable (20 tiles, 50% over budget, nothing evictable)
+{
+  const p = result.phase3Reconcile.irreconcilable;
+  const w = 'phase3Reconcile.irreconcilable';
+  eq(`${w}.tileCount`, p.tileCount, 20);
+  eq(`${w}.before.accountedResidentBytes`, p.before.accountedResidentBytes, 5_242_880);
+  eq(`${w}.afterOneUpdate.accountedResidentBytes`, p.afterOneUpdate.accountedResidentBytes, 62_941_200);
+  eq(`${w}.after.accountedResidentBytes`, p.after.accountedResidentBytes, 62_941_200);
+  eq(`${w}.after.residentCount`, p.after.residentCount, 20);
+  eq(`${w}.byteCostRevisionCount`, p.byteCostRevisionCount, 20);
+  eq(`${w}.byteCostRevisionCountDelta`, p.byteCostRevisionCountDelta, 20);
+  eq(`${w}.byteCostRevisionBytes`, p.byteCostRevisionBytes, 57_698_320);
+  gt(`${w}.softViolationCountDelta (the tripwire fires honestly)`, p.softViolationCountDelta, 0);
+  eq(`${w}.evictedCount`, p.evictedCount, 0);
+}
+
+// -- LayerManager.removeLayer (round 5, item D)
+{
+  const r = result.phase4RemoveLayer;
+  const { before, after } = r;
+  eq('phase4RemoveLayer.before.residentHasR/OR', [before.residentHasR, before.residentHasOR], [true, true]);
+  eq('phase4RemoveLayer.before.pendingHasP/OP', [before.pendingHasP, before.pendingHasOP], [true, true]);
+  eq('phase4RemoveLayer.before.failedHasF/OF', [before.failedHasF, before.failedHasOF], [true, true]);
+  eq('phase4RemoveLayer.before.pendingBytes', before.pendingBytes, 4000);
+  eq('phase4RemoveLayer.before.residentBytes', before.residentBytes, 2000);
+  eq('phase4RemoveLayer.before.cancelledCount/evictedCount', [before.cancelledCount, before.evictedCount], [0, 0]);
+  eq('phase4RemoveLayer.before.targetReleased/otherReleased', [before.targetReleased, before.otherReleased], [[], []]);
+  eq('phase4RemoveLayer.before.layersRegistered', before.layersRegistered, ['rl-other', 'rl-target']);
+  eq('phase4RemoveLayer.after.pendingHasP', after.pendingHasP, false);
+  eq('phase4RemoveLayer.after.pendingBytes', after.pendingBytes, 2000);
+  eq('phase4RemoveLayer.after.cancelledCount', after.cancelledCount, 1);
+  eq('phase4RemoveLayer.after.residentHasR', after.residentHasR, false);
+  eq('phase4RemoveLayer.after.residentBytes', after.residentBytes, 1000);
+  eq('phase4RemoveLayer.after.evictedCount', after.evictedCount, 1);
+  eq('phase4RemoveLayer.after.targetReleased', after.targetReleased, ['R']);
+  eq('phase4RemoveLayer.after.failedHasF', after.failedHasF, false);
+  eq('phase4RemoveLayer.freshLayerAdmittedF', r.freshLayerAdmittedF, true);
+  eq('phase4RemoveLayer.after.residentHasOR', after.residentHasOR, true);
+  eq('phase4RemoveLayer.after.pendingHasOP', after.pendingHasOP, true);
+  eq('phase4RemoveLayer.after.failedHasOF', after.failedHasOF, true);
+  eq('phase4RemoveLayer.after.otherReleased', after.otherReleased, []);
+  eq('phase4RemoveLayer.after.layersRegistered', after.layersRegistered, ['rl-other']);
+  eq('phase4RemoveLayer.afterNoopOnUnknownId == after', r.afterNoopOnUnknownId, after);
+}
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(
+  `layers_budget_check: ${assertionCount - failures.length} passed, ${failures.length} failed `
+  + `(maxResidentBytes=${result.maxResidentBytes}/${LIT_BUDGET}, softViolationCount=${result.softViolationCount}, `
+  + `deferredCount=${result.deferredCount})\n`,
+);
+
+// stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));

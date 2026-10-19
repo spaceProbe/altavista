@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-// CLI harness for tests/test_viewer_layers_panel.py: `node web/js/layers_panel_check.mjs`.
+// Standalone check: `node web/js/layers_panel_check.mjs` (exits non-zero on a failed check).
+// No pytest test runs this file (`tests/test_viewer_layers_panel.py` is the separate
+// headless-Chrome half and does not invoke it), so the gate's standalone loop over
+// `web/js/**/*_check.mjs` is its only coverage (question 254 item 5 audit).
 //
 // Round 5 (question 228 finding 2, browser half): headless proof for the Layers panel
 // (web/js/panels/layers_panel.js) and the toggle sequence web/js/app.js's own

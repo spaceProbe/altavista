@@ -158,12 +158,12 @@ const HEADER_LEN: usize = 4 + 32;
 /// verdict).
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
-    /// `shard_key` cannot be turned into a safe file name under the log directory --
-    /// empty, a bare `.`/`..` path-traversal component, or containing a path separator or
-    /// NUL byte. A typed refusal, never a file written somewhere else (this crate's own
-    /// path-traversal test asserts exactly that).
+    /// `shard_key` is not a path-component id (`av_cdm::path_id`, question 254 item 1: 1 to 128
+    /// bytes of `[A-Za-z0-9._-]` starting with `[A-Za-z0-9]`), so it cannot be turned into a
+    /// file name under the log directory. A typed refusal, never a file written somewhere else
+    /// (this crate's own path-traversal test asserts exactly that).
     #[error("shard_key {shard_key:?} is not a valid partition key ({reason}) -- refusing to write outside the log directory")]
-    InvalidShardKey { shard_key: String, reason: &'static str },
+    InvalidShardKey { shard_key: String, reason: av_cdm::path_id::PathIdError },
     /// A payload (an encoded `MeasurementBatch`) is too large for this record framing's
     /// 32-bit length field. Not expected to be reachable by any batch this platform's
     /// producers actually build, but refused explicitly rather than silently truncating
@@ -199,23 +199,18 @@ pub struct RecoveryReport {
 }
 
 /// Sanitises `shard_key` into a file name confined to the log directory: refuses (as
-/// [`LogError::InvalidShardKey`]) an empty key, a bare `.`/`..` component, or any key
-/// containing `/`, `\`, or a NUL byte -- which between them rule out every way a path
-/// string can name a file outside the directory it is joined onto (an embedded `../` is
-/// caught by the separator check before the `..` component is ever reached). On success,
-/// returns the file name (not a full path) to join onto the log directory -- since the
-/// sanitised name can never contain a separator, `dir.join(name)` can never resolve
-/// outside `dir` regardless of what `dir` itself is.
+/// [`LogError::InvalidShardKey`]) anything that is not a path-component id
+/// (`av_cdm::path_id::validate_path_component_id`, question 254 item 1) -- the empty key, `.`,
+/// `..`, a key containing `/`, `\`, NUL, any control character or any other byte outside
+/// `[A-Za-z0-9._-]`, a key that does not start with `[A-Za-z0-9]`, or one over 128 bytes. That
+/// rules out every way a path string can name a file outside the directory it is joined onto.
+/// On success, returns the file name (not a full path) to join onto the log directory -- since
+/// the sanitised name can never contain a separator, `dir.join(name)` can never resolve outside
+/// `dir` regardless of what `dir` itself is. (Before question 254 only the empty key, `.`, `..`,
+/// `/`, `\` and NUL were refused; every shard key committed in this repository passes the
+/// stricter rule.)
 pub fn sanitize_shard_key(shard_key: &str) -> Result<String, LogError> {
-    if shard_key.is_empty() {
-        return Err(LogError::InvalidShardKey { shard_key: shard_key.to_string(), reason: "empty" });
-    }
-    if shard_key == "." || shard_key == ".." {
-        return Err(LogError::InvalidShardKey { shard_key: shard_key.to_string(), reason: "is itself a path-traversal component (\".\" or \"..\")" });
-    }
-    if shard_key.chars().any(|c| c == '/' || c == '\\' || c == '\0') {
-        return Err(LogError::InvalidShardKey { shard_key: shard_key.to_string(), reason: "contains a path separator or a NUL byte" });
-    }
+    av_cdm::path_id::validate_path_component_id(shard_key).map_err(|reason| LogError::InvalidShardKey { shard_key: shard_key.to_string(), reason })?;
     Ok(format!("{shard_key}.avlog"))
 }
 

@@ -245,8 +245,8 @@ export const ENTITY_MARKER_RADIUS_PX = 5;
  * every viewport's camera renders (`web/js/scene.js`: the primary renderer and one per
  * extra viewport, each with its own camera, distance and canvas size). Scaling the
  * instances from the CPU once per tick can only use one camera's distance, so the other
- * viewports would see a marker that is sub-pixel or huge (the defect
- * `Viewer._markerReferenceDistance` documents for the per-spacecraft markers). Here the
+ * viewports would see a marker that is sub-pixel or huge (the defect the per-spacecraft
+ * markers had until `Viewer._sizeMarkers` sized them per drawing view). Here the
  * size is resolved per draw call, from the camera and the drawing canvas that draw it:
  *
  *   - the instance CENTRE is projected as usual (`projectionMatrix * modelViewMatrix *

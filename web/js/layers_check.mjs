@@ -1,4 +1,6 @@
-// CLI harness for tests/test_viewer_layers.py: `node web/js/layers_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_layers.py drives:
+// `node web/js/layers_check.mjs`. It asserts its own checks and exits 1 on any failure
+// (question 254 item 5); see "ASSERTS AND EXITS" at the bottom.
 //
 // Drives the real web/js/layers/ module (LayerManager + the three real adapters:
 // ImageryLayerAdapter, TerrainLayerAdapter, Tiles3DLayerAdapter) over a fixed,
@@ -765,4 +767,128 @@ const result = {
   failureAttributionProbe,
 };
 
-process.stdout.write(JSON.stringify(result));
+// ASSERTS AND EXITS: every assertion tests/test_viewer_layers.py makes on `result` (except
+// cross-process byte-identity, which needs two processes and stays in the driver) is made
+// here too, same thresholds, so the standalone gate fails on a regression by itself. Each
+// failure prints to stderr as `FAIL <name>: measured X, bound Y`, then a summary line,
+// then exit 1; success exits 0.
+const failures = [];
+let assertionCount = 0;
+function assertBound(name, ok, measured, bound) {
+  assertionCount += 1;
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const show = (v) => JSON.stringify(v);
+const eq = (name, got, want) => assertBound(name, show(got) === show(want), show(got), `== ${show(want)}`);
+const le = (name, got, max) => assertBound(name, got <= max, show(got), `<= ${show(max)}`);
+const gt = (name, got, min) => assertBound(name, got > min, show(got), `> ${show(min)}`);
+
+// -- the printed plan is internally consistent and in the stated priority order
+eq('steps.length', result.steps.length, 7);
+for (const step of result.steps) {
+  eq(`step ${step.label} orderedKeys == requests' globalKeys`, step.orderedKeys, step.requests.map((r) => r.globalKey));
+  // The stated rule (design constraint d), recomputed independently of layer.js's
+  // comparePriority: descending sseError, ties by ascending viewDistanceM, ties by
+  // ascending globalKey.
+  const expected = step.requests.slice().sort((a, b) => (
+    (b.sseError - a.sseError)
+    || (a.viewDistanceM - b.viewDistanceM)
+    || (a.globalKey < b.globalKey ? -1 : a.globalKey > b.globalKey ? 1 : 0)
+  )).map((r) => r.globalKey);
+  eq(`step ${step.label} printed order == independently recomputed priority order`, step.orderedKeys, expected);
+  const tieKeys = step.requests.map((r) => `${r.sseError}|${r.viewDistanceM}|${r.globalKey}`);
+  eq(`step ${step.label} priority order is total (no duplicate tie key)`, new Set(tieKeys).size, tieKeys.length);
+}
+
+// -- byte budget respected, and eviction actually ran
+eq('budgetRespected', result.budgetRespected, true);
+le('maxResidentBytesObserved <= memoryBudgetBytes', result.maxResidentBytesObserved, result.memoryBudgetBytes);
+gt('evictedCount', result.evictedCount, 0);
+for (const step of result.steps) le(`step ${step.label} residentBytes <= memoryBudgetBytes`, step.residentBytes, result.memoryBudgetBytes);
+eq('softViolationCount', result.softViolationCount, 0);
+
+// -- the budget is in bytes: per-layer costs are real and different
+eq('imageryTileBytes', result.imageryTileBytes, 256 * 256 * 4);
+eq('defaultTile3DBytes', result.defaultTile3DBytes, result.imageryTileBytes * 10);
+{
+  const seenByteCosts = {};
+  for (const step of result.steps) for (const r of step.requests) seenByteCosts[r.layerId] = r.byteCost;
+  eq('byteCost of an imagery request', seenByteCosts.imagery, result.imageryTileBytes);
+  eq('byteCost of a tiles3d request', seenByteCosts.tiles3d, result.defaultTile3DBytes);
+  assertBound('imagery byteCost != tiles3d byteCost', seenByteCosts.imagery !== seenByteCosts.tiles3d, seenByteCosts.imagery, `!= ${seenByteCosts.tiles3d}`);
+}
+
+// -- cancellation on the deliberate view jump
+gt('cancelledCount', result.cancelledCount, 0);
+gt('jump-ne step cancelledThisStep', result.steps.find((s) => s.label === 'jump-ne').cancelledThisStep, 0);
+
+// -- maxConcurrentLoads makes the priority queue load-bearing
+{
+  const q = result.queueIsLoadBearing;
+  gt('queueIsLoadBearing.planLength > maxConcurrentLoads', q.planLength, q.maxConcurrentLoads);
+  eq('queueIsLoadBearing.startedFirstUpdateMatchesTopN', q.startedFirstUpdateMatchesTopN, true);
+  eq('queueIsLoadBearing.startedFirstUpdateCount == maxConcurrentLoads', q.startedFirstUpdateCount, q.maxConcurrentLoads);
+  eq('queueIsLoadBearing.deferredKeyNotStartedFirstUpdate', q.deferredKeyNotStartedFirstUpdate, true);
+  eq('queueIsLoadBearing.deferredKeyStartedSecondUpdateAfterSlotsFreed', q.deferredKeyStartedSecondUpdateAfterSlotsFreed, true);
+  eq('queueIsLoadBearing.ok', q.ok, true);
+}
+
+// -- a permanently failing layer does not starve a well-behaved one
+{
+  const p = result.starvationProbe;
+  eq('starvationProbe bad/good request counts', [p.badRequestCount, p.goodRequestCount], [10, 10]);
+  eq('starvationProbe.goodResident == goodRequestCount', p.goodResident, p.goodRequestCount);
+  le('starvationProbe.badLoadAttempts <= badRequestCount', p.badLoadAttempts, p.badRequestCount);
+  eq('starvationProbe.badResident', p.badResident, 0);
+  eq('starvationProbe.pending', p.pending, 0);
+  eq('starvationProbe.failedCount == badRequestCount', p.failedCount, p.badRequestCount);
+  eq('starvationProbe.failureNames', p.failureNames, ['AlwaysFailsError']);
+  eq('starvationProbe.ok', p.ok, true);
+}
+
+// -- one manager interface for all three layers
+eq('planNeverLoadsDirectly', result.planNeverLoadsDirectly, true);
+eq('residentPayloadLookupWorks', result.residentPayloadLookupWorks, true);
+eq('perLayerCounts layer ids', Object.keys(result.perLayerCounts).sort(), ['imagery', 'terrain', 'tiles3d']);
+gt('perLayerCounts.imagery.resident', result.perLayerCounts.imagery.resident, 0);
+gt('perLayerCounts.tiles3d.resident', result.perLayerCounts.tiles3d.resident, 0);
+eq(
+  'layer ids seen in the merged plan',
+  [...new Set(result.steps.flatMap((s) => s.requests.map((r) => r.layerId)))].sort(),
+  ['imagery', 'terrain', 'tiles3d'],
+);
+
+// -- terrain is a typed, named refusal and never charges the budget
+gt('terrainRefusalCount', result.terrainRefusalCount, 0);
+eq('terrainRefusalName', result.terrainRefusalName, 'TerrainLoaderNotImplementedError');
+eq('perLayerCounts.terrain.resident', result.perLayerCounts.terrain.resident, 0);
+eq('perLayerCounts.terrain.pending', result.perLayerCounts.terrain.pending, 0);
+
+// -- task 5b: failure attribution
+eq('noLoaderLayerIds', result.noLoaderLayerIds, ['terrain']);
+eq('failuresByLayer keys', Object.keys(result.failuresByLayer).sort(), ['terrain']);
+eq('failuresByLayer.terrain.count == terrainRefusalCount', result.failuresByLayer.terrain.count, result.terrainRefusalCount);
+eq('failuresByLayer.terrain.names', result.failuresByLayer.terrain.names, ['TerrainLoaderNotImplementedError']);
+eq(
+  'sum of failuresByLayer counts == failedCount',
+  Object.values(result.failuresByLayer).reduce((s, e) => s + e.count, 0),
+  result.failedCount,
+);
+{
+  const p = result.failureAttributionProbe;
+  eq('failureAttributionProbe.totalsMatch', p.totalsMatch, true);
+  eq('failureAttributionProbe.terrainAttributedCorrectly', p.terrainAttributedCorrectly, true);
+  eq('failureAttributionProbe.badAttributedCorrectly', p.badAttributedCorrectly, true);
+  eq('failureAttributionProbe.noCrossContamination', p.noCrossContamination, true);
+}
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(
+  `layers_check: ${assertionCount - failures.length} passed, ${failures.length} failed `
+  + `(maxResidentBytesObserved=${result.maxResidentBytesObserved}/${result.memoryBudgetBytes}, `
+  + `cancelledCount=${result.cancelledCount}, evictedCount=${result.evictedCount}, `
+  + `softViolationCount=${result.softViolationCount})\n`,
+);
+
+// stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));

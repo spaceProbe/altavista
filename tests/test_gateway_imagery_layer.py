@@ -25,6 +25,7 @@ real `fetch`).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -50,6 +51,11 @@ def check_data() -> dict:
         [node, str(CHECK)], cwd=str(CHECK.parent), capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"node {CHECK.name} exited {proc.returncode}\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
+    # The check asserts its own cases (and exits 1 on any failure, printing each one to
+    # stderr); its summary line must agree with the exit code asserted above.
+    assert re.search(r"gateway_imagery_layer_check: \d+ passed, 0 failed", proc.stderr), (
+        f"{CHECK.name} summary line missing or reports failures\nstderr: {proc.stderr}"
+    )
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError:

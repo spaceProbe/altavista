@@ -97,6 +97,7 @@ test, be able to name the wrong implementation it would fail against"):
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -132,6 +133,11 @@ def _run_node_raw() -> str:
     assert proc.returncode == 0, (
         f"node {LAYERS_CHECK.name} exited {proc.returncode}\n"
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+    # The check asserts its own bounds (and exits 1 on any failure, printing each one to
+    # stderr); its summary line must agree with the exit code asserted above.
+    assert re.search(r"layers_check: \d+ passed, 0 failed", proc.stderr), (
+        f"{LAYERS_CHECK.name} summary line missing or reports failures\nstderr: {proc.stderr}"
     )
     return proc.stdout
 

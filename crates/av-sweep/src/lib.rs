@@ -33,6 +33,10 @@
 //! - [`json`] -- the proto3 canonical JSON encoder for `SweepResults` and everything it reaches.
 //! - [`store`] -- [`store::StudyStore`] (F2), the study-store trait, [`store::FileStudyStore`],
 //!   and the `open_store` seam over both backends.
+//! - [`plan`] -- [`plan::StudyPlan`] (question 254 item 2), what a study will contain before its
+//!   first sample runs, and its comparison with a study a store already holds.
+//! - [`study_write`] -- the two-phase write of one study to every configured store, and the plan
+//!   check that refuses a conflicting store before any sample runs.
 //! - [`clickhouse`] -- [`clickhouse::ClickHouseStudyStore`] (question 245), the ClickHouse
 //!   implementation of [`store::StudyStore`]: columnar tables, an all-or-nothing write without
 //!   transactions, exact-float `RowBinary`, a verified schema, and the MoE query answered in SQL.
@@ -43,10 +47,12 @@ pub mod error;
 pub mod grid;
 pub mod hash;
 pub mod json;
+pub mod plan;
 pub mod sample;
 pub mod schema;
 pub mod seed;
 pub mod store;
+pub mod study_write;
 
 pub use aggregate::aggregate;
 pub use error::SweepError;

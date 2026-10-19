@@ -119,10 +119,11 @@ const HEADER_LEN: usize = 4 + 32;
 /// refusal a caller must handle, never a panic.
 #[derive(Debug, thiserror::Error)]
 pub enum JobLogError {
-    /// `name` cannot be turned into a safe file name under the log directory -- empty, a
-    /// bare `.`/`..` path-traversal component, or containing a path separator or NUL byte.
+    /// `name` is not a path-component id (`av_cdm::path_id`, question 254 item 1: 1 to 128
+    /// bytes of `[A-Za-z0-9._-]` starting with `[A-Za-z0-9]`), so it cannot be turned into a
+    /// file name under the log directory.
     #[error("queue name {name:?} is not a valid job log name ({reason}) -- refusing to write outside the log directory")]
-    InvalidName { name: String, reason: &'static str },
+    InvalidName { name: String, reason: av_cdm::path_id::PathIdError },
     /// A payload (an encoded `JobLogRecord`) is too large for this record framing's 32-bit
     /// length field.
     #[error("payload of {len} bytes does not fit in this record framing's 32-bit length field")]
@@ -157,21 +158,14 @@ pub struct RecoveryReport {
 }
 
 /// Sanitises `name` into a file name confined to the log directory: refuses (as
-/// [`JobLogError::InvalidName`]) an empty name, a bare `.`/`..` component, or any name
-/// containing `/`, `\`, or a NUL byte -- the identical rule `crates/av-ingest/src/
+/// [`JobLogError::InvalidName`]) anything that is not a path-component id
+/// (`av_cdm::path_id::validate_path_component_id`, question 254 item 1: 1 to 128 bytes of
+/// `[A-Za-z0-9._-]` starting with `[A-Za-z0-9]`) -- the identical rule `crates/av-ingest/src/
 /// log.rs::sanitize_shard_key` applies to its own partition keys. On success, returns the
 /// file name (not a full path) to join onto the log directory -- since the sanitised name can
 /// never contain a separator, `dir.join(name)` can never resolve outside `dir`.
 pub fn sanitize_log_name(name: &str) -> Result<String, JobLogError> {
-    if name.is_empty() {
-        return Err(JobLogError::InvalidName { name: name.to_string(), reason: "empty" });
-    }
-    if name == "." || name == ".." {
-        return Err(JobLogError::InvalidName { name: name.to_string(), reason: "is itself a path-traversal component (\".\" or \"..\")" });
-    }
-    if name.chars().any(|c| c == '/' || c == '\\' || c == '\0') {
-        return Err(JobLogError::InvalidName { name: name.to_string(), reason: "contains a path separator or a NUL byte" });
-    }
+    av_cdm::path_id::validate_path_component_id(name).map_err(|reason| JobLogError::InvalidName { name: name.to_string(), reason })?;
     Ok(format!("{name}.avjobs"))
 }
 
@@ -487,6 +481,47 @@ mod tests {
         assert!(matches!(sanitize_log_name("a/b"), Err(JobLogError::InvalidName { .. })));
         assert!(matches!(sanitize_log_name("a\\b"), Err(JobLogError::InvalidName { .. })));
         assert!(matches!(sanitize_log_name("a\0b"), Err(JobLogError::InvalidName { .. })));
+    }
+
+    /// A traversal queue name (and an absolute one, and the newly refused control-character and
+    /// encoded forms) writes nothing: the directory holding the log directory is identical
+    /// (names and sizes) before and after, `<parent>/x.avjobs` does not exist and the log
+    /// directory itself is not created.
+    #[test]
+    fn job_log_open_with_a_traversal_name_writes_nothing() {
+        let parent = TempDir::new("traversal-writes");
+        let logs = parent.path().join("logs");
+        let listing = |dir: &Path| -> Vec<(String, u64)> {
+            let mut v: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().len())).collect();
+            v.sort();
+            v
+        };
+        let before = listing(parent.path());
+        let absolute = parent.path().join("x").display().to_string();
+        for name in ["../x", "..", &absolute, "a/b", "a\\b", "a\0b", "a\nb", "%2e%2e%2fx", "..%2fx", ".hidden"] {
+            let err = JobLog::open(&logs, name).unwrap_err();
+            assert!(matches!(err, JobLogError::InvalidName { .. }), "{name:?}: {err:?}");
+            assert_eq!(listing(parent.path()), before, "{name:?}");
+        }
+        assert!(!logs.exists() && !parent.path().join("x.avjobs").exists());
+    }
+
+    /// Question 254 item 1: the shared path-component rule decides, against the same vectors
+    /// the rule's Rust and Python tests read (`data/path_component_id_vectors.json`).
+    #[test]
+    fn sanitize_log_name_follows_the_shared_path_component_vectors() {
+        let vectors: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/path_component_id_vectors.json")).unwrap()).unwrap();
+        for id in vectors["accepted"].as_array().unwrap() {
+            let id = id.as_str().unwrap();
+            assert_eq!(sanitize_log_name(id).unwrap(), format!("{id}.avjobs"), "{id:?}");
+        }
+        for entry in vectors["refused"].as_array().unwrap() {
+            let id = entry["id"].as_str().unwrap();
+            match sanitize_log_name(id) {
+                Err(JobLogError::InvalidName { reason, .. }) => assert_eq!(reason.reason(), entry["reason"].as_str().unwrap(), "{id:?}"),
+                other => panic!("{id:?} must be refused as InvalidName, got {other:?}"),
+            }
+        }
     }
 
     #[test]

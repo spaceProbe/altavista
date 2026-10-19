@@ -69,6 +69,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -338,6 +339,11 @@ def _run_node_json(script: Path) -> dict:
     assert proc.returncode == 0, (
         f"node {script.name} exited {proc.returncode}\n"
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+    )
+    # The check asserts its own bounds (and exits 1 on any failure, printing each one to
+    # stderr); its summary line must agree with the exit code asserted above.
+    assert re.search(rf"{re.escape(script.stem)}: \d+ passed, 0 failed", proc.stderr), (
+        f"{script.name} summary line missing or reports failures\nstderr: {proc.stderr}"
     )
     try:
         return json.loads(proc.stdout)

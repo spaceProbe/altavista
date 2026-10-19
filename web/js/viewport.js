@@ -4,12 +4,13 @@
 // any other viewport: its own camera, its own view-frame/focus state, its own floating
 // origin, and its own copy of the precision-sensitive trajectory/footprint line geometry
 // (see this module's own docstring on `Viewport.lines`/`Viewport.footprintLines` for why
-// those need a per-viewport copy). Everything else in the scene (bodies, the globe,
-// stars/grid/axes, and the entity objects: spacecraft markers, event markers, instanced entity
-// markers, trails, covariance / keep-out meshes, glTF models) is a single shared Object3D,
-// rendered by every viewport's camera -- the entity objects are WRITTEN per drawing viewport
-// (see the next paragraphs). See web/js/scene.js's module docstring for the "one scene, many
-// cameras" split this module is one half of.
+// those need a per-viewport copy). Everything else in the scene (stars/grid/axes, the bodies
+// with their dots, the globe, the body-fixed frame of the 3D Tiles overlay, and the entity
+// objects: spacecraft markers, event markers, instanced entity markers, trails, covariance /
+// keep-out meshes, glTF models) is a single shared Object3D, rendered by every viewport's camera
+// -- the bodies and the entity objects are WRITTEN per drawing viewport (see the next
+// paragraphs). See web/js/scene.js's module docstring for the "one scene, many cameras" split
+// this module is one half of.
 //
 // **A shared Object3D's rendered precision is NOT origin-independent (question 240).** A
 // `THREE.Object3D.position` is a plain JS `number` triple -- f64 -- and Three's own
@@ -30,7 +31,13 @@
 // The fix is a per-viewport WRITE, not a per-viewport copy of the objects: the shared entity
 // objects are placed for the viewport that is about to draw them, relative to that viewport's
 // own floating origin (`Viewer._placeSharedEntities`, run from `scene.onBeforeRender`, keyed by
-// the drawing camera), so each viewport sees them as precisely as its own trajectory lines.
+// the drawing camera), so each viewport sees them as precisely as its own trajectory lines. The
+// bodies are written in the same place (`Viewer._placeBodies`, question 254 item 4): the sphere
+// meshes, the sub-pixel dots (whose visibility and size are decided per view, from that view's own
+// camera), the tiled globe's group and the body-fixed frame. A body is far from a view's origin,
+// so a viewport gets its f64 position unrounded; what is left on screen is the GPU's float32
+// model-view multiply, which no placement can remove. (The globe's tile SELECTION is level of
+// detail, not placement, and still plans for the primary camera only.)
 // The alternative (an `InstancedMesh`, trail lines, ellipsoid / keep-out meshes and glTF clones
 // per viewport on its own layer) costs memory, a build / dispose lifecycle on every viewport
 // and scenario change, and N copies of the layer manager's residency; web/VIEWER.md's "Shared
@@ -214,9 +221,15 @@ export class Viewport {
  * from that viewport's own eye/frame, so two viewports looking at the same screen
  * coordinate from different cameras correctly resolve to different world objects (or the
  * same one, when that is geometrically correct) without either needing to know about
- * `THREE.Layers` at all -- every pick target (body mesh, spacecraft marker, event mesh)
- * is a single object shared by every viewport (see module docstring), so no per-viewport
- * layer filtering is needed for picking to be correct, only the right camera.
+ * `THREE.Layers` at all -- every pick target (body mesh, spacecraft marker, event mesh,
+ * glTF model mesh) is a single object shared by every viewport (see module docstring), so no
+ * per-viewport layer filtering is needed for picking to be correct, only the right camera
+ * AND the targets standing where that viewport draws them: the shared entity objects are
+ * written per drawing viewport (`Viewer._placeSharedEntities`), so `Viewer.pick()` places
+ * them for the clicked viewport before it calls this function and restores the previous
+ * placement afterwards. This function itself raycasts whatever the targets' world matrices
+ * hold, so a caller that does not place them first gets the placement of whichever view
+ * wrote them last.
  *
  * @param {THREE.Camera} camera
  * @param {number} ndcX

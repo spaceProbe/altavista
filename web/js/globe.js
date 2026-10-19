@@ -15,8 +15,14 @@
 // same reason web/js/scene.js's existing `makeBodyMesh()` sphere geometry is built in
 // unit-sphere-then-`mesh.scale()` space rather than absolute coordinates.
 // `GlobeLayer.group` is positioned/oriented every tick to exactly track the body's own
-// already-origin-relative `mesh.position`/`mesh.quaternion` (see `Viewer.
-// _syncGlobeLayer` in scene.js) -- it is parented as a sibling of the body mesh, not a
+// origin-relative `mesh.position`/`mesh.quaternion` (see `Viewer._syncGlobeLayer` in
+// scene.js), and its POSITION is written for each drawing viewport against that viewport's
+// own floating origin (`Viewer._placeBodies`, question 254 item 4; the tile vertices
+// themselves, in body-local units, never depend on any origin). What the GPU's float32
+// model-view multiply cannot do for vertices a body radius from the group's origin (about
+// ulp of the distance, 0.8 m at LEO) is the floor no placement removes. The tile SELECTION
+// (`Viewer._syncGlobeLayer`'s `planView`) is level of detail, not placement, and plans for
+// the primary camera only. The group is parented as a sibling of the body mesh, not a
 // child of it (so tile vertices are never additionally scaled by the body mesh's own
 // `(r,r,r*(1-flattening))` scale factor; ellipsoid flattening is instead baked
 // directly into each tile vertex via WGS84_A_M/WGS84_B_M in globe_lod.js's

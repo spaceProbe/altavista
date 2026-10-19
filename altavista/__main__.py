@@ -61,6 +61,15 @@ def main(argv=None) -> int:
                     help="path to a file holding the OIDC token this server presents to "
                          "the av-gateway DataGatewayService (read fresh on every call)")
 
+    # Question 254 item 1: the folders POST /api/cdm/sweep/sample may read a sample's
+    # run_products.pb under. The sweep's publisher names the sample directory, so only the
+    # operator's own roots are trusted. Ordinary CLI flag, repeatable -- never the process
+    # environment (question 199); no default root.
+    s.add_argument("--study-root", dest="study_roots", action="append", default=None, metavar="DIR",
+                    help="folder a feasibility study was run into; the viewer opens a sweep sample "
+                         "only from a directory inside one of these (repeatable; default: none, "
+                         "so samples cannot be opened)")
+
     r = sub.add_parser("run", help="run a GMAT script and publish it to the viewer")
     r.add_argument("script")
     r.add_argument("--name", default=None)
@@ -77,7 +86,8 @@ def main(argv=None) -> int:
               command_entities=args.command_entities or [],
               profiles_dir=args.profiles_dir,
               tiles_endpoint=args.tiles_endpoint, tiles_token_path=args.tiles_token_path,
-              gateway_endpoint=args.gateway_endpoint, gateway_token_path=args.gateway_token_path)
+              gateway_endpoint=args.gateway_endpoint, gateway_token_path=args.gateway_token_path,
+              study_roots=args.study_roots or [])
         return 0
     if args.cmd == "run":
         from .scenario import Scenario

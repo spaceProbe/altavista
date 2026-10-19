@@ -742,6 +742,22 @@ mod tests {
         assert_eq!(sanitize_for_container_name("!!!"), "___");
     }
 
+    /// Question 254 item 1 (audit: unreachable by a hostile `job_id`): the job id reaches the
+    /// scratch directory only as `av-job-<sanitized id>-<pid>-<nanos>`, and the sanitized id holds
+    /// only `[A-Za-z0-9._-]`, so whatever the id is the name is exactly one `Normal` path
+    /// component (never `..`, never a separator, never absolute), directly under the scratch root.
+    #[test]
+    fn a_hostile_job_id_can_only_ever_be_one_scratch_component() {
+        for hostile in ["../x", "..", ".", "/abs/path", "a/b", "a\\b", "a\0b", "%2e%2e%2fx", "..%2fx", "", "x/../../y"] {
+            let name = format!("av-job-{}-{}", sanitize_for_container_name(hostile), unique_suffix());
+            let scratch = std::path::Path::new("/scratch-root").join(&name);
+            assert_eq!(scratch.parent(), Some(std::path::Path::new("/scratch-root")), "{hostile:?} -> {scratch:?}");
+            let comps: Vec<_> = std::path::Path::new(&name).components().collect();
+            assert!(comps.len() == 1 && matches!(comps[0], std::path::Component::Normal(_)), "{hostile:?} -> {name:?}");
+            assert!(name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')), "{name:?}");
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // digest_gate's own empty-field precondition needs no Docker at all -- it returns before
     // ever calling `docker image inspect`.

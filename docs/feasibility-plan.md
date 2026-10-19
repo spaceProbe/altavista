@@ -110,8 +110,15 @@ into it.
   differs from the declared count exactly when a sample failed.
 - **The store is a trait from day one.** `FileStudyStore` writes `<root>/<sweep_id>/` with
   the `SweepResults` message, its canonical JSON, and a JSONL of samples; the ClickHouse
-  backend is a typed refusal naming the deferral, not a stub that pretends to work. The
-  `--out-dir` tree stays the sample workspace; `--store-dir` is the platform's read path.
+  backend (question 245, `--store-clickhouse`) is the second implementation of the same trait.
+  The `--out-dir` tree stays the sample workspace; `--store-dir` is the platform's read path.
+  Studies are immutable in both stores. With both configured, study mode has every store
+  check the study before its first sample runs (a store holding a different study refuses
+  then, writing nothing), and writes them in two phases (prepare both, commit ClickHouse then
+  the file store) so a refusal or failure in one never leaves them holding different studies
+  (question 254 item 2; `crates/av-sweep/src/study_write.rs` has the table of every outcome,
+  and `av-sweep --import-study <out-dir>/sweep_results.pb` with the same store options is the
+  repair for the two outcomes where they can still disagree).
 
 ### The fixture study, measured
 
@@ -198,7 +205,9 @@ av-kernel` was never run: nothing this track touches compiles into it.
   the host that ran the study; the panel's first implementation fetched that string from the
   browser and could never have worked. `POST /api/cdm/sweep/sample` takes an identity
   (`sweepId`, `pointIndex`, `drawIndex`) and resolves it against the study the server itself
-  published, so no caller-supplied path is ever opened. The `RunProducts`-to-scenario conversion
+  published, so the *requester* supplies no path. The recorded `productsUri` is still the
+  *publisher's* string, so the file is opened only inside an operator-configured study root
+  (`--study-root`, question 254 item 1; README "Run"). The `RunProducts`-to-scenario conversion
   is now one shared function, which the unedited run-publish tests prove.
 - **The worked study found a modelling assumption before it found a trend.** The manager's own
   design put both of `docs/studies/drag-sail-vs-burn.md`'s axes on `demo_mvr`, which carries no

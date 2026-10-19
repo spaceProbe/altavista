@@ -47,6 +47,30 @@
 //! its schema verified, or migrated when it has no tables yet) **before the first sample runs**,
 //! so a wrong URL, password variable, CA or schema fails in seconds, not after the study.
 //!
+//! ## Question 254 item 2: every store is checked up front and they never disagree
+//!
+//! Studies are immutable in both stores, so a store holding a different study under the id would
+//! refuse only after the whole study ran, and writing the stores one after the other could leave
+//! them holding different studies. Study mode therefore:
+//!
+//! 1. opens every configured store, then builds the study's plan (`av_sweep::plan::StudyPlan`:
+//!    what is known before a sample runs, including the canonical sample directory each
+//!    `products_uri` would name) and has **every store check it before the first sample runs**
+//!    (`study_write::check_plan`). A store holding a study the plan cannot reproduce refuses with
+//!    `WriteRefusal::DifferentPlan` naming the field; the study is refused, nothing was written
+//!    to any store, no sample runs and `--out-dir` holds no `sweep_results.pb`. An identical
+//!    rerun (same `--out-dir`) is compatible and stays idempotent. (`--out-dir` itself is
+//!    created first, so the sample directory canonicalizes.)
+//! 2. runs the samples, then writes `sweep_results.pb`/`.json` to `--out-dir` **before** touching
+//!    any store, so the repair input below always exists.
+//! 3. writes the stores in two phases (`study_write::write_study`, whose module doc has the
+//!    protocol and the table of every partial-failure outcome): prepare every store (ClickHouse
+//!    first, then the file store; nothing visible), abort all on any failure, then commit
+//!    ClickHouse before the file store. The two outcomes in which one store can hold the study and
+//!    the other not (a ClickHouse commit of unknown outcome, a file rename that fails after
+//!    ClickHouse committed) are typed errors saying which store holds what; the repair is
+//!    `av-sweep --import-study <out-dir>/sweep_results.pb` with the same store options.
+//!
 //! ## Question 192 additions: `seeds`, event axes and `dispersed`
 //!
 //! `SweepSample.seed` (one projected value) no longer exists -- [`Running`] now carries the
@@ -83,12 +107,14 @@ use std::time::Duration;
 
 use av_cdm::pb;
 use av_kernel::drm::ExecutionErrorMode;
-use av_sweep::store::{open_store, FileStudyStore, StoreBackend, StudyStore};
+use av_sweep::plan::{PlannedRun, PlannedSample, StudyPlan};
+use av_sweep::study_write;
 use av_sweep::{json, SampleConfig};
 use prost::Message;
 
 use crate::cli::{Dispatch, StudyArgs};
 use crate::jobs;
+use crate::store_mode::{describe_write_error, open_selected_stores, report_written};
 
 /// The maximum number of stderr bytes a failed sample's own [`pb::SweepSample::error`] message
 /// quotes -- this task's own brief: "cap the stderr at 4096 bytes and say explicitly in the
@@ -103,6 +129,9 @@ fn load_systems(paths: &[PathBuf]) -> Result<BTreeMap<String, pb::SystemDefiniti
     let mut systems = BTreeMap::new();
     for path in paths {
         let sys = av_kernel::drm::schema::parse_system_definition_yaml(&read_to_string(path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The id becomes `sys_<id>.pb` in every sample directory (`write_sample_inputs`): refused
+        // here, once, before anything is written.
+        av_cdm::path_id::validate_path_component_id(&sys.id).map_err(|e| format!("{}: SystemDefinition.id {:?} cannot name a sample file (sys_<id>.pb): {e}", path.display(), sys.id))?;
         if let Some(_prev) = systems.insert(sys.id.clone(), sys) {
             return Err(format!("two --system files declare the same SystemDefinition.id (last one: {})", path.display()));
         }
@@ -171,6 +200,12 @@ pub struct SampleInputPaths {
 /// factored out of the worker-pool loop specifically so it is unit-testable on its own (this
 /// crate's own `tests::written_sample_files_recompute_the_same_config_hash`).
 pub fn write_sample_inputs(sample_dir: &Path, cfg: &SampleConfig) -> io::Result<SampleInputPaths> {
+    // `sys_<id>.pb` names a file from a `SystemDefinition.id` (untrusted YAML): every id must be a
+    // path component (`av_cdm::path_id`) before the directory or any file is created. `load_systems`
+    // refuses the same ids earlier; this keeps the function safe for any other caller.
+    for id in cfg.systems.keys() {
+        av_cdm::path_id::validate_path_component_id(id).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("SystemDefinition.id {id:?} cannot name a sample file (sys_<id>.pb): {e}")))?;
+    }
     std::fs::create_dir_all(sample_dir)?;
     let drm_pb = sample_dir.join("drm.pb");
     std::fs::write(&drm_pb, cfg.drm.encode_to_vec())?;
@@ -362,13 +397,56 @@ fn build_samples(loaded: &Loaded, points: &[av_sweep::GridPoint], draws: u32) ->
             match av_sweep::sample_config(&loaded.sweep, &loaded.sweep_hash, &loaded.drm, &loaded.sos, &loaded.systems, point.point_index, draw) {
                 Ok(cfg) => queue.push_back(cfg),
                 Err(e) => {
-                    let run_id = format!("{}_p{}_d{draw}", loaded.sweep.id, point.point_index);
+                    let run_id = sample_run_id(&loaded.sweep.id, point.point_index, draw);
                     results.push(pb::SweepSample { point_index: point.point_index, draw_index: draw, run_id, error: e.to_string(), ..Default::default() });
                 }
             }
         }
     }
     (results, queue)
+}
+
+/// The run id of one sample: `<sweep id>_p<point>_d<draw>`, the one place it is spelled.
+pub fn sample_run_id(sweep_id: &str, point_index: u32, draw_index: u32) -> String {
+    format!("{sweep_id}_p{point_index}_d{draw_index}")
+}
+
+/// The study's provenance: known before any sample runs, so the plan carries it too.
+fn study_provenance(loaded: &Loaded) -> pb::Provenance {
+    pb::Provenance {
+        author_kind: pb::AuthorKind::Agent as i32,
+        tool: "av-sweep".to_string(),
+        run_id: loaded.sweep.id.clone(),
+        config_hash: loaded.sweep_hash.clone(),
+        // Deliberately not a wall-clock read -- matches av_kernel::drm::executor's own
+        // Provenance.created_tai_ns convention (this crate's own task brief: "products carry
+        // no wall clock, which is what makes byte-identical re-runs possible").
+        created_tai_ns: 0,
+        ..Default::default()
+    }
+}
+
+/// The study's plan (question 254 item 2): everything of the finished `SweepResults` that is
+/// known before the first sample runs. `failed` are the records [`build_samples`] already made
+/// for samples whose configuration could not be built, `queue` the samples that will run, and
+/// `out_dir` must exist (each success's `products_uri` is the canonical path of its sample
+/// directory under it, exactly what [`finalize`] records). A sample dispatched as a job names the
+/// same directory.
+fn study_plan(loaded: &Loaded, failed: &[pb::SweepSample], queue: &VecDeque<SampleConfig>, out_dir: &Path) -> Result<StudyPlan, String> {
+    let canonical = std::fs::canonicalize(out_dir).map_err(|e| format!("resolving {}: {e}", out_dir.display()))?;
+    let mut samples: Vec<PlannedSample> = failed.iter().cloned().map(PlannedSample::Fixed).collect();
+    samples.extend(queue.iter().map(|cfg| {
+        PlannedSample::Runs(PlannedRun {
+            point_index: cfg.point_index,
+            draw_index: cfg.draw_index,
+            run_id: sample_run_id(&loaded.sweep.id, cfg.point_index, cfg.draw_index),
+            config_hash: cfg.config_hash.clone(),
+            axis_values: cfg.axis_values.clone(),
+            seeds: cfg.seeds.clone(),
+            products_dir: canonical.join(format!("sample_p{}_d{}", cfg.point_index, cfg.draw_index)).display().to_string(),
+        })
+    }));
+    Ok(StudyPlan { sweep_id: loaded.sweep.id.clone(), sweep_hash: loaded.sweep_hash.clone(), drm_hash: loaded.drm.hash.clone(), provenance: Some(study_provenance(loaded)), samples })
 }
 
 pub fn run_study(args: StudyArgs, exe: &Path) -> Result<(), String> {
@@ -386,15 +464,16 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
         return Err(crate::sample_mode::GMAT_STARTUP_REFUSAL.to_string());
     }
     let loaded = preflight(&args)?;
-    // Question 245: open the ClickHouse store first (see the write below for why).
-    let clickhouse_store = match &args.clickhouse {
-        None => None,
-        Some(config) => {
-            let label = format!("the ClickHouse study store at {} (database {})", config.url, config.database);
-            let store = open_store(StoreBackend::ClickHouse(config.clone())).map_err(|e| format!("opening {label}: {e}"))?;
-            Some((label, store))
-        }
-    };
+    // Question 254 item 1: the sweep YAML's `id` becomes `<store-dir>/<id>/`; the file store would
+    // refuse a bad one only after the whole study ran, so say so now, before any sample does.
+    if args.store_dir.is_some() {
+        av_cdm::path_id::validate_path_component_id(&loaded.sweep.id)
+            .map_err(|e| format!("{}: ParameterSweep.id {:?} cannot name a study directory under --store-dir: {e}", args.sweep.display(), loaded.sweep.id))?;
+    }
+    // Question 245: open every store before the first sample runs (a wrong URL, password variable,
+    // CA or schema fails in seconds, not after the study); question 254 item 2: and check the plan
+    // with each of them below.
+    let mut stores = open_selected_stores(&args.store_dir, &args.clickhouse)?;
     let points = av_sweep::expand_grid(&loaded.sweep).map_err(|e| format!("{}: {e}", args.sweep.display()))?;
     let draws = loaded.sweep.monte_carlo_draws;
     // Question 192(d): Sampled when the sweep declares more than one draw OR when it forces
@@ -405,6 +484,13 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
 
     let (mut results, mut queue) = build_samples(&loaded, &points, draws);
 
+    // Question 254 item 2: every store says now whether it would accept this study, before any
+    // sample runs. A refusal is fatal here: nothing was written anywhere and no sample ran.
+    if !stores.is_empty() {
+        let plan = study_plan(&loaded, &results, &queue, &args.out_dir)?;
+        study_write::check_plan(&stores, &plan).map_err(|e| format!("{e}; no sample was run"))?;
+    }
+
     let mut failed_count = 0usize;
     match &args.dispatch {
         // Today's behaviour, unchanged: up to `--workers` children of this binary at a time.
@@ -414,7 +500,7 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
                 while running.len() < args.workers as usize {
                     let Some(cfg) = queue.pop_front() else { break };
                     let sample_dir = args.out_dir.join(format!("sample_p{}_d{}", cfg.point_index, cfg.draw_index));
-                    let run_id = format!("{}_p{}_d{}", loaded.sweep.id, cfg.point_index, cfg.draw_index);
+                    let run_id = sample_run_id(&loaded.sweep.id, cfg.point_index, cfg.draw_index);
                     let inputs = write_sample_inputs(&sample_dir, &cfg).map_err(|e| format!("writing sample inputs for p{} d{}: {e}", cfg.point_index, cfg.draw_index))?;
                     let r = spawn_sample(exe, &inputs, &cfg, &run_id, error_mode, args.gmat_startup.as_deref(), &sample_dir)?;
                     running.push(r);
@@ -490,17 +576,7 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
         drm_hash: loaded.drm.hash.clone(), // verified equal to its own canonical hash in preflight()
         samples: results,
         aggregates,
-        provenance: Some(pb::Provenance {
-            author_kind: pb::AuthorKind::Agent as i32,
-            tool: "av-sweep".to_string(),
-            run_id: loaded.sweep.id.clone(),
-            config_hash: loaded.sweep_hash.clone(),
-            // Deliberately not a wall-clock read -- matches av_kernel::drm::executor's own
-            // Provenance.created_tai_ns convention (this crate's own task brief: "products carry
-            // no wall clock, which is what makes byte-identical re-runs possible").
-            created_tai_ns: 0,
-            ..Default::default()
-        }),
+        provenance: Some(study_provenance(&loaded)),
     };
 
     let pb_path = args.out_dir.join("sweep_results.pb");
@@ -508,20 +584,14 @@ fn run_study_with(args: StudyArgs, exe: &Path, injected: Option<&dyn jobs::JobBa
     let json_path = args.out_dir.join("sweep_results.json");
     std::fs::write(&json_path, json::sweep_results_to_json(&sweep_results)).map_err(|e| format!("writing {}: {e}", json_path.display()))?;
 
-    // F2: the study store is an ADDITIONAL, OPTIONAL destination -- see this module's own doc
+    // F2: the study stores are ADDITIONAL, OPTIONAL destinations -- see this module's own doc
     // comment's "F2 additions" section for why --out-dir itself is untouched. Nothing is written
-    // under any store directory unless --store-dir was actually given.
-    if let Some(store_dir) = &args.store_dir {
-        let mut store = FileStudyStore::new(store_dir);
-        let location = store.put_study(&sweep_results).map_err(|e| format!("writing the study store at {}: {e}", store_dir.display()))?;
-        eprintln!("av-sweep: study store written to {location}");
-    }
-    // Question 245: the ClickHouse store, opened (connected, schema verified) BEFORE any sample
-    // ran, so an unreachable server or a mismatching schema fails in seconds rather than after
-    // the whole study. It gets the same SweepResults as the file store.
-    if let Some((label, mut store)) = clickhouse_store {
-        let location = store.put_study(&sweep_results).map_err(|e| format!("writing study {:?} to {label}: {e}", sweep_results.sweep_id))?;
-        eprintln!("av-sweep: study written to {location}");
+    // under any store unless --store-dir / --store-clickhouse was actually given. Question 254
+    // item 2: all of them in one two-phase write, so a refusal or failure in one never leaves the
+    // stores holding different studies; the file above is the repair input if they might.
+    if !stores.is_empty() {
+        let written = study_write::write_study(&mut stores, &sweep_results).map_err(|e| describe_write_error(&e, &pb_path, &args.store_dir, &args.clickhouse))?;
+        report_written(&written, &sweep_results.sweep_id);
     }
 
     eprintln!("av-sweep: study {:?}: {} sample(s), {failed_count} failed", loaded.sweep.id, sweep_results.samples.len());
@@ -607,6 +677,56 @@ mod tests {
         assert_eq!(names, vec!["sys_demo_ctrl_sys.pb".to_string(), "sys_leo_demo_sys.pb".to_string()], "id-sorted, sys_<id>.pb naming");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Question 254 item 1: a `SystemDefinition.id` that is not a path component never reaches a
+    /// `join`. The sample directory is pre-seeded with `sys_x/`, so an unchecked id of
+    /// `x/../../evil` would resolve to `<parent of the sample dir>/evil.pb` and be written there;
+    /// instead `write_sample_inputs` refuses it (and `/abs`, `..`, `a\b`, NUL, the empty id) as
+    /// `InvalidInput` before creating anything, and the whole tree around it is unchanged.
+    #[test]
+    fn a_system_id_that_is_not_a_path_component_is_refused_before_any_file_is_written() {
+        fn tree(dir: &Path) -> BTreeMap<String, String> {
+            fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+                    let rel = entry.path().strip_prefix(base).unwrap().display().to_string();
+                    if meta.is_dir() {
+                        out.insert(rel, "dir".to_string());
+                        walk(base, &entry.path(), out);
+                    } else {
+                        out.insert(rel, format!("{} bytes", meta.len()));
+                    }
+                }
+            }
+            let mut out = BTreeMap::new();
+            walk(dir, dir, &mut out);
+            out
+        }
+        let sweep = pb::ParameterSweep { id: "sweep_test".to_string(), drm_id: "demo_two_instance_drm".to_string(), monte_carlo_draws: 1, ..Default::default() };
+        let sweep_hash = av_sweep::canonical_sweep_hash(&sweep);
+        let good = av_sweep::sample_config(&sweep, &sweep_hash, &fixture_drm(), &fixture_sos(), &fixture_systems(), 0, 0).expect("samples");
+
+        let parent = temp_dir("system-id-traversal");
+        let sample_dir = parent.join("sample_p0_d0");
+        std::fs::create_dir_all(sample_dir.join("sys_x")).unwrap();
+        let before = tree(&parent);
+        for bad in ["x/../../evil", "../x", "..", "/abs/under/parent", "a\\b", "a\0b", "", "%2e%2e%2fx"] {
+            let mut cfg = good.clone();
+            let mut sys = cfg.systems.values().next().unwrap().clone();
+            sys.id = bad.to_string();
+            cfg.systems = BTreeMap::from([(bad.to_string(), sys)]);
+            let Err(err) = write_sample_inputs(&sample_dir, &cfg) else { panic!("{bad:?} must be refused") };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}: {err}");
+            assert!(err.to_string().contains("cannot name a sample file"), "{err}");
+            assert_eq!(tree(&parent), before, "{bad:?}: something was created");
+            assert!(!parent.join("evil.pb").exists());
+        }
+        // The real ids still write.
+        write_sample_inputs(&sample_dir, &good).expect("valid ids still write");
+        assert!(sample_dir.join("sys_leo_demo_sys.pb").is_file());
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     /// Fast, no GMAT, no child process: a sweep with two grid points where only the SECOND
@@ -883,6 +1003,51 @@ exit 0"#;
         assert_eq!(runs.len(), 8);
         assert_eq!(backend.runs.lock().unwrap().len(), 8, "no sample is run twice");
         assert!(!out_dir.join(".job-scratch").exists(), "the default scratch root is not left behind");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Question 254 item 2: the plan study mode checks before the first sample is a plan the
+    /// finished study satisfies, however the samples ended -- every child failed (empty
+    /// `products_uri`) and jobs that succeeded (`products_uri` the canonical sample directory,
+    /// which is the field a drifted plan would get wrong) with one failed job. Fails if the plan's
+    /// run ids, hashes, axis values, seeds or sample directories drift from what `finalize` records.
+    #[test]
+    fn the_plan_checked_up_front_is_satisfied_by_the_study_that_then_runs() {
+        let dir = temp_dir("plan-vs-study");
+        let exe = write_fake_exe(&dir, "fake_exe.sh", "exit 7");
+        let plan_for = |args: &StudyArgs| {
+            let loaded = preflight(args).unwrap_or_else(|e| panic!("preflight: {e}"));
+            let points = av_sweep::expand_grid(&loaded.sweep).unwrap();
+            std::fs::create_dir_all(&args.out_dir).unwrap();
+            let (failed, queue) = build_samples(&loaded, &points, loaded.sweep.monte_carlo_draws);
+            study_plan(&loaded, &failed, &queue, &args.out_dir).unwrap()
+        };
+
+        // Every child fails.
+        let out = dir.join("out-children");
+        let args = study_args_for_fake_child(&out);
+        let plan = plan_for(&args);
+        assert_eq!(plan.samples.len(), 8);
+        run_study(args, &exe).unwrap();
+        assert_eq!(plan.first_difference(&read_results(&out)), None);
+
+        // Jobs: successes name their sample directory; one job fails.
+        let out = dir.join("out-jobs");
+        let mut args = study_args_for_fake_child(&out);
+        let image = crate::cli::ImageRef { name: "av-sweep-sample".to_string(), digest: format!("sha256:{}", "1".repeat(64)) };
+        args.dispatch = Dispatch::Jobs(Box::new(crate::cli::JobsArgs { target: crate::cli::JobsTarget::Container, image, scratch_root: None, labels: BTreeMap::new() }));
+        let plan = plan_for(&args);
+        let backend = ScriptedBackend { fail_suffix: "_p1_d0", runs: std::sync::Mutex::new(Vec::new()) };
+        run_study_with(args, Path::new("/no/such/exe"), Some(&backend)).unwrap();
+        let results = read_results(&out);
+        assert!(results.samples.iter().any(|s| s.products_uri.ends_with("sample_p0_d0")), "some jobs succeeded");
+        assert_eq!(plan.first_difference(&results), None);
+
+        // A study that ran into another --out-dir is NOT satisfied by this plan: the field named
+        // is the first sample's products_uri.
+        let other = plan_for(&study_args_for_fake_child(&dir.join("out-elsewhere")));
+        assert_eq!(other.first_difference(&results).unwrap().field, "samples[p0_d0].products_uri");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

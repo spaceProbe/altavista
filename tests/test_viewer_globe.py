@@ -104,6 +104,7 @@ network in tests"):
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -144,7 +145,12 @@ def _require_node() -> str:
     return NODE
 
 
-def _run_node_json(script: Path) -> dict:
+def _run_node_json(script: Path, asserts_itself: bool = False) -> dict:
+    """Run a check and parse its stdout JSON. With ``asserts_itself`` (globe_lod,
+    globe_imagery and tiles3d checks, which assert their own bounds and exit 1 on any
+    failure, question 254 item 5) also require their stderr summary line to report
+    zero failures, so the summary and the exit code asserted here must agree.
+    """
     node = _require_node()
     proc = subprocess.run(
         [node, str(script)],
@@ -157,6 +163,10 @@ def _run_node_json(script: Path) -> dict:
         f"node {script.name} exited {proc.returncode}\n"
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
     )
+    if asserts_itself:
+        assert re.search(rf"{re.escape(script.stem)}: \d+ passed, 0 failed", proc.stderr), (
+            f"{script.name} summary line missing or reports failures\nstderr: {proc.stderr}"
+        )
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError:
@@ -166,7 +176,7 @@ def _run_node_json(script: Path) -> dict:
 # --------------------------------------------------------------------------- fixtures
 @pytest.fixture(scope="module")
 def globe_lod_data() -> dict:
-    return _run_node_json(GLOBE_LOD_CHECK)
+    return _run_node_json(GLOBE_LOD_CHECK, asserts_itself=True)
 
 
 @pytest.fixture(scope="module")
@@ -198,7 +208,7 @@ def scene_jitter_data() -> dict:
 
 @pytest.fixture(scope="module")
 def tiles3d_data() -> dict:
-    return _run_node_json(TILES3D_CHECK)
+    return _run_node_json(TILES3D_CHECK, asserts_itself=True)
 
 
 @pytest.fixture(scope="module")
@@ -230,7 +240,7 @@ def tiles3d_geo_data() -> dict:
 
 @pytest.fixture(scope="module")
 def globe_imagery_data() -> dict:
-    return _run_node_json(GLOBE_IMAGERY_CHECK)
+    return _run_node_json(GLOBE_IMAGERY_CHECK, asserts_itself=True)
 
 
 # ------------------------------------------------------------------- tile selection

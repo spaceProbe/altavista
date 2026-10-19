@@ -1,0 +1,378 @@
+{
+ "rule": "1 to 128 bytes of ASCII [A-Za-z0-9._-] whose first byte is [A-Za-z0-9]. Reasons are checked in this order: empty, too_long (> 128 bytes), disallowed_byte (the first byte outside the set), bad_first_byte (first byte is '.', '-' or '_'). Question 254 item 1. Read by crates/av-cdm/src/path_id.rs and tests/test_path_id.py.",
+ "max_len": 128,
+ "accepted": [
+  "a",
+  "A",
+  "0",
+  "9",
+  "study1",
+  "s1",
+  "race",
+  "study_a",
+  "study-b",
+  "demo_two_instance_sweep",
+  "leo_orbital_native_sweep",
+  "drag_sail_vs_burn_flt",
+  "v1.2.3",
+  "a.b",
+  "a..b",
+  "a-",
+  "a_",
+  "a.",
+  "sweep.id-with_all.three",
+  "0123456789",
+  "ABCxyz",
+  "producer-1",
+  "plugin.adsb.1",
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "9aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "z..a"
+ ],
+ "refused": [
+  {
+   "id": "",
+   "reason": "empty"
+  },
+  {
+   "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "reason": "too_long"
+  },
+  {
+   "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "reason": "too_long"
+  },
+  {
+   "id": "/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////",
+   "reason": "too_long"
+  },
+  {
+   "id": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+   "reason": "too_long"
+  },
+  {
+   "id": ".",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "..",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "...",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": ".hidden",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": ".incoming-1-2-3",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "..x",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "-x",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "_x",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "-",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "_",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "-.",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "._-",
+   "reason": "bad_first_byte"
+  },
+  {
+   "id": "../x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "..\\x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a/b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\\b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "/abs",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "/Users/probe/x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "x/",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a/../b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a/./b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a//b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "C:\\x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\\\\host\\share",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "./x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": ".//x",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a/..",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u0000b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\u0000",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u0000",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\nb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\rb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\tb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u001bb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u007fb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u0001",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\nx",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": " ",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": " a",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a ",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u00a0b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u2003b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a%2e%2e",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "%2e%2e%2fx",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "..%2fx",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a%2Fb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a:b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a:",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a*b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a?b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a<b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a>b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a|b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\"b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a'b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a;b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a&b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a$b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a`b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a~",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "~a",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a#b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a@b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a=b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a+b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a,b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a(b)",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a[b]",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a{b}",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a!b",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "caf\u00e9",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\u00e9",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\u65e5\u672c",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\ud83d\ude00",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\uff0e\uff0e",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "\u2024\u2024",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "a\u202eb",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": ".\u0000",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "./",
+   "reason": "disallowed_byte"
+  },
+  {
+   "id": "-/",
+   "reason": "disallowed_byte"
+  }
+ ]
+}

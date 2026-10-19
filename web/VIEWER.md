@@ -175,8 +175,9 @@ treatment: they're recomputed fresh from absolute f64 interpolated data every
 `floatingOrigin.toRenderSpace`), so they never go stale between rebases. Only geometry
 built once from static data (trajectory line vertex buffers, event marker positions
 set at scenario-load time) needs an explicit refresh, which the rebase helper performs.
-`_toLocal` is the PRIMARY camera's origin; the entity objects the extra viewports also
-draw are therefore written per drawing viewport, see "Shared entity objects" below.
+`_toLocal` is the PRIMARY camera's origin; the entity objects and the bodies the extra
+viewports also draw are therefore written per drawing viewport, see "Shared entity objects"
+and "Bodies, the globe and the body-fixed frame" below.
 
 ### Shared entity objects are written per drawing viewport (question 240)
 
@@ -236,6 +237,78 @@ groups, the class toggles applied to N groups, the layer manager's declared byte
 entry per entity, a copy per viewport is outside its model), the asynchronous model load
 attaching N clones under the reload token guard, and picking choosing the right copy. Each
 viewport already has its own GL context, so GPU memory is not what separates the designs.
+
+### Bodies, the globe and the body-fixed frame are written per drawing viewport (question 254 item 4)
+
+The body meshes, their sub-pixel dots, the tiled globe's group and the body-fixed frame node the
+3D Tiles overlay hangs from were written once per tick against the primary's origin
+(`_toLocal`) and drawn by every viewport. `Viewer._placeBodies(vp)` (called from
+`_placeSharedEntities`, and by `update(t)` for the primary once the tick's `b.abs`, the cached
+f64 absolute position, is written) now places them for the drawing view, at
+`(S_v - S_p) + (abs - O_v)` so the world position is `S_v + (abs - O_v)`. Differences from the
+entity objects:
+
+- **A viewport's value is not rounded to float32.** A body is far from a view's origin (the
+  Earth 7 scene units from a LEO viewport's, the Moon 384 from one framed at the Earth) and its
+  position is an f64 `Object3D.position`, so `fround(abs - O_v)` would only add up to 0.24 m
+  (LEO) or 15 m (Earth-Moon distance). The primary keeps `_toLocal`'s value bit for bit
+  (asserted).
+- **The dot is decided per view.** Visibility (disc under 1.5 px in radius) and size (1.5 px)
+  use that view's own camera distance (f64, world space), canvas height and fov. One dot sized
+  for the primary was a sphere hundreds of pixels across in a viewport next to a small body
+  (a 10 km body 100 km away: 655 px at LEO, 13,000 px at lunar distance after `fit()`).
+- **The body-fixed frame is parented under the entities render group**, beside the body mesh. It
+  hung under the frame node, which has no origin shift, so the overlay sat the primary's origin
+  away from the body (7,000 km at LEO, 42,164 km at GEO, 386,000 km at lunar distance whenever
+  the primary was framed on the spacecraft). This is the one change to the primary's drawing:
+  its local position is still the mesh's, its world position is now the body's.
+- **Not per view: the globe's tile selection** (`_syncGlobeLayer(cam)`). It is level of detail
+  and plans for the primary. With the primary after `fit()` it selects level 0 (2 tiles); a
+  viewport 700 km above the Earth would select levels 1-2 (14 tiles), and at the Moon 29 tiles.
+  Placement of the tiles it does draw is exact; the surface is just coarser (level 0 chords sag
+  up to 122 km) than that viewport asks for. GEO and a primary framed on the same spacecraft
+  select the same tiles. Recorded, not changed. `enableGlobe` also builds a WGS84 ellipsoid
+  whatever the body: `enableGlobe('Moon')` draws a 6,378 km globe at the Moon.
+
+What is left on screen is the GPU's float32 model-view multiply, about `ulp(distance to the
+object's origin)`: a sphere's vertices sit a body radius from its origin, so near the surface
+of a body the error is that floor whatever the placement (0.25-0.9 m at LEO, 2-4 m at GEO, 0.06-0.2 m
+around the Moon), while a small near body meets question 46's centimetre bound (4 mm).
+`web/js/bodies_viewport_precision_check.mjs` (node) and
+`tests/test_viewer_bodies_viewport_precision_browser.py` (real Chrome) split every number into
+the on-screen error, the placement-only error (the same placement in f64) and the floor (the
+exact placement through the float32 pipeline): before, the placement error in a viewport was up
+to 9.2 m (Moon) and 17 m (a small body) after `fit()` at lunar distance, 0.26 m at LEO and 1.9 m
+at GEO; after, it is 0 in every viewport.
+
+### Fixed-pixel markers are sized per drawing viewport (question 254 item 3b)
+
+The spacecraft marker spheres (7 px across) and the event octahedra (9 px) are one object each,
+drawn by every view. `update(t)` used to scale them once per tick from the closest camera of all
+views (`_markerReferenceDistance`), measured from the primary-placed position, before
+`_updateViewport` moved the extra viewports' cameras. With the clock running a close-up viewport
+(cameras follow focus) drew the marker sized for where its camera had been a tick earlier (tens to
+thousands of pixels in the 10 m viewport at LEO, GEO and lunar distance, against 3.5 px declared),
+and a viewport farther than the closest camera drew it sub-pixel (0.06 px at 1.3 km).
+
+`Viewer._sizeMarkers(vp)` (`vp` null = the primary) now writes the scale for the view about to
+draw, from that view's own camera (after it moved), canvas height and fov, at the render-time
+placement (`_placeSharedEntities`), and on every call, including the ones the (view, epoch) memo
+skips, so a camera moved or a canvas resized within an epoch is never missed (an unchanged scale
+is not rewritten). An extra viewport uses the f64 distance between the entity's cached `abs` and
+its camera's world position; the primary keeps the expression it always had (the placed marker's
+world position), so a scene without an extra viewport has bit-identical scales (asserted against a
+digest of every scale recorded on the previous code). What changes for the primary when viewports
+exist: it is sized for its own camera, no longer the closest one (a 10 m viewport made its markers
+sub-pixel). No camera can be inside a marker (the M26.3 defect), since each view's marker is a
+fixed fraction of that view's own distance. The instanced entity markers were already per draw
+(`createScreenSpaceMarkerMaterial`); the body dots are per view (`_placeBodies`).
+
+Measured (`web/js/marker_pixel_size_check.mjs`, node; `tests/test_viewer_marker_pixel_size_browser.py`,
+real Chrome, also with the page's own clock playing): the drawn radius of every marker and event
+in the primary and two viewports of different canvas heights, on every tick, is within 0.1% of
+3.5 px / 4.5 px (largest seen 0.005%, the float32 placement against the f64 distance). Sizing one
+view costs about 0.0005-0.0015 ms per tick.
 
 ### Jitter test: real path, not a parallel one
 

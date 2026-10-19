@@ -3770,3 +3770,355 @@ No compliance test failed. No SBOM or manifest moved this round.
 
 - The lead's browser drive of task 1, which closes the round. It includes a real-GPU frame time.
 - The "Found, not fixed" items above, each for the lead to schedule.
+
+## Status (heavy manager, 2026-10-19) — open-items round (question 254)
+
+This round does not reopen the plan. It delivers question 254's heavy items 1–5 and what the lead
+added during the round: items 5b, 1b, 1c and 3b, and rulings A and B on item 2. No proto, image
+or compliance file moved. `## Delivered` stands. The lead's browser drive of items 3, 3b and 4
+closes the round.
+
+### What landed, one commit per accepted task
+
+| Commit | What |
+| --- | --- |
+| `4af3886` | Item 5: `entities_jitter_check.mjs` asserts its own bound and exits 1 on failure |
+| `bb3055c` | Item 5b (lead): seven more node checks assert what their drivers assert; `ric_axes_check` no longer passes vacuously |
+| `c5d7b56` | Item 3: picking in an extra viewport raycasts that viewport's own placement |
+| `13085bf` | Item 1: an id that becomes a path component is validated by one rule before any path is built |
+| `a09d5b7` | Item 4: bodies, dots, the globe group and the body-fixed frame placed per drawing viewport |
+| `f28f019` | Item 1c (lead): `/api/cdm/sweep/sample` opens a sample only inside a configured study root |
+| `bc19982` | Item 3b (lead): fixed-pixel markers sized per drawing view on every tick |
+| `91e5807` | Item 1b (lead): `FileStudyStore` refuses sweep ids that differ only in ASCII case |
+| `d39b039` | Item 2: every store checks the plan before the first sample; a two-phase write never leaves the stores disagreeing (with rulings A and B) |
+| this commit | this status section |
+
+### Item 1: an id that becomes a path is one path component
+
+**The rule (decision 2).** A path-component id is 1 to 128 bytes of ASCII `[A-Za-z0-9._-]`, and
+its first byte is `[A-Za-z0-9]`. So the empty id, `.`, `..`, any leading dot (a `.incoming-*`
+staging name can never be a study id), `/`, `\`, NUL, control characters, whitespace, `%`, `:` and
+non-ASCII are all refused. A refusal is typed and comes before any `join`.
+
+There is one Rust definition, `av_cdm::path_id`, built under the `full` feature so the cFS shim's
+narrow build is untouched. Its Python twin is `altavista/path_id.py`. Both read
+`data/path_component_id_vectors.json`: 26 accepted ids and 86 refused ids, each refused one with its
+reason, checked in a fixed order.
+
+**The inventory, before the rule landed (the lead's requirement).** Every id in the repository
+that reaches one of these places passes: fixtures, goldens, tests and doc examples, 1,193 text
+files. Every reported failure was a scanner artefact (a regex, a format placeholder, a deliberate
+traversal test) or an id that never becomes a path. Nothing was widened, nothing was renamed and no
+hash moved.
+
+The generated run id `{sweep.id}_p{n}_d{m}` can exceed 128 bytes for a sweep id of 116 bytes or
+more. It never becomes a path.
+
+**The audit.** Traversal tests cover `../x`, `..`, an absolute path, `a/b`, `a\b`, NUL and the
+encoded `%2e%2e%2fx`/`..%2fx` forms. Each asserts that the tree around the root is unchanged and
+that the target does not exist.
+
+| Place | Input source | Verdict | Proof |
+| --- | --- | --- | --- |
+| `FileStudyStore` `put_study`/`get_study`/`list_studies` | sweep YAML `id`, decoded `sweep_results.pb`, `--read-study` | refused: `InvalidSweepId`; `list_studies` skips invalid names | `store.rs` `a_sweep_id_that_is_not_a_path_component_is_refused_and_nothing_is_written`, `the_shared_vectors_decide_what_the_store_accepts` |
+| the same, case variants (item 1b) | the same | refused: `SweepIdCollision` | `case_variant_ids_are_refused_on_this_filesystem` (case-insensitive APFS) and `…_on_a_case_sensitive_volume` (`hdiutil` volume) |
+| `av-sweep` study mode, `ParameterSweep.id` with `--store-dir` | sweep YAML | refused before any sample or directory | `file_store_cli` `a_traversal_id_in_a_sweep_or_system_yaml_is_refused_before_any_sample_runs` |
+| `sys_<id>.pb` (`load_systems`, `write_sample_inputs`) | `SystemDefinition.id`, YAML | refused before any file | `study.rs` `a_system_id_that_is_not_a_path_component_is_refused_before_any_file_is_written`; the CLI test above |
+| `--read-study`, `--import-study` | CLI argument, decoded protobuf | refused, nothing written | `store_mode.rs` tests; `file_store_cli` `a_traversal_sweep_id_is_refused_by_import_and_read_and_nothing_is_written` |
+| `sample_p{p}_d{d}` directories | `u32` integers | unreachable | formatted from integers |
+| `av-jobs` container scratch `av-job-<id>-<pid>-<nanos>` | job id | unreachable: sanitized to one `[A-Za-z0-9._-]` component | `container.rs` `a_hostile_job_id_can_only_ever_be_one_scratch_component` |
+| `av-jobs` k8s scratch `av-job-<dns_fragment>-…` | job id | unreachable: `[a-z0-9-]` only | `manifest.rs` dns-fragment test |
+| `--job-scratch-root`, `--out-dir`, `--store-dir` | operator CLI flags | trusted configuration, not ids | none needed |
+| `av-jobs` `JobLog`/`JobQueue` names | queue name | refused (full rule, a behaviour change) | `log.rs` `job_log_open_with_a_traversal_name_writes_nothing` and the shared-vector test |
+| `av-ingest` partition log `<shard_key>.avlog` | producer's shard key, over the wire | refused (full rule, a behaviour change) | `path_traversal.rs`, both new tests |
+| `av-edge-plugin` `<buffer-dir>/<producer_id>.buflog` | `--plugin-config` | refused before any connection | `the_buffer_file_is_named_only_from_a_path_component_producer_id` |
+| `<profiles>/<profile_id>.yaml` | profile id | refused: `ProfileError` | `tests/test_path_component_places.py` |
+| `<report_dir>/<spacecraft>.rpt` | GMAT script text | refused: `ValueError` | `tests/test_path_component_places.py` |
+| `GET /textures/{file}` | HTTP path segment, decoded by ASGI | refused: HTTP 400; `Path(file).name` used to let `.` and `..` through | `tests/test_path_component_places.py` (encoded variants) |
+| `POST /api/cdm/sweep/sample` (item 1c) | the publisher's `productsUri` | refused: HTTP 403 outside the configured study roots | `tests/test_feasibility_join.py`, 20 new tests |
+| `av-run`, `av-kernel`, `av-tiles`, `av-store`, `av-catalog` | run, instance and tile ids | unreachable: no filesystem path is built from an id outside tests (temporary directories, literal example names); tiles are object-store keys | the worker's join-site listing, re-read by the manager |
+
+**Item 1c: study roots.** The route read `<productsUri>/run_products.pb`. `productsUri` is
+whatever the publisher sent in its earlier `POST /api/cdm/sweep`, so anyone who could publish could
+make the viewer read any `run_products.pb` on the host. The docstring's "never the request body"
+was wrong.
+
+- `python -m altavista serve --study-root DIR` is repeatable, with `create_app(study_roots=…)` as
+  the programmatic form. There is no default and no environment variable (question 199).
+- With no root configured, every sample open is refused with a 403 that names the flag.
+- Otherwise the file must resolve inside a resolved root: symlinks and `..` resolved, then
+  `is_relative_to`.
+- Containment is checked before existence, and its refusal is one fixed 403, so the response
+  never shows whether a path outside the roots exists. The file is then resolved strictly,
+  checked again and read from the resolved path.
+- Publishing a sweep stays permissive.
+- **The operator recipe:** `.venv/bin/python -m altavista serve --study-root out` for studies run
+  under the repository's `out/`. The lead adds the same flag to `.claude/launch.json` on `develop`.
+
+### Item 2: study mode checks every store up front, and the stores never disagree
+
+- **The plan check.** `plan.rs`'s `StudyPlan` holds everything of the finished `SweepResults` that
+  is known before a sample runs, including the canonical directory each `products_uri` would name.
+  `check_plan` (every store, before the first sample) refuses a store holding a study the plan
+  cannot reproduce, with `WriteRefusal::DifferentPlan` naming the first differing field. It also
+  refuses an invalid or case-colliding id and an occupied target (ruling A). On a refusal, nothing
+  is written, no sample runs and no `sweep_results.pb` is produced.
+- **The two-phase write.** `study_write::write_study` prepares ClickHouse (every row but the
+  header, which leaves invisible orphans) and then the file store (an fsynced `.incoming-*`
+  directory). Any failure aborts everything. It then commits ClickHouse (the header insert and the
+  winner re-read, which is retried 3 times 200 ms apart under ruling B; the insert is never
+  retried) before the file store (the rename). The order holds whatever order the stores were
+  given in. `--import-study` uses the same path, after the exact-plan check.
+
+| Failure | Outcome | Stores afterwards | Test |
+| --- | --- | --- | --- |
+| a store refuses the plan | `PlanRefused`, no sample runs | unchanged | coordinator unit tests; `store_agreement_cli` (both mirror cases, the real-ClickHouse up-front refusal in `clickhouse_store.rs`) |
+| occupied file target (ruling A) | `PlanRefused` up front or `PrepareFailed` | unchanged; ClickHouse never committed | `two_phase_stores`, `store_agreement_cli`, `store.rs` occupied-target test |
+| a store refuses or fails at prepare | `PrepareFailed`, stages aborted | unchanged (ClickHouse may hold invisible orphans) | coordinator and `two_phase_stores` |
+| first commit fails definitely | `CommitFailed`, file stage aborted | unchanged | the same |
+| header insert errors and every re-read fails | `CommitOutcomeUnknown` (write id, repair) | ClickHouse may hold it, the file store does not | `two_phase_stores` (exactly 3 re-reads, 1 insert) |
+| reply lost, a re-read recovers (ruling B) | resolved | as resolved | `two_phase_stores` (1 insert, 3 reads) |
+| ClickHouse lost a race to different content | `CommitFailed` (`DifferentContent`) | the other writer's study in ClickHouse, the file store unchanged | coordinator and `two_phase_stores` |
+| ClickHouse committed, the rename fails | `PartialCommit` (both stores named, repair) | ClickHouse holds it, the file store does not | `two_phase_stores` (root `chmod 555`; a target created between the phases); `store_agreement_cli` (a dangling symlink) |
+| both stores already hold it | `Ok`, nothing written | unchanged | coordinator |
+| one store holds it, the other does not | the other is written | at worst the state before the run | coordinator |
+
+**The residual windows (ruled acceptable).** In two outcomes one store holds the study and the
+other does not:
+
+1. a ClickHouse commit whose outcome cannot be read back in 3 attempts;
+2. a rename that fails after ClickHouse committed, for a reason `prepare` cannot see
+   (permissions, disk, a target created between the phases).
+
+Both are typed errors, and both print the exact repair, `av-sweep --import-study
+<out-dir>/sweep_results.pb` with the same store flags. A test proves the repair converges.
+`sweep_results.pb` is written to `--out-dir` before any store is touched.
+
+The rerun-into-another-`--out-dir` case is now refused before any sample runs. The precision
+round's test asserted the old after-the-run behaviour, which was the defect; it is changed.
+
+### Items 3 and 3b: picking, and markers, per view
+
+- **Picking (item 3).** `pick()` maps the camera to its view, using the draw hook's own mapping
+  (`_viewportForCamera`). It places the shared objects for that view, raycasts, and restores the
+  placement current on entry; each single pick leaves the scene graph bit for bit unchanged.
+  The glTF model's meshes are a pick target that resolves to the spacecraft. With viewport A
+  focused on the Chaser, 10 m from the 1.5 m model:
+
+  | Picks that should resolve to the Chaser | LEO | GEO | lunar |
+  | --- | --- | --- | --- |
+  | before | 0/13 | 0/13 | 0/13 |
+  | after, node and real Chrome | 13/13 | 13/13 | 13/13 |
+
+  - Off-silhouette picks: 5/5 miss.
+  - Viewport B's marker: 3/5, 0/5 and 0/5 before; 5/5 after.
+  - Bodies are covered once they are placed per view (item 4): a body pick lands within 5e-8 m of
+    the truth.
+  - One pick costs about 0.02 ms.
+- **Markers (item 3b).** Markers were sized once per tick from the closest camera, before the
+  viewports moved. With the clock running, a close-up viewport drew a 3.5 px marker 1,604, 653 and
+  217 px wide at LEO, GEO and lunar distance (2,062 px for the event).
+  - `_sizeMarkers(vp)` now sizes for each drawing view from its own camera, after that camera has
+    moved, and also on a memo hit.
+  - Result: every view, every tick, is within 0.1% (worst seen 0.005%): node 84/84, Chrome 81/81,
+    including the page's own clock.
+  - A primary-only scene is bit-identical. `_markerReferenceDistance` is gone.
+
+### Item 4: bodies and the tiled globe per viewport
+
+- **The placement.** `_placeBodies(vp)` places body meshes, dots, the globe group and the
+  body-fixed frame for the drawing view.
+  - The primary keeps `_toLocal` bit for bit.
+  - A viewport gets unrounded f64 (decision 9).
+  - Each dot is decided per view: a shared dot sized for the primary had been 655 px wide at LEO
+    and 13,000 px at lunar distance, next to a 10 km body.
+- **Defect found and fixed:** the body-fixed frame lacked the render shift. The 3D Tiles overlay
+  sat 7,000 km (LEO), 42,164 km (GEO) or 386,000 km (lunar) off its body whenever the primary was
+  framed on a spacecraft. This is the one change to the primary's drawing.
+
+| Viewport A, primary after `fit()` (placement-only error, m) | LEO | GEO | lunar |
+| --- | --- | --- | --- |
+| before: nearest body / small near body | 0 / 0.26 | 0 / 1.9 | 9.2 / 17 |
+| after: every class | 0 | 0 | 0 |
+| what remains on screen: the float32 model-view floor at the body surface | 0.25–0.9 | 2–4 | 0.06–0.2 |
+
+  - A small near body meets question 46's centimetre bound (4 mm).
+  - Node: 721/721. Real Chrome: the same.
+  - Placement costs 0.0025 ms per extra viewport per tick. `update(t)` without GL is unchanged
+    (median 0.2 ms, p95 0.3 ms).
+
+### Items 5 and 5b: node checks assert their own bounds
+
+- **Item 5.** `entities_jitter_check.mjs` makes 10 assertions. Each failure prints its measured
+  value and bound, and the check exits 1.
+- **Item 5b (lead).** Seven more checks did the same as item 5 before it: globe_imagery (9
+  assertions), globe_lod (15), tiles3d (15), gateway_imagery_layer (24), layers_budget (116),
+  layers (73) and tiles3d_manager (39). Each now asserts what its driver asserts, and each driver
+  also requires the zero-failure summary line.
+- **`ric_axes_check`** passed vacuously on an empty fixture, and on a NaN residual. It now requires
+  epochs, one comparison per fixture pair and finite residuals.
+- **The audit of the other 24 checks.** Every one exits non-zero on a reported failure (each was
+  perturbed), except `layers_stream_check.mjs`, which needs a live gateway and still exits 0 by
+  construction (not fixed).
+- `entity_framing_check` and `layers_panel_check` have no pytest driver, so the gate's standalone
+  loop is their only coverage. `layers_panel`'s header wrongly named one and is corrected.
+
+### Defects found, and their root causes
+
+1. **`FileStudyStore` joined an unchecked `sweep_id`.** `../x` wrote outside the root, and an
+   absolute id replaced it. Root cause: `root.join(id)`. Fixed (item 1).
+2. **`/textures/{file}` let `.` and `..` through.** Root cause: `Path(file).name`. Fixed (400).
+3. **`/api/cdm/sweep/sample` could read any `run_products.pb` on the host.** Root cause: a
+   publisher-supplied path treated as server state. Fixed (item 1c).
+4. **Case-insensitive APFS made `Study` read `study`'s study.** Fixed (item 1b).
+5. **A refusal by one store skipped or contradicted the other, and arrived after the whole
+   study.** Root cause: sequential `put_study`. Fixed (item 2).
+6. **Picking in an extra viewport raycast the primary's placement.** Fixed (item 3).
+7. **Markers were sized from the previous tick's cameras.** Root cause: sizing in `update(t)`
+   before `_updateViewport`. Fixed (item 3b).
+8. **The body-fixed frame was missing the render shift `S`, so the overlay was off by the
+   primary's origin.** Root cause: parented under the frame node rather than the render group.
+   Fixed (item 4).
+9. **Bodies and dots were placed and sized for the primary in every view.** Fixed (item 4).
+10. **Eight node checks exited 0 by construction, and one passed vacuously.** Fixed (items 5, 5b).
+11. **`pick()`'s restore was untested.** Found by the manager's perturbation: removing it still
+    passed 48/48. Each single pick is now snapshotted.
+
+### Decisions taken this round (numbered for the lead's log)
+
+1. Tasks 1, 3 and 5 ran in parallel because their files were disjoint. 2 followed 1 and 1b
+   (`store.rs`); 4 and 3b followed 3 (`scene.js`).
+2. The path-component rule is an allowlist (above), one definition with a Python twin and shared
+   vectors. Shard keys and job-log names take the full rule too (the lead's ruling 1, a behaviour
+   change for external producers; every committed value passes).
+3. Case-fold collisions are refused on every filesystem, and `get_study` requires the exact id
+   (the lead's ruling 2).
+4. Study roots are trusted configuration only. There is no default root; publishing stays
+   permissive (the lead's ruling 3).
+5. The two-phase order is ClickHouse first, then the file store, so no reader ever sees a
+   withdrawn study.
+6. Ruling A: an occupied file target is refused at `check_plan` and `prepare`.
+7. Ruling B: only the winner re-read is retried, 3 times 200 ms apart, adding at most 400 ms of
+   sleep. The INSERT is never retried.
+8. Picking: the model meshes are targets, the restore puts back whatever placement was current on
+   entry, and the check is a new file importing the precision check's exports.
+9. Bodies in a viewport are unrounded f64; the primary keeps `fround`. A manager perturbation
+   shows the f64 choice is load-bearing (0.26 m at LEO with `fround`).
+10. Dots and markers are sized per view, from that view's own camera and canvas.
+11. The body-fixed frame is reparented under the render group. This is the one primary-visible
+    change, and it is a defect fix.
+12. Stub reads (the session read cache): workers read unchanged files from the develop checkout at
+    `d2dddba`, read-only, or the manager pasted the file inline (task 5). No refused command was
+    rerouted, and `LEAN_CTX_EXTRA_ROOTS` was never used.
+13. `target/debug/deps` reached 113,314 entries during the round. cargo-slot warned at the gate's
+    start, so the gate was stopped and restarted after
+    `mv deps deps.old-heavy-open-202610190149` (question 236). `deps.old-1017c` (the lead's) and
+    the new copy are left for the lead to delete.
+
+### Process, recorded
+
+- The task 1 worker edited repository files through Python replace scripts run from its scratch
+  folder.
+- The task 4 worker edited one test file the same way, and ran one `python -` heredoc, which was
+  refused and not retried.
+- The task 1c worker appended tests with a `cat >>` heredoc.
+- The task 2 worker ran one `sed -i` on its own new file.
+- None of these is a rerouted shell-policy refusal, but all are against the manager's
+  Edit/Write-only instruction, which was added to every brief after task 1. The manager reviewed
+  every resulting diff in full.
+
+### Found, not fixed
+
+- The globe's tile selection plans for the primary camera only. A viewport 700 km above the Earth,
+  with the primary after `fit()`, gets level-0 tiles (chords sag up to 122 km) where it would
+  choose levels 1–2.
+- `enableGlobe` builds a WGS84 ellipsoid whatever the body (`enableGlobe('Moon')` draws an
+  Earth-sized globe).
+- `layers_stream_check.mjs` exits 0 by construction (it needs a live gateway).
+- On a case-sensitive filesystem, two writers racing on case variants in the same instant can both
+  publish; each study is whole under its own id.
+- Question 239's text still describes the old shared marker sizing.
+- The two residual windows of item 2, above.
+- The proposer, cFS and sweep images need re-pinning at this head (see Gates). Re-pinning is the
+  lead's merge step.
+- A host-wide `pkill -f "cargo test -p av-kernel"` from another team's worker killed this gate's
+  kernel phase once. Any `pkill -f` on a cargo command line can reach every worktree on this host.
+- The task 1c worker's first wide pytest run had 4 failures it did not capture. Its identical
+  rerun, the manager's rerun (318 passed) and the gate below were clean. Not root-caused: there is
+  no failing output to work from.
+
+### Gates
+
+The gate ran at `d39b039`, the last code commit, using
+`/Users/probe/code/altavista-lead/rounds/heavy-open/gate/run_gate.sh`. Phases ran in sequence,
+and each phase's whole output was captured before it was read. Before the gate, `target/debug/deps`
+was moved aside and rebuilt from 0 entries (decision 13).
+
+| Gate | Result |
+| --- | --- |
+| `buf breaking proto --against /Users/probe/code/AltaVista/proto` | **clean, exit 0** (no proto change) |
+| `buf lint proto` | **clean, exit 0** |
+| `cargo test --workspace --exclude av-kernel --no-fail-fast` | **183 binaries, 1917 passed, 0 failed, 4 ignored, exit 0**, 1643 s |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **clean, exit 0** |
+| the same clippy for `av-kernel`, `av-run` and `av-sweep` with `--no-default-features` | **clean, exit 0** each |
+| required-features lint (its steps run through `cargo-slot`) | **clean**: 5 groups (`av-cdm` `full`, `av-kernel`/`av-run`/`av-sweep` `gmat`, `av-jobs` `store-fixture`) |
+| `cargo deny check` | **advisories ok, bans ok, licenses ok, sources ok** |
+| `cargo test -p av-orbital --no-default-features` | **15 binaries, 142 passed, 0 failed** |
+| `cargo-slot build -p av-edge-board --bins` | **built, exit 0** |
+| `cargo test -p av-kernel --no-default-features` | **21 binaries, 752 passed, 0 failed** |
+| `cargo test -p av-kernel --no-fail-fast` | first run **killed by SIGTERM after 40 s** (rc 143, every test that had run passing); **rerun alone: 57 binaries, 1004 passed, 0 failed, 1 ignored, exit 0**, 730 s. Root cause: the native round's task 14 worker ran the host-wide `pkill -f "cargo test -p av-kernel"` at that time (`rounds/native-open/scratch/manager/decisions.md`, item 34), which matches this gate's command line. Checked first and ruled out: a Monitor expiry (a probe job survived one), a second gate process (there was none), and cargo-slot (it sends no signals). |
+| Renode test (`drm_attitude_control_renode`, `AV_RENODE_TESTS=1`) | **1 passed**, 600 s |
+| stand-in HIL test (`hil_standin_renode`) | **1 passed**, 55 s |
+| every `web/js/**/*_check.mjs` | **29 of 33 exit 0**. The four argument-driven harnesses print their usage (`command_panel`, `panels`, `timeline` exit 2; `layers_stream` exits 1) and pass under pytest. |
+| the real-Chrome viewer tests (precision, picking, bodies, marker size, framing, entities, CDM visual model, viewport) | **40 passed**, 337 s |
+| `CFS_MIRROR_DIR=… cargo-slot --hold -- .venv/bin/python -m pytest -q -rs` | **1638 passed, 2 failed, 51 skipped**, 1948 s |
+
+**The two pytest failures are image provenance, stale by commit.** They are
+`tests/test_proposer_container.py::test_proposer_on_an_internal_network_proposes_and_cannot_reach_the_authority`
+and `services/cfs/tests/test_image_digest.py::test_image_digest_matches_recorded_value`.
+- Root cause: `13085bf` added `crates/av-cdm/src/path_id.rs`, and `crates/av-cdm` is one of the
+  copied paths of both images, so question 232's rule finds a commit on top of each recorded one.
+- The cFS shim builds `av-cdm` without `full`, where `path_id` does not exist, so its binary is
+  expected to be unchanged. That is not measured.
+- The proposer compiles the module but does not use it.
+- The images are re-pinned at the merge, as in earlier rounds.
+- `crates/av-sweep` also changed (`d39b039`), so the sweep image is behind `HEAD` as well. Its
+  tests compare by digest and passed, but it needs the same re-pin.
+
+**Skips.** They are the visible opt-ins (`AV_SBOM_REBUILD`, `AV_KIT_*`, the unbuilt proof kit,
+`AV_CFS_RUN_REPRO_BUILD`, the two cFS build artefacts), plus two that come from this host's image
+state, not from this round:
+- the pinned MinIO image is not present locally, so 24 tests skip: they never pull, and the lead
+  fetches it once;
+- `av-edge-plugin:local`'s id does not match its recorded digest. This round built no image, so
+  the tag was retagged on the shared daemon outside it.
+
+The files where the task 1c worker saw four uncaptured failures all passed here. No compliance file
+moved.
+
+### The lead's browser drive (items 3, 3b, 4)
+
+1. Run `.venv/bin/python -m altavista serve --study-root out` from the aiplane worktree.
+2. Publish an RPO scenario whose Chaser declares a glTF `model`, and turn the Models class on.
+3. **Picking.** Swap a pane to "3D Viewport" and Focus it on the Chaser (about 10 m). Double-click
+   the model's faces: the viewport re-focuses on the Chaser. Double-click about one model-width
+   off: nothing happens. Try it at LEO, GEO and lunar radius, with the primary left at the
+   whole-scenario fit.
+4. **Markers.** Play the clock at 1 min/s or faster. In the close-up viewport, a second zoomed-out
+   viewport and the primary, every marker stays a steady dot about 7 px across (the event about
+   9 px). Before the fix it was a huge blob or nearly invisible.
+5. **Bodies.** In the console:
+   - `M = await import('/js/bodies_viewport_precision_check.mjs')`;
+   - `viewer.setScenario(M.bodiesScenario('LEO'))`, then add viewports A and B;
+   - `M.measureRun(viewer, A, B, 'LEO', 'framed', 'plain', M.attachOverlayProbes(viewer, M.NEAR_BODY.LEO, 'Chaser'))`.
+
+   Expect `place` ≈ 0, `total` = `floor`, and `M.primaryBodiesIdentity(viewer, {})` = `[]`. On
+   screen: with the primary framed on the Chaser and a 3D Tiles overlay loaded, the overlay sits on
+   the Earth. After `fit()`, the 10 km Debris body is a disc in A, not a giant dot.
+6. Read a real-GPU frame time. SwiftShader's `finish()` p95 (141–154 ms) is the same before and
+   after.
+
+### What remains, each with its reason
+
+- The lead's browser drive above, which closes the round, including a real-GPU frame time.
+- The "Found, not fixed" items, each for the lead to schedule.

@@ -1,4 +1,7 @@
-// CLI harness for tests/test_entities_jitter.py: `node web/js/entities_jitter_check.mjs`.
+// Standalone check, and the harness tests/test_entities_jitter.py drives:
+// `node web/js/entities_jitter_check.mjs`. It asserts its own bounds and exits 1 on any
+// failure (question 254 item 5; before that it only printed, so it exited 0 by
+// construction and only the pytest driver held the bound). See "ASSERTS AND EXITS" below.
 //
 // H6 scope item 4 (docs/heavy-plan.md): "the RIC jitter test extended to a model at a
 // ten-metre RPO range (question 46)." Question 46's answer: "floating origin per frame
@@ -32,6 +35,13 @@
 // floating origin, exactly `measureRpo`'s own two-sided proof shape. Bound: centimetre,
 // WITH the origin; the WITHOUT path must EXCEED the centimetre bound (proving the
 // origin is load-bearing for a real model at this range, not merely present).
+//
+// ASSERTS AND EXITS: this check asserts the question 46 bounds itself (WITH the floating
+// origin every vertex stays under CENTIMETRE_BOUND_M; WITHOUT it the error exceeds the
+// bound; vertexCount > 0 and one error per vertex; the attitude is non-identity; the
+// farthest vertex offset is finite and positive). Failures print to stderr with
+// measured value and bound, then a pass/fail summary line, then exit 1; success exits 0.
+// stdout stays one JSON object for the pytest driver.
 import * as THREE from 'three';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -173,8 +183,41 @@ async function measureModelAtRpoRange() {
 }
 
 const result = await measureModelAtRpoRange();
+
+// The attitude applied to the deputy's model must be a real rotation, not the identity
+// (|w| of a unit quaternion is 1 only for the identity rotation).
+const ATTITUDE_W_MAX = 1 - 1e-9;
+const attitudeW = DEPUTY_ATTITUDE_QUAT.w;
+
+// The bounds, asserted here (and re-checked by tests/test_entities_jitter.py) so the
+// standalone gate (`node web/js/entities_jitter_check.mjs`, exit code) fails on a
+// regression by itself. Same thresholds the pytest driver always asserted.
+const failures = [];
+function assertBound(name, ok, measured, bound) {
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const assertionCount = 6 + result.perVertexMaxErrWithM.length;
+assertBound('errWithM < centimetre bound (every vertex, max)', result.errWithM < CENTIMETRE_BOUND_M, `${result.errWithM} m`, `< ${CENTIMETRE_BOUND_M} m`);
+assertBound('errWithoutM > centimetre bound (floating origin is load-bearing)', result.errWithoutM > CENTIMETRE_BOUND_M, `${result.errWithoutM} m`, `> ${CENTIMETRE_BOUND_M} m`);
+assertBound('vertexCount > 0', result.vertexCount > 0, result.vertexCount, '> 0');
+assertBound('perVertexMaxErrWithM.length == vertexCount', result.perVertexMaxErrWithM.length === result.vertexCount, result.perVertexMaxErrWithM.length, `== ${result.vertexCount}`);
+assertBound('attitude is non-identity (|w| < 1 - 1e-9)', Math.abs(attitudeW) < ATTITUDE_W_MAX, `|w| = ${Math.abs(attitudeW)}`, `< ${ATTITUDE_W_MAX}`);
+assertBound('farthestVertexOffsetM finite and > 0', Number.isFinite(result.farthestVertexOffsetM) && result.farthestVertexOffsetM > 0, result.farthestVertexOffsetM, '> 0');
+result.perVertexMaxErrWithM.forEach((err, i) => {
+  assertBound(`vertex ${i} error < centimetre bound`, err < CENTIMETRE_BOUND_M, `${err} m`, `< ${CENTIMETRE_BOUND_M} m`);
+});
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(
+  `entities_jitter_check: ${assertionCount - failures.length} passed, ${failures.length} failed `
+  + `(errWithM=${result.errWithM} m, errWithoutM=${result.errWithoutM} m, bound=${CENTIMETRE_BOUND_M} m)\n`,
+);
+
+// stdout JSON keeps its shape (the pytest driver parses it); attitudeW is the only addition.
+// Exit inside the write callback so a piped stdout is flushed before the process ends.
 process.stdout.write(JSON.stringify({
   sepM: SEP_M,
   centimetreBoundM: CENTIMETRE_BOUND_M,
+  attitudeW,
   ...result,
-}));
+}), () => process.exit(failures.length === 0 ? 0 : 1));
