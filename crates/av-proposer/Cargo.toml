@@ -37,7 +37,7 @@ serde_json.workspace = true
 # crates/av-track/Cargo.toml declares it, by direct path (not yet a workspace.dependencies
 # entry -- av-track's own Cargo.toml does not use one for it either).
 spoore-cdm.workspace = true
-spoore-models = { path = "/Users/probe/code/spoore/crates/spoore-models" }
+spoore-models = { path = "../../../spoore/crates/spoore-models" }
 nalgebra.workspace = true
 
 # D4: SHA-256 for Command.id/idempotency_key, through the openssl crate against the system
@@ -97,7 +97,7 @@ http = "1"
 # shipped `av-proposer` binary, used only by `tests/model_service.rs` to drive the served
 # ModelService over a real loopback channel and decode its answers through the same fallible
 # `TryFrom` boundary spoore-ml's own module doc describes.
-spoore-ml = { path = "/Users/probe/code/spoore/crates/spoore-ml" }
+spoore-ml = { path = "../../../spoore/crates/spoore-ml" }
 
 [[bin]]
 name = "av-proposer"
