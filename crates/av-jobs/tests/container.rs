@@ -5,7 +5,7 @@
 //! # Template -- gating, locking, labelling, pruning, skip wording copied exactly
 //!
 //! `crates/av-jobs/tests/store_tiler.rs` is this file's own template for the docker-gated test
-//! shape (that file's own module doc: "`crates/av-store/tests/minio_store.rs` is this file's
+//! shape (that file's own module doc: "`crates/av-store/tests/s3_store.rs` is this file's
 //! own template"). `image_digest_md_path`/`fenced_block_after`/`parse_image_digest_md`/`gate`/
 //! `gate_or_skip!` below are copied from `store_tiler.rs`, pointed at this file's own
 //! `CONTAINER_EXECUTOR_IMAGE_DIGEST.md` instead of `services/store/IMAGE_DIGEST.md` -- see that
@@ -23,7 +23,7 @@
 //! in-memory `MemoryObjectSource`/`MemoryObjectSink` test doubles for that half -- exactly like
 //! `tests/runner.rs`'s own tests -- because what this test exists to prove (a container really
 //! ran, hardened, from a digest-pinned image, producing real bytes) has nothing to do with
-//! which store backs the runner; `tests/store_tiler.rs` already proves the real-MinIO half for
+//! which store backs the runner; `tests/store_tiler.rs` already proves the real-S3-server half for
 //! `crate::tiler::TilerExecutor` and needs no repeating here.
 //!
 //! # docker events, captured separately
@@ -71,7 +71,7 @@ const CONTAINER_IMAGE: &str = "alpine";
 
 // -----------------------------------------------------------------------------------------
 // CONTAINER_EXECUTOR_IMAGE_DIGEST.md parsing -- copied from crates/av-jobs/tests/store_tiler.rs
-// (that file's own copy of crates/av-store/tests/minio_store.rs), character for character,
+// (that file's own copy of crates/av-store/tests/s3_store.rs's earlier form), character for character,
 // pointed at this file's own recorded digest.
 // -----------------------------------------------------------------------------------------
 

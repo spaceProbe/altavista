@@ -3,7 +3,7 @@
 # digest, that the sweep study store's tests run against (question 245), for a developer to poke
 # at by hand (clickhouse-client, curl, a GUI). The same developer convenience
 # services/catalog/run-dev-catalog.sh is for PostGIS and services/store/run-dev-store.sh is for
-# MinIO -- this script mirrors the catalog one's structure and lock discipline, adjusted only for
+# the S3 server -- this script mirrors the catalog one's structure and lock discipline, adjusted only for
 # ClickHouse's ports, env vars and readiness shape.
 #
 # NOT used by any test: the store's tests start and tear down their own containers through

@@ -92,7 +92,7 @@ pub struct MigrationRecord {
 /// ADR-004's crypto rule") and that file's own local `hex_encode` mirrors byte for byte; every
 /// file in this workspace that needs a hex-encoded SHA-256 writes this same small helper
 /// locally rather than sharing one across crates (the established convention, not an oversight
-/// -- `crates/av-store/tests/minio_store.rs::hex` is the identical pattern one crate over).
+/// -- `crates/av-store/tests/s3_store.rs::hex` is the identical pattern one crate over).
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = sha256(bytes);
     let mut s = String::with_capacity(64);

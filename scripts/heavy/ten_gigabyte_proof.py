@@ -2,7 +2,7 @@
 """AltaVista HEAVY track, round 3, task P2a, deliverable 2: the committed, re-runnable proof
 that a tile set genuinely exceeding ten gigabytes of stored bytes streams through
 `av-tile-fixture --streaming` (`crates/av-jobs/src/bin/av-tile-fixture.rs`) -> a real
-`av-store`/MinIO object store, with peak resident memory measured, not assumed.
+`av-store`/S3 object store, with peak resident memory measured, not assumed.
 
 Run with the project's own venv interpreter -- this script uses nothing beyond the stdlib,
 this repo's own ``altavista`` package (already installed into ``.venv``), and ``httpx``
@@ -51,11 +51,15 @@ time, rather than trusting this docstring's own arithmetic forever.
 1. `host_state()`: prints other cargo/docker-build/pytest processes, VM-overlay and host free
    space, `docker info`, and a quiet-window verdict -- FIRST, before anything else runs.
 2. Prunes stale `av.test`-labelled docker resources under the host-wide lock
-   (`altavista.docker_test_lock.lock_docker_tests`), then starts a labelled MinIO from the
-   image digest recorded in `services/store/IMAGE_DIGEST.md` (never `docker pull`), bind-
-   mounting `<out-dir>/minio-data` (a HOST path, under this git-ignored worktree's own `out/`)
-   onto the container's `/data` -- never a docker volume, never the VM's own overlay (this
-   task's own measured-host-facts section).
+   (`altavista.docker_test_lock.lock_docker_tests`), then starts a labelled S3 server exactly
+   as the launch record in `services/store/IMAGE_DIGEST.md` says (read by
+   `altavista.store_record`: image by digest, container port, health path, credential
+   environment with per-run generated credentials, server arguments; never `docker pull`),
+   bind-mounting `<out-dir>/store-data` (a HOST path, under this git-ignored worktree's own
+   `out/`) onto the server's data directory -- never a docker volume, never the VM's own overlay
+   (this task's own measured-host-facts section). The data directory is the LAST recorded
+   server argument (the directory the server serves buckets from); the script refuses a record
+   whose last argument is not an absolute path.
 3. Builds (`--release`, this run's own performance-driven exception noted at that call site)
    and runs `av-tile-fixture --streaming` at a shape verified to exceed ten gigabytes, and
    captures its one JSON line: manifest SHA-256, tile count, total stored bytes, peak RSS,
@@ -75,7 +79,7 @@ time, rather than trusting this docstring's own arithmetic forever.
 6. Captures `docker events --filter label=av.test=1` to `<out-dir>/docker-events.log` for the
    whole window this invocation runs (started before step 2, stopped just before this
    invocation exits -- NOT before the containers it created; those stay up as step 5 says).
-7. Never touches the network beyond loopback: the MinIO image is never pulled (only
+7. Never touches the network beyond loopback: the S3 server image is never pulled (only
    `docker image inspect` against the recorded digest), and every HTTP call in this script
    targets `127.0.0.1`.
 
@@ -86,7 +90,7 @@ module's run (that file's own convention: "acquire this for a docker-gated test'
 body"). This script deliberately does NOT do that for the generation step: holding a host-
 wide lock for the many minutes (or longer) a genuine ten-gigabyte render takes would block
 every OTHER docker-gated test/script on this host for that whole window, which is a far
-worse outcond than the (much shorter) unlocked gap between "MinIO is confirmed healthy" and
+worse outcond than the (much shorter) unlocked gap between "the S3 server is confirmed healthy" and
 "av-tile-fixture starts talking to it" -- nothing else on this host mutates or removes THIS
 run's own labelled resources by their specific run id, only stale ones from a crashed prior
 run, which pruning (itself lock-protected) already handles. The lock is held only around
@@ -119,12 +123,12 @@ sys.path.insert(0, str(REPO_ROOT))  # harmless if altavista is already importabl
 from altavista.container_hardening import TEST_LABEL_KEY, TEST_LABEL_VALUE, label_args, prune_stale_labelled_resources  # noqa: E402
 from altavista.docker_test_lock import lock_docker_tests  # noqa: E402
 from altavista.pb.altavista.v1 import heavy_pb2  # noqa: E402
+from altavista.store_record import STORE_IMAGE_DIGEST_MD, StoreRecord, parse_store_record  # noqa: E402
 
 RUSTUP_PATH_PREFIX = "/opt/homebrew/opt/rustup/bin"
-IMAGE_DIGEST_MD = REPO_ROOT / "services" / "store" / "IMAGE_DIGEST.md"
-CONTAINER_PORT = 9000
-MINIO_REGION = "us-east-1"
-MINIO_HEALTH_TIMEOUT_S = 30.0
+IMAGE_DIGEST_MD = STORE_IMAGE_DIGEST_MD
+S3_REGION = "us-east-1"
+STORE_HEALTH_TIMEOUT_S = 30.0
 DEFAULT_OUT_DIR = REPO_ROOT / "out" / "ten-gigabyte-tileset"
 TEN_GIGABYTES = 10 * 1024 * 1024 * 1024
 
@@ -204,37 +208,45 @@ def print_host_state(out_dir: Path) -> None:
 
 
 # =====================================================================================
-# services/store/IMAGE_DIGEST.md parsing -- duplicated (not imported across the tests/
-# package boundary) from `tests/heavy_stack.py::_parse_image_digest_md`, mirroring the SAME
-# already-established, documented convention that file's own module doc names: this exact
-# parser is independently re-derived a THIRD time here (Rust: crates/av-store/tests/
-# minio_store.rs and crates/av-jobs/tests/store_tiler.rs; Python: tests/heavy_stack.py and
-# this file) because `tests/` is a pytest rootdir, not an importable package this standalone
-# script (no pytest involved) can reach without a path hack uglier than 15 duplicated lines.
+# services/store/IMAGE_DIGEST.md parsing -- not duplicated here: `altavista/store_record.py` is
+# the one Python reader of the record (image, recorded id, container port, health path,
+# credential environment, server arguments), shared with `tests/heavy_stack.py`.
 # =====================================================================================
 
 
-def _fenced_block_after(text: str, marker: str) -> Optional[str]:
-    lines = text.splitlines()
-    marker_idx = next((i for i, line in enumerate(lines) if marker in line), None)
-    if marker_idx is None:
-        return None
+def _store_record() -> StoreRecord:
     try:
-        fence_start = next(i for i in range(marker_idx, len(lines)) if lines[i].strip() == "```")
-        fence_end = next(i for i in range(fence_start + 1, len(lines)) if lines[i].strip() == "```")
-    except StopIteration:
-        return None
-    content = "\n".join(lines[fence_start + 1 : fence_end]).strip()
-    return content or None
+        return parse_store_record(IMAGE_DIGEST_MD)
+    except (ValueError, OSError) as e:
+        sys.exit(f"cannot read the S3 store's launch record: {e}")
 
 
-def _parse_image_digest_md():
-    text = IMAGE_DIGEST_MD.read_text()
-    image_ref = _fenced_block_after(text, "Registry reference")
-    recorded_id = _fenced_block_after(text, "docker image inspect")
-    if not image_ref or not recorded_id:
-        raise RuntimeError(f"could not find the 'Registry reference'/'docker image inspect' fenced blocks in {IMAGE_DIGEST_MD}")
-    return image_ref, recorded_id
+def store_data_dir_in_container(record: StoreRecord) -> str:
+    """The directory the recorded server serves its buckets from: the LAST recorded server
+    argument (`posix <dir>` for Versity Gateway, `server <dir>` for MinIO). The record has no
+    field of its own for it, so a record whose last argument is not an absolute path is refused
+    rather than guessed at."""
+    if not record.args or not record.args[-1].startswith("/"):
+        sys.exit(f"the recorded server arguments {list(record.args)!r} do not end with an absolute data directory; this script bind-mounts a HOST directory onto that last argument")
+    return record.args[-1]
+
+
+def store_run_argv(record: StoreRecord, run_id: str, access_key: str, secret_key: str, data_dir_host: Path) -> list:
+    """The `docker run` argv, exactly as the record says (labels, the record's credential
+    environment with the per-run credentials, loopback-only `-p 127.0.0.1::<container port>`, the
+    HOST bind mount onto the recorded data directory, the recorded image reference and
+    arguments)."""
+    env_args = [arg for name, value in record.env(access_key, secret_key).items() for arg in ("-e", f"{name}={value}")]
+    return [
+        "docker", "run", "-d", *label_args(run_id),
+        *env_args,
+        "-p", f"127.0.0.1::{record.container_port}",
+        # THE bind mount: a HOST path under this git-ignored out/, never a docker volume
+        # and never left on the VM's own overlay (this task's own measured-host-facts
+        # section: 985 GB free on the host vs. a few GB on the VM overlay).
+        "-v", f"{data_dir_host}:{store_data_dir_in_container(record)}",
+        record.image_ref, *record.args,
+    ]
 
 
 def _local_image_id(image_ref: str) -> Optional[str]:
@@ -250,7 +262,8 @@ def _gate_or_die() -> None:
     result = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
     if result.returncode != 0:
         sys.exit(f"docker is not available: `docker info` exited {result.returncode}: {result.stderr.decode(errors='replace').strip()}")
-    image_ref, recorded_id = _parse_image_digest_md()
+    record = _store_record()
+    image_ref, recorded_id = record.image_ref, record.recorded_id
     actual_id = _local_image_id(image_ref)
     if actual_id is None:
         sys.exit(f"image {image_ref!r} is not present locally -- this script never pulls (question 154); see {IMAGE_DIGEST_MD} for the one-time `docker pull`.")
@@ -259,7 +272,7 @@ def _gate_or_die() -> None:
 
 
 # =====================================================================================
-# 2. Labelled MinIO, bind-mounted onto the HOST filesystem.
+# 2. Labelled S3 server, bind-mounted onto the HOST filesystem.
 # =====================================================================================
 
 
@@ -269,60 +282,63 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _wait_for_minio_health(host_port: int, container_id: str) -> None:
-    deadline = time.monotonic() + MINIO_HEALTH_TIMEOUT_S
+def _remove_container(container_id: str) -> None:
+    """`docker rm -f -v`: the store image may declare a `VOLUME`, and a plain `rm -f` would leave
+    its anonymous volume behind (question 249)."""
+    subprocess.run(["docker", "rm", "-f", "-v", container_id], capture_output=True, timeout=30)
+
+
+def _wait_for_store_health(host_port: int, container_id: str, health_path: str) -> None:
+    deadline = time.monotonic() + STORE_HEALTH_TIMEOUT_S
     last_err = "never attempted"
     while time.monotonic() < deadline:
         try:
-            resp = httpx.get(f"http://127.0.0.1:{host_port}/minio/health/live", timeout=2.0)
+            resp = httpx.get(f"http://127.0.0.1:{host_port}{health_path}", timeout=2.0)
             if resp.status_code == 200:
                 return
+            last_err = f"status {resp.status_code}"
         except httpx.HTTPError as e:
             last_err = str(e)
         time.sleep(0.15)
     logs = subprocess.run(["docker", "logs", container_id], capture_output=True, text=True).stdout
-    sys.exit(f"MinIO at 127.0.0.1:{host_port} did not answer /minio/health/live within {MINIO_HEALTH_TIMEOUT_S}s; last error: {last_err}; logs:\n{logs}")
+    sys.exit(f"the S3 server at 127.0.0.1:{host_port} did not answer GET {health_path} with 200 within {STORE_HEALTH_TIMEOUT_S}s; last error: {last_err}; logs:\n{logs}")
 
 
-def start_minio(out_dir: Path, run_id: str, bucket: str):
+def start_store(out_dir: Path, run_id: str, bucket: str):
     """Runs under `lock_docker_tests()` for prune+create+health-wait ONLY -- see this
     module's own doc, "The docker-test lock is held around container lifecycle only"."""
-    image_ref, recorded_id = _parse_image_digest_md()
+    record = _store_record()
+    image_ref, recorded_id = record.image_ref, record.recorded_id
     access_key = f"avheavyproof{''.join(c for c in run_id if c.isalnum())}"
     secret_key = f"avheavyproofsecret{''.join(c for c in run_id if c.isalnum())}"
-    minio_data_dir = out_dir / "minio-data"
-    minio_data_dir.mkdir(parents=True, exist_ok=True)
+    store_data_dir = out_dir / "store-data"
+    store_data_dir.mkdir(parents=True, exist_ok=True)
 
     with lock_docker_tests():
         prune_stale_labelled_resources()
-        cmd = [
-            "docker", "run", "-d", *label_args(run_id),
-            "-e", f"MINIO_ROOT_USER={access_key}",
-            "-e", f"MINIO_ROOT_PASSWORD={secret_key}",
-            "-p", "127.0.0.1::9000",
-            # THE bind mount: a HOST path under this git-ignored out/, never a docker volume
-            # and never left on the VM's own overlay (this task's own measured-host-facts
-            # section: 985 GB free on the host vs. a few GB on the VM overlay).
-            "-v", f"{minio_data_dir}:/data",
-            image_ref, "server", "/data",
-        ]
+        cmd = store_run_argv(record, run_id, access_key, secret_key, store_data_dir)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            sys.exit(f"`docker run` (MinIO) failed: {result.stderr}")
+            sys.exit(f"`docker run` (S3 server) failed: {result.stderr}")
         container_id = result.stdout.strip()
 
-        port_result = subprocess.run(["docker", "port", container_id, "9000/tcp"], capture_output=True, text=True, timeout=10)
-        if port_result.returncode != 0:
-            sys.exit(f"`docker port {container_id} 9000/tcp` failed: {port_result.stderr}")
-        host_port = int(port_result.stdout.strip().rsplit(":", 1)[-1])
+        try:
+            port_result = subprocess.run(["docker", "port", container_id, f"{record.container_port}/tcp"], capture_output=True, text=True, timeout=10)
+            if port_result.returncode != 0:
+                sys.exit(f"`docker port {container_id} {record.container_port}/tcp` failed: {port_result.stderr}")
+            host_port = int(port_result.stdout.strip().splitlines()[0].rsplit(":", 1)[-1])
 
-        _wait_for_minio_health(host_port, container_id)
+            _wait_for_store_health(host_port, container_id, record.health_path)
 
-        actual_id = _local_image_id(image_ref)
-        if actual_id != recorded_id:
-            sys.exit(f"RUNNING container's own image id {actual_id!r} != recorded digest {recorded_id!r} (question 212(a)) -- mismatch after the earlier gate passed.")
+            actual_id = _local_image_id(image_ref)
+            if actual_id != recorded_id:
+                sys.exit(f"RUNNING container's own image id {actual_id!r} != recorded digest {recorded_id!r} (question 212(a)) -- mismatch after the earlier gate passed.")
+        except BaseException:
+            # SystemExit included: a container this script started must not outlive its failure.
+            _remove_container(container_id)
+            raise
 
-    return {"container_id": container_id, "host_port": host_port, "access_key": access_key, "secret_key": secret_key, "bucket": bucket, "minio_data_dir": minio_data_dir}
+    return {"container_id": container_id, "host_port": host_port, "access_key": access_key, "secret_key": secret_key, "bucket": bucket, "store_data_dir": store_data_dir}
 
 
 # =====================================================================================
@@ -350,7 +366,7 @@ def build_tile_fixture() -> Path:
     return bin_path
 
 
-def run_tile_fixture(bin_path: Path, minio: dict, args: argparse.Namespace) -> dict:
+def run_tile_fixture(bin_path: Path, store: dict, args: argparse.Namespace) -> dict:
     cmd = [
         str(bin_path),
         "--key-prefix", args.key_prefix,
@@ -362,11 +378,11 @@ def run_tile_fixture(bin_path: Path, minio: dict, args: argparse.Namespace) -> d
         "--tile-size", str(args.tile_size),
         "--synthetic-source", args.synthetic_source,
         "--streaming",
-        "--store-endpoint", f"http://127.0.0.1:{minio['host_port']}",
-        "--store-region", MINIO_REGION,
-        "--store-access-key-id", minio["access_key"],
-        "--store-secret-access-key", minio["secret_key"],
-        "--store-bucket", minio["bucket"],
+        "--store-endpoint", f"http://127.0.0.1:{store['host_port']}",
+        "--store-region", S3_REGION,
+        "--store-access-key-id", store["access_key"],
+        "--store-secret-access-key", store["secret_key"],
+        "--store-bucket", store["bucket"],
         "--store-path-style",
     ]
     print(f"running: {' '.join(cmd)}")
@@ -415,15 +431,15 @@ def _sigv4_get_headers(host: str, port: int, path: str, access_key: str, secret_
     return {"x-amz-date": amzdate, "x-amz-content-sha256": payload_hash, "Authorization": authorization, "Host": host_header}
 
 
-def s3_get(minio: dict, key: str) -> bytes:
-    path = f"/{minio['bucket']}/{key}"
-    headers = _sigv4_get_headers("127.0.0.1", minio["host_port"], path, minio["access_key"], minio["secret_key"], MINIO_REGION)
-    resp = httpx.get(f"http://127.0.0.1:{minio['host_port']}{path}", headers=headers, timeout=30.0)
+def s3_get(store: dict, key: str) -> bytes:
+    path = f"/{store['bucket']}/{key}"
+    headers = _sigv4_get_headers("127.0.0.1", store["host_port"], path, store["access_key"], store["secret_key"], S3_REGION)
+    resp = httpx.get(f"http://127.0.0.1:{store['host_port']}{path}", headers=headers, timeout=30.0)
     resp.raise_for_status()
     return resp.content
 
 
-def verify(minio: dict, fixture_result: dict) -> None:
+def verify(store: dict, fixture_result: dict) -> None:
     print("-" * 88)
     print("VERIFICATION (question 148: an exit code is not evidence -- show the artifact)")
     print("-" * 88)
@@ -431,7 +447,7 @@ def verify(minio: dict, fixture_result: dict) -> None:
     prefix = fixture_result["object_key_prefix"]
     manifest_hash = fixture_result["manifest_sha256"]
     manifest_key = f"{prefix}/{manifest_hash[0:2]}/{manifest_hash[2:4]}/{manifest_hash}"
-    manifest_bytes = s3_get(minio, manifest_key)
+    manifest_bytes = s3_get(store, manifest_key)
     fetched_manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
     assert fetched_manifest_hash == manifest_hash, f"fetched manifest hashes to {fetched_manifest_hash}, not the reported {manifest_hash}"
     manifest = heavy_pb2.TileSetManifest()
@@ -444,16 +460,20 @@ def verify(minio: dict, fixture_result: dict) -> None:
     assert recomputed_total == fixture_result["total_stored_bytes"], "reported total_stored_bytes must equal manifest bytes + sum of every TileEntry.size_bytes"
 
     disk_bytes = 0
-    for p in minio["minio_data_dir"].rglob("*"):
-        if p.is_file() and ".minio.sys" not in p.parts:
+    data_dir = store["store_data_dir"]
+    for p in data_dir.rglob("*"):
+        # Skip the server's own hidden top-level directories (internal metadata or temporary
+        # upload space, e.g. MinIO's .minio.sys, Versity Gateway's .sgwtmp): they are not object
+        # payload, and leaving them out can only make the on-disk check stricter.
+        if p.is_file() and not p.relative_to(data_dir).parts[0].startswith("."):
             disk_bytes += p.stat().st_size
-    print(f"real bytes on the HOST bind-mount directory ({minio['minio_data_dir']}), excluding MinIO's own .minio.sys metadata: {disk_bytes}")
+    print(f"real bytes on the HOST bind-mount directory ({data_dir}), excluding the server's own hidden top-level directories: {disk_bytes}")
     assert disk_bytes >= fixture_result["total_stored_bytes"], f"host disk usage {disk_bytes} is LESS than the reported payload total {fixture_result['total_stored_bytes']} -- data did not really land on the host filesystem"
     assert disk_bytes >= TEN_GIGABYTES or fixture_result["total_stored_bytes"] < TEN_GIGABYTES, "sanity: a >=10GB payload total should show up as >=10GB on disk too"
 
     tile = manifest.tiles[0]
     tile_key = f"{manifest.object_key_prefix}/{tile.sha256[0:2]}/{tile.sha256[2:4]}/{tile.sha256}"
-    tile_bytes = s3_get(minio, tile_key)
+    tile_bytes = s3_get(store, tile_key)
     fetched_tile_hash = hashlib.sha256(tile_bytes).hexdigest()
     print(f"re-fetched tile (level={tile.level}, x={tile.x}, y={tile.y}): {len(tile_bytes)} bytes, sha256={fetched_tile_hash}")
     assert fetched_tile_hash == tile.sha256, f"re-fetched tile's own sha256 {fetched_tile_hash} != manifest TileEntry.sha256 {tile.sha256}"
@@ -515,7 +535,7 @@ def teardown(out_dir: Path) -> None:
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help=f"host directory the MinIO data volume binds onto (default: {DEFAULT_OUT_DIR})")
+    p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help=f"host directory the S3 server's data directory binds onto (default: {DEFAULT_OUT_DIR})")
     p.add_argument("--tile-size", type=int, default=1024, help="power of two in [16, 4096] (default: 1024)")
     p.add_argument("--min-level", type=int, default=0)
     p.add_argument("--max-level", type=int, default=6, help="default 6: the smallest integer level that makes tile_size=1024 exceed 10 GB -- see this script's own module doc for the arithmetic")
@@ -553,13 +573,13 @@ def main(argv=None) -> int:
     print(f"capturing docker events to {events_log}")
 
     try:
-        minio = start_minio(args.out_dir, run_id, args.bucket)
-        print(f"MinIO up: container={minio['container_id'][:12]} host_port={minio['host_port']} bucket={minio['bucket']} data_dir={minio['minio_data_dir']}")
+        store = start_store(args.out_dir, run_id, args.bucket)
+        print(f"S3 server up: container={store['container_id'][:12]} host_port={store['host_port']} bucket={store['bucket']} data_dir={store['store_data_dir']}")
 
         bin_path = build_tile_fixture()
         print(f"built {bin_path}")
 
-        result = run_tile_fixture(bin_path, minio, args)
+        result = run_tile_fixture(bin_path, store, args)
         print("av-tile-fixture JSON:")
         print(json.dumps(result, indent=2, sort_keys=True))
         print(f"measured wall-clock: {result['measured_wall_clock_s']:.1f}s")
@@ -568,10 +588,10 @@ def main(argv=None) -> int:
         if result["total_stored_bytes"] < TEN_GIGABYTES:
             print(f"WARNING: total_stored_bytes {result['total_stored_bytes']} does NOT exceed ten gigabytes -- adjust --min-level/--max-level/--tile-size.", file=sys.stderr)
 
-        verify(minio, result)
+        verify(store, result)
 
         print()
-        print(f"Stack is left UP: MinIO container {minio['container_id'][:12]} on 127.0.0.1:{minio['host_port']}, bucket {minio['bucket']!r}, key_prefix {result['object_key_prefix']!r}.")
+        print(f"Stack is left UP: S3 server container {store['container_id'][:12]} on 127.0.0.1:{store['host_port']}, bucket {store['bucket']!r}, key_prefix {result['object_key_prefix']!r}.")
         print(f"manifest_sha256 = {result['manifest_sha256']}")
         print("Run with --teardown to stop/remove everything and delete the generated tile set.")
         return 0

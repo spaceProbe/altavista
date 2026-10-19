@@ -62,7 +62,7 @@ av-jobs = { path = "../av-jobs" }
 [dev-dependencies]
 # tests/clickhouse_store.rs and tests/clickhouse_real_sweep.rs run the pinned ClickHouse image
 # under the host-wide docker lock with the same gate/lock/label/prune discipline as
-# crates/av-store/tests/minio_store.rs. Dev-only: this crate's production code has no reason to
+# crates/av-store/tests/s3_store.rs. Dev-only: this crate's production code has no reason to
 # know Docker exists.
 av-lockstep = { path = "../av-lockstep" }
 

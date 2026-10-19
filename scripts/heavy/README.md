@@ -42,7 +42,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 The script's own final lines name everything the rest of this README needs:
 
 ```
-Stack is left UP: MinIO container <id> on 127.0.0.1:<MINIO_PORT>, bucket '<BUCKET>', key_prefix '<KEY_PREFIX>'.
+Stack is left UP: S3 server container <id> on 127.0.0.1:<STORE_PORT>, bucket '<BUCKET>', key_prefix '<KEY_PREFIX>'.
 manifest_sha256 = <MANIFEST_SHA256>          # <- THIS is where the manifest hash comes from: it is
                                               #    printed by av-tile-fixture itself (JSON field
                                               #    "manifest_sha256"), echoed by this script, and it is
@@ -56,17 +56,18 @@ this task either way. Step 0.5c below is where this recipe's own `--synthetic-so
 labelled` variant lives, because it is the only step that registers anything the browser drive
 can actually see -- see that step's own note.)
 
-The MinIO container's own access key / secret key are not printed by the proof script (they
+The S3 server container's own access key / secret key are not printed by the proof script (they
 never need to be, for that script's own purposes -- it holds them in memory and uses them
 itself); read them back off the running container when you need them for the next step:
 
 ```sh
 CONTAINER_ID=<the id printed above>
-docker inspect "$CONTAINER_ID" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep MINIO_ROOT
-# MINIO_ROOT_USER=...
-# MINIO_ROOT_PASSWORD=...
-docker port "$CONTAINER_ID" 9000/tcp
-# 127.0.0.1:<MINIO_PORT>
+docker inspect "$CONTAINER_ID" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep ROOT_
+# the variables the record's "Credential environment" block names (services/store/IMAGE_DIGEST.md), e.g.
+# ROOT_ACCESS_KEY_ID=...   <- <ACCESS_KEY>
+# ROOT_SECRET_ACCESS_KEY=... <- <SECRET_KEY>
+docker port "$CONTAINER_ID"
+# <the record's container port>/tcp -> 127.0.0.1:<STORE_PORT>
 ```
 
 ### 0.5. Register the generated tile set in the catalog (round 5, question 228 finding 2)
@@ -87,7 +88,7 @@ derived from the real, on-disk flag parsers the same way step 0.5c's flags alway
 this section's own pre-existing standard) -- what proves this whole sequence works, every time,
 committed and re-runnable by anyone, is
 `tests/test_catalog_tilesets_route.py::test_real_round_trip_migrate_then_register_then_list_through_the_real_gateway_route`
-(docker-gated, real PostGIS + real MinIO + real `av-catalog-migrate` + real `av-tile-fixture`
+(docker-gated, real PostGIS + real S3 server + real `av-catalog-migrate` + real `av-tile-fixture`
 + a real `av-gateway` subprocess + a real `GET /api/catalog/tilesets` through `create_app`):
 
 ```sh
@@ -97,7 +98,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
 This is the only step that makes a generated tile set visible to `GET /api/catalog/tilesets`
 (and therefore to the Layers panel) -- step 0 above never registers anything; it only writes
-tile objects into the MinIO store. It needs a real PostGIS catalog reachable
+tile objects into the S3 store. It needs a real PostGIS catalog reachable
 (`services/catalog/IMAGE_DIGEST.md` -- the image is present, by digest, on this host this
 round) and belongs after step 0 (it needs step 0's own `manifest_sha256`/`key_prefix`, and it
 re-runs the exact same `av-tile-fixture` binary step 0 already used) and before the browser is
@@ -150,8 +151,8 @@ target/release/av-tile-fixture \
   --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
   --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
   --synthetic-source 64x32 \
-  --store-endpoint "http://127.0.0.1:<MINIO_PORT>" --store-region us-east-1 \
-  --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
+  --store-endpoint "http://127.0.0.1:<STORE_PORT>" --store-region us-east-1 \
+  --store-access-key-id "<ACCESS_KEY>" --store-secret-access-key "<SECRET_KEY>" \
   --store-bucket "<BUCKET>" --store-path-style \
   --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
   --catalog-user postgres \
@@ -168,7 +169,7 @@ gradient raster reads as a smooth teal/brown-ish ramp that looks close enough to
 fixture Earth texture's own teal/brown palette that a person driving the browser could not
 actually SEE the switch step 0.5's own registration proves happened. This step is where that
 switch becomes visible, because it is the only step in this whole recipe that ever registers a
-manifest in the catalog (step 0 above writes tiles to MinIO but registers nothing) -- so
+manifest in the catalog (step 0 above writes tiles to the S3 server but registers nothing) -- so
 whichever style this command renders is the entire tile set the Layers panel ever lists.
 
 Pass `--synthetic-source-style labelled` on the SAME command to render a high-contrast
@@ -179,7 +180,7 @@ Because this changes the raster's own bytes, it is deliberately NOT the same con
 re-registration the paragraph above describes: it performs a genuine second write (new tile
 objects, a new manifest, both under the SAME `--key-prefix`/`--job-id`) and registers THAT
 manifest instead. Nothing already recorded by digest moves -- step 0's own gradient-style
-objects and manifest are untouched on MinIO, just no longer the one thing the catalog points
+objects and manifest are untouched on the S3 server, just no longer the one thing the catalog points
 at:
 
 ```sh
@@ -187,8 +188,8 @@ target/release/av-tile-fixture \
   --key-prefix heavy-stackup-demo --ladder "UNCLASSIFIED,CUI,SECRET" --label-marking CUI \
   --job-id heavy-stackup-demo --min-level 0 --max-level 2 --tile-size 1024 \
   --synthetic-source 64x32 --synthetic-source-style labelled \
-  --store-endpoint "http://127.0.0.1:<MINIO_PORT>" --store-region us-east-1 \
-  --store-access-key-id "<MINIO_ROOT_USER>" --store-secret-access-key "<MINIO_ROOT_PASSWORD>" \
+  --store-endpoint "http://127.0.0.1:<STORE_PORT>" --store-region us-east-1 \
+  --store-access-key-id "<ACCESS_KEY>" --store-secret-access-key "<SECRET_KEY>" \
   --store-bucket "<BUCKET>" --store-path-style \
   --catalog-host 127.0.0.1 --catalog-port "<CATALOG_PORT from a.>" \
   --catalog-user postgres \
@@ -243,7 +244,7 @@ surface to; without it step 2b's `av-gateway` answers step 4b with
 `403 no role in groups ["tile-readers"] grants surface query` (lead's drive, 2026-09-22),
 and the viewer's Layers panel lists nothing.
 
-### 2. Start the real `av-tiles` gateway against that MinIO
+### 2. Start the real `av-tiles` gateway against that S3 server
 
 ```sh
 cargo build -p av-tiles --bin av-tiles
@@ -253,10 +254,10 @@ target/debug/av-tiles \
   --oidc-public-key-path "$WORKDIR/issuer_public.pem" \
   --ladder "UNCLASSIFIED,CUI,SECRET" \
   --key-prefix "<KEY_PREFIX from step 0>" \
-  --store-endpoint "http://127.0.0.1:<MINIO_PORT>" \
+  --store-endpoint "http://127.0.0.1:<STORE_PORT>" \
   --store-region "us-east-1" \
-  --store-access-key-id "<MINIO_ROOT_USER from step 0>" \
-  --store-secret-access-key "<MINIO_ROOT_PASSWORD from step 0>" \
+  --store-access-key-id "<ACCESS_KEY from step 0>" \
+  --store-secret-access-key "<SECRET_KEY from step 0>" \
   --store-bucket "<BUCKET from step 0>" \
   --store-path-style \
   --group-clearance "tile-readers=CUI" \

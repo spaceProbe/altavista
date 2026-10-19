@@ -1,6 +1,6 @@
 //! The ClickHouse study store against a **real** ClickHouse server (question 245): the image
 //! `services/clickhouse/IMAGE_DIGEST.md` records, run under the host-wide docker lock with the
-//! gate / label / prune discipline of `crates/av-store/tests/minio_store.rs` (see `tests/common`).
+//! gate / label / prune discipline of `crates/av-store/tests/s3_store.rs` (see `tests/common`).
 //! Nothing here mocks the server; the fake-server counterparts (the wire format the *client*
 //! produces, and faults a healthy server never shows) are `tests/clickhouse_fake_server.rs`.
 //!
