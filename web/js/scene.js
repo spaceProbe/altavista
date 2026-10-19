@@ -515,8 +515,13 @@ export class Viewer {
       dot.visible = false;
       rootObj.add(mesh, dot);
       const label = this._label(b.name, 'body');
-      this.bodies.set(b.name, { mesh, dot, interp: new BodyInterp(b), data: b, label, visible: true });
+      const interp = new BodyInterp(b);
+      // `abs`: this tick's absolute (f64, scene units) position, written by update(t) and read by
+      // `_placeBodies` for every view (initialised at the first sample).
+      const abs = interp.position(b.t.length ? b.t[0] : 0, new THREE.Vector3()).multiplyScalar(SCALE);
+      this.bodies.set(b.name, { mesh, dot, interp, data: b, label, visible: true, abs });
     }
+    this._bodiesPlacedView = undefined; // new objects: no view has them placed
     const w = this.canvas.clientWidth || 1, h = this.canvas.clientHeight || 1;
     for (const s of sc.spacecraft || []) {
       const interp = new TrajectoryInterp(s);
@@ -1452,7 +1457,9 @@ export class Viewer {
     const w = vp.canvas.clientWidth, h = vp.canvas.clientHeight;
     for (const [name, b] of this.bodies) {
       const el = vp.labels.bodies.get(name);
-      const d = b.mesh.position.distanceTo(vp.camera.position);
+      // f64 distance in world space: `b.mesh.position` (this view's placement, local to the
+      // entities render group) and `vp.camera.position` (local to ITS parent) share no space
+      const d = b.abs.distanceTo(vp.camera.getWorldPosition(this._tmp));
       const r = b.data.radius * SCALE;
       this._placeLabel(el, b.mesh, b.visible && d > r * 1.05, vp.camera, w, h);
     }
@@ -1492,9 +1499,9 @@ export class Viewer {
    * camera -> that viewport) -- i.e. against what that view draws, not what the primary
    * drew; the primary's (or whichever placement was current) is written back before this
    * returns, so the scene graph between ticks is unchanged. Anything `_placeSharedEntities`
-   * places (today the entity objects: spacecraft markers, events, glTF models; the bodies
-   * once they are placed there) is covered with no second mechanism, provided it updates
-   * the world matrices of what it moves, as that method does. A picking cost: one
+   * places (the entity objects: spacecraft markers, events, glTF models; the body meshes,
+   * `_placeBodies`) is covered with no second mechanism, provided it updates the world
+   * matrices of what it moves, as that method does. A picking cost: one
    * placement per view switch, and the write-back, per click -- never per tick.
    *
    * Targets: body meshes, spacecraft markers, event meshes, and the glTF model of a
@@ -1561,6 +1568,7 @@ export class Viewer {
     this.globeBodyName = bodyName;
     this._entitiesGroup.add(this.globeLayer.group);
     b.mesh.visible = false;
+    this._placeEpoch++; // the globe group is now one of the bodies' placed objects
     return true;
   }
 
@@ -1573,16 +1581,23 @@ export class Viewer {
     const b = this.globeBodyName ? this.bodies.get(this.globeBodyName) : null;
     if (b) b.mesh.visible = b.visible;
     this.globeBodyName = null;
+    this._placeEpoch++;
   }
 
   /**
    * Per-tick globe upkeep, first half: called from `_updateLayerManager()` below once
    * the current body positions/quaternions are known. Tracks `body.mesh`'s already
    * origin-relative transform exactly (plain position/quaternion copy -- see globe.js's
-   * module docstring for why the globe never needs its own floating-origin treatment),
+   * module docstring for why the tile vertices never need a floating-origin treatment
+   * of their own; the group's POSITION is written for each drawing view by
+   * `_placeBodies`, this copy being the primary's),
    * then computes the camera's position **in that body's local frame** (scene units) via
    * `worldToLocal` and asks `GlobeLayer.planView()` for the globe's fragment of this
-   * tick's view (the real screen-space-error tile selection, web/js/globe_lod.js). It
+   * tick's view (the real screen-space-error tile selection, web/js/globe_lod.js).
+   * The selection is level of detail, not placement, and plans for the PRIMARY camera
+   * only (`cam`): an extra viewport near the body draws the tiles the primary needs, so it
+   * can see coarser tiles than its own distance asks for (the placement of those tiles is
+   * its own, exact). Recorded, not changed. It
    * does NOT call `layerManager.update()`: the globe's fragment is merged with the
    * entities' and the overlay's into the tick's one update call, and the globe's
    * meshes/textures are then reconciled by `GlobeLayer.commitPlannedView()`.
@@ -1650,11 +1665,13 @@ export class Viewer {
    * synthetic originTrack) would risk the two ever disagreeing. `_syncBodyFixedFrame`
    * instead keeps this node in lockstep with the already-computed body mesh, the same
    * pattern `_syncGlobeLayer` already uses for `globeLayer.group` (a plain sibling,
-   * not a frame node) -- parented at `this._originFrameId` (the entities frame), the
-   * body mesh's own parent, so copying `b.mesh`'s *local* position/quaternion
-   * reproduces its exact world transform (both are children of parents with zero
-   * local transform relative to each other; see `update()`'s body loop and this
-   * class's constructor comments on `_entitiesGroup`).
+   * not a frame node) -- parented under `this._entitiesGroup`, the body mesh's own
+   * parent (the render group of the entities frame, a child of the frame node), so
+   * copying `b.mesh`'s *local* position/quaternion reproduces its exact world
+   * transform. (It used to hang directly under the frame node, which has no origin
+   * shift: the node, and the overlay in it, sat `S` = the primary's origin away from
+   * the body, 7,000 km at LEO.) `_placeBodies` writes it for each drawing view like the
+   * mesh, so the overlay's tiles follow the view's own render space (see its docstring).
    *
    * Scoped narrowly to what the tiles overlay needs: a scenario's own declared
    * `AXES_KIND_BODY_FIXED` frames (if any, in `sc.frames`) are unaffected and still
@@ -1664,7 +1681,13 @@ export class Viewer {
   _bodyFixedFrame(bodyName) {
     const id = `body-fixed:${bodyName}`;
     if (!this.frameGraph.has(id)) {
-      this.frameGraph.addFrame({ id, parentId: this._originFrameId, axesKind: null });
+      const node = this.frameGraph.addFrame({ id, parentId: this._originFrameId, axesKind: null });
+      // Under the entities RENDER GROUP, beside the body mesh, not directly under the frame node:
+      // the frame node is an always-zero anchor, the render group carries the origin shift S, and
+      // this node's local transform is the body mesh's (`_syncBodyFixedFrame`, `_placeBodies`).
+      // Parented under the frame node its world position was `fround(abs - O)`, missing `+ S`:
+      // 7,000 km off the body whenever the primary's origin sat at a LEO spacecraft (measured).
+      this._entitiesGroup.add(node.object3D);
     }
     return this.frameGraph.frame(id);
   }
@@ -1721,6 +1744,7 @@ export class Viewer {
     const frameNode = this._bodyFixedFrame(bodyName);
     placeOverlayInBodyFixedFrame(this.tilesOverlay.group, this.frameGraph, frameNode.id);
     this._syncBodyFixedFrame(bodyName); // avoid one tick of stale (identity) orientation before the next update()
+    this._placeEpoch++; // the body-fixed frame is now one of the bodies' placed objects
   }
 
   clearTilesOverlay() {
@@ -1966,7 +1990,7 @@ export class Viewer {
     const o = m.get(name);
     if (!o) return;
     o.visible = visible;
-    if (kind === 'body') { o.mesh.visible = visible; if (!visible) o.dot.visible = false; }
+    if (kind === 'body') { o.mesh.visible = visible; if (!visible) o.dot.visible = false; this._placeEpoch++; }
     else {
       o.marker.visible = visible;
       o.line.visible = visible && this.options.trail !== 'off';
@@ -2241,6 +2265,11 @@ export class Viewer {
   // another viewport's camera sits to the entity -- and it hops between ticks. (Trajectory
   // and footprint LINES avoid this with a per-viewport copy; see viewport.js.)
   //
+  // The bodies (their meshes and dots, the tiled globe's group, the body-fixed frame of the 3D
+  // Tiles overlay) are placed the same way, by `_placeBodies` (question 254 item 4): the same
+  // per-view write, but with an f64 position that is NOT rounded to float32 in a viewport (they
+  // are far from a view's origin and rest on f64 `position`s, see its docstring).
+  //
   // The fix is to write the objects for the view that is about to draw them. For a view `v`
   // with floating origin `O_v` and render shift `S_v` (the primary: `this.floatingOrigin` and
   // `_entitiesGroup.position`; a viewport: `vp.floatingOrigin` and `vp.renderGroup.position`),
@@ -2274,6 +2303,12 @@ export class Viewer {
     this._placeMatrix = new THREE.Matrix4();
     this._placeQuat = new THREE.Quaternion();
     this._placeScale = new THREE.Vector3();
+    // the bodies' own (view, epoch) memo: update(t) places the primary's bodies before anything
+    // else in the tick reads them, ahead of `_placeSharedEntities` (which needs this tick's `s.abs`)
+    this._bodiesPlacedView = undefined;
+    this._bodiesPlacedEpoch = -1;
+    this._placeBodyOffset = new THREE.Vector3();
+    this._placeCamWorld = new THREE.Vector3();
   }
 
   /** `out = off + toRenderSpace_view(abs)`; `off` null means zero, in which case the result
@@ -2327,6 +2362,7 @@ export class Viewer {
     const offAdd = vp ? off : null;
     const local = this._placeLocal;
 
+    this._placeBodies(vp);
     for (const s of this.spacecraft.values()) {
       this._toViewLocal(fo, s.abs, offAdd, s.marker.position);
       s.marker.updateWorldMatrix(false, false);
@@ -2353,6 +2389,86 @@ export class Viewer {
       if (!s) continue;
       this._toViewLocal(fo, s.abs, offAdd, entity.group.position);
       entity.group.updateMatrixWorld(true);
+    }
+  }
+
+  /**
+   * Place the bodies for the view `vp` (a `Viewport`, or `null` for the primary camera): each
+   * body's sphere mesh and sub-pixel dot, the tiled globe's group when the globe is on that body,
+   * and the body-fixed frame node the 3D Tiles overlay hangs from when the overlay is on it.
+   * They are children of `_entitiesGroup` (the frame node too, see `_bodyFixedFrame`), so each is
+   * written at `(S_v - S_p) + (abs - O_v)`: its world position is `S_v + (abs - O_v)`, the
+   * body's true position, in the view's own render space.
+   *
+   * The primary's value is `_toLocal`'s, `fround(abs - O_p)`, bit for bit (it is the state between
+   * ticks, which picking, labels and Focus read). A viewport's is NOT rounded: unlike an entity
+   * marker or a trail vertex, a body is far from the view's origin (the Earth is 7 scene units
+   * from a LEO viewport's, the Moon 384 from a viewport framed at the Earth) and its position is
+   * an f64 `Object3D.position`, not a buffer, so rounding `abs - O_v` to float32 would only add
+   * up to 0.24 m (LEO) or 15 m (Earth-Moon distance) of error for nothing. What remains on screen
+   * is the GPU's own float32 model-view multiply, about ulp(distance to the body's origin), which
+   * no placement can remove (a sphere's vertices sit a body radius from its origin).
+   *
+   * Per view, from the view's own camera: the dot. A body whose disc is under 1.5 px in radius IN
+   * THIS VIEW gets a dot of 1.5 px in this view (its own camera distance, canvas height and fov);
+   * one shared dot sized for the primary was a sphere of hundreds of pixels in a viewport next to
+   * the body. The distance is the f64 one between the body's absolute position and the camera's
+   * world position (the same as the old local-space distance when the camera sits in the
+   * entities frame, and right when it sits in another frame).
+   *
+   * Not per view: the globe's tile SELECTION (`_syncGlobeLayer(cam)`), which is level of detail,
+   * not placement, and plans for the primary camera: an extra viewport draws the tiles the primary
+   * needs (see its docstring).
+   *
+   * Memoised per (view, epoch) like `_placeSharedEntities`; `update(t)` calls it for the primary
+   * once this tick's `b.abs` is written, before anything else in the tick reads the bodies.
+   * World matrices of everything moved are updated here (three updates them BEFORE
+   * `scene.onBeforeRender`, where the extra viewports are placed).
+   */
+  _placeBodies(vp) {
+    if (this._bodiesPlacedView === vp && this._bodiesPlacedEpoch === this._placeEpoch) return;
+    this._bodiesPlacedView = vp;
+    this._bodiesPlacedEpoch = this._placeEpoch;
+    if (!this.bodies.size) return;
+    const frame = this._originFrameId;
+    const off = this._placeBodyOffset;
+    let ox = 0, oy = 0, oz = 0;
+    if (vp) {
+      off.copy(vp.renderGroup.position).sub(this._entitiesGroup.position); // S_v - S_p
+      if (vp.floatingOrigin.isEnabledForFrame(frame)) { const o = vp.floatingOrigin.getOrigin(frame); ox = o.x; oy = o.y; oz = o.z; }
+    }
+    const cam = vp ? vp.camera : this.camera;
+    const camWorld = cam.getWorldPosition(this._placeCamWorld);
+    const H = (vp && vp.canvas && vp.canvas.clientHeight) || this._referenceCanvasHeight();
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+    const globe = this.globeLayer, globeBody = this.globeBodyName;
+    const fixedBody = this._tilesOverlayBodyName;
+    const fixedId = fixedBody ? `body-fixed:${fixedBody}` : null;
+    for (const [name, b] of this.bodies) {
+      const p = b.mesh.position;
+      if (vp) p.set(b.abs.x - ox + off.x, b.abs.y - oy + off.y, b.abs.z - oz + off.z);
+      else this._toLocal(b.abs, p);
+      b.mesh.updateWorldMatrix(false, false);
+      // sub-pixel disc -> draw a 1.5 px dot instead (this view's pixels per scene unit at the body)
+      const pxPerUnit = H / (2 * b.abs.distanceTo(camWorld) * tanHalf);
+      const useDot = b.visible && b.data.radius * SCALE * pxPerUnit < 1.5;
+      b.dot.visible = useDot;
+      if (useDot) {
+        b.dot.position.copy(p);
+        b.dot.scale.setScalar(Math.max(1.5 / pxPerUnit, 1e-6));
+        b.dot.updateWorldMatrix(false, false);
+      }
+      if (globe && name === globeBody) {
+        globe.group.position.copy(p);
+        globe.group.quaternion.copy(b.mesh.quaternion);
+        globe.group.updateMatrixWorld(true);
+      }
+      if (fixedId && name === fixedBody && this.frameGraph.has(fixedId)) {
+        const node = this.frameGraph.frame(fixedId).object3D;
+        node.position.copy(p);
+        node.quaternion.copy(b.mesh.quaternion);
+        node.updateMatrixWorld(true);
+      }
     }
   }
 
@@ -2514,23 +2630,17 @@ export class Viewer {
     this.frameGraph.update(t, SCALE);
     this._updatePrimaryCamera(t);
 
-    // bodies
-    const h0 = this._referenceCanvasHeight();
-    const pxPerUnitAt = (d) => h0 / (2 * d * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)));
+    // bodies: this tick's f64 absolute position (every view's placement reads it) and orientation,
+    // then the primary's placement (`_placeBodies`: the mesh, the dot, the globe group and the
+    // body-fixed frame), which the rest of the tick reads; the extra viewports' draws place the
+    // same objects for themselves (`_placeSharedEntities`)
     for (const b of this.bodies.values()) {
-      b.interp.position(t, this._tmpAbs).multiplyScalar(SCALE);
-      this._toLocal(this._tmpAbs, b.mesh.position);
+      b.interp.position(t, b.abs).multiplyScalar(SCALE);
       b.interp.orientation(t, b.mesh.quaternion);
+    }
+    this._placeBodies(null);
+    for (const b of this.bodies.values()) {
       if (b.data.name === 'Sun') this._sunDir.copy(b.mesh.position);
-      // sub-pixel disc -> draw a 3 px dot instead
-      const d = b.mesh.position.distanceTo(cam.position);
-      const discPx = b.data.radius * SCALE * pxPerUnitAt(d);
-      const useDot = b.visible && discPx < 1.5;
-      b.dot.visible = useDot;
-      if (useDot) {
-        b.dot.position.copy(b.mesh.position);
-        b.dot.scale.setScalar(Math.max(1.5 / pxPerUnitAt(d), 1e-6));
-      }
     }
     // M15.4/M16.4 + heavy cleanup round 1: globe tiles, 3D Tiles overlay and entity
     // markers/trails all plan into the ONE `layerManager.update()` this tick makes
@@ -2669,8 +2779,8 @@ export class Viewer {
       el.style.top = ((1 - v.y) / 2 * h) + 'px';
     };
     for (const b of this.bodies.values()) {
-      // offset label beyond the visible disc
-      const d = b.mesh.position.distanceTo(this.camera.position);
+      // offset label beyond the visible disc (f64 world distance, as in _updateViewportLabels)
+      const d = b.abs.distanceTo(this.camera.getWorldPosition(this._tmpAim));
       const r = b.data.radius * SCALE;
       place(b.label, b.mesh, b.visible && d > r * 1.05);
     }

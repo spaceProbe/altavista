@@ -97,7 +97,7 @@ export class Recorder {
   }
 }
 
-function nearestIndex(times, t) {
+export function nearestIndex(times, t) {
   let best = 0, bd = Infinity;
   for (let i = 0; i < times.length; i++) { const d = Math.abs(times[i] - t); if (d < bd) { bd = d; best = i; } }
   return best;
@@ -278,7 +278,7 @@ const IS_NODE_MAIN = typeof process !== 'undefined' && process.argv && process.a
   && process.argv[1].endsWith('entities_viewport_precision_check.mjs');
 
 /** three's render() prologue and its per-object modelViewMatrix line, nothing else. */
-function standInRenderer() {
+export function standInRenderer() {
   return {
     render(scene, camera) {
       if (scene.matrixWorldAutoUpdate === true) scene.updateMatrixWorld();
@@ -294,7 +294,7 @@ function standInRenderer() {
 }
 
 const fakeEl = () => ({ style: {}, className: '', textContent: '', remove() {}, classList: { add() {}, remove() {} } });
-const stubControls = () => ({ target: new THREE.Vector3(), minDistance: 1e-3, maxDistance: 1e8, update() {} });
+export const stubControls = () => ({ target: new THREE.Vector3(), minDistance: 1e-3, maxDistance: 1e8, update() {} });
 
 export async function nodeSetup() {
   const fs = await import('node:fs');
@@ -366,12 +366,14 @@ function makeStandIn(dep, rec, viewSpecs) {
   return v;
 }
 
-const settle = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+export const settle = async (n = 6) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 
-export async function buildViewer(dep, rec, radiusKm) {
+/** `scenario` (optional): the scene JSON to load instead of `closedFormScenario(radiusKm)` (the
+ * bodies check, bodies_viewport_precision_check.mjs, passes scenes with bodies). */
+export async function buildViewer(dep, rec, radiusKm, scenario = closedFormScenario(radiusKm)) {
   dep.resetViewportLayerCounterForTests();
   const v = makeStandIn(dep, rec);
-  v.setScenario(closedFormScenario(radiusKm));
+  v.setScenario(scenario);
   // two extra viewports (real Viewports; stand-in renderer and controls)
   const mk = (id, aspect) => {
     const vp = v.addViewport(id);
