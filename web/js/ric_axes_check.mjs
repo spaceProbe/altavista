@@ -1,4 +1,7 @@
-// CLI harness for tests/test_viewer_jitter.py: `node web/js/ric_axes_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_jitter.py drives:
+// `node web/js/ric_axes_check.mjs`. Exits 1 unless at least one epoch was compared, every
+// (epoch, axes kind) pair in the fixture was compared, every residual is finite and the worst
+// is under BOUND (question 254 item 5: it used to pass vacuously on an empty fixture).
 //
 // M5.2: checks the viewer's client-side RIC/VNB/VVLH axes computation
 // (web/js/frames.js's axesRIC/axesVNB/axesVVLH, driven every render tick by
@@ -72,6 +75,25 @@ for (const entry of fixture.epochs) {
   }
 }
 
-const pass = worstResidual < BOUND;
-process.stdout.write(JSON.stringify({ pass, bound: BOUND, worstResidual, worstDetail, results }));
-process.exit(pass ? 0 : 1);
+// Question 254 item 5: the residual bound alone passes vacuously when nothing is compared
+// (an empty fixture leaves worstResidual at 0) or when a residual is NaN (NaN > worst is
+// false). So the check also requires at least one epoch, one comparison per (epoch, axes
+// kind) the fixture declares, and every residual finite.
+const epochCount = fixture.epochs.length;
+const expectedComparisons = fixture.epochs.reduce((n, e) => n + Object.keys(e.rotation).length, 0);
+const allFinite = results.every((r) => Number.isFinite(r.axesResidual) && Number.isFinite(r.quatResidual));
+const failures = [];
+if (!(epochCount > 0)) failures.push(`FAIL epochCount > 0: measured ${epochCount}, bound > 0`);
+if (!(expectedComparisons > 0 && results.length === expectedComparisons)) {
+  failures.push(`FAIL comparisons == the fixture's (epoch, axes kind) pairs: measured ${results.length}, bound == ${expectedComparisons} and > 0`);
+}
+if (!allFinite) failures.push(`FAIL every residual finite: measured ${results.filter((r) => !Number.isFinite(r.maxAbsResidual)).length} non-finite, bound 0`);
+if (!(worstResidual < BOUND)) failures.push(`FAIL worstResidual < bound: measured ${worstResidual} at ${JSON.stringify(worstDetail)}, bound < ${BOUND}`);
+const pass = failures.length === 0;
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(`ric_axes_check: ${4 - failures.length} passed, ${failures.length} failed (epochs=${epochCount}, comparisons=${results.length}, worstResidual=${worstResidual})\n`);
+// Exit inside the write callback so a piped stdout is flushed before the process ends.
+process.stdout.write(
+  JSON.stringify({ pass, bound: BOUND, worstResidual, worstDetail, epochCount, comparisonCount: results.length, results }),
+  () => process.exit(pass ? 0 : 1),
+);

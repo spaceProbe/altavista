@@ -1,5 +1,6 @@
-// CLI harness for tests/test_gateway_imagery_layer.py: `node
-// web/js/gateway_imagery_layer_check.mjs`.
+// Standalone check, and the harness tests/test_gateway_imagery_layer.py drives: `node
+// web/js/gateway_imagery_layer_check.mjs`. It asserts its own cases and exits 1 on any
+// failure (question 254 item 5); see "ASSERTS AND EXITS" at the bottom.
 //
 // Drives the real `GatewayImageryLayerAdapter` (web/js/layers/gateway_imagery_layer.js)
 // with an injected `fetchImpl` stub -- no real network I/O of any kind (question 51,
@@ -403,4 +404,37 @@ const result = {
   decodeModeSwitch,
 };
 
-process.stdout.write(JSON.stringify(result));
+// ASSERTS AND EXITS: every assertion tests/test_gateway_imagery_layer.py makes on `result`
+// is made here too (same values), so the standalone gate fails on a regression by itself.
+// Each failure prints to stderr as `FAIL <name>: measured X, bound Y`, then a summary
+// line, then exit 1; success exits 0.
+const failures = [];
+let assertionCount = 0;
+function assertBound(name, ok, measured, bound) {
+  assertionCount += 1;
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const mustBeTrue = (name, value) => assertBound(name, value === true, value, 'true');
+for (const name of [
+  'planNeverFetches', 'urlIsSameOriginRelativeByDefault', 'originIsHonoured', 'matchingEtagResolves',
+  'mismatchedEtagRejectsWithTypedError', 'missingEtagRejectsWithTypedError',
+  'nonOkStatusRejectsWithTypedHttpError', 'abortRejectsAndSignalWasPassedThrough',
+  'textureShapedPayload', 'provenanceTagged', 'verifiedBytesStillReachable',
+  'releaseDisposesTheRealTexture', 'releaseIsNoopOnceAlreadyReleased',
+]) mustBeTrue(name, result[name]);
+assertBound('expectedRelativeUrl starts with /api/tiles/', result.expectedRelativeUrl.startsWith('/api/tiles/'), result.expectedRelativeUrl, 'starts with /api/tiles/');
+for (const name of [
+  'beforeFetchIsFallback', 'manifestFetchedExpectedUrl', 'afterFetchUsesManifestByteCost',
+  'unlistedTileFallsBackToEstimate', 'ok',
+]) mustBeTrue(`manifestByteCostProbe.${name}`, result.manifestByteCostProbe[name]);
+assertBound('manifestByteCostProbe.manifestTileCount == 2', result.manifestByteCostProbe.manifestTileCount === 2, result.manifestByteCostProbe.manifestTileCount, '== 2');
+for (const name of [
+  'realDecodePathProducesRealTexture', 'realDecodeFailureStillResolvesWithTaggedFallback',
+  'globalRestoredAfterStubbing', 'ok',
+]) mustBeTrue(`decodeModeSwitch.${name}`, result.decodeModeSwitch[name]);
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(`gateway_imagery_layer_check: ${assertionCount - failures.length} passed, ${failures.length} failed\n`);
+
+// stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));

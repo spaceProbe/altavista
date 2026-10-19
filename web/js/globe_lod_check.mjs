@@ -1,4 +1,6 @@
-// CLI harness for tests/test_viewer_globe.py: `node web/js/globe_lod_check.mjs`.
+// Standalone check, and the harness tests/test_viewer_globe.py drives:
+// `node web/js/globe_lod_check.mjs`. It asserts its own checks and exits 1 on any failure
+// (question 254 item 5); see "ASSERTS AND EXITS" at the bottom.
 //
 // Drives web/js/globe_lod.js's real selectTiles()/TileLoadScheduler over a fixed,
 // scripted camera path (geodetic lon/lat/altitude -> ECEF, deterministic, no
@@ -93,4 +95,44 @@ const result = {
   maxLevelNear: steps[3].maxLevelSelected,  // LEO close-up step
 };
 
-process.stdout.write(JSON.stringify(result));
+// ASSERTS AND EXITS: every assertion tests/test_viewer_globe.py makes on `result` (except
+// cross-process byte-identity, which needs two processes and stays in the driver) is made
+// here too, same thresholds, so the standalone gate fails on a regression by itself. Each
+// failure prints to stderr as `FAIL <name>: measured X, bound Y`, then a summary line,
+// then exit 1; success exits 0.
+const failures = [];
+let assertionCount = 0;
+function assertBound(name, ok, measured, bound) {
+  assertionCount += 1;
+  if (!ok) failures.push(`FAIL ${name}: measured ${measured}, bound ${bound}`);
+}
+const keyParts = (k) => k.split('/').map(Number);
+const keyOrder = (a, b) => {
+  const pa = keyParts(a);
+  const pb = keyParts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+};
+assertBound('steps.length == 8', result.steps.length === 8, result.steps.length, '== 8');
+result.steps.forEach((step, i) => {
+  const sorted = step.tileKeys.every((k, j) => j === 0 || keyOrder(step.tileKeys[j - 1], k) <= 0);
+  assertBound(`step ${i} tileKeys canonically sorted`, sorted, JSON.stringify(step.tileKeys.slice(0, 3)), 'ascending numeric (z/x/y) order');
+});
+assertBound('budgetRespected === true', result.budgetRespected === true, result.budgetRespected, 'true');
+assertBound('maxResidentObserved <= residentBudget', result.maxResidentObserved <= result.residentBudget, result.maxResidentObserved, `<= ${result.residentBudget}`);
+assertBound('evictedCount > 0 (eviction actually ran)', result.evictedCount > 0, result.evictedCount, '> 0');
+assertBound('cancelledCount > 0 (stale loads cancelled on camera jump)', result.cancelledCount > 0, result.cancelledCount, '> 0');
+assertBound('maxLevelFar < maxLevelNear', result.maxLevelFar < result.maxLevelNear, result.maxLevelFar, `< ${result.maxLevelNear}`);
+assertBound('maxLevelFar == 0 (GEO step selects only the roots)', result.maxLevelFar === 0, result.maxLevelFar, '== 0');
+
+for (const line of failures) process.stderr.write(`${line}\n`);
+process.stderr.write(
+  `globe_lod_check: ${assertionCount - failures.length} passed, ${failures.length} failed `
+  + `(maxResidentObserved=${result.maxResidentObserved}/${result.residentBudget}, cancelled=${result.cancelledCount}, `
+  + `evicted=${result.evictedCount}, maxLevelFar=${result.maxLevelFar}, maxLevelNear=${result.maxLevelNear})\n`,
+);
+
+// stdout keeps its JSON shape; exit inside the write callback so a piped stdout is flushed.
+process.stdout.write(JSON.stringify(result), () => process.exit(failures.length === 0 ? 0 : 1));

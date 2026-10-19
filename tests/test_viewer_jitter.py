@@ -350,6 +350,12 @@ def test_ric_vnb_vvlh_axes_match_gmat(ric_axes_data):
     failed = [r for r in ric_axes_data["results"] if r["maxAbsResidual"] >= RIC_AXES_AGREEMENT_BOUND]
     assert not failed, f"RIC/VNB/VVLH axes disagreement >= {RIC_AXES_AGREEMENT_BOUND:.0e} at: {failed}"
     assert ric_axes_data["pass"] is True
+    # Question 254 item 5: not vacuous -- every (epoch, axes kind) of the committed fixture
+    # was compared, and there was at least one.
+    fixture = json.loads(RIC_AXES_FIXTURE.read_text())
+    expected = sum(len(e["rotation"]) for e in fixture["epochs"])
+    assert ric_axes_data["epochCount"] == len(fixture["epochs"]) > 0
+    assert ric_axes_data["comparisonCount"] == len(ric_axes_data["results"]) == expected > 0
 
 
 def test_ric_axes_agreement_report(ric_axes_data, capsys):
