@@ -76,6 +76,22 @@
 //! - **Healing.** An identical re-put of a study whose `sweep_results.json` or `samples.jsonl`
 //!   is *missing* (the old writer wrote `sweep_results.pb` first and could be killed before the
 //!   others) writes only the missing file. Files that exist are never rewritten.
+//! - **Case-insensitive filesystems** (question 254 item 1; macOS's default APFS is one):
+//!   `<root>/Study` and `<root>/study` are one directory there, so ids that differ only in ASCII
+//!   case (exact, since ids are ASCII) would otherwise read each other's study. The store has one
+//!   rule on every filesystem: **an id that ASCII-case-folds equal to a differently spelled
+//!   directory already in the root is refused** with [`StoreError::SweepIdCollision`].
+//!   `put_study` checks before it stages anything, and again when its rename fails (the racing
+//!   writer path), with one `read_dir` of the root (cost: one directory listing per `put_study`,
+//!   plus one per `get_study` that finds nothing or finds another id's study; a `get_study` hit
+//!   reads none). `get_study` also requires the decoded `sweep_id` to equal the requested id
+//!   exactly: a case-folded hit or a foreign file is that same typed error, never another id's
+//!   study and never `None` (`None` would say "no such study" about a directory that holds one).
+//!   `list_studies` skips a directory whose stored `sweep_id` differs from its name (it is not a
+//!   study `get_study` can open under that name; listing it under the stored id would hand out an
+//!   id that resolves to another directory or none). Limit: on a case-sensitive filesystem two
+//!   writers racing on case variants of one id in the same instant can both pass the check and
+//!   both publish; each study is whole and correct under its own id, and `list_studies` shows both.
 //! - **`list_studies` skips a directory whose name is not a valid id**: the store cannot have
 //!   written it (a staging directory, an operator's own folder, a name that is not UTF-8), and
 //!   `get_study` would refuse the name anyway.
@@ -124,6 +140,14 @@ pub enum StoreError {
     /// or written; the `reason` is the typed [`PathIdError`](av_cdm::path_id::PathIdError).
     #[error("study id {sweep_id:?} is not a valid sweep_id: {reason}")]
     InvalidSweepId { sweep_id: String, reason: av_cdm::path_id::PathIdError },
+
+    /// The id `sweep_id` names, in this store's directory tree, a directory that is another id's:
+    /// `dir` is a directory in the root holding (or named for) `existing`, which is not `sweep_id`
+    /// but case-folds equal to it (`Study` against `study`: one directory on a case-insensitive
+    /// filesystem), or whose decoded `sweep_id` is `existing` (a foreign or renamed directory).
+    /// Nothing was written and no other id's study was returned. See the module doc.
+    #[error("study id {sweep_id:?} collides with {existing:?} at {}: ids that differ only in ASCII case name one directory on a case-insensitive filesystem, and a directory must hold the study of the id it is named for", dir.display())]
+    SweepIdCollision { sweep_id: String, existing: String, dir: PathBuf },
 
     /// A store refused to write study `sweep_id`; `reason` says whether the study already exists
     /// with different content (either backend), or the ClickHouse server refused the insert.
@@ -276,6 +300,55 @@ impl FileStudyStore {
         av_cdm::path_id::validate_path_component_id(sweep_id).map_err(|reason| StoreError::InvalidSweepId { sweep_id: sweep_id.to_string(), reason })?;
         Ok(self.root.join(sweep_id))
     }
+
+    /// Refuses `sweep_id` when the root holds an entry spelled differently that ASCII-case-folds
+    /// equal to it (one `read_dir` of the root; a root that does not exist yet holds none). The
+    /// entry's own spelling is what the error names, so it is the on-disk one even where the
+    /// filesystem would have resolved `sweep_id` to it.
+    fn reject_case_variant(&self, sweep_id: &str) -> Result<(), StoreError> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_err(&self.root, e)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err(&self.root, e))?;
+            let name = entry.file_name();
+            if let Some(name) = name.to_str().filter(|n| *n != sweep_id && n.eq_ignore_ascii_case(sweep_id)) {
+                return Err(StoreError::SweepIdCollision { sweep_id: sweep_id.to_string(), existing: name.to_string(), dir: entry.path() });
+            }
+        }
+        Ok(())
+    }
+
+    /// The study in `dir` (which must be `study_dir(sweep_id)`), `None` if it holds no
+    /// `sweep_results.pb`. The decoded `sweep_id` must equal `sweep_id` exactly: otherwise the
+    /// filesystem resolved the name to another id's directory (a case-folded hit) or the directory
+    /// holds a foreign file, and that is [`StoreError::SweepIdCollision`].
+    fn read_study(&self, dir: &Path, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
+        let pb_path = dir.join("sweep_results.pb");
+        if !pb_path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&pb_path).map_err(|e| io_err(&pb_path, e))?;
+        let results = pb::SweepResults::decode(bytes.as_slice()).map_err(|e| StoreError::Decode { path: pb_path.clone(), source: e })?;
+        if results.sweep_id != sweep_id {
+            self.reject_case_variant(sweep_id)?; // a case variant names its real on-disk spelling
+            return Err(StoreError::SweepIdCollision { sweep_id: sweep_id.to_string(), existing: results.sweep_id, dir: dir.to_path_buf() });
+        }
+        Ok(Some(results))
+    }
+
+    /// What `put_study` answers when its rename failed: either another writer published this id
+    /// (or a case variant of it) in the meantime, or `dir` is a non-empty directory that holds no
+    /// study.
+    fn settle_failed_rename(&self, dir: &Path, results: &pb::SweepResults, rename_error: std::io::Error) -> Result<String, StoreError> {
+        self.reject_case_variant(&results.sweep_id)?;
+        match self.read_study(dir, &results.sweep_id)? {
+            Some(existing) => settle_existing(dir, &existing, results),
+            None => Err(io_err(dir, rename_error)),
+        }
+    }
 }
 
 /// [`crate::json::sweep_sample_json`], one call per sample, samples sorted `(point_index,
@@ -345,7 +418,8 @@ fn settle_existing(dir: &Path, existing: &pb::SweepResults, new: &pb::SweepResul
 impl StudyStore for FileStudyStore {
     fn put_study(&mut self, results: &pb::SweepResults) -> Result<String, StoreError> {
         let dir = self.study_dir(&results.sweep_id)?;
-        if let Some(existing) = self.get_study(&results.sweep_id)? {
+        self.reject_case_variant(&results.sweep_id)?;
+        if let Some(existing) = self.read_study(&dir, &results.sweep_id)? {
             return settle_existing(&dir, &existing, results);
         }
 
@@ -369,26 +443,19 @@ impl StudyStore for FileStudyStore {
                 Ok(dir.display().to_string())
             }
             Err(rename_error) => {
-                // Either another writer published this id between the check and the rename (its
-                // study now answers as any existing one), or `dir` is a non-empty directory that
-                // holds no study.
                 let _ = fs::remove_dir_all(&stage);
-                match self.get_study(&results.sweep_id)? {
-                    Some(existing) => settle_existing(&dir, &existing, results),
-                    None => Err(io_err(&dir, rename_error)),
-                }
+                self.settle_failed_rename(&dir, results, rename_error)
             }
         }
     }
 
     fn get_study(&self, sweep_id: &str) -> Result<Option<pb::SweepResults>, StoreError> {
-        let pb_path = self.study_dir(sweep_id)?.join("sweep_results.pb");
-        if !pb_path.exists() {
-            return Ok(None);
+        let dir = self.study_dir(sweep_id)?;
+        let found = self.read_study(&dir, sweep_id)?;
+        if found.is_none() {
+            self.reject_case_variant(sweep_id)?; // "not found" must not hide a study under a case variant
         }
-        let bytes = fs::read(&pb_path).map_err(|e| io_err(&pb_path, e))?;
-        let results = pb::SweepResults::decode(bytes.as_slice()).map_err(|e| StoreError::Decode { path: pb_path.clone(), source: e })?;
-        Ok(Some(results))
+        Ok(found)
     }
 
     fn list_studies(&self) -> Result<Vec<StudySummary>, StoreError> {
@@ -407,8 +474,12 @@ impl StudyStore for FileStudyStore {
             if av_cdm::path_id::validate_path_component_id(&sweep_id).is_err() {
                 continue; // not a name this store can have written: a staging directory (`.incoming-*`), an operator's folder, ...
             }
-            if let Some(results) = self.get_study(&sweep_id)? {
-                summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
+            match self.read_study(&entry.path(), &sweep_id) {
+                Ok(Some(results)) => {
+                    summaries.insert(sweep_id, StudySummary { sweep_id: results.sweep_id.clone(), sweep_hash: results.sweep_hash.clone(), sample_count: results.samples.len() });
+                }
+                Ok(None) | Err(StoreError::SweepIdCollision { .. }) => {} // no study, or one stored under another id: not listed under this name
+                Err(e) => return Err(e),
             }
         }
         Ok(summaries.into_values().collect())
@@ -854,8 +925,8 @@ mod tests {
         }
         assert_eq!(tree(&parent), before, "no refusal created the store root or anything else");
         // One store per accepted id: `a` and `A` are different ids that name one directory on a
-        // case-insensitive filesystem (macOS's default), where the second would be a typed
-        // `RefusedWrite` (different content under an existing id), never an overwrite.
+        // case-insensitive filesystem (macOS's default); in one store the second would be a typed
+        // `SweepIdCollision`, never an overwrite (`case_variant_ids_are_refused_*` below).
         for (n, id) in vectors["accepted"].as_array().unwrap().iter().enumerate() {
             let id = id.as_str().unwrap();
             let mut own = FileStudyStore::new(parent.join(format!("accepted-{n}")));
@@ -895,6 +966,200 @@ mod tests {
         let listed = store.list_studies().unwrap();
         assert_eq!(listed.iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["s1"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Whether `dir` is on a case-insensitive filesystem, measured: write `case-probe-a` and ask
+    /// whether `CASE-PROBE-A` exists. The case tests assert their premise with this rather than
+    /// assume it, so they cannot pass on one kind of filesystem for the other's reason.
+    fn is_case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("case-probe-a");
+        std::fs::write(&probe, b"").unwrap();
+        let insensitive = dir.join("CASE-PROBE-A").exists();
+        std::fs::remove_file(&probe).unwrap();
+        insensitive
+    }
+
+    fn dir_names(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    fn assert_collision(err: &StoreError, requested: &str, existing: &str, dir_name: &str) {
+        match err {
+            StoreError::SweepIdCollision { sweep_id, existing: found, dir } => {
+                assert_eq!(sweep_id, requested);
+                assert_eq!(found, existing);
+                assert_eq!(dir.file_name().unwrap().to_str().unwrap(), dir_name, "names the on-disk directory: {dir:?}");
+                let msg = err.to_string();
+                assert!(msg.contains(&format!("{requested:?}")) && msg.contains(&format!("{existing:?}")) && msg.contains(dir_name), "{msg}");
+            }
+            other => panic!("expected SweepIdCollision, got {other:?}"),
+        }
+    }
+
+    /// The one rule, run on a store under `root`: `study` is stored; `Study` (and `STUDY`) is
+    /// refused by `put_study` and `get_study` whatever the filesystem; the stored study is untouched
+    /// and nothing is left staged; `study` itself still reads and re-puts. `insensitive` is the
+    /// measured kind of `root`'s filesystem.
+    fn assert_case_variants_are_refused(root: &Path, insensitive: bool) {
+        let mut store = FileStudyStore::new(root);
+        let first = study("study", vec![sample(0, 0), sample(0, 1)]);
+        store.put_study(&first).unwrap();
+        // The premise: on a case-insensitive filesystem `Study` resolves to the stored directory
+        // (the defect's cause); on a case-sensitive one it does not exist.
+        assert_eq!(root.join("Study/sweep_results.pb").exists(), insensitive, "the measured filesystem kind");
+        let before = snapshot(&root.join("study"));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        for variant in ["Study", "STUDY", "sTuDy"] {
+            let err = store.put_study(&study(variant, vec![sample(0, 0), sample(0, 1)])).unwrap_err();
+            assert_collision(&err, variant, "study", "study");
+            let err = store.get_study(variant).unwrap_err();
+            assert_collision(&err, variant, "study", "study");
+        }
+        assert_eq!(snapshot(&root.join("study")), before, "the stored study is untouched, bytes, mtime and inode");
+        assert_eq!(dir_names(root), vec!["study".to_string()], "nothing staged left, no second directory");
+
+        assert_eq!(store.get_study("study").unwrap().unwrap(), first);
+        let second = store.put_study(&first.clone()).expect("an identical re-put of study is still Ok");
+        assert!(second.ends_with("study"), "{second}");
+        assert_eq!(snapshot(&root.join("study")), before, "the identical re-put rewrote nothing");
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["study"]);
+
+        // An unrelated id is unaffected, and refuses its own variants.
+        store.put_study(&study("other", vec![sample(0, 0)])).unwrap();
+        assert_collision(&store.put_study(&study("OTHER", vec![sample(0, 0)])).unwrap_err(), "OTHER", "other", "other");
+        assert_eq!(dir_names(root), vec!["other".to_string(), "study".to_string()]);
+    }
+
+    /// Question 254 item 1 on this host's filesystem (macOS's default APFS is case-insensitive, and
+    /// `is_case_insensitive` measures it rather than assuming it; the kind is printed). On a
+    /// case-sensitive filesystem the same assertions hold, for the other reason: `Study` is a
+    /// different, absent directory and the explicit check is what refuses it.
+    #[test]
+    fn case_variant_ids_are_refused_on_this_filesystem() {
+        let root = temp_dir("case-variants");
+        let insensitive = is_case_insensitive(&root);
+        eprintln!("case_variant_ids_are_refused_on_this_filesystem: {} is on a case-{} filesystem", root.display(), if insensitive { "insensitive" } else { "sensitive" });
+        assert_case_variants_are_refused(&root, insensitive);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same rule on a case-sensitive volume, where `study` and `Study` could be two
+    /// directories: the store refuses the pair there too. Point `AV_SWEEP_CASE_SENSITIVE_DIR` at a
+    /// directory on a case-sensitive volume (e.g. `hdiutil create -fs "Case-sensitive APFS" ...`);
+    /// without it the test says it was skipped. With both directories already present (written by
+    /// an older store or by hand) each still reads under its exact id and both are listed.
+    #[test]
+    fn case_variant_ids_are_refused_on_a_case_sensitive_volume() {
+        let Some(base) = std::env::var_os("AV_SWEEP_CASE_SENSITIVE_DIR").map(PathBuf::from) else {
+            eprintln!("SKIPPED case_variant_ids_are_refused_on_a_case_sensitive_volume: AV_SWEEP_CASE_SENSITIVE_DIR is not set (no case-sensitive volume given)");
+            return;
+        };
+        let root = base.join(format!("av-sweep-store-test-cs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!is_case_insensitive(&root), "AV_SWEEP_CASE_SENSITIVE_DIR ({}) is not on a case-sensitive volume", base.display());
+        assert_case_variants_are_refused(&root, false);
+
+        // Both spellings already on disk: each is its own whole study.
+        let pair = root.join("pair");
+        let mut store = FileStudyStore::new(&pair);
+        let (lower, upper) = (study("pair", vec![sample(0, 0)]), study("PAIR", vec![sample(0, 1)]));
+        for (name, results) in [("pair", &lower), ("PAIR", &upper)] {
+            std::fs::create_dir_all(pair.join(name)).unwrap();
+            for (file, bytes) in study_files(results) {
+                std::fs::write(pair.join(name).join(file), bytes).unwrap();
+            }
+        }
+        assert_eq!(store.get_study("pair").unwrap().unwrap(), lower);
+        assert_eq!(store.get_study("PAIR").unwrap().unwrap(), upper);
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["PAIR", "pair"]);
+        assert_collision(&store.put_study(&study("Pair", vec![sample(0, 0)])).unwrap_err(), "Pair", "PAIR", "PAIR");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory that holds another id's study is not that id's study, on any filesystem:
+    /// `get_study` and `put_study` give the typed collision (naming the stored id and the
+    /// directory), `list_studies` skips it, and nothing is written.
+    #[test]
+    fn a_directory_holding_another_ids_study_is_a_collision_not_a_study() {
+        let root = temp_dir("foreign-id");
+        let mut store = FileStudyStore::new(&root);
+        store.put_study(&study("good", vec![sample(0, 0)])).unwrap();
+        std::fs::create_dir_all(root.join("s1")).unwrap();
+        std::fs::write(root.join("s1/sweep_results.pb"), study("other", vec![sample(0, 0)]).encode_to_vec()).unwrap();
+        let before = tree(&root);
+
+        assert_collision(&store.get_study("s1").unwrap_err(), "s1", "other", "s1");
+        assert_collision(&store.put_study(&study("s1", vec![sample(0, 0)])).unwrap_err(), "s1", "other", "s1");
+        assert_eq!(tree(&root), before, "nothing written");
+        assert_eq!(store.list_studies().unwrap().iter().map(|s| s.sweep_id.as_str()).collect::<Vec<_>>(), vec!["good"], "skipped, not listed under its stored id");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The racing-writer path (the rename failed) checks case variants too, and still answers as
+    /// before for an exact existing study and for a directory that holds none. Called directly,
+    /// because the window between `put_study`'s check and its rename is not one a test can hold open.
+    #[test]
+    fn the_failed_rename_path_checks_case_variants_too() {
+        let root = temp_dir("failed-rename");
+        let mut store = FileStudyStore::new(&root);
+        let first = study("study", vec![sample(0, 0)]);
+        store.put_study(&first).unwrap();
+        let failure = || std::io::Error::other("rename failed");
+
+        let err = store.settle_failed_rename(&root.join("Study"), &study("Study", vec![sample(0, 0)]), failure()).unwrap_err();
+        assert_collision(&err, "Study", "study", "study");
+        let same = store.settle_failed_rename(&root.join("study"), &first, failure()).expect("identical content is Ok");
+        assert!(same.ends_with("study"), "{same}");
+        let different = store.settle_failed_rename(&root.join("study"), &changed(first.clone()), failure()).unwrap_err();
+        assert_refused_different(&different, "study", &first, &changed(first.clone()));
+        let no_study = store.settle_failed_rename(&root.join("nothere"), &study("nothere", vec![sample(0, 0)]), failure()).unwrap_err();
+        assert!(matches!(&no_study, StoreError::Io { path, .. } if path.ends_with("nothere")), "{no_study:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Writers racing on `study` and `Study` (identical content per spelling): on a
+    /// case-insensitive filesystem exactly one spelling wins, every writer of the other gets the
+    /// typed collision (at the check, or at the failed rename), and one directory is left. On a
+    /// case-sensitive one the window between check and rename is open (module doc), so only the
+    /// per-writer outcomes are asserted.
+    #[test]
+    fn racing_case_variants_leave_one_spelling_on_a_case_insensitive_filesystem() {
+        for round in 0..20 {
+            let root = temp_dir(&format!("race-case-{round}"));
+            let insensitive = is_case_insensitive(&root);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8usize)
+                .map(|n| {
+                    let (root, barrier) = (root.clone(), barrier.clone());
+                    let id = if n % 2 == 0 { "study" } else { "Study" };
+                    std::thread::spawn(move || {
+                        let results = study(id, vec![sample(0, 0)]);
+                        barrier.wait();
+                        (id, FileStudyStore::new(&root).put_study(&results))
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let mut winning: Vec<&str> = outcomes.iter().filter(|(_, r)| r.is_ok()).map(|(id, _)| *id).collect();
+            winning.dedup();
+            for (id, outcome) in &outcomes {
+                if let Err(e) = outcome {
+                    let other = if *id == "study" { "Study" } else { "study" };
+                    assert_collision(e, id, other, other);
+                }
+            }
+            if insensitive {
+                assert!(winning.windows(2).all(|w| w[0] == w[1]) && !winning.is_empty(), "round {round}: one spelling wins: {winning:?}");
+                let names = dir_names(&root);
+                assert_eq!(names.len(), 1, "round {round}: one directory, no staging: {names:?}");
+                assert_eq!(names[0], winning[0]);
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// The deferred refusal is gone (question 245): `open_store(StoreBackend::ClickHouse)` now
