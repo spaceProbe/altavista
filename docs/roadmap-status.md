@@ -1,7 +1,7 @@
 # Roadmap status
 
 As of 2026-10-19, against the phase table in `architecture.md`. Decisions are numbered in
-`open-questions.md` (1–255); each track's plan records its rounds and its `## Delivered` section.
+`open-questions.md` (1–257); each track's plan records its rounds and its `## Delivered` section.
 
 ## By phase
 
@@ -23,8 +23,8 @@ recipe is in `README.md`.
 
 - **Hardware in the loop:** deferred by the user (question 245). When resumed: the 2024.2 ZCU104 BSP from the user for the real `BOOT.BIN` (question 243), then the board day (question 244).
 - **Reproducibility across platforms (question 248):** run bytes reproduce on the same build target and libm, not across macOS and Linux; a portable libm in `av-orbital` would change that and re-pin every golden it moves. The user's call whether it is wanted.
-- **MinIO (question 255):** its pinned image can no longer be fetched (quay.io refuses the digest, Docker Hub has no repository); 24 store tests skip and the kit's MinIO item cannot be obtained by an operator. A replacement S3-compatible server is the user's call (question 39 chose MinIO).
-- **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is measured, not pinned.
+- **MinIO (questions 255, 256):** its pinned image can no longer be fetched; the heavy team is trialling SeaweedFS and Versity Gateway (Apache-2.0) to replace it.
+- **The kit (questions 251, 255):** GMAT is pinned for macOS arm64 (this host's install) and Linux x86_64 (NASA's Ubuntu archive); NASA publishes no Linux aarch64 build; the RHEL 7 archive is being pinned as a second variant (question 257).
 - **`serde_yaml` (questions 246, 251):** gone from AltaVista's crates; the `RUSTSEC-2024-0449` ignore stays for spoore's `spoore-tree` until the user applies `docs/spoore-upstream.md`'s sixth proposal. MSRV 1.89, measured.
 - **Heavy (question 255):** globe tile selection plans for the primary only; `enableGlobe` builds WGS84 for any body; `layers_stream_check.mjs` exits 0 by construction (it needs a live gateway); two writers racing on case variants of one id on a case-sensitive filesystem can both publish; two typed store-write windows remain (an unreadable ClickHouse outcome, a rename failing after ClickHouse committed), each printing its repair.
 - **Native (question 255):** a mis-named but well-shaped emit port is not caught; `integral` over radians is `UnitCompositionUndefined`; classic-builder image ids drift across cache chains (content hashes hold).
@@ -35,7 +35,7 @@ recipe is in `README.md`.
 
 ## Next, in the order the lead would take it
 
-1. The MinIO replacement, once the user chooses (question 255).
+1. The MinIO replacement (question 256, heavy round running) and the RHEL 7 GMAT pin (question 257, native round).
 2. The open heavy and native items above, as one round per team when the user charters them.
 3. Cross-platform reproducibility (question 248), if the user wants it.
 4. Hardware in the loop, when the user resumes it.
